@@ -1,0 +1,111 @@
+/*
+ * Copyright (c) GOSH Technology Ltd. All rights reserved.
+ * 
+ * Acki Nacki and GOSH are either registered trademarks or trademarks of GOSH
+ * 
+ * Licensed under the ANNL. See License.txt in the project root for license information.
+*/
+pragma gosh-solidity >=0.76.1;
+
+/// @title PMP Errors
+/// @notice Common error codes for PMP contracts
+abstract contract Errors {    
+    /// @notice Message sender address mismatch
+    uint16 constant ERR_INVALID_SENDER = 101;
+
+    /// @notice Deposit value is too low
+    uint16 constant ERR_LOW_VALUE = 102;
+
+    /// @notice Event already resolved
+    uint16 constant ERR_ALREADY_RESOLVED = 103;
+
+    /// @notice Wallet already initialized / stake confirmed
+    uint16 constant ERR_ALREADY_INITIALIZED = 107;
+
+    /// @notice User already claimed winnings
+    uint16 constant ERR_ALREADY_CLAIMED = 108;
+
+    /// @notice Wallet or stake not yet initialized/confirmed
+    uint16 constant ERR_NOT_INITIALIZED = 114;
+
+    /// @notice User is not a winner in this event
+    uint16 constant ERR_NOT_WINNER = 115;
+
+    /// @notice Contract not approved by oracle
+    uint16 constant ERR_NOT_APPROVED = 116;
+
+    /// @notice Contract already approved by oracle
+    uint16 constant ERR_ALREADY_APPROVED = 117;
+
+    /// @notice Insufficient network fee
+    uint16 constant ERR_INSUFFICIENT_NETWORK_FEE = 118;
+
+    /// @notice Stake submission period has ended
+    uint16 constant ERR_STAKE_PERIOD_ENDED = 120;
+
+    /// @notice PrivateNote is currently busy with another operation
+    uint16 constant ERR_NOTE_BUSY = 121;
+
+    /// @notice Stake candidate amount not zero
+    uint16 constant ERR_STAKE_NOT_APPROVED = 122;
+    
+    /// @notice Wrong PMP deadline for stake
+    uint16 constant ERR_WRONG_DEADLINE = 123;
+
+    /// @notice Stake submission period has not started
+    uint16 constant ERR_STAKE_NOT_STARTED = 124;
+
+    /// @notice Result submission period has not started
+    uint16 constant ERR_RESULT_NOT_STARTED = 125;
+
+    /// @notice Result submission period has ended
+    uint16 constant ERR_RESULT_ENDED = 126; 
+    
+    /// @notice Invalid currency count
+    uint16 constant ERR_INVALID_CURRENCY_COUNT = 127;
+
+    /// @notice Zero token amount provided
+    uint16 constant ERR_ZERO_TOKEN_AMOUNT = 128;
+
+    /// @notice Invalid parameters provided
+    uint16 constant ERR_INVALID_PARAMS = 129;
+
+    /// @notice Invalid outcome ID provided
+    uint16 constant ERR_INVALID_OUTCOME_ID = 130;
+
+    /// @notice Outcomes not set for the event
+    uint16 constant ERR_OUTCOMES_NOT_SET = 131;
+
+    /// @notice Order already cancelled
+    uint16 constant ERR_ALREADY_CANCELLED = 132;
+
+    /// @notice Order not cancelled
+    uint16 constant ERR_NOT_CANCELLED = 133;
+
+    /// @notice Long array provided
+    uint16 constant ERR_LONG_ARRAY = 134;
+
+    /// @notice User already voted on proposal
+    uint16 constant ERR_ALREADY_VOTED = 135;
+
+    /// @notice Wrong hash for oracle members
+    uint16 constant ERR_WRONG_HASH = 136;
+
+    /// @notice Invalid zero-knowledge proof
+    uint16 constant ERR_INVALID_ZKPROOF = 137;
+
+    /// @notice Invalid token type
+    uint16 constant ERR_INVALID_TOKEN_TYPE = 138;
+
+    /// @notice Not all oracle events approved
+    uint16 constant ERR_NOT_APPROVED_BY_ORACLE = 139;
+
+    /// @notice Proposal not exists
+    uint16 constant ERR_PROPOSAL_NOT_EXISTS = 140;
+
+    /// @notice Vaucher nominal not allow
+    uint16 constant ERR_NOT_ALLOWED = 141;
+
+    /// @notice Cancel for unexist stake
+    uint16 constant ERR_STAKE_NOT_EXISTS = 142;
+}
