@@ -49,16 +49,16 @@ abstract contract Modifiers is Errors {
     uint128 constant PMP_INITIALIZED = 29;
     uint128 constant PMP_PROPOSAL_CREATED = 30;
     uint128 constant PMP_PROPOSAL_EXECUTED = 31;
+    uint128 constant PMP_CANCELLED_BY_ORACLE = 32;
 
     // OracleList events
-    uint128 constant ORACLE_EVENT_ADDED = 32;
-    uint128 constant ORACLE_EVENT_PUBLISHED = 33;
+    uint128 constant ORACLE_EVENT_ADDED = 33;
+    uint128 constant ORACLE_EVENT_PUBLISHED = 34;
 
     // Vault events
-    uint128 constant VAULT_VAUCHER_GENERATED = 34;
-
+    uint128 constant VAULT_VAUCHER_GENERATED = 35;
     // Root Oracle event
-    uint128 constant ROOTORACLE_ORACLE_DEPLOYED = 35;
+    uint128 constant ROOTORACLE_ORACLE_DEPLOYED = 36;
 
     // Function type identifiers for OracleUnion proposals
     uint32 constant FUNCTION_TYPE_SET_STAKE_DEADLINE = 1;
@@ -85,9 +85,6 @@ abstract contract Modifiers is Errors {
 
     /// @notice Address of RootPN contract
     address constant ROOT_PN_ADDRESS = address.makeAddrStd(0, 0x1010101010101010101010101010101010101010101010101010101010101010);
-
-    /// @notice Address of Vault contract
-    address constant VAULT_ADDRESS = address.makeAddrStd(0, 0x1212121212121212121212121212121212121212121212121212121212121212);
 
     /// @notice Address of RootOracle contract
     address constant ROOT_ORACLE_ADDRESS = address.makeAddrStd(0, 0x1515151515151515151515151515151515151515151515151515151515151515);

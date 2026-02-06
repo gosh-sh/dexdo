@@ -34,6 +34,12 @@ contract RootPN is Modifiers {
     /// @notice Mapping of deployed PrivateNote values
     mapping(uint32 => uint128) _deployedValues;
 
+    /// @notice Emitted when a new voucher is generated
+    /// @param sk_u_commit Commitment of the secret key
+    /// @param vaucher_nominal Nominal value of the voucher
+    /// @param token_type Type of token for the voucher
+	event vaucherGenerated(uint256 sk_u_commit, uint vaucher_nominal, uint32 token_type);
+
     // Events
     event PrivateNoteDeployed(uint256 depositIdentifierHash, address noteAddress, uint128 initialBalance);
     event NullifierDeployed(address nullifierAddress, uint64 value);
@@ -62,7 +68,6 @@ contract RootPN is Modifiers {
         pub_inputs.append(private_note_digest_bytes);
 
         require(gosh.zkhalo2verify(pub_inputs, proof), ERR_INVALID_ZKPROOF);
-        gosh.mintecc(value, CURRENCIES_ID_SHELL);
         mapping(uint32 => varuint32) data_cur;
         data_cur[CURRENCIES_ID_SHELL] = value;
         TvmCell stateInit = abi.encodeStateInit({
@@ -177,6 +182,69 @@ contract RootPN is Modifiers {
         }
         uint256 oracle_list_hash = tvm.hash(abi.encode(for_oracle_hash));
         return DexLib.computePMPAddress(_PrivateNoteCode, _pmpCode, event_id, oracle_list_hash, token_type);
+    }
+
+    /// VAULT FUNCTIONS
+
+    /// @notice Check is it Allowed
+    function isAllowedNominal(uint128 nominal) private view returns (bool) {
+        for (uint i = 0; i < ALLOWED_NOMINALS.length; i++) {
+            if (ALLOWED_NOMINALS[i] == nominal) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// @notice Checks if the nominal is allowed for vault operations
+    function generateVaucher(uint256 sk_u_commit, bool isFee) public view internalMsg {
+		require(msg.currencies.keys().length == 1, 300);
+		uint32 token_type = msg.currencies.keys()[0];
+        if ((token_type == CURRENCIES_ID_SHELL) && (isFee)) {
+            token_type = CURRENCIES_ID_SHELL_FEE;
+        }
+		require(msg.currencies[token_type] > 0, 303);
+		tvm.accept();
+        ensureBalance();
+
+		uint vaucher_nominal = msg.currencies[token_type];
+        require(isAllowedNominal(uint128(vaucher_nominal)), ERR_NOT_ALLOWED);
+
+        address addrExtern = address.makeAddrExtern(VAULT_VAUCHER_GENERATED, bitCntAddress);
+		emit vaucherGenerated{dest: addrExtern}(sk_u_commit, vaucher_nominal, token_type);
+	}
+
+    /// @notice Withdraws tokens to a specified wallet
+    /// @param withdrawed_value Amount to withdraw
+    /// @param token_type Type of token to withdraw
+    /// @param flags Transfer flags
+    /// @param wallet_addr Destination wallet address
+    /// @param initial_data_hash Initial data hash for verification
+    function withdrawTokens(
+        uint128 withdrawed_value, 
+        uint32 token_type, 
+        uint8 flags, 
+        address wallet_addr, 
+        uint256 initial_data_hash
+    ) public senderIs(DexLib.computePrivateNoteAddress(_PrivateNoteCode, initial_data_hash)) accept {
+        ensureBalance();
+        // Verify sufficient balance
+        if (address(this).currencies[token_type] < withdrawed_value) {
+            PrivateNote(msg.sender).revertWithdraw{value: 0.1 vmshell, flag: 1}(
+                token_type,
+                withdrawed_value
+            );
+            return;
+        }
+        
+        // Prepare currency transfer data
+        mapping(uint32 => varuint32) cc;
+        cc[token_type] = varuint32(withdrawed_value);
+        bool bounce = false;
+        _deployedValues[token_type] -= withdrawed_value;
+        
+        // Transfer tokens to wallet
+        wallet_addr.transfer(varuint16(withdrawed_value), bounce, flags, TvmCell(), cc);
     }
 
     /// @notice Returns all global variables

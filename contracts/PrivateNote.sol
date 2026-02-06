@@ -4,7 +4,6 @@ pragma AbiHeader pubkey;
 
 import "./modifiers/modifiers.sol";
 import "./PMP.sol";
-import "./Vault.sol";
 import "./RootPN.sol";
 import "./libraries/DexLib.sol";
 
@@ -528,14 +527,14 @@ contract PrivateNote is Modifiers {
     function withdrawTokens(uint8 flags, address dest_wallet_addr, uint32 token_type) public onlyOwnerPubkey(_ethemeral_pubkey) accept {
         ensureBalance();
         require(_stakes.empty(), ERR_NOTE_BUSY);
-        Vault(VAULT_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1}(_balance[token_type], token_type, flags, dest_wallet_addr, _deposit_identifier_hash);
+        RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1}(_balance[token_type], token_type, flags, dest_wallet_addr, _deposit_identifier_hash);
         _balance[token_type] = 0;
 	}
 
     /// @notice Reverts a withdraw operation (called by Vault)
     /// @param token_type Type of token
     /// @param value Amount to revert
-    function revertWithdraw(uint32 token_type, uint128 value) public senderIs(VAULT_ADDRESS) accept {
+    function revertWithdraw(uint32 token_type, uint128 value) public senderIs(ROOT_PN_ADDRESS) accept {
         ensureBalance();
         _balance[token_type] += value;
     }

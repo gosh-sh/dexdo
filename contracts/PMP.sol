@@ -136,6 +136,9 @@ contract PMP is Modifiers {
     /// @notice Emitted when the event is cancelled by oracle governance.
     event EventCancelled();
 
+    /// @notice Emitted when a PMP is cancelled by oracle.
+    event PMPCancelled();
+
     /// @notice Emitted when an oracle governance proposal is created.
     /// @param proposalId Deterministic proposal identifier (hash of functionType + data).
     /// @param functionType Proposed action type (see FUNCTION_TYPE_* constants).
@@ -180,12 +183,16 @@ contract PMP is Modifiers {
         require(_oracleEventsConfirmed.exists(msg.sender.value), ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
+        address addrExtern = address.makeAddrExtern(PMP_CANCELLED_BY_ORACLE, bitCntAddress);
+        emit PMPCancelled{dest: addrExtern}();
         
-        for ((uint256 key, ) : _oracleEventsConfirmed) {
-            OracleEventList(address.makeAddrStd(0, key)).cancelEvent{
-                value: 0.1 vmshell,
-                flag: 1
-            }(_event_id, _oracle_list_hash, _token_type);
+        for ((uint256 key, bool value) : _oracleEventsConfirmed) {
+            if (value == true) {
+                OracleEventList(address.makeAddrStd(0, key)).cancelEvent{
+                    value: 0.1 vmshell,
+                    flag: 1
+                }(_event_id, _oracle_list_hash, _token_type);
+            }
         }
 
         selfdestruct(ROOT_PN_ADDRESS);
