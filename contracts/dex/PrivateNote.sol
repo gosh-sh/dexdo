@@ -42,13 +42,63 @@ contract PrivateNote is Modifiers {
     /// @notice Current token balance
     mapping(uint32 => uint128) _balance;
 
+    /// @notice User debt per token type (created after coupon win)
+    /// @dev Debt is created when user wins with a coupon
+    uint128 _debt;
+
+    /// @notice Token type for the debt
+    uint32 _debt_token_type;
+    
+    /// @notice Indicates that tokens were withdrawn before
+    bool _has_withdrawn;
+
+    /// @notice Available coupons
+    uint128 _coupons_value;
+
+    /// @notice Coupon type (used for tracking which token type the coupon is for)
+    uint32 _coupons_token_type;
+
     // Events
+
+    /// @notice Emitted when owner pubkey is changed
+    /// @param oldPubkey Previous ephemeral public key
+    /// @param newPubkey New ephemeral public key
     event OwnerChanged(uint256 oldPubkey, uint256 newPubkey);
-    event StakeConfirmed(address stakeController, uint32 outcome, uint128 amount);
+
+    /// @notice Emitted when a single-outcome stake is confirmed by PMP
+    /// @param stakeController PMP address (stake controller)
+    /// @param outcome Outcome index used in stake
+    /// @param amount Confirmed stake amount
+    /// @param bet_type 0 - clean bet, 1 - debt bet, 2 - coupon bet
+    event StakeConfirmed(address stakeController, uint32 outcome, uint128 amount, uint8 bet_type);
+
+    /// @notice Emitted when a single-outcome stake is cancelled and funds returned
+    /// @param stakeController PMP address
+    /// @param value Returned token value to balance
     event StakeCancelled(address stakeController, uint128 value);
+
+    /// @notice Emitted when a full-set stake is confirmed by PMP
+    /// @param stakeController PMP address
+    /// @param amount Confirmed stake amounts per outcome
     event FullSetStakeConfirmed(address stakeController, uint128[] amount);
+
+    /// @notice Emitted when a full-set stake is cancelled and funds returned
+    /// @param stakeController PMP address
+    /// @param value Total returned token value to balance
     event FullSetStakeCancelled(address stakeController, uint128 value);
+
+    /// @notice Emitted when claim is accepted by PMP
+    /// @param stakeController PMP address
+    /// @param outcome Optional outcome (set when market resolved)
+    /// @param payout Total payout (including debt payout)
     event ClaimAccepted(address stakeController, optional(uint32) outcome, uint128 payout);
+
+    /// @notice Emitted when a PMP is about to be deployed by this wallet
+    /// @param event_id Event identifier
+    /// @param token_type Token type used by PMP
+    /// @param pmpAddress Deterministic PMP address
+    /// @param oracleEventLists OracleEventList addresses used by PMP
+    /// @param oracleFee Fee per oracle (same order as oracleEventLists)
     event PMPDeployed(uint256 event_id, uint32 token_type, address pmpAddress, address[] oracleEventLists, uint128[] oracleFee);
 
     /// @notice PrivateNote constructor
@@ -87,9 +137,38 @@ contract PrivateNote is Modifiers {
         gosh.mintshellq(MIN_BALANCE);
     }
 
-    /// @notice Deploys a new PMP contract
-    /// @param event_id Unique identifier for the PMP event
-    /// @param oracleFee Additional shell tokens for oracle fee
+    /// @notice Deploys a new PMP contract for a prediction market event.
+    /// @dev This function deterministically computes oracle addresses and
+    ///      OracleEventList contracts, prepares the required currency balances
+    ///      for oracle and network fees, and deploys a new PMP instance.
+    ///
+    ///      Deployment flow:
+    ///      1. Validate input array lengths.
+    ///      2. Compute oracle addresses from `names`.
+    ///      3. Compute OracleEventList addresses using oracle code and indexes.
+    ///      4. Aggregate oracle fees and include network fee.
+    ///      5. Build PMP StateInit and compute deterministic PMP address.
+    ///      6. Emit `PMPDeployed` event.
+    ///      7. Deploy PMP contract with required currencies.
+    ///
+    /// @param event_id Unique identifier of the PMP event.
+    /// @param oracleFee Array of additional fees (in shell tokens) for each oracle.
+    ///                  Must match the length of `names` and `index`.
+    /// @param token_type Token type used by the PMP contract.
+    /// @param names Array of oracle names used to compute oracle addresses.
+    /// @param index Array of oracle indexes used to compute OracleEventList addresses.
+    ///
+    /// @custom:requirements
+    /// - Caller must be authorized by the owner ephemeral public key.
+    /// - `names.length == oracleFee.length == index.length`.
+    ///
+    /// @custom:effects
+    /// - Emits `PMPDeployed` with the computed PMP address and oracle configuration.
+    /// - Deploys a new PMP contract at a deterministic address.
+    ///
+    /// @custom:reverts
+    /// - If input array lengths mismatch.
+    /// - If caller is not the owner.
     function deployPMP(uint256 event_id, uint128[] oracleFee, uint32 token_type, string[] names, uint128[] index) public view onlyOwnerPubkey(_ethemeral_pubkey) {
         uint256 length = names.length;
         require(length == oracleFee.length, ERR_INVALID_PARAMS);
@@ -154,14 +233,16 @@ contract PrivateNote is Modifiers {
         PMP(pmpAddress).cancelStake{
             value: 0.1 vmshell, 
             flag: 1
-        }(_stakes[hash].amount, _deposit_identifier_hash);
+        }(_stakes[hash].amount, _stakes[hash].debt_amount, _stakes[hash].coupons_amount,_deposit_identifier_hash);
     }
 
     /// @notice Called by PMP after stake is cancelled
     /// @param event_id PMP event ID
     /// @param oracle_list_hash Hash of Oracles
     /// @param token_type Token type
-    function onStakeCancelled(uint256 event_id, uint256 oracle_list_hash, uint32 token_type, uint128 value) 
+    /// @param value Amount refunded
+    /// @param coupon_value Coupon amount refunded
+    function onStakeCancelled(uint256 event_id, uint256 oracle_list_hash, uint32 token_type, uint128 value, uint128 coupon_value) 
         public senderIs(_busy.get()) accept
     {
         ensureBalance();
@@ -170,6 +251,7 @@ contract PrivateNote is Modifiers {
         uint256 hash = tvm.hash(data);
         delete _stakes[hash];
         _balance[token_type] += value;
+        _coupons_value += coupon_value;
         
         address addrExtern = address.makeAddrExtern(PRIVATENOTE_STAKE_CANCELLED, bitCntAddress);
         emit StakeCancelled{dest: addrExtern}(_busy.get(), value);
@@ -188,6 +270,7 @@ contract PrivateNote is Modifiers {
         uint128[] amount
     ) public onlyOwnerPubkey(_ethemeral_pubkey) accept {
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
+        require(_debt == 0, ERR_DEPT_NON_ZERO);
 
         ensureBalance();
 
@@ -197,12 +280,6 @@ contract PrivateNote is Modifiers {
 
         StakeInfo stake = _stakes[hash];
         require(amount.length == stake.amount.length, ERR_INVALID_PARAMS);
-
-        bool[] isDecr = new bool[](amount.length);
-        for (uint32 i = 0; i < amount.length; i++) {
-            require(stake.amount[i] >= amount[i], ERR_LOW_VALUE);
-            isDecr[i] = amount[i] > 0;
-        }
 
         _stakes[hash] = stake;
 
@@ -220,7 +297,7 @@ contract PrivateNote is Modifiers {
         PMP(pmpAddress).withdrawFullSet{
             value: 0.1 vmshell,
             flag: 1
-        }(amount, isDecr, _deposit_identifier_hash);
+        }(amount, _deposit_identifier_hash);
     }
 
     /// @notice Called by PMP after full set stake is cancelled
@@ -243,7 +320,7 @@ contract PrivateNote is Modifiers {
         uint128 total = 0;
         for (uint32 i = 0; i < amount.length; i++) {
             stake.amount[i] -= amount[i];
-            if (stake.amount[i] > 0) {
+            if ((stake.amount[i] > 0) || (stake.debt_amount[i] > 0)  || (stake.coupons_amount[i] > 0)) {
                 isEmpty = false;
             }
             total += amount[i];
@@ -262,35 +339,51 @@ contract PrivateNote is Modifiers {
         delete _busy;
     }
 
-
-
-    /// @notice Sets a stake on a PMP contract
-    /// @param event_id PMP event ID
-    /// @param oracle_list_hash Hash of Oracles
-    /// @param outcome Stake outcome
-    /// @param amount Stake amount
-    function setStake(uint256 event_id, uint256 oracle_list_hash, uint32 token_type, uint32 outcome, uint128 amount) 
+    /// @notice Places a stake on a specific outcome in PMP.
+    ///
+    /// @dev Deducts funds from wallet balance or coupons immediately.
+    ///      The stake is first stored as candidate and finalized only
+    ///      after `onStakeAccepted` callback from PMP.
+    ///
+    /// @param event_id PMP event identifier.
+    /// @param oracle_list_hash Hash of oracle configuration.
+    /// @param token_type Token type.
+    /// @param outcome Outcome index.
+    /// @param amount Stake amount.
+    /// @param use_coupon Whether to use coupon for this stake (if true, amount will be taken from available coupons instead of balance)
+    ///
+    /// Requirements:
+    /// - Wallet must not be busy.
+    /// - Amount must be greater than zero.
+    /// - Sufficient balance or coupons must exist.
+    function setStake(uint256 event_id, uint256 oracle_list_hash, uint32 token_type, uint32 outcome, uint128 amount, bool use_coupon) 
         public onlyOwnerPubkey(_ethemeral_pubkey) accept
     {        
         require(amount > 0, ERR_LOW_VALUE);
-        require(_balance[token_type] >= amount, ERR_LOW_VALUE);
+        if (use_coupon) {
+            require(_coupons_value >= amount, ERR_LOW_VALUE);
+        } else {
+            require(_balance[token_type] >= amount, ERR_LOW_VALUE);
+        }
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         ensureBalance();
-        bool isInc = true;
         TvmCell data = abi.encode(event_id, oracle_list_hash, token_type);
         uint256 hash = tvm.hash(data);
         address pmpAddress = DexLib.computePMPAddress(_PrivateNoteCode, _pmpCode, event_id, oracle_list_hash, token_type);
-        
+        uint8 bet_type = _debt > 0 && _debt_token_type == token_type ? 1 : 0;
+        bet_type = use_coupon ? 2 : bet_type;
+
         if (_stakes.exists(hash)) {
             StakeInfo stake = _stakes[hash];
             require(stake.candidate_amount == 0, ERR_STAKE_NOT_APPROVED);
             stake.candidate_amount = amount;
             stake.candidate_outcome = outcome;
             _stakes[hash] = stake;
-            isInc = false;
         } else {
             _stakes[hash] = StakeInfo({
                 amount: new uint128[](0),
+                debt_amount: new uint128[](0),
+                coupons_amount: new uint128[](0),
                 candidate_amount: amount,
                 candidate_outcome: outcome,
                 oracle_list_hash: oracle_list_hash,
@@ -300,19 +393,25 @@ contract PrivateNote is Modifiers {
         
         _busy = pmpAddress;
         _lastHash = hash;
-        _balance[token_type] -= amount;
-        
+        if (use_coupon) {
+            _coupons_value -= amount;
+        } else {
+            _balance[token_type] -= amount;
+        }
         PMP(pmpAddress).acceptStake{
             value: 0.1 vmshell, 
             flag: 1
-        }(outcome, amount, _deposit_identifier_hash, isInc);
+        }(outcome, amount, _deposit_identifier_hash, bet_type);
     }
 
     /// @notice Sets a full set stake on a PMP contract
+    /// @dev Deducts total amount from balance immediately.
+    ///      Stake is finalized after `onFullSetStakeAccepted`
+    ///
     /// @param event_id PMP event ID
     /// @param oracle_list_hash Hash of Oracles
     /// @param token_type Token type
-    /// @param amount Stake amounts per outcome
+    /// @param amount Array of stake amounts per outcome
     function setFullSetStake(
         uint256 event_id,
         uint256 oracle_list_hash,
@@ -321,6 +420,7 @@ contract PrivateNote is Modifiers {
     ) public onlyOwnerPubkey(_ethemeral_pubkey) accept {
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         require(amount.length > 0, ERR_INVALID_PARAMS);
+        require(_debt == 0, ERR_DEPT_NON_ZERO);
 
         ensureBalance();
 
@@ -341,32 +441,22 @@ contract PrivateNote is Modifiers {
             token_type
         );
 
-        bool[] isInc = new bool[](amount.length);
-
         if (_stakes.exists(hash)) {
             StakeInfo stake = _stakes[hash];
             require(stake.candidate_amount == 0, ERR_STAKE_NOT_APPROVED);
             require(amount.length == stake.amount.length, ERR_INVALID_PARAMS);
             stake.candidate_amount = total;
             _stakes[hash] = stake;
-            for (uint32 i = 0; i < isInc.length; i++) {
-                if (amount[i] > 0 && stake.amount[i] == 0) {
-                    isInc[i] = true;
-                }
-            }
         } else {
             _stakes[hash] = StakeInfo({
                 amount: new uint128[](amount.length),
+                debt_amount: new uint128[](0),
+                coupons_amount: new uint128[](0),
                 candidate_amount: total,
                 candidate_outcome: 0,
                 oracle_list_hash: oracle_list_hash,
                 token_type: token_type
             });
-            for (uint32 i = 0; i < isInc.length; i++) {
-                if (amount[i] > 0) {
-                    isInc[i] = true;
-                }
-            }
         }
 
         _balance[token_type] -= total;
@@ -376,7 +466,7 @@ contract PrivateNote is Modifiers {
         PMP(pmpAddress).acceptFullSetStake{
             value: 0.1 vmshell,
             flag: 1
-        }(amount, isInc, _deposit_identifier_hash);
+        }(amount, _deposit_identifier_hash);
     }
 
 
@@ -384,7 +474,8 @@ contract PrivateNote is Modifiers {
     /// @param event_id PMP event ID
     /// @param oracle_list_hash Hash of Oracles
     /// @param token_type Token type
-    function onStakeAccepted(uint256 event_id, uint256 oracle_list_hash, uint32 token_type, uint128 outcome_count) 
+    /// @param bet_type 0 - clean bet, 1 - debt bet, 2 - coupon bet
+    function onStakeAccepted(uint256 event_id, uint256 oracle_list_hash, uint32 token_type, uint128 outcome_count, uint8 bet_type) 
         public senderIs(_busy.get()) 
     {
         tvm.accept();
@@ -394,15 +485,29 @@ contract PrivateNote is Modifiers {
         uint256 hash = tvm.hash(data);
         StakeInfo stake = _stakes[hash];
         uint128 amount = stake.candidate_amount;
-        if (stake.amount.length == 0) {
-            stake.amount = new uint128[](outcome_count);
+        if (bet_type == 2) {
+            if (stake.coupons_amount.length == 0) {
+                stake.coupons_amount = new uint128[](outcome_count);
+            }   
+            stake.coupons_amount[stake.candidate_outcome] += amount;
+        } 
+        if (bet_type == 1) {
+            if (stake.debt_amount.length == 0) {
+                stake.debt_amount = new uint128[](outcome_count);
+            }   
+            stake.debt_amount[stake.candidate_outcome] += amount;
         }
-        stake.amount[stake.candidate_outcome] += amount;
+        if (bet_type == 0) {
+            if (stake.amount.length == 0) {
+                stake.amount = new uint128[](outcome_count);
+            }   
+            stake.amount[stake.candidate_outcome] += amount;
+        }
         stake.candidate_amount = 0;
         _stakes[hash] = stake;
         
         address addrExtern = address.makeAddrExtern(PRIVATENOTE_STAKE_CONFIRMED, bitCntAddress);
-        emit StakeConfirmed{dest: addrExtern}(_busy.get(), stake.candidate_outcome, amount);
+        emit StakeConfirmed{dest: addrExtern}(_busy.get(), stake.candidate_outcome, amount, bet_type);
         delete _busy;
     }
 
@@ -440,10 +545,11 @@ contract PrivateNote is Modifiers {
         delete _busy;
     }
 
-
     /// @notice Claims winnings from PMP
+    /// @dev Sends claim request to PMP. Wallet enters busy state
+    ///      until `onClaimAccepted` callback is received.
     /// @param event_id PMP event ID
-    /// @param oracle_list_hash Hash of Oracles
+    /// @param oracle_list_hash Hash of oracle configuration
     /// @param token_type Token type
     function claim(uint256 event_id, uint256 oracle_list_hash, uint32 token_type) public onlyOwnerPubkey(_ethemeral_pubkey) {
         TvmCell data = abi.encode(event_id, oracle_list_hash, token_type);
@@ -463,15 +569,17 @@ contract PrivateNote is Modifiers {
         PMP(pmpaddress).claim{
             value: 0.1 vmshell, 
             flag: 1
-        }(stake.amount, _deposit_identifier_hash);
+        }(stake.amount, stake.debt_amount, stake.coupons_amount, _deposit_identifier_hash);
     }
 
     /// @notice Called by PMP after claim is processed
     /// @param event_id PMP event ID
     /// @param oracle_list_hash Hash of Oracles
     /// @param outcome Optional outcome (if resolved)
-    /// @param payout Payout amount
-    function onClaimAccepted(uint256 event_id, uint256 oracle_list_hash, uint32 token_type, optional(uint32) outcome, uint128 payout) 
+    /// @param payoutClean Payout amount for clean bets
+    /// @param payout_debt Debt payout amount
+    /// @param payout_coupon Coupon payout amount
+    function onClaimAccepted(uint256 event_id, uint256 oracle_list_hash, uint32 token_type, optional(uint32) outcome, uint128 payoutClean, uint128 payout_debt, uint128 payout_coupon) 
         public senderIs(_busy.get()) 
     {        
         tvm.accept();
@@ -482,10 +590,18 @@ contract PrivateNote is Modifiers {
             return;
         } 
         
-        _balance[token_type] += payout;
-        
+        _balance[token_type] += payoutClean + payout_debt + payout_coupon;
+        if (payout_coupon > 0) {
+            _debt += payout_coupon;
+        }
+        uint128 diff = payout_debt * FULL_PERCENT / (FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT) * DEBT_REDISTRIBUTION_PERCENT; // Assuming 5% fee on debt payout
+        if (_debt > diff) {
+            _debt -= diff;
+        } else {
+            _debt = 0;
+        }
         address addrExtern = address.makeAddrExtern(PRIVATENOTE_CLAIM_ACCEPTED, bitCntAddress);
-        emit ClaimAccepted{dest: addrExtern}(_busy.get(), outcome, payout);
+        emit ClaimAccepted{dest: addrExtern}(_busy.get(), outcome, payoutClean + payout_debt + payout_coupon);
         
         TvmCell data = abi.encode(event_id, oracle_list_hash, token_type);
         uint256 hash = tvm.hash(data);
@@ -496,6 +612,42 @@ contract PrivateNote is Modifiers {
     function acceptFee(uint128 fee, uint32 token_type, uint256 event_id, uint256 oracle_list_hash) public senderIs(DexLib.computePMPAddress(_PrivateNoteCode, _pmpCode, event_id, oracle_list_hash, token_type)) accept {
         ensureBalance();
         _balance[token_type] += fee;
+    }
+
+    function getCouponValue(uint32 token_type) private pure returns (uint128) {
+        if (token_type == CURRENCIES_ID_SHELL) {
+            return SHELL_COUPON_VALUE;
+        } else if (token_type == CURRENCIES_ID) {
+            return NACKL_COUPON_VALUE;
+        } else if (token_type == CURRENCIES_ID_USDC) {
+            return USDC_COUPON_VALUE;
+        } else {
+            return 0;
+        }
+    }
+
+    /// @notice Generates a free coupon for the specified token type
+    /// @param token_type Token type for which to generate coupon
+    /// @dev Can only generate coupon when:
+    ///      - all token balances == 0
+    ///      - debt == 0
+    ///      - No active stakes exist.
+    ///      - No coupon currently exists.
+    function generateCoupon(uint32 token_type) public onlyOwnerPubkey(_ethemeral_pubkey) accept {
+        ensureBalance();
+        require(_debt == 0, ERR_HAS_DEBT);
+        require(!_has_withdrawn, ERR_INVALID_STATE);
+        require(_stakes.empty(), ERR_NOTE_BUSY);
+        for ((, uint128 bal) : _balance) {
+            require(bal == 0, ERR_NON_ZERO_BALANCE);
+        }        
+        require(_coupons_value == 0, ERR_COUPON_ALREADY_EXISTS);
+        _coupons_value = getCouponValue(token_type);
+        _coupons_token_type = token_type;
+
+        uint128 base_debt = _coupons_value * 5 / 100;
+        _debt = base_debt;
+        _debt_token_type = token_type;
     }
 
     /// @notice Receives funds to the wallet
@@ -527,8 +679,10 @@ contract PrivateNote is Modifiers {
     function withdrawTokens(uint8 flags, address dest_wallet_addr, uint32 token_type) public onlyOwnerPubkey(_ethemeral_pubkey) accept {
         ensureBalance();
         require(_stakes.empty(), ERR_NOTE_BUSY);
+        require(_debt == 0, ERR_DEPT_NON_ZERO);
         RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1}(_balance[token_type], token_type, flags, dest_wallet_addr, _deposit_identifier_hash);
         _balance[token_type] = 0;
+        _has_withdrawn = true;
 	}
 
     /// @notice Reverts a withdraw operation (called by Vault)

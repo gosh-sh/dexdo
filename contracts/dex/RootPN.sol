@@ -33,15 +33,24 @@ contract RootPN is Modifiers {
 
     /// @notice Mapping of deployed PrivateNote values
     mapping(uint32 => uint128) _deployedValues;
+    
+    // Events
 
     /// @notice Emitted when a new voucher is generated
     /// @param sk_u_commit Commitment of the secret key
-    /// @param vaucher_nominal Nominal value of the voucher
+    /// @param voucher_nominal Nominal value of the voucher
     /// @param token_type Type of token for the voucher
-	event vaucherGenerated(uint256 sk_u_commit, uint vaucher_nominal, uint32 token_type);
+	event voucherGenerated(uint256 sk_u_commit, uint voucher_nominal, uint32 token_type);
 
-    // Events
+    /// @notice Emitted when a PrivateNote contract is successfully deployed and registered.
+    /// @param depositIdentifierHash Deposit identifier hash
+    /// @param noteAddress — Deployed PrivateNote address
+    /// @param initialBalance — Initial token balance
     event PrivateNoteDeployed(uint256 depositIdentifierHash, address noteAddress, uint128 initialBalance);
+
+    /// @notice Emitted when a Nullifier contract is deployed.
+    /// @param nullifierAddress — Address associated with the deployment
+    /// @param value — Value linked to the nullifier
     event NullifierDeployed(address nullifierAddress, uint64 value);
 
     /// @notice Root constructor
@@ -55,6 +64,30 @@ contract RootPN is Modifiers {
         gosh.mintshellq(MIN_BALANCE);
     }
 
+    /// @notice Verifies a zero-knowledge proof and deploys a Nullifier contract
+    ///         linked to a deterministic PrivateNote address.
+    ///
+    /// @dev This function reconstructs the public inputs for zk verification in the following order:
+    ///      1. 24 zero bytes (reserved)
+    ///      2. `value` encoded as bytes8
+    ///      3. 24 zero bytes (reserved)
+    ///      4. `CURRENCIES_ID_SHELL_FEE` encoded as bytes8
+    ///      5. `nullifier_hash` encoded as bytes32
+    ///
+    ///      The proof must validate against these public inputs using `gosh.zkhalo2verify`.
+    ///      If verification succeeds:
+    ///      - A Nullifier contract is deployed with `_nullifier_hash`.
+    ///      - The deterministic PrivateNote address is computed from `deposit_identifier_hash`.
+    ///      - The specified `value` is transferred as shell currency to the Nullifier constructor.
+    ///      - `NullifierDeployed` event is emitted.
+    ///
+    ///      Reverts with `ERR_INVALID_ZKPROOF` if the proof verification fails.
+    ///
+    /// @param proof Zero-knowledge proof generated off-chain.
+    /// @param nullifier_hash Hash of the nullifier used to prevent double spending.
+    /// @param deposit_identifier_hash Unique deposit identifier used to deterministically derive
+    ///        the associated PrivateNote contract address.
+    /// @param value Amount encoded into the zk public inputs and passed as shell currency.
     function sendEccShellToPrivateNote(bytes proof, uint256 nullifier_hash, uint256 deposit_identifier_hash, uint64 value) public view accept {
         ensureBalance();
 
@@ -81,6 +114,8 @@ contract RootPN is Modifiers {
         TvmCell stateInitNote = DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash);
         address noteAddress = address.makeAddrStd(0, tvm.hash(stateInitNote));
 
+        address nullifier = address.makeAddrStd(0, tvm.hash(stateInit));
+
         new Nullifier{
             stateInit: stateInit,
             value: 10 vmshell,
@@ -89,7 +124,7 @@ contract RootPN is Modifiers {
         }(noteAddress);
 
         address addrExtern = address.makeAddrExtern(ROOTPN_NULLIFIER_DEPLOYED, bitCntAddress);
-        emit NullifierDeployed{dest: addrExtern}(noteAddress, value);
+        emit NullifierDeployed{dest: addrExtern}(nullifier, value);
     }
 
     /// @notice Deploys a new PrivateNote contract
@@ -112,18 +147,14 @@ contract RootPN is Modifiers {
         bytes private_note_digest_bytes = bytes(bytes32(deposit_identifier_hash));
         pub_inputs.append(private_note_digest_bytes);
 
-        require(token_type == CURRENCIES_ID, ERR_INVALID_TOKEN_TYPE);
         require(gosh.zkhalo2verify(pub_inputs, zkproof), ERR_INVALID_ZKPROOF);
         TvmCell stateInit = DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash);
-        address noteAddress = address.makeAddrStd(0, tvm.hash(stateInit));
 
         new PrivateNote{
             stateInit: stateInit,
             value: 50 vmshell,
             flag: 1
         }(value, ethemeral_pubkey, token_type, _pmpCode, _oracleEventListCode, _oracleCode);
-        address addrExtern = address.makeAddrExtern(ROOTPN_PRIVATE_NOTE_DEPLOYED, bitCntAddress);
-        emit PrivateNoteDeployed{dest: addrExtern}(deposit_identifier_hash, noteAddress, value);
     }
 
     /// @notice Records deployment of a PrivateNote contract
@@ -132,6 +163,8 @@ contract RootPN is Modifiers {
     /// @param deployed_value Value of the deployed token
     function privateNoteDeployed(uint256 deposit_identifier_hash, uint32 token_type, uint128 deployed_value) public senderIs(address.makeAddrStd(0, tvm.hash(DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash)))) accept {
         _deployedValues[token_type] += deployed_value;
+        address addrExtern = address.makeAddrExtern(ROOTPN_PRIVATE_NOTE_DEPLOYED, bitCntAddress);
+        emit PrivateNoteDeployed{dest: addrExtern}(deposit_identifier_hash, msg.sender, deployed_value);
     }
 
     /// @notice Updates the contract code for RootPN
@@ -197,7 +230,7 @@ contract RootPN is Modifiers {
     }
 
     /// @notice Checks if the nominal is allowed for vault operations
-    function generateVaucher(uint256 sk_u_commit, bool isFee) public view internalMsg {
+    function generatevoucher(uint256 sk_u_commit, bool isFee) public view internalMsg {
 		require(msg.currencies.keys().length == 1, 300);
 		uint32 token_type = msg.currencies.keys()[0];
         if ((token_type == CURRENCIES_ID_SHELL) && (isFee)) {
@@ -207,11 +240,11 @@ contract RootPN is Modifiers {
 		tvm.accept();
         ensureBalance();
 
-		uint vaucher_nominal = msg.currencies[token_type];
-        require(isAllowedNominal(uint128(vaucher_nominal)), ERR_NOT_ALLOWED);
+		uint voucher_nominal = msg.currencies[token_type];
+        require(isAllowedNominal(uint128(voucher_nominal)), ERR_NOT_ALLOWED);
 
-        address addrExtern = address.makeAddrExtern(VAULT_VAUCHER_GENERATED, bitCntAddress);
-		emit vaucherGenerated{dest: addrExtern}(sk_u_commit, vaucher_nominal, token_type);
+        address addrExtern = address.makeAddrExtern(VAULT_voucher_GENERATED, bitCntAddress);
+		emit voucherGenerated{dest: addrExtern}(sk_u_commit, voucher_nominal, token_type);
 	}
 
     /// @notice Withdraws tokens to a specified wallet

@@ -26,7 +26,12 @@ contract RootOracle is Modifiers {
     /// @notice Root owner public key
     uint256 _ownerPubkey;
 
-    // Events
+    /// Events
+
+    /// @notice Emitted when a new Oracle contract is deployed by this root.
+    /// @param oracle Deployed Oracle contract address.
+    /// @param pubkey Oracle owner public key provided at deployment.
+    /// @param name Oracle unique name used for deterministic address derivation.
     event OracleDeployed(address oracle, uint256 pubkey, string name);
 
     /// @notice Root constructor

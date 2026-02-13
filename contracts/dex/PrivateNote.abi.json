@@ -62,7 +62,8 @@
 				{"name":"event_id","type":"uint256"},
 				{"name":"oracle_list_hash","type":"uint256"},
 				{"name":"token_type","type":"uint32"},
-				{"name":"value","type":"uint128"}
+				{"name":"value","type":"uint128"},
+				{"name":"coupon_value","type":"uint128"}
 			],
 			"outputs": [
 			]
@@ -96,7 +97,8 @@
 				{"name":"oracle_list_hash","type":"uint256"},
 				{"name":"token_type","type":"uint32"},
 				{"name":"outcome","type":"uint32"},
-				{"name":"amount","type":"uint128"}
+				{"name":"amount","type":"uint128"},
+				{"name":"use_coupon","type":"bool"}
 			],
 			"outputs": [
 			]
@@ -118,7 +120,8 @@
 				{"name":"event_id","type":"uint256"},
 				{"name":"oracle_list_hash","type":"uint256"},
 				{"name":"token_type","type":"uint32"},
-				{"name":"outcome_count","type":"uint128"}
+				{"name":"outcome_count","type":"uint128"},
+				{"name":"bet_type","type":"uint8"}
 			],
 			"outputs": [
 			]
@@ -151,7 +154,9 @@
 				{"name":"oracle_list_hash","type":"uint256"},
 				{"name":"token_type","type":"uint32"},
 				{"name":"outcome","type":"optional(uint32)"},
-				{"name":"payout","type":"uint128"}
+				{"name":"payoutClean","type":"uint128"},
+				{"name":"payout_debt","type":"uint128"},
+				{"name":"payout_coupon","type":"uint128"}
 			],
 			"outputs": [
 			]
@@ -163,6 +168,14 @@
 				{"name":"token_type","type":"uint32"},
 				{"name":"event_id","type":"uint256"},
 				{"name":"oracle_list_hash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "generateCoupon",
+			"inputs": [
+				{"name":"token_type","type":"uint32"}
 			],
 			"outputs": [
 			]
@@ -230,7 +243,7 @@
 			"inputs": [
 			],
 			"outputs": [
-				{"components":[{"name":"amount","type":"uint128[]"},{"name":"candidate_amount","type":"uint128"},{"name":"candidate_outcome","type":"uint32"},{"name":"token_type","type":"uint32"},{"name":"oracle_list_hash","type":"uint256"}],"name":"_stakes","type":"map(uint256,tuple)"}
+				{"components":[{"name":"amount","type":"uint128[]"},{"name":"debt_amount","type":"uint128[]"},{"name":"coupons_amount","type":"uint128[]"},{"name":"candidate_amount","type":"uint128"},{"name":"candidate_outcome","type":"uint32"},{"name":"token_type","type":"uint32"},{"name":"oracle_list_hash","type":"uint256"}],"name":"_stakes","type":"map(uint256,tuple)"}
 			]
 		}
 	],
@@ -249,7 +262,8 @@
 			"inputs": [
 				{"name":"stakeController","type":"address"},
 				{"name":"outcome","type":"uint32"},
-				{"name":"amount","type":"uint128"}
+				{"name":"amount","type":"uint128"},
+				{"name":"bet_type","type":"uint8"}
 			],
 			"outputs": [
 			]
@@ -315,9 +329,14 @@
 		{"init":false,"name":"_PrivateNoteCode","type":"cell"},
 		{"init":false,"name":"_oracleCode","type":"cell"},
 		{"init":false,"name":"_oracleEventList","type":"cell"},
-		{"components":[{"name":"amount","type":"uint128[]"},{"name":"candidate_amount","type":"uint128"},{"name":"candidate_outcome","type":"uint32"},{"name":"token_type","type":"uint32"},{"name":"oracle_list_hash","type":"uint256"}],"init":false,"name":"_stakes","type":"map(uint256,tuple)"},
+		{"components":[{"name":"amount","type":"uint128[]"},{"name":"debt_amount","type":"uint128[]"},{"name":"coupons_amount","type":"uint128[]"},{"name":"candidate_amount","type":"uint128"},{"name":"candidate_outcome","type":"uint32"},{"name":"token_type","type":"uint32"},{"name":"oracle_list_hash","type":"uint256"}],"init":false,"name":"_stakes","type":"map(uint256,tuple)"},
 		{"init":false,"name":"_busy","type":"optional(address)"},
 		{"init":false,"name":"_lastHash","type":"uint256"},
-		{"init":false,"name":"_balance","type":"map(uint32,uint128)"}
+		{"init":false,"name":"_balance","type":"map(uint32,uint128)"},
+		{"init":false,"name":"_debt","type":"uint128"},
+		{"init":false,"name":"_debt_token_type","type":"uint32"},
+		{"init":false,"name":"_has_withdrawn","type":"bool"},
+		{"init":false,"name":"_coupons_value","type":"uint128"},
+		{"init":false,"name":"_coupons_token_type","type":"uint32"}
 	]
 }

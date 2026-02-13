@@ -37,11 +37,32 @@ contract PMP is Modifiers {
     /// @notice Total pool of all stakes
     uint128 _totalPool;
 
-    /// @notice Outcome pools
-    mapping(uint32 => uint128) _outcomePools;
+    /// @notice Pools separated by bet type
+    /// @dev Structure: outcome => bet_type => pool_amount
+    mapping(uint32 => mapping(uint8 => uint128)) _typedOutcomePools;
 
-    /// @notice Outcome stake counts
-    mapping(uint32 => uint128) _outcomeCounts;
+    /// @notice Stake counts separated by bet type
+    /// @dev Structure: outcome => bet_type => stake_count
+    mapping(uint32 => mapping(uint8 => uint128)) _typedOutcomeCounts;
+
+    /// @notice Total coupon pool across all outcomes
+    /// @dev Used to enforce COUPON_POOL_LIMIT_PERCENT
+    uint128 _totalCouponPool;
+
+    /// @notice Total pool for clean bets
+    uint128 _totalCleanPool;
+
+    /// @notice Total pool for debt bets
+    uint128 _totalDebtPool;
+
+    /// @notice Coefficient for calculating coupon winnings, set at resolution
+    uint128 _couponWinCoef;
+
+    /// @notice Coefficient for calculating debt winnings, set at resolution
+    uint128 _deptWinCoef;
+
+    /// @notice Total winnings from the winning outcome, used for payout calculations
+    uint128 _totalWinPool;
 
     /// @notice Finalized outcome
     optional(uint32) _resolvedOutcome;
@@ -90,14 +111,15 @@ contract PMP is Modifiers {
     /// @notice Mapping of oracle proposals
     mapping(uint256 => Proposal) _oracleProposals;
 
-    // Events
+    /// Events
 
     /// @notice Emitted when a stake is accepted and accounted into the pool.
     /// @dev `note` is a PrivateNote wallet address that sent the stake.
     /// @param note PrivateNote address (wallet) that placed the stake.
     /// @param outcomeId Outcome identifier the stake is placed on.
     /// @param amount Stake amount added to the pool.
-    event StakeAccepted(address indexed note, uint32 outcomeId, uint128 amount);
+    /// @param bet_type 0 - clean bet, 1 - debt bet, 2 - coupon bet
+    event StakeAccepted(address indexed note, uint32 outcomeId, uint128 amount, uint8 bet_type);
 
     /// @notice Emitted when the event is fully approved by oracle(s).
     /// @dev This event is emitted only when all required oracle confirmations are collected.
@@ -304,12 +326,12 @@ contract PMP is Modifiers {
     /// @param outcomeId Stake outcome identifier (must be < _numOutcomes)
     /// @param stakeAmount Stake amount
     /// @param deposit_identifier_hash Deposit identifier hash
-    /// @param isInc Is it new PrivateNote for Stake
+    /// @param bet_type 0 - clean bet, 1 - debt bet, 2 - coupon bet
     function acceptStake(
         uint32 outcomeId,
         uint128 stakeAmount,
         uint256 deposit_identifier_hash,
-        bool isInc
+        uint8 bet_type
     ) public {
         require(_approved, ERR_NOT_APPROVED);
         require(!_isCancelled, ERR_ALREADY_CANCELLED);
@@ -318,6 +340,7 @@ contract PMP is Modifiers {
         require(outcomeId < _numOutcomes, ERR_INVALID_OUTCOME_ID);
         require(block.timestamp >= _stakeStart, ERR_STAKE_NOT_STARTED);
         require(block.timestamp < _stakeStart + (_stakeEnd - _stakeStart) * FULL_SET_PERCENT / FULL_PERCENT, ERR_STAKE_PERIOD_ENDED);
+        require(bet_type <= BET_TYPE_COUPON, ERR_INVALID_BET_TYPE);
         
         address wallet = DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
@@ -325,28 +348,65 @@ contract PMP is Modifiers {
         tvm.accept();
         ensureBalance();
 
-        _totalPool += stakeAmount;
-        _outcomePools[outcomeId] += stakeAmount;
-        if (isInc) {        
-            _outcomeCounts[outcomeId] += 1;
+        if (bet_type == BET_TYPE_COUPON) {
+            uint128 current_outcome_coupon_pool = _typedOutcomePools[outcomeId][BET_TYPE_COUPON];
+            uint128 new_outcome_coupon_pool = current_outcome_coupon_pool + stakeAmount;            
+            uint128 current_outcome_total = _typedOutcomePools[outcomeId][BET_TYPE_COUPON]
+                                        + _typedOutcomePools[outcomeId][BET_TYPE_DEBT]
+                                        + _typedOutcomePools[outcomeId][BET_TYPE_CLEAN];            
+            uint128 new_outcome_total = current_outcome_total + stakeAmount;            
+            uint128 max_outcome_coupon_pool = uint128(
+                (uint256(new_outcome_total) * uint256(COUPON_POOL_LIMIT_PERCENT)) / uint256(FULL_PERCENT)
+            );
+            require(new_outcome_coupon_pool <= max_outcome_coupon_pool, ERR_COUPON_POOL_LIMIT_EXCEEDED);            
+            _totalCouponPool += stakeAmount;
+        } else if (bet_type == BET_TYPE_CLEAN) {
+            _totalCleanPool += stakeAmount;
+            _totalPool += stakeAmount;    
+        } else if (bet_type == BET_TYPE_DEBT) {
+            _totalDebtPool += stakeAmount;
+            _totalPool += stakeAmount;    
         }
-
-        address addrExtern = address.makeAddrExtern(PMP_STAKE_ACCEPTED, bitCntAddress);
-        emit StakeAccepted{dest: addrExtern}(wallet, outcomeId, stakeAmount);
-
+    
+        _typedOutcomePools[outcomeId][bet_type] += stakeAmount;        
+        
         PrivateNote(wallet).onStakeAccepted{
             value: 0.1 vmshell,
             flag: 1
-        }(_event_id, _oracle_list_hash, _token_type, _numOutcomes);
+        }(_event_id, _oracle_list_hash, _token_type, _numOutcomes, bet_type);
+        
+        address addrExtern = address.makeAddrExtern(PMP_STAKE_ACCEPTED, bitCntAddress);
+        emit StakeAccepted{dest: addrExtern}(wallet, outcomeId, stakeAmount, bet_type);
     }
 
-    /// @notice Cancels a stake and refunds the user
-    /// @param stakeAmount Stake amount
-    /// @param deposit_identifier_hash Deposit identifier hash
+    /// @notice Cancels user stakes after event cancellation and processes refund
+    /// @dev
+    /// - Callable only by the corresponding PrivateNote wallet.
+    /// - The event must be cancelled.
+    /// - If the result window has ended and the event is not resolved,
+    ///   the function triggers automatic cancellation.
+    /// - Decreases internal pool balances for clean, debt and coupon bets.
+    /// - Clean and debt amounts reduce `_totalPool`.
+    /// - Coupon amounts reduce `_totalCouponPool` only.
+    /// - Sends aggregated refund data back to PrivateNote via `onStakeCancelled`.
+    ///
+    /// @param stakeAmount Array of clean stake amounts per outcome.
+    ///        Length should correspond to `_numOutcomes`.
+    /// @param debtAmount Array of debt stake amounts per outcome.
+    ///        Length should correspond to `_numOutcomes`.
+    /// @param couponsAmount Array of coupon stake amounts per outcome.
+    ///        Length should correspond to `_numOutcomes`.
+    /// @param deposit_identifier_hash Deposit identifier hash used to
+    ///        deterministically compute the caller's PrivateNote address.
     function cancelStake(
         uint128[] stakeAmount,
+        uint128[] debtAmount,
+        uint128[] couponsAmount,
         uint256 deposit_identifier_hash
     ) public {
+        if ((block.timestamp > _resultEnd) && (!_resolvedOutcome.hasValue()) && (!_isCancelled)) {
+            cancelEvent();
+        }
         require(_isCancelled, ERR_NOT_CANCELLED);
 
         address wallet = DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
@@ -355,17 +415,32 @@ contract PMP is Modifiers {
         tvm.accept();
         ensureBalance();
         uint128 totalStake = 0;
-        for (uint32 outcomeId = 0; outcomeId < _numOutcomes; outcomeId++) {
-            _outcomePools[outcomeId] -= stakeAmount[outcomeId];
-            _outcomeCounts[outcomeId] -= 1;
+        uint128 totalCouponRefund = 0;
+
+        for (uint32 outcomeId = 0; outcomeId < stakeAmount.length; outcomeId++) {
+            _typedOutcomePools[outcomeId][BET_TYPE_CLEAN] -= stakeAmount[outcomeId];
             _totalPool -= stakeAmount[outcomeId];
+            _totalCleanPool -= stakeAmount[outcomeId];
             totalStake += stakeAmount[outcomeId];
+        }
+
+        for (uint32 outcomeId = 0; outcomeId < debtAmount.length; outcomeId++) {
+            _typedOutcomePools[outcomeId][BET_TYPE_DEBT] -= debtAmount[outcomeId];
+            _totalPool -= debtAmount[outcomeId];
+            _totalDebtPool -= debtAmount[outcomeId];
+            totalStake += debtAmount[outcomeId];
+        }
+
+        for (uint32 outcomeId = 0; outcomeId < couponsAmount.length; outcomeId++) {
+            _typedOutcomePools[outcomeId][BET_TYPE_COUPON] -= couponsAmount[outcomeId];
+            _totalCouponPool -= couponsAmount[outcomeId];
+            totalCouponRefund += couponsAmount[outcomeId];
         }
 
         PrivateNote(wallet).onStakeCancelled{
             value: 0.1 vmshell,
             flag: 1
-        }(_event_id, _oracle_list_hash, _token_type, totalStake);
+        }(_event_id, _oracle_list_hash, _token_type, totalStake, totalCouponRefund);
     }
 
     function _checkFullSetProportion(uint128[] amount) private view {
@@ -374,21 +449,32 @@ contract PMP is Modifiers {
         uint128 baseAmount;
 
         for (uint32 i = 0; i < _numOutcomes; i++) {
-            if (_outcomePools[i] > 0) {
+            uint128 poolSum = 0;
+            for (uint8 t = 0; t < BET_TYPE_COUPON; t++) {
+                poolSum += _typedOutcomePools[i][t];
+            }
+            if (poolSum > 0) {
                 baseIndex = i;
-                basePool = _outcomePools[i];
+                basePool = poolSum;
                 baseAmount = amount[i];
                 break;
             }
         }
+
         require(baseIndex != type(uint32).max, ERR_INVALID_PARAMS);
+
         for (uint32 i = 0; i < _numOutcomes; i++) {
-            if (_outcomePools[i] == 0) {
+            uint128 poolSum = 0;
+            for (uint8 t = 0; t < BET_TYPE_COUPON; t++) {
+                poolSum += _typedOutcomePools[i][t];
+            }
+
+            if (poolSum == 0) {
                 require(amount[i] == 0, ERR_INVALID_PARAMS);
             } else {
                 require(
                     uint256(amount[i]) * uint256(basePool) ==
-                    uint256(baseAmount) * uint256(_outcomePools[i]),
+                    uint256(baseAmount) * uint256(poolSum),
                     ERR_INVALID_PARAMS
                 );
             }
@@ -396,13 +482,28 @@ contract PMP is Modifiers {
     }
 
 
-    /// @notice Accepts full set stake from PrivateNote and confirms it
-    /// @param amount Stake amounts per outcome
-    /// @param isInc Is it new PrivateNote for Stake
-    /// @param deposit_identifier_hash Deposit identifier hash
+    /// @notice Accepts a proportional full-set stake from PrivateNote across all outcomes.
+    /// @dev
+    /// - Callable only by the corresponding PrivateNote wallet.
+    /// - The event must be approved and not cancelled.
+    /// - The event must not be resolved.
+    /// - Can be executed only during the full-set staking window
+    ///   (final portion of the stake period).
+    /// - `amount.length` must equal `_numOutcomes`.
+    /// - `_totalPool` must be greater than zero.
+    /// - The provided amounts must preserve proportionality with
+    ///   existing outcome pools (validated via `_checkFullSetProportion`).
+    /// - Internally treated as clean bets:
+    ///   increases `_typedOutcomePools[i][BET_TYPE_CLEAN]`,
+    ///   `_totalPool`, and `_totalCleanPool`.
+    /// - Notifies the caller’s PrivateNote via `onFullSetStakeAccepted`.
+    ///
+    /// @param amount Array of stake amounts per outcome.
+    ///        Must match `_numOutcomes` and preserve pool proportions.
+    /// @param deposit_identifier_hash Deposit identifier hash used to
+    ///        deterministically compute the caller's PrivateNote address.
     function acceptFullSetStake(
         uint128[] amount,
-        bool[] isInc,
         uint256 deposit_identifier_hash
     ) public {
         require(_approved, ERR_NOT_APPROVED);
@@ -431,13 +532,11 @@ contract PMP is Modifiers {
 
         uint128 addedTotal = 0;
         for (uint32 i = 0; i < _numOutcomes; i++) {
-            if (isInc[i]) {
-                _outcomeCounts[i] += 1;
-            }
-            _outcomePools[i] += amount[i];
+            _typedOutcomePools[i][BET_TYPE_CLEAN] += amount[i];
             addedTotal += amount[i];
         }
         _totalPool += addedTotal;
+        _totalCleanPool += addedTotal;
 
         PrivateNote(wallet).onFullSetStakeAccepted{
             value: 0.1 vmshell,
@@ -445,13 +544,29 @@ contract PMP is Modifiers {
         }(_event_id, _oracle_list_hash, _token_type, amount);
     }
 
-    /// @notice Cancels a full set stake and refunds the user
-    /// @param amount Stake amounts per outcome 
-    /// @param isDecr Is it decrease of stake
-    /// @param deposit_identifier_hash Deposit identifier hash
+    /// @notice Withdraws (cancels) a proportional full-set stake across all outcomes.
+    /// @dev
+    /// - Callable only by the corresponding PrivateNote wallet.
+    /// - The event must be approved and not cancelled.
+    /// - The event must not be resolved.
+    /// - Can be executed only during the full-set staking window
+    ///   (final portion of the stake period).
+    /// - `amount.length` must equal `_numOutcomes`.
+    /// - `_totalPool` must be greater than zero.
+    /// - Each outcome clean pool must be sufficient:
+    ///   `_typedOutcomePools[i][BET_TYPE_CLEAN] >= amount[i]`.
+    /// - The provided amounts must preserve proportionality with
+    ///   existing outcome pools (validated via `_checkFullSetProportion`).
+    /// - Internally decreases `_typedOutcomePools[i][BET_TYPE_CLEAN]`,
+    ///   `_totalPool`, and `_totalCleanPool`.
+    /// - Notifies the caller’s PrivateNote via `onFullSetStakeCancelled`.
+    ///
+    /// @param amount Array of withdrawal amounts per outcome.
+    ///        Must match `_numOutcomes` and preserve pool proportions.
+    /// @param deposit_identifier_hash Deposit identifier hash used to
+    ///        deterministically compute the caller's PrivateNote address.
     function withdrawFullSet(
         uint128[] amount,
-        bool[] isDecr,
         uint256 deposit_identifier_hash
     ) public {
         require(_approved, ERR_NOT_APPROVED);
@@ -480,15 +595,12 @@ contract PMP is Modifiers {
 
         uint128 removedTotal = 0;
         for (uint32 i = 0; i < _numOutcomes; i++) {
-            require(_outcomePools[i] >= amount[i], ERR_INVALID_PARAMS);
-            if (isDecr[i]) {
-                require(_outcomeCounts[i] > 0, ERR_INVALID_PARAMS);
-                _outcomeCounts[i] -= 1;
-            }
-            _outcomePools[i] -= amount[i];
+            require(_typedOutcomePools[i][BET_TYPE_CLEAN] >= amount[i], ERR_INVALID_PARAMS);
+            _typedOutcomePools[i][BET_TYPE_CLEAN] -= amount[i];
             removedTotal += amount[i];
         }
         _totalPool -= removedTotal;
+        _totalCleanPool -= removedTotal;
 
         PrivateNote(wallet).onFullSetStakeCancelled{
             value: 0.1 vmshell,
@@ -497,12 +609,11 @@ contract PMP is Modifiers {
     }
 
 
-
-
     /// @notice Resolves the event outcome
     /// @param outcomeId Resolution outcome identifier (must be < _numOutcomes)
     function resolve(uint32 outcomeId) private {
         require(_approved, ERR_NOT_APPROVED);
+        require(!_isCancelled, ERR_ALREADY_CANCELLED);
         require(!_resolvedOutcome.hasValue(), ERR_ALREADY_RESOLVED);
         require(outcomeId < _numOutcomes, ERR_INVALID_OUTCOME_ID);
         require(block.timestamp >= _resultStart, ERR_RESULT_NOT_STARTED);
@@ -511,87 +622,152 @@ contract PMP is Modifiers {
         tvm.accept();
         ensureBalance();
         _resolvedOutcome = outcomeId;
-
-        uint128 privateNoteFee = (_totalPool * FEE_PERCENT) / FULL_PERCENT;
-        if (privateNoteFee > 0) {
-            PrivateNote(_deployer).acceptFee{
-                value: 0.1 vmshell,
-                flag: 1
-            }(privateNoteFee, _token_type, _event_id, _oracle_list_hash);
+        uint128 winningClean = _typedOutcomePools[outcomeId][BET_TYPE_CLEAN];
+        uint128 winningDebt = _typedOutcomePools[outcomeId][BET_TYPE_DEBT];
+        uint128 winningCoupon = _typedOutcomePools[outcomeId][BET_TYPE_COUPON];
+        uint128 totalWinningMass = winningClean + winningDebt + winningCoupon;
+        require(totalWinningMass > 0, ERR_INVALID_PARAMS);
+        uint128 profitBudget = _totalPool - winningClean - winningDebt;
+        uint128 originalProfitBudget = profitBudget;
+        uint128 profitPerUnit = uint128(
+            (uint256(profitBudget) * FULL_PERCENT) /
+            totalWinningMass
+        );
+        _couponWinCoef = profitPerUnit;
+        if (_couponWinCoef > COUPON_MAX_PAYOUT_MULTIPLIER) {
+            _couponWinCoef = COUPON_MAX_PAYOUT_MULTIPLIER;
         }
-        _totalPool -= privateNoteFee;
+        uint128 couponProfit = uint128(
+            (uint256(winningCoupon) * _couponWinCoef) /
+            FULL_PERCENT
+        );
+        if (couponProfit > profitBudget) {
+            couponProfit = profitBudget;
+        }
+        profitBudget -= couponProfit;
+        uint128 realWinningMass =
+            winningClean + winningDebt;
+        if (realWinningMass > 0) {
+            uint128 baseRealProfitPerUnit = uint128(
+                (uint256(profitBudget) * FULL_PERCENT) /
+                realWinningMass
+            );
 
-        address addrExtern = address.makeAddrExtern(PMP_RESOLVED, bitCntAddress);
+            uint128 P = originalProfitBudget;
+            uint128 R = winningDebt;
+
+            if (P > 0 && P > R) {
+                _deptWinCoef = uint128(
+                    (uint256(baseRealProfitPerUnit) *
+                    uint256(P - R)) / uint256(P)
+                );
+            } else {
+                _deptWinCoef = 0;
+            }
+        } else {
+            _deptWinCoef = 0;
+        }
+        _totalPool = profitBudget;
+        _totalWinPool = totalWinningMass;
+        address addrExtern =
+        address.makeAddrExtern(PMP_RESOLVED, bitCntAddress);
         emit Resolved{dest: addrExtern}(outcomeId);
     }
 
-    /// @notice Claims winnings for user
-    /// @param stakeAmount Stake amount
-    /// @param deposit_identifier_hash Deposit identifier hash
+
+    /// @notice Claims winnings for the caller's PrivateNote wallet.
+    /// @dev
+    /// - Callable only by the corresponding PrivateNote wallet.
+    /// - The event must be approved.
+    /// - `stakeAmount.length` must equal `_numOutcomes`.
+    /// - If the event is not yet resolved, the function processes
+    ///   a zero-payout claim and returns immediately.
+    /// - Determines whether the caller has a winning position
+    ///   based on the resolved outcome.
+    /// - Calculates payout for:
+    ///     * clean bets — proportional share of `_totalPool`
+    ///       relative to the winning clean pool,
+    ///     * debt bets — original debt amount plus proportional
+    ///       profit based on `_deptWinCoef`,
+    ///     * coupon bets — profit based on `_couponWinCoef`.
+    /// - Updates `_totalWinPool` to track remaining distributable
+    ///   winning stake amounts.
+    /// - Notifies the caller’s PrivateNote via `onClaimAccepted`.
+    /// - Emits `ClaimProcessed`.
+    /// - If `_totalWinPool` becomes zero after processing,
+    ///   the contract self-destructs to `_deployer`.
+    ///
+    /// @param stakeAmount Array of clean stake amounts per outcome.
+    /// @param debtAmount Array of debt stake amounts per outcome.
+    /// @param couponsAmount Array of coupon stake amounts per outcome.
+    /// @param deposit_identifier_hash Deposit identifier hash used to
+    ///        deterministically compute the caller's PrivateNote address.
     function claim(
-        uint128[] stakeAmount,
-        uint256 deposit_identifier_hash
+    uint128[] stakeAmount,
+    uint128[] debtAmount,
+    uint128[] couponsAmount,
+    uint256 deposit_identifier_hash
     ) public {
         require(_approved, ERR_NOT_APPROVED);
         require(stakeAmount.length == _numOutcomes, ERR_INVALID_OUTCOME_ID);
-
         address wallet = DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
-
-        address addrExtern;
-
         if (!_resolvedOutcome.hasValue()) {
             PrivateNote(wallet).onClaimAccepted{
                 value: 0.1 vmshell,
                 flag: 1
-            }(_event_id, _oracle_list_hash, _token_type, _resolvedOutcome, 0);
-
-            addrExtern = address.makeAddrExtern(PMP_CLAIM_PROCESSED, bitCntAddress);
-            emit ClaimProcessed{dest: addrExtern}(wallet, 0, false);
+            }(_event_id, _oracle_list_hash, _token_type, _resolvedOutcome, 0, 0, 0);
             return;
         }
-
-        bool win = stakeAmount[_resolvedOutcome.get()] > 0;
-
-        for (uint32 i = 0; i < _numOutcomes; i++)
-            if (stakeAmount[i] > 0) 
-                _outcomeCounts[i] -= 1;
-
-        if (!win) {
-            PrivateNote(wallet).onClaimAccepted{
-                value: 0.1 vmshell,
-                flag: 1
-            }(_event_id, _oracle_list_hash, _token_type, _resolvedOutcome, 0);
-
-            addrExtern = address.makeAddrExtern(PMP_CLAIM_PROCESSED, bitCntAddress);
-            emit ClaimProcessed{dest: addrExtern}(wallet, 0, false);
-            return;
+        uint32 W = _resolvedOutcome.get();
+        uint128 payoutClean = 0;
+        uint128 payoutDebt = 0;
+        uint128 payoutCoupon = 0;
+        bool win = false;
+        uint128 winningClean = _typedOutcomePools[W][BET_TYPE_CLEAN];
+        if (winningClean > 0 && stakeAmount[W] > 0) {
+            payoutClean = uint128((uint256(stakeAmount[W]) * uint256(_totalPool)) / uint256(winningClean));
+            win = true;
         }
 
-        tvm.accept();
-
-        uint128 winningPool = _outcomePools[_resolvedOutcome.get()];
-        uint128 payout = 0;
-        if (winningPool != 0) {
-            payout = uint128(
-                (uint256(stakeAmount[_resolvedOutcome.get()]) * uint256(_totalPool)) / uint256(winningPool)
-            );
+        if (debtAmount[W] > 0) {
+            uint128 profit = uint128((uint256(debtAmount[W]) * uint256(_deptWinCoef)) / FULL_PERCENT);
+            payoutDebt = debtAmount[W] + profit;
+            win = true;
         }
+
+        if (couponsAmount[W] > 0) {
+            payoutCoupon = uint128((uint256(couponsAmount[W]) * uint256(_couponWinCoef)) / FULL_PERCENT);
+            win = true;
+        }
+
+        uint128 totalPayout = payoutClean + payoutCoupon;
 
         PrivateNote(wallet).onClaimAccepted{
             value: 0.1 vmshell,
             flag: 1
-        }(_event_id, _oracle_list_hash, _token_type, _resolvedOutcome, payout);
+        }(
+            _event_id,
+            _oracle_list_hash,
+            _token_type,
+            _resolvedOutcome,
+            payoutClean,
+            payoutDebt,
+            payoutCoupon
+        );
 
-        addrExtern = address.makeAddrExtern(PMP_CLAIM_PROCESSED, bitCntAddress);
-        emit ClaimProcessed{dest: addrExtern}(wallet, payout, true);
-
-        if (_outcomeCounts[_resolvedOutcome.get()] == 0) {
+        address addrExtern = address.makeAddrExtern(PMP_CLAIM_PROCESSED, bitCntAddress);
+        emit ClaimProcessed{dest: addrExtern}(wallet, totalPayout, win);
+        if (_totalWinPool > 0) {
+            _totalWinPool -= (stakeAmount[W] + debtAmount[W] + couponsAmount[W]);
+        }
+        if (_totalWinPool == 0) {
             selfdestruct(_deployer);
         }
     }
+
 
     /// @notice Creates a new proposal for the PMP
     /// @param function_type Type of function the proposal is for
@@ -701,7 +877,32 @@ contract PMP is Modifiers {
         }
     }
 
-    /// @notice Returns all contract details
+    /// @notice Returns full current state of the PMP contract.
+    /// @dev
+    /// - Provides a complete snapshot of event configuration,
+    ///   lifecycle state, oracle confirmations and pool balances.
+    /// - Intended for frontend applications, indexers and analytics tools.
+    /// - Does not modify contract state.
+    ///
+    /// @return name Human-readable pool name.
+    /// @return token_type Static token type used by the pool.
+    /// @return event_id Identifier of the associated event.
+    /// @return oracle_list_hash Hash of the oracle list used during deployment.
+    /// @return deployer Address of the PrivateNote wallet that deployed the contract.
+    /// @return privateNoteCodeHash Hash of the PrivateNote contract code used for address derivation.
+    /// @return totalPool Total amount currently stored in the pool.
+    /// @return approved Whether the event has been approved for staking.
+    /// @return numOutcomes Total number of available outcomes.
+    /// @return resolvedOutcome Final resolved outcome identifier (if set).
+    /// @return stakeStart Stake acceptance start timestamp.
+    /// @return stakeEnd Stake acceptance end timestamp.
+    /// @return resultStart Result acceptance start timestamp.
+    /// @return resultEnd Result acceptance end timestamp.
+    /// @return isCancelled Whether the event has been cancelled.
+    /// @return numberOfOracleEvents Total number of required oracle confirmations.
+    /// @return approvedOracleEvents Number of oracle confirmations received.
+    /// @return typedOutcomePools Mapping of outcome → bet type → pool amount.
+    /// @return outcomeNames Mapping of outcome identifiers to human-readable names.
     function getDetails() external view returns (
         string name,
         uint32 token_type,
@@ -720,8 +921,7 @@ contract PMP is Modifiers {
         bool isCancelled,
         uint128 numberOfOracleEvents,
         uint128 approvedOracleEvents,
-        mapping(uint32 => uint128) outcomePoolAmounts,
-        mapping(uint32 => uint128) outcomeStakeCounts,
+        mapping(uint32 => mapping(uint8 => uint128)) typedOutcomePools,
         mapping(uint32 => string) outcomeNames
     ) {
         return (
@@ -742,8 +942,7 @@ contract PMP is Modifiers {
             _isCancelled,
             _numberOfOracleEvents,
             _approvedOracleEvents,
-            _outcomePools,
-            _outcomeCounts,
+            _typedOutcomePools,
             _outcomeNames
         );
     }

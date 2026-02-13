@@ -82,7 +82,7 @@
 			]
 		},
 		{
-			"name": "generateVaucher",
+			"name": "generatevoucher",
 			"inputs": [
 				{"name":"sk_u_commit","type":"uint256"},
 				{"name":"isFee","type":"bool"}
@@ -125,10 +125,10 @@
 	],
 	"events": [
 		{
-			"name": "vaucherGenerated",
+			"name": "voucherGenerated",
 			"inputs": [
 				{"name":"sk_u_commit","type":"uint256"},
-				{"name":"vaucher_nominal","type":"uint256"},
+				{"name":"voucher_nominal","type":"uint256"},
 				{"name":"token_type","type":"uint32"}
 			],
 			"outputs": [

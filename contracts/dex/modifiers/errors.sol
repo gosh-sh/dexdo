@@ -103,9 +103,36 @@ abstract contract Errors {
     /// @notice Proposal not exists
     uint16 constant ERR_PROPOSAL_NOT_EXISTS = 140;
 
-    /// @notice Vaucher nominal not allow
+    /// @notice voucher nominal not allow
     uint16 constant ERR_NOT_ALLOWED = 141;
 
     /// @notice Cancel for unexist stake
     uint16 constant ERR_STAKE_NOT_EXISTS = 142;
+
+    /// @notice Cannot generate coupon: user has debt
+    uint16 constant ERR_HAS_DEBT = 143;
+
+    /// @notice Cannot generate coupon: non-zero balance exists
+    uint16 constant ERR_NON_ZERO_BALANCE = 144;
+
+    /// @notice Coupon pool limit exceeded
+    uint16 constant ERR_COUPON_POOL_LIMIT_EXCEEDED = 145;
+
+    /// @notice No coupon available for staking
+    uint16 constant ERR_NO_COUPON_AVAILABLE = 146;
+
+    /// @notice Invalid bet type specified
+    uint16 constant ERR_INVALID_BET_TYPE = 147;
+
+    /// @notice Coupon already exists for this token type
+    uint16 constant ERR_COUPON_ALREADY_EXISTS = 148;
+
+    /// @notice Cannot perform operation: coupon is active
+    uint16 constant ERR_COUPON_ACTIVE = 149;
+
+    /// @notice Dept is exists for this token type
+    uint16 constant ERR_DEPT_NON_ZERO = 150;
+
+    /// @notice Invalid state for this operation
+    uint16 constant ERR_INVALID_STATE = 151;   
 }

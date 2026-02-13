@@ -25,8 +25,18 @@ contract Oracle is Modifiers {
 
     /// @notice Static name of the Oracle (unique identifier)
     string static _name;
-    
+
+    /// Events
+
+    /// @notice Emitted when a new OracleEventList is deployed.
+    /// @param eventListAddress Address of the deployed OracleEventList contract.
+    /// @param index Index of the deployed list (shard/partition identifier).
     event OracleEventListDeployed(address eventListAddress, uint128 index);
+
+    /// @notice Emitted when an event is published by the oracle subsystem.
+    /// @dev This event may be emitted by external flows; keeping it here for a unified external ABI.
+    /// @param event_id Unique identifier of the published event.
+    /// @param event_name Human-readable name of the event.
     event EventPublished(uint256 event_id, string event_name);
     
     /// @notice Oracle constructor - deploys initial OracleEventList

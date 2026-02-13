@@ -26,10 +26,22 @@ contract OracleEventList is Modifiers {
     /// @notice PMP contract code
     TvmCell _pmpCode;
     
-    /// @notice Mapping from event_id to event info
+    /// @notice Mapping from event_id to event information.
+    /// @dev `event_id` is computed as tvm.hash(abi.encode(event_name, deadline, describe, outcomeNames)).
     mapping(uint256 => EventInfo) public _events;
-    
+
+    /// Events
+
+    /// @notice Emitted when a new event is added by the oracle admin.
+    /// @param event_id Unique event identifier hash.
+    /// @param event_name Human-readable event name.
+    /// @param oracle_fee Required oracle fee in shell currency units.
+    /// @param deadline Unix timestamp until which the oracle is willing to service the event.
     event EventAdded(uint256 event_id, string event_name, uint128 oracle_fee, uint64 deadline);
+
+    /// @notice Emitted when a PMP successfully confirms the oracle service for an event.
+    /// @param event_id Unique event identifier hash.
+    /// @param pmpAddress PMP contract address that performed confirmation.
     event EventConfirmed(uint256 event_id, address pmpAddress);
     
     constructor(uint256 pubkey, TvmCell PrivateNoteCode, TvmCell pmpCode) {
@@ -92,7 +104,6 @@ contract OracleEventList is Modifiers {
             return;
         }
         EventInfo eventInfo = _events[event_id];
-        eventInfo.count += 1;
         if ((eventInfo.deadline < block.timestamp) || (msg.currencies[CURRENCIES_ID_SHELL] < eventInfo.oracle_fee)) {
             PMP(msg.sender).rejectEvent{value: 0.1 vmshell, flag: 1}();
         } else {
