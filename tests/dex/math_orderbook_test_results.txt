@@ -1,0 +1,50 @@
+======================================================================
+  MATH ORDERBOOK TEST RESULTS
+======================================================================
+  [PASS] S1.1: Balance decreased by collateral
+         before=398000000000, after=348000000000, expected_decrease=50000000000
+  [PASS] S1.2: Outcome pool 0 increased by split delta
+         expected=126002500250, actual=126002500250
+  [PASS] S1.3: Outcome pool 1 increased by split delta
+         expected=126002500250, actual=126002500250
+  [PASS] S1.4: Split neutrality (implied F per outcome)
+         implied_F_0=49999999999, implied_F_1=49999999999
+  [PASS] S2.1: Book empty after full matching
+         orderCount=0
+  [PASS] S2.2: Seller balance += proceeds (notional - maker fee)
+         expected=5999100000, actual=5999100000
+  [PASS] S2.3: Buyer balance change = -cost + (refund - fee)
+         expected=-6000900000, actual=-6000900000, cost=7003150000, refund=1000000000, fee=900000
+  [PASS] S2.4: OB totalMakerFees = sell_fee + buy_fee (both flags=0)
+         expected=1800000, actual=1800000
+  [PASS] S2.5: OB totalTakerFees == 0 (no taker-flagged orders)
+         expected=0, actual=0
+  [PASS] S3.1: 1 order remains (partial fill, 5 rests)
+         orderCount=1
+  [PASS] S3.2: Resting order amount = 5 NACKL
+         expected=5000000000, actual=5000000000
+  [PASS] S3.3: Seller balance change matches partial fill proceeds
+         expected=4999250000, actual=4999250000
+  [PASS] S4.1: Book empty after IOC with no counterparty
+         orderCount=0
+  [PASS] S4.2: Balance restored after IOC cancel
+         before=388998350000, after=388998350000
+  [PASS] S5.1: POST_ONLY cancelled, sell still rests
+         orderCount=1
+  [PASS] S5.2: POST_ONLY buyer balance restored
+         before=388998350000, after=388998350000
+  [PASS] S6.1: Balance increased by merge collateral
+         expected_increase=39996000000, actual_increase=39996000000
+  [PASS] S6.2: PMP totalPool decreased after merge
+         before=252000000000, after=212004000000, decreased=39996000000
+  [PASS] S7.1: Conservation (fee + payouts + dust = totalPool)
+         totalPool=212004000000, fee=20200000, payouts=[171987799999, 39996000000], dust=1
+  [PASS] S7.2: PN_B received payout for OB-bought outcome 0 tokens
+         payout=39996000000
+  [PASS] S8.1: Cumulative maker fees match (all flags=0)
+         expected=3300000 (S2:1800000 + S3:1500000), actual=3300000
+  [PASS] S8.2: Cumulative taker fees == 0
+         expected=0, actual=0
+
+  Total: 22 | Passed: 22 | Failed: 0
+======================================================================

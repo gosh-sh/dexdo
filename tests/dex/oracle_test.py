@@ -6,12 +6,12 @@ sys.path.append("tests")
 from helper import common
 
 ROOT_ORACLE_ADDRESS = "0:1515151515151515151515151515151515151515151515151515151515151515"
-ROOT_ORACLE_ABI = "./contracts/dex/RootOracle.abi.json"
+ROOT_ORACLE_ABI = "./contracts/0.79.3_compiled/dex/RootOracle.abi.json"
 EPHEMERAL_KEY_PATH = "./tests/dex/ephemeral.keys.json"
 ORACLE_KEY_PATH = "./tests/dex/oracle.keys.json"
 
-ORACLE_ABI = "./contracts/dex/Oracle.abi.json"
-EVENTLIST_ABI = "./contracts/dex/OracleEventList.abi.json"
+ORACLE_ABI = "./contracts/0.79.3_compiled/dex/Oracle.abi.json"
+EVENTLIST_ABI = "./contracts/0.79.3_compiled/dex/OracleEventList.abi.json"
 
 ORACLE_NAME = "MyOracle"
 EVENT_NAME = "Winner of match X"

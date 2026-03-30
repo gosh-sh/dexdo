@@ -1,0 +1,32 @@
+======================================================================
+  MATH SPLIT COEFFICIENT TEST RESULTS
+======================================================================
+  [PASS] Phase 2: Coupon generated
+         coupon=100000000000, debt=5000000000
+  [PASS] S3.1: baseTotalPool matches pre-freeze totalPool
+         expected=4000000000000, actual=4000000000000
+  [PASS] S3.2: Live totalPool increased by exactly F after split
+         expected=4200000000000, actual=4200000000000
+  [PASS] S3.4: PN spent exactly collateral F (no remainder)
+         collateral=200000000000, actualSpent=200000000000
+  [PASS] S4.1: couponWinCoef matches base pool computation
+         expected=20000, actual=20000
+  [PASS] S4.2: debtWinCoef matches base pool computation
+         expected=27546, actual=27546
+  [PASS] S4.3: creatorFee computed from baseTotalPool
+         expected=400000000, actual=400000000
+  [PASS] S4.4: profitToClean matches base pool computation
+         expected=2899600000000, actual=2899600000000
+  [PASS] S5.1: Creator clean payout matches base computation
+         expected=38996000, actual=38996000
+  [PASS] S5.2: PN_Clean payout matches base computation
+         expected=3899561004000, actual=3899561004000
+  [PASS] S5.3: Coupon payout matches base computation
+         expected=100000000000, actual=100000000000
+  [PASS] S5.4: Splitter payout matches R_k-based computation
+         split_tokens_0=51287311519, R_W=3899600000000, expected_payout=199999999999, actual=199999999999
+  [PASS] S6.1: Conservation (fee + payouts + dust = live totalPool)
+         liveTotalPool=4200000000000, baseTotalPool=4000000000000, fee=400000000, payouts=[38996000, 3899561004000, 100000000000, 199999999999], total_paid=4199999999999, dust=1
+
+  Total: 13 | Passed: 13 | Failed: 0
+======================================================================
