@@ -63,7 +63,6 @@
 		{"init":true,"name":"_pubkey","type":"uint256"},
 		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
-		{"init":false,"name":"THRESHOLD","type":"uint32"},
 		{"init":false,"name":"_PrivateNoteCode","type":"cell"},
 		{"init":false,"name":"_pmpCode","type":"cell"},
 		{"init":false,"name":"_oracleCode","type":"cell"},

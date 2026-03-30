@@ -11,7 +11,8 @@ import "./libraries/DexLib.sol";
 /// @notice Root contract responsible for deploying PrivateNote contracts
 contract RootPN is Modifiers {
 
-    string constant version = "1.0.0";
+    /// @notice Contract semantic version.
+    string constant version = "1.0.2";
 
     /// @notice Stored code of PrivateNote contract
     TvmCell _PrivateNoteCode;
@@ -27,6 +28,9 @@ contract RootPN is Modifiers {
 
     /// @notice Stored code of OracleEventList contract
     TvmCell _oracleEventListCode;
+
+    /// @notice Stored code of OrderBook contract
+    TvmCell _orderBookCode;
 
     /// @notice Root owner public key
     uint256 _ownerPubkey;
@@ -130,10 +134,10 @@ contract RootPN is Modifiers {
     /// @notice Deploys a new PrivateNote contract
     /// @param zkproof Zero-knowledge proof used to validate the deposit public inputs
     /// @param deposit_identifier_hash Unique identifier hash for the deposit (used to derive the PrivateNote address)
-    /// @param ethemeral_pubkey Ephemeral public key for authorizing the deployed PrivateNote
+    /// @param ephemeral_pubkey Ephemeral public key for authorizing the deployed PrivateNote
     /// @param value Initial token balance (encoded into the ZK public inputs)
-    /// @param token_type Type of token for the PrivateNote (must match the supported token type) (1 for NACKL, etc.)
-    function deployPrivateNote(bytes zkproof, uint256 deposit_identifier_hash, uint256 ethemeral_pubkey, uint64 value, uint32 token_type)
+    /// @param token_type Token type encoded in zk public inputs and used by the deployed PrivateNote.
+    function deployPrivateNote(bytes zkproof, uint256 deposit_identifier_hash, uint256 ephemeral_pubkey, uint64 value, uint32 token_type)
         public view accept
     {
         ensureBalance();
@@ -154,7 +158,8 @@ contract RootPN is Modifiers {
             stateInit: stateInit,
             value: 50 vmshell,
             flag: 1
-        }(value, ethemeral_pubkey, token_type, _pmpCode, _oracleEventListCode, _oracleCode);
+        }(value, ephemeral_pubkey, token_type, _pmpCode, _orderBookCode,
+          tvm.hash(_oracleCode), _oracleCode.depth(), tvm.hash(_oracleEventListCode), _oracleEventListCode.depth());
     }
 
     /// @notice Records deployment of a PrivateNote contract
@@ -169,6 +174,7 @@ contract RootPN is Modifiers {
 
     /// @notice Updates the contract code for RootPN
     /// @param newcode New contract code
+    /// @param cell Encoded persistent state used by `onCodeUpgrade`.
     function updateCode(TvmCell newcode, TvmCell cell) public onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         tvm.setcode(newcode);
@@ -182,7 +188,7 @@ contract RootPN is Modifiers {
         tvm.accept();
         ensureBalance();
         tvm.resetStorage();
-        (_pmpCode, _PrivateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
+        (_pmpCode, _PrivateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _orderBookCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
     }
 
     /// @notice Returns the salted PrivateNote contract code
@@ -220,9 +226,13 @@ contract RootPN is Modifiers {
     /// VAULT FUNCTIONS
 
     /// @notice Check is it Allowed
-    function isAllowedNominal(uint128 nominal) private view returns (bool) {
+    /// @param nominal Voucher nominal in token base units.
+    /// @param token_type Token type to validate.
+    /// @return isAllowed True if nominal matches one of `ALLOWED_NOMINALS` for the token decimals.
+    function isAllowedNominal(uint128 nominal, uint32 token_type) private view returns (bool) {
+        uint128 decimals = tokenDecimals(token_type);
         for (uint i = 0; i < ALLOWED_NOMINALS.length; i++) {
-            if (ALLOWED_NOMINALS[i] == nominal) {
+            if (ALLOWED_NOMINALS[i] * decimals == nominal) {
                 return true;
             }
         }
@@ -230,6 +240,8 @@ contract RootPN is Modifiers {
     }
 
     /// @notice Checks if the nominal is allowed for vault operations
+    /// @param sk_u_commit Commitment of user secret key used in off-chain flows.
+    /// @param isFee Whether incoming shell tokens must be treated as fee token type.
     function generatevoucher(uint256 sk_u_commit, bool isFee) public view internalMsg {
 		require(msg.currencies.keys().length == 1, 300);
 		uint32 token_type = msg.currencies.keys()[0];
@@ -241,7 +253,7 @@ contract RootPN is Modifiers {
         ensureBalance();
 
 		uint voucher_nominal = msg.currencies[token_type];
-        require(isAllowedNominal(uint128(voucher_nominal)), ERR_NOT_ALLOWED);
+        require(isAllowedNominal(uint128(voucher_nominal), token_type), ERR_NOT_ALLOWED);
 
         address addrExtern = address.makeAddrExtern(VAULT_voucher_GENERATED, bitCntAddress);
 		emit voucherGenerated{dest: addrExtern}(sk_u_commit, voucher_nominal, token_type);
@@ -300,7 +312,8 @@ contract RootPN is Modifiers {
     }
 
     /// @notice Returns root version
-    /// @return Contract name
+    /// @return value0 Contract semantic version.
+    /// @return value1 Contract identifier.
     function getVersion() external pure returns (string, string) {
         return (version, "RootPN");
     }

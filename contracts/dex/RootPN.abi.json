@@ -26,7 +26,7 @@
 			"inputs": [
 				{"name":"zkproof","type":"bytes"},
 				{"name":"deposit_identifier_hash","type":"uint256"},
-				{"name":"ethemeral_pubkey","type":"uint256"},
+				{"name":"ephemeral_pubkey","type":"uint256"},
 				{"name":"value","type":"uint64"},
 				{"name":"token_type","type":"uint32"}
 			],
@@ -158,12 +158,12 @@
 		{"init":true,"name":"_pubkey","type":"uint256"},
 		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
-		{"init":false,"name":"THRESHOLD","type":"uint32"},
 		{"init":false,"name":"_PrivateNoteCode","type":"cell"},
 		{"init":false,"name":"_pmpCode","type":"cell"},
 		{"init":false,"name":"_nullifierCode","type":"cell"},
 		{"init":false,"name":"_oracleCode","type":"cell"},
 		{"init":false,"name":"_oracleEventListCode","type":"cell"},
+		{"init":false,"name":"_orderBookCode","type":"cell"},
 		{"init":false,"name":"_ownerPubkey","type":"uint256"},
 		{"init":false,"name":"_deployedValues","type":"map(uint32,uint128)"}
 	]

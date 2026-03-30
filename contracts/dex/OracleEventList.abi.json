@@ -7,8 +7,8 @@
 			"name": "constructor",
 			"inputs": [
 				{"name":"pubkey","type":"uint256"},
-				{"name":"PrivateNoteCode","type":"cell"},
-				{"name":"pmpCode","type":"cell"}
+				{"name":"pmpSaltedCodeHash","type":"uint256"},
+				{"name":"pmpSaltedCodeDepth","type":"uint16"}
 			],
 			"outputs": [
 			]
@@ -98,12 +98,11 @@
 		{"init":true,"name":"_pubkey","type":"uint256"},
 		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
-		{"init":false,"name":"THRESHOLD","type":"uint32"},
 		{"init":true,"name":"_oracle","type":"address"},
 		{"init":true,"name":"_index","type":"uint128"},
 		{"init":false,"name":"_oracle_pubkey","type":"uint256"},
-		{"init":false,"name":"_PrivateNoteCode","type":"cell"},
-		{"init":false,"name":"_pmpCode","type":"cell"},
+		{"init":false,"name":"_pmpSaltedCodeHash","type":"uint256"},
+		{"init":false,"name":"_pmpSaltedCodeDepth","type":"uint16"},
 		{"components":[{"name":"event_name","type":"string"},{"name":"oracle_fee","type":"uint128"},{"name":"deadline","type":"uint64"},{"name":"describe","type":"string"},{"name":"outcomeNames","type":"map(uint32,string)"},{"name":"count","type":"uint128"},{"name":"trustAddr","type":"optional(uint256)"}],"init":false,"name":"_events","type":"map(uint256,tuple)"}
 	]
 }

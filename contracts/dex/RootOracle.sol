@@ -9,7 +9,8 @@ import "./libraries/DexLib.sol";
 /// @notice Root contract responsible for deploying Oracle contracts
 contract RootOracle is Modifiers {
 
-    string constant version = "1.0.0";
+    /// @notice Contract semantic version.
+    string constant version = "1.0.2";
 
     /// @notice Stored code of PrivateNote contract
     TvmCell _PrivateNoteCode;
@@ -63,6 +64,7 @@ contract RootOracle is Modifiers {
 
     /// @notice Updates the contract code for RootOracle
     /// @param newcode New contract code
+    /// @param cell Encoded persistent state used by `onCodeUpgrade`
     function updateCode(TvmCell newcode, TvmCell cell) public onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         tvm.setcode(newcode);
@@ -87,7 +89,8 @@ contract RootOracle is Modifiers {
     }
 
     /// @notice Returns root version
-    /// @return Contract name
+    /// @return value0 Contract semantic version.
+    /// @return value1 Contract identifier.
     function getVersion() external pure returns (string, string) {
         return (version, "RootOracle");
     }

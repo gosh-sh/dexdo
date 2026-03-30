@@ -115,8 +115,8 @@ contract GiverV3 is Upgradable {
         return abi.encode(name, decimals, walletCode, transactionCode, pubkey, mintDisabled, initialSupplyToOwner, initialSupply);
     }
 
-    function getDataForPMP(TvmCell PMPCode, TvmCell PMPWalletCode, TvmCell NullifierCode, TvmCell OracleCode, TvmCell OracleEventListCode, uint256 pubkey) public view returns (TvmCell) {
-        return abi.encode(PMPCode, PMPWalletCode, NullifierCode, OracleCode, OracleEventListCode, pubkey);
+    function getDataForPMP(TvmCell PMPCode, TvmCell PMPWalletCode, TvmCell NullifierCode, TvmCell OracleCode, TvmCell OracleEventListCode, TvmCell OrderBookCode, uint256 pubkey) public view returns (TvmCell) {
+        return abi.encode(PMPCode, PMPWalletCode, NullifierCode, OracleCode, OracleEventListCode, OrderBookCode, pubkey);
     }
 
     function getDataForOracle(TvmCell PMPCode, TvmCell PMPWalletCode, TvmCell OracleCode, TvmCell OracleEventListCode, uint256 pubkey) public view returns (TvmCell) {
@@ -125,6 +125,14 @@ contract GiverV3 is Upgradable {
 
     function getDataForVault(TvmCell PMPWalletCode, uint256 pubkey, address root) public view returns (TvmCell) {
         return abi.encode(PMPWalletCode, pubkey, root);
+    }
+
+    function getDataForAuthService(TvmCell profileCode, uint256 pubkey) public view returns (TvmCell) {
+        return abi.encode(profileCode, pubkey);
+    }
+
+    function getDataForBoost(address wallet, address popitGame, address root, uint64 mbiCur, uint256 rootPubkey, address miner) public view returns (TvmCell) {
+        return abi.encode(wallet, popitGame, root, mbiCur, rootPubkey, miner);
     }
 
     function onCodeUpgrade() internal override {}

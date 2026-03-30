@@ -130,9 +130,36 @@ abstract contract Errors {
     /// @notice Cannot perform operation: coupon is active
     uint16 constant ERR_COUPON_ACTIVE = 149;
 
-    /// @notice Dept is exists for this token type
-    uint16 constant ERR_DEPT_NON_ZERO = 150;
+    /// @notice Debt is non-zero for this token type
+    uint16 constant ERR_DEBT_NON_ZERO = 150;
 
     /// @notice Invalid state for this operation
-    uint16 constant ERR_INVALID_STATE = 151;   
+    uint16 constant ERR_INVALID_STATE = 151;
+
+    /// @notice Deployer has not staked on all outcomes before full-set window
+    uint16 constant ERR_DEPLOYER_NOT_COVERED = 152;
+
+    /// @notice Base pools not frozen yet
+    uint16 constant ERR_NOT_FROZEN = 153;
+
+    /// @notice Base pools already frozen
+    uint16 constant ERR_ALREADY_FROZEN = 154;
+
+    /// @notice Merge would make PMP insolvent
+    uint16 constant ERR_MERGE_SOLVENCY = 155;
+
+    /// @notice Stake period has not ended yet
+    uint16 constant ERR_NOT_STAKEEND = 156;
+
+    /// @notice Order book: invalid epoch
+    uint16 constant ERR_INVALID_EPOCH = 157;
+
+    /// @notice Order book: order not found
+    uint16 constant ERR_ORDER_NOT_FOUND = 158;
+
+    /// @notice Order book: epoch not ended yet
+    uint16 constant ERR_EPOCH_NOT_ENDED = 159;
+
+    /// @notice Order book: amount below minimum order size
+    uint16 constant ERR_ORDER_TOO_SMALL = 160;
 }

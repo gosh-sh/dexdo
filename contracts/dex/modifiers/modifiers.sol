@@ -12,64 +12,137 @@ import "./errors.sol";
 /// @title Modifiers and Constants Contract
 /// @notice Provides common modifiers, constants and configuration for PMP contracts
 abstract contract Modifiers is Errors {
-    // Constants for external event emission
+    /// @notice Bit length used for external event destination addresses.
     uint constant bitCntAddress = 256;
     
     // RootPN events
+    /// @notice External event id for `RootPN.PrivateNoteDeployed`.
     uint128 constant ROOTPN_PRIVATE_NOTE_DEPLOYED = 101;
+    /// @notice External event id for `RootPN.NullifierDeployed`.
     uint128 constant ROOTPN_NULLIFIER_DEPLOYED = 102;
+    /// @notice Reserved RootPN external event id for oracle deployment notifications.
     uint128 constant ROOTPN_ORACLE_DEPLOYED = 103;
 
     // Oracle events
+    /// @notice External event id for `Oracle.OracleEventListDeployed`.
     uint128 constant ORACLE_DEPLOYED = 104;
+    /// @notice Reserved external event id for OracleEventList deployment.
     uint128 constant ORACLE_EVENT_LIST_DEPLOYED = 105;
+    /// @notice External event id for `OracleEventList.EventConfirmed`.
     uint128 constant ORACLE_EVENT_CONFIRMED = 106;
     
     // PrivateNote events
+    /// @notice External event id for `PrivateNote.PMPDeployed`.
     uint128 constant PRIVATENOTE_PMP_DEPLOYED = 111;
+    /// @notice External event id for `PrivateNote.OwnerChanged`.
     uint128 constant PRIVATENOTE_OWNER_CHANGED = 112;
+    /// @notice External event id for `PrivateNote.StakeConfirmed`.
     uint128 constant PRIVATENOTE_STAKE_CONFIRMED = 113;
+    /// @notice External event id for `PrivateNote.ClaimAccepted`.
     uint128 constant PRIVATENOTE_CLAIM_ACCEPTED = 114;
+    /// @notice External event id for `PrivateNote.StakeCancelled`.
     uint128 constant PRIVATENOTE_STAKE_CANCELLED = 115;
+    /// @notice External event id for `PrivateNote.FullSetStakeConfirmed`.
     uint128 constant PRIVATENOTE_FULLSET_STAKE_CONFIRMED = 116;
+    /// @notice External event id for `PrivateNote.FullSetStakeCancelled`.
     uint128 constant PRIVATENOTE_FULLSET_STAKE_CANCELLED = 117;
-    
     // PMP events
+    /// @notice External event id for `PMP.StakeAccepted`.
     uint128 constant PMP_STAKE_ACCEPTED = 118;
+    /// @notice External event id for `PMP.ApprovedByOracle`.
     uint128 constant PMP_APPROVED_BY_ORACLE = 119;
+    /// @notice External event id for `PMP.Resolved`.
     uint128 constant PMP_RESOLVED = 120;
+    /// @notice External event id for `PMP.ClaimProcessed`.
     uint128 constant PMP_CLAIM_PROCESSED = 121;
+    /// @notice Reserved external event id for network fee burn accounting.
     uint128 constant PMP_NETWORK_FEE_BURNED = 122;
+    /// @notice Reserved external event id for legacy stake deadline updates.
     uint128 constant PMP_STAKE_DEADLINE_SET = 123;
+    /// @notice External event id for `PMP.TimingsSet`.
     uint128 constant PMP_SET_TIMINGS = 124;
+    /// @notice Reserved external event id for number-of-outcomes updates.
     uint128 constant PMP_NUM_OUTCOMES_SET = 125;
+    /// @notice External event id for `PMP.EventCancelled`.
     uint128 constant PMP_EVENT_CANCELLED = 126;
+    /// @notice Reserved external event id for per-oracle confirmation.
     uint128 constant PMP_ORACLE_CONFIRMED = 127;
+    /// @notice Reserved external event id for full oracle confirmation.
     uint128 constant PMP_ALL_ORACLES_CONFIRMED = 128;
+    /// @notice Reserved external event id for PMP initialization.
     uint128 constant PMP_INITIALIZED = 129;
-    uint128 constant PMP_PROPOSAL_CREATED = 130;
-    uint128 constant PMP_PROPOSAL_EXECUTED = 131;
+    /// @notice External event id for `PMP.PMPCancelled`.
     uint128 constant PMP_CANCELLED_BY_ORACLE = 132;
 
     // OracleList events
+    /// @notice External event id for `OracleEventList.EventAdded`.
     uint128 constant ORACLE_EVENT_ADDED = 133;
+    /// @notice Reserved external event id for oracle event publishing.
     uint128 constant ORACLE_EVENT_PUBLISHED = 134;
 
     // Vault events
+    /// @notice External event id for `RootPN.voucherGenerated`.
     uint128 constant VAULT_voucher_GENERATED = 135;
     // Root Oracle event
+    /// @notice External event id for `RootOracle.OracleDeployed`.
     uint128 constant ROOTORACLE_ORACLE_DEPLOYED = 136;
 
-    // Function type identifiers for OracleUnion proposals
-    uint32 constant FUNCTION_TYPE_SET_STAKE_DEADLINE = 1;
-    uint32 constant FUNCTION_TYPE_SET_RESOLVE = 2;
-    uint32 constant FUNCTION_TYPE_CANCEL_EVENT = 3;
-    
+    // Creator fee event
+    /// @notice External event id for `PMP.CreatorFeeCollected`.
+    uint128 constant PMP_CREATOR_FEE_COLLECTED = 137;
+
+    // Split/Merge events
+    /// @notice External event id for `PrivateNote.SplitConfirmed`.
+    uint128 constant PRIVATENOTE_SPLIT_CONFIRMED = 138;
+    /// @notice External event id for `PrivateNote.MergeConfirmed`.
+    uint128 constant PRIVATENOTE_MERGE_CONFIRMED = 139;
+    /// @notice External event id for `PMP.PoolsFrozen`.
+    uint128 constant PMP_POOLS_FROZEN = 140;
+    /// @notice External event id for `PMP.SplitProcessed`.
+    uint128 constant PMP_SPLIT_PROCESSED = 141;
+    /// @notice External event id for `PMP.MergeProcessed`.
+    uint128 constant PMP_MERGE_PROCESSED = 142;
+
+    // OrderBook events
+    /// @notice External event id for `OrderBook.OrderPlaced`.
+    uint128 constant OB_ORDER_PLACED = 143;
+    /// @notice External event id for `OrderBook.OrderCancelled`.
+    uint128 constant OB_ORDER_CANCELLED = 144;
+    /// @notice External event id for `OrderBook.EpochSettled`.
+    uint128 constant OB_EPOCH_SETTLED = 145;
+    /// @notice External event id for `OrderBook.OrderFilled`.
+    uint128 constant OB_ORDER_FILLED = 146;
+    /// @notice External event id for `PrivateNote.OrderPlaced`.
+    uint128 constant PRIVATENOTE_ORDER_PLACED = 147;
+    /// @notice External event id for `PrivateNote.OrderFilled`.
+    uint128 constant PRIVATENOTE_ORDER_FILLED = 148;
+
+    // Transfer events
+    /// @notice External event id for `PrivateNote.TransferInitiated`.
+    uint128 constant PRIVATENOTE_TRANSFER_INITIATED = 149;
+    /// @notice External event id for `PrivateNote.TransferReceived`.
+    uint128 constant PRIVATENOTE_TRANSFER_CONFIRMED = 150;
+
     /// @notice Minimum native balance required for contract operation
     uint64 constant MIN_BALANCE = 100 vmshell;
 
-    /// @notice Minimum allowed deposit value
+    /// @notice Minimum allowed deposit value for NACKL tokens (9 decimals)
     uint64 constant MIN_VALUE = 10_000_000; // 0.01 NACKL
+
+    /// @notice Minimum allowed deposit value for Shell tokens (9 decimals)
+    uint64 constant MIN_VALUE_SHELL = 10_000_000; // 0.01 Shell
+
+    /// @notice Minimum allowed deposit value for USDC tokens (6 decimals)
+    uint64 constant MIN_VALUE_USDC = 10_000; // 0.01 USDC
+
+    /// @notice Minimum order size for NACKL tokens (9 decimals)
+    uint128 constant MIN_ORDER_NACKL = 10_000_000_000; // 10 NACKL
+
+    /// @notice Minimum order size for Shell tokens (9 decimals)
+    uint128 constant MIN_ORDER_SHELL = 100_000_000_000; // 100 Shell
+
+    /// @notice Minimum order size for USDC tokens (6 decimals)
+    uint128 constant MIN_ORDER_USDC = 1_000_000; // 1 USDC
 
     /// @notice Currency ID used for PMP pools (staking tokens)
     uint32 constant CURRENCIES_ID = 1;
@@ -81,7 +154,7 @@ abstract contract Modifiers is Errors {
     uint32 constant CURRENCIES_ID_SHELL_FEE = 300;
 
     /// @notice Currency ID used for USDC tokens
-    uint32 constant CURRENCIES_ID_USDC = 301;
+    uint32 constant CURRENCIES_ID_USDC = 3;
 
     /// @notice Fixed network fee to burn on approval
     uint64 constant NETWORK_FEE_AMOUNT = 1_000_000_000; // 1 shell tokens
@@ -93,21 +166,34 @@ abstract contract Modifiers is Errors {
     address constant ROOT_ORACLE_ADDRESS = address.makeAddrStd(0, 0x1515151515151515151515151515151515151515151515151515151515151515);
 
     /// @notice Voting threshold for OracleUnion decisions
-    uint32 THRESHOLD = 6600; // 66% = 6600
+    uint32 constant THRESHOLD = 6600; // 66% = 6600
 
     /// @notice Full percentage constant
     uint128 constant FULL_PERCENT = 10000; // 100% = 10000
 
-    /// @notice Full set percentage for Stake distribution
-    uint128 constant FULL_SET_PERCENT = 1000; 
+    /// @notice Grace period for oracle resolve (24 hours in seconds)
+    uint64 constant GRACE_PERIOD = 86400;
 
     /// @notice Fee percentage for staking operations
     uint128 constant FEE_PERCENT = 1; // 0.01% = 1
+
+    /// @notice Trading fee denominator (0.001% precision)
+    uint128 constant FEE_DENOMINATOR = 100000;
+
+    /// @notice Maker fee rate (limit orders that add liquidity)
+    /// @dev 15 / 100000 = 0.015% — Hyperliquid Tier 0 maker rate
+    uint128 constant MAKER_FEE_RATE = 15;
+
+    /// @notice Taker fee rate (IOC/FOK/MARKET orders that remove liquidity)
+    /// @dev 45 / 100000 = 0.045% — Hyperliquid Tier 0 taker rate
+    uint128 constant TAKER_FEE_RATE = 45;
 
     /// @notice Bet type identifiers
     uint8 constant BET_TYPE_CLEAN = 0;    // Stake without debt
     uint8 constant BET_TYPE_DEBT = 1;     // Stake with debt
     uint8 constant BET_TYPE_COUPON = 2;   // Stake with free coupon
+    uint8 constant BET_TYPE_OB_SELL = 3;  // OrderBook sell order (bounce restores stake.amount)
+    uint8 constant BET_TYPE_MERGE = 4;   // mergeFullSet (bounce: no-op on _balance, just clear candidate)
 
     /// @notice Maximum coupon pool as percentage of total pool
     /// @dev 500 = 5% (of 10000 = 100%)
@@ -121,13 +207,20 @@ abstract contract Modifiers is Errors {
     /// @dev 500 = 5% (of 10000 = 100%)
     uint128 constant DEBT_REDISTRIBUTION_PERCENT = 500;
 
-    /// @notice Allowed nominal for vault
+    /// @notice Base allowed nominals for vault (without decimals)
     uint128[] constant ALLOWED_NOMINALS = [
-        uint128(1000000000),
-        uint128(100000000000),
-        uint128(1000000000000),
-        uint128(10000000000000)
+        uint128(100),
+        uint128(1000),
+        uint128(10000)
     ];
+
+    /// @notice Returns decimals for a given token type
+    /// @param token_type Currency identifier.
+    /// @return decimals Token decimals multiplier (1e6 for USDC, 1e9 otherwise).
+    function tokenDecimals(uint32 token_type) internal pure returns (uint128) {
+        if (token_type == CURRENCIES_ID_USDC) return 1_000_000;
+        return 1_000_000_000;
+    }
 
     /// @notice Shell token coupon value
     uint128 constant SHELL_COUPON_VALUE = 100000000000; // 100 shell token
@@ -138,6 +231,22 @@ abstract contract Modifiers is Errors {
     /// @notice USDC token coupon value
     uint128 constant USDC_COUPON_VALUE = 100000000; // 100 USDC (6 decimals)
  
+    /// @notice Returns the minimum allowed stake value for a given token type
+    /// @param token_type Currency identifier
+    /// @return minValue Minimum allowed stake amount for the token type.
+    function minStakeValue(uint32 token_type) internal pure returns (uint128) {
+        if (token_type == CURRENCIES_ID_SHELL) return uint128(MIN_VALUE_SHELL);
+        if (token_type == CURRENCIES_ID_USDC)  return uint128(MIN_VALUE_USDC);
+        return uint128(MIN_VALUE);
+    }
+
+    /// @notice Returns the minimum allowed order size for a given token type
+    function minOrderAmount(uint32 token_type) internal pure returns (uint128) {
+        if (token_type == CURRENCIES_ID_SHELL) return MIN_ORDER_SHELL;
+        if (token_type == CURRENCIES_ID_USDC)  return MIN_ORDER_USDC;
+        return MIN_ORDER_NACKL;
+    }
+
     /// @notice Modifier for owner authorization using public key
     /// @param rootpubkey Expected owner public key
     modifier onlyOwnerPubkey(uint256 rootpubkey) {
@@ -161,31 +270,32 @@ abstract contract Modifiers is Errors {
     /// @notice Stake information per PMP
     struct StakeInfo {
         uint128[] amount;          // confirmed stakes per outcome
-        uint128[] debt_amount;     // confirmed stakes with dept
+        uint128[] debt_amount;     // confirmed stakes with debt
         uint128[] coupons_amount;  // confirmed coupon stakes per outcome
         uint128 candidate_amount;  // pending stakes per outcome
         uint32 candidate_outcome;  // pending stake outcome
+        uint8 candidate_bet_type;  // bet type for pending stake (0=clean, 1=debt, 2=coupon)
+        /// @notice Token type used by the stake record.
         uint32 token_type;
+        /// @notice Hash of oracle set used by related PMP.
         uint256 oracle_list_hash;
-    }
-
-    /// @notice Proposal structure
-    struct Proposal {
-        uint32 function_type;
-        TvmCell data;
-        uint64 deadline;
-        uint32 voteCount;
-        mapping(uint256 => bool) votes;
     }
 
     /// @notice Event information structure
     struct EventInfo {
+        /// @notice Human-readable oracle event name.
         string event_name;
+        /// @notice Oracle service fee required for confirmation.
         uint128 oracle_fee;
+        /// @notice Service deadline as Unix timestamp.
         uint64 deadline;
+        /// @notice Human-readable event description.
         string describe;
+        /// @notice Mapping outcome id => human-readable outcome name.
         mapping(uint32 => string) outcomeNames;
+        /// @notice Number of active PMP confirmations bound to this event.
         uint128 count;
+        /// @notice Optional trusted internal address for oracle governance calls.
         optional(uint256) trustAddr;
     }
 }

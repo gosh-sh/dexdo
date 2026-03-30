@@ -9,149 +9,113 @@ import "./libraries/DexLib.sol";
 /// @title Oracle Contract
 contract Oracle is Modifiers {
 
-    string constant version = "1.0.0";
+    /// @notice Contract semantic version.
+    string constant version = "1.0.2";
 
-    /// @notice Oracle's public key for authorization
+    /// @notice Oracle owner pubkey used for access control.
     uint256 _oraclePubkey;
-
-    /// @notice Code of OracleEventList contract for deployment
+    /// @notice OracleEventList code used for deterministic deployments.
     TvmCell _oracleEventListCode;
 
-    /// @notice Code of PrivateNote contract for address computations
-    TvmCell _PrivateNoteCode;
+    /// @notice Hash of salted PMP code for sender verification in OracleEventList.
+    uint256 _pmpSaltedCodeHash;
+    /// @notice Depth of salted PMP code for sender verification in OracleEventList.
+    uint16  _pmpSaltedCodeDepth;
 
-    /// @notice Code of PMP contract for event management
-    TvmCell _pmpCode;
-
-    /// @notice Static name of the Oracle (unique identifier)
+    /// @notice Oracle name (state-init static field).
     string static _name;
 
-    /// Events
-
     /// @notice Emitted when a new OracleEventList is deployed.
-    /// @param eventListAddress Address of the deployed OracleEventList contract.
-    /// @param index Index of the deployed list (shard/partition identifier).
+    /// @param eventListAddress Deployed OracleEventList address.
+    /// @param index Deployed OracleEventList index.
     event OracleEventListDeployed(address eventListAddress, uint128 index);
 
-    /// @notice Emitted when an event is published by the oracle subsystem.
-    /// @dev This event may be emitted by external flows; keeping it here for a unified external ABI.
-    /// @param event_id Unique identifier of the published event.
-    /// @param event_name Human-readable name of the event.
+    /// @notice Reserved event for external publication flow.
+    /// @param event_id Event identifier.
+    /// @param event_name Human-readable event name.
     event EventPublished(uint256 event_id, string event_name);
-    
-    /// @notice Oracle constructor - deploys initial OracleEventList
-    /// @param oraclePubkey Oracle's public key for authorization
-    /// @param oracleEventListCode Code of OracleEventList contract
-    /// @param PrivateNoteCode Code of PrivateNote contract
-    /// @param pmpCode Code of PMP contract
+
+    /// @notice Initializes Oracle and deploys default OracleEventList with index 0.
+    /// @param oraclePubkey Oracle owner public key.
+    /// @param oracleEventListCode OracleEventList contract code.
+    /// @param PrivateNoteCode PrivateNote contract code used to salt PMP.
+    /// @param pmpCode Base PMP contract code.
     constructor(
-        uint256 oraclePubkey, 
-        TvmCell oracleEventListCode, 
-        TvmCell PrivateNoteCode, 
+        uint256 oraclePubkey,
+        TvmCell oracleEventListCode,
+        TvmCell PrivateNoteCode,
         TvmCell pmpCode
     ) {
         tvm.accept();
-        
         require(msg.sender == ROOT_ORACLE_ADDRESS, ERR_INVALID_SENDER);
-        
+
         _oraclePubkey = oraclePubkey;
         _oracleEventListCode = oracleEventListCode;
-        _PrivateNoteCode = PrivateNoteCode;
-        _pmpCode = pmpCode;
-        
+
+        TvmCell saltedPmpCode = DexLib.buildPMPCode(PrivateNoteCode, pmpCode);
+        _pmpSaltedCodeHash = tvm.hash(saltedPmpCode);
+        _pmpSaltedCodeDepth = saltedPmpCode.depth();
+
         address oracleEventList = new OracleEventList{
             stateInit: DexLib.buildOracleEventListStateInit(
-                _oracleEventListCode, 
-                address(this), 
-                0
+                _oracleEventListCode, address(this), 0
             ),
-            value: 10 vmshell, 
-            flag: 1            
-        }(_oraclePubkey, _PrivateNoteCode, _pmpCode);
-        
+            value: 10 vmshell, flag: 1
+        }(_oraclePubkey, _pmpSaltedCodeHash, _pmpSaltedCodeDepth);
+
         address addrExtern = address.makeAddrExtern(ORACLE_DEPLOYED, bitCntAddress);
         emit OracleEventListDeployed{dest: addrExtern}(oracleEventList, 0);
     }
 
-    /// @notice Deploys a new OracleEventList with specified index
-    /// @param index Index identifier for the new OracleEventList
+    /// @notice Deploys an OracleEventList with a custom index.
+    /// @param index OracleEventList index.
     function deployEventList(uint128 index) public view onlyOwnerPubkey(_oraclePubkey) accept {
         ensureBalance();
-        
+
         address oracleEventList = new OracleEventList{
             stateInit: DexLib.buildOracleEventListStateInit(
-                _oracleEventListCode, 
-                address(this), 
-                index
+                _oracleEventListCode, address(this), index
             ),
-            value: 10 vmshell,  
-            flag: 1            
-        }(_oraclePubkey, _PrivateNoteCode, _pmpCode);
+            value: 10 vmshell, flag: 1
+        }(_oraclePubkey, _pmpSaltedCodeHash, _pmpSaltedCodeDepth);
 
         address addrExtern = address.makeAddrExtern(ORACLE_DEPLOYED, bitCntAddress);
         emit OracleEventListDeployed{dest: addrExtern}(oracleEventList, index);
     }
 
-    /// @notice Ensures minimal native balance for operations
+    /// @notice Ensures minimal native balance for operations.
     function ensureBalance() private pure {
         if (address(this).balance > MIN_BALANCE) return;
         gosh.mintshellq(MIN_BALANCE);
     }
 
-    /// @notice Withdraws accumulated fees to specified address
-    /// @param to Recipient address for the fees
-    /// @param amount Amount of fees to withdraw
+    /// @notice Withdraws shell fees from the Oracle contract.
+    /// @param to Recipient address.
+    /// @param amount Amount of shell fees to withdraw.
     function withdrawFees(address to, uint128 amount) public view onlyOwnerPubkey(_oraclePubkey) accept {
         mapping(uint32 => varuint32) data;
         data[CURRENCIES_ID_SHELL] = amount;
-        to.transfer({
-            value: 0.1 vmshell, 
-            flag: 1,             
-            currencies: data    
-        });
+        to.transfer({ value: 0.1 vmshell, flag: 1, currencies: data });
     }
 
-    /// @notice Fallback function to receive incoming payments
+    /// @notice Accepts native transfers and replenishes balance if needed.
     receive() external pure {
-        tvm.accept();        
-        ensureBalance();        
+        tvm.accept();
+        ensureBalance();
     }
 
-    /// @notice Helper function to encode data for setting stake deadlines
-    /// @param stakeStart Timestamp for the start of staking period
-    /// @param stakeEnd Timestamp for the end of staking period
-    /// @param resultStart Timestamp for the start of result submission period
-    /// @param resultEnd Timestamp for the end of result submission period
-    /// @return TvmCell Encoded data cell for stake deadline proposal
-    function getCellForProposalSetStakeDeadline(
-        uint64 stakeStart, 
-        uint64 stakeEnd, 
-        uint64 resultStart, 
-        uint64 resultEnd
-    ) public pure returns (TvmCell) {
-        return abi.encode(stakeStart, stakeEnd, resultStart, resultEnd);
-    }
-
-    /// @notice Helper function to encode data for setting event resolution
-    /// @param outcomeId Identifier of the winning outcome
-    /// @return TvmCell Encoded data cell for resolution proposal
-    function getCellForProposalSetResolve(uint32 outcomeId) public pure returns (TvmCell) {
-        return abi.encode(outcomeId);
-    }
-    
     /// @notice Returns OracleEventList address for specified index
-    /// @param index Index of the OracleEventList (currently only 0 supported)
-    /// @return address OracleEventList contract address
+    /// @param index Index of the OracleEventList
+    /// @return eventListAddress OracleEventList contract address
     function getEventListAddress(uint128 index) external view returns (address) {
         return DexLib.computeOracleEventListAddress(
-            _oracleEventListCode, 
-            address(this), 
-            index
+            _oracleEventListCode, address(this), index
         );
     }
     
     /// @notice Returns contract version identifier
-    /// @return string Contract name for version identification
+    /// @return value0 Contract semantic version.
+    /// @return value1 Contract identifier.
     function getVersion() external pure returns (string, string) {
         return (version, "Oracle");
     }

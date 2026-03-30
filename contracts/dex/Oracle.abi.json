@@ -32,27 +32,6 @@
 			]
 		},
 		{
-			"name": "getCellForProposalSetStakeDeadline",
-			"inputs": [
-				{"name":"stakeStart","type":"uint64"},
-				{"name":"stakeEnd","type":"uint64"},
-				{"name":"resultStart","type":"uint64"},
-				{"name":"resultEnd","type":"uint64"}
-			],
-			"outputs": [
-				{"name":"value0","type":"cell"}
-			]
-		},
-		{
-			"name": "getCellForProposalSetResolve",
-			"inputs": [
-				{"name":"outcomeId","type":"uint32"}
-			],
-			"outputs": [
-				{"name":"value0","type":"cell"}
-			]
-		},
-		{
 			"name": "getEventListAddress",
 			"inputs": [
 				{"name":"index","type":"uint128"}
@@ -95,11 +74,10 @@
 		{"init":true,"name":"_pubkey","type":"uint256"},
 		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
-		{"init":false,"name":"THRESHOLD","type":"uint32"},
 		{"init":false,"name":"_oraclePubkey","type":"uint256"},
 		{"init":false,"name":"_oracleEventListCode","type":"cell"},
-		{"init":false,"name":"_PrivateNoteCode","type":"cell"},
-		{"init":false,"name":"_pmpCode","type":"cell"},
+		{"init":false,"name":"_pmpSaltedCodeHash","type":"uint256"},
+		{"init":false,"name":"_pmpSaltedCodeDepth","type":"uint16"},
 		{"init":true,"name":"_name","type":"string"}
 	]
 }

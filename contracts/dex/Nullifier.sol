@@ -7,10 +7,14 @@ import "./RootPN.sol";
 
 /// @title Nullifier Contract
 contract Nullifier is Modifiers {
-    string constant version = "1.0.0";
+    /// @notice Contract semantic version.
+    string constant version = "1.0.2";
+
+    /// @notice Nullifier hash used as deterministic deployment key.
     uint256 static _nullifier_hash;
 
-    /// @notice Nullifier  constructor
+    /// @notice Nullifier constructor.
+    /// @param to Recipient PrivateNote address that receives transferred shell funds.
     constructor(address to) {
         tvm.accept();
         require(msg.sender == ROOT_PN_ADDRESS, ERR_INVALID_SENDER);
@@ -19,8 +23,9 @@ contract Nullifier is Modifiers {
         to.transfer({value: 0.1 vmshell, bounce: false, currencies: data_cur});
     }
 
-    /// @notice Returns root version
-    /// @return Contract name
+    /// @notice Returns contract version
+    /// @return value0 Contract semantic version.
+    /// @return value1 Contract identifier.
     function getVersion() external pure returns (string, string) {
         return (version, "Nullifier");
     }
