@@ -40,8 +40,9 @@ Content-Type: application/json
 ## Authentication
 
 All API endpoints are private in the MVP version and require one API token.
-Each API token is bound to one or more `privateNoteAddresses`, which are the
-account IDs for this API.
+Each API token is bound to one `userId`. `userId` is the primary
+deposit hash received by the integrator when depositing to the main
+`PrivateNote` used for trading.
 
 | Location | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- | --- |
@@ -51,24 +52,24 @@ No per-endpoint security classes are defined in the MVP.
 
 ## Integration Configuration
 
-During integration, the integrator provides the `privateNoteAddresses` that
-should be used as trading accounts. The API service returns one API token for
-that address list.
+During integration, the integrator provides the primary deposit hash for the
+main trading `PrivateNote`. The API service uses it as `userId`, derives
+the related `privateNoteAddress`, and returns one API token.
 
 Runtime API requests do not pass an account ID. The account is selected by the
 API token.
 
-Read endpoints aggregate data across all `privateNoteAddresses` bound to the
-token. `*/prepare` endpoints use `defaultPrivateNoteAddress` as the target
-`PrivateNote` in the MVP.
+The API may associate additional `PrivateNote` addresses with the same
+`userId` internally later. The public account ID remains the primary
+deposit hash.
 
 Token configuration fields:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
 | `token` | STRING | YES | Generated API token returned to the integrator. |
-| `privateNoteAddresses` | ARRAY | YES | PrivateNote addresses used as API account IDs. |
-| `defaultPrivateNoteAddress` | STRING | YES | PrivateNote address used by `*/prepare` endpoints. |
+| `userId` | STRING | YES | Primary deposit hash used as the API account ID. |
+| `privateNoteAddress` | STRING | YES | Main trading `PrivateNote` address derived from `userId`. |
 | `metadata` | OBJECT | NO | Integration metadata for this token. |
 | `status` | STRING | YES | Token status. MVP value: `ACTIVE`. |
 | `createdAt` | LONG | YES | Token creation timestamp. |
@@ -78,11 +79,11 @@ Example token metadata:
 ```json
 {
   "token": "dodex_live_generated_token",
-  "privateNoteAddresses": ["0:private-note-address"],
-  "defaultPrivateNoteAddress": "0:private-note-address",
+  "userId": "12345678901234567890",
+  "privateNoteAddress": "0:private-note-address",
   "metadata": {
     "name": "primary-mm",
-    "description": "Primary market-making account"
+    "description": "Primary trading account"
   },
   "status": "ACTIVE",
   "createdAt": 1710000000000
@@ -297,8 +298,8 @@ Each bid or ask item is:
 GET /api/v1/account
 ```
 
-Fetch account balances. If the API token is bound to multiple
-`privateNoteAddresses`, balances are aggregated by asset.
+Fetch account balances for the `PrivateNote` associated with the API token's
+`userId`.
 
 Query parameters:
 
@@ -628,8 +629,7 @@ PrivateNote.cancelBatch(
 GET /api/v1/openOrders
 ```
 
-Fetch orders that are currently in the order book. If the API token is bound to
-multiple `privateNoteAddresses`, orders are returned across all bound addresses.
+Fetch orders that are currently in the order book for the API token's `userId`.
 
 Query parameters:
 
