@@ -1,0 +1,320 @@
+pragma gosh-solidity >=0.76.1;
+pragma AbiHeader expire;
+pragma AbiHeader pubkey;
+
+import "./modifiers/modifiers.sol";
+import "./PrivateNote.sol";
+import "./Nullifier.sol";
+import "./Oracle.sol";
+import "./libraries/DexLib.sol";
+
+/// @notice Root contract responsible for deploying PrivateNote contracts
+contract RootPN is Modifiers {
+
+    /// @notice Contract semantic version.
+    string constant version = "1.1.0";
+
+    /// @notice Stored code of PrivateNote contract
+    TvmCell _PrivateNoteCode;
+
+    /// @notice Stored code of PMP contract
+    TvmCell _pmpCode;
+
+    /// @notice Stored code of Nullifier contract
+    TvmCell _nullifierCode;
+
+    /// @notice Stored code of Oracle contract
+    TvmCell _oracleCode;
+
+    /// @notice Stored code of OracleEventList contract
+    TvmCell _oracleEventListCode;
+
+    /// @notice Stored code of OrderBook contract
+    TvmCell _orderBookCode;
+
+    /// @notice Root owner public key
+    uint256 _ownerPubkey;
+
+    /// @notice Mapping of deployed PrivateNote values
+    mapping(uint32 => uint128) _deployedValues;
+    
+    // Events
+
+    /// @notice Emitted when a new voucher is generated
+    /// @param sk_u_commit Commitment of the secret key
+    /// @param voucher_nominal Nominal value of the voucher
+    /// @param token_type Type of token for the voucher
+	event voucherGenerated(uint256 sk_u_commit, uint voucher_nominal, uint32 token_type);
+
+    /// @notice Emitted when a PrivateNote contract is successfully deployed and registered.
+    /// @param depositIdentifierHash Deposit identifier hash
+    /// @param noteAddress — Deployed PrivateNote address
+    /// @param initialBalance — Initial token balance
+    event PrivateNoteDeployed(uint256 depositIdentifierHash, address noteAddress, uint128 initialBalance);
+
+    /// @notice Emitted when a Nullifier contract is deployed.
+    /// @param nullifierAddress — Address associated with the deployment
+    /// @param value — Value linked to the nullifier
+    event NullifierDeployed(address nullifierAddress, uint64 value);
+
+    /// @notice Root constructor
+    constructor() {
+        tvm.accept();
+    }
+
+    /// @notice Ensures minimal native balance for root operations
+    function ensureBalance() private pure {
+        if (address(this).balance > MIN_BALANCE) return;
+        gosh.mintshellq(MIN_BALANCE);
+    }
+
+    /// @notice Verifies a zero-knowledge proof and deploys a Nullifier contract
+    ///         linked to a deterministic PrivateNote address.
+    ///
+    /// @dev This function reconstructs the public inputs for zk verification in the following order:
+    ///      1. 24 zero bytes (reserved)
+    ///      2. `value` encoded as bytes8
+    ///      3. 24 zero bytes (reserved)
+    ///      4. `CURRENCIES_ID_SHELL_FEE` encoded as bytes8
+    ///      5. `nullifier_hash` encoded as bytes32
+    ///
+    ///      The proof must validate against these public inputs using `gosh.zkhalo2verify`.
+    ///      If verification succeeds:
+    ///      - A Nullifier contract is deployed with `_nullifier_hash`.
+    ///      - The deterministic PrivateNote address is computed from `deposit_identifier_hash`.
+    ///      - The specified `value` is transferred as shell currency to the Nullifier constructor.
+    ///      - `NullifierDeployed` event is emitted.
+    ///
+    ///      Reverts with `ERR_INVALID_ZKPROOF` if the proof verification fails.
+    ///
+    /// @param proof Zero-knowledge proof generated off-chain.
+    /// @param nullifier_hash Hash of the nullifier used to prevent double spending.
+    /// @param deposit_identifier_hash Unique deposit identifier used to deterministically derive
+    ///        the associated PrivateNote contract address.
+    /// @param value Amount encoded into the zk public inputs and passed as shell currency.
+    function sendEccShellToPrivateNote(bytes proof, uint256 nullifier_hash, uint256 deposit_identifier_hash, uint64 value) public view accept {
+        ensureBalance();
+
+        bytes pub_inputs = hex"000000000000000000000000000000000000000000000000"; // 24 zero bytes
+        bytes private_note_sum_bytes = bytes(bytes8(value));
+        pub_inputs.append(private_note_sum_bytes);
+        pub_inputs.append(hex"000000000000000000000000000000000000000000000000");
+        bytes token_type_bytes = bytes(bytes8(uint64(CURRENCIES_ID_SHELL_FEE)));
+        pub_inputs.append(token_type_bytes);
+        bytes private_note_digest_bytes = bytes(bytes32(nullifier_hash));
+        pub_inputs.append(private_note_digest_bytes);
+
+        require(gosh.zkhalo2verify(pub_inputs, proof), ERR_INVALID_ZKPROOF);
+        mapping(uint32 => varuint32) data_cur;
+        data_cur[CURRENCIES_ID_SHELL] = value;
+        TvmCell stateInit = abi.encodeStateInit({
+            contr: Nullifier,
+            varInit: {
+                _nullifier_hash: nullifier_hash
+            },
+            code: _nullifierCode
+        });
+
+        TvmCell stateInitNote = DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash);
+        address noteAddress = address.makeAddrStd(0, tvm.hash(stateInitNote));
+
+        address nullifier = address.makeAddrStd(0, tvm.hash(stateInit));
+
+        new Nullifier{
+            stateInit: stateInit,
+            value: 10 vmshell,
+            flag: 1,
+            currencies: data_cur
+        }(noteAddress);
+
+        address addrExtern = address.makeAddrExtern(ROOTPN_NULLIFIER_DEPLOYED, bitCntAddress);
+        emit NullifierDeployed{dest: addrExtern}(nullifier, value);
+    }
+
+    /// @notice Deploys a new PrivateNote contract
+    /// @param zkproof Zero-knowledge proof used to validate the deposit public inputs
+    /// @param deposit_identifier_hash Unique identifier hash for the deposit (used to derive the PrivateNote address)
+    /// @param ephemeral_pubkey Ephemeral public key for authorizing the deployed PrivateNote
+    /// @param value Initial token balance (encoded into the ZK public inputs)
+    /// @param token_type Token type encoded in zk public inputs and used by the deployed PrivateNote.
+    function deployPrivateNote(bytes zkproof, uint256 deposit_identifier_hash, uint256 ephemeral_pubkey, uint64 value, uint32 token_type)
+        public view accept
+    {
+        ensureBalance();
+
+        bytes pub_inputs = hex"000000000000000000000000000000000000000000000000"; // 24 zero bytes
+        bytes private_note_sum_bytes = bytes(bytes8(value));
+        pub_inputs.append(private_note_sum_bytes);
+        pub_inputs.append(hex"000000000000000000000000000000000000000000000000");
+        bytes token_type_bytes = bytes(bytes8(uint64(token_type)));
+        pub_inputs.append(token_type_bytes);
+        bytes private_note_digest_bytes = bytes(bytes32(deposit_identifier_hash));
+        pub_inputs.append(private_note_digest_bytes);
+
+        require(gosh.zkhalo2verify(pub_inputs, zkproof), ERR_INVALID_ZKPROOF);
+        TvmCell stateInit = DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash);
+
+        new PrivateNote{
+            stateInit: stateInit,
+            value: 50 vmshell,
+            flag: 1
+        }(value, ephemeral_pubkey, token_type, _pmpCode, _orderBookCode,
+          tvm.hash(_oracleCode), _oracleCode.depth(), tvm.hash(_oracleEventListCode), _oracleEventListCode.depth());
+    }
+
+    /// @notice Records deployment of a PrivateNote contract
+    /// @param deposit_identifier_hash Unique identifier for the deposit
+    /// @param token_type Type of token deployed 
+    /// @param deployed_value Value of the deployed token
+    function privateNoteDeployed(uint256 deposit_identifier_hash, uint32 token_type, uint128 deployed_value) public senderIs(address.makeAddrStd(0, tvm.hash(DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash)))) accept {
+        _deployedValues[token_type] += deployed_value;
+        address addrExtern = address.makeAddrExtern(ROOTPN_PRIVATE_NOTE_DEPLOYED, bitCntAddress);
+        emit PrivateNoteDeployed{dest: addrExtern}(deposit_identifier_hash, msg.sender, deployed_value);
+    }
+
+    /// @notice Updates the contract code for RootPN
+    /// @param newcode New contract code
+    /// @param cell Encoded persistent state used by `onCodeUpgrade`.
+    function updateCode(TvmCell newcode, TvmCell cell) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        tvm.setcode(newcode);
+        tvm.setCurrentCode(newcode);
+        onCodeUpgrade(cell);
+    }
+
+    /// @notice Handles root code upgrade
+    /// @param cell Code upgrade data cell
+    function onCodeUpgrade(TvmCell cell) private {
+        tvm.accept();
+        ensureBalance();
+        tvm.resetStorage();
+        (_pmpCode, _PrivateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _orderBookCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
+    }
+
+    /// @notice Returns the salted PrivateNote contract code
+    /// @return privateNoteCode The salted PrivateNote contract code as TvmCell
+    /// @return privateNoteHash Hash of PrivateNote contract code
+    function getPrivateNoteCode() external view returns(TvmCell privateNoteCode, uint256 privateNoteHash) {
+        TvmCell saltPN = abi.encode(_PrivateNoteCode);
+        TvmCell codePN = abi.setCodeSalt(_PrivateNoteCode, saltPN);
+        return (codePN, tvm.hash(codePN));
+    }
+
+    /// @notice Returns the deterministic address of a PrivateNote by deposit identifier hash
+    /// @param deposit_identifier_hash Unique identifier hash for the deposit
+    /// @return privateNoteAddress Deterministic PrivateNote contract address
+    function getPrivateNoteAddress(uint256 deposit_identifier_hash) external view returns(address privateNoteAddress) {
+        return DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
+    }
+
+    /// @notice Returns the deterministic address of a PMP for the given event and oracle set
+    /// @param event_id Event identifier used by the PMP
+    /// @param names List of oracle names used to build the oracle list hash
+    /// @param token_type Token type used by the PMP
+    /// @return pmpAddress Deterministic PMP contract address
+    function getPMPAddress(uint256 event_id, string[] names, uint32 token_type) external view returns(address pmpAddress) {
+        mapping(uint256 => bool) for_oracle_hash;
+        uint256 length = names.length;
+
+        for (uint32 i = 0; i < length; i++) {
+            for_oracle_hash[tvm.hash(names[i])] = true;
+        }
+        uint256 oracle_list_hash = tvm.hash(abi.encode(for_oracle_hash));
+        return DexLib.computePMPAddress(_PrivateNoteCode, _pmpCode, event_id, oracle_list_hash, token_type);
+    }
+
+    /// VAULT FUNCTIONS
+
+    /// @notice Check is it Allowed
+    /// @param nominal Voucher nominal in token base units.
+    /// @param token_type Token type to validate.
+    /// @return isAllowed True if nominal matches one of `ALLOWED_NOMINALS` for the token decimals.
+    function isAllowedNominal(uint128 nominal, uint32 token_type) private view returns (bool) {
+        uint128 decimals = tokenDecimals(token_type);
+        for (uint i = 0; i < ALLOWED_NOMINALS.length; i++) {
+            if (ALLOWED_NOMINALS[i] * decimals == nominal) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// @notice Checks if the nominal is allowed for vault operations
+    /// @param sk_u_commit Commitment of user secret key used in off-chain flows.
+    /// @param isFee Whether incoming shell tokens must be treated as fee token type.
+    function generatevoucher(uint256 sk_u_commit, bool isFee) public view internalMsg {
+		require(msg.currencies.keys().length == 1, 300);
+		uint32 token_type = msg.currencies.keys()[0];
+        if ((token_type == CURRENCIES_ID_SHELL) && (isFee)) {
+            token_type = CURRENCIES_ID_SHELL_FEE;
+        }
+		require(msg.currencies[token_type] > 0, 303);
+		tvm.accept();
+        ensureBalance();
+
+		uint voucher_nominal = msg.currencies[token_type];
+        require(isAllowedNominal(uint128(voucher_nominal), token_type), ERR_NOT_ALLOWED);
+
+        address addrExtern = address.makeAddrExtern(VAULT_voucher_GENERATED, bitCntAddress);
+		emit voucherGenerated{dest: addrExtern}(sk_u_commit, voucher_nominal, token_type);
+	}
+
+    /// @notice Withdraws tokens to a specified wallet
+    /// @param withdrawed_value Amount to withdraw
+    /// @param token_type Type of token to withdraw
+    /// @param flags Transfer flags
+    /// @param wallet_addr Destination wallet address
+    /// @param initial_data_hash Initial data hash for verification
+    function withdrawTokens(
+        uint128 withdrawed_value, 
+        uint32 token_type, 
+        uint8 flags, 
+        address wallet_addr, 
+        uint256 initial_data_hash
+    ) public senderIs(DexLib.computePrivateNoteAddress(_PrivateNoteCode, initial_data_hash)) accept {
+        ensureBalance();
+        // Verify sufficient balance
+        if (address(this).currencies[token_type] < withdrawed_value) {
+            PrivateNote(msg.sender).revertWithdraw{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
+                token_type,
+                withdrawed_value
+            );
+            return;
+        }
+        
+        // Prepare currency transfer data
+        mapping(uint32 => varuint32) cc;
+        cc[token_type] = varuint32(withdrawed_value);
+        bool bounce = false;
+        _deployedValues[token_type] -= withdrawed_value;
+        
+        // Transfer tokens to wallet
+        wallet_addr.transfer(varuint16(withdrawed_value), bounce, flags, TvmCell(), cc);
+    }
+
+    /// @notice Returns all global variables
+    /// @return pmpCodeHash Hash of PMP code
+    /// @return privateNoteCodeHash Hash of PrivateNote code
+    /// @return ownerPubkey Root owner public key
+    /// @return balance Current contract balance
+    function getDetails() external view returns (
+        uint256 pmpCodeHash,
+        uint256 privateNoteCodeHash,
+        uint256 ownerPubkey,
+        uint128 balance
+    ) {
+        return (
+            tvm.hash(_pmpCode),
+            tvm.hash(_PrivateNoteCode),
+            _ownerPubkey,
+            address(this).balance
+        );
+    }
+
+    /// @notice Returns root version
+    /// @return value0 Contract semantic version.
+    /// @return value1 Contract identifier.
+    function getVersion() external pure returns (string, string) {
+        return (version, "RootPN");
+    }
+}
