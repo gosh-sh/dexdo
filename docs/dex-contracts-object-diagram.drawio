@@ -1,6 +1,6 @@
 <mxfile host="app.diagrams.net" agent="Codex">
   <diagram id="dex-contracts-object-diagram" name="DEX Contracts">
-    <mxGraphModel dx="1737" dy="758" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="3200" pageHeight="2600" math="0" shadow="0">
+    <mxGraphModel dx="1737" dy="758" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="3200" pageHeight="4000" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -91,10 +91,10 @@
         <mxCell id="34" edge="1" parent="1" source="3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#666666;fontSize=11;labelBackgroundColor=#ffffff;" target="16" value="transfer&#xa;keys: dest_deposit_hash / sender_deposit_hash">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="40" parent="1" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;spacingLeft=8;spacingTop=6;fontSize=12;" value="Event Objects&#xa;all declared events from all contracts in contracts/" vertex="1">
+        <mxCell id="40" parent="1" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;spacingLeft=8;spacingTop=6;fontSize=12;" value="Declared Event Types&#xa;all event declarations from contracts/" vertex="1">
           <mxGeometry height="70" width="280" x="40" y="1390" as="geometry" />
         </mxCell>
-        <mxCell id="41" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="RootPN events&#xa;- voucherGenerated(dst, sk_u_commit, voucher_nominal, token_type)&#xa;- PrivateNoteDeployed(dst, depositIdentifierHash, noteAddress, initialBalance)&#xa;- NullifierDeployed(dst, nullifierAddress, value)" vertex="1">
+        <mxCell id="41" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="RootPN events&#xa;- voucherGenerated(sk_u_commit, voucher_nominal, token_type)&#xa;- PrivateNoteDeployed(depositIdentifierHash, noteAddress, initialBalance)&#xa;- NullifierDeployed(nullifierAddress, value)" vertex="1">
           <mxGeometry height="130" width="480" x="40" y="1490" as="geometry" />
         </mxCell>
         <mxCell id="42" edge="1" parent="1" source="2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#9673a6;fontSize=11;labelBackgroundColor=#ffffff;" target="41" value="declares">
@@ -106,40 +106,85 @@
         <mxCell id="44" edge="1" parent="1" source="4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#9673a6;fontSize=11;labelBackgroundColor=#ffffff;" target="43" value="declares">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="45" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="PrivateNote events&#xa;- OwnerChanged(dst, oldPubkey, newPubkey)&#xa;- StakeConfirmed(dst, stakeController, outcome, amount, bet_type)&#xa;- StakeCancelled(dst, stakeController, value)&#xa;- FullSetStakeConfirmed(dst, stakeController, amount[])&#xa;- FullSetStakeCancelled(dst, stakeController, value)&#xa;- ClaimAccepted(dst, stakeController, outcome?, payout)&#xa;- PMPDeployed(dst, event_id, token_type, pmpAddress, oracleEventLists[], oracleFee[])&#xa;- OrderPlacedConfirmed(dst, orderBook, orderId)&#xa;- OrderFilledConfirmed(dst, orderBook, filledAmount, isBuy)&#xa;- TransferInitiated(dst, dest, token_type, amount)&#xa;- TransferReceived(dst, from, token_type, amount)" vertex="1">
+        <mxCell id="45" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="PrivateNote events&#xa;- OwnerChanged(oldPubkey, newPubkey)&#xa;- StakeConfirmed(stakeController, outcome, amount, bet_type)&#xa;- StakeCancelled(stakeController, value)&#xa;- FullSetStakeConfirmed(stakeController, amount[])&#xa;- FullSetStakeCancelled(stakeController, value)&#xa;- ClaimAccepted(stakeController, outcome?, payout)&#xa;- PMPDeployed(event_id, token_type, pmpAddress, oracleEventLists[], oracleFee[])&#xa;- OrderPlacedConfirmed(orderBook, orderId)&#xa;- OrderFilledConfirmed(orderBook, filledAmount, isBuy)&#xa;- TransferInitiated(dest, token_type, amount)&#xa;- TransferReceived(from, token_type, amount)" vertex="1">
           <mxGeometry height="260" width="720" x="550" y="1490" as="geometry" />
         </mxCell>
         <mxCell id="46" edge="1" parent="1" source="3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#9673a6;fontSize=11;labelBackgroundColor=#ffffff;" target="45" value="declares">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="47" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="RootOracle events&#xa;- OracleDeployed(dst, oracle, pubkey, name)" vertex="1">
+        <mxCell id="47" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="RootOracle events&#xa;- OracleDeployed(oracle, pubkey, name)" vertex="1">
           <mxGeometry height="80" width="380" x="1310" y="1490" as="geometry" />
         </mxCell>
         <mxCell id="48" edge="1" parent="1" source="5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#9673a6;fontSize=11;labelBackgroundColor=#ffffff;" target="47" value="declares">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="49" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="Oracle events&#xa;- OracleEventListDeployed(dst, eventListAddress, index)&#xa;- EventPublished(dst, event_id, event_name)" vertex="1">
+        <mxCell id="49" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="Oracle events&#xa;- OracleEventListDeployed(eventListAddress, index)&#xa;- EventPublished(event_id, event_name)" vertex="1">
           <mxGeometry height="100" width="420" x="1710" y="1490" as="geometry" />
         </mxCell>
         <mxCell id="50" edge="1" parent="1" source="6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#9673a6;fontSize=11;labelBackgroundColor=#ffffff;" target="49" value="declares">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="51" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="OracleEventList events&#xa;- EventAdded(dst, event_id, event_name, oracle_fee, deadline)&#xa;- EventConfirmed(dst, event_id, pmpAddress)" vertex="1">
+        <mxCell id="51" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="OracleEventList events&#xa;- EventAdded(event_id, event_name, oracle_fee, deadline)&#xa;- EventConfirmed(event_id, pmpAddress)" vertex="1">
           <mxGeometry height="100" width="470" x="2150" y="1490" as="geometry" />
         </mxCell>
         <mxCell id="52" edge="1" parent="1" source="7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#9673a6;fontSize=11;labelBackgroundColor=#ffffff;" target="51" value="declares">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="53" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="PMP events&#xa;- StakeAccepted(dst, note, outcomeId, amount, bet_type)&#xa;- ApprovedByOracle(dst, oracleEventList, oraclePubkey)&#xa;- Resolved(dst, outcomeId)&#xa;- ClaimProcessed(dst, note, payout, win)&#xa;- NetworkFeeBurned(dst, amount)&#xa;- TimingsSet(dst, stakeStart, stakeEnd, resultStart, resultEnd)&#xa;- NumOutcomesSet(dst, numOutcomes)&#xa;- EventCancelled(dst)&#xa;- PMPCancelled(dst)&#xa;- CreatorFeeCollected(dst, fee)&#xa;- PoolsFrozen(dst, baseTotalPool)&#xa;- SplitProcessed(dst, note, collateral)&#xa;- MergeProcessed(dst, note, collateral)" vertex="1">
+        <mxCell id="53" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="PMP events&#xa;- StakeAccepted(note, outcomeId, amount, bet_type)&#xa;- ApprovedByOracle(oracleEventList, oraclePubkey)&#xa;- Resolved(outcomeId)&#xa;- ClaimProcessed(note, payout, win)&#xa;- NetworkFeeBurned(amount)&#xa;- TimingsSet(stakeStart, stakeEnd, resultStart, resultEnd)&#xa;- NumOutcomesSet(numOutcomes)&#xa;- EventCancelled()&#xa;- PMPCancelled()&#xa;- CreatorFeeCollected(fee)&#xa;- PoolsFrozen(baseTotalPool)&#xa;- SplitProcessed(note, collateral)&#xa;- MergeProcessed(note, collateral)" vertex="1">
           <mxGeometry height="280" width="640" x="1310" y="1640" as="geometry" />
         </mxCell>
         <mxCell id="54" edge="1" parent="1" source="8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#9673a6;fontSize=11;labelBackgroundColor=#ffffff;" target="53" value="declares">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="55" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="OrderBook events&#xa;- OrderPlaced(dst, orderId, outcomeId, isBuy, flags, price, amount)&#xa;- OrderCancelled(dst, orderId)&#xa;- OrderFilled(dst, orderId, filledAmount, clearingPrice, feeAmount, isTaker)&#xa;- Queued(dst, slot, queueId, entryType)&#xa;- Rejected(dst, entryType, deposit_hash)&#xa;- CallbackBounced(dst, dest, lt)" vertex="1">
+        <mxCell id="55" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="OrderBook events&#xa;- OrderPlaced(orderId, outcomeId, isBuy, flags, price, amount)&#xa;- OrderCancelled(orderId)&#xa;- OrderFilled(orderId, filledAmount, clearingPrice, feeAmount, isTaker)&#xa;- Queued(slot, queueId, entryType)&#xa;- Rejected(entryType, deposit_hash)&#xa;- CallbackBounced(dest, lt)" vertex="1">
           <mxGeometry height="180" width="640" x="1980" y="1640" as="geometry" />
         </mxCell>
         <mxCell id="56" edge="1" parent="1" source="9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#9673a6;fontSize=11;labelBackgroundColor=#ffffff;" target="55" value="declares">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="60" parent="1" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;spacingLeft=8;spacingTop=6;fontSize=12;" value="Emitted External Event Objects&#xa;only objects created by `emit Event{dest: ...}(...)` have `dst`" vertex="1">
+          <mxGeometry height="80" width="390" x="40" y="1980" as="geometry" />
+        </mxCell>
+        <mxCell id="61" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e1f5;strokeColor=#6c8ebf;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="RootPN emitted external event objects&#xa;- voucherGenerated(dst, sk_u_commit, voucher_nominal, token_type)&#xa;- PrivateNoteDeployed(dst, depositIdentifierHash, noteAddress, initialBalance)&#xa;- NullifierDeployed(dst, nullifierAddress, value)" vertex="1">
+          <mxGeometry height="130" width="500" x="40" y="2080" as="geometry" />
+        </mxCell>
+        <mxCell id="62" edge="1" parent="1" source="2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;" target="61" value="emits external">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="63" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e1f5;strokeColor=#6c8ebf;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="PrivateNote emitted external event objects&#xa;- OwnerChanged(dst, oldPubkey, newPubkey)&#xa;- PMPDeployed(dst, event_id, token_type, pmpAddress, oracleEventLists[], oracleFee[])&#xa;- StakeCancelled(dst, stakeController, value)&#xa;- FullSetStakeConfirmed(dst, stakeController, amount[])&#xa;- FullSetStakeCancelled(dst, stakeController, value)&#xa;- StakeConfirmed(dst, stakeController, outcome, amount, bet_type)&#xa;- ClaimAccepted(dst, stakeController, outcome?, payout)&#xa;- TransferInitiated(dst, dest, token_type, amount)&#xa;- TransferReceived(dst, from, token_type, amount)&#xa;- OrderPlacedConfirmed(dst, orderBook, orderId)&#xa;- OrderFilledConfirmed(dst, orderBook, filledAmount, isBuy)" vertex="1">
+          <mxGeometry height="260" width="760" x="570" y="2080" as="geometry" />
+        </mxCell>
+        <mxCell id="64" edge="1" parent="1" source="3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;" target="63" value="emits external">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="65" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e1f5;strokeColor=#6c8ebf;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="RootOracle emitted external event objects&#xa;- OracleDeployed(dst, oracle, pubkey, name)" vertex="1">
+          <mxGeometry height="80" width="410" x="1360" y="2080" as="geometry" />
+        </mxCell>
+        <mxCell id="66" edge="1" parent="1" source="5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;" target="65" value="emits external">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="67" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e1f5;strokeColor=#6c8ebf;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="Oracle emitted external event objects&#xa;- OracleEventListDeployed(dst, eventListAddress, index)" vertex="1">
+          <mxGeometry height="80" width="420" x="1800" y="2080" as="geometry" />
+        </mxCell>
+        <mxCell id="68" edge="1" parent="1" source="6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;" target="67" value="emits external">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="69" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e1f5;strokeColor=#6c8ebf;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="OracleEventList emitted external event objects&#xa;- EventAdded(dst, event_id, event_name, oracle_fee, deadline)&#xa;- EventConfirmed(dst, event_id, pmpAddress)" vertex="1">
+          <mxGeometry height="100" width="470" x="2250" y="2080" as="geometry" />
+        </mxCell>
+        <mxCell id="70" edge="1" parent="1" source="7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;" target="69" value="emits external">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="71" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e1f5;strokeColor=#6c8ebf;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="PMP emitted external event objects&#xa;- PMPCancelled(dst)&#xa;- ApprovedByOracle(dst, oracleEventList, oraclePubkey)&#xa;- TimingsSet(dst, stakeStart, stakeEnd, resultStart, resultEnd)&#xa;- EventCancelled(dst)&#xa;- StakeAccepted(dst, note, outcomeId, amount, bet_type)&#xa;- PoolsFrozen(dst, baseTotalPool)&#xa;- SplitProcessed(dst, note, collateral)&#xa;- MergeProcessed(dst, note, collateral)&#xa;- CreatorFeeCollected(dst, fee)&#xa;- Resolved(dst, outcomeId)&#xa;- ClaimProcessed(dst, note, payout, win)" vertex="1">
+          <mxGeometry height="250" width="700" x="1360" y="2200" as="geometry" />
+        </mxCell>
+        <mxCell id="72" edge="1" parent="1" source="8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;" target="71" value="emits external">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="73" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e1f5;strokeColor=#6c8ebf;align=left;spacingLeft=8;spacingTop=6;fontSize=11;" value="OrderBook emitted external event objects&#xa;- Rejected(dst, entryType, deposit_hash)&#xa;- Queued(dst, slot, queueId, entryType)&#xa;- OrderPlaced(dst, orderId, outcomeId, isBuy, flags, price, amount)&#xa;- OrderCancelled(dst, orderId)&#xa;- OrderFilled(dst, orderId, filledAmount, clearingPrice, feeAmount, isTaker)&#xa;- CallbackBounced(dst, dest, lt)" vertex="1">
+          <mxGeometry height="180" width="700" x="2090" y="2200" as="geometry" />
+        </mxCell>
+        <mxCell id="74" edge="1" parent="1" source="9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;" target="73" value="emits external">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
       </root>
