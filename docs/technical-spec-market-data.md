@@ -65,6 +65,8 @@ Implementation:
    * `TICK_SIZE = 10` - price quantisation (10 bps)
    * No upper bound on price (outcome tokens may trade > 1 collateral unit).
 
+symbol = PMP._name+_outcomeNames[i]+_token_type.toEnumVariant # 1 - NACKL, 2 - SHELL, 3 - USDC
+
 ### GET /api/v1/depth
 
 Fetch bids and asks for one outcome symbol.
