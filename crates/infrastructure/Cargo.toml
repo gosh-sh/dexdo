@@ -1,0 +1,17 @@
+[package]
+name = "dodex-infrastructure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+dodex-application = { path = "../application" }
+dodex-domain = { path = "../domain" }
+

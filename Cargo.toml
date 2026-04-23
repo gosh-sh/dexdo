@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "services/api",
+    "services/indexer",
+    "crates/domain",
+    "crates/application",
+    "crates/infrastructure",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "UNLICENSED"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "macros", "migrate", "json"] }
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+salvo = { version = "0.74", features = ["logging"] }
+salvo_extra = "0.74"

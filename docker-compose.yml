@@ -1,0 +1,30 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      APP_CONFIG: /app/config/local.yaml
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "dodex-api", "--help"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  indexer:
+    build:
+      context: .
+      dockerfile: docker/indexer.Dockerfile
+    environment:
+      APP_CONFIG: /app/config/local.yaml
+      RUST_LOG: info
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+
