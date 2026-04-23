@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: docker/api.Dockerfile
     environment:
-      APP_CONFIG: /app/config/local.yaml
+      APP_CONFIG: /app/config/api.local.yaml
       RUST_LOG: info
     ports:
       - "8080:8080"
@@ -22,9 +22,8 @@ services:
       context: .
       dockerfile: docker/indexer.Dockerfile
     environment:
-      APP_CONFIG: /app/config/local.yaml
+      APP_CONFIG: /app/config/indexer.local.yaml
       RUST_LOG: info
     volumes:
       - ./config:/app/config:ro
     restart: unless-stopped
-

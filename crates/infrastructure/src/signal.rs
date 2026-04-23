@@ -1,3 +1,6 @@
+// 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
+//
+
 use std::sync::Arc;
 
 use tokio::sync::RwLock;

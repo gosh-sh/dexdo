@@ -1,3 +1,6 @@
+// 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
+//
+
 use async_trait::async_trait;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::Market;

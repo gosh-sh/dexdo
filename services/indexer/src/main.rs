@@ -1,3 +1,6 @@
+// 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
+//
+
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let config_path = env::var("APP_CONFIG").unwrap_or_else(|_| "config/local.yaml".to_string());
+    let config_path = env::var("APP_CONFIG").unwrap_or_else(|_| "config/indexer.local.yaml".to_string());
     let config = AppConfig::load_from_path(&config_path)?;
     let config_state = Arc::new(RwLock::new(config));
 
