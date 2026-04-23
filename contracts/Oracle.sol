@@ -10,7 +10,7 @@ import "./libraries/DexLib.sol";
 contract Oracle is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "1.1.0";
+    string constant version = "1.4.0";
 
     /// @notice Oracle owner pubkey used for access control.
     uint256 _oraclePubkey;
@@ -31,9 +31,9 @@ contract Oracle is Modifiers {
     event OracleEventListDeployed(address eventListAddress, uint128 index);
 
     /// @notice Reserved event for external publication flow.
-    /// @param event_id Event identifier.
-    /// @param event_name Human-readable event name.
-    event EventPublished(uint256 event_id, string event_name);
+    /// @param eventId Event identifier.
+    /// @param eventName Human-readable event name.
+    event EventPublished(uint256 eventId, string eventName);
 
     /// @notice Initializes Oracle and deploys default OracleEventList with index 0.
     /// @param oraclePubkey Oracle owner public key.
@@ -48,6 +48,9 @@ contract Oracle is Modifiers {
     ) {
         tvm.accept();
         require(msg.sender == ROOT_ORACLE_ADDRESS, ERR_INVALID_SENDER);
+        // pubkey=0 would make every onlyOwnerPubkey-gated method callable
+        // by any keyless ext tx (msg.pubkey()==0). Reject at deploy.
+        require(oraclePubkey != 0, ERR_INVALID_PARAMS);
 
         _oraclePubkey = oraclePubkey;
         _oracleEventListCode = oracleEventListCode;

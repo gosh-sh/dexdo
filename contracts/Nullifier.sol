@@ -8,19 +8,19 @@ import "./RootPN.sol";
 /// @title Nullifier Contract
 contract Nullifier is Modifiers {
     /// @notice Contract semantic version.
-    string constant version = "1.1.0";
+    string constant version = "1.4.0";
 
     /// @notice Nullifier hash used as deterministic deployment key.
-    uint256 static _nullifier_hash;
+    uint256 static _nullifierHash;
 
     /// @notice Nullifier constructor.
     /// @param to Recipient PrivateNote address that receives transferred shell funds.
     constructor(address to) {
         tvm.accept();
         require(msg.sender == ROOT_PN_ADDRESS, ERR_INVALID_SENDER);
-        mapping(uint32 => varuint32) data_cur;
-        data_cur[CURRENCIES_ID_SHELL] = msg.currencies[CURRENCIES_ID_SHELL];
-        to.transfer({value: 0.1 vmshell, bounce: false, currencies: data_cur, dest_dapp_id: ROOT_PN_DAPP_ID});
+        mapping(uint32 => varuint32) dataCur;
+        dataCur[CURRENCIES_ID_SHELL] = msg.currencies[CURRENCIES_ID_SHELL];
+        to.transfer({value: 0.1 vmshell, bounce: false, currencies: dataCur, dest_dapp_id: ROOT_PN_DAPP_ID});
     }
 
     /// @notice Returns contract version

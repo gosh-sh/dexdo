@@ -81,7 +81,7 @@ abstract contract Modifiers is Errors {
     uint128 constant ORACLE_EVENT_PUBLISHED = 134;
 
     // Vault events
-    /// @notice External event id for `RootPN.voucherGenerated`.
+    /// @notice External event id for `RootPN.VoucherGenerated`.
     uint128 constant VAULT_voucher_GENERATED = 135;
     // Root Oracle event
     /// @notice External event id for `RootOracle.OracleDeployed`.
@@ -116,6 +116,11 @@ abstract contract Modifiers is Errors {
     uint128 constant PRIVATENOTE_ORDER_PLACED = 147;
     /// @notice External event id for `PrivateNote.OrderFilled`.
     uint128 constant PRIVATENOTE_ORDER_FILLED = 148;
+
+    /// @notice External event id for `PrivateNote.OrderSubmitted`.
+    uint128 constant PRIVATENOTE_ORDER_SUBMITTED = 151;
+    /// @notice External event id for `PrivateNote.OrderCancelledConfirmed`.
+    uint128 constant PRIVATENOTE_ORDER_CANCELLED = 152;
 
     // Transfer events
     /// @notice External event id for `PrivateNote.TransferInitiated`.
@@ -156,6 +161,13 @@ abstract contract Modifiers is Errors {
     ///         Market orders (FLAG_MARKET) skip this check since price is ignored.
     ///         Common across all token types.
     uint256 constant TICK_SIZE = 10; // 10 bps = 0.1%
+
+    /// @notice Maximum number of orders (or cancels) in a single batch.
+    ///         Shared across PrivateNote.placeBatch/cancelBatch and
+    ///         OrderBook.executeBatch — keeping the limit in one place
+    ///         prevents PN from accepting more than OB can dispatch
+    ///         (truncation on OB side would leak collateral / stake).
+    uint32 constant MAX_BATCH_SIZE = 5;
 
     /// @notice Currency ID used for PMP pools (staking tokens)
     uint32 constant CURRENCIES_ID = 1;
@@ -223,7 +235,7 @@ abstract contract Modifiers is Errors {
     uint128 constant COUPON_POOL_LIMIT_PERCENT = 500;
 
     /// @notice Maximum coupon payout multiplier
-    /// @dev Maximum win = coupon_size * COUPON_MAX_PAYOUT_MULTIPLIER
+    /// @dev Maximum win = couponSize * COUPON_MAX_PAYOUT_MULTIPLIER
     uint128 constant COUPON_MAX_PAYOUT_MULTIPLIER = 20000;
 
     /// @notice Redistribution percentage from debt bets to clean bets
@@ -240,10 +252,10 @@ abstract contract Modifiers is Errors {
     ];
 
     /// @notice Returns decimals for a given token type
-    /// @param token_type Currency identifier.
+    /// @param tokenType Currency identifier.
     /// @return decimals Token decimals multiplier (1e6 for USDC, 1e9 otherwise).
-    function tokenDecimals(uint32 token_type) internal pure returns (uint128) {
-        if (token_type == CURRENCIES_ID_USDC) return 1_000_000;
+    function tokenDecimals(uint32 tokenType) internal pure returns (uint128) {
+        if (tokenType == CURRENCIES_ID_USDC) return 1_000_000;
         return 1_000_000_000;
     }
 
@@ -257,25 +269,25 @@ abstract contract Modifiers is Errors {
     uint128 constant USDC_COUPON_VALUE = 100000000; // 100 USDC (6 decimals)
  
     /// @notice Returns the minimum allowed stake value for a given token type
-    /// @param token_type Currency identifier
+    /// @param tokenType Currency identifier
     /// @return minValue Minimum allowed stake amount for the token type.
-    function minStakeValue(uint32 token_type) internal pure returns (uint128) {
-        if (token_type == CURRENCIES_ID_SHELL) return uint128(MIN_VALUE_SHELL);
-        if (token_type == CURRENCIES_ID_USDC)  return uint128(MIN_VALUE_USDC);
+    function minStakeValue(uint32 tokenType) internal pure returns (uint128) {
+        if (tokenType == CURRENCIES_ID_SHELL) return uint128(MIN_VALUE_SHELL);
+        if (tokenType == CURRENCIES_ID_USDC)  return uint128(MIN_VALUE_USDC);
         return uint128(MIN_VALUE);
     }
 
     /// @notice Returns the minimum allowed order size for a given token type
-    function minOrderNotional(uint32 token_type) internal pure returns (uint128) {
-        if (token_type == CURRENCIES_ID_SHELL) return MIN_ORDER_NOTIONAL_SHELL;
-        if (token_type == CURRENCIES_ID_USDC)  return MIN_ORDER_NOTIONAL_USDC;
+    function minOrderNotional(uint32 tokenType) internal pure returns (uint128) {
+        if (tokenType == CURRENCIES_ID_SHELL) return MIN_ORDER_NOTIONAL_SHELL;
+        if (tokenType == CURRENCIES_ID_USDC)  return MIN_ORDER_NOTIONAL_USDC;
         return MIN_ORDER_NOTIONAL_NACKL;
     }
 
     /// @notice Returns the lot size (amount quantisation step) for a token type.
-    function lotSize(uint32 token_type) internal pure returns (uint128) {
-        if (token_type == CURRENCIES_ID_SHELL) return LOT_SIZE_SHELL;
-        if (token_type == CURRENCIES_ID_USDC)  return LOT_SIZE_USDC;
+    function lotSize(uint32 tokenType) internal pure returns (uint128) {
+        if (tokenType == CURRENCIES_ID_SHELL) return LOT_SIZE_SHELL;
+        if (tokenType == CURRENCIES_ID_USDC)  return LOT_SIZE_USDC;
         return LOT_SIZE_NACKL;
     }
 
@@ -302,23 +314,23 @@ abstract contract Modifiers is Errors {
     /// @notice Stake information per PMP
     struct StakeInfo {
         uint128[] amount;          // confirmed stakes per outcome
-        uint128[] debt_amount;     // confirmed stakes with debt
-        uint128[] coupons_amount;  // confirmed coupon stakes per outcome
-        uint128 candidate_amount;  // pending stakes per outcome
-        uint32 candidate_outcome;  // pending stake outcome
-        uint8 candidate_bet_type;  // bet type for pending stake (0=clean, 1=debt, 2=coupon)
+        uint128[] debtAmount;     // confirmed stakes with debt
+        uint128[] couponsAmount;  // confirmed coupon stakes per outcome
+        uint128 candidateAmount;  // pending stakes per outcome
+        uint32 candidateOutcome;  // pending stake outcome
+        uint8 candidateBetType;  // bet type for pending stake (0=clean, 1=debt, 2=coupon)
         /// @notice Token type used by the stake record.
-        uint32 token_type;
+        uint32 tokenType;
         /// @notice Hash of oracle set used by related PMP.
-        uint256 oracle_list_hash;
+        uint256 oracleListHash;
     }
 
     /// @notice Event information structure
     struct EventInfo {
         /// @notice Human-readable oracle event name.
-        string event_name;
+        string eventName;
         /// @notice Oracle service fee required for confirmation.
-        uint128 oracle_fee;
+        uint128 oracleFee;
         /// @notice Service deadline as Unix timestamp.
         uint64 deadline;
         /// @notice Human-readable event description.

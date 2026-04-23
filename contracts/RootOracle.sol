@@ -10,10 +10,10 @@ import "./libraries/DexLib.sol";
 contract RootOracle is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "1.1.0";
+    string constant version = "1.4.0";
 
     /// @notice Stored code of PrivateNote contract
-    TvmCell _PrivateNoteCode;
+    TvmCell _privateNoteCode;
 
     /// @notice Stored code of PMP contract
     TvmCell _pmpCode;
@@ -51,12 +51,15 @@ contract RootOracle is Modifiers {
     /// @param oracleName Name of the oracle
     function deployOracle(uint256 oraclePubkey, string oracleName) public view accept {
         ensureBalance();
+        // Mirror the Oracle constructor guard: block the pubkey=0 footgun at
+        // the root so we don't waste gas on a doomed deploy.
+        require(oraclePubkey != 0, ERR_INVALID_PARAMS);
         TvmCell stateInit = DexLib.buildOracleStateInit(_oracleCode, oracleName);
         address oracle = new Oracle{
             stateInit: stateInit,
             value: 60 vmshell,
             flag: 1
-        }(oraclePubkey, _oracleEventListCode, _PrivateNoteCode, _pmpCode);
+        }(oraclePubkey, _oracleEventListCode, _privateNoteCode, _pmpCode);
 
         address addrExtern = address.makeAddrExtern(ROOTORACLE_ORACLE_DEPLOYED, bitCntAddress);
         emit OracleDeployed{dest: addrExtern}(oracle, oraclePubkey, oracleName);
@@ -78,7 +81,7 @@ contract RootOracle is Modifiers {
         tvm.accept();
         ensureBalance();
         tvm.resetStorage();
-        (_pmpCode, _PrivateNoteCode, _oracleCode, _oracleEventListCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, uint256));
+        (_pmpCode, _privateNoteCode, _oracleCode, _oracleEventListCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, uint256));
     }
 
     /// @notice Returns the deterministic address of an Oracle by name

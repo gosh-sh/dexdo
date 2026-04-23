@@ -12,10 +12,10 @@ import "./libraries/DexLib.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "1.1.0";
+    string constant version = "1.4.0";
 
     /// @notice Stored code of PrivateNote contract
-    TvmCell _PrivateNoteCode;
+    TvmCell _privateNoteCode;
 
     /// @notice Stored code of PMP contract
     TvmCell _pmpCode;
@@ -37,14 +37,67 @@ contract RootPN is Modifiers {
 
     /// @notice Mapping of deployed PrivateNote values
     mapping(uint32 => uint128) _deployedValues;
+
+    /// @notice Encode a uint64 into the bn254 Fr representation that halo2
+    ///         emits for `voucherNominal` (32 LE bytes, padded with zeros,
+    ///         then read as a big-endian uint256).
+    function _u64ToFr(uint64 v) private pure returns (uint256) {
+        uint64 swapped =
+            ((v >> 56) & 0xff)
+          | (((v >> 48) & 0xff) << 8)
+          | (((v >> 40) & 0xff) << 16)
+          | (((v >> 32) & 0xff) << 24)
+          | (((v >> 24) & 0xff) << 32)
+          | (((v >> 16) & 0xff) << 40)
+          | (((v >>  8) & 0xff) << 48)
+          | (( v        & 0xff) << 56);
+        return uint256(swapped) << 192;
+    }
+
+    /// @notice Encode a uint32 into the bn254 Fr representation halo2 emits
+    ///         for `tokenType`.
+    function _u32ToFr(uint32 v) private pure returns (uint256) {
+        uint32 swapped =
+            ((v >> 24) & 0xff)
+          | (((v >> 16) & 0xff) << 8)
+          | (((v >>  8) & 0xff) << 16)
+          | (( v        & 0xff) << 24);
+        return uint256(swapped) << 224;
+    }
+
+    /// @notice BN254 Fr modulus (a.k.a. group order of the bn254 G1 group's
+    ///         scalar field). All halo2 instances are Fr elements; raw
+    ///         uint256 inputs that exceed this must be reduced.
+    uint256 constant FR_MODULUS = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001;
+
+    /// @notice Encode an arbitrary uint256 (e.g. ephemeralPubkey) into the
+    ///         bn254 Fr representation halo2 emits — that is,
+    ///         `(v mod p).to_bytes_le()` packed into a uint256 whose
+    ///         big-endian 32-byte view IS the LE-bytes (so when later
+    ///         shipped to gosh.zkhalo2verify via `bytes(bytes32(...))` the
+    ///         on-wire bytes are exactly the LE Fr canonical form).
+    ///
+    ///         Without the mod-reduce step, a pubkey whose top 2 bits are
+    ///         set (above Fr) gets reduced inside the prover but not
+    ///         on-chain → instance mismatch and verification fails.
+    function _u256ToFr(uint256 v) private pure returns (uint256) {
+        uint256 reduced = v % FR_MODULUS;
+        uint256 r = 0;
+        // 32-byte byte-swap (BE → LE)
+        for (uint8 i = 0; i < 32; i++) {
+            r = (r << 8) | (reduced & 0xff);
+            reduced >>= 8;
+        }
+        return r;
+    }
     
     // Events
 
-    /// @notice Emitted when a new voucher is generated
-    /// @param sk_u_commit Commitment of the secret key
-    /// @param voucher_nominal Nominal value of the voucher
-    /// @param token_type Type of token for the voucher
-	event voucherGenerated(uint256 sk_u_commit, uint voucher_nominal, uint32 token_type);
+    /// @notice Emitted when a new voucher is generated.
+    /// @param skUCommit Commitment of the secret key
+    /// @param voucherNominal Nominal value of the voucher
+    /// @param tokenType Type of token for the voucher
+	event VoucherGenerated(uint256 skUCommit, uint voucherNominal, uint32 tokenType);
 
     /// @notice Emitted when a PrivateNote contract is successfully deployed and registered.
     /// @param depositIdentifierHash Deposit identifier hash
@@ -68,54 +121,117 @@ contract RootPN is Modifiers {
         gosh.mintshellq(MIN_BALANCE);
     }
 
-    /// @notice Verifies a zero-knowledge proof and deploys a Nullifier contract
+    /// @notice Verifies a zero-knowledge proof together with a node-side
+    ///         historical-hash check, then deploys a Nullifier contract
     ///         linked to a deterministic PrivateNote address.
     ///
-    /// @dev This function reconstructs the public inputs for zk verification in the following order:
-    ///      1. 24 zero bytes (reserved)
-    ///      2. `value` encoded as bytes8
-    ///      3. 24 zero bytes (reserved)
-    ///      4. `CURRENCIES_ID_SHELL_FEE` encoded as bytes8
-    ///      5. `nullifier_hash` encoded as bytes32
+    /// @dev Public inputs for zk verification are 4 × 32 bytes, in order:
+    ///      0. `depositIdentifierHash` — Poseidon commitment.
+    ///      1. `finalLayerHistoricalHashRoot` — dense chain root that
+    ///         the node verifies against `GlobalHistoricalData[layerNumber]`.
+    ///      2. `voucherNominalFr` — voucher nominal as Fr.
+    ///      3. `tokenTypeFr` — token type as Fr.
     ///
-    ///      The proof must validate against these public inputs using `gosh.zkhalo2verify`.
-    ///      If verification succeeds:
-    ///      - A Nullifier contract is deployed with `_nullifier_hash`.
-    ///      - The deterministic PrivateNote address is computed from `deposit_identifier_hash`.
-    ///      - The specified `value` is transferred as shell currency to the Nullifier constructor.
-    ///      - `NullifierDeployed` event is emitted.
+    ///      The flow is:
+    ///      1. `gosh.check_layer_hash` confirms the node still has this
+    ///         historical root in the requested layer's window. If the
+    ///         hash has aged out of the historical window, the caller
+    ///         must rebuild the proof against an older layer (L+1) and
+    ///         retry — this is the L1 → L2 fallback used by the live
+    ///         test (generate_vouchers_with_live_event_proving.py).
+    ///      2. `gosh.zkhalo2verify` validates the zk proof against the
+    ///         4-field public-input vector built above.
+    ///      3. On success, deploys the Nullifier and emits
+    ///         `NullifierDeployed`.
     ///
-    ///      Reverts with `ERR_INVALID_ZKPROOF` if the proof verification fails.
-    ///
-    /// @param proof Zero-knowledge proof generated off-chain.
-    /// @param nullifier_hash Hash of the nullifier used to prevent double spending.
-    /// @param deposit_identifier_hash Unique deposit identifier used to deterministically derive
-    ///        the associated PrivateNote contract address.
-    /// @param value Amount encoded into the zk public inputs and passed as shell currency.
-    function sendEccShellToPrivateNote(bytes proof, uint256 nullifier_hash, uint256 deposit_identifier_hash, uint64 value) public view accept {
+    /// @param proof Zero-knowledge proof of ownership of the source SHELL_FEE
+    ///        voucher (whose dih is `nullifierHash`).
+    /// @param nullifierHash Source SHELL_FEE voucher's deposit identifier hash
+    ///        (Poseidon commitment), used as the proof's instance 0 and as the
+    ///        Nullifier contract's varInit. Replays of the same source voucher
+    ///        produce the same Nullifier address, so the second `new` is a
+    ///        no-op — natural one-shot semantics, no state tracking needed.
+    /// @param depositIdentifierHash Destination PrivateNote's dih — derives
+    ///        the recipient PN address. Independent of the source voucher.
+    /// @param finalLayerHistoricalHashRoot Dense chain root (instance 1).
+    /// @param voucherNominalFr Source voucher nominal as Fr (instance 2);
+    ///        must encode the user-supplied `value`.
+    /// @param tokenTypeFr Source voucher token type as Fr (instance 3); must
+    ///        encode CURRENCIES_ID_SHELL_FEE (300) — only fee vouchers may
+    ///        top up a PN's fee balance via this path.
+    /// @param value Amount of SHELL ECC forwarded to the Nullifier and on to
+    ///        the PrivateNote. Must equal the source voucher's nominal.
+    /// @param layerNumber Historical layer being proved against (L1, L2, …).
+    function sendEccShellToPrivateNote(
+        bytes proof,
+        uint256 nullifierHash,
+        uint256 depositIdentifierHash,
+        uint256 finalLayerHistoricalHashRoot,
+        uint256 voucherNominalFr,
+        uint256 tokenTypeFr,
+        uint64 value,
+        uint8 layerNumber,
+        uint256 recipientEphemeralPubkey
+    ) public view {
+        tvm.accept();
         ensureBalance();
+        // Frontrun defense: `depositIdentifierHash` (recipient) is NOT in the
+        // zk proof's public inputs, so the proof alone doesn't bind the
+        // destination. Without a signature gate, an attacker could replay a
+        // pending user's proof with their own `depositIdentifierHash` and
+        // reroute the SHELL-fee ECC into a PN they control. Require the caller
+        // to sign the ext message with the destination PN's ephemeral key.
+        // (This restricts third-party SHELL top-ups; use case is typically
+        // self-funding, and the owner holds this key.)
+        require(msg.pubkey() == recipientEphemeralPubkey, ERR_INVALID_SENDER);
+        require(recipientEphemeralPubkey != 0, ERR_INVALID_PARAMS);
 
-        bytes pub_inputs = hex"000000000000000000000000000000000000000000000000"; // 24 zero bytes
-        bytes private_note_sum_bytes = bytes(bytes8(value));
-        pub_inputs.append(private_note_sum_bytes);
-        pub_inputs.append(hex"000000000000000000000000000000000000000000000000");
-        bytes token_type_bytes = bytes(bytes8(uint64(CURRENCIES_ID_SHELL_FEE)));
-        pub_inputs.append(token_type_bytes);
-        bytes private_note_digest_bytes = bytes(bytes32(nullifier_hash));
-        pub_inputs.append(private_note_digest_bytes);
+        require(
+            gosh.check_layer_hash(finalLayerHistoricalHashRoot, layerNumber),
+            ERR_INVALID_HISTORY_PROOF
+        );
 
-        require(gosh.zkhalo2verify(pub_inputs, proof), ERR_INVALID_ZKPROOF);
-        mapping(uint32 => varuint32) data_cur;
-        data_cur[CURRENCIES_ID_SHELL] = value;
+        // Bind `value` to the proof's nominal: an attacker cannot mint
+        // arbitrary balance from a tiny voucher.
+        require(_u64ToFr(value) == voucherNominalFr, ERR_INVALID_ZKPROOF);
+        // Only SHELL_FEE vouchers may be spent here. A SHELL voucher (type 2)
+        // would otherwise let an attacker route a regular voucher's nominal
+        // into a PN they don't own.
+        require(_u32ToFr(CURRENCIES_ID_SHELL_FEE) == tokenTypeFr, ERR_INVALID_ZKPROOF);
+
+        // Instance 0 = nullifierHash (the source voucher's dih). The proof
+        // attests ownership of the SHELL_FEE voucher whose dih is
+        // nullifierHash. `depositIdentifierHash` (recipient) is NOT in
+        // the proof — to prevent an attacker from replaying a pending tx
+        // with a different recipient we rely on:
+        //   a) instance 4 = recipientEphemeralPubkey: the voucher was
+        //      generated with a commit to this exact pubkey (see
+        //      generateVoucher). Attacker's swap of recipientEphemeralPubkey
+        //      breaks zk verification.
+        //   b) msg.pubkey() == recipientEphemeralPubkey gate above:
+        //      belt-and-suspenders so a replay by an unrelated key also
+        //      fails at signature check.
+        bytes pubInputs;
+        pubInputs.append(bytes(bytes32(nullifierHash)));
+        pubInputs.append(bytes(bytes32(finalLayerHistoricalHashRoot)));
+        pubInputs.append(bytes(bytes32(voucherNominalFr)));
+        pubInputs.append(bytes(bytes32(tokenTypeFr)));
+        pubInputs.append(bytes(bytes32(_u256ToFr(recipientEphemeralPubkey))));
+
+        require(gosh.zkhalo2verify(pubInputs, proof), ERR_INVALID_ZKPROOF);
+
+        mapping(uint32 => varuint32) dataCur;
+        dataCur[CURRENCIES_ID_SHELL] = value;
+
         TvmCell stateInit = abi.encodeStateInit({
             contr: Nullifier,
             varInit: {
-                _nullifier_hash: nullifier_hash
+                _nullifierHash: nullifierHash
             },
             code: _nullifierCode
         });
 
-        TvmCell stateInitNote = DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash);
+        TvmCell stateInitNote = DexLib.buildPrivateNoteInitData(_privateNoteCode, depositIdentifierHash);
         address noteAddress = address.makeAddrStd(0, tvm.hash(stateInitNote));
 
         address nullifier = address.makeAddrStd(0, tvm.hash(stateInit));
@@ -124,52 +240,103 @@ contract RootPN is Modifiers {
             stateInit: stateInit,
             value: 10 vmshell,
             flag: 1,
-            currencies: data_cur
+            currencies: dataCur
         }(noteAddress);
 
         address addrExtern = address.makeAddrExtern(ROOTPN_NULLIFIER_DEPLOYED, bitCntAddress);
         emit NullifierDeployed{dest: addrExtern}(nullifier, value);
     }
 
-    /// @notice Deploys a new PrivateNote contract
-    /// @param zkproof Zero-knowledge proof used to validate the deposit public inputs
-    /// @param deposit_identifier_hash Unique identifier hash for the deposit (used to derive the PrivateNote address)
-    /// @param ephemeral_pubkey Ephemeral public key for authorizing the deployed PrivateNote
-    /// @param value Initial token balance (encoded into the ZK public inputs)
-    /// @param token_type Token type encoded in zk public inputs and used by the deployed PrivateNote.
-    function deployPrivateNote(bytes zkproof, uint256 deposit_identifier_hash, uint256 ephemeral_pubkey, uint64 value, uint32 token_type)
-        public view accept
-    {
+    /// @notice Deploys a new PrivateNote contract.
+    ///         Same proof-verification flow as `sendEccShellToPrivateNote`:
+    ///         the node-side `check_layer_hash` must succeed for the supplied
+    ///         `finalLayerHistoricalHashRoot` at `layerNumber`, and the
+    ///         halo2 proof must validate against the 4-field public-input
+    ///         vector below.
+    ///
+    /// @param zkproof Zero-knowledge proof used to validate the deposit public inputs.
+    /// @param depositIdentifierHash Poseidon commitment (instance 0), also
+    ///        derives the PrivateNote address.
+    /// @param finalLayerHistoricalHashRoot Dense chain root (instance 1),
+    ///        checked against the node's `GlobalHistoricalData[layerNumber]`.
+    /// @param voucherNominalFr Voucher nominal as Fr (instance 2).
+    /// @param tokenTypeFr Token type as Fr (instance 3).
+    /// @param ephemeralPubkey Ephemeral public key for authorizing the deployed PrivateNote.
+    /// @param value Initial token balance.
+    /// @param tokenType Token type used by the deployed PrivateNote.
+    /// @param layerNumber Historical layer being proved against (L1, L2, …).
+    function deployPrivateNote(
+        bytes zkproof,
+        uint256 depositIdentifierHash,
+        uint256 finalLayerHistoricalHashRoot,
+        uint256 voucherNominalFr,
+        uint256 tokenTypeFr,
+        uint256 ephemeralPubkey,
+        uint64 value,
+        uint32 tokenType,
+        uint8 layerNumber
+    ) public view accept {
         ensureBalance();
 
-        bytes pub_inputs = hex"000000000000000000000000000000000000000000000000"; // 24 zero bytes
-        bytes private_note_sum_bytes = bytes(bytes8(value));
-        pub_inputs.append(private_note_sum_bytes);
-        pub_inputs.append(hex"000000000000000000000000000000000000000000000000");
-        bytes token_type_bytes = bytes(bytes8(uint64(token_type)));
-        pub_inputs.append(token_type_bytes);
-        bytes private_note_digest_bytes = bytes(bytes32(deposit_identifier_hash));
-        pub_inputs.append(private_note_digest_bytes);
+        require(
+            gosh.check_layer_hash(finalLayerHistoricalHashRoot, layerNumber),
+            ERR_INVALID_HISTORY_PROOF
+        );
 
-        require(gosh.zkhalo2verify(pub_inputs, zkproof), ERR_INVALID_ZKPROOF);
-        TvmCell stateInit = DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash);
+        // Bind user's `value` and `tokenType` to the proof's pubInputs so
+        // a 100-shell voucher proof cannot be replayed as e.g. a 1M-NACKL
+        // deposit (BUG #6 — money minting from a stale/cheap voucher).
+        require(_u64ToFr(value) == voucherNominalFr, ERR_INVALID_ZKPROOF);
+        require(_u32ToFr(tokenType) == tokenTypeFr, ERR_INVALID_ZKPROOF);
+        // BUG #7 footgun: eph=0 means msg.pubkey()==0 passes onlyOwnerPubkey on
+        // every PN method — any keyless tx can drain the PN. Reject up front.
+        require(ephemeralPubkey != 0, ERR_INVALID_PARAMS);
+        // BUG #9: SHELL_FEE (300) is the gas-only token used by
+        // sendEccShellToPrivateNote. A PN whose main ledger holds SHELL_FEE
+        // creates a phantom asset (RootPN doesn't custody type-300 ECC, only
+        // type-2), so trading flows would silently break. Reject deployment
+        // for the fee-only token.
+        require(tokenType != CURRENCIES_ID_SHELL_FEE, ERR_INVALID_PARAMS);
+
+        // Frontrun defense — bind ephemeralPubkey to the proof. The halo2
+        // circuit emits ephemeralPubkey as instance 4; any mismatch between
+        // the caller-supplied value and the one baked into the proof aborts
+        // zkhalo2verify. Attacker cannot substitute their own pubkey without
+        // re-running the prover against a secret they don't own.
+        //
+        // CIRCUIT/PROVER CONTRACT:
+        //   pubInputs[0] = depositIdentifierHash
+        //   pubInputs[1] = finalLayerHistoricalHashRoot
+        //   pubInputs[2] = voucherNominalFr
+        //   pubInputs[3] = tokenTypeFr
+        //   pubInputs[4] = ephemeralPubkey (raw uint256 big-endian 32 bytes)
+        // The halo2 prover MUST expose the same 5-field instance vector.
+        bytes pubInputs;
+        pubInputs.append(bytes(bytes32(depositIdentifierHash)));
+        pubInputs.append(bytes(bytes32(finalLayerHistoricalHashRoot)));
+        pubInputs.append(bytes(bytes32(voucherNominalFr)));
+        pubInputs.append(bytes(bytes32(tokenTypeFr)));
+        pubInputs.append(bytes(bytes32(_u256ToFr(ephemeralPubkey))));
+
+        require(gosh.zkhalo2verify(pubInputs, zkproof), ERR_INVALID_ZKPROOF);
+        TvmCell stateInit = DexLib.buildPrivateNoteInitData(_privateNoteCode, depositIdentifierHash);
 
         new PrivateNote{
             stateInit: stateInit,
             value: 50 vmshell,
             flag: 1
-        }(value, ephemeral_pubkey, token_type, _pmpCode, _orderBookCode,
+        }(value, ephemeralPubkey, tokenType, _pmpCode, _orderBookCode,
           tvm.hash(_oracleCode), _oracleCode.depth(), tvm.hash(_oracleEventListCode), _oracleEventListCode.depth());
     }
 
     /// @notice Records deployment of a PrivateNote contract
-    /// @param deposit_identifier_hash Unique identifier for the deposit
-    /// @param token_type Type of token deployed 
-    /// @param deployed_value Value of the deployed token
-    function privateNoteDeployed(uint256 deposit_identifier_hash, uint32 token_type, uint128 deployed_value) public senderIs(address.makeAddrStd(0, tvm.hash(DexLib.buildPrivateNoteInitData(_PrivateNoteCode, deposit_identifier_hash)))) accept {
-        _deployedValues[token_type] += deployed_value;
+    /// @param depositIdentifierHash Unique identifier for the deposit
+    /// @param tokenType Type of token deployed 
+    /// @param deployedValue Value of the deployed token
+    function privateNoteDeployed(uint256 depositIdentifierHash, uint32 tokenType, uint128 deployedValue) public senderIs(address.makeAddrStd(0, tvm.hash(DexLib.buildPrivateNoteInitData(_privateNoteCode, depositIdentifierHash)))) accept {
+        _deployedValues[tokenType] += deployedValue;
         address addrExtern = address.makeAddrExtern(ROOTPN_PRIVATE_NOTE_DEPLOYED, bitCntAddress);
-        emit PrivateNoteDeployed{dest: addrExtern}(deposit_identifier_hash, msg.sender, deployed_value);
+        emit PrivateNoteDeployed{dest: addrExtern}(depositIdentifierHash, msg.sender, deployedValue);
     }
 
     /// @notice Updates the contract code for RootPN
@@ -188,49 +355,49 @@ contract RootPN is Modifiers {
         tvm.accept();
         ensureBalance();
         tvm.resetStorage();
-        (_pmpCode, _PrivateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _orderBookCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
+        (_pmpCode, _privateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _orderBookCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
     }
 
     /// @notice Returns the salted PrivateNote contract code
     /// @return privateNoteCode The salted PrivateNote contract code as TvmCell
     /// @return privateNoteHash Hash of PrivateNote contract code
     function getPrivateNoteCode() external view returns(TvmCell privateNoteCode, uint256 privateNoteHash) {
-        TvmCell saltPN = abi.encode(_PrivateNoteCode);
-        TvmCell codePN = abi.setCodeSalt(_PrivateNoteCode, saltPN);
+        TvmCell saltPN = abi.encode(_privateNoteCode);
+        TvmCell codePN = abi.setCodeSalt(_privateNoteCode, saltPN);
         return (codePN, tvm.hash(codePN));
     }
 
     /// @notice Returns the deterministic address of a PrivateNote by deposit identifier hash
-    /// @param deposit_identifier_hash Unique identifier hash for the deposit
+    /// @param depositIdentifierHash Unique identifier hash for the deposit
     /// @return privateNoteAddress Deterministic PrivateNote contract address
-    function getPrivateNoteAddress(uint256 deposit_identifier_hash) external view returns(address privateNoteAddress) {
-        return DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
+    function getPrivateNoteAddress(uint256 depositIdentifierHash) external view returns(address privateNoteAddress) {
+        return DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
     }
 
     /// @notice Returns the deterministic address of a PMP for the given event and oracle set
-    /// @param event_id Event identifier used by the PMP
+    /// @param eventId Event identifier used by the PMP
     /// @param names List of oracle names used to build the oracle list hash
-    /// @param token_type Token type used by the PMP
+    /// @param tokenType Token type used by the PMP
     /// @return pmpAddress Deterministic PMP contract address
-    function getPMPAddress(uint256 event_id, string[] names, uint32 token_type) external view returns(address pmpAddress) {
-        mapping(uint256 => bool) for_oracle_hash;
+    function getPMPAddress(uint256 eventId, string[] names, uint32 tokenType) external view returns(address pmpAddress) {
+        mapping(uint256 => bool) forOracleHash;
         uint256 length = names.length;
 
         for (uint32 i = 0; i < length; i++) {
-            for_oracle_hash[tvm.hash(names[i])] = true;
+            forOracleHash[tvm.hash(names[i])] = true;
         }
-        uint256 oracle_list_hash = tvm.hash(abi.encode(for_oracle_hash));
-        return DexLib.computePMPAddress(_PrivateNoteCode, _pmpCode, event_id, oracle_list_hash, token_type);
+        uint256 oracleListHash = tvm.hash(abi.encode(forOracleHash));
+        return DexLib.computePMPAddress(_privateNoteCode, _pmpCode, eventId, oracleListHash, tokenType);
     }
 
     /// VAULT FUNCTIONS
 
     /// @notice Check is it Allowed
     /// @param nominal Voucher nominal in token base units.
-    /// @param token_type Token type to validate.
+    /// @param tokenType Token type to validate.
     /// @return isAllowed True if nominal matches one of `ALLOWED_NOMINALS` for the token decimals.
-    function isAllowedNominal(uint128 nominal, uint32 token_type) private view returns (bool) {
-        uint128 decimals = tokenDecimals(token_type);
+    function isAllowedNominal(uint128 nominal, uint32 tokenType) private view returns (bool) {
+        uint128 decimals = tokenDecimals(tokenType);
         for (uint i = 0; i < ALLOWED_NOMINALS.length; i++) {
             if (ALLOWED_NOMINALS[i] * decimals == nominal) {
                 return true;
@@ -240,56 +407,59 @@ contract RootPN is Modifiers {
     }
 
     /// @notice Checks if the nominal is allowed for vault operations
-    /// @param sk_u_commit Commitment of user secret key used in off-chain flows.
+    /// @param skUCommit Commitment of user secret key used in off-chain flows.
     /// @param isFee Whether incoming shell tokens must be treated as fee token type.
-    function generatevoucher(uint256 sk_u_commit, bool isFee) public view internalMsg {
+    function generateVoucher(uint256 skUCommit, bool isFee) public view internalMsg {
 		require(msg.currencies.keys().length == 1, 300);
-		uint32 token_type = msg.currencies.keys()[0];
-        if ((token_type == CURRENCIES_ID_SHELL) && (isFee)) {
-            token_type = CURRENCIES_ID_SHELL_FEE;
-        }
-		require(msg.currencies[token_type] > 0, 303);
+		uint32 tokenType = msg.currencies.keys()[0];
+		require(msg.currencies[tokenType] > 0, 303);
 		tvm.accept();
         ensureBalance();
 
-		uint voucher_nominal = msg.currencies[token_type];
-        require(isAllowedNominal(uint128(voucher_nominal), token_type), ERR_NOT_ALLOWED);
+		uint voucherNominal = msg.currencies[tokenType];
+        require(isAllowedNominal(uint128(voucherNominal), tokenType), ERR_NOT_ALLOWED);
+
+        if ((tokenType == CURRENCIES_ID_SHELL) && (isFee)) {
+            tokenType = CURRENCIES_ID_SHELL_FEE;
+        }
 
         address addrExtern = address.makeAddrExtern(VAULT_voucher_GENERATED, bitCntAddress);
-		emit voucherGenerated{dest: addrExtern}(sk_u_commit, voucher_nominal, token_type);
+		emit VoucherGenerated{dest: addrExtern}(skUCommit, voucherNominal, tokenType);
 	}
 
-    /// @notice Withdraws tokens to a specified wallet
-    /// @param withdrawed_value Amount to withdraw
-    /// @param token_type Type of token to withdraw
-    /// @param flags Transfer flags
-    /// @param wallet_addr Destination wallet address
-    /// @param initial_data_hash Initial data hash for verification
+    /// @notice Withdraws tokens to a specified wallet.
+    /// @dev The inner `transfer` flag is hard-coded to 1. Allowing a
+    ///      caller-supplied flag here would let any PN owner pass TVM flags
+    ///      128 (CARRY_ALL_BALANCE) or 32 (DELETE_IF_EMPTY) — draining or
+    ///      destroying this RootPN. Since RootPN custodies every PN's ECC,
+    ///      that single tx would steal or brick the entire DEX.
+    /// @param withdrawedValue Amount to withdraw
+    /// @param tokenType Type of token to withdraw
+    /// @param walletAddr Destination wallet address
+    /// @param initialDataHash Initial data hash for verification
     function withdrawTokens(
-        uint128 withdrawed_value, 
-        uint32 token_type, 
-        uint8 flags, 
-        address wallet_addr, 
-        uint256 initial_data_hash
-    ) public senderIs(DexLib.computePrivateNoteAddress(_PrivateNoteCode, initial_data_hash)) accept {
+        uint128 withdrawedValue,
+        uint32 tokenType,
+        address walletAddr,
+        uint256 initialDataHash
+    ) public senderIs(DexLib.computePrivateNoteAddress(_privateNoteCode, initialDataHash)) accept {
         ensureBalance();
         // Verify sufficient balance
-        if (address(this).currencies[token_type] < withdrawed_value) {
+        if (address(this).currencies[tokenType] < withdrawedValue) {
             PrivateNote(msg.sender).revertWithdraw{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
-                token_type,
-                withdrawed_value
+                tokenType,
+                withdrawedValue
             );
             return;
         }
-        
+
         // Prepare currency transfer data
         mapping(uint32 => varuint32) cc;
-        cc[token_type] = varuint32(withdrawed_value);
-        bool bounce = false;
-        _deployedValues[token_type] -= withdrawed_value;
-        
-        // Transfer tokens to wallet
-        wallet_addr.transfer(varuint16(withdrawed_value), bounce, flags, TvmCell(), cc);
+        cc[tokenType] = varuint32(withdrawedValue);
+        _deployedValues[tokenType] -= withdrawedValue;
+
+        // Transfer tokens to wallet — flag is intentionally hard-coded to 1.
+        walletAddr.transfer(varuint16(withdrawedValue), false, 1, TvmCell(), cc);
     }
 
     /// @notice Returns all global variables
@@ -305,7 +475,7 @@ contract RootPN is Modifiers {
     ) {
         return (
             tvm.hash(_pmpCode),
-            tvm.hash(_PrivateNoteCode),
+            tvm.hash(_privateNoteCode),
             _ownerPubkey,
             address(this).balance
         );

@@ -19,21 +19,21 @@ library DexLib {
 
     /// @notice Computes deterministic PrivateNote address for a deposit hash.
     /// @param PrivateNoteCode PrivateNote contract code.
-    /// @param deposit_identifier_hash Deposit identifier hash.
+    /// @param depositIdentifierHash Deposit identifier hash.
     /// @return PrivateNote deterministic address.
-    function computePrivateNoteAddress(TvmCell PrivateNoteCode, uint256 deposit_identifier_hash) public returns(address) {
-        TvmCell s1 = buildPrivateNoteInitData(PrivateNoteCode, deposit_identifier_hash);
+    function computePrivateNoteAddress(TvmCell PrivateNoteCode, uint256 depositIdentifierHash) public returns(address) {
+        TvmCell s1 = buildPrivateNoteInitData(PrivateNoteCode, depositIdentifierHash);
         return address.makeAddrStd(0, tvm.hash(s1));
     }
 
     /// @notice Builds StateInit for PrivateNote contract
     /// @param PrivateNoteCode Code of PrivateNote contract
-    /// @param deposit_identifier_hash Unique identifier for the deposit
+    /// @param depositIdentifierHash Unique identifier for the deposit
     /// @return StateInit cell for PrivateNote
-    function buildPrivateNoteInitData(TvmCell PrivateNoteCode, uint256 deposit_identifier_hash) public returns (TvmCell) {
+    function buildPrivateNoteInitData(TvmCell PrivateNoteCode, uint256 depositIdentifierHash) public returns (TvmCell) {
         return abi.encodeStateInit({
             contr: PrivateNote,
-            varInit: { _deposit_identifier_hash: deposit_identifier_hash },
+            varInit: { _depositIdentifierHash: depositIdentifierHash },
             code: PrivateNoteCode
         });
     }
@@ -41,27 +41,27 @@ library DexLib {
     /// @notice Computes deterministic PMP address for event and oracle set.
     /// @param PrivateNoteCode Code of PrivateNote contract
     /// @param pmpCode Code of PMP contract
-    /// @param event_id Event identifier
-    /// @param oracle_list_hash Hash of Oracle list
-    /// @param token_type Token type
+    /// @param eventId Event identifier
+    /// @param oracleListHash Hash of Oracle list
+    /// @param tokenType Token type
     /// @return PMP contract address
-    function computePMPAddress(TvmCell PrivateNoteCode, TvmCell pmpCode, uint256 event_id, uint256 oracle_list_hash, uint32 token_type) public returns (address) {
-        TvmCell stateInit = buildPMPStateInit(PrivateNoteCode, pmpCode, event_id, oracle_list_hash, token_type);
+    function computePMPAddress(TvmCell PrivateNoteCode, TvmCell pmpCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (address) {
+        TvmCell stateInit = buildPMPStateInit(PrivateNoteCode, pmpCode, eventId, oracleListHash, tokenType);
         return address.makeAddrStd(0, tvm.hash(stateInit));
     }
 
     /// @notice Builds PMP StateInit with salted code and static ids.
     /// @param PrivateNoteCode PrivateNote contract code used for salt.
     /// @param pmpCode PMP base code.
-    /// @param event_id Event identifier.
-    /// @param oracle_list_hash Hash of oracle set.
-    /// @param token_type Token type.
+    /// @param eventId Event identifier.
+    /// @param oracleListHash Hash of oracle set.
+    /// @param tokenType Token type.
     /// @return PMP StateInit cell.
-    function buildPMPStateInit(TvmCell PrivateNoteCode, TvmCell pmpCode, uint256 event_id, uint256 oracle_list_hash, uint32 token_type) public returns (TvmCell) {
+    function buildPMPStateInit(TvmCell PrivateNoteCode, TvmCell pmpCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (TvmCell) {
         TvmCell code = buildPMPCode(PrivateNoteCode, pmpCode);
         return abi.encodeStateInit({
             contr: PMP,
-            varInit: { _event_id: event_id, _oracle_list_hash: oracle_list_hash, _token_type: token_type },
+            varInit: { _eventId: eventId, _oracleListHash: oracleListHash, _tokenType: tokenType },
             code: code
         });
     }
@@ -122,27 +122,27 @@ library DexLib {
     /// @notice Computes deterministic OrderBook address for a market.
     /// @param PrivateNoteCode PrivateNote contract code used for salt.
     /// @param orderBookCode OrderBook base code.
-    /// @param event_id Event identifier.
-    /// @param oracle_list_hash Oracle list hash.
-    /// @param token_type Token type.
+    /// @param eventId Event identifier.
+    /// @param oracleListHash Oracle list hash.
+    /// @param tokenType Token type.
     /// @return OrderBook deterministic address.
-    function computeOrderBookAddress(TvmCell PrivateNoteCode, TvmCell orderBookCode, uint256 event_id, uint256 oracle_list_hash, uint32 token_type) public returns (address) {
-        TvmCell stateInit = buildOrderBookStateInit(PrivateNoteCode, orderBookCode, event_id, oracle_list_hash, token_type);
+    function computeOrderBookAddress(TvmCell PrivateNoteCode, TvmCell orderBookCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (address) {
+        TvmCell stateInit = buildOrderBookStateInit(PrivateNoteCode, orderBookCode, eventId, oracleListHash, tokenType);
         return address.makeAddrStd(0, tvm.hash(stateInit));
     }
 
     /// @notice Builds OrderBook StateInit with salted code and static ids.
     /// @param PrivateNoteCode PrivateNote contract code used for salt.
     /// @param orderBookCode OrderBook base code.
-    /// @param event_id Event identifier.
-    /// @param oracle_list_hash Oracle list hash.
-    /// @param token_type Token type.
+    /// @param eventId Event identifier.
+    /// @param oracleListHash Oracle list hash.
+    /// @param tokenType Token type.
     /// @return OrderBook StateInit cell.
-    function buildOrderBookStateInit(TvmCell PrivateNoteCode, TvmCell orderBookCode, uint256 event_id, uint256 oracle_list_hash, uint32 token_type) public returns (TvmCell) {
+    function buildOrderBookStateInit(TvmCell PrivateNoteCode, TvmCell orderBookCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (TvmCell) {
         TvmCell code = buildOrderBookCode(PrivateNoteCode, orderBookCode);
         return abi.encodeStateInit({
             contr: OrderBook,
-            varInit: { _event_id: event_id, _oracle_list_hash: oracle_list_hash, _token_type: token_type },
+            varInit: { _eventId: eventId, _oracleListHash: oracleListHash, _tokenType: tokenType },
             code: code
         });
     }
@@ -171,18 +171,18 @@ library DexLib {
     /// @notice Computes deterministic PMP address from salted code hash/depth.
     /// @param saltedCodeHash Salted PMP code hash.
     /// @param saltedCodeDepth Salted PMP code depth.
-    /// @param event_id Event identifier.
-    /// @param oracle_list_hash Oracle list hash.
-    /// @param token_type Token type.
+    /// @param eventId Event identifier.
+    /// @param oracleListHash Oracle list hash.
+    /// @param tokenType Token type.
     /// @return PMP deterministic address.
     function computePMPAddressFromHash(
         uint256 saltedCodeHash, uint16 saltedCodeDepth,
-        uint256 event_id, uint256 oracle_list_hash, uint32 token_type
+        uint256 eventId, uint256 oracleListHash, uint32 tokenType
     ) public returns (address) {
         TvmCell dummyCode;
         TvmCell si = abi.encodeStateInit({
             contr: PMP, code: dummyCode,
-            varInit: { _event_id: event_id, _oracle_list_hash: oracle_list_hash, _token_type: token_type }
+            varInit: { _eventId: eventId, _oracleListHash: oracleListHash, _tokenType: tokenType }
         });
         TvmCell dataCell = _extractDataCell(si);
         return address.makeAddrStd(0, abi.stateInitHash(saltedCodeHash, tvm.hash(dataCell), saltedCodeDepth, dataCell.depth()));
@@ -222,18 +222,18 @@ library DexLib {
     /// @notice Computes deterministic OrderBook address from salted code hash/depth.
     /// @param saltedCodeHash Salted OrderBook code hash.
     /// @param saltedCodeDepth Salted OrderBook code depth.
-    /// @param event_id Event identifier.
-    /// @param oracle_list_hash Oracle list hash.
-    /// @param token_type Token type.
+    /// @param eventId Event identifier.
+    /// @param oracleListHash Oracle list hash.
+    /// @param tokenType Token type.
     /// @return OrderBook deterministic address.
     function computeOrderBookAddressFromHash(
         uint256 saltedCodeHash, uint16 saltedCodeDepth,
-        uint256 event_id, uint256 oracle_list_hash, uint32 token_type
+        uint256 eventId, uint256 oracleListHash, uint32 tokenType
     ) public returns (address) {
         TvmCell dummyCode;
         TvmCell si = abi.encodeStateInit({
             contr: OrderBook, code: dummyCode,
-            varInit: { _event_id: event_id, _oracle_list_hash: oracle_list_hash, _token_type: token_type }
+            varInit: { _eventId: eventId, _oracleListHash: oracleListHash, _tokenType: tokenType }
         });
         TvmCell dataCell = _extractDataCell(si);
         return address.makeAddrStd(0, abi.stateInitHash(saltedCodeHash, tvm.hash(dataCell), saltedCodeDepth, dataCell.depth()));

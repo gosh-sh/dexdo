@@ -13,7 +13,7 @@ import "./libraries/DexLib.sol";
 contract PMP is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "1.1.0";
+    string constant version = "1.4.0";
 
     /// @notice PMP name (static, unique identifier)
     string _name;
@@ -22,29 +22,29 @@ contract PMP is Modifiers {
     string _describe;
 
     /// @notice Token type (static)
-    uint32 static _token_type;
+    uint32 static _tokenType;
 
     /// @notice Event identifier
-    uint256 static _event_id;
+    uint256 static _eventId;
 
     /// @notice Oracle list hash (static)
-    uint256 static _oracle_list_hash;
+    uint256 static _oracleListHash;
 
     /// @notice Contract deployer (PrivateNote address)
     address _deployer;
 
     /// @notice PrivateNote code for address computation
-    TvmCell _PrivateNoteCode;
+    TvmCell _privateNoteCode;
 
     /// @notice Total pool of all stakes
     uint128 _totalPool;
 
     /// @notice Pools separated by bet type
-    /// @dev Structure: outcome => bet_type => pool_amount
+    /// @dev Structure: outcome => betType => poolAmount
     mapping(uint32 => mapping(uint8 => uint128)) _typedOutcomePools;
 
     /// @notice Stake counts separated by bet type
-    /// @dev Structure: outcome => bet_type => stake_count
+    /// @dev Structure: outcome => betType => stakeCount
     mapping(uint32 => mapping(uint8 => uint128)) _typedOutcomeCounts;
 
     /// @notice Total coupon pool across all outcomes
@@ -154,30 +154,15 @@ contract PMP is Modifiers {
     /// @notice Snapshot of _totalPool at freeze time (clean + debt only)
     uint128 _baseTotalPool;
 
-    /// @notice Frozen clean pool per outcome at stakeEnd (M_k in spec)
+    /// @notice Normalized clean pool per outcome at stakeEnd (M*_k in spec —
+    ///         after refunding the mod-G remainder back to the PMP creator).
     mapping(uint32 => uint128) _frozenCleanPools;
 
-    /// @notice Frozen debt pool per outcome at stakeEnd (D_k in spec)
-    mapping(uint32 => uint128) _frozenDebtPools;
+    /// @notice Live winning clean pool snapshot at resolve, used as the
+    ///         denominator for proportional clean payouts.
+    uint128 _resolvedWinClean;
 
-    // ===== Pre-computed per-outcome payout coefficients (frozen) =====
-
-    /// @notice Frozen coupon win coefficient per outcome (K_coupon_k)
-    mapping(uint32 => uint128) _frozenCouponWinCoef;
-
-    /// @notice Frozen debt win coefficient per outcome (K_debt_k)
-    mapping(uint32 => uint128) _frozenDebtWinCoef;
-
-    /// @notice Frozen profit allocated to clean bets per outcome
-    mapping(uint32 => uint128) _frozenProfitToClean;
-
-    /// @notice Frozen creator fee per outcome
-    mapping(uint32 => uint128) _frozenCreatorFee;
-
-    /// @notice Maximum fixed obligation across all outcomes (for merge solvency)
-    uint128 _maxFixedObligation;
-
-    /// @notice Market-level collateral quantum Q used by split/merge and clean claims.
+    /// @notice Market-level collateral quantum Q used by split/merge.
     uint128 _splitMergeQ;
 
     /// @notice Per-outcome basket units u_k for clean tokens.
@@ -193,8 +178,8 @@ contract PMP is Modifiers {
     /// @param note PrivateNote address (wallet) that placed the stake.
     /// @param outcomeId Outcome identifier the stake is placed on.
     /// @param amount Stake amount added to the pool.
-    /// @param bet_type 0 - clean bet, 1 - debt bet, 2 - coupon bet
-    event StakeAccepted(address indexed note, uint32 outcomeId, uint128 amount, uint8 bet_type);
+    /// @param betType 0 - clean bet, 1 - debt bet, 2 - coupon bet
+    event StakeAccepted(address indexed note, uint32 outcomeId, uint128 amount, uint8 betType);
 
     /// @notice Emitted when the event is fully approved by oracle(s).
     /// @dev This event is emitted only when all required oracle confirmations are collected.
@@ -255,37 +240,37 @@ contract PMP is Modifiers {
 
 
     /// @notice PMP constructor
-    /// @param deposit_identifier_hash Deposit identifier hash from PrivateNote
-    /// @param token_type Token type of collateral used by this PMP.
-    /// @param oracle_event_lists OracleEventList contracts that must confirm this event.
-    /// @param oracle_fees Per-oracle shell fees transferred during confirmation.
+    /// @param depositIdentifierHash Deposit identifier hash from PrivateNote
+    /// @param tokenType Token type of collateral used by this PMP.
+    /// @param oracleEventLists OracleEventList contracts that must confirm this event.
+    /// @param oracleFees Per-oracle shell fees transferred during confirmation.
     /// @param initialStakes Per-outcome initial clean stakes from deployer (validated in approveEvent)
     /// @param orderBookCode OrderBook contract code used for deterministic OrderBook address.
-    constructor(uint256 deposit_identifier_hash, uint32 token_type, address[] oracle_event_lists, uint128[] oracle_fees, uint128[] initialStakes, TvmCell orderBookCode) {
+    constructor(uint256 depositIdentifierHash, uint32 tokenType, address[] oracleEventLists, uint128[] oracleFees, uint128[] initialStakes, TvmCell orderBookCode) {
         tvm.accept();
-        _token_type = token_type;
+        _tokenType = tokenType;
         TvmCell salt = abi.codeSalt(tvm.code()).get();
         (TvmCell PrivateNoteCode) = abi.decode(salt, (TvmCell));
-        _PrivateNoteCode = PrivateNoteCode;
+        _privateNoteCode = PrivateNoteCode;
         _orderBookCode = orderBookCode;
         _approved = false;
         _deployer = msg.sender;
         _numOutcomes = 0; // Initialize with 0 outcomes
         _initialStakes = initialStakes;
 
-        address expectedNote = DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
+        address expectedNote = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
         require(msg.sender == expectedNote, ERR_INVALID_SENDER);
-        _numberOfOracleEvents = uint128(oracle_event_lists.length);
-        for (uint32 i = 0; i < oracle_event_lists.length; i++) {
+        _numberOfOracleEvents = uint128(oracleEventLists.length);
+        for (uint32 i = 0; i < oracleEventLists.length; i++) {
             mapping(uint32 => varuint32) data;
-            data[CURRENCIES_ID_SHELL] = oracle_fees[i];
-            _oracleEventsConfirmed[oracle_event_lists[i].value] = false;
-            OracleEventList(oracle_event_lists[i]).confirmEvent{
+            data[CURRENCIES_ID_SHELL] = oracleFees[i];
+            _oracleEventsConfirmed[oracleEventLists[i].value] = false;
+            OracleEventList(oracleEventLists[i]).confirmEvent{
                 value: 0.1 vmshell,
                 flag: 1,
                 currencies: data,
                 dest_dapp_id: ORACLE_DAPP_ID
-            }(_event_id, _oracle_list_hash, _token_type);
+            }(_eventId, _oracleListHash, _tokenType);
         }
     }
 
@@ -303,7 +288,7 @@ contract PMP is Modifiers {
                     value: 0.1 vmshell,
                     flag: 1,
                     dest_dapp_id: ORACLE_DAPP_ID
-                }(_event_id, _oracle_list_hash, _token_type);
+                }(_eventId, _oracleListHash, _tokenType);
             }
         }
 
@@ -315,7 +300,7 @@ contract PMP is Modifiers {
                 refundTotal += _initialStakes[i];
             }
             PrivateNote(_deployer).onInitialStakesFailed{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
-                _event_id, _oracle_list_hash, _token_type, refundTotal
+                _eventId, _oracleListHash, _tokenType, refundTotal
             );
         }
 
@@ -335,19 +320,24 @@ contract PMP is Modifiers {
     ///   for internal governance message authorization.
     /// - When all required oracle approvals are collected, emits `ApprovedByOracle`.
     ///
-    /// @param oracle_pubkey Oracle public key used as a unique oracle identifier
+    /// @param oraclePubkey Oracle public key used as a unique oracle identifier
     /// @param outcomeNames Mapping of outcome identifiers to human-readable names;
     ///        used only on the first approval call
     /// @param describe Human-readable description of the event;
     ///        used only on the first approval call
     /// @param name Pool name;
     ///        updated on every approval call (last call wins)
-    /// @param trustAddr Optional trusted internal address to bind with `oracle_pubkey`
-    function approveEvent(uint256 oracle_pubkey, mapping(uint32 => string) outcomeNames, string describe, string name, optional(uint256) trustAddr) public {
+    /// @param trustAddr Optional trusted internal address to bind with `oraclePubkey`
+    function approveEvent(uint256 oraclePubkey, mapping(uint32 => string) outcomeNames, string describe, string name, optional(uint256) trustAddr) public {
         require(_oracleEventsConfirmed.exists(msg.sender.value), ERR_INVALID_SENDER);
+        // Reject pubkey=0 so an OEL deployed with a zero oracle pubkey cannot
+        // register it in _oracleEventsPubkeys — otherwise any unsigned ext msg
+        // (msg.pubkey()==0) would pass the governance gates in _getOraclePubkey
+        // (submitResolve / submitSetTimings / submitCancelEvent).
+        require(oraclePubkey != 0, ERR_INVALID_PARAMS);
         if (_oracleEventsConfirmed[msg.sender.value] == true) {
             return;
-        } 
+        }
         if (_approvedOracleEvents >= _numberOfOracleEvents) {
             return;
         }
@@ -367,7 +357,7 @@ contract PMP is Modifiers {
                     refundTotal += _initialStakes[i];
                 }
                 PrivateNote(_deployer).onInitialStakesFailed{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
-                    _event_id, _oracle_list_hash, _token_type, refundTotal
+                    _eventId, _oracleListHash, _tokenType, refundTotal
                 );
                 selfdestruct(ROOT_PN_ADDRESS);
                 return;
@@ -382,13 +372,13 @@ contract PMP is Modifiers {
             _totalPool += initialTotal;
             _totalCleanPool += initialTotal;
             PrivateNote(_deployer).onInitialStakesAccepted{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
-                _event_id, _oracle_list_hash, _token_type, _initialStakes
+                _eventId, _oracleListHash, _tokenType, _initialStakes
             );
         }
         _oracleEventsConfirmed[msg.sender.value] = true;
-        _oracleEventsPubkeys[oracle_pubkey] = true;
+        _oracleEventsPubkeys[oraclePubkey] = true;
         if (trustAddr.hasValue()) {
-            _oracleEventsAddress[trustAddr.get()] = oracle_pubkey;
+            _oracleEventsAddress[trustAddr.get()] = oraclePubkey;
         }
 
         _approvedOracleEvents += 1;
@@ -396,7 +386,7 @@ contract PMP is Modifiers {
 
         if (allConfirmed) {
             address addrExtern = address.makeAddrExtern(PMP_APPROVED_BY_ORACLE, bitCntAddress);
-            emit ApprovedByOracle{dest: addrExtern}(msg.sender, oracle_pubkey);
+            emit ApprovedByOracle{dest: addrExtern}(msg.sender, oraclePubkey);
         }
     }
 
@@ -418,6 +408,10 @@ contract PMP is Modifiers {
         require(!_resolvedOutcome.hasValue(), ERR_ALREADY_RESOLVED);
         require(_approvedOracleEvents == _numberOfOracleEvents, ERR_NOT_INITIALIZED);
         require(resultStart > block.timestamp, ERR_INVALID_PARAMS);
+        // Once the previous resultStart has elapsed, the result window is open
+        // and cancellation/resolve become live — moving the deadline retroactively
+        // would let oracles invalidate in-flight resolves.
+        require(_resultStart == 0 || block.timestamp < _resultStart, ERR_INVALID_PARAMS);
 
         // stakeStart = now on first call (PMP approval)
         if (_stakeStart == 0) {
@@ -430,6 +424,18 @@ contract PMP is Modifiers {
         // If the new stakeEnd <= now, auto-freeze
         if (block.timestamp >= _computeStakeEnd()) {
             _ensureFrozen();
+        }
+
+        // OB already alive — propagate the new resultStart so its time-gate stays consistent.
+        if (_frozen) {
+            address obAddress = DexLib.computeOrderBookAddress(
+                _privateNoteCode, _orderBookCode,
+                _eventId, _oracleListHash, _tokenType
+            );
+            OrderBook(obAddress).setResultStart{
+                value: 0.1 vmshell,
+                flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+            }(_resultStart);
         }
 
         tvm.accept();
@@ -457,13 +463,13 @@ contract PMP is Modifiers {
     /// @notice Accepts stake from PrivateNote and confirms it
     /// @param outcomeId Stake outcome identifier (must be < _numOutcomes)
     /// @param stakeAmount Stake amount
-    /// @param deposit_identifier_hash Deposit identifier hash
-    /// @param bet_type 0 - clean bet, 1 - debt bet, 2 - coupon bet
+    /// @param depositIdentifierHash Deposit identifier hash
+    /// @param betType 0 - clean bet, 1 - debt bet, 2 - coupon bet
     function acceptStake(
         uint32 outcomeId,
         uint128 stakeAmount,
-        uint256 deposit_identifier_hash,
-        uint8 bet_type
+        uint256 depositIdentifierHash,
+        uint8 betType
     ) public {
         require(_approved, ERR_NOT_APPROVED);
         require(!_isCancelled, ERR_ALREADY_CANCELLED);
@@ -473,43 +479,43 @@ contract PMP is Modifiers {
         require(!_frozen, ERR_ALREADY_FROZEN);
         require(block.timestamp >= _stakeStart, ERR_STAKE_NOT_STARTED);
         require(block.timestamp < _computeStakeEnd(), ERR_STAKE_PERIOD_ENDED);
-        require(bet_type <= BET_TYPE_COUPON, ERR_INVALID_BET_TYPE);
+        require(betType <= BET_TYPE_COUPON, ERR_INVALID_BET_TYPE);
         
-        address wallet = DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
+        address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
 
         tvm.accept();
         ensureBalance();
 
-        if (bet_type == BET_TYPE_COUPON) {
-            uint128 current_outcome_coupon_pool = _typedOutcomePools[outcomeId][BET_TYPE_COUPON];
-            uint128 new_outcome_coupon_pool = current_outcome_coupon_pool + stakeAmount;            
-            uint128 current_outcome_total = _typedOutcomePools[outcomeId][BET_TYPE_COUPON]
+        if (betType == BET_TYPE_COUPON) {
+            uint128 currentOutcomeCouponPool = _typedOutcomePools[outcomeId][BET_TYPE_COUPON];
+            uint128 newOutcomeCouponPool = currentOutcomeCouponPool + stakeAmount;            
+            uint128 currentOutcomeTotal = _typedOutcomePools[outcomeId][BET_TYPE_COUPON]
                                         + _typedOutcomePools[outcomeId][BET_TYPE_DEBT]
                                         + _typedOutcomePools[outcomeId][BET_TYPE_CLEAN];            
-            uint128 new_outcome_total = current_outcome_total + stakeAmount;            
-            uint128 max_outcome_coupon_pool = uint128(
-                (uint256(new_outcome_total) * uint256(COUPON_POOL_LIMIT_PERCENT)) / uint256(FULL_PERCENT)
+            uint128 newOutcomeTotal = currentOutcomeTotal + stakeAmount;            
+            uint128 maxOutcomeCouponPool = uint128(
+                (uint256(newOutcomeTotal) * uint256(COUPON_POOL_LIMIT_PERCENT)) / uint256(FULL_PERCENT)
             );
-            require(new_outcome_coupon_pool <= max_outcome_coupon_pool, ERR_COUPON_POOL_LIMIT_EXCEEDED);            
+            require(newOutcomeCouponPool <= maxOutcomeCouponPool, ERR_COUPON_POOL_LIMIT_EXCEEDED);            
             _totalCouponPool += stakeAmount;
-        } else if (bet_type == BET_TYPE_CLEAN) {
+        } else if (betType == BET_TYPE_CLEAN) {
             _totalCleanPool += stakeAmount;
             _totalPool += stakeAmount;    
-        } else if (bet_type == BET_TYPE_DEBT) {
+        } else if (betType == BET_TYPE_DEBT) {
             _totalDebtPool += stakeAmount;
             _totalPool += stakeAmount;    
         }
     
-        _typedOutcomePools[outcomeId][bet_type] += stakeAmount;
+        _typedOutcomePools[outcomeId][betType] += stakeAmount;
 
         PrivateNote(wallet).onStakeAccepted{
             value: 0.1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_event_id, _oracle_list_hash, _token_type, _numOutcomes, bet_type);
+        }(_eventId, _oracleListHash, _tokenType, _numOutcomes, betType);
         
         address addrExtern = address.makeAddrExtern(PMP_STAKE_ACCEPTED, bitCntAddress);
-        emit StakeAccepted{dest: addrExtern}(wallet, outcomeId, stakeAmount, bet_type);
+        emit StakeAccepted{dest: addrExtern}(wallet, outcomeId, stakeAmount, betType);
     }
 
     /// @notice Cancels user stakes after event cancellation and processes refund
@@ -529,20 +535,23 @@ contract PMP is Modifiers {
     ///        Length should correspond to `_numOutcomes`.
     /// @param couponsAmount Array of coupon stake amounts per outcome.
     ///        Length should correspond to `_numOutcomes`.
-    /// @param deposit_identifier_hash Deposit identifier hash used to
+    /// @param depositIdentifierHash Deposit identifier hash used to
     ///        deterministically compute the caller's PrivateNote address.
     function cancelStake(
         uint128[] stakeAmount,
         uint128[] debtAmount,
         uint128[] couponsAmount,
-        uint256 deposit_identifier_hash
+        uint256 depositIdentifierHash
     ) public {
-        if ((block.timestamp > (_resultStart + GRACE_PERIOD)) && (!_resolvedOutcome.hasValue()) && (!_isCancelled)) {
+        if ((block.timestamp > (_resultStart + GRACE_PERIOD))
+            && (!_resolvedOutcome.hasValue())
+            && (!_isCancelled))
+        {
             cancelEvent();
         }
         require(_isCancelled, ERR_NOT_CANCELLED);
 
-        address wallet = DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
+        address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
 
         tvm.accept();
@@ -550,11 +559,12 @@ contract PMP is Modifiers {
         uint128 totalStake = 0;
         uint128 totalCouponRefund = 0;
 
-        // Three arrays are typically same length (per-outcome). Iterate up to
-        // their max length once and decrement whichever pools have a value.
         uint32 nMax = uint32(stakeAmount.length);
         if (uint32(debtAmount.length) > nMax) nMax = uint32(debtAmount.length);
         if (uint32(couponsAmount.length) > nMax) nMax = uint32(couponsAmount.length);
+
+        // Three arrays are typically same length (per-outcome). Iterate up to
+        // their max length once and decrement whichever pools have a value.
         for (uint32 outcomeId = 0; outcomeId < nMax; outcomeId++) {
             if (outcomeId < uint32(stakeAmount.length)) {
                 uint128 a = stakeAmount[outcomeId];
@@ -581,7 +591,7 @@ contract PMP is Modifiers {
         PrivateNote(wallet).onStakeCancelled{
             value: 0.1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_event_id, _oracle_list_hash, _token_type, totalStake, totalCouponRefund);
+        }(_eventId, _oracleListHash, _tokenType, totalStake, totalCouponRefund);
     }
 
 
@@ -589,8 +599,18 @@ contract PMP is Modifiers {
     // ===== Split/Merge Functions =====
 
     /// @dev Ensures pools are frozen. Called automatically by split/merge/resolve
-    ///      on first access after stakeEnd. Snapshots pools, pre-computes payout
-    ///      coefficients for every possible outcome, and deploys OrderBook.
+    ///      on first access after stakeEnd.
+    ///
+    ///      New (clean-only split/merge) model:
+    ///        1. Refund mod-G remainder of each clean pool to the PMP creator
+    ///           (where G = min(_initialStakes)) so the residual pools are
+    ///           multiples of G — guarantees an integer split/merge basket.
+    ///        2. Build basket: g = gcd(M*_k), u_k = M*_k / g, Q = Σ u_k.
+    ///        3. Deploy OrderBook (with resultStart for time-gate).
+    ///
+    ///      No payout coefficients (creatorFee, couponCoef, debtCoef,
+    ///      profitToClean) are frozen here — they are computed at resolve
+    ///      from live pools.
     function _ensureFrozen() private {
         if (_frozen) return;
         require(_approved, ERR_NOT_APPROVED);
@@ -600,137 +620,93 @@ contract PMP is Modifiers {
         _frozen = true;
         _baseTotalPool = _totalPool;
 
-        // Combined pass: snapshot per-outcome clean+debt AND pre-compute payout coefficients.
-        uint128 maxFO = 0;
-        for (uint32 k = 0; k < _numOutcomes; k++) {
-            uint128 winClean = _typedOutcomePools[k][BET_TYPE_CLEAN];
-            uint128 winDebt  = _typedOutcomePools[k][BET_TYPE_DEBT];
-            _frozenCleanPools[k] = winClean;
-            _frozenDebtPools[k]  = winDebt;
-            uint128 winCoupon = _typedOutcomePools[k][BET_TYPE_COUPON];
-            uint128 totalWinMass = winClean + winDebt + winCoupon;
-
-            if (totalWinMass == 0) {
-                continue;
-            }
-
-            uint128 profitBudget = _baseTotalPool - winClean - winDebt;
-
-            // Creator fee (capped by profit budget)
-            uint128 fee = uint128(
-                (uint256(_baseTotalPool) * uint256(FEE_PERCENT)) / uint256(FULL_PERCENT)
-            );
-            if (fee > profitBudget) {
-                fee = profitBudget;
-            }
-            _frozenCreatorFee[k] = fee;
-            profitBudget -= fee;
-
-            // Coupon coefficient (capped at COUPON_MAX_PAYOUT_MULTIPLIER)
-            uint128 profitPerUnit = uint128(
-                (uint256(profitBudget) * FULL_PERCENT) / totalWinMass
-            );
-            uint128 couponCoef = profitPerUnit;
-            if (couponCoef > COUPON_MAX_PAYOUT_MULTIPLIER) {
-                couponCoef = COUPON_MAX_PAYOUT_MULTIPLIER;
-            }
-            _frozenCouponWinCoef[k] = couponCoef;
-
-            uint128 couponPaid = uint128(
-                (uint256(winCoupon) * couponCoef) / FULL_PERCENT
-            );
-            if (couponPaid > profitBudget) {
-                couponPaid = profitBudget;
-            }
-            profitBudget -= couponPaid;
-
-            // Debt coefficient
-            uint128 realWinMass = winClean + winDebt;
-            uint128 debtCoef = 0;
-            uint128 debtProfit = 0;
-            if (realWinMass > 0) {
-                uint128 baseRealPPU = uint128(
-                    (uint256(profitBudget) * FULL_PERCENT) / realWinMass
-                );
-                debtCoef = uint128(
-                    (uint256(baseRealPPU) *
-                    uint256(FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT)) / uint256(FULL_PERCENT)
-                );
-                debtProfit = uint128(
-                    (uint256(winDebt) * uint256(debtCoef)) / FULL_PERCENT
-                );
-                profitBudget -= debtProfit;
-            }
-            _frozenDebtWinCoef[k] = debtCoef;
-            _frozenProfitToClean[k] = profitBudget;
-
-            // Fixed obligation for solvency check:
-            // FO_k = D_k + Fee_k + CouponPaid_k + DebtProfit_k
-            uint128 fo = winDebt + fee + couponPaid + debtProfit;
-            if (fo > maxFO) {
-                maxFO = fo;
-            }
+        // ===== Step 1: normalize clean pools to multiples of G ========
+        // G := min(_initialStakes). Each outcome's clean pool gets its mod-G
+        // remainder refunded back to the creator's PrivateNote (collateral
+        // returned + stake.amount[k] decremented). Without this step the
+        // GCD basket would have to absorb arbitrary "dust" tails.
+        uint128 minInitialStake = type(uint128).max;
+        for (uint32 i = 0; i < _initialStakes.length; i++) {
+            if (_initialStakes[i] < minInitialStake) minInitialStake = _initialStakes[i];
         }
-        _maxFixedObligation = maxFO;
+        require(
+            minInitialStake > 0 && minInitialStake != type(uint128).max,
+            ERR_INVALID_PARAMS
+        );
 
-        // ===== Quantized split/merge/claim parameters =====
-        // D   = max(floor(_baseTotalPool / 10^4), 1)
-        // Q_k = (R_k - M_k <= D) ? 1 : ceil( R_k*(R_k - D) / (M_k*D) )
-        // Q   = max_k Q_k
-        // u_k = ceil( Q * M_k / R_k )   for outcomes with M_k > 0
+        uint128[] refundAmounts = new uint128[](_numOutcomes);
+        uint128 refundTotal = 0;
+        for (uint32 k = 0; k < _numOutcomes; k++) {
+            uint128 cleanPool = _typedOutcomePools[k][BET_TYPE_CLEAN];
+            uint128 remainder = cleanPool % minInitialStake;
+            refundAmounts[k] = remainder;
+            if (remainder > 0) {
+                _typedOutcomePools[k][BET_TYPE_CLEAN] = cleanPool - remainder;
+                refundTotal += remainder;
+            }
+            _frozenCleanPools[k] = _typedOutcomePools[k][BET_TYPE_CLEAN];
+        }
+        if (refundTotal > 0) {
+            _totalCleanPool -= refundTotal;
+            _totalPool      -= refundTotal;
+            // Update creator's PN: decrement stake.amount[k] and credit balance.
+            PrivateNote(_deployer).onPmpCleanRefund{
+                value: 0.1 vmshell,
+                flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+            }(_eventId, _oracleListHash, _tokenType, refundAmounts, refundTotal);
+        }
+
+        // ===== Step 2: integer split/merge basket from M*_k =====
+        //   g    = gcd_{k: M*_k>0}(M*_k)
+        //   u_k  = M*_k / g
+        //   Q    = sum_k u_k
+        // Each split/merge consumes/produces t baskets of (Q collateral,
+        // t*u_k clean[k]) — no remainders since M*_k is a multiple of G.
         {
-            // Single-pass Q computation: skip outcomes with M_k == 0; track
-            // anyClean implicitly (Q stays at sentinel 0 when all M_k == 0).
-            uint128 dCap = uint128(uint256(_baseTotalPool) / uint256(10000));
-            uint128 D = dCap == 0 ? uint128(1) : dCap;
-
-            uint128 Q = 0;
+            uint128 gcdValue = 0;
             for (uint32 k = 0; k < _numOutcomes; k++) {
-                uint128 M_k = _frozenCleanPools[k];
-                if (M_k == 0) continue;
-                if (Q == 0) Q = 1; // first non-zero clean pool seen
-                uint128 R_k = M_k + _frozenProfitToClean[k];
-                uint128 Q_k;
-                if (R_k - M_k <= D) {
-                    Q_k = 1;
+                uint128 cleanPool = _frozenCleanPools[k];
+                if (cleanPool == 0) continue;
+                if (gcdValue == 0) {
+                    gcdValue = cleanPool;
                 } else {
-                    uint256 num = uint256(R_k) * uint256(R_k - D);
-                    uint256 den = uint256(M_k) * uint256(D);
-                    Q_k = uint128((num + den - 1) / den);
+                    uint128 a = gcdValue;
+                    uint128 b = cleanPool;
+                    while (b != 0) {
+                        uint128 r = a % b;
+                        a = b;
+                        b = r;
+                    }
+                    gcdValue = a;
                 }
-                if (Q_k > Q) Q = Q_k;
             }
-            if (Q > 0) {
-                _splitMergeQ = Q;
-
+            uint128 basketSize = 0;
+            if (gcdValue > 0) {
                 for (uint32 k = 0; k < _numOutcomes; k++) {
-                    uint128 M_k = _frozenCleanPools[k];
-                    if (M_k == 0) continue;
-                    uint128 R_k = M_k + _frozenProfitToClean[k];
-                    // u_k = ceil(Q * M_k / R_k)
-                    uint256 num = uint256(Q) * uint256(M_k);
-                    uint128 u_k = uint128((num + uint256(R_k) - 1) / uint256(R_k));
-                    _frozenCleanUnitsPerQ[k] = u_k;
+                    uint128 cleanPool = _frozenCleanPools[k];
+                    if (cleanPool == 0) continue;
+                    uint128 units = cleanPool / gcdValue;
+                    _frozenCleanUnitsPerQ[k] = units;
+                    basketSize += units;
                 }
-            } else {
-                _splitMergeQ = 0;
             }
+            _splitMergeQ = basketSize;
         }
 
         // Deploy OrderBook
         TvmCell stateInit = DexLib.buildOrderBookStateInit(
-            _PrivateNoteCode,
+            _privateNoteCode,
             _orderBookCode,
-            _event_id,
-            _oracle_list_hash,
-            _token_type
+            _eventId,
+            _oracleListHash,
+            _tokenType
         );
 
         new OrderBook{
             stateInit: stateInit,
             value: 10 vmshell,
             flag: 1
-        }(tvm.hash(tvm.code()), tvm.code().depth());
+        }(tvm.hash(tvm.code()), tvm.code().depth(), _resultStart);
 
         address addrExtern = address.makeAddrExtern(PMP_POOLS_FROZEN, bitCntAddress);
         emit PoolsFrozen{dest: addrExtern}(_baseTotalPool);
@@ -743,20 +719,23 @@ contract PMP is Modifiers {
     ///      Remainder F - Σδ_k stays in pool as surplus (benefits existing stakers).
     ///
     /// @param collateral Amount of collateral to split (F).
-    /// @param deposit_identifier_hash Caller's PrivateNote deposit ID.
+    /// @param depositIdentifierHash Caller's PrivateNote deposit ID.
     function splitFullSet(
         uint128 collateral,
-        uint256 deposit_identifier_hash
+        uint256 depositIdentifierHash
     ) public {
         _ensureFrozen();
         require(!_resolvedOutcome.hasValue(), ERR_ALREADY_RESOLVED);
         require(!_isCancelled, ERR_ALREADY_CANCELLED);
+        // Once the result window opens, the pool composition must be frozen for
+        // claim accounting — no further split/merge is permitted.
+        require(block.timestamp < _resultStart, ERR_RESULT_NOT_STARTED);
         require(collateral > 0, ERR_LOW_VALUE);
         require(_baseTotalPool > 0, ERR_INVALID_PARAMS);
 
         address wallet = DexLib.computePrivateNoteAddress(
-            _PrivateNoteCode,
-            deposit_identifier_hash
+            _privateNoteCode,
+            depositIdentifierHash
         );
         require(msg.sender == wallet, ERR_INVALID_SENDER);
 
@@ -792,32 +771,37 @@ contract PMP is Modifiers {
         PrivateNote(wallet).onSplitAccepted{
             value: 0.1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_event_id, _oracle_list_hash, _token_type, amounts, F_use);
+        }(_eventId, _oracleListHash, _tokenType, amounts, F_use);
 
         address addrExtern = address.makeAddrExtern(PMP_SPLIT_PROCESSED, bitCntAddress);
         emit SplitProcessed{dest: addrExtern}(wallet, F_use);
     }
 
     /// @notice Merges proportional outcome tokens back into collateral.
-    /// @dev Per spec: δ_k = floor(F × M_k / T) using frozen clean pools.
-    ///      Solvency: _totalPool - F >= _maxFixedObligation.
-    ///      Pool update: _totalPool -= F (full collateral returned).
+    /// @dev Burns t baskets of clean tokens (`t * u_k` per outcome),
+    ///      returns `t * Q` collateral. Pool update: _totalPool -= F.
+    ///      No fixed-obligation check — payout obligations are computed
+    ///      live at resolve, so merge solvency is governed by basic pool
+    ///      arithmetic only.
     ///
     /// @param amount Array of outcome token amounts to merge (upper bounds).
-    /// @param deposit_identifier_hash Caller's PrivateNote deposit ID.
+    /// @param depositIdentifierHash Caller's PrivateNote deposit ID.
     function mergeFullSet(
         uint128[] amount,
-        uint256 deposit_identifier_hash
+        uint256 depositIdentifierHash
     ) public {
         _ensureFrozen();
         require(!_resolvedOutcome.hasValue(), ERR_ALREADY_RESOLVED);
         require(!_isCancelled, ERR_ALREADY_CANCELLED);
+        // Once the result window opens, the pool composition must be frozen for
+        // claim accounting — no further split/merge is permitted.
+        require(block.timestamp < _resultStart, ERR_RESULT_NOT_STARTED);
         require(amount.length == _numOutcomes, ERR_INVALID_OUTCOME_ID);
         require(_baseTotalPool > 0, ERR_INVALID_PARAMS);
 
         address wallet = DexLib.computePrivateNoteAddress(
-            _PrivateNoteCode,
-            deposit_identifier_hash
+            _privateNoteCode,
+            depositIdentifierHash
         );
         require(msg.sender == wallet, ERR_INVALID_SENDER);
 
@@ -846,10 +830,10 @@ contract PMP is Modifiers {
 
         uint128 collateral = t * Q;
 
-        // Solvency: pool after merge must cover max fixed obligation
-        require(_totalPool >= collateral, ERR_INVALID_PARAMS);
-        uint128 poolAfter = _totalPool - collateral;
-        require(poolAfter >= _maxFixedObligation, ERR_MERGE_SOLVENCY);
+        // Solvency: payout obligations are computed live at resolve, so basic
+        // pool arithmetic is sufficient here — no fixed-obligation reserve.
+        require(_totalPool      >= collateral, ERR_INVALID_PARAMS);
+        require(_totalCleanPool >= collateral, ERR_INVALID_PARAMS);
 
         uint128[] actual;
         uint128 burnedTotal = 0;
@@ -872,13 +856,17 @@ contract PMP is Modifiers {
         PrivateNote(wallet).onMergeAccepted{
             value: 0.1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_event_id, _oracle_list_hash, _token_type, collateral, actual);
+        }(_eventId, _oracleListHash, _tokenType, collateral, actual);
 
         address addrExtern = address.makeAddrExtern(PMP_MERGE_PROCESSED, bitCntAddress);
         emit MergeProcessed{dest: addrExtern}(wallet, collateral);
     }
 
-    /// @notice Resolves the event outcome
+    /// @notice Resolves the event outcome.
+    /// @dev All payout coefficients (creatorFee, couponWinCoef, debtWinCoef,
+    ///      profitToClean) are computed here from LIVE pools — i.e. after
+    ///      every post-freeze split/merge — not from frozen snapshots.
+    ///      Clean payouts use the proportional formula (see `claim`).
     /// @param outcomeId Resolution outcome identifier (must be < _numOutcomes)
     function resolve(uint32 outcomeId) private {
         require(_approved, ERR_NOT_APPROVED);
@@ -893,51 +881,93 @@ contract PMP is Modifiers {
         ensureBalance();
         _resolvedOutcome = outcomeId;
 
-        // Read pre-computed coefficients for the winning outcome
-        _creatorFee = _frozenCreatorFee[outcomeId];
-        _couponWinCoef = _frozenCouponWinCoef[outcomeId];
-        _debtWinCoef = _frozenDebtWinCoef[outcomeId];
-        _profitToClean = _frozenProfitToClean[outcomeId];
-        // Use live clean pool (includes split tokens) for selfdestruct tracking
-        uint128 liveWinClean = _typedOutcomePools[outcomeId][BET_TYPE_CLEAN];
-        uint128 frozenWinDebt = _frozenDebtPools[outcomeId];
+        // Live pools at resolve time (post all split/merge).
+        uint128 winClean  = _typedOutcomePools[outcomeId][BET_TYPE_CLEAN];
+        uint128 winDebt   = _typedOutcomePools[outcomeId][BET_TYPE_DEBT];
         uint128 winCoupon = _typedOutcomePools[outcomeId][BET_TYPE_COUPON];
-        _totalWinPool = liveWinClean + frozenWinDebt + winCoupon;
+        uint128 totalWinMass = winClean + winDebt + winCoupon;
 
-        // Total claimable rewards budget (excl. creator fee paid separately).
-        // Original (frozen) budget covers all pre-freeze stakers exactly.
-        _totalRewardsClean = _frozenCleanPools[outcomeId] + _profitToClean;
-        // Split tokens added AFTER freeze increase the live clean pool but the
-        // frozen budget did not account for them. Top up the budget by the
-        // per-token rate (Q / u_W) for the delta so split holders are paid the
-        // same per-token amount as pre-freeze stakers and the budget cap doesn't
-        // strand them. Without split, delta == 0 and budget is unchanged.
-        if (liveWinClean > _frozenCleanPools[outcomeId]
-            && _splitMergeQ > 0
-            && _frozenCleanUnitsPerQ[outcomeId] > 0)
-        {
-            uint128 splitAdded = liveWinClean - _frozenCleanPools[outcomeId];
-            _totalRewardsClean += uint128(
-                (uint256(splitAdded) * uint256(_splitMergeQ)) /
-                uint256(_frozenCleanUnitsPerQ[outcomeId])
+        _resolvedWinClean = winClean;
+        _totalWinPool     = totalWinMass;
+
+        if (totalWinMass == 0) {
+            // No winning stakes — zero out everything; residual collateral
+            // flows to the creator via the claim tail-out path.
+            _creatorFee         = 0;
+            _couponWinCoef      = 0;
+            _debtWinCoef        = 0;
+            _profitToClean      = 0;
+            _totalRewardsClean  = 0;
+            _totalRewardsDebt   = 0;
+            _totalRewardsCoupon = 0;
+        } else {
+            // Live profit budget: total pool minus principal owed to clean+debt winners.
+            uint128 profitBudget = _totalPool > (winClean + winDebt)
+                ? _totalPool - winClean - winDebt
+                : 0;
+
+            // Creator fee (pct of live total pool, capped by profit budget).
+            uint128 fee = uint128(
+                (uint256(_totalPool) * uint256(FEE_PERCENT)) / uint256(FULL_PERCENT)
             );
-        }
-        _totalRewardsDebt  = frozenWinDebt + uint128((uint256(frozenWinDebt) * uint256(_debtWinCoef)) / FULL_PERCENT);
-        _totalRewardsCoupon = uint128((uint256(winCoupon) * uint256(_couponWinCoef)) / FULL_PERCENT);
+            if (fee > profitBudget) fee = profitBudget;
+            _creatorFee = fee;
+            profitBudget -= fee;
 
-        // Send creator fee to deployer's PrivateNote
+            // Coupon coefficient (capped at COUPON_MAX_PAYOUT_MULTIPLIER).
+            uint128 profitPerUnit = uint128(
+                (uint256(profitBudget) * FULL_PERCENT) / totalWinMass
+            );
+            uint128 couponCoef = profitPerUnit;
+            if (couponCoef > COUPON_MAX_PAYOUT_MULTIPLIER) {
+                couponCoef = COUPON_MAX_PAYOUT_MULTIPLIER;
+            }
+            _couponWinCoef = couponCoef;
+
+            uint128 couponPaid = uint128(
+                (uint256(winCoupon) * couponCoef) / FULL_PERCENT
+            );
+            if (couponPaid > profitBudget) couponPaid = profitBudget;
+            profitBudget -= couponPaid;
+
+            // Debt coefficient.
+            uint128 realWinMass = winClean + winDebt;
+            uint128 debtCoef    = 0;
+            uint128 debtProfit  = 0;
+            if (realWinMass > 0) {
+                uint128 baseRealPPU = uint128(
+                    (uint256(profitBudget) * FULL_PERCENT) / realWinMass
+                );
+                debtCoef = uint128(
+                    (uint256(baseRealPPU) *
+                     uint256(FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT)) / uint256(FULL_PERCENT)
+                );
+                debtProfit = uint128(
+                    (uint256(winDebt) * uint256(debtCoef)) / FULL_PERCENT
+                );
+                if (debtProfit > profitBudget) debtProfit = profitBudget;
+                profitBudget -= debtProfit;
+            }
+            _debtWinCoef    = debtCoef;
+            _profitToClean  = profitBudget;
+
+            _totalRewardsClean  = winClean + _profitToClean;
+            _totalRewardsDebt   = winDebt + debtProfit;
+            _totalRewardsCoupon = couponPaid;
+        }
+
+        // Send creator fee to deployer's PrivateNote.
         if (_creatorFee > 0) {
             PrivateNote(_deployer).acceptFee{
                 value: 0.1 vmshell,
                 flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-            }(_creatorFee, _token_type, _event_id, _oracle_list_hash);
+            }(_creatorFee, _tokenType, _eventId, _oracleListHash);
 
             address addrExternFee = address.makeAddrExtern(PMP_CREATOR_FEE_COLLECTED, bitCntAddress);
             emit CreatorFeeCollected{dest: addrExternFee}(_creatorFee);
         }
 
-        address addrExtern =
-        address.makeAddrExtern(PMP_RESOLVED, bitCntAddress);
+        address addrExtern = address.makeAddrExtern(PMP_RESOLVED, bitCntAddress);
         emit Resolved{dest: addrExtern}(outcomeId);
     }
 
@@ -968,17 +998,17 @@ contract PMP is Modifiers {
     /// @param stakeAmount Array of clean stake amounts per outcome.
     /// @param debtAmount Array of debt stake amounts per outcome.
     /// @param couponsAmount Array of coupon stake amounts per outcome.
-    /// @param deposit_identifier_hash Deposit identifier hash used to
+    /// @param depositIdentifierHash Deposit identifier hash used to
     ///        deterministically compute the caller's PrivateNote address.
     function claim(
     uint128[] stakeAmount,
     uint128[] debtAmount,
     uint128[] couponsAmount,
-    uint256 deposit_identifier_hash
+    uint256 depositIdentifierHash
     ) public {
         require(_approved, ERR_NOT_APPROVED);
         require(stakeAmount.length == _numOutcomes, ERR_INVALID_OUTCOME_ID);
-        address wallet = DexLib.computePrivateNoteAddress(_PrivateNoteCode, deposit_identifier_hash);
+        address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
@@ -986,23 +1016,24 @@ contract PMP is Modifiers {
             PrivateNote(wallet).onClaimAccepted{
                 value: 0.1 vmshell,
                 flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-            }(_event_id, _oracle_list_hash, _token_type, _resolvedOutcome, 0, 0, 0, 0);
+            }(_eventId, _oracleListHash, _tokenType, _resolvedOutcome, 0, 0, 0, 0);
             return;
         }
         uint32 W = _resolvedOutcome.get();
-        uint128 payoutClean = 0;
-        uint128 payoutDebt = 0;
+        uint128 payoutClean  = 0;
+        uint128 payoutDebt   = 0;
         uint128 payoutCoupon = 0;
-        uint128 debtPaid = 0;
-        bool win = false;
-        // Quantized clean claim:
-        //   payoutClean = floor(stakeAmount[W] * Q / u_W)
-        uint128 u_W = _frozenCleanUnitsPerQ[W];
-        uint128 Q_m = _splitMergeQ;
-        if (u_W > 0 && stakeAmount[W] > 0) {
-            payoutClean = uint128(
-                (uint256(stakeAmount[W]) * uint256(Q_m)) / uint256(u_W)
+        uint128 debtPaid     = 0;
+        bool win             = false;
+        // Proportional clean claim — share of profitBudget by stake share in
+        // the live winning clean pool, plus the principal returned 1:1:
+        //   payoutClean = stakeAmount[W]
+        //               + floor(stakeAmount[W] * _profitToClean / _resolvedWinClean)
+        if (_resolvedWinClean > 0 && stakeAmount[W] > 0) {
+            uint128 cleanProfit = uint128(
+                (uint256(stakeAmount[W]) * uint256(_profitToClean)) / uint256(_resolvedWinClean)
             );
+            payoutClean = stakeAmount[W] + cleanProfit;
             win = true;
         }
 
@@ -1051,9 +1082,9 @@ contract PMP is Modifiers {
             value: 0.1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
         }(
-            _event_id,
-            _oracle_list_hash,
-            _token_type,
+            _eventId,
+            _oracleListHash,
+            _tokenType,
             _resolvedOutcome,
             payoutClean,
             payoutDebt,
@@ -1082,15 +1113,15 @@ contract PMP is Modifiers {
                 PrivateNote(_deployer).acceptFee{
                     value: 0.1 vmshell,
                     flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-                }(residual, _token_type, _event_id, _oracle_list_hash);
+                }(residual, _tokenType, _eventId, _oracleListHash);
             }
             // Shutdown OrderBook: cancel all remaining orders, then OB selfdestructs.
             address obAddress = DexLib.computeOrderBookAddress(
-                _PrivateNoteCode,
+                _privateNoteCode,
                 _orderBookCode,
-                _event_id,
-                _oracle_list_hash,
-                _token_type
+                _eventId,
+                _oracleListHash,
+                _tokenType
             );
             OrderBook(obAddress).shutdown{
                 value: 10 vmshell,
@@ -1218,7 +1249,7 @@ contract PMP is Modifiers {
                     OracleEventList(address.makeAddrStd(0, key)).cancelEvent{
                         value: 0.1 vmshell,
                         flag: 1, dest_dapp_id: ORACLE_DAPP_ID
-                    }(_event_id, _oracle_list_hash, _token_type);
+                    }(_eventId, _oracleListHash, _tokenType);
                 }
             }
 
@@ -1232,7 +1263,7 @@ contract PMP is Modifiers {
                 }
                 PrivateNote(_deployer).onInitialStakesFailed{
                     value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-                }(_event_id, _oracle_list_hash, _token_type, refundTotal);
+                }(_eventId, _oracleListHash, _tokenType, refundTotal);
             }
 
             selfdestruct(ROOT_PN_ADDRESS);
@@ -1247,9 +1278,9 @@ contract PMP is Modifiers {
     /// - Does not modify contract state.
     ///
     /// @return name Human-readable pool name.
-    /// @return token_type Static token type used by the pool.
-    /// @return event_id Identifier of the associated event.
-    /// @return oracle_list_hash Hash of the oracle list used during deployment.
+    /// @return tokenType Static token type used by the pool.
+    /// @return eventId Identifier of the associated event.
+    /// @return oracleListHash Hash of the oracle list used during deployment.
     /// @return deployer Address of the PrivateNote wallet that deployed the contract.
     /// @return privateNoteCodeHash Hash of the PrivateNote contract code used for address derivation.
     /// @return totalPool Total amount currently stored in the pool.
@@ -1268,9 +1299,9 @@ contract PMP is Modifiers {
     /// @return creatorFee Creator fee collected at resolve.
     function getDetails() external view returns (
         string name,
-        uint32 token_type,
-        uint256 event_id,
-        uint256 oracle_list_hash,
+        uint32 tokenType,
+        uint256 eventId,
+        uint256 oracleListHash,
         address deployer,
         uint256 privateNoteCodeHash,
         uint128 totalPool,
@@ -1296,11 +1327,11 @@ contract PMP is Modifiers {
     ) {
         return (
             _name,
-            _token_type,
-            _event_id,
-            _oracle_list_hash,
+            _tokenType,
+            _eventId,
+            _oracleListHash,
             _deployer,
-            tvm.hash(_PrivateNoteCode),
+            tvm.hash(_privateNoteCode),
             _totalPool,
             _approved,
             _numOutcomes,
@@ -1328,11 +1359,11 @@ contract PMP is Modifiers {
     /// @return orderBookAddress Deterministic OrderBook address for this market.
     function getOrderBookAddress() external view returns (address orderBookAddress) {
         return DexLib.computeOrderBookAddress(
-            _PrivateNoteCode,
+            _privateNoteCode,
             _orderBookCode,
-            _event_id,
-            _oracle_list_hash,
-            _token_type
+            _eventId,
+            _oracleListHash,
+            _tokenType
         );
     }
 

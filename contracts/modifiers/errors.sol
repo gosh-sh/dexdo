@@ -174,4 +174,23 @@ abstract contract Errors {
 
     /// @notice Order book: price is not a multiple of tick size
     uint16 constant ERR_PRICE_NOT_TICK_MULTIPLE = 164;
+
+    // ===== Replay protection =====
+
+    /// @notice External message hash already processed within its expireAt window.
+    uint16 constant ERR_MESSAGE_IS_EXIST = 400;
+
+    /// @notice External message expireAt is too far in the future (> 5 minutes).
+    uint16 constant ERR_MESSAGE_WITH_HUGE_EXPIREAT = 401;
+
+    /// @notice External message expireAt is in the past — already expired.
+    uint16 constant ERR_MESSAGE_EXPIRED = 402;
+
+    // ===== Halo2 historical-proof verification =====
+
+    /// @notice The supplied final-layer historical hash root is not present
+    ///         in the node's GlobalHistoricalData for the requested layer.
+    ///         Either the layer number is wrong or the hash has aged out of
+    ///         the historical window.
+    uint16 constant ERR_INVALID_HISTORY_PROOF = 403;
 }

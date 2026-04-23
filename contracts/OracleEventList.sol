@@ -10,7 +10,7 @@ import "./libraries/DexLib.sol";
 contract OracleEventList is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "1.1.0";
+    string constant version = "1.4.0";
 
     /// @notice Oracle contract address bound to this list (state-init static field).
     address static _oracle;
@@ -18,7 +18,7 @@ contract OracleEventList is Modifiers {
     uint128 static _index;
 
     /// @notice Oracle owner pubkey used for access control and approvals.
-    uint256 _oracle_pubkey;
+    uint256 _oraclePubkey;
 
     /// @notice Hash of salted PMP code used to validate caller PMP address.
     uint256 _pmpSaltedCodeHash;
@@ -29,16 +29,16 @@ contract OracleEventList is Modifiers {
     mapping(uint256 => EventInfo) public _events;
 
     /// @notice Emitted when a new event is added to the registry.
-    /// @param event_id Deterministic event identifier hash.
-    /// @param event_name Human-readable event name.
-    /// @param oracle_fee Oracle fee required to confirm the event.
+    /// @param eventId Deterministic event identifier hash.
+    /// @param eventName Human-readable event name.
+    /// @param oracleFee Oracle fee required to confirm the event.
     /// @param deadline Service deadline timestamp.
-    event EventAdded(uint256 event_id, string event_name, uint128 oracle_fee, uint64 deadline);
+    event EventAdded(uint256 eventId, string eventName, uint128 oracleFee, uint64 deadline);
     
     /// @notice Emitted when an event is confirmed for a PMP.
-    /// @param event_id Event identifier hash.
+    /// @param eventId Event identifier hash.
     /// @param pmpAddress PMP address that received confirmation.
-    event EventConfirmed(uint256 event_id, address pmpAddress);
+    event EventConfirmed(uint256 eventId, address pmpAddress);
 
     /// @notice Initializes OracleEventList parameters.
     /// @param pubkey Oracle owner pubkey.
@@ -46,8 +46,20 @@ contract OracleEventList is Modifiers {
     /// @param pmpSaltedCodeDepth Depth of salted PMP code.
     constructor(uint256 pubkey, uint256 pmpSaltedCodeHash, uint16 pmpSaltedCodeDepth) {
         tvm.accept();
-        _oracle = msg.sender;
-        _oracle_pubkey = pubkey;
+        // `_oracle` is a static field (set via stateInit to the legitimate
+        // Oracle address). Without this check, the old code was
+        //     _oracle = msg.sender;
+        // which an attacker could exploit by race-deploying OEL at the
+        // deterministic address using a stateInit where _oracle == legit
+        // Oracle, letting the constructor overwrite _oracle with the
+        // attacker's own address. Check sender matches static field instead.
+        require(msg.sender == _oracle, ERR_INVALID_SENDER);
+        // pubkey=0 would hand OEL admin access (addEvent/deleteEvent) to any
+        // keyless ext tx — and since PMP.approveEvent propagates this into
+        // _oracleEventsPubkeys, it would also break governance on downstream
+        // PMPs. Reject at deploy.
+        require(pubkey != 0, ERR_INVALID_PARAMS);
+        _oraclePubkey = pubkey;
         _pmpSaltedCodeHash = pmpSaltedCodeHash;
         _pmpSaltedCodeDepth = pmpSaltedCodeDepth;
     }
@@ -59,28 +71,29 @@ contract OracleEventList is Modifiers {
     }
     
     /// @notice Adds a new event that Oracle is willing to service
-    /// @param event_name Human-readable event name
-    /// @param oracle_fee Oracle fee
+    /// @param eventName Human-readable event name
+    /// @param oracleFee Oracle fee
     /// @param deadline Timestamp when Oracle is ready to service
     /// @param describe Human-readable event description passed to PMP on approval.
     /// @param outcomeNames Mapping of outcome id to outcome label.
     /// @param trustAddr Trusted addr for oracle event
     function addEvent(
-        string event_name,
-        uint128 oracle_fee,
+        string eventName,
+        uint128 oracleFee,
         uint64 deadline,
         string describe,
         mapping(uint32 => string) outcomeNames,
         optional(uint256) trustAddr
-    ) public onlyOwnerPubkey(_oracle_pubkey) accept {
+    ) public onlyOwnerPubkey(_oraclePubkey) accept {
         require(deadline > block.timestamp, ERR_INVALID_PARAMS);
         ensureBalance();
         require(outcomeNames.keys().length >= 2, ERR_INVALID_PARAMS);
         require(outcomeNames.keys().length < 20, ERR_INVALID_PARAMS);
-        uint256 event_id = tvm.hash(abi.encode(event_name, deadline, describe, outcomeNames));
-        _events[event_id] = EventInfo({
-            event_name: event_name,
-            oracle_fee: oracle_fee,
+        uint256 eventId = tvm.hash(abi.encode(eventName, deadline, describe, outcomeNames));
+        require(!_events.exists(eventId), ERR_ALREADY_INITIALIZED);
+        _events[eventId] = EventInfo({
+            eventName: eventName,
+            oracleFee: oracleFee,
             deadline: deadline,
             outcomeNames: outcomeNames,
             describe: describe,
@@ -89,54 +102,54 @@ contract OracleEventList is Modifiers {
         });
 
         address addrExtern = address.makeAddrExtern(ORACLE_EVENT_ADDED, bitCntAddress);
-        emit EventAdded{dest: addrExtern}(event_id, event_name, oracle_fee, deadline);
+        emit EventAdded{dest: addrExtern}(eventId, eventName, oracleFee, deadline);
     }
 
     /// @notice Confirms an event for a PMP after fee and deadline checks.
-    /// @param event_id Event identifier hash.
-    /// @param oracle_list_hash Hash of PMP oracle list.
-    /// @param token_type PMP token type.
-    function confirmEvent(uint256 event_id, uint256 oracle_list_hash, uint32 token_type)
-        public senderIs(DexLib.computePMPAddressFromHash(_pmpSaltedCodeHash, _pmpSaltedCodeDepth, event_id, oracle_list_hash, token_type)) accept
+    /// @param eventId Event identifier hash.
+    /// @param oracleListHash Hash of PMP oracle list.
+    /// @param tokenType PMP token type.
+    function confirmEvent(uint256 eventId, uint256 oracleListHash, uint32 tokenType)
+        public senderIs(DexLib.computePMPAddressFromHash(_pmpSaltedCodeHash, _pmpSaltedCodeDepth, eventId, oracleListHash, tokenType)) accept
     {
         ensureBalance();
         _oracle.transfer({value: 0.1 vmshell, flag: 1, currencies: msg.currencies, dest_dapp_id: ORACLE_DAPP_ID});
-        if (!_events.exists(event_id)) {
+        if (!_events.exists(eventId)) {
             PMP(msg.sender).rejectEvent{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}();
             return;
         }
-        EventInfo eventInfo = _events[event_id];
-        if ((eventInfo.deadline < block.timestamp) || (msg.currencies[CURRENCIES_ID_SHELL] < eventInfo.oracle_fee)) {
+        EventInfo eventInfo = _events[eventId];
+        if ((eventInfo.deadline < block.timestamp) || (msg.currencies[CURRENCIES_ID_SHELL] < eventInfo.oracleFee)) {
             PMP(msg.sender).rejectEvent{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}();
         } else {
             eventInfo.count += 1;
-            _events[event_id] = eventInfo;
-            PMP(msg.sender).approveEvent{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_oracle_pubkey, eventInfo.outcomeNames, eventInfo.describe, eventInfo.event_name, eventInfo.trustAddr);
+            _events[eventId] = eventInfo;
+            PMP(msg.sender).approveEvent{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_oraclePubkey, eventInfo.outcomeNames, eventInfo.describe, eventInfo.eventName, eventInfo.trustAddr);
             address addrExtern = address.makeAddrExtern(ORACLE_EVENT_CONFIRMED, bitCntAddress);
-            emit EventConfirmed{dest: addrExtern}(event_id, msg.sender);
+            emit EventConfirmed{dest: addrExtern}(eventId, msg.sender);
         }
     }
 
     /// @notice Decrements active confirmation counter for an event when PMP is canceled.
-    /// @param event_id Event identifier hash.
-    /// @param oracle_list_hash Hash of PMP oracle list.
-    /// @param token_type PMP token type.
-    function cancelEvent(uint256 event_id, uint256 oracle_list_hash, uint32 token_type)
-        public senderIs(DexLib.computePMPAddressFromHash(_pmpSaltedCodeHash, _pmpSaltedCodeDepth, event_id, oracle_list_hash, token_type)) accept
+    /// @param eventId Event identifier hash.
+    /// @param oracleListHash Hash of PMP oracle list.
+    /// @param tokenType PMP token type.
+    function cancelEvent(uint256 eventId, uint256 oracleListHash, uint32 tokenType)
+        public senderIs(DexLib.computePMPAddressFromHash(_pmpSaltedCodeHash, _pmpSaltedCodeDepth, eventId, oracleListHash, tokenType)) accept
     {
         ensureBalance();
-        EventInfo eventInfo = _events[event_id];
+        EventInfo eventInfo = _events[eventId];
         eventInfo.count -= 1;
-        _events[event_id] = eventInfo;
+        _events[eventId] = eventInfo;
     }
 
     /// @notice Deletes an event when there are no active confirmations or deadline is expired.
-    /// @param event_id Event identifier hash.
-    function deleteEvent(uint256 event_id) public onlyOwnerPubkey(_oracle_pubkey) accept {
+    /// @param eventId Event identifier hash.
+    function deleteEvent(uint256 eventId) public onlyOwnerPubkey(_oraclePubkey) accept {
         ensureBalance();
-        EventInfo eventInfo = _events[event_id];
+        EventInfo eventInfo = _events[eventId];
         if ((eventInfo.count == 0) || (eventInfo.deadline < block.timestamp)) {
-            delete _events[event_id];
+            delete _events[eventId];
         }
     } 
     
