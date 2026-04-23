@@ -4,4 +4,3 @@ internal-docs/
 .codex
 .claude
 target/
-Cargo.lock

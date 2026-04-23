@@ -1,7 +1,5 @@
 *logs*
 venv
-Cargo.lock
-**/Cargo.lock
 tests
 .temp
 **/target
