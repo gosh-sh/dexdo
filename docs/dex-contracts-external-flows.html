@@ -1,0 +1,1455 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>DODEX External Contract Flows</title>
+    <style>
+      :root {
+        --bg: #f4efe3;
+        --bg2: #fffaf0;
+        --card: #fffdfa;
+        --ink: #1f2937;
+        --muted: #526071;
+        --border: #d7c6a3;
+        --accent: #0f766e;
+        --accent-fill: #ecfeff;
+        --event: #b91c1c;
+        --event-fill: #fff1f2;
+        --line: #475569;
+        --note-fill: #f8fafc;
+        --note-stroke: #94a3b8;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 32px;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, #fff6dd 0, #fff6dd 18%, transparent 42%),
+          linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+        font-family: Georgia, "Times New Roman", serif;
+        line-height: 1.55;
+      }
+
+      main {
+        max-width: 1240px;
+        margin: 0 auto;
+      }
+
+      h1,
+      h2,
+      h3 {
+        font-family: "Helvetica Neue", Arial, sans-serif;
+        letter-spacing: 0.01em;
+        margin: 0 0 12px;
+      }
+
+      h1 {
+        font-size: 34px;
+      }
+
+      h2 {
+        font-size: 24px;
+      }
+
+      h3 {
+        font-size: 18px;
+      }
+
+      p {
+        margin: 0 0 12px;
+      }
+
+      a {
+        color: #8b4513;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 24px;
+        margin: 22px 0;
+        box-shadow: 0 10px 30px rgba(54, 36, 10, 0.08);
+      }
+
+      .hero {
+        padding: 28px;
+      }
+
+      .hero p:last-child {
+        margin-bottom: 0;
+      }
+
+      .links {
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+        font-family: "Helvetica Neue", Arial, sans-serif;
+        font-size: 14px;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: #f5efe1;
+        border: 1px solid #dbc7a1;
+        margin: 0 8px 8px 0;
+        font-family: "Helvetica Neue", Arial, sans-serif;
+        font-size: 13px;
+      }
+
+      .legend {
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+        font-family: "Helvetica Neue", Arial, sans-serif;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .legend-box {
+        width: 30px;
+        height: 16px;
+        border-radius: 8px;
+        border: 3px solid var(--event);
+        background: var(--event-fill);
+      }
+
+      .legend-line {
+        width: 34px;
+        border-top: 2px solid var(--line);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        padding: 10px 12px;
+        border-bottom: 1px solid #eadcc3;
+        vertical-align: top;
+      }
+
+      th {
+        text-align: left;
+        font-family: "Helvetica Neue", Arial, sans-serif;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .diagram {
+        margin-top: 14px;
+      }
+
+      .diagram svg {
+        width: 100%;
+        height: auto;
+        display: block;
+        background: #fff;
+        border: 1px solid #eadcc3;
+        border-radius: 14px;
+      }
+
+      .caption {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      @media (max-width: 900px) {
+        body {
+          padding: 18px;
+        }
+
+        .card {
+          padding: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card hero">
+        <h1>DODEX External Contract Flows</h1>
+        <p>Полная HTML-документация по stateful externally reachable entrypoint-ам в `contracts/`. Здесь акцент не на структуре контрактов как таковой, а на том, какие именно runtime-flows запускают внешние вызовы, какие callbacks они порождают и где появляются внешние события.</p>
+        <p>Диаграммы сделаны как inline SVG без внешнего JS, поэтому рендер предсказуем локально. Красные плашки на sequence diagrams — это внешние `emit ...{dest: ...}` события; адрес получателя написан прямо внутри каждого event-блока, без вынесенных таблиц и подписей под схемами.</p>
+        <div class="links">
+          <a href="dex-contracts-system.html">System Overview</a>
+          <a href="dex-contracts-object-diagram.drawio">Object Diagram (.drawio)</a>
+          <a href="dex-events-routing.md">Event Routing Tables</a>
+        </div>
+        <div style="margin-top: 14px;">
+          <span class="pill">RootPN</span>
+          <span class="pill">PrivateNote</span>
+          <span class="pill">Nullifier</span>
+          <span class="pill">RootOracle</span>
+          <span class="pill">Oracle</span>
+          <span class="pill">OracleEventList</span>
+          <span class="pill">PMP</span>
+          <span class="pill">OrderBook</span>
+        </div>
+        <div class="legend">
+          <div class="legend-item"><span class="legend-line"></span><span>вызов / callback</span></div>
+          <div class="legend-item"><span class="legend-box"></span><span>внешний event-object (`emit ...{dest: ...}`)</span></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Contract Map</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Contract</th>
+              <th>Роль</th>
+              <th>Ключевые deterministic keys</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>RootPN</strong></td>
+              <td>Корневой deployer для `PrivateNote`, `Nullifier` и vault-потока.</td>
+              <td>`_depositIdentifierHash`, `_nullifierHash`</td>
+            </tr>
+            <tr>
+              <td><strong>PrivateNote</strong></td>
+              <td>Пользовательский кошелек DEX: stake, split/merge, claim, orders, transfer.</td>
+              <td>`_depositIdentifierHash`, `stakeHash = hash(eventId, oracleListHash, tokenType)`</td>
+            </tr>
+            <tr>
+              <td><strong>Nullifier</strong></td>
+              <td>One-shot relay для shell-fee top-up в `PrivateNote`.</td>
+              <td>`_nullifierHash`</td>
+            </tr>
+            <tr>
+              <td><strong>RootOracle</strong></td>
+              <td>Корневой deployer для `Oracle`.</td>
+              <td>`_name` у downstream `Oracle`</td>
+            </tr>
+            <tr>
+              <td><strong>Oracle</strong></td>
+              <td>Oracle-owner контракт, который создает `OracleEventList`.</td>
+              <td>`_name`, `(_oracle, _index)` у `OracleEventList`</td>
+            </tr>
+            <tr>
+              <td><strong>OracleEventList</strong></td>
+              <td>Реестр событий и точка oracle-confirmation для PMP.</td>
+              <td>`(_oracle, _index)` для адреса контракта; `eventId` для внутренних `EventInfo`</td>
+            </tr>
+            <tr>
+              <td><strong>PMP</strong></td>
+              <td>Prediction market pool, approvals, timings, resolve, split/merge.</td>
+              <td>`(eventId, oracleListHash, tokenType)`</td>
+            </tr>
+            <tr>
+              <td><strong>OrderBook</strong></td>
+              <td>Книга заявок для frozen market, очереди, match/fill/cancel.</td>
+              <td>`(eventId, oracleListHash, tokenType)`, `orderId`, `clientOrderId`</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Coverage Map</h2>
+        <p>Ниже — карта покрытия по flow-группам. В документ включены все stateful externally reachable entrypoint-ы: user/admin вызовы, oracle/governance вызовы, inter-contract callbacks, recovery hooks и shutdown paths. Исключены только read-only методы вроде `getDetails(...)`, `getVersion(...)`, `getOrder(...)`, `getQueueSize(...)` и им подобные.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Flow Group</th>
+              <th>Покрытые entrypoint-ы</th>
+              <th>Где описано</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Bootstrap / voucher / fee top-up</strong></td>
+              <td>`RootPN.generateVoucher`, `RootPN.deployPrivateNote`, `RootPN.sendEccShellToPrivateNote`, `RootPN.privateNoteDeployed`, `Nullifier.constructor`, `PrivateNote.receive`</td>
+              <td>Раздел 1</td>
+            </tr>
+            <tr>
+              <td><strong>Oracle deployment and registry</strong></td>
+              <td>`RootOracle.deployOracle`, `Oracle.deployEventList`, `Oracle.withdrawFees`, `Oracle.receive`, `OracleEventList.addEvent`, `OracleEventList.deleteEvent`</td>
+              <td>Раздел 2</td>
+            </tr>
+            <tr>
+              <td><strong>Market deployment / first approval / reject / freeze</strong></td>
+              <td>`PrivateNote.deployPMP`, `PMP.constructor`, `OracleEventList.confirmEvent`, `OracleEventList.cancelEvent`, `PMP.approveEvent`, `PMP.rejectEvent`, `PMP.onBounce`, `PrivateNote.onInitialStakesAccepted`, `PrivateNote.onInitialStakesFailed`, `PrivateNote.onPmpCleanRefund`, `OrderBook.constructor`</td>
+              <td>Раздел 3</td>
+            </tr>
+            <tr>
+              <td><strong>Oracle governance on approved market</strong></td>
+              <td>`PMP.submitSetTimings`, `PMP.submitResolve`, `PMP.submitCancelEvent`, `OrderBook.setResultStart`</td>
+              <td>Раздел 4</td>
+            </tr>
+            <tr>
+              <td><strong>Stake / cancel / split / merge / claim</strong></td>
+              <td>`PrivateNote.setStake`, `PrivateNote.cancelStake`, `PrivateNote.claim`, `PrivateNote.splitFullSet`, `PrivateNote.mergeFullSet`, `PMP.acceptStake`, `PMP.cancelStake`, `PMP.claim`, `PMP.splitFullSet`, `PMP.mergeFullSet`, `PrivateNote.onStakeAccepted`, `PrivateNote.onStakeCancelled`, `PrivateNote.onClaimAccepted`, `PrivateNote.onSplitAccepted`, `PrivateNote.onMergeAccepted`, `PrivateNote.acceptFee`</td>
+              <td>Разделы 5 и 10</td>
+            </tr>
+            <tr>
+              <td><strong>Order placement and fill</strong></td>
+              <td>`PrivateNote.placeOrder`, `PrivateNote.placeBatch`, `OrderBook.executeBatch`, `OrderBook.processHead`, `PrivateNote.onOrderPlaced`, `PrivateNote.onOrderFilled`, `PrivateNote.onBatchComplete`</td>
+              <td>Раздел 6</td>
+            </tr>
+            <tr>
+              <td><strong>Order cancel / reject / queue control / bounce</strong></td>
+              <td>`PrivateNote.cancelOrder`, `PrivateNote.cancelOrderByClient`, `PrivateNote.cancelBatch`, `PrivateNote.cancelAllOrders`, `OrderBook.cancelAllOrders`, `OrderBook.cancelByClientId`, `OrderBook.cancelQueued`, `PrivateNote.onOrderCancelled`, `PrivateNote.onOrderRejected`, `OrderBook.onBounce`, `PrivateNote.onBounce`</td>
+              <td>Раздел 7</td>
+            </tr>
+            <tr>
+              <td><strong>Transfer / withdraw / coupon / local admin</strong></td>
+              <td>`PrivateNote.initTransfer`, `PrivateNote.offerTransfer`, `PrivateNote.onTransferAccepted`, `PrivateNote.clearTransferBusy`, `PrivateNote.withdrawTokens`, `RootPN.withdrawTokens`, `PrivateNote.revertWithdraw`, `PrivateNote.changeOwner`, `PrivateNote.generateCoupon`, `PrivateNote.discardCoupon`, `PrivateNote.deleteStake`, `RootPN.updateCode`, `RootOracle.updateCode`</td>
+              <td>Разделы 8 и 9</td>
+            </tr>
+            <tr>
+              <td><strong>Terminal shutdown</strong></td>
+              <td>`PMP.claim` tail-path, `OrderBook.shutdown`</td>
+              <td>Раздел 10</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>1. Bootstrap, Voucher, Fee Top-Up</h2>
+        <p>Эта цепочка покрывает три отдельных потока: создание `PrivateNote`, shell-fee top-up через `Nullifier` и генерацию voucher-event в `RootPN`.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 470" role="img" aria-label="Vault and PrivateNote lifecycle">
+            <defs>
+              <marker id="arrow-vault" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-vault-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="40" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="240" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="440" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="640" y="20" width="170" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="110" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="310" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">RootPN</text>
+            <text x="510" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Nullifier</text>
+            <text x="725" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <line x1="110" y1="60" x2="110" y2="430" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="310" y1="60" x2="310" y2="430" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="510" y1="60" x2="510" y2="430" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="725" y1="60" x2="725" y2="430" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="110" y1="95" x2="310" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-vault)" />
+            <text x="145" y="86" font-family="Arial" font-size="13">deployPrivateNote(...)</text>
+
+            <line x1="310" y1="140" x2="725" y2="140" stroke="#475569" stroke-width="2" marker-end="url(#arrow-vault)" />
+            <text x="430" y="131" font-family="Arial" font-size="13">new PrivateNote(...)</text>
+
+            <line x1="725" y1="185" x2="310" y2="185" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-vault)" />
+            <text x="455" y="176" font-family="Arial" font-size="13">privateNoteDeployed(...)</text>
+
+            <line x1="310" y1="215" x2="565" y2="215" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-vault-red)" />
+            <rect x="570" y="190" width="260" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="700" y="210" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">PrivateNoteDeployed</text>
+            <text x="700" y="226" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(101)</text>
+
+            <line x1="110" y1="270" x2="310" y2="270" stroke="#475569" stroke-width="2" marker-end="url(#arrow-vault)" />
+            <text x="132" y="261" font-family="Arial" font-size="13">sendEccShellToPrivateNote(...)</text>
+
+            <line x1="310" y1="315" x2="510" y2="315" stroke="#475569" stroke-width="2" marker-end="url(#arrow-vault)" />
+            <text x="360" y="306" font-family="Arial" font-size="13">new Nullifier(noteAddress)</text>
+
+            <line x1="310" y1="345" x2="565" y2="345" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-vault-red)" />
+            <rect x="570" y="320" width="248" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="694" y="340" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">NullifierDeployed</text>
+            <text x="694" y="356" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(102)</text>
+
+            <line x1="510" y1="390" x2="725" y2="390" stroke="#475569" stroke-width="2" marker-end="url(#arrow-vault)" />
+            <text x="555" y="381" font-family="Arial" font-size="13">transfer shell fee</text>
+
+            <line x1="110" y1="430" x2="310" y2="430" stroke="#475569" stroke-width="2" marker-end="url(#arrow-vault)" />
+            <text x="170" y="421" font-family="Arial" font-size="13">generateVoucher(...)</text>
+
+            <line x1="310" y1="430" x2="565" y2="430" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-vault-red)" />
+            <rect x="570" y="405" width="252" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="696" y="425" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">VoucherGenerated</text>
+            <text x="696" y="441" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(135)</text>
+
+            <rect x="22" y="402" width="250" height="46" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="147" y="421" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">`Nullifier` своих event-object не эмитит.</text>
+            <text x="147" y="438" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">После deploy он только переводит shell-fee в `PrivateNote`.</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>2. Oracle Deployment And Registry</h2>
+        <p>Oracle-ветка состоит из `RootOracle`, `Oracle` и `OracleEventList`. Именно `OracleEventList` хранит `EventInfo` и подтверждает рынок для PMP.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 520" role="img" aria-label="Oracle deployment and event registry">
+            <defs>
+              <marker id="arrow-oracle" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-oracle-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="220" y="20" width="170" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="430" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="640" y="20" width="190" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="105" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Operator</text>
+            <text x="305" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">RootOracle</text>
+            <text x="505" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Oracle</text>
+            <text x="735" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OracleEventList</text>
+            <line x1="105" y1="60" x2="105" y2="440" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="305" y1="60" x2="305" y2="440" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="505" y1="60" x2="505" y2="440" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="735" y1="60" x2="735" y2="440" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="105" y1="95" x2="305" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle)" />
+            <text x="160" y="86" font-family="Arial" font-size="13">deployOracle(pubkey, name)</text>
+
+            <line x1="305" y1="135" x2="505" y2="135" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle)" />
+            <text x="372" y="126" font-family="Arial" font-size="13">new Oracle(...)</text>
+
+            <line x1="305" y1="170" x2="555" y2="170" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-oracle-red)" />
+            <rect x="560" y="145" width="280" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="700" y="165" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OracleDeployed</text>
+            <text x="700" y="181" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(136)</text>
+
+            <line x1="505" y1="225" x2="735" y2="225" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle)" />
+            <text x="560" y="216" font-family="Arial" font-size="13">constructor - new OracleEventList(0)</text>
+
+            <line x1="505" y1="260" x2="555" y2="260" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-oracle-red)" />
+            <rect x="560" y="235" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="710" y="255" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OracleEventListDeployed</text>
+            <text x="710" y="271" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(104)</text>
+
+            <line x1="105" y1="315" x2="505" y2="315" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle)" />
+            <text x="235" y="306" font-family="Arial" font-size="13">deployEventList(index)</text>
+
+            <line x1="505" y1="350" x2="735" y2="350" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle)" />
+            <text x="562" y="341" font-family="Arial" font-size="13">new OracleEventList(index)</text>
+
+            <line x1="505" y1="385" x2="555" y2="385" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-oracle-red)" />
+            <rect x="560" y="360" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="710" y="380" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OracleEventListDeployed</text>
+            <text x="710" y="396" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(104)</text>
+
+            <line x1="105" y1="430" x2="735" y2="430" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle)" />
+            <text x="295" y="421" font-family="Arial" font-size="13">addEvent(name, fee, deadline, describe, outcomeNames, trustAddr)</text>
+
+            <line x1="735" y1="455" x2="545" y2="455" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-oracle-red)" />
+            <rect x="550" y="430" width="270" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="685" y="450" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">EventAdded</text>
+            <text x="685" y="466" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(133)</text>
+
+            <rect x="22" y="458" width="250" height="38" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="147" y="482" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">`EventPublished` declared, но emit в текущем коде нет.</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 230" role="img" aria-label="Oracle fee withdraw and top-up">
+            <defs>
+              <marker id="arrow-oracle-mini" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="260" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="490" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="710" y="20" width="170" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="110" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Funder</text>
+            <text x="340" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Oracle Owner</text>
+            <text x="565" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Oracle</text>
+            <text x="795" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Wallet</text>
+            <line x1="110" y1="60" x2="110" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="340" y1="60" x2="340" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="565" y1="60" x2="565" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="795" y1="60" x2="795" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="110" y1="95" x2="565" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle-mini)" />
+            <text x="245" y="86" font-family="Arial" font-size="13">receive() - replenish native balance</text>
+
+            <line x1="340" y1="145" x2="565" y2="145" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle-mini)" />
+            <text x="395" y="136" font-family="Arial" font-size="13">withdrawFees(to, amount)</text>
+
+            <line x1="565" y1="175" x2="795" y2="175" stroke="#475569" stroke-width="2" marker-end="url(#arrow-oracle-mini)" />
+            <text x="635" y="166" font-family="Arial" font-size="13">transfer shell fees</text>
+
+            <rect x="250" y="182" width="440" height="30" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="470" y="202" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Оба одношаговых flow меняют state/баланс, но внешних event-object не эмитят.</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>3. Market Deployment, Oracle Approval, Freeze</h2>
+        <p>`PrivateNote` создает `PMP`, `PMP` собирает подтверждения от всех `OracleEventList`, на первом approval отдельно фиксирует initial stakes deployer-а, потом переходит в approved-state, получает timings и только после freeze поднимает `OrderBook`.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 520" role="img" aria-label="PMP deployment and approval success">
+            <defs>
+              <marker id="arrow-market" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-market-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="120" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="190" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="380" y="20" width="120" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="540" y="20" width="170" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="760" y="20" width="170" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="90" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="265" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="440" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <text x="625" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OracleEventList A</text>
+            <text x="845" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OracleEventList B</text>
+            <line x1="90" y1="60" x2="90" y2="450" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="265" y1="60" x2="265" y2="450" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="440" y1="60" x2="440" y2="450" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="625" y1="60" x2="625" y2="450" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="845" y1="60" x2="845" y2="450" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="90" y1="95" x2="265" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-market)" />
+            <text x="118" y="86" font-family="Arial" font-size="13">deployPMP(...)</text>
+
+            <line x1="265" y1="120" x2="515" y2="120" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-market-red)" />
+            <rect x="520" y="95" width="260" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="650" y="115" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">PMPDeployed</text>
+            <text x="650" y="131" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(111)</text>
+
+            <line x1="265" y1="165" x2="440" y2="165" stroke="#475569" stroke-width="2" marker-end="url(#arrow-market)" />
+            <text x="302" y="156" font-family="Arial" font-size="13">new PMP(...)</text>
+
+            <line x1="440" y1="215" x2="625" y2="215" stroke="#475569" stroke-width="2" marker-end="url(#arrow-market)" />
+            <text x="470" y="206" font-family="Arial" font-size="13">confirmEvent(eventId, oracleListHash, tokenType)</text>
+
+            <line x1="625" y1="245" x2="485" y2="245" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-market-red)" />
+            <rect x="490" y="220" width="270" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="625" y="240" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">EventConfirmed</text>
+            <text x="625" y="256" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(106)</text>
+
+            <line x1="625" y1="300" x2="440" y2="300" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-market)" />
+            <text x="492" y="291" font-family="Arial" font-size="13">approveEvent(...)</text>
+
+            <line x1="440" y1="335" x2="265" y2="335" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-market)" />
+            <text x="300" y="326" font-family="Arial" font-size="13">onInitialStakesAccepted(...)</text>
+
+            <rect x="20" y="348" width="220" height="38" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="130" y="372" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Первый approve фиксирует `initialStakes` creator note.</text>
+
+            <line x1="440" y1="390" x2="845" y2="390" stroke="#475569" stroke-width="2" marker-end="url(#arrow-market)" />
+            <text x="560" y="381" font-family="Arial" font-size="13">confirmEvent(...) second oracle</text>
+
+            <line x1="845" y1="420" x2="505" y2="420" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-market-red)" />
+            <rect x="510" y="395" width="270" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="645" y="415" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">EventConfirmed</text>
+            <text x="645" y="431" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(106)</text>
+
+            <line x1="845" y1="455" x2="440" y2="455" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-market)" />
+            <text x="625" y="446" font-family="Arial" font-size="13">approveEvent(...)</text>
+
+            <line x1="440" y1="485" x2="715" y2="485" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-market-red)" />
+            <rect x="720" y="460" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="870" y="480" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">ApprovedByOracle</text>
+            <text x="870" y="496" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(119)</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 320" role="img" aria-label="PMP reject and cleanup">
+            <defs>
+              <marker id="arrow-market-fail" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-market-fail-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="40" y="20" width="180" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="290" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="500" y="20" width="210" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="790" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="130" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OracleEventList / bounce</text>
+            <text x="355" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <text x="605" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Confirmed OracleEventLists</text>
+            <text x="870" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Creator PN</text>
+            <line x1="130" y1="60" x2="130" y2="250" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="355" y1="60" x2="355" y2="250" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="605" y1="60" x2="605" y2="250" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="870" y1="60" x2="870" y2="250" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="130" y1="95" x2="355" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-market-fail)" />
+            <text x="190" y="86" font-family="Arial" font-size="13">rejectEvent() or bounced confirm path</text>
+
+            <line x1="355" y1="125" x2="615" y2="125" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-market-fail-red)" />
+            <rect x="620" y="100" width="290" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="765" y="120" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">PMPCancelled</text>
+            <text x="765" y="136" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(132)</text>
+
+            <line x1="355" y1="175" x2="605" y2="175" stroke="#475569" stroke-width="2" marker-end="url(#arrow-market-fail)" />
+            <text x="430" y="166" font-family="Arial" font-size="13">cancelEvent(...) for already confirmed lists</text>
+
+            <line x1="355" y1="215" x2="870" y2="215" stroke="#475569" stroke-width="2" marker-end="url(#arrow-market-fail)" />
+            <text x="520" y="206" font-family="Arial" font-size="13">onInitialStakesFailed(refundTotal) if first approve never completed</text>
+
+            <rect x="24" y="245" width="540" height="38" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="294" y="269" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">`OracleEventList.cancelEvent(...)` только уменьшает локальный счетчик и внешнего event-object не создает.</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 300" role="img" aria-label="PMP freeze and order book deployment">
+            <defs>
+              <marker id="arrow-freeze" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-freeze-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="250" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="450" y="20" width="170" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="700" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="105" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User / Oracle quorum</text>
+            <text x="315" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <text x="535" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Creator PN</text>
+            <text x="780" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OrderBook</text>
+            <line x1="105" y1="60" x2="105" y2="230" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="315" y1="60" x2="315" y2="230" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="535" y1="60" x2="535" y2="230" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="780" y1="60" x2="780" y2="230" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="105" y1="95" x2="315" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-freeze)" />
+            <text x="140" y="86" font-family="Arial" font-size="13">first split / merge / resolve after stakeEnd</text>
+
+            <path d="M 315 125 C 380 125 380 160 315 160" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-freeze)" />
+            <text x="328" y="117" font-family="Arial" font-size="13">_ensureFrozen()</text>
+
+            <line x1="315" y1="185" x2="535" y2="185" stroke="#475569" stroke-width="2" marker-end="url(#arrow-freeze)" />
+            <text x="355" y="176" font-family="Arial" font-size="13">onPmpCleanRefund(...)</text>
+
+            <line x1="315" y1="220" x2="780" y2="220" stroke="#475569" stroke-width="2" marker-end="url(#arrow-freeze)" />
+            <text x="470" y="211" font-family="Arial" font-size="13">new OrderBook(...)</text>
+
+            <line x1="315" y1="255" x2="610" y2="255" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-freeze-red)" />
+            <rect x="615" y="230" width="290" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="760" y="250" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">PoolsFrozen</text>
+            <text x="760" y="266" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(140)</text>
+
+            <rect x="30" y="248" width="250" height="30" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="155" y="268" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Тот же `_ensureFrozen()` может сработать и внутри `setTimings()`.</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>4. Oracle Governance Entry Flows</h2>
+        <p>После approval рынок управляется quorum-механикой внутри `PMP`. Входные точки здесь не `private`: внешние сообщения в `submitSetTimings`, `submitResolve` и `submitCancelEvent` собирают голоса oracle-подписантов или доверенных адресов, а затем уже переключают основной state рынка.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1030 560" role="img" aria-label="Oracle timings and resolve quorum">
+            <defs>
+              <marker id="arrow-gov" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-gov-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="230" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="430" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="610" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="800" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="105" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Oracle A</text>
+            <text x="305" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Oracle B</text>
+            <text x="495" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <text x="680" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OrderBook</text>
+            <text x="870" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Deployer PN</text>
+            <line x1="105" y1="60" x2="105" y2="470" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="305" y1="60" x2="305" y2="470" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="495" y1="60" x2="495" y2="470" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="680" y1="60" x2="680" y2="470" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="870" y1="60" x2="870" y2="470" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="105" y1="95" x2="495" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov)" />
+            <text x="225" y="86" font-family="Arial" font-size="13">submitSetTimings(resultStart)</text>
+            <line x1="305" y1="130" x2="495" y2="130" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov)" />
+            <text x="344" y="121" font-family="Arial" font-size="13">submitSetTimings(resultStart)</text>
+
+            <path d="M 495 165 C 560 165 560 205 495 205" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov)" />
+            <text x="508" y="157" font-family="Arial" font-size="13">quorum -> setTimings()</text>
+            <line x1="495" y1="225" x2="700" y2="225" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-gov)" />
+            <text x="556" y="216" font-family="Arial" font-size="13">setResultStart(resultStart) if frozen</text>
+            <line x1="495" y1="255" x2="700" y2="255" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-gov-red)" />
+            <rect x="705" y="230" width="280" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="845" y="250" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">TimingsSet</text>
+            <text x="845" y="266" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(124)</text>
+
+            <line x1="105" y1="315" x2="495" y2="315" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov)" />
+            <text x="240" y="306" font-family="Arial" font-size="13">submitResolve(outcomeId)</text>
+            <line x1="305" y1="350" x2="495" y2="350" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov)" />
+            <text x="357" y="341" font-family="Arial" font-size="13">submitResolve(outcomeId)</text>
+            <path d="M 495 385 C 560 385 560 425 495 425" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov)" />
+            <text x="505" y="377" font-family="Arial" font-size="13">quorum -> resolve()</text>
+            <line x1="495" y1="445" x2="870" y2="445" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-gov)" />
+            <text x="616" y="436" font-family="Arial" font-size="13">acceptFee(creatorFee)</text>
+            <line x1="495" y1="475" x2="710" y2="475" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-gov-red)" />
+            <rect x="715" y="450" width="280" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="855" y="470" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">CreatorFeeCollected</text>
+            <text x="855" y="486" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(137)</text>
+
+            <line x1="495" y1="515" x2="710" y2="515" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-gov-red)" />
+            <rect x="715" y="490" width="280" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="855" y="510" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">Resolved</text>
+            <text x="855" y="526" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(120)</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 260" role="img" aria-label="Oracle cancel quorum">
+            <defs>
+              <marker id="arrow-gov-cancel" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-gov-cancel-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="40" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="250" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="460" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="115" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Oracle A</text>
+            <text x="325" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Oracle B</text>
+            <text x="525" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <line x1="115" y1="60" x2="115" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="325" y1="60" x2="325" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="525" y1="60" x2="525" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="115" y1="95" x2="525" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov-cancel)" />
+            <text x="245" y="86" font-family="Arial" font-size="13">submitCancelEvent()</text>
+            <line x1="325" y1="130" x2="525" y2="130" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov-cancel)" />
+            <text x="377" y="121" font-family="Arial" font-size="13">submitCancelEvent()</text>
+
+            <path d="M 525 165 C 590 165 590 195 525 195" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-gov-cancel)" />
+            <text x="537" y="157" font-family="Arial" font-size="13">quorum -&gt; cancelEvent()</text>
+
+            <line x1="525" y1="225" x2="750" y2="225" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-gov-cancel-red)" />
+            <rect x="755" y="200" width="140" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="825" y="220" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">EventCancelled</text>
+            <text x="825" y="236" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(126)</text>
+
+            <rect x="30" y="205" width="320" height="34" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="190" y="227" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Здесь голос одноразовый: повторный `submitCancelEvent()` того же oracle игнорируется.</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>5. Stake, Split, Merge, Resolve, Claim</h2>
+        <p>Это основной execution-path рынка после approval: обычный stake, full-set split/merge, затем resolve и claim. Здесь наиболее заметна зеркальная пара событий PMP и PrivateNote.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 520" role="img" aria-label="Stake and cancel stake flows">
+            <defs>
+              <marker id="arrow-stake" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-stake-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="50" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="280" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="520" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="115" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="355" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="585" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <line x1="115" y1="60" x2="115" y2="430" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="355" y1="60" x2="355" y2="430" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="585" y1="60" x2="585" y2="430" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="115" y1="95" x2="355" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-stake)" />
+            <text x="185" y="86" font-family="Arial" font-size="13">setStake(...)</text>
+            <line x1="355" y1="135" x2="585" y2="135" stroke="#475569" stroke-width="2" marker-end="url(#arrow-stake)" />
+            <text x="420" y="126" font-family="Arial" font-size="13">acceptStake(...)</text>
+            <line x1="585" y1="165" x2="455" y2="165" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-stake-red)" />
+            <rect x="460" y="140" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="602" y="160" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">StakeAccepted</text>
+            <text x="602" y="176" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(118)</text>
+            <line x1="585" y1="205" x2="355" y2="205" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-stake)" />
+            <text x="430" y="196" font-family="Arial" font-size="13">onStakeAccepted(...)</text>
+            <line x1="355" y1="235" x2="505" y2="235" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-stake-red)" />
+            <rect x="510" y="210" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="652" y="230" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">StakeConfirmed</text>
+            <text x="652" y="246" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(113)</text>
+
+            <line x1="115" y1="315" x2="355" y2="315" stroke="#475569" stroke-width="2" marker-end="url(#arrow-stake)" />
+            <text x="176" y="306" font-family="Arial" font-size="13">cancelStake(...)</text>
+            <line x1="355" y1="355" x2="585" y2="355" stroke="#475569" stroke-width="2" marker-end="url(#arrow-stake)" />
+            <text x="422" y="346" font-family="Arial" font-size="13">cancelStake(...)</text>
+            <line x1="585" y1="390" x2="355" y2="390" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-stake)" />
+            <text x="430" y="381" font-family="Arial" font-size="13">onStakeCancelled(...)</text>
+            <line x1="355" y1="425" x2="520" y2="425" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-stake-red)" />
+            <rect x="525" y="400" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="667" y="420" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">StakeCancelled</text>
+            <text x="667" y="436" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(115)</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 560" role="img" aria-label="Split and merge full set flows">
+            <defs>
+              <marker id="arrow-sm" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-sm-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="50" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="280" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="520" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="115" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="355" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="585" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <line x1="115" y1="60" x2="115" y2="470" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="355" y1="60" x2="355" y2="470" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="585" y1="60" x2="585" y2="470" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="115" y1="95" x2="355" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-sm)" />
+            <text x="178" y="86" font-family="Arial" font-size="13">splitFullSet(...)</text>
+            <line x1="355" y1="135" x2="585" y2="135" stroke="#475569" stroke-width="2" marker-end="url(#arrow-sm)" />
+            <text x="424" y="126" font-family="Arial" font-size="13">splitFullSet(...)</text>
+            <line x1="585" y1="170" x2="455" y2="170" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-sm-red)" />
+            <rect x="460" y="145" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="602" y="165" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">SplitProcessed</text>
+            <text x="602" y="181" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(141)</text>
+            <line x1="585" y1="210" x2="355" y2="210" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-sm)" />
+            <text x="428" y="201" font-family="Arial" font-size="13">onSplitAccepted(...)</text>
+            <line x1="355" y1="245" x2="520" y2="245" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-sm-red)" />
+            <rect x="525" y="220" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="667" y="240" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">FullSetStakeConfirmed</text>
+            <text x="667" y="256" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(116)</text>
+
+            <line x1="115" y1="330" x2="355" y2="330" stroke="#475569" stroke-width="2" marker-end="url(#arrow-sm)" />
+            <text x="172" y="321" font-family="Arial" font-size="13">mergeFullSet(...)</text>
+            <line x1="355" y1="370" x2="585" y2="370" stroke="#475569" stroke-width="2" marker-end="url(#arrow-sm)" />
+            <text x="424" y="361" font-family="Arial" font-size="13">mergeFullSet(...)</text>
+            <line x1="585" y1="405" x2="455" y2="405" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-sm-red)" />
+            <rect x="460" y="380" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="602" y="400" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">MergeProcessed</text>
+            <text x="602" y="416" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(142)</text>
+            <line x1="585" y1="445" x2="355" y2="445" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-sm)" />
+            <text x="425" y="436" font-family="Arial" font-size="13">onMergeAccepted(...)</text>
+            <line x1="355" y1="480" x2="520" y2="480" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-sm-red)" />
+            <rect x="525" y="455" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="667" y="475" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">FullSetStakeCancelled</text>
+            <text x="667" y="491" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(117)</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 430" role="img" aria-label="Claim flows">
+            <defs>
+              <marker id="arrow-claim" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-claim-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="40" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="300" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="570" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="105" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="375" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="635" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <line x1="105" y1="60" x2="105" y2="340" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="375" y1="60" x2="375" y2="340" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="635" y1="60" x2="635" y2="340" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="105" y1="95" x2="375" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-claim)" />
+            <text x="200" y="86" font-family="Arial" font-size="13">claim(...) before resolve</text>
+            <line x1="375" y1="130" x2="635" y2="130" stroke="#475569" stroke-width="2" marker-end="url(#arrow-claim)" />
+            <text x="460" y="121" font-family="Arial" font-size="13">claim(...)</text>
+            <line x1="635" y1="165" x2="375" y2="165" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-claim)" />
+            <text x="450" y="156" font-family="Arial" font-size="13">onClaimAccepted(outcome = none)</text>
+            <rect x="100" y="182" width="410" height="34" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="305" y="204" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Нерешенный claim очищает `_busy`, но внешних event-object не создает.</text>
+
+            <line x1="105" y1="255" x2="375" y2="255" stroke="#475569" stroke-width="2" marker-end="url(#arrow-claim)" />
+            <text x="205" y="246" font-family="Arial" font-size="13">claim(...) after resolve</text>
+            <line x1="375" y1="290" x2="635" y2="290" stroke="#475569" stroke-width="2" marker-end="url(#arrow-claim)" />
+            <text x="460" y="281" font-family="Arial" font-size="13">claim(...)</text>
+            <line x1="635" y1="325" x2="470" y2="325" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-claim-red)" />
+            <rect x="475" y="300" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="617" y="320" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">ClaimProcessed</text>
+            <text x="617" y="336" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(121)</text>
+            <line x1="635" y1="375" x2="375" y2="375" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-claim)" />
+            <text x="450" y="366" font-family="Arial" font-size="13">onClaimAccepted(...)</text>
+            <line x1="375" y1="410" x2="540" y2="410" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-claim-red)" />
+            <rect x="545" y="385" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="687" y="405" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">ClaimAccepted</text>
+            <text x="687" y="421" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(114)</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>6. OrderBook: Placement And Fill</h2>
+        <p>Order-flow разбит на очередь и callbacks. В single-order path `PrivateNote` сначала эмитит `OrderSubmitted`, а уже потом получает обратное подтверждение от `OrderBook` по `OrderPlacedConfirmed` / `OrderFilledConfirmed`. Batch placement использует тот же queue/match механизм, но без `OrderSubmitted` на каждый элемент и с завершающим `onBatchComplete(...)`.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 650" role="img" aria-label="Single order placement and fill sequence">
+            <defs>
+              <marker id="arrow-order" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-order-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="50" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="285" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="560" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="115" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="365" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="640" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OrderBook</text>
+            <line x1="115" y1="60" x2="115" y2="560" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="365" y1="60" x2="365" y2="560" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="640" y1="60" x2="640" y2="560" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="115" y1="95" x2="365" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-order)" />
+            <text x="205" y="86" font-family="Arial" font-size="13">placeOrder(...)</text>
+
+            <line x1="365" y1="125" x2="520" y2="125" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-order-red)" />
+            <rect x="525" y="100" width="290" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="670" y="120" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OrderSubmitted</text>
+            <text x="670" y="136" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(151)</text>
+
+            <line x1="365" y1="170" x2="640" y2="170" stroke="#475569" stroke-width="2" marker-end="url(#arrow-order)" />
+            <text x="440" y="161" font-family="Arial" font-size="13">executeBatch(orders, [])</text>
+
+            <line x1="640" y1="200" x2="505" y2="200" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-order-red)" />
+            <rect x="510" y="175" width="260" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="640" y="195" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">Queued</text>
+            <text x="640" y="211" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(0)</text>
+
+            <path d="M 640 245 C 705 245 705 285 640 285" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-order)" />
+            <text x="652" y="237" font-family="Arial" font-size="13">processHead()</text>
+
+            <line x1="640" y1="300" x2="505" y2="300" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-order-red)" />
+            <rect x="510" y="275" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="652" y="295" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OrderPlaced</text>
+            <text x="652" y="311" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(143)</text>
+
+            <line x1="640" y1="345" x2="365" y2="345" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-order)" />
+            <text x="450" y="336" font-family="Arial" font-size="13">onOrderPlaced(...)</text>
+
+            <line x1="365" y1="375" x2="520" y2="375" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-order-red)" />
+            <rect x="525" y="350" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="675" y="370" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OrderPlacedConfirmed</text>
+            <text x="675" y="386" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(147)</text>
+
+            <path d="M 640 415 C 720 415 720 455 640 455" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-order)" />
+            <text x="652" y="407" font-family="Arial" font-size="13">match / fill loop</text>
+
+            <line x1="640" y1="470" x2="500" y2="470" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-order-red)" />
+            <rect x="505" y="445" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="647" y="465" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OrderFilled</text>
+            <text x="647" y="481" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(146)</text>
+
+            <line x1="640" y1="520" x2="475" y2="520" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-order-red)" />
+            <rect x="480" y="495" width="315" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="637" y="515" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">PartialFill / FullyFilled</text>
+            <text x="637" y="531" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(0)</text>
+
+            <line x1="640" y1="575" x2="365" y2="575" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-order)" />
+            <text x="450" y="566" font-family="Arial" font-size="13">onOrderFilled(...)</text>
+
+            <line x1="365" y1="610" x2="535" y2="610" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-order-red)" />
+            <rect x="540" y="585" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="690" y="605" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OrderFilledConfirmed</text>
+            <text x="690" y="621" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(148)</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 350" role="img" aria-label="Batch order placement and queue poke">
+            <defs>
+              <marker id="arrow-order-batch" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-order-batch-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="120" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="210" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="430" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="650" y="20" width="120" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="90" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="290" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="510" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OrderBook</text>
+            <text x="710" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Keeper</text>
+            <line x1="90" y1="60" x2="90" y2="270" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="290" y1="60" x2="290" y2="270" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="510" y1="60" x2="510" y2="270" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="710" y1="60" x2="710" y2="270" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="90" y1="95" x2="290" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-order-batch)" />
+            <text x="140" y="86" font-family="Arial" font-size="13">placeBatch(orders[])</text>
+            <line x1="290" y1="135" x2="510" y2="135" stroke="#475569" stroke-width="2" marker-end="url(#arrow-order-batch)" />
+            <text x="360" y="126" font-family="Arial" font-size="13">executeBatch(orders[], [])</text>
+            <line x1="510" y1="170" x2="675" y2="170" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-order-batch-red)" />
+            <rect x="680" y="145" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="830" y="165" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">Queued per accepted batch entry</text>
+            <text x="830" y="181" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(0)</text>
+
+            <line x1="710" y1="215" x2="510" y2="215" stroke="#475569" stroke-width="2" marker-end="url(#arrow-order-batch)" />
+            <text x="600" y="206" font-family="Arial" font-size="13">processHead() external poke</text>
+
+            <path d="M 510 245 C 575 245 575 280 510 280" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-order-batch)" />
+            <text x="522" y="237" font-family="Arial" font-size="13">same `OrderPlaced` / `OrderFilled` / `Rejected` callbacks as single path</text>
+
+            <line x1="510" y1="315" x2="290" y2="315" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-order-batch)" />
+            <text x="370" y="306" font-family="Arial" font-size="13">onBatchComplete(...)</text>
+
+            <rect x="30" y="290" width="350" height="34" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="205" y="312" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">У batch-path нет отдельного `OrderSubmitted` на каждый элемент.</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>7. OrderBook: Cancel, Reject, Bounce</h2>
+        <p>Отмена, reject и callback-bounce — отдельный observability path. Здесь важны именно сервисные события `Queued`, `Rejected` и `CallbackBounced`. Для batch cancel-path `cancelBatch()` / `cancelAllOrders()` `OrderBook` дополнительно завершает серию callback-ом `onBatchComplete(...)` без собственного event-object.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 460" role="img" aria-label="Order cancel flows">
+            <defs>
+              <marker id="arrow-cancel" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-cancel-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="50" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="285" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="560" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="115" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="365" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="640" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OrderBook</text>
+            <line x1="115" y1="60" x2="115" y2="340" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="365" y1="60" x2="365" y2="340" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="640" y1="60" x2="640" y2="340" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="115" y1="95" x2="365" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-cancel)" />
+            <text x="160" y="86" font-family="Arial" font-size="13">cancelOrder / cancelOrderByClient</text>
+
+            <line x1="365" y1="140" x2="640" y2="140" stroke="#475569" stroke-width="2" marker-end="url(#arrow-cancel)" />
+            <text x="438" y="131" font-family="Arial" font-size="13">executeBatch(cancel) / cancelByClientId</text>
+
+            <line x1="640" y1="170" x2="505" y2="170" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-cancel-red)" />
+            <rect x="510" y="145" width="260" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="640" y="165" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">Queued</text>
+            <text x="640" y="181" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(0)</text>
+
+            <path d="M 640 215 C 705 215 705 255 640 255" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-cancel)" />
+            <text x="652" y="207" font-family="Arial" font-size="13">cancel path / queue drain</text>
+
+            <line x1="640" y1="270" x2="490" y2="270" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-cancel-red)" />
+            <rect x="495" y="245" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="637" y="265" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OrderCancelled</text>
+            <text x="637" y="281" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(144)</text>
+
+            <line x1="640" y1="315" x2="365" y2="315" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-cancel)" />
+            <text x="445" y="306" font-family="Arial" font-size="13">onOrderCancelled(...)</text>
+
+            <line x1="365" y1="315" x2="495" y2="315" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-cancel-red)" />
+            <rect x="500" y="290" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="650" y="310" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OrderCancelledConfirmed</text>
+            <text x="650" y="326" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(152)</text>
+
+            <rect x="40" y="360" width="620" height="34" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="350" y="382" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">`cancelBatch()` и `cancelAllOrders()` проходят тот же путь, только с повторяющимися cancel callbacks и завершающим `onBatchComplete(...)`.</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 320" role="img" aria-label="Order reject, bounce and cancel queued">
+            <defs>
+              <marker id="arrow-cancel-extra" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-cancel-extra-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="230" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="450" y="20" width="160" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="670" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="100" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User / Keeper</text>
+            <text x="310" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="530" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OrderBook</text>
+            <text x="745" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Callback Dest</text>
+            <line x1="100" y1="60" x2="100" y2="240" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="310" y1="60" x2="310" y2="240" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="530" y1="60" x2="530" y2="240" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="745" y1="60" x2="745" y2="240" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="310" y1="95" x2="530" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-cancel-extra)" />
+            <text x="350" y="86" font-family="Arial" font-size="13">invalid params / full queue</text>
+            <line x1="530" y1="130" x2="375" y2="130" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-cancel-extra-red)" />
+            <rect x="380" y="105" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="522" y="125" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">Rejected</text>
+            <text x="522" y="141" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(0)</text>
+            <line x1="530" y1="170" x2="310" y2="170" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-cancel-extra)" />
+            <text x="380" y="161" font-family="Arial" font-size="13">onOrderRejected(...)</text>
+
+            <line x1="530" y1="205" x2="745" y2="205" stroke="#475569" stroke-width="2" marker-end="url(#arrow-cancel-extra)" />
+            <text x="585" y="196" font-family="Arial" font-size="13">callback bounce from PN</text>
+            <line x1="530" y1="240" x2="365" y2="240" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-cancel-extra-red)" />
+            <rect x="370" y="215" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="512" y="235" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">CallbackBounced</text>
+            <text x="512" y="251" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(0)</text>
+
+            <rect x="30" y="270" width="650" height="34" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="355" y="292" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">`cancelQueued(slot, queueId, depositHash)` — прямой OB-вызов без event; он лишь помечает queue entry как cancelled, после чего `processHead()` его пропускает.</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>8. PrivateNote To PrivateNote Transfer</h2>
+        <p>P2P-перевод живет отдельно от order/stake-механики: отправитель блокирует сумму, получатель сразу кредитует баланс, а затем посылает ack.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 330" role="img" aria-label="PrivateNote to PrivateNote transfer sequence">
+            <defs>
+              <marker id="arrow-transfer" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-transfer-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="40" y="20" width="120" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="220" y="20" width="190" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="490" y="20" width="210" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="100" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">User</text>
+            <text x="315" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote Sender</text>
+            <text x="595" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote Receiver</text>
+            <line x1="100" y1="60" x2="100" y2="250" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="315" y1="60" x2="315" y2="250" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="595" y1="60" x2="595" y2="250" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="100" y1="95" x2="315" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-transfer)" />
+            <text x="138" y="86" font-family="Arial" font-size="13">initTransfer(destDepositHash, tokenType, amount)</text>
+
+            <line x1="315" y1="125" x2="470" y2="125" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-transfer-red)" />
+            <rect x="475" y="100" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="625" y="120" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">TransferInitiated</text>
+            <text x="625" y="136" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(149)</text>
+
+            <line x1="315" y1="180" x2="595" y2="180" stroke="#475569" stroke-width="2" marker-end="url(#arrow-transfer)" />
+            <text x="380" y="171" font-family="Arial" font-size="13">offerTransfer(tokenType, amount, senderDepositHash)</text>
+
+            <line x1="595" y1="210" x2="440" y2="210" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-transfer-red)" />
+            <rect x="445" y="185" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="595" y="205" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">TransferReceived</text>
+            <text x="595" y="221" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(150)</text>
+
+            <line x1="595" y1="265" x2="315" y2="265" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-transfer)" />
+            <text x="425" y="256" font-family="Arial" font-size="13">onTransferAccepted()</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 250" role="img" aria-label="Transfer recovery flows">
+            <defs>
+              <marker id="arrow-transfer-mini" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="120" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="220" y="20" width="190" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="490" y="20" width="210" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="90" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Owner</text>
+            <text x="315" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote Sender</text>
+            <text x="595" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote Receiver</text>
+            <line x1="90" y1="60" x2="90" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="315" y1="60" x2="315" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="595" y1="60" x2="595" y2="180" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="315" y1="95" x2="595" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-transfer-mini)" />
+            <text x="390" y="86" font-family="Arial" font-size="13">offerTransfer(...)</text>
+            <rect x="155" y="112" width="360" height="34" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="335" y="134" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Если этот вызов bounce-ится, sender `onBounce()` возвращает сумму в `_balance` без внешнего event-object.</text>
+
+            <line x1="90" y1="175" x2="315" y2="175" stroke="#475569" stroke-width="2" marker-end="url(#arrow-transfer-mini)" />
+            <text x="145" y="166" font-family="Arial" font-size="13">clearTransferBusy()</text>
+            <rect x="410" y="158" width="360" height="34" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="590" y="180" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Use only when receiver already credited transfer and ack `onTransferAccepted()` was lost.</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>9. Wallet Withdraw, Coupon, Local Admin, Recovery</h2>
+        <p>Не все externally reachable entrypoint-ы ведут в большой market-flow. У `PrivateNote`, `RootPN` и root-контрактов есть отдельные кошельковые и административные ветки: withdraw, transfer recovery, owner rotation, coupon issuance и code upgrade.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 620" role="img" aria-label="Wallet withdraw, coupon, local admin and recovery flows">
+            <defs>
+              <marker id="arrow-wallet" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-wallet-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="210" y="20" width="170" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="430" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="630" y="20" width="130" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="810" y="20" width="180" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="95" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Owner</text>
+            <text x="295" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="505" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">RootPN</text>
+            <text x="695" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Wallet</text>
+            <text x="900" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Other PN / Root</text>
+            <line x1="95" y1="60" x2="95" y2="540" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="295" y1="60" x2="295" y2="540" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="505" y1="60" x2="505" y2="540" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="695" y1="60" x2="695" y2="540" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="900" y1="60" x2="900" y2="540" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="95" y1="95" x2="295" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="146" y="86" font-family="Arial" font-size="13">changeOwner(newPubkey)</text>
+            <line x1="295" y1="125" x2="450" y2="125" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-wallet-red)" />
+            <rect x="455" y="100" width="300" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="605" y="120" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OwnerChanged</text>
+            <text x="605" y="136" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(112)</text>
+
+            <line x1="95" y1="170" x2="295" y2="170" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="138" y="161" font-family="Arial" font-size="13">generateCoupon(tokenType)</text>
+            <path d="M 295 205 C 360 205 360 235 295 235" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="306" y="197" font-family="Arial" font-size="13">local coupon + debt state</text>
+            <path d="M 295 265 C 360 265 360 295 295 295" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="304" y="257" font-family="Arial" font-size="13">discardCoupon()</text>
+            <path d="M 295 325 C 360 325 360 355 295 355" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="310" y="317" font-family="Arial" font-size="13">deleteStake()</text>
+
+            <line x1="95" y1="395" x2="295" y2="395" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="150" y="386" font-family="Arial" font-size="13">withdrawTokens(destWallet, tokenType)</text>
+            <line x1="295" y1="430" x2="505" y2="430" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="360" y="421" font-family="Arial" font-size="13">RootPN.withdrawTokens(...)</text>
+            <line x1="505" y1="465" x2="695" y2="465" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="558" y="456" font-family="Arial" font-size="13">transfer currencies</text>
+            <line x1="505" y1="500" x2="295" y2="500" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-wallet)" />
+            <text x="350" y="491" font-family="Arial" font-size="13">revertWithdraw(...) on insufficient RootPN liquidity</text>
+
+            <line x1="95" y1="555" x2="295" y2="555" stroke="#475569" stroke-width="2" marker-end="url(#arrow-wallet)" />
+            <text x="155" y="546" font-family="Arial" font-size="13">clearTransferBusy()</text>
+            <rect x="585" y="515" width="380" height="62" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="775" y="540" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Все показанные здесь wallet-операции, кроме `changeOwner(...)`,</text>
+            <text x="775" y="558" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">меняют локальный state, но внешних event-object в текущем коде не создают.</text>
+          </svg>
+        </div>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 290" role="img" aria-label="PrivateNote receive and root upgrade flows">
+            <defs>
+              <marker id="arrow-admin-mini" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+            </defs>
+            <rect x="30" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="220" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="420" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="620" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="820" y="20" width="170" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="100" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Funder / Root Owner</text>
+            <text x="295" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PrivateNote</text>
+            <text x="495" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">RootPN</text>
+            <text x="695" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">RootOracle</text>
+            <text x="905" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">After Upgrade</text>
+            <line x1="100" y1="60" x2="100" y2="210" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="295" y1="60" x2="295" y2="210" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="495" y1="60" x2="495" y2="210" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="695" y1="60" x2="695" y2="210" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="905" y1="60" x2="905" y2="210" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="100" y1="95" x2="295" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-admin-mini)" />
+            <text x="145" y="86" font-family="Arial" font-size="13">receive()</text>
+            <rect x="330" y="78" width="310" height="34" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="485" y="100" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">`PrivateNote.receive()` принимает native funds, но не кредитует торговый `_balance`.</text>
+
+            <line x1="100" y1="155" x2="495" y2="155" stroke="#475569" stroke-width="2" marker-end="url(#arrow-admin-mini)" />
+            <text x="225" y="146" font-family="Arial" font-size="13">RootPN.updateCode(newcode, cell)</text>
+            <line x1="100" y1="195" x2="695" y2="195" stroke="#475569" stroke-width="2" marker-end="url(#arrow-admin-mini)" />
+            <text x="300" y="186" font-family="Arial" font-size="13">RootOracle.updateCode(newcode, cell)</text>
+
+            <rect x="720" y="148" width="280" height="60" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="860" y="173" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Оба upgrade-flow делают `setcode` / `setCurrentCode` / `onCodeUpgrade`</text>
+            <text x="860" y="191" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">и не создают внешних event-object.</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>10. Terminal Shutdown And Last Claim Tail</h2>
+        <p>Последний claim не просто завершает payout конкретному победителю. Если после него `_totalWinPool == 0`, `PMP` закрывает рынок: отправляет residual deployer-у, запускает `OrderBook.shutdown()` и сам уходит в `selfdestruct`.</p>
+        <div class="diagram">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 600" role="img" aria-label="Terminal shutdown and last claim tail">
+            <defs>
+              <marker id="arrow-tail" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#475569" />
+              </marker>
+              <marker id="arrow-tail-red" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+                <polygon points="0,0 12,4 0,8" fill="#b91c1c" />
+              </marker>
+            </defs>
+            <rect x="20" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="220" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="410" y="20" width="140" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="600" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <rect x="800" y="20" width="150" height="40" rx="10" fill="#ecfeff" stroke="#0f766e" stroke-width="2" />
+            <text x="95" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Winner PN</text>
+            <text x="290" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">PMP</text>
+            <text x="480" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Deployer PN</text>
+            <text x="675" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">OrderBook</text>
+            <text x="875" y="45" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700">Other PNs</text>
+            <line x1="95" y1="60" x2="95" y2="480" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="290" y1="60" x2="290" y2="480" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="480" y1="60" x2="480" y2="480" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="675" y1="60" x2="675" y2="480" stroke="#94a3b8" stroke-dasharray="6 6" />
+            <line x1="875" y1="60" x2="875" y2="480" stroke="#94a3b8" stroke-dasharray="6 6" />
+
+            <line x1="95" y1="95" x2="290" y2="95" stroke="#475569" stroke-width="2" marker-end="url(#arrow-tail)" />
+            <text x="145" y="86" font-family="Arial" font-size="13">claim(...)</text>
+            <line x1="290" y1="135" x2="95" y2="135" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-tail)" />
+            <text x="150" y="126" font-family="Arial" font-size="13">onClaimAccepted(...)</text>
+            <line x1="290" y1="170" x2="455" y2="170" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-tail-red)" />
+            <rect x="460" y="145" width="285" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="602" y="165" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">ClaimProcessed</text>
+            <text x="602" y="181" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(121)</text>
+
+            <rect x="135" y="205" width="280" height="44" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
+            <text x="275" y="232" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">only when `_totalWinPool == 0`</text>
+
+            <line x1="290" y1="275" x2="480" y2="275" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-tail)" />
+            <text x="340" y="266" font-family="Arial" font-size="13">acceptFee(residual)</text>
+            <line x1="290" y1="315" x2="675" y2="315" stroke="#475569" stroke-width="2" marker-end="url(#arrow-tail)" />
+            <text x="430" y="306" font-family="Arial" font-size="13">shutdown()</text>
+            <line x1="675" y1="355" x2="875" y2="355" stroke="#475569" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow-tail)" />
+            <text x="726" y="346" font-family="Arial" font-size="13">onOrderCancelled(...)</text>
+            <line x1="675" y1="390" x2="825" y2="390" stroke="#b91c1c" stroke-width="2" marker-end="url(#arrow-tail-red)" />
+            <rect x="725" y="365" width="245" height="48" rx="10" fill="#fff1f2" stroke="#b91c1c" stroke-width="3" />
+            <text x="847" y="385" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">OrderCancelled</text>
+            <text x="847" y="401" text-anchor="middle" font-family="Arial" font-size="10.5" font-weight="700" fill="#b91c1c">dest: address.makeAddrExtern(144)</text>
+
+            <path d="M 675 430 C 740 430 740 460 675 460" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-tail)" />
+            <text x="687" y="422" font-family="Arial" font-size="13">self-call shutdown() batches</text>
+            <path d="M 290 465 C 355 465 355 495 290 495" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-tail)" />
+            <text x="300" y="457" font-family="Arial" font-size="13">selfdestruct(_deployer)</text>
+
+          </svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>11. Internal Callbacks With State Changes</h2>
+        <p>Не все важные переходы в системе оформлены внешними event-object’ами. Ниже собраны внутренние callbacks, которые реально меняют state контрактов и поэтому важны для чтения flow рядом с sequence diagrams.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Где возникает</th>
+              <th>Internal callback</th>
+              <th>Что меняет</th>
+              <th>Внешний event рядом</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>PMP</strong> первый `approveEvent()`</td>
+              <td>`PrivateNote.onInitialStakesAccepted(...)`</td>
+              <td>Фиксирует initial stakes deployer-а по outcome-массивам и снимает начальную неопределенность вокруг `_busy` у creator note.</td>
+              <td>Позже в том же approval lifecycle может появиться `ApprovedByOracle`, но только на последнем oracle.</td>
+            </tr>
+            <tr>
+              <td><strong>PMP</strong> reject / invalid initial stakes</td>
+              <td>`PrivateNote.onInitialStakesFailed(...)`</td>
+              <td>Возвращает deployer-у initial stakes и размораживает note, если рынок не смог пройти инициализацию.</td>
+              <td>Обычно рядом идет `PMPCancelled`, но у callback собственного event-object нет.</td>
+            </tr>
+            <tr>
+              <td><strong>PMP</strong> `_ensureFrozen()`</td>
+              <td>`PrivateNote.onPmpCleanRefund(...)`</td>
+              <td>Возвращает creator-у remainders clean-pools перед построением integer split/merge basket.</td>
+              <td>Следом идет `PoolsFrozen`.</td>
+            </tr>
+            <tr>
+              <td><strong>OrderBook</strong> reject place-path</td>
+              <td>`PrivateNote.onOrderRejected(...)`</td>
+              <td>Восстанавливает buy-lock или sell-lock, если заявка отвергнута на pre-validation или из-за переполненной очереди.</td>
+              <td>`Rejected` эмитится на стороне `OrderBook`.</td>
+            </tr>
+            <tr>
+              <td><strong>OrderBook</strong> batch place / cancel / cancel-all</td>
+              <td>`PrivateNote.onBatchComplete(...)`</td>
+              <td>Снимает `_pendingBatch*` защиту и очищает `_busy` после того, как весь batch уже dispatch-нут в callbacks.</td>
+              <td>Отдельного event-object нет; batch использует обычные `Queued` / `OrderPlaced` / `OrderCancelled` / `OrderFilled` по ходу обработки.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>12. Declared But Not Emitted</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Contract</th>
+              <th>Event</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Oracle</strong></td>
+              <td>`EventPublished(eventId, eventName)`</td>
+              <td>Объявлен, но в текущем коде ни один `emit` его не создает.</td>
+            </tr>
+            <tr>
+              <td><strong>PMP</strong></td>
+              <td>`NetworkFeeBurned(amount)`</td>
+              <td>Объявлен как reserved event, но сейчас не эмитится.</td>
+            </tr>
+            <tr>
+              <td><strong>PMP</strong></td>
+              <td>`NumOutcomesSet(numOutcomes)`</td>
+              <td>Объявлен, но `_numOutcomes` сейчас заполняется внутри `approveEvent()` без отдельного event.</td>
+            </tr>
+            <tr>
+              <td><strong>Nullifier</strong></td>
+              <td>Собственных `event` нет</td>
+              <td>Observability идет через `RootPN.NullifierDeployed`.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </body>
+</html>
