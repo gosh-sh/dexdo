@@ -131,10 +131,10 @@ Example:
 
 ```text
 canonicalQueryString = recvWindow=5000&timestamp=1710000000000
-canonicalRequestBody = {"symbol":"ETHUSDC","side":"BUY","quantity":"1.500000","price":"2500.00"}
+canonicalRequestBody = {"symbol":"PM-2026-ELECTION-YES-USDC","side":"BUY","quantity":"1.500000","price":"2500.00"}
 
 signature = HMAC_SHA256(
-  'recvWindow=5000&timestamp=1710000000000{"symbol":"ETHUSDC","side":"BUY","quantity":"1.500000","price":"2500.00"}',
+  'recvWindow=5000&timestamp=1710000000000{"symbol":"PM-2026-ELECTION-YES-USDC","side":"BUY","quantity":"1.500000","price":"2500.00"}',
   apiSecret
 )
 ```
@@ -208,7 +208,7 @@ Recommended common error codes:
 | List markets | `GET` | `/api/v1/markets` | `NONE` |
 | Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
 | Fetch account balance | `GET` | `/api/v1/account` | `USER_DATA` |
-| Create single limit order | `POST` | `/api/v1/order` | `TRADE` |
+| Create single order | `POST` | `/api/v1/order` | `TRADE` |
 | Cancel single order by ID | `DELETE` | `/api/v1/order` | `TRADE` |
 | Create batch orders | `POST` | `/api/v1/batchOrders` | `TRADE` |
 | Cancel batch orders by IDs | `DELETE` | `/api/v1/batchOrders` | `TRADE` |
@@ -366,18 +366,19 @@ POST /api/v1/order
 
 Security: `TRADE`
 
-Create a single limit order.
+Create a single order.
 
 Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
+| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
+| `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
-| `quantity` | DECIMAL | YES | Base asset quantity. Must follow `stepSize`. |
-| `price` | DECIMAL | YES | Limit price. Must follow `tickSize`. |
-| `type` | ENUM | NO | Only `LIMIT` is supported. Default: `LIMIT`. |
-| `timeInForce` | ENUM | NO | See [Time In Force](#time-in-force). Default: `GTC`. |
+| `quantity` | DECIMAL | YES | Base asset quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the collateral amount to spend. |
+| `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
+| `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
+| `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
 
 Signed query parameters:
 
@@ -391,8 +392,9 @@ Response:
 
 ```json
 {
-  "symbol": "ETHUSDC",
+  "symbol": "PM-2026-ELECTION-YES-USDC",
   "orderId": "123456789",
+  "clientOrderId": "mm-order-0001",
   "transactTime": 1710000000000,
   "price": "2500.00",
   "origQty": "1.500000",
@@ -418,7 +420,7 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
+| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
 | `orderId` | STRING | YES | Order ID to cancel. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
@@ -428,7 +430,7 @@ Response:
 
 ```json
 {
-  "symbol": "ETHUSDC",
+  "symbol": "PM-2026-ELECTION-YES-USDC",
   "orderId": "123456789",
   "price": "2500.00",
   "origQty": "1.500000",
@@ -450,7 +452,7 @@ POST /api/v1/batchOrders
 
 Security: `TRADE`
 
-Create multiple limit orders in one request.
+Create multiple orders in one request.
 
 Body parameters:
 
@@ -462,10 +464,13 @@ Each order item:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
+| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
+| `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
-| `quantity` | DECIMAL | YES | Base asset quantity. Must follow `stepSize`. |
-| `price` | DECIMAL | YES | Limit price. Must follow `tickSize`. |
+| `quantity` | DECIMAL | YES | Base asset quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the collateral amount to spend. |
+| `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
+| `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
+| `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
 
 Signed query parameters:
 
@@ -481,16 +486,22 @@ Request body:
 {
   "orders": [
     {
-      "symbol": "ETHUSDC",
+      "symbol": "PM-2026-ELECTION-YES-USDC",
+      "newOrderClientId": "mm-order-0001",
       "side": "BUY",
       "quantity": "1.500000",
-      "price": "2500.00"
+      "price": "2500.00",
+      "type": "LIMIT",
+      "timeInForce": "GTC"
     },
     {
-      "symbol": "ETHUSDC",
+      "symbol": "PM-2026-ELECTION-YES-USDC",
+      "newOrderClientId": "mm-order-0002",
       "side": "SELL",
       "quantity": "0.750000",
-      "price": "2600.00"
+      "price": "2600.00",
+      "type": "LIMIT",
+      "timeInForce": "POST_ONLY"
     }
   ]
 }
@@ -501,8 +512,9 @@ Response:
 ```json
 [
   {
-    "symbol": "ETHUSDC",
+    "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
+    "clientOrderId": "mm-order-0001",
     "transactTime": 1710000000000,
     "price": "2500.00",
     "origQty": "1.500000",
@@ -513,8 +525,9 @@ Response:
     "side": "BUY"
   },
   {
-    "symbol": "ETHUSDC",
+    "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456790",
+    "clientOrderId": "mm-order-0002",
     "transactTime": 1710000000000,
     "price": "2600.00",
     "origQty": "0.750000",
@@ -544,7 +557,7 @@ Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
+| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
 | `orderIds` | ARRAY | YES | List of order IDs to cancel. Max: `20`. |
 
 Signed query parameters:
@@ -559,7 +572,7 @@ Request body:
 
 ```json
 {
-  "symbol": "ETHUSDC",
+  "symbol": "PM-2026-ELECTION-YES-USDC",
   "orderIds": ["123456789", "123456790"]
 }
 ```
@@ -569,15 +582,29 @@ Response:
 ```json
 [
   {
-    "symbol": "ETHUSDC",
+    "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
+    "price": "2500.00",
+    "origQty": "1.500000",
+    "executedQty": "0.000000",
     "status": "CANCELED",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "BUY",
+    "time": 1710000000000,
     "updateTime": 1710000010000
   },
   {
-    "symbol": "ETHUSDC",
+    "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456790",
+    "price": "2600.00",
+    "origQty": "0.750000",
+    "executedQty": "0.000000",
     "status": "CANCELED",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "SELL",
+    "time": 1710000000000,
     "updateTime": 1710000010000
   }
 ]
@@ -597,7 +624,7 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
+| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
 | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
@@ -607,7 +634,7 @@ Response:
 ```json
 [
   {
-    "symbol": "ETHUSDC",
+    "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
     "status": "CANCELED",
     "updateTime": 1710000010000
@@ -639,7 +666,7 @@ Response:
 ```json
 [
   {
-    "symbol": "ETHUSDC",
+    "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
     "price": "2500.00",
     "origQty": "1.500000",
@@ -682,7 +709,7 @@ Response:
 ```json
 [
   {
-    "symbol": "ETHUSDC",
+    "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
     "price": "2500.00",
     "origQty": "1.500000",
@@ -708,16 +735,16 @@ Order creation MUST validate:
 | `price` is a multiple of `tickSize` | `/api/v1/markets` |
 | `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/markets` |
 | `quantity` is a multiple of `stepSize` | `/api/v1/markets` |
-| `price * quantity` is at least `minNotional` | `/api/v1/markets` |
+| For `LIMIT` orders, `price * quantity` is at least `minNotional`; for `MARKET` buy orders, `quantity` is at least `minNotional` | `/api/v1/markets` |
 | Account has enough available balance | `/api/v1/account` |
 
 ## Minimal Trading Scope
 
 Supported in this API version:
 
-- Limit orders only.
+- Limit and market orders.
 - Buy and sell sides only.
-- GTC time in force only.
+- `GTC`, `IOC`, `FOK`, and `POST_ONLY` for limit orders.
 - Public market data.
 - Account balances.
 - Open order and closed order history.
@@ -726,7 +753,6 @@ Supported in this API version:
 
 Not included in this API version:
 
-- Market orders.
 - Stop orders.
 - OCO orders.
 - Iceberg orders.
