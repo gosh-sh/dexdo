@@ -321,7 +321,7 @@ GET /api/v1/account
 
 Security: `USER_DATA`
 
-Fetch account balances.
+Fetch account collateral balances and outcome-token balances.
 
 Parameters:
 
@@ -351,6 +351,13 @@ Response:
       "asset": "USDC",
       "free": "25000.00",
       "locked": "3750.00"
+    }
+  ],
+  "outcome_balances": [
+    {
+      "asset": "PM-2026-ELECTION-YES",
+      "free": "10.00",
+      "lockedInOrders": "1000.00"
     }
   ]
 }
@@ -618,7 +625,7 @@ DELETE /api/v1/openOrders
 
 Security: `TRADE`
 
-Cancel all open orders on a market pair.
+Cancel all open orders on one outcome symbol.
 
 Parameters:
 
@@ -636,7 +643,14 @@ Response:
   {
     "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
+    "price": "2500.00",
+    "origQty": "1.500000",
+    "executedQty": "0.000000",
     "status": "CANCELED",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "BUY",
+    "time": 1710000000000,
     "updateTime": 1710000010000
   }
 ]
@@ -731,11 +745,12 @@ Order creation MUST validate:
 | Rule | Source |
 | --- | --- |
 | `symbol` exists and has `status = TRADING` | `/api/v1/markets` |
-| `price` decimal places do not exceed `pricePrecision` | `/api/v1/markets` |
-| `price` is a multiple of `tickSize` | `/api/v1/markets` |
+| For `LIMIT` orders, `price` decimal places do not exceed `pricePrecision` | `/api/v1/markets` |
+| For `LIMIT` orders, `price` is a multiple of `tickSize` | `/api/v1/markets` |
 | `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/markets` |
 | `quantity` is a multiple of `stepSize` | `/api/v1/markets` |
-| For `LIMIT` orders, `price * quantity` is at least `minNotional`; for `MARKET` buy orders, `quantity` is at least `minNotional` | `/api/v1/markets` |
+| For `LIMIT` orders, `price * quantity` is at least `minNotional` | `/api/v1/markets` |
+| For `MARKET` orders, order size (`quantity * price`) is at least `minNotional` | `/api/v1/markets` |
 | Account has enough available balance | `/api/v1/account` |
 
 ## Minimal Trading Scope
@@ -749,16 +764,9 @@ Supported in this API version:
 - Account balances.
 - Open order and closed order history.
 - Single and batch order creation.
-- Single, batch, and pair-wide order cancellation.
+- Single, batch, and symbol-wide order cancellation.
 
-Not included in this API version:
+Not Included in this API version:
 
-- Stop orders.
-- OCO orders.
-- Iceberg orders.
-- Trailing orders.
-- Post-only orders.
-- Margin or borrow endpoints.
-- Deposits and withdrawals.
-- WebSocket streams.
-- User data stream listen keys.
+- WebSocket for fills.
+- Maker and taker fees per market. This can be exposed either in `/api/v1/markets` as `makerFee` and `takerFee`, or via a separate `/api/v1/fees` endpoint.
