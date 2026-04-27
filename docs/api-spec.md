@@ -2,6 +2,7 @@
   - [Reference Style](#reference-style)
   - [Base URL](#base-url)
   - [Data Types](#data-types)
+  - [Symbol Model](#symbol-model)
   - [Security Types](#security-types)
     - [Signature Formation](#signature-formation)
   - [Common Enums](#common-enums)
@@ -65,12 +66,31 @@ Content-Type: application/json
 
 | Type | Description | Example |
 | --- | --- | --- |
-| `STRING` | UTF-8 string | `"ETHUSDC"` |
-| `DECIMAL` | Decimal number encoded as string | `"2500.12"` |
+| `STRING` | UTF-8 string | `"PM-2026-ELECTION-NO-USDC"` |
+| `DECIMAL` | Decimal number encoded as string | `"0.615"` |
 | `LONG` | Integer timestamp or ID | `1710000000000` |
+| `INT` | JSON integer | `5` |
+| `BOOLEAN` | JSON boolean | `true` |
 | `ARRAY` | JSON array | `[]` |
+| `OBJECT` | JSON object | `{}` |
 
-All asset amounts and prices MUST be returned as strings to avoid floating point precision loss.
+All asset amounts and human-facing prices MUST be encoded as strings to avoid
+floating-point precision loss.
+
+## Symbol Model
+
+A trading symbol represents one outcome token inside one prediction market.
+
+Each prediction market exposes separate outcome symbols, for example:
+
+```text
+PM-2026-ELECTION-NO-USDC
+PM-2026-ELECTION-YES-USDC
+```
+
+`outcomeId` is part of the symbol identity. For binary markets, `NO` uses
+`outcomeId = 0` and `YES` uses `outcomeId = 1`. API requests use `symbol`; they
+do not pass `outcomeId` as a separate trading parameter in the MVP.
 
 ## Security Types
 
