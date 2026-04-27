@@ -14,8 +14,7 @@
     - [Order](#order)
   - [Endpoint Summary](#endpoint-summary)
   - [Market Data Endpoints](#market-data-endpoints)
-    - [Exchange Information](#exchange-information)
-    - [Ticker](#ticker)
+    - [Markets](#markets)
     - [Order Book](#order-book)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
@@ -219,8 +218,7 @@ Fields:
 
 | Function | Method | Path | Security |
 | --- | --- | --- | --- |
-| List markets and limits | `GET` | `/api/v1/exchangeInfo` | `NONE` |
-| Fetch ticker | `GET` | `/api/v1/ticker/24hr` | `NONE` |
+| List markets | `GET` | `/api/v1/markets` | `NONE` |
 | Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
 | Fetch account balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Create single limit order | `POST` | `/api/v1/order` | `TRADE` |
@@ -233,75 +231,58 @@ Fields:
 
 ## Market Data Endpoints
 
-### Exchange Information
+### Markets
 
 ```http
-GET /api/v1/exchangeInfo
+GET /api/v1/markets
 ```
 
-Security: `NONE`
+Fetch available prediction markets and their outcome symbols.
 
-Fetch available markets, pair metadata, asset precision, price precision, amount precision,
-tick size, amount step size, and minimum order notional.
-
-Parameters:
+Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | NO | Return metadata for one symbol only. Example: `ETHUSDC`. |
+| `marketId` | STRING | NO | Return one market only. |
 
 Response:
 
 ```json
 {
-  "timezone": "UTC",
   "serverTime": 1710000000000,
-  "symbols": [
+  "markets": [
     {
-      "symbol": "ETHUSDC",
+      "marketId": "PM-2026-ELECTION",
+      "name": "2026 Election",
       "status": "TRADING",
-      "baseAsset": "ETH",
       "quoteAsset": "USDC",
-      "baseAssetPrecision": 18,
-      "quoteAssetPrecision": 6,
-      "pricePrecision": 18,
-      "quantityPrecision": 18,
-      "tickSize": "0.000000000000000001",
-      "stepSize": "0.000001",
-      "minNotional": "10.00"
+      "marketAddress": "0:market-address",
+      "outcomes": [
+        {
+          "outcomeId": 0,
+          "outcomeName": "NO",
+          "symbol": "PM-2026-ELECTION-NO-USDC",
+          "pricePrecision": 3,
+          "quantityPrecision": 2,
+          "tickSize": "0.001",
+          "stepSize": "0.01",
+          "minNotional": "1",
+          "maxBatchSize": 5
+        },
+        {
+          "outcomeId": 1,
+          "outcomeName": "YES",
+          "symbol": "PM-2026-ELECTION-YES-USDC",
+          "pricePrecision": 3,
+          "quantityPrecision": 2,
+          "tickSize": "0.001",
+          "stepSize": "0.01",
+          "minNotional": "1",
+          "maxBatchSize": 5
+        }
+      ]
     }
   ]
-}
-```
-
-### Ticker
-
-```http
-GET /api/v1/ticker/24hr
-```
-
-Security: `NONE`
-
-Fetch last price, best bid, best ask, and 24h volume.
-
-Parameters:
-
-| Name | Type | Mandatory | Description |
-| --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
-
-Response:
-
-```json
-{
-  "symbol": "ETHUSDC",
-  "lastPrice": "2501.25",
-  "bidPrice": "2501.20",
-  "askPrice": "2501.30",
-  "volume": "12345.678900",
-  "quoteVolume": "30900123.45",
-  "openTime": 1709913600000,
-  "closeTime": 1710000000000
 }
 ```
 
@@ -311,29 +292,28 @@ Response:
 GET /api/v1/depth
 ```
 
-Security: `NONE`
+Fetch bids and asks for one outcome symbol.
 
-Fetch order book bids and asks with requested depth.
-
-Parameters:
+Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
+| `symbol` | STRING | YES | Outcome symbol. |
 | `limit` | INT | NO | Number of price levels per side. Default: `100`. Max: `1000`. |
 
 Response:
 
 ```json
 {
+  "symbol": "PM-2026-ELECTION-YES-USDC",
   "lastUpdateId": 1027024,
   "bids": [
-    ["2501.20", "4.125000"],
-    ["2501.10", "0.750000"]
+    ["0.614", "100.00"],
+    ["0.613", "25.50"]
   ],
   "asks": [
-    ["2501.30", "2.000000"],
-    ["2501.40", "1.500000"]
+    ["0.616", "50.00"],
+    ["0.617", "75.25"]
   ]
 }
 ```
@@ -736,12 +716,12 @@ Order creation MUST validate:
 
 | Rule | Source |
 | --- | --- |
-| `symbol` exists and has `status = TRADING` | `/api/v1/exchangeInfo` |
-| `price` decimal places do not exceed `pricePrecision` | `/api/v1/exchangeInfo` |
-| `price` is a multiple of `tickSize` | `/api/v1/exchangeInfo` |
-| `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/exchangeInfo` |
-| `quantity` is a multiple of `stepSize` | `/api/v1/exchangeInfo` |
-| `price * quantity` is at least `minNotional` | `/api/v1/exchangeInfo` |
+| `symbol` exists and has `status = TRADING` | `/api/v1/markets` |
+| `price` decimal places do not exceed `pricePrecision` | `/api/v1/markets` |
+| `price` is a multiple of `tickSize` | `/api/v1/markets` |
+| `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/markets` |
+| `quantity` is a multiple of `stepSize` | `/api/v1/markets` |
+| `price * quantity` is at least `minNotional` | `/api/v1/markets` |
 | Account has enough available balance | `/api/v1/account` |
 
 ## Minimal Trading Scope
