@@ -124,7 +124,8 @@ canonicalQueryString + canonicalRequestBody
 ```
 
 - `canonicalQueryString` contains all query parameters except `signature`, sorted by key.
-- `canonicalRequestBody` is the minified JSON body for requests with a body, or an empty string.
+- `canonicalRequestBody` is the exact minified JSON body string sent over the wire for requests with a body, or an empty string.
+- JSON keys in `canonicalRequestBody` are not re-sorted. The signature MUST be computed over the same key order and bytes that are sent in the request body.
 - The signature is HMAC SHA256 using the API secret.
 
 Formula:
@@ -389,7 +390,7 @@ Body parameters:
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
-| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. |
+| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
 | `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
 | `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
@@ -486,7 +487,7 @@ Each order item:
 | --- | --- | --- | --- |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
-| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. |
+| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
 | `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
 | `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
@@ -777,6 +778,7 @@ Order creation MUST validate:
 | `quantity` is a multiple of `stepSize` | `/api/v1/markets` |
 | For `LIMIT` orders, `price * quantity` is at least `minNotional` | `/api/v1/markets` |
 | For `MARKET` buy orders, `quantity` in the market `quoteAsset` is at least `minNotional` | `/api/v1/markets` |
+| For `MARKET` buy orders, `quantityPrecision` and `stepSize` apply to the quote-asset spend amount, not to outcome-token units | `/api/v1/markets` |
 | Account has enough available balance | `/api/v1/account` |
 
 ## Minimal Trading Scope
