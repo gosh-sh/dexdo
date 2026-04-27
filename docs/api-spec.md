@@ -22,7 +22,7 @@
     - [Cancel Order](#cancel-order)
     - [New Batch Orders](#new-batch-orders)
     - [Cancel Batch Orders](#cancel-batch-orders)
-    - [Cancel All Open Orders On Symbol](#cancel-all-open-orders-on-symbol)
+    - [Cancel All Open Orders On Outcome](#cancel-all-open-orders-on-outcome)
     - [Current Open Orders](#current-open-orders)
     - [Closed And Canceled Orders](#closed-and-canceled-orders)
   - [Validation Rules](#validation-rules)
@@ -77,24 +77,25 @@ floating-point precision loss.
 
 ## Symbol Model
 
-Dodex uses the following API identifiers:
+Dodex uses the following market identifiers:
 
-- `marketId` is a unique identifier of the market.
+- `marketAddress` is the unique on-chain address of the market and is used in requests. Example: `0:market-address`.
 - `marketName` is the market name. Example: `PM-2026-ELECTION`.
-- `outcomeId` is a unique identifier of the outcome.
+- `outcomeId` is the numeric identifier of the outcome inside the market. Example: `1`.
 - `outcomeSymbol` is the outcome symbol and is formed as `<marketName>-<OUTCOME_NAME>`. Example: `PM-2026-ELECTION-YES`.
-- `orderBookId` is a unique identifier of the order book.
-- `orderBookName` is the order book name and is formed as `<outcomeSymbol>-<QUOTE_ASSET>`. Example: `PM-2026-ELECTION-YES-USDC`.
+- `symbol` is the order book symbol and is formed as `<outcomeSymbol>-<QUOTE_ASSET>`. Example: `PM-2026-ELECTION-YES-USDC`.
+
+Requests that target one order book use `marketAddress` and `outcomeId`.
+Responses return the same identifiers together with `symbol` where relevant.
 
 Examples:
 
 ```text
-marketId      = 7e2f3d9c-1b7a-4f90-9b5c-11c2d9c4a001
+marketAddress = 0:market-address
 marketName    = PM-2026-ELECTION
-outcomeId     = 4f5d3a0e-90a2-4b78-9d24-55a88f3f1001
+outcomeId     = 1
 outcomeSymbol = PM-2026-ELECTION-YES
-orderBookId   = c1b8b7c2-3e54-4f0c-92bb-26f8f8f4b001
-orderBookName = PM-2026-ELECTION-YES-USDC
+symbol        = PM-2026-ELECTION-YES-USDC
 ```
 
 
@@ -136,14 +137,14 @@ Formula:
 signature = HMAC_SHA256(canonicalQueryString + canonicalRequestBody, apiSecret)
 ```
 
-Example:
+Example for `POST /api/v1/order`:
 
 ```text
 canonicalQueryString = recvWindow=5000&timestamp=1710000000000
-canonicalRequestBody = {"symbol":"PM-2026-ELECTION-YES-USDC","side":"BUY","quantity":"1.500000","price":"2500.00"}
+canonicalRequestBody = {"marketAddress":"0:market-address","outcomeId":1,"side":"BUY","quantity":"1.500000","price":"0.615","type":"LIMIT","timeInForce":"GTC"}
 
 signature = HMAC_SHA256(
-  'recvWindow=5000&timestamp=1710000000000{"symbol":"PM-2026-ELECTION-YES-USDC","side":"BUY","quantity":"1.500000","price":"2500.00"}',
+  'recvWindow=5000&timestamp=1710000000000{"marketAddress":"0:market-address","outcomeId":1,"side":"BUY","quantity":"1.500000","price":"0.615","type":"LIMIT","timeInForce":"GTC"}',
   apiSecret
 )
 ```
@@ -154,8 +155,8 @@ signature = HMAC_SHA256(
 
 | Value | Description |
 | --- | --- |
-| `BUY` | Buy the symbol's outcome token using collateral. |
-| `SELL` | Sell the symbol's outcome token for collateral. |
+| `BUY` | Buy the selected outcome token using the market quote asset. |
+| `SELL` | Sell the selected outcome token for the market quote asset. |
 
 ### Order Type
 
@@ -192,7 +193,7 @@ All errors use the same response format.
 ```json
 {
   "code": -1121,
-  "msg": "Invalid symbol."
+  "msg": "Invalid market or outcome."
 }
 ```
 
@@ -206,7 +207,7 @@ Recommended common error codes:
 | `-1022` | Invalid signature. |
 | `-1102` | Mandatory parameter was not sent. |
 | `-1111` | Precision is over the maximum defined for this asset. |
-| `-1121` | Invalid symbol. |
+| `-1121` | Invalid market or outcome. |
 | `-2010` | Order would immediately fail validation. |
 | `-2011` | Unknown order. |
 
@@ -221,7 +222,7 @@ Recommended common error codes:
 | Cancel single order by ID | `DELETE` | `/api/v1/order` | `TRADE` |
 | Create batch orders | `POST` | `/api/v1/batchOrders` | `TRADE` |
 | Cancel batch orders by IDs | `DELETE` | `/api/v1/batchOrders` | `TRADE` |
-| Cancel all open orders on pair | `DELETE` | `/api/v1/openOrders` | `TRADE` |
+| Cancel all open orders on one outcome | `DELETE` | `/api/v1/openOrders` | `TRADE` |
 | Fetch open orders | `GET` | `/api/v1/openOrders` | `USER_DATA` |
 | Fetch closed and canceled orders | `GET` | `/api/v1/allOrders` | `USER_DATA` |
 
@@ -233,13 +234,13 @@ Recommended common error codes:
 GET /api/v1/markets
 ```
 
-Fetch available prediction markets and their outcome symbols.
+Fetch available prediction markets and their outcomes.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketId` | STRING | NO | Return one market only. |
+| `marketAddress` | STRING | NO | Return one market only. |
 
 Response:
 
@@ -248,15 +249,15 @@ Response:
   "serverTime": 1710000000000,
   "markets": [
     {
-      "marketId": "PM-2026-ELECTION",
-      "name": "2026 Election",
-      "status": "TRADING",
       "quoteAsset": "USDC",
       "marketAddress": "0:market-address",
+      "marketName": "PM-2026-ELECTION",
+      "status": "TRADING",
       "outcomes": [
         {
           "outcomeId": 0,
           "outcomeName": "NO",
+          "outcomeSymbol": "PM-2026-ELECTION-NO",
           "symbol": "PM-2026-ELECTION-NO-USDC",
           "pricePrecision": 3,
           "quantityPrecision": 2,
@@ -268,6 +269,7 @@ Response:
         {
           "outcomeId": 1,
           "outcomeName": "YES",
+          "outcomeSymbol": "PM-2026-ELECTION-YES",
           "symbol": "PM-2026-ELECTION-YES-USDC",
           "pricePrecision": 3,
           "quantityPrecision": 2,
@@ -288,19 +290,22 @@ Response:
 GET /api/v1/depth
 ```
 
-Fetch bids and asks for one outcome symbol.
+Fetch bids and asks for one market outcome.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Outcome symbol. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `outcomeId` | INT | YES | Outcome identifier inside the market. Example: `1`. |
 | `limit` | INT | NO | Number of price levels per side. Default: `100`. Max: `1000`. |
 
 Response:
 
 ```json
 {
+  "marketAddress": "0:market-address",
+  "outcomeId": 1,
   "symbol": "PM-2026-ELECTION-YES-USDC",
   "lastUpdateId": 1027024,
   "bids": [
@@ -352,7 +357,7 @@ Response:
   "updateTime": 1710000000000,
   "balances": [
     {
-      "asset": "ETH",
+      "asset": "NACKL",
       "free": "10.000000",
       "locked": "1.500000"
     },
@@ -364,6 +369,9 @@ Response:
   ],
   "outcome_balances": [
     {
+      "marketAddress": "0:market-address",
+      "outcomeId": 1,
+      "outcomeSymbol": "PM-2026-ELECTION-YES",
       "asset": "PM-2026-ELECTION-YES",
       "free": "10.00",
       "lockedInOrders": "1000.00"
@@ -388,10 +396,11 @@ Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `outcomeId` | INT | YES | Outcome identifier inside the market. Example: `1`. |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
-| `quantity` | DECIMAL | YES | Base asset quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the collateral amount to spend. |
+| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
 | `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
 | `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
@@ -408,11 +417,13 @@ Response:
 
 ```json
 {
+  "marketAddress": "0:market-address",
+  "outcomeId": 1,
   "symbol": "PM-2026-ELECTION-YES-USDC",
   "orderId": "123456789",
   "clientOrderId": "mm-order-0001",
   "transactTime": 1710000000000,
-  "price": "2500.00",
+  "price": "0.615",
   "origQty": "1.500000",
   "executedQty": "0.000000",
   "status": "NEW",
@@ -436,7 +447,8 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `outcomeId` | INT | YES | Outcome identifier inside the market. Example: `1`. |
 | `orderId` | STRING | YES | Order ID to cancel. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
@@ -446,9 +458,11 @@ Response:
 
 ```json
 {
+  "marketAddress": "0:market-address",
+  "outcomeId": 1,
   "symbol": "PM-2026-ELECTION-YES-USDC",
   "orderId": "123456789",
-  "price": "2500.00",
+  "price": "0.615",
   "origQty": "1.500000",
   "executedQty": "0.000000",
   "status": "CANCELED",
@@ -469,14 +483,15 @@ POST /api/v1/batchOrders
 Security: `TRADE`
 
 Create multiple orders in one request.
-All orders in the batch are submitted to the single order book identified by the top-level `symbol`.
+All orders in the batch are submitted to the single market outcome identified by the top-level `marketAddress` and `outcomeId`.
 
 Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
-| `orders` | ARRAY | YES | List of orders to create on the specified market. Max: `20`. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `outcomeId` | INT | YES | Outcome identifier inside the market. Example: `1`. |
+| `orders` | ARRAY | YES | List of orders to create on the specified market outcome. Max: `20`. |
 
 Each order item:
 
@@ -484,7 +499,7 @@ Each order item:
 | --- | --- | --- | --- |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
-| `quantity` | DECIMAL | YES | Base asset quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the collateral amount to spend. |
+| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
 | `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
 | `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
@@ -501,13 +516,14 @@ Request body:
 
 ```json
 {
-  "symbol": "PM-2026-ELECTION-YES-USDC",
+  "marketAddress": "0:market-address",
+  "outcomeId": 1,
   "orders": [
     {
       "newOrderClientId": "mm-order-0001",
       "side": "BUY",
       "quantity": "1.500000",
-      "price": "2500.00",
+      "price": "0.615",
       "type": "LIMIT",
       "timeInForce": "GTC"
     },
@@ -515,7 +531,7 @@ Request body:
       "newOrderClientId": "mm-order-0002",
       "side": "SELL",
       "quantity": "0.750000",
-      "price": "2600.00",
+      "price": "0.620",
       "type": "LIMIT",
       "timeInForce": "POST_ONLY"
     }
@@ -528,11 +544,13 @@ Response:
 ```json
 [
   {
+    "marketAddress": "0:market-address",
+    "outcomeId": 1,
     "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
     "clientOrderId": "mm-order-0001",
     "transactTime": 1710000000000,
-    "price": "2500.00",
+    "price": "0.615",
     "origQty": "1.500000",
     "executedQty": "0.000000",
     "status": "NEW",
@@ -541,15 +559,17 @@ Response:
     "side": "BUY"
   },
   {
+    "marketAddress": "0:market-address",
+    "outcomeId": 1,
     "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456790",
     "clientOrderId": "mm-order-0002",
     "transactTime": 1710000000000,
-    "price": "2600.00",
+    "price": "0.620",
     "origQty": "0.750000",
     "executedQty": "0.000000",
     "status": "NEW",
-    "timeInForce": "GTC",
+    "timeInForce": "POST_ONLY",
     "type": "LIMIT",
     "side": "SELL"
   }
@@ -573,7 +593,8 @@ Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `outcomeId` | INT | YES | Outcome identifier inside the market. Example: `1`. |
 | `orderIds` | ARRAY | YES | List of order IDs to cancel. Max: `20`. |
 
 Signed query parameters:
@@ -588,7 +609,8 @@ Request body:
 
 ```json
 {
-  "symbol": "PM-2026-ELECTION-YES-USDC",
+  "marketAddress": "0:market-address",
+  "outcomeId": 1,
   "orderIds": ["123456789", "123456790"]
 }
 ```
@@ -598,9 +620,11 @@ Response:
 ```json
 [
   {
+    "marketAddress": "0:market-address",
+    "outcomeId": 1,
     "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
-    "price": "2500.00",
+    "price": "0.615",
     "origQty": "1.500000",
     "executedQty": "0.000000",
     "status": "CANCELED",
@@ -611,13 +635,15 @@ Response:
     "updateTime": 1710000010000
   },
   {
+    "marketAddress": "0:market-address",
+    "outcomeId": 1,
     "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456790",
-    "price": "2600.00",
+    "price": "0.620",
     "origQty": "0.750000",
     "executedQty": "0.000000",
     "status": "CANCELED",
-    "timeInForce": "GTC",
+    "timeInForce": "POST_ONLY",
     "type": "LIMIT",
     "side": "SELL",
     "time": 1710000000000,
@@ -626,7 +652,7 @@ Response:
 ]
 ```
 
-### Cancel All Open Orders On Symbol
+### Cancel All Open Orders On Outcome
 
 ```http
 DELETE /api/v1/openOrders
@@ -634,13 +660,14 @@ DELETE /api/v1/openOrders
 
 Security: `TRADE`
 
-Cancel all open orders on one outcome symbol.
+Cancel all open orders on one market outcome.
 
 Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `outcomeId` | INT | YES | Outcome identifier inside the market. Example: `1`. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
 | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
@@ -650,9 +677,11 @@ Response:
 ```json
 [
   {
+    "marketAddress": "0:market-address",
+    "outcomeId": 1,
     "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
-    "price": "2500.00",
+    "price": "0.615",
     "origQty": "1.500000",
     "executedQty": "0.000000",
     "status": "CANCELED",
@@ -679,7 +708,8 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | NO | Market symbol. If omitted, returns open orders for all symbols. |
+| `marketAddress` | STRING | NO | Market address. If omitted, returns open orders for all markets. |
+| `outcomeId` | INT | NO | Outcome identifier inside the selected market. Requires `marketAddress`. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
 | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
@@ -689,9 +719,11 @@ Response:
 ```json
 [
   {
+    "marketAddress": "0:market-address",
+    "outcomeId": 1,
     "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
-    "price": "2500.00",
+    "price": "0.615",
     "origQty": "1.500000",
     "executedQty": "0.500000",
     "status": "PARTIALLY_FILLED",
@@ -718,7 +750,8 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | NO | Market symbol. If omitted, returns history for all symbols. |
+| `marketAddress` | STRING | NO | Market address. If omitted, returns history for all markets. |
+| `outcomeId` | INT | NO | Outcome identifier inside the selected market. Requires `marketAddress`. |
 | `status` | ENUM | NO | Filter by status: `FILLED`, `CANCELED`, or `REJECTED`. |
 | `startTime` | LONG | NO | Start time in milliseconds. |
 | `endTime` | LONG | NO | End time in milliseconds. |
@@ -732,9 +765,11 @@ Response:
 ```json
 [
   {
+    "marketAddress": "0:market-address",
+    "outcomeId": 1,
     "symbol": "PM-2026-ELECTION-YES-USDC",
     "orderId": "123456789",
-    "price": "2500.00",
+    "price": "0.615",
     "origQty": "1.500000",
     "executedQty": "1.500000",
     "status": "FILLED",
@@ -753,13 +788,15 @@ Order creation MUST validate:
 
 | Rule | Source |
 | --- | --- |
-| `symbol` exists and has `status = TRADING` | `/api/v1/markets` |
+| `marketAddress` exists | `/api/v1/markets` |
+| `outcomeId` exists within the selected market | `/api/v1/markets` |
+| The selected market has `status = TRADING` | `/api/v1/markets` |
 | For `LIMIT` orders, `price` decimal places do not exceed `pricePrecision` | `/api/v1/markets` |
 | For `LIMIT` orders, `price` is a multiple of `tickSize` | `/api/v1/markets` |
 | `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/markets` |
 | `quantity` is a multiple of `stepSize` | `/api/v1/markets` |
 | For `LIMIT` orders, `price * quantity` is at least `minNotional` | `/api/v1/markets` |
-| For `MARKET` orders, order size (`quantity * price`) is at least `minNotional` | `/api/v1/markets` |
+| For `MARKET` buy orders, `quantity` in the market `quoteAsset` is at least `minNotional` | `/api/v1/markets` |
 | Account has enough available balance | `/api/v1/account` |
 
 ## Minimal Trading Scope
@@ -773,7 +810,7 @@ Supported in this API version:
 - Account balances.
 - Open order and closed order history.
 - Single and batch order creation.
-- Single, batch, and symbol-wide order cancellation.
+- Single, batch, and outcome-wide order cancellation.
 
 Not Included in this API version:
 
