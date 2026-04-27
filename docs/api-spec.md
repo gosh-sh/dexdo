@@ -8,6 +8,7 @@
   - [Common Enums](#common-enums)
     - [Order Side](#order-side)
     - [Order Type](#order-type)
+    - [Time In Force](#time-in-force)
     - [Order Status](#order-status)
   - [Error Response](#error-response)
   - [Endpoint Summary](#endpoint-summary)
@@ -85,9 +86,8 @@ PM-2026-ELECTION-NO-USDC
 PM-2026-ELECTION-YES-USDC
 ```
 
-`outcomeId` is part of the symbol identity. For binary markets, `NO` uses
-`outcomeId = 0` and `YES` uses `outcomeId = 1`. API requests use `symbol`; they
-do not pass `outcomeId` as a separate trading parameter in the MVP.
+symbol = PMP._name+_outcomeNames[i]+_token_type.toEnumVariant # 1 - NACKL, 2 - SHELL, 3 - USDC
+
 
 ## Security Types
 
@@ -154,9 +154,17 @@ signature = HMAC_SHA256(
 | --- | --- |
 | `LIMIT` | Limit order. Unfilled quantity remains in the order book. |
 | `MARKET` | Market order. Matches available liquidity and does not rest in the order book. |
-| `IOC` | Limit immediate-or-cancel order. Any unfilled quantity is canceled. |
-| `FOK` | Limit fill-or-kill order. The full quantity must be filled or the order is canceled. |
-| `POST_ONLY` | Limit post-only order. The order is canceled if it would immediately match. |
+
+### Time In Force
+
+`timeInForce` values:
+
+| Value | Description |
+| --- | --- |
+| `GTC` | Good Til Canceled. An order will be on the book unless the order is canceled. |
+| `IOC` | Immediate Or Cancel. An order will try to fill the order as much as it can before the order expires. |
+| `FOK` | Fill or Kill. An order will expire if the full order cannot be filled upon execution. |
+| `POST_ONLY` | Post Only. An order must rest on the book and will be canceled if it would immediately match. |
 
 ### Order Status
 
@@ -369,7 +377,7 @@ Body parameters:
 | `quantity` | DECIMAL | YES | Base asset quantity. Must follow `stepSize`. |
 | `price` | DECIMAL | YES | Limit price. Must follow `tickSize`. |
 | `type` | ENUM | NO | Only `LIMIT` is supported. Default: `LIMIT`. |
-| `timeInForce` | ENUM | NO | Only `GTC` is required for v1. Default: `GTC`. |
+| `timeInForce` | ENUM | NO | See [Time In Force](#time-in-force). Default: `GTC`. |
 
 Signed query parameters:
 
