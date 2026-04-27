@@ -453,18 +453,19 @@ POST /api/v1/batchOrders
 Security: `TRADE`
 
 Create multiple orders in one request.
+All orders in the batch are submitted to the single order book identified by the top-level `symbol`.
 
 Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `orders` | ARRAY | YES | List of orders to create. Max: `20`. |
+| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
+| `orders` | ARRAY | YES | List of orders to create on the specified market. Max: `20`. |
 
 Each order item:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `PM-2026-ELECTION-YES-USDC`. |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
 | `quantity` | DECIMAL | YES | Base asset quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the collateral amount to spend. |
@@ -484,9 +485,9 @@ Request body:
 
 ```json
 {
+  "symbol": "PM-2026-ELECTION-YES-USDC",
   "orders": [
     {
-      "symbol": "PM-2026-ELECTION-YES-USDC",
       "newOrderClientId": "mm-order-0001",
       "side": "BUY",
       "quantity": "1.500000",
@@ -495,7 +496,6 @@ Request body:
       "timeInForce": "GTC"
     },
     {
-      "symbol": "PM-2026-ELECTION-YES-USDC",
       "newOrderClientId": "mm-order-0002",
       "side": "SELL",
       "quantity": "0.750000",
