@@ -4,13 +4,13 @@
 
 ### GET /api/v1/markets
 
-Fetch available prediction markets and their outcome symbols.
+Fetch available prediction markets and their outcomes.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketId` | STRING | NO | Return one market only. |
+| `marketAddress` | STRING | NO | Return one market only. |
 
 Response:
 
@@ -19,16 +19,14 @@ Response:
   "serverTime": 1710000000000,
   "markets": [
     {
-      "marketId": "PM-2026-ELECTION",
-      "name": "2026 Election",
-      "status": "TRADING",
       "quoteAsset": "USDC",
       "marketAddress": "0:market-address",
+      "marketName": "PM-2026-ELECTION",
+      "status": "TRADING",
       "outcomes": [
         {
-          "outcomeId": 0,
           "outcomeName": "NO",
-          "symbol": "PM-2026-ELECTION-NO-USDC",
+          "symbol": "PM-2026-ELECTION-NO",
           "pricePrecision": 3,
           "quantityPrecision": 2,
           "tickSize": "0.001",
@@ -37,9 +35,8 @@ Response:
           "maxBatchSize": 5
         },
         {
-          "outcomeId": 1,
           "outcomeName": "YES",
-          "symbol": "PM-2026-ELECTION-YES-USDC",
+          "symbol": "PM-2026-ELECTION-YES",
           "pricePrecision": 3,
           "quantityPrecision": 2,
           "tickSize": "0.001",
@@ -77,20 +74,22 @@ Where token-type variants are:
 
 ### GET /api/v1/depth
 
-Fetch bids and asks for one outcome symbol.
+Fetch bids and asks for one symbol in one market.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Outcome symbol. |
+| `marketAddress` | STRING | YES | Market address. |
+| `symbol` | STRING | YES | Outcome-token symbol. |
 | `limit` | INT | NO | Number of price levels per side. Default: `100`. Max: `1000`. |
 
 Response:
 
 ```json
 {
-  "symbol": "PM-2026-ELECTION-YES-USDC",
+  "marketAddress": "0:market-address",
+  "symbol": "PM-2026-ELECTION-YES",
   "lastUpdateId": 1027024,
   "bids": [
     ["0.614", "100.00"],
