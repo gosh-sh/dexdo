@@ -77,16 +77,25 @@ floating-point precision loss.
 
 ## Symbol Model
 
-A trading symbol represents one outcome token inside one prediction market.
+Dodex uses the following API identifiers:
 
-Each prediction market exposes separate outcome symbols, for example:
+- `marketId` is a unique identifier of the market.
+- `marketName` is the market name. Example: `PM-2026-ELECTION`.
+- `outcomeId` is a unique identifier of the outcome.
+- `outcomeSymbol` is the outcome symbol and is formed as `<marketName>-<OUTCOME_NAME>`. Example: `PM-2026-ELECTION-YES`.
+- `orderBookId` is a unique identifier of the order book.
+- `orderBookName` is the order book name and is formed as `<outcomeSymbol>-<QUOTE_ASSET>`. Example: `PM-2026-ELECTION-YES-USDC`.
+
+Examples:
 
 ```text
-PM-2026-ELECTION-NO-USDC
-PM-2026-ELECTION-YES-USDC
+marketId      = 7e2f3d9c-1b7a-4f90-9b5c-11c2d9c4a001
+marketName    = PM-2026-ELECTION
+outcomeId     = 4f5d3a0e-90a2-4b78-9d24-55a88f3f1001
+outcomeSymbol = PM-2026-ELECTION-YES
+orderBookId   = c1b8b7c2-3e54-4f0c-92bb-26f8f8f4b001
+orderBookName = PM-2026-ELECTION-YES-USDC
 ```
-
-symbol = PMP._name+_outcomeNames[i]+_token_type.toEnumVariant # 1 - NACKL, 2 - SHELL, 3 - USDC
 
 
 ## Security Types

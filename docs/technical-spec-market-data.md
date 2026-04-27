@@ -64,8 +64,16 @@ Implementation:
    * `lotSize(token_type)` - amount quantisation (0.01 token, decimals-adjusted)
    * `TICK_SIZE = 10` - price quantisation (10 bps)
    * No upper bound on price (outcome tokens may trade > 1 collateral unit).
+6. Build the public market-data symbol for each outcome as:
 
-symbol = PMP._name+_outcomeNames[i]+_token_type.toEnumVariant # 1 - NACKL, 2 - SHELL, 3 - USDC
+```text
+symbol = PMP._name + _outcomeNames[i] + _token_type.toEnumVariant
+```
+
+Where token-type variants are:
+- `1 -> NACKL`
+- `2 -> SHELL`
+- `3 -> USDC`
 
 ### GET /api/v1/depth
 
