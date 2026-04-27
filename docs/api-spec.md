@@ -17,8 +17,6 @@
     - [Exchange Information](#exchange-information)
     - [Ticker](#ticker)
     - [Order Book](#order-book)
-    - [Public Trades](#public-trades)
-    - [OHLCV Candles](#ohlcv-candles)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
   - [Trading Endpoints](#trading-endpoints)
@@ -224,8 +222,6 @@ Fields:
 | List markets and limits | `GET` | `/api/v1/exchangeInfo` | `NONE` |
 | Fetch ticker | `GET` | `/api/v1/ticker/24hr` | `NONE` |
 | Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
-| Fetch public trades | `GET` | `/api/v1/trades` | `NONE` |
-| Fetch OHLCV candles | `GET` | `/api/v1/klines` | `NONE` |
 | Fetch account balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Create single limit order | `POST` | `/api/v1/order` | `TRADE` |
 | Cancel single order by ID | `DELETE` | `/api/v1/order` | `TRADE` |
@@ -346,74 +342,6 @@ Each bid or ask item is:
 
 ```text
 [price, quantity]
-```
-
-### Public Trades
-
-```http
-GET /api/v1/trades
-```
-
-Security: `NONE`
-
-Fetch recent public trades.
-
-Parameters:
-
-| Name | Type | Mandatory | Description |
-| --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
-| `limit` | INT | NO | Number of trades. Default: `100`. Max: `1000`. |
-
-Response:
-
-```json
-[
-  {
-    "id": "90001",
-    "price": "2501.25",
-    "qty": "0.500000",
-    "quoteQty": "1250.625000",
-    "time": 1710000000000,
-    "isBuyerMaker": false
-  }
-]
-```
-
-### OHLCV Candles
-
-```http
-GET /api/v1/klines
-```
-
-Security: `NONE`
-
-Fetch OHLCV candles.
-
-Parameters:
-
-| Name | Type | Mandatory | Description |
-| --- | --- | --- | --- |
-| `symbol` | STRING | YES | Market symbol. Example: `ETHUSDC`. |
-| `interval` | STRING | YES | Candle interval. Supported: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. |
-| `startTime` | LONG | NO | Start time in milliseconds. |
-| `endTime` | LONG | NO | End time in milliseconds. |
-| `limit` | INT | NO | Number of candles. Default: `500`. Max: `1000`. |
-
-Response:
-
-```json
-[
-  {
-    "openTime": 1710000000000,
-    "open": "2500.00",
-    "high": "2510.00",
-    "low": "2490.00",
-    "close": "2501.25",
-    "volume": "123.456000",
-    "closeTime": 1710000059999
-  }
-]
 ```
 
 ## Account Endpoints
