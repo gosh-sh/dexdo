@@ -8,11 +8,8 @@
   - [Common Enums](#common-enums)
     - [Order Side](#order-side)
     - [Order Type](#order-type)
-    - [Time In Force](#time-in-force)
     - [Order Status](#order-status)
   - [Error Response](#error-response)
-  - [Common Objects](#common-objects)
-    - [Order](#order)
   - [Endpoint Summary](#endpoint-summary)
   - [Market Data Endpoints](#market-data-endpoints)
     - [Markets](#markets)
@@ -148,20 +145,18 @@ signature = HMAC_SHA256(
 
 | Value | Description |
 | --- | --- |
-| `BUY` | Buy base asset using quote asset. |
-| `SELL` | Sell base asset for quote asset. |
+| `BUY` | Buy the symbol's outcome token using collateral. |
+| `SELL` | Sell the symbol's outcome token for collateral. |
 
 ### Order Type
 
 | Value | Description |
 | --- | --- |
-| `LIMIT` | Limit order. This is the only supported order type in this API version. |
-
-### Time In Force
-
-| Value | Description |
-| --- | --- |
-| `GTC` | Good till canceled. This is the default and only required mode for v1. |
+| `LIMIT` | Limit order. Unfilled quantity remains in the order book. |
+| `MARKET` | Market order. Matches available liquidity and does not rest in the order book. |
+| `IOC` | Limit immediate-or-cancel order. Any unfilled quantity is canceled. |
+| `FOK` | Limit fill-or-kill order. The full quantity must be filled or the order is canceled. |
+| `POST_ONLY` | Limit post-only order. The order is canceled if it would immediately match. |
 
 ### Order Status
 
@@ -197,42 +192,6 @@ Recommended common error codes:
 | `-1121` | Invalid symbol. |
 | `-2010` | Order would immediately fail validation. |
 | `-2011` | Unknown order. |
-
-## Common Objects
-
-### Order
-
-```json
-{
-  "symbol": "ETHUSDC",
-  "orderId": "123456789",
-  "price": "2500.00",
-  "origQty": "1.500000",
-  "executedQty": "0.500000",
-  "status": "PARTIALLY_FILLED",
-  "timeInForce": "GTC",
-  "type": "LIMIT",
-  "side": "BUY",
-  "time": 1710000000000,
-  "updateTime": 1710000001000
-}
-```
-
-Fields:
-
-| Name | Type | Description |
-| --- | --- | --- |
-| `symbol` | STRING | Market symbol. |
-| `orderId` | STRING | Dodex order ID. |
-| `price` | DECIMAL | Limit price. |
-| `origQty` | DECIMAL | Original base asset quantity. |
-| `executedQty` | DECIMAL | Filled base asset quantity. |
-| `status` | ENUM | Order status. |
-| `timeInForce` | ENUM | Time in force. |
-| `type` | ENUM | Order type. |
-| `side` | ENUM | Order side. |
-| `time` | LONG | Creation time in milliseconds. |
-| `updateTime` | LONG | Last update time in milliseconds. |
 
 ## Endpoint Summary
 
