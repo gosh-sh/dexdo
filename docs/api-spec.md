@@ -690,8 +690,8 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | NO | Market address. If omitted, returns open orders for all markets. |
-| `symbol` | STRING | NO | Outcome-token symbol. Requires `marketAddress`. |
+| `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns open orders for all markets. |
+| `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
 | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
@@ -731,8 +731,8 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | NO | Market address. If omitted, returns history for all markets. |
-| `symbol` | STRING | NO | Outcome-token symbol. Requires `marketAddress`. |
+| `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns history for all markets. |
+| `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
 | `status` | ENUM | NO | Filter by status: `FILLED`, `CANCELED`, or `REJECTED`. |
 | `startTime` | LONG | NO | Start time in milliseconds. |
 | `endTime` | LONG | NO | End time in milliseconds. |
