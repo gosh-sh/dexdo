@@ -7,13 +7,15 @@ use tokio::sync::RwLock;
 use tracing::error;
 use tracing::info;
 
-use crate::config::AppConfig;
+use crate::config::ReloadableConfig;
 
-pub async fn run_config_reload_loop(
+pub async fn run_config_reload_loop<C>(
     config_path: String,
-    config_state: Arc<RwLock<AppConfig>>,
+    config_state: Arc<RwLock<C>>,
     service_name: &'static str,
-) {
+) where
+    C: ReloadableConfig,
+{
     #[cfg(unix)]
     {
         use tokio::signal::unix::signal;
@@ -28,7 +30,7 @@ pub async fn run_config_reload_loop(
         };
 
         while stream.recv().await.is_some() {
-            match AppConfig::load_from_path(&config_path) {
+            match C::load_from_path(&config_path) {
                 Ok(new_config) => {
                     *config_state.write().await = new_config;
                     info!(service = service_name, path = %config_path, "config reloaded");

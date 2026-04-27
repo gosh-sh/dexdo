@@ -13,7 +13,7 @@ use dodex_application::GetMarketsUseCase;
 use dodex_domain::DomainError;
 use dodex_domain::MarketId;
 use dodex_domain::Symbol;
-use dodex_infrastructure::config::AppConfig;
+use dodex_infrastructure::config::ApiConfig;
 use dodex_infrastructure::signal::run_config_reload_loop;
 use dodex_infrastructure::stub::StubReadModelRepository;
 use salvo::prelude::*;
@@ -70,7 +70,7 @@ struct DepthResponse {
 }
 
 #[handler]
-async fn healthz() -> &'static str {
+async fn readiness() -> &'static str {
     "ok"
 }
 
@@ -152,8 +152,9 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let config_path = env::var("APP_CONFIG").unwrap_or_else(|_| "config/api.local.yaml".to_string());
-    let config = AppConfig::load_from_path(&config_path)?;
+    let config_path =
+        env::var("APP_CONFIG").unwrap_or_else(|_| "config/api.local.yaml".to_string());
+    let config = ApiConfig::load_from_path(&config_path)?;
     let config_state = Arc::new(RwLock::new(config.clone()));
     let state = AppState { repo: StubReadModelRepository };
 
@@ -161,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
 
     let router = Router::new()
         .hoop(inject(state))
-        .push(Router::with_path("healthz").get(healthz))
+        .push(Router::with_path("readiness").get(readiness))
         .push(Router::with_path("api/v1/markets").get(get_markets))
         .push(Router::with_path("api/v1/depth").get(get_depth));
 

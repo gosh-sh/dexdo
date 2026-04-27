@@ -13,16 +13,5 @@ database:
   min_connections: 1
   connect_timeout_ms: 3000
 
-graphql:
-  endpoint: https://graphql.example.invalid
-  page_size: 100
-  request_timeout_ms: 10000
-
-indexer:
-  polling_interval_ms: 3000
-  depth_refresh_interval_ms: 5000
-  reconciliation_interval_ms: 60000
-
 features:
   stub_mode: true
-

@@ -2,19 +2,14 @@ app:
   env: local
   log_level: info
 
-server:
-  host: 0.0.0.0
-  port: 18080
-  request_timeout_ms: 5000
-
 database:
-  url: postgres://postgres:postgres@localhost:5432/dodex
+  url: postgresql://indexer.dngmarvcxzmyesxaohvg:VWVxaXVKZUo1Yk16Qk14Wm0jOTV1cksh@aws-1-eu-central-1.pooler.supabase.com:5432/postgres
   max_connections: 10
   min_connections: 1
   connect_timeout_ms: 3000
 
 graphql:
-  endpoint: https://graphql.example.invalid
+  endpoint: https://shellnet.ackinacki.org/graphql
   page_size: 100
   request_timeout_ms: 10000
 
@@ -25,4 +20,3 @@ indexer:
 
 features:
   stub_mode: true
-

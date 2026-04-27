@@ -69,28 +69,25 @@ pub struct DepthSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Oracle {
-    pub id: Option<i64>,
     pub name: String,
     pub address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleEventList {
-    pub id: Option<i64>,
-    pub oracle_id: i64,
+    pub oracle_address: String,
     pub msg_id: String,
     pub address: String,
-    pub list_index: Option<i64>,
+    pub list_index: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleEvent {
-    pub id: Option<i64>,
-    pub eventlist_id: i64,
-    pub internal_id_in_eventlist: String,
+    pub event_list_address: String,
+    pub event_id: String,
     pub event_name: String,
-    pub deadline: i64,
-    pub outcome_names_json: serde_json::Value,
+    pub deadline: u64,
+    pub outcome_names: serde_json::Value,
 }
 
 #[derive(Debug, Error)]

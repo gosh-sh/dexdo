@@ -2,5 +2,6 @@
 //
 
 pub mod config;
+pub mod rows;
 pub mod signal;
 pub mod stub;
