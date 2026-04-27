@@ -479,7 +479,7 @@ Body parameters:
 | --- | --- | --- | --- |
 | `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Max: `20`. |
+| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Max: `5`. |
 
 Each order item:
 
@@ -581,7 +581,7 @@ Body parameters:
 | --- | --- | --- | --- |
 | `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `orderIds` | ARRAY | YES | List of order IDs to cancel. Max: `20`. |
+| `orderIds` | ARRAY | YES | List of order IDs to cancel. Max: `5`. |
 
 Signed query parameters:
 
