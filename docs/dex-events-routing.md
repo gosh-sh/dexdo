@@ -1,288 +1,98 @@
 # DODEX Event Routing
 
-Документ фиксирует по каждому `event` из `contracts`:
+Документ фиксирует все `event` из `contracts`: когда они отправляются, кому уходит `dst`, и какие события сейчас только объявлены, но не эмитятся.
 
-- в какой момент он отправляется;
-- кому он отправляется (`dst`), если используется `emit ...{dest: ...}`;
-- если событие объявлено, но в текущей реализации не эмитится, это отмечено явно.
+## Общий принцип
 
-## Общий принцип доставки
+`dst` существует только у внешнего event-object, который создается через `emit Event{dest: ...}(...)`.
 
-В DEX-системе внешние события обычно отправляются на внешний адрес вида:
+В этой кодовой базе есть три режима:
 
-```solidity
-address.makeAddrExtern(EVENT_ID, bitCntAddress)
-```
-
-То есть `dst` определяется не пользовательским адресом, а внешним event-channel адресом, собранным из numeric event id.
-
-Исключение в текущем коде:
-
-- некоторые события `OrderBook` отправляются в `address.makeAddrExtern(0, bitCntAddress)`;
-- некоторые объявленные события вообще не эмитятся.
+| Случай | Кому уходит |
+| --- | --- |
+| Обычные внешние события | `address.makeAddrExtern(EVENT_ID, bitCntAddress)` |
+| Специальные каналы `OrderBook` | `address.makeAddrExtern(0, bitCntAddress)` |
+| Событие только объявлено | `dst` отсутствует, потому что `emit` нет |
 
 ## RootPN
 
-### `voucherGenerated(uint256 sk_u_commit, uint voucher_nominal, uint32 token_type)`
-
-- Когда отправляется: в `generatevoucher()` после проверки номинала ваучера и перед завершением обработки входящего сообщения.
-- `dst`: `address.makeAddrExtern(VAULT_voucher_GENERATED, bitCntAddress)` (`135`).
-- Код: [contracts/RootPN.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:245), [contracts/RootPN.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:258)
-
-### `PrivateNoteDeployed(uint256 depositIdentifierHash, address noteAddress, uint128 initialBalance)`
-
-- Когда отправляется: в `privateNoteDeployed()` когда `RootPN` получает callback от только что задеплоенного `PrivateNote` и фиксирует его баланс в `_deployedValues`.
-- `dst`: `address.makeAddrExtern(ROOTPN_PRIVATE_NOTE_DEPLOYED, bitCntAddress)` (`101`).
-- Код: [contracts/RootPN.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:169), [contracts/RootPN.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:171)
-
-### `NullifierDeployed(address nullifierAddress, uint64 value)`
-
-- Когда отправляется: в `sendEccShellToPrivateNote()` после успешной zk-проверки и после деплоя `Nullifier`.
-- `dst`: `address.makeAddrExtern(ROOTPN_NULLIFIER_DEPLOYED, bitCntAddress)` (`102`).
-- Код: [contracts/RootPN.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:95), [contracts/RootPN.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:130)
+| Event | Fields | Когда отправляется | Кому (`dst`) | Код |
+| --- | --- | --- | --- | --- |
+| `VoucherGenerated` | `skUCommit`, `voucherNominal`, `tokenType` | В `generateVoucher()` после проверки номинала и возможного ремапа `SHELL -> SHELL_FEE`. | `address.makeAddrExtern(VAULT_voucher_GENERATED, bitCntAddress)` = `135` | [RootPN.sol:427](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:427) |
+| `PrivateNoteDeployed` | `depositIdentifierHash`, `noteAddress`, `initialBalance` | В callback `privateNoteDeployed()` после увеличения `_deployedValues[tokenType]`. | `address.makeAddrExtern(ROOTPN_PRIVATE_NOTE_DEPLOYED, bitCntAddress)` = `101` | [RootPN.sol:339](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:339) |
+| `NullifierDeployed` | `nullifierAddress`, `value` | В `sendEccShellToPrivateNote()` после успешной zk-проверки и деплоя `Nullifier`. | `address.makeAddrExtern(ROOTPN_NULLIFIER_DEPLOYED, bitCntAddress)` = `102` | [RootPN.sol:247](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootPN.sol:247) |
 
 ## RootOracle
 
-### `OracleDeployed(address oracle, uint256 pubkey, string name)`
-
-- Когда отправляется: в `deployOracle()` сразу после деплоя нового `Oracle`.
-- `dst`: `address.makeAddrExtern(ROOTORACLE_ORACLE_DEPLOYED, bitCntAddress)` (`136`).
-- Код: [contracts/RootOracle.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootOracle.sol:52), [contracts/RootOracle.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootOracle.sol:61)
+| Event | Fields | Когда отправляется | Кому (`dst`) | Код |
+| --- | --- | --- | --- | --- |
+| `OracleDeployed` | `oracle`, `pubkey`, `name` | В `deployOracle()` сразу после деплоя нового `Oracle`. | `address.makeAddrExtern(ROOTORACLE_ORACLE_DEPLOYED, bitCntAddress)` = `136` | [RootOracle.sol:65](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/RootOracle.sol:65) |
 
 ## Oracle
 
-### `OracleEventListDeployed(address eventListAddress, uint128 index)`
-
-- Когда отправляется:
-- в конструкторе `Oracle` после деплоя дефолтного `OracleEventList` с `index = 0`;
-- в `deployEventList(uint128 index)` после деплоя дополнительного `OracleEventList`.
-- `dst`: `address.makeAddrExtern(ORACLE_DEPLOYED, bitCntAddress)` (`104`).
-- Код: [contracts/Oracle.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/Oracle.sol:59), [contracts/Oracle.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/Oracle.sol:66), [contracts/Oracle.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/Oracle.sol:75), [contracts/Oracle.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/Oracle.sol:82)
-
-### `EventPublished(uint256 event_id, string event_name)`
-
-- Когда отправляется: не отправляется в текущей реализации.
-- `dst`: отсутствует, потому что `emit` для этого события в коде нет.
-- Код объявления: [contracts/Oracle.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/Oracle.sol:36)
+| Event | Fields | Когда отправляется | Кому (`dst`) | Код |
+| --- | --- | --- | --- | --- |
+| `OracleEventListDeployed` | `eventListAddress`, `index` | В конструкторе `Oracle` для дефолтного списка с `index = 0`, и в `deployEventList()` для дополнительных списков. | `address.makeAddrExtern(ORACLE_DEPLOYED, bitCntAddress)` = `104` | [Oracle.sol:70](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/Oracle.sol:70), [Oracle.sol:86](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/Oracle.sol:86) |
+| `EventPublished` | `eventId`, `eventName` | В текущей реализации не эмитится. | Нет `dst` | [Oracle.sol:36](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/Oracle.sol:36) |
 
 ## OracleEventList
 
-### `EventAdded(uint256 event_id, string event_name, uint128 oracle_fee, uint64 deadline)`
-
-- Когда отправляется: в `addEvent()` после записи нового `EventInfo` в `_events[event_id]`.
-- `dst`: `address.makeAddrExtern(ORACLE_EVENT_ADDED, bitCntAddress)` (`133`).
-- Код: [contracts/OracleEventList.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OracleEventList.sol:68), [contracts/OracleEventList.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OracleEventList.sol:91)
-
-### `EventConfirmed(uint256 event_id, address pmpAddress)`
-
-- Когда отправляется: в `confirmEvent()` при успешной валидации oracle fee и `deadline`, после увеличения `eventInfo.count` и вызова `PMP.approveEvent(...)`.
-- `dst`: `address.makeAddrExtern(ORACLE_EVENT_CONFIRMED, bitCntAddress)` (`106`).
-- Код: [contracts/OracleEventList.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OracleEventList.sol:99), [contracts/OracleEventList.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OracleEventList.sol:115)
+| Event | Fields | Когда отправляется | Кому (`dst`) | Код |
+| --- | --- | --- | --- | --- |
+| `EventAdded` | `eventId`, `eventName`, `oracleFee`, `deadline` | В `addEvent()` после записи нового `EventInfo` в `_events[eventId]`. | `address.makeAddrExtern(ORACLE_EVENT_ADDED, bitCntAddress)` = `133` | [OracleEventList.sol:105](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OracleEventList.sol:105) |
+| `EventConfirmed` | `eventId`, `pmpAddress` | В `confirmEvent()` после проверки `deadline` и `oracleFee`, увеличения `eventInfo.count` и вызова `PMP.approveEvent(...)`. | `address.makeAddrExtern(ORACLE_EVENT_CONFIRMED, bitCntAddress)` = `106` | [OracleEventList.sol:129](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OracleEventList.sol:129) |
 
 ## PrivateNote
 
-### `OwnerChanged(uint256 oldPubkey, uint256 newPubkey)`
-
-- Когда отправляется: в `changeOwner()` после обновления `_ephemeral_pubkey`.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_OWNER_CHANGED, bitCntAddress)` (`112`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:199), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:207)
-
-### `StakeConfirmed(address stakeController, uint32 outcome, uint128 amount, uint8 bet_type)`
-
-- Когда отправляется: в `onStakeAccepted()` после переноса `candidate_amount` в подтвержденные stake-массивы.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_STAKE_CONFIRMED, bitCntAddress)` (`113`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:684), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:713)
-
-### `StakeCancelled(address stakeController, uint128 value)`
-
-- Когда отправляется: в `onStakeCancelled()` после удаления stake-record, возврата средств в `_balance` и возврата coupons в `_coupons_value`.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_STAKE_CANCELLED, bitCntAddress)` (`115`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:397), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:408)
-
-### `FullSetStakeConfirmed(address stakeController, uint128[] amount)`
-
-- Когда отправляется: в `onSplitAccepted()` после добавления split amounts в `stake.amount[]`.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_SPLIT_CONFIRMED, bitCntAddress)` (`138`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:473), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:502)
-
-### `FullSetStakeCancelled(address stakeController, uint128 value)`
-
-- Когда отправляется: в `onMergeAccepted()` после списания outcome-token amounts из stake и возврата collateral в `_balance[token_type]`.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_MERGE_CONFIRMED, bitCntAddress)` (`139`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:571), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:601)
-
-### `ClaimAccepted(address stakeController, optional(uint32) outcome, uint128 payout)`
-
-- Когда отправляется: в `onClaimAccepted()` только если `outcome.hasValue() == true`, то есть когда PMP уже resolved и payout реально зачисляется.
-- Не отправляется в ветке `!outcome.hasValue()`: там функция просто очищает `_busy` и выходит.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_CLAIM_ACCEPTED, bitCntAddress)` (`114`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:755), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:779)
-
-### `PMPDeployed(uint256 event_id, uint32 token_type, address pmpAddress, address[] oracleEventLists, uint128[] oracleFee)`
-
-- Когда отправляется: в `deployPMP()` после вычисления `pmpAddress`, подготовки `_stakes[hash]` и установки `_busy`, непосредственно перед `new PMP{...}`.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_PMP_DEPLOYED, bitCntAddress)` (`111`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:250), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:311)
-
-### `OrderPlacedConfirmed(address orderBook, uint128 orderId)`
-
-- Когда отправляется: в `onOrderPlaced()` после валидации `msg.sender` как ожидаемого `OrderBook` и после записи `_orderFeeReserves[orderId]` для buy-ордера.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_ORDER_PLACED, bitCntAddress)` (`147`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1166), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1209)
-
-### `OrderFilledConfirmed(address orderBook, uint128 filledAmount, bool isBuy)`
-
-- Когда отправляется: в `onOrderFilled()` после обработки fill в локальном состоянии `PrivateNote`.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_ORDER_FILLED, bitCntAddress)` (`148`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1381), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1447)
-
-### `TransferInitiated(address dest, uint32 token_type, uint128 amount)`
-
-- Когда отправляется: в `initTransfer()` после блокировки суммы в `_pendingTransferAmount` и перед отправкой `offerTransfer()` в другой `PrivateNote`.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_TRANSFER_INITIATED, bitCntAddress)` (`149`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:946), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:967)
-
-### `TransferReceived(address from, uint32 token_type, uint128 amount)`
-
-- Когда отправляется: в `offerTransfer()` после кредитования `_balance[token_type]` у получателя.
-- `dst`: `address.makeAddrExtern(PRIVATENOTE_TRANSFER_CONFIRMED, bitCntAddress)` (`150`).
-- Код: [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:981), [contracts/PrivateNote.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:990)
+| Event | Fields | Когда отправляется | Кому (`dst`) | Код |
+| --- | --- | --- | --- | --- |
+| `OwnerChanged` | `oldPubkey`, `newPubkey` | В `changeOwner()` после замены `_ephemeralPubkey`. | `address.makeAddrExtern(PRIVATENOTE_OWNER_CHANGED, bitCntAddress)` = `112` | [PrivateNote.sol:243](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:243) |
+| `PMPDeployed` | `eventId`, `tokenType`, `pmpAddress`, `oracleEventLists`, `oracleFee` | В `deployPMP()` после вычисления адреса PMP, подготовки `_stakes[hash]` и установки `_busy`, прямо перед `new PMP`. | `address.makeAddrExtern(PRIVATENOTE_PMP_DEPLOYED, bitCntAddress)` = `111` | [PrivateNote.sol:346](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:346) |
+| `StakeCancelled` | `stakeController`, `value` | В `onStakeCancelled()` после удаления stake-record и возврата средств в `_balance` / `_couponsValue`. | `address.makeAddrExtern(PRIVATENOTE_STAKE_CANCELLED, bitCntAddress)` = `115` | [PrivateNote.sol:476](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:476) |
+| `FullSetStakeConfirmed` | `stakeController`, `amount` | В `onSplitAccepted()` после зачисления split-amounts в `stake.amount[]` и возможного возврата неиспользованного collateral. | `address.makeAddrExtern(PRIVATENOTE_SPLIT_CONFIRMED, bitCntAddress)` = `138` | [PrivateNote.sol:570](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:570) |
+| `FullSetStakeCancelled` | `stakeController`, `value` | В `onMergeAccepted()` после списания merged outcome-токенов и возврата collateral в `_balance[tokenType]`. | `address.makeAddrExtern(PRIVATENOTE_MERGE_CONFIRMED, bitCntAddress)` = `139` | [PrivateNote.sol:669](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:669) |
+| `StakeConfirmed` | `stakeController`, `outcome`, `amount`, `betType` | В `onStakeAccepted()` после переноса `candidateAmount` в подтвержденные массивы (`amount`, `debtAmount`, `couponsAmount`). | `address.makeAddrExtern(PRIVATENOTE_STAKE_CONFIRMED, bitCntAddress)` = `113` | [PrivateNote.sol:781](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:781) |
+| `ClaimAccepted` | `stakeController`, `outcome`, `payout` | В `onClaimAccepted()` только если `outcome.hasValue() == true`; при unresolved-ветке callback просто очищает `_busy` и выходит без события. | `address.makeAddrExtern(PRIVATENOTE_CLAIM_ACCEPTED, bitCntAddress)` = `114` | [PrivateNote.sol:846](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:846) |
+| `TransferInitiated` | `dest`, `tokenType`, `amount` | В `initTransfer()` после списания суммы из `_balance`, фиксации `_pendingTransferAmount` и перед вызовом `offerTransfer()` у другого `PrivateNote`. | `address.makeAddrExtern(PRIVATENOTE_TRANSFER_INITIATED, bitCntAddress)` = `149` | [PrivateNote.sol:1052](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1052) |
+| `TransferReceived` | `from`, `tokenType`, `amount` | В `offerTransfer()` после кредитования `_balance[tokenType]` у получателя и перед `onTransferAccepted()`. | `address.makeAddrExtern(PRIVATENOTE_TRANSFER_CONFIRMED, bitCntAddress)` = `150` | [PrivateNote.sol:1075](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1075) |
+| `OrderSubmitted` | `clientOrderId`, `outcomeId`, `isBuy`, `price`, `amount`, `flags`, `eventId`, `tokenType` | В `placeOrder()` сразу после валидации параметров и до отправки заявки в `OrderBook`. Это событие фиксирует сам факт отправки заявки, а не подтверждение постановки в книгу. | `address.makeAddrExtern(PRIVATENOTE_ORDER_SUBMITTED, bitCntAddress)` = `151` | [PrivateNote.sol:1201](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1201) |
+| `OrderPlacedConfirmed` | `orderBook`, `orderId` | В `onOrderPlaced()` после валидации `OrderBook` и записи per-order `feeReserve` / `lock` в локальное состояние `PrivateNote`. | `address.makeAddrExtern(PRIVATENOTE_ORDER_PLACED, bitCntAddress)` = `147` | [PrivateNote.sol:1322](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1322) |
+| `OrderCancelledConfirmed` | `orderBook`, `orderId`, `outcomeId`, `isBuy`, `returnAmount` | В `onOrderCancelled()` после возврата оставшегося buy-lock в `_balance` или возврата outcome-токенов в stake. | `address.makeAddrExtern(PRIVATENOTE_ORDER_CANCELLED, bitCntAddress)` = `152` | [PrivateNote.sol:1528](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1528) |
+| `OrderFilledConfirmed` | `orderBook`, `orderId`, `outcomeId`, `filledAmount`, `clearingPrice`, `isBuy`, `feeAmount`, `isFinal` | В `onOrderFilled()` после обновления локальных balances / stakes / fee reserves / locks по факту fill от `OrderBook`. | `address.makeAddrExtern(PRIVATENOTE_ORDER_FILLED, bitCntAddress)` = `148` | [PrivateNote.sol:1654](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PrivateNote.sol:1654) |
 
 ## PMP
 
-### `StakeAccepted(address indexed note, uint32 outcomeId, uint128 amount, uint8 bet_type)`
-
-- Когда отправляется: в `acceptStake()` после обновления pool accounting и callback `PrivateNote.onStakeAccepted(...)`.
-- `dst`: `address.makeAddrExtern(PMP_STAKE_ACCEPTED, bitCntAddress)` (`118`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:462), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:511)
-
-### `ApprovedByOracle(address oracleEventList, uint256 oraclePubkey)`
-
-- Когда отправляется: в `approveEvent()` в момент, когда собраны все обязательные oracle approvals, то есть на последнем подтверждении.
-- `dst`: `address.makeAddrExtern(PMP_APPROVED_BY_ORACLE, bitCntAddress)` (`119`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:346), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:398)
-
-### `Resolved(uint32 outcomeId)`
-
-- Когда отправляется: в `resolve()` после установки `_resolvedOutcome`, вычисления payout coefficients и, при наличии, отправки creator fee.
-- `dst`: `address.makeAddrExtern(PMP_RESOLVED, bitCntAddress)` (`120`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:883), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:939)
-
-### `ClaimProcessed(address indexed note, uint128 payout, bool win)`
-
-- Когда отправляется: в `claim()` после callback `PrivateNote.onClaimAccepted(...)`, если рынок уже resolved.
-- `dst`: `address.makeAddrExtern(PMP_CLAIM_PROCESSED, bitCntAddress)` (`121`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:973), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:1064)
-
-### `NetworkFeeBurned(uint64 amount)`
-
-- Когда отправляется: не отправляется в текущей реализации.
-- `dst`: отсутствует, потому что `emit` для этого события в коде нет.
-- Код объявления: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:219)
-
-### `TimingsSet(uint64 stakeStart, uint64 stakeEnd, uint64 resultStart, uint64 resultEnd)`
-
-- Когда отправляется: в `setTimings()` после фиксации `_stakeStart`, `_resultStart`, выставления `_approved = true` и возможного auto-freeze.
-- `dst`: `address.makeAddrExtern(PMP_SET_TIMINGS, bitCntAddress)` (`124`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:415), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:438)
-
-### `NumOutcomesSet(uint32 numOutcomes)`
-
-- Когда отправляется: не отправляется в текущей реализации.
-- `dst`: отсутствует, потому что `emit` для этого события в коде нет.
-- Код объявления: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:231)
-
-### `EventCancelled()`
-
-- Когда отправляется: в `cancelEvent()` после установки `_isCancelled = true`.
-- `dst`: `address.makeAddrExtern(PMP_EVENT_CANCELLED, bitCntAddress)` (`126`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:443), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:453)
-
-### `PMPCancelled()`
-
-- Когда отправляется: в `rejectEvent()` когда `OracleEventList` отклоняет рынок или при rollback сценарии до selfdestruct.
-- `dst`: `address.makeAddrExtern(PMP_CANCELLED_BY_ORACLE, bitCntAddress)` (`132`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:292), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:297)
-
-### `CreatorFeeCollected(uint128 fee)`
-
-- Когда отправляется: в `resolve()` если `_creatorFee > 0`, после отправки fee в `PrivateNote(_deployer).acceptFee(...)`.
-- `dst`: `address.makeAddrExtern(PMP_CREATOR_FEE_COLLECTED, bitCntAddress)` (`137`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:928), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:935)
-
-### `PoolsFrozen(uint128 baseTotalPool)`
-
-- Когда отправляется: в `_ensureFrozen()` после freeze snapshot и после деплоя `OrderBook`.
-- `dst`: `address.makeAddrExtern(PMP_POOLS_FROZEN, bitCntAddress)` (`140`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:594), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:735)
-
-### `SplitProcessed(address indexed note, uint128 collateral)`
-
-- Когда отправляется: в `splitFullSet()` после callback `PrivateNote.onSplitAccepted(...)`.
-- `dst`: `address.makeAddrExtern(PMP_SPLIT_PROCESSED, bitCntAddress)` (`141`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:747), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:797)
-
-### `MergeProcessed(address indexed note, uint128 collateral)`
-
-- Когда отправляется: в `mergeFullSet()` после callback `PrivateNote.onMergeAccepted(...)`.
-- `dst`: `address.makeAddrExtern(PMP_MERGE_PROCESSED, bitCntAddress)` (`142`).
-- Код: [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:808), [contracts/PMP.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:877)
+| Event | Fields | Когда отправляется | Кому (`dst`) | Код |
+| --- | --- | --- | --- | --- |
+| `StakeAccepted` | `note`, `outcomeId`, `amount`, `betType` | В `acceptStake()` после обновления pool accounting и отправки callback `PrivateNote.onStakeAccepted(...)`. | `address.makeAddrExtern(PMP_STAKE_ACCEPTED, bitCntAddress)` = `118` | [PMP.sol:518](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:518) |
+| `ApprovedByOracle` | `oracleEventList`, `oraclePubkey` | В `approveEvent()` только на последнем обязательном oracle approval, когда `_approvedOracleEvents == _numberOfOracleEvents`. | `address.makeAddrExtern(PMP_APPROVED_BY_ORACLE, bitCntAddress)` = `119` | [PMP.sol:389](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:389) |
+| `Resolved` | `outcomeId` | В `resolve()` после вычисления resolution-коэффициентов и после `CreatorFeeCollected`, если fee был начислен. | `address.makeAddrExtern(PMP_RESOLVED, bitCntAddress)` = `120` | [PMP.sol:971](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:971) |
+| `ClaimProcessed` | `note`, `payout`, `win` | В `claim()` только для уже resolved market, после callback `PrivateNote.onClaimAccepted(...)`. | `address.makeAddrExtern(PMP_CLAIM_PROCESSED, bitCntAddress)` = `121` | [PMP.sol:1096](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:1096) |
+| `NetworkFeeBurned` | `amount` | В текущей реализации не эмитится. | Нет `dst` | [PMP.sol:204](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:204) |
+| `TimingsSet` | `stakeStart`, `stakeEnd`, `resultStart`, `resultEnd` | В `setTimings()` после фиксации `_stakeStart`, `_resultStart`, `_approved = true` и возможного auto-freeze. | `address.makeAddrExtern(PMP_SET_TIMINGS, bitCntAddress)` = `124` | [PMP.sol:445](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:445) |
+| `NumOutcomesSet` | `numOutcomes` | В текущей реализации не эмитится. `_numOutcomes` выводится из `outcomeNames` в `approveEvent()`. | Нет `dst` | [PMP.sol:216](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:216) |
+| `EventCancelled` | `-` | В `cancelEvent()` после установки `_isCancelled = true`. | `address.makeAddrExtern(PMP_EVENT_CANCELLED, bitCntAddress)` = `126` | [PMP.sol:460](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:460) |
+| `PMPCancelled` | `-` | В `rejectEvent()` когда `OracleEventList` отклоняет маркет или подтверждение невозможно, после чего PMP начинает rollback и `selfdestruct`. | `address.makeAddrExtern(PMP_CANCELLED_BY_ORACLE, bitCntAddress)` = `132` | [PMP.sol:283](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:283) |
+| `CreatorFeeCollected` | `fee` | В `resolve()` только если `_creatorFee > 0`, после отправки fee в `PrivateNote(_deployer).acceptFee(...)`. | `address.makeAddrExtern(PMP_CREATOR_FEE_COLLECTED, bitCntAddress)` = `137` | [PMP.sol:967](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:967) |
+| `PoolsFrozen` | `baseTotalPool` | В `_ensureFrozen()` после freeze snapshot и после деплоя `OrderBook`. | `address.makeAddrExtern(PMP_POOLS_FROZEN, bitCntAddress)` = `140` | [PMP.sol:712](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:712) |
+| `SplitProcessed` | `note`, `collateral` | В `splitFullSet()` после callback `PrivateNote.onSplitAccepted(...)`. В событие идет именно `F_use`, то есть реально использованный quantized collateral. | `address.makeAddrExtern(PMP_SPLIT_PROCESSED, bitCntAddress)` = `141` | [PMP.sol:777](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:777) |
+| `MergeProcessed` | `note`, `collateral` | В `mergeFullSet()` после callback `PrivateNote.onMergeAccepted(...)`. | `address.makeAddrExtern(PMP_MERGE_PROCESSED, bitCntAddress)` = `142` | [PMP.sol:862](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/PMP.sol:862) |
 
 ## OrderBook
 
-### `OrderPlaced(uint128 orderId, uint32 outcomeId, bool isBuy, uint8 flags, uint256 price, uint128 amount)`
+| Event | Fields | Когда отправляется | Кому (`dst`) | Код |
+| --- | --- | --- | --- | --- |
+| `OrderPlaced` | `orderId`, `outcomeId`, `isBuy`, `flags`, `price`, `amount`, `clientOrderId` | В `_emitOrderPlacedTo()` при успешной постановке ордера, перед callback `PrivateNote.onOrderPlaced(...)`. | `address.makeAddrExtern(OB_ORDER_PLACED, bitCntAddress)` = `143` | [OrderBook.sol:1134](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:1134) |
+| `OrderCancelled` | `orderId`, `clientOrderId` | В общей helper-функции `_emitOrderCancelled()`, которая вызывается из сценариев обычной отмены, cancel-all и внутренних no-book-entry / shutdown-cancel путей. | `address.makeAddrExtern(OB_ORDER_CANCELLED, bitCntAddress)` = `144` | [OrderBook.sol:1142](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:1142) |
+| `OrderFilled` | `orderId`, `filledAmount`, `clearingPrice`, `feeAmount`, `isTaker` | В `_processFillTo()` на каждый match/fill, перед callback `PrivateNote.onOrderFilled(...)`. | `address.makeAddrExtern(OB_ORDER_FILLED, bitCntAddress)` = `146` | [OrderBook.sol:1225](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:1225) |
+| `PartialFill` | `orderId`, `clientOrderId`, `filledAmount`, `remainingAmount` | В `_emitPartialFill()` один раз на завершение обработки конкретного taker-order, если после матчинга остается остаток. | `address.makeAddrExtern(0, bitCntAddress)` | [OrderBook.sol:1177](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:1177) |
+| `FullyFilled` | `orderId`, `clientOrderId`, `filledAmount` | В `_emitFullyFilled()` один раз на завершение обработки конкретного taker-order, если он полностью исполнен. | `address.makeAddrExtern(0, bitCntAddress)` | [OrderBook.sol:1182](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:1182) |
+| `Queued` | `slot`, `queueId`, `entryType` | После успешной постановки `QueueEntry` в `_enqueuePlace()`, `_enqueueCancel()` и `_enqueueCancelAll()`. | `address.makeAddrExtern(0, bitCntAddress)` | [OrderBook.sol:481](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:481), [OrderBook.sol:515](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:515), [OrderBook.sol:546](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:546) |
+| `Rejected` | `entryType`, `depositHash` | При немедленном reject place-заявки на этапе pre-validation в `executeBatch()`, а также при переполнении очереди в `_enqueuePlace()`, `_enqueueCancel()`, `_enqueueCancelAll()`. | `address.makeAddrExtern(0, bitCntAddress)` | [OrderBook.sol:362](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:362), [OrderBook.sol:456](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:456), [OrderBook.sol:491](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:491), [OrderBook.sol:522](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:522) |
+| `CallbackBounced` | `dest`, `lt` | В `onBounce()` когда любой исходящий callback `OrderBook -> PrivateNote` отскакивает назад. Это observability hook, состояние OrderBook автоматически не откатывает. | `address.makeAddrExtern(0, bitCntAddress)` | [OrderBook.sol:1367](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:1367) |
 
-- Когда отправляется: в `_emitOrderPlacedTo()` при успешной постановке ордера, перед callback `PrivateNote.onOrderPlaced(...)`.
-- `dst`: `address.makeAddrExtern(OB_ORDER_PLACED, bitCntAddress)` (`143`).
-- Код: [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:833), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:841)
+## Nullifier
 
-### `OrderCancelled(uint128 orderId)`
-
-- Когда отправляется:
-- в `_doCancel()` при успешной отмене конкретного ордера владельцем;
-- в `_doCancelAll()` для каждого ордера в cancel-all проходе;
-- в `shutdown()` для каждого ордера, который снимается во время дренажа книги.
-- `dst`: `address.makeAddrExtern(OB_ORDER_CANCELLED, bitCntAddress)` (`144`).
-- Код: [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:650), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:662), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:848), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:987)
-
-### `OrderFilled(uint128 orderId, uint128 filledAmount, uint256 clearingPrice, uint128 feeAmount, bool isTaker)`
-
-- Когда отправляется: в `_processFillTo()` при каждом match/fill, после расчета `feeAmount` и обновления `_totalMakerFees` / `_totalTakerFees`, перед callback `PrivateNote.onOrderFilled(...)`.
-- `dst`: `address.makeAddrExtern(OB_ORDER_FILLED, bitCntAddress)` (`146`).
-- Код: [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:889), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:912)
-
-### `Queued(uint8 slot, uint32 queueId, uint8 entryType)`
-
-- Когда отправляется:
-- в `_enqueuePlace()` после записи `QueueEntry` с `entryType = QENTRY_PLACE`;
-- в `_enqueueCancel()` после записи `QueueEntry` с `entryType = QENTRY_CANCEL`;
-- в `_enqueueCancelAll()` после записи `QueueEntry` с `entryType = QENTRY_CANCEL_ALL`.
-- `dst`: `address.makeAddrExtern(0, bitCntAddress)`.
-- Код: [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:343), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:373), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:378), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:402), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:407), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:428)
-
-### `Rejected(uint8 entryType, uint256 deposit_hash)`
-
-- Когда отправляется:
-- в `executeBatch()` если place-заявка не проходит локальную валидацию до постановки в очередь;
-- в `_enqueuePlace()` если очередь place-потока заполнена;
-- в `_enqueueCancel()` если очередь cancel-потока заполнена;
-- в `_enqueueCancelAll()` если очередь cancel-потока заполнена.
-- `dst`: `address.makeAddrExtern(0, bitCntAddress)`.
-- Код: [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:218), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:263), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:353), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:382), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:408)
-
-### `CallbackBounced(address dest, uint64 lt)`
-
-- Когда отправляется: в `onBounce()` при bounce любого исходящего callback из `OrderBook`.
-- `dst`: `address.makeAddrExtern(0, bitCntAddress)`.
-- Поле `dest` внутри payload — это `msg.sender`, то есть адрес bounced callback receiver.
-- Код: [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:1033), [contracts/OrderBook.sol](/Users/ekaterinapantaz/Documents/GitHub/DODEX/contracts/OrderBook.sol:1035)
-
-## События без собственной отправки
-
-Ниже события объявлены, но `emit` для них в текущем коде отсутствует:
-
-- `Oracle.EventPublished`
-- `PMP.NetworkFeeBurned`
-- `PMP.NumOutcomesSet`
-
-`Nullifier` собственных `event`-объявлений не имеет.
+| Contract | Event declarations | Комментарий |
+| --- | --- | --- |
+| `Nullifier` | Нет | У `contracts/Nullifier.sol` нет собственных `event`-объявлений. |

@@ -1,29 +1,52 @@
-# Dodex API Specification
+- [Dodex REST API Specification](#dodex-rest-api-specification)
+  - [Reference Style](#reference-style)
+  - [Base URL](#base-url)
+  - [Data Types](#data-types)
+  - [Symbol Model](#symbol-model)
+  - [Security Types](#security-types)
+    - [Signature Formation](#signature-formation)
+  - [Common Enums](#common-enums)
+    - [Order Side](#order-side)
+    - [Order Type](#order-type)
+    - [Time In Force](#time-in-force)
+    - [Order Status](#order-status)
+  - [Error Response](#error-response)
+  - [Endpoint Summary](#endpoint-summary)
+  - [Market Data Endpoints](#market-data-endpoints)
+    - [Markets](#markets)
+    - [Order Book](#order-book)
+  - [Account Endpoints](#account-endpoints)
+    - [Account Balance](#account-balance)
+  - [Trading Endpoints](#trading-endpoints)
+    - [New Order](#new-order)
+    - [Cancel Order](#cancel-order)
+    - [New Batch Orders](#new-batch-orders)
+    - [Cancel Batch Orders](#cancel-batch-orders)
+    - [Cancel All Open Orders On Symbol](#cancel-all-open-orders-on-symbol)
+    - [Current Open Orders](#current-open-orders)
+    - [Closed And Canceled Orders](#closed-and-canceled-orders)
+  - [Validation Rules](#validation-rules)
+  - [Minimal Trading Scope](#minimal-trading-scope)
 
-Status: Draft MVP
+# Dodex REST API Specification
 
-This document defines the minimal private API needed for integration.
+Status: Draft
 
-All trading writes are on-chain actions. The API prepares the data needed to
-build a transaction message, but the client forms and sends the final blockchain
-message outside this API.
+This document defines the minimal REST API required for basic spot-style trading on Dodex.
+The API shape follows the Binance Spot REST style where useful, but intentionally removes
+advanced order types, margin, OCO, strategy parameters, iceberg orders, STP, trailing stops,
+and other non-basic trading features.
 
-## Table Of Contents
+## Reference Style
 
-- [Base URL](#base-url)
-- [Authentication](#authentication)
-- [Integration Configuration](#integration-configuration)
-- [Data Types](#data-types)
-- [Symbol Model](#symbol-model)
-- [Price And Amount Encoding](#price-and-amount-encoding)
-- [On-Chain Message Flow](#on-chain-message-flow)
-- [Common Enums](#common-enums)
-- [Error Response](#error-response)
-- [Endpoint Summary](#endpoint-summary)
-- [Market Data Endpoints](#market-data-endpoints)
-- [Account Endpoints](#account-endpoints)
-- [On-Chain Trading Endpoints](#on-chain-trading-endpoints)
-- [Order Read Endpoints](#order-read-endpoints)
+- Binance Spot REST general API information:
+  https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-api-information
+- Binance Spot REST market data endpoints:
+  https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints
+- Binance Spot REST trading endpoints:
+  https://developers.binance.com/docs/binance-spot-api-docs/rest-api/trading-endpoints
+- Binance Spot REST account endpoints:
+  https://developers.binance.com/docs/binance-spot-api-docs/rest-api/account-endpoints
 
 ## Base URL
 
@@ -31,70 +54,17 @@ message outside this API.
 https://api.dodex.example.com
 ```
 
-All request and response bodies use JSON.
+All endpoints use JSON responses.
 
 ```http
 Content-Type: application/json
-```
-
-## Authentication
-
-All API endpoints are private in the MVP version and require one API token.
-Each API token is bound to one `userId`. `userId` is the primary
-deposit hash received by the integrator when depositing to the main
-`PrivateNote` used for trading.
-
-| Location | Name | Type | Mandatory | Description |
-| --- | --- | --- | --- | --- |
-| Header | `Authorization` | STRING | YES | `Bearer <token>` |
-
-No per-endpoint security classes are defined in the MVP.
-
-## Integration Configuration
-
-During integration, the integrator provides the primary deposit hash for the
-main trading `PrivateNote`. The API service uses it as `userId`, derives
-the related `privateNoteAddress`, and returns one API token.
-
-Runtime API requests do not pass an account ID. The account is selected by the
-API token.
-
-The API may associate additional `PrivateNote` addresses with the same
-`userId` internally later. The public account ID remains the primary
-deposit hash.
-
-Token configuration fields:
-
-| Name | Type | Mandatory | Description |
-| --- | --- | --- | --- |
-| `token` | STRING | YES | Generated API token returned to the integrator. |
-| `userId` | STRING | YES | Primary deposit hash used as the API account ID. |
-| `privateNoteAddress` | STRING | YES | Main trading `PrivateNote` address derived from `userId`. |
-| `metadata` | OBJECT | NO | Integration metadata for this token. |
-| `status` | STRING | YES | Token status. MVP value: `ACTIVE`. |
-| `createdAt` | LONG | YES | Token creation timestamp. |
-
-Example token metadata:
-
-```json
-{
-  "token": "dodex_live_generated_token",
-  "userId": "12345678901234567890",
-  "privateNoteAddress": "0:private-note-address",
-  "metadata": {
-    "name": "primary-mm",
-    "description": "Primary trading account"
-  },
-  "status": "ACTIVE",
-  "createdAt": 1710000000000
-}
 ```
 
 ## Data Types
 
 | Type | Description | Example |
 | --- | --- | --- |
-| `STRING` | UTF-8 string | `"PM-2026-ELECTION-NO-USDC"` |
+| `STRING` | UTF-8 string | `"PM-2026-ELECTION-NO"` |
 | `DECIMAL` | Decimal number encoded as string | `"0.615"` |
 | `LONG` | Integer timestamp or ID | `1710000000000` |
 | `INT` | JSON integer | `5` |
@@ -107,39 +77,74 @@ floating-point precision loss.
 
 ## Symbol Model
 
-A trading symbol represents one outcome token inside one prediction market.
+Dodex uses the following market identifiers:
 
-Each prediction market exposes separate outcome symbols, for example:
+- `marketAddress` is the unique on-chain address of the market and is used in requests. Example: `0:market-address`.
+- `marketName` is the market name. Example: `PM-2026-ELECTION`.
+- `symbol` is the outcome-token symbol and is formed as `<marketName>-<OUTCOME_NAME>`. Example: `PM-2026-ELECTION-YES`.
 
-```text
-PM-2026-ELECTION-NO-USDC
-PM-2026-ELECTION-YES-USDC
-```
+Requests that target one order book use `marketAddress` and `symbol`.
+Responses return the same identifiers where relevant.
 
-`outcomeId` is part of the symbol identity. For binary markets, `NO` uses
-`outcomeId = 0` and `YES` uses `outcomeId = 1`. API requests use `symbol`; they
-do not pass `outcomeId` as a separate trading parameter in the MVP.
-
-## Price And Amount Encoding
-
-TBD. This section is intentionally left for a later pass. Open questions and
-rough notes are tracked in `TODO.md`.
-
-## On-Chain Message Flow
-
-For on-chain write endpoints:
-
-1. Client calls an API `*/prepare` endpoint.
-2. API returns the target `PrivateNote` call data and an unsigned message payload.
-3. Client uses `tvm-sdk` to form/sign the final message.
-4. Client sends the final message to:
+Examples:
 
 ```text
-https://mainnet.ackinacki.org
+marketAddress = 0:market-address
+marketName    = PM-2026-ELECTION
+symbol        = PM-2026-ELECTION-YES
 ```
 
-This is intentionally a short placeholder. Exact `tvm-sdk` message-building and
-node request details will be filled in later.
+
+## Security Types
+
+| Security | Description |
+| --- | --- |
+| `NONE` | Public endpoint. No authentication required. |
+| `USER_DATA` | Requires account authentication. Used for balances and order history. |
+| `TRADE` | Requires account authentication and trading permission. Used for order creation and cancellation. |
+
+Private endpoints require:
+
+| Location | Name | Type | Mandatory | Description |
+| --- | --- | --- | --- | --- |
+| Header | `X-DODEX-APIKEY` | STRING | YES | API key or API token issued by the Dodex backend. |
+| Query | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| Query | `recvWindow` | LONG | NO | Request validity window in milliseconds. Default: `5000`. Max: `60000`. |
+| Query | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+### Signature Formation
+
+Private requests are signed with the API secret that belongs to the provided `X-DODEX-APIKEY`.
+The API secret MUST NOT be sent in any request.
+
+Signature payload:
+
+```text
+canonicalQueryString + canonicalRequestBody
+```
+
+- `canonicalQueryString` contains all query parameters except `signature`, sorted by key.
+- `canonicalRequestBody` is the exact minified JSON body string sent over the wire for requests with a body, or an empty string.
+- JSON keys in `canonicalRequestBody` are not re-sorted. The signature MUST be computed over the same key order and bytes that are sent in the request body.
+- The signature is HMAC SHA256 using the API secret.
+
+Formula:
+
+```text
+signature = HMAC_SHA256(canonicalQueryString + canonicalRequestBody, apiSecret)
+```
+
+Example for `POST /api/v1/order`:
+
+```text
+canonicalQueryString = recvWindow=5000&timestamp=1710000000000
+canonicalRequestBody = {"marketAddress":"0:market-address","symbol":"PM-2026-ELECTION-YES","side":"BUY","quantity":"1.500000","price":"0.615","type":"LIMIT","timeInForce":"GTC"}
+
+signature = HMAC_SHA256(
+  'recvWindow=5000&timestamp=1710000000000{"marketAddress":"0:market-address","symbol":"PM-2026-ELECTION-YES","side":"BUY","quantity":"1.500000","price":"0.615","type":"LIMIT","timeInForce":"GTC"}',
+  apiSecret
+)
+```
 
 ## Common Enums
 
@@ -147,8 +152,8 @@ node request details will be filled in later.
 
 | Value | Description |
 | --- | --- |
-| `BUY` | Buy the symbol's outcome token using collateral. |
-| `SELL` | Sell the symbol's outcome token for collateral. |
+| `BUY` | Buy the selected outcome token using the market quote asset. |
+| `SELL` | Sell the selected outcome token for the market quote asset. |
 
 ### Order Type
 
@@ -156,44 +161,67 @@ node request details will be filled in later.
 | --- | --- |
 | `LIMIT` | Limit order. Unfilled quantity remains in the order book. |
 | `MARKET` | Market order. Matches available liquidity and does not rest in the order book. |
-| `IOC` | Limit immediate-or-cancel order. Any unfilled quantity is canceled. |
-| `FOK` | Limit fill-or-kill order. The full quantity must be filled or the order is canceled. |
-| `POST_ONLY` | Limit post-only order. The order is canceled if it would immediately match. |
+
+### Time In Force
+
+`timeInForce` values:
+
+| Value | Description |
+| --- | --- |
+| `GTC` | Good Til Canceled. An order will be on the book unless the order is canceled. |
+| `IOC` | Immediate Or Cancel. An order will try to fill the order as much as it can before the order expires. |
+| `FOK` | Fill or Kill. An order will expire if the full order cannot be filled upon execution. |
+| `POST_ONLY` | Post Only. An order must rest on the book and will be canceled if it would immediately match. |
+
+### Order Status
+
+| Value | Description |
+| --- | --- |
+| `NEW` | Order is open and has no fills. |
+| `PARTIALLY_FILLED` | Order is open and partially filled. |
+| `FILLED` | Order is completely filled. |
+| `CANCELED` | Order was canceled by the user or system. |
+| `REJECTED` | Order was rejected and was not opened. |
 
 ## Error Response
 
-All REST errors use the same response format.
+All errors use the same response format.
 
 ```json
 {
   "code": -1121,
-  "msg": "Invalid symbol."
+  "msg": "Invalid market or symbol."
 }
 ```
 
-Recommended MVP error codes:
+Recommended common error codes:
 
 | Code | Message |
 | --- | --- |
 | `-1000` | Unknown error. |
 | `-1002` | Authentication required. |
+| `-1021` | Timestamp outside recvWindow. |
+| `-1022` | Invalid signature. |
 | `-1102` | Mandatory parameter was not sent. |
-| `-1121` | Invalid symbol. |
-| `-2010` | Request failed local checks. |
+| `-1111` | Precision is over the maximum defined for this asset. |
+| `-1121` | Invalid market or symbol. |
+| `-2010` | Order would immediately fail validation. |
 | `-2011` | Unknown order. |
 
 ## Endpoint Summary
 
-| Function | Method | Path |
-| --- | --- | --- |
-| List markets | `GET` | `/api/v1/markets` |
-| Fetch order book | `GET` | `/api/v1/depth` |
-| Fetch account balance | `GET` | `/api/v1/account` |
-| Prepare single order | `POST` | `/api/v1/order/prepare` |
-| Prepare single cancel | `POST` | `/api/v1/order/cancel/prepare` |
-| Prepare batch orders | `POST` | `/api/v1/batchOrders/prepare` |
-| Prepare batch cancel | `POST` | `/api/v1/batchOrders/cancel/prepare` |
-| Fetch orders in order book | `GET` | `/api/v1/openOrders` |
+| Function | Method | Path | Security |
+| --- | --- | --- | --- |
+| List markets | `GET` | `/api/v1/markets` | `NONE` |
+| Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
+| Fetch account balance | `GET` | `/api/v1/account` | `USER_DATA` |
+| Create single order | `POST` | `/api/v1/order` | `TRADE` |
+| Cancel single order by ID | `DELETE` | `/api/v1/order` | `TRADE` |
+| Create batch orders | `POST` | `/api/v1/batchOrders` | `TRADE` |
+| Cancel batch orders by IDs | `DELETE` | `/api/v1/batchOrders` | `TRADE` |
+| Cancel all open orders on one symbol | `DELETE` | `/api/v1/openOrders` | `TRADE` |
+| Fetch open orders | `GET` | `/api/v1/openOrders` | `USER_DATA` |
+| Fetch closed and canceled orders | `GET` | `/api/v1/allOrders` | `USER_DATA` |
 
 ## Market Data Endpoints
 
@@ -203,13 +231,13 @@ Recommended MVP error codes:
 GET /api/v1/markets
 ```
 
-Fetch available prediction markets and their outcome symbols.
+Fetch available prediction markets and their outcomes.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketId` | STRING | NO | Return one market only. |
+| `marketAddress` | STRING | NO | Return one market only. |
 
 Response:
 
@@ -218,16 +246,14 @@ Response:
   "serverTime": 1710000000000,
   "markets": [
     {
-      "marketId": "PM-2026-ELECTION",
-      "name": "2026 Election",
-      "status": "TRADING",
       "quoteAsset": "USDC",
       "marketAddress": "0:market-address",
+      "marketName": "PM-2026-ELECTION",
+      "status": "TRADING",
       "outcomes": [
         {
-          "outcomeId": 0,
           "outcomeName": "NO",
-          "symbol": "PM-2026-ELECTION-NO-USDC",
+          "symbol": "PM-2026-ELECTION-NO",
           "pricePrecision": 3,
           "quantityPrecision": 2,
           "tickSize": "0.001",
@@ -236,9 +262,8 @@ Response:
           "maxBatchSize": 5
         },
         {
-          "outcomeId": 1,
           "outcomeName": "YES",
-          "symbol": "PM-2026-ELECTION-YES-USDC",
+          "symbol": "PM-2026-ELECTION-YES",
           "pricePrecision": 3,
           "quantityPrecision": 2,
           "tickSize": "0.001",
@@ -258,20 +283,22 @@ Response:
 GET /api/v1/depth
 ```
 
-Fetch bids and asks for one outcome symbol.
+Fetch bids and asks for one symbol in one market.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Outcome symbol. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
 | `limit` | INT | NO | Number of price levels per side. Default: `100`. Max: `1000`. |
 
 Response:
 
 ```json
 {
-  "symbol": "PM-2026-ELECTION-YES-USDC",
+  "marketAddress": "0:market-address",
+  "symbol": "PM-2026-ELECTION-YES",
   "lastUpdateId": 1027024,
   "bids": [
     ["0.614", "100.00"],
@@ -298,209 +325,203 @@ Each bid or ask item is:
 GET /api/v1/account
 ```
 
-Fetch account balances for the `PrivateNote` associated with the API token's
-`userId`.
+Security: `USER_DATA`
 
-Query parameters:
+Fetch account collateral balances and outcome-token balances.
 
-No endpoint-specific query parameters.
+Parameters:
+
+No endpoint-specific parameters.
+
+Signed parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
 
 Response:
 
 ```json
 {
+  "accountId": "account-1",
+  "updateTime": 1710000000000,
   "balances": [
+    {
+      "asset": "NACKL",
+      "free": "10.000000",
+      "locked": "1.500000"
+    },
     {
       "asset": "USDC",
       "free": "25000.00",
-      "lockedInOrders": "3750.00"
+      "locked": "3750.00"
+    }
+  ],
+  "outcome_balances": [
+    {
+      "marketAddress": "0:market-address",
+      "symbol": "PM-2026-ELECTION-YES",
+      "free": "10.00",
+      "lockedInOrders": "1000.00"
     }
   ]
 }
 ```
 
-## On-Chain Trading Endpoints
+## Trading Endpoints
 
-The endpoints below return prepared on-chain message data only. They do not send
-messages to the blockchain and do not track execution status.
-
-In every `*/prepare` response, `method` is the target `PrivateNote` method and
-`params` contains the exact contract arguments for that method. Contract integer
-values wider than 32 bits are encoded as decimal strings in JSON.
-
-### Prepare New Order
+### New Order
 
 ```http
-POST /api/v1/order/prepare
+POST /api/v1/order
 ```
 
-Prepare a single order placement for one outcome symbol.
+Security: `TRADE`
 
-Request body fields:
+Create a single order.
+
+Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Outcome symbol. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
+| `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
-| `orderType` | ENUM | YES | See [Order Type](#order-type). |
-| `quantity` | DECIMAL | YES | Outcome-token quantity. |
-| `price` | DECIMAL | NO | Limit price. Required for `LIMIT`, `IOC`, `FOK`, and `POST_ONLY`; omitted for `MARKET`. |
-| `minQuantity` | DECIMAL | NO | Minimum fill quantity. Default: `"0"`. |
-| `epochId` | STRING | NO | Epoch id. |
+| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
+| `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
+| `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
+| `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
 
-Request body:
+Signed query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+Response:
 
 ```json
 {
-  "symbol": "PM-2026-ELECTION-YES-USDC",
-  "side": "BUY",
-  "orderType": "LIMIT",
-  "quantity": "100.00",
+  "marketAddress": "0:market-address",
+  "symbol": "PM-2026-ELECTION-YES",
+  "orderId": "123456789",
+  "clientOrderId": "mm-order-0001",
+  "transactTime": 1710000000000,
   "price": "0.615",
-  "minQuantity": "0",
-  "epochId": "42"
+  "origQty": "1.500000",
+  "executedQty": "0.000000",
+  "status": "NEW",
+  "timeInForce": "GTC",
+  "type": "LIMIT",
+  "side": "BUY"
 }
 ```
 
-Response:
-
-```json
-{
-  "chain": "ackinacki-mainnet",
-  "nodeEndpoint": "https://mainnet.ackinacki.org",
-  "privateNoteAddress": "0:private-note-address",
-  "method": "placeOrder",
-  "params": {
-    "event_id": "12345678901234567890",
-    "oracle_list_hash": "98765432109876543210",
-    "token_type": 3,
-    "outcomeId": 1,
-    "isBuy": true,
-    "price": "6150",
-    "amount": "100000000",
-    "flags": 0,
-    "minAmount": "0",
-    "epochId": "42"
-  },
-  "unsignedMessage": "base64-or-chain-specific-payload"
-}
-```
-
-`params` contract method:
-
-```solidity
-PrivateNote.placeOrder(
-  uint256 event_id,
-  uint256 oracle_list_hash,
-  uint32 token_type,
-  uint32 outcomeId,
-  bool isBuy,
-  uint256 price,
-  uint128 amount,
-  uint8 flags,
-  uint128 minAmount,
-  uint64 epochId
-)
-```
-
-### Prepare Cancel Order
+### Cancel Order
 
 ```http
-POST /api/v1/order/cancel/prepare
+DELETE /api/v1/order
 ```
 
-Prepare cancellation of one order that is currently in the order book.
+Security: `TRADE`
 
-Request body fields:
+Cancel a single open order by ID.
+
+Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Outcome symbol. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
 | `orderId` | STRING | YES | Order ID to cancel. |
-
-Request body:
-
-```json
-{
-  "symbol": "PM-2026-ELECTION-YES-USDC",
-  "orderId": "123456789"
-}
-```
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
 
 Response:
 
 ```json
 {
-  "chain": "ackinacki-mainnet",
-  "nodeEndpoint": "https://mainnet.ackinacki.org",
-  "privateNoteAddress": "0:private-note-address",
-  "method": "cancelOrder",
-  "params": {
-    "event_id": "12345678901234567890",
-    "oracle_list_hash": "98765432109876543210",
-    "token_type": 3,
-    "orderId": "123456789"
-  },
-  "unsignedMessage": "base64-or-chain-specific-payload"
+  "marketAddress": "0:market-address",
+  "symbol": "PM-2026-ELECTION-YES",
+  "orderId": "123456789",
+  "price": "0.615",
+  "origQty": "1.500000",
+  "executedQty": "0.000000",
+  "status": "CANCELED",
+  "timeInForce": "GTC",
+  "type": "LIMIT",
+  "side": "BUY",
+  "time": 1710000000000,
+  "updateTime": 1710000010000
 }
 ```
 
-`params` contract method:
-
-```solidity
-PrivateNote.cancelOrder(
-  uint256 event_id,
-  uint256 oracle_list_hash,
-  uint32 token_type,
-  uint128 orderId
-)
-```
-
-### Prepare New Batch Orders
+### New Batch Orders
 
 ```http
-POST /api/v1/batchOrders/prepare
+POST /api/v1/batchOrders
 ```
 
-Prepare placement of multiple orders for one outcome symbol.
+Security: `TRADE`
 
-Request body fields:
+Create multiple orders in one request.
+All orders in the batch are submitted to the single market symbol identified by the top-level `marketAddress` and `symbol`.
+
+Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Outcome symbol. All orders use this symbol. |
-| `orders` | ARRAY | YES | List of orders to create. Min: `1`. Max: `5`. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
+| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Max: `5`. |
 
 Each order item:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
+| `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | `BUY` or `SELL`. |
-| `orderType` | ENUM | YES | See [Order Type](#order-type). |
-| `quantity` | DECIMAL | YES | Outcome-token quantity. |
-| `price` | DECIMAL | NO | Limit price. Required for `LIMIT`, `IOC`, `FOK`, and `POST_ONLY`; omitted for `MARKET`. |
-| `minQuantity` | DECIMAL | NO | Minimum fill quantity. Default: `"0"`. |
-| `epochId` | STRING | NO | Epoch id. |
+| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
+| `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
+| `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
+| `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
+
+Signed query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
 
 Request body:
 
 ```json
 {
-  "symbol": "PM-2026-ELECTION-YES-USDC",
+  "marketAddress": "0:market-address",
+  "symbol": "PM-2026-ELECTION-YES",
   "orders": [
     {
+      "newOrderClientId": "mm-order-0001",
       "side": "BUY",
-      "orderType": "LIMIT",
-      "quantity": "100.00",
+      "quantity": "1.500000",
       "price": "0.615",
-      "epochId": "42"
+      "type": "LIMIT",
+      "timeInForce": "GTC"
     },
     {
+      "newOrderClientId": "mm-order-0002",
       "side": "SELL",
-      "orderType": "LIMIT",
-      "quantity": "50.00",
+      "quantity": "0.750000",
       "price": "0.620",
-      "epochId": "42"
+      "type": "LIMIT",
+      "timeInForce": "POST_ONLY"
     }
   ]
 }
@@ -509,85 +530,73 @@ Request body:
 Response:
 
 ```json
-{
-  "chain": "ackinacki-mainnet",
-  "nodeEndpoint": "https://mainnet.ackinacki.org",
-  "privateNoteAddress": "0:private-note-address",
-  "method": "placeBatch",
-  "params": {
-    "event_id": "12345678901234567890",
-    "oracle_list_hash": "98765432109876543210",
-    "token_type": 3,
-    "orders": [
-      {
-        "outcomeId": 1,
-        "isBuy": true,
-        "flags": 0,
-        "price": "6150",
-        "amount": "100000000",
-        "minAmount": "0",
-        "epochId": "42"
-      },
-      {
-        "outcomeId": 1,
-        "isBuy": false,
-        "flags": 0,
-        "price": "6200",
-        "amount": "50000000",
-        "minAmount": "0",
-        "epochId": "42"
-      }
-    ]
+[
+  {
+    "marketAddress": "0:market-address",
+    "symbol": "PM-2026-ELECTION-YES",
+    "orderId": "123456789",
+    "clientOrderId": "mm-order-0001",
+    "transactTime": 1710000000000,
+    "price": "0.615",
+    "origQty": "1.500000",
+    "executedQty": "0.000000",
+    "status": "NEW",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "BUY"
   },
-  "unsignedMessage": "base64-or-chain-specific-payload"
-}
+  {
+    "marketAddress": "0:market-address",
+    "symbol": "PM-2026-ELECTION-YES",
+    "orderId": "123456790",
+    "clientOrderId": "mm-order-0002",
+    "transactTime": 1710000000000,
+    "price": "0.620",
+    "origQty": "0.750000",
+    "executedQty": "0.000000",
+    "status": "NEW",
+    "timeInForce": "POST_ONLY",
+    "type": "LIMIT",
+    "side": "SELL"
+  }
+]
 ```
 
-`params` contract method:
+Batch creation is atomic at the API validation level: if any order is invalid, the whole request
+is rejected and no orders are created.
 
-```solidity
-PrivateNote.placeBatch(
-  uint256 event_id,
-  uint256 oracle_list_hash,
-  uint32 token_type,
-  OrderBook.PlaceParams[] orders
-)
-```
-
-`orders` item contract type:
-
-```solidity
-OrderBook.PlaceParams(
-  uint32 outcomeId,
-  bool isBuy,
-  uint8 flags,
-  uint256 price,
-  uint128 amount,
-  uint128 minAmount,
-  uint64 epochId
-)
-```
-
-### Prepare Cancel Batch Orders
+### Cancel Batch Orders
 
 ```http
-POST /api/v1/batchOrders/cancel/prepare
+DELETE /api/v1/batchOrders
 ```
 
-Prepare cancellation of multiple orders that are currently in the order book.
+Security: `TRADE`
 
-Request body fields:
+Cancel multiple open orders by IDs.
+
+Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | YES | Outcome symbol. |
-| `orderIds` | ARRAY | YES | List of order IDs to cancel. Min: `1`. Max: `5`. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
+| `orderIds` | ARRAY | YES | List of order IDs to cancel. Max: `5`. |
+
+Signed query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
 
 Request body:
 
 ```json
 {
-  "symbol": "PM-2026-ELECTION-YES-USDC",
+  "marketAddress": "0:market-address",
+  "symbol": "PM-2026-ELECTION-YES",
   "orderIds": ["123456789", "123456790"]
 }
 ```
@@ -595,61 +604,197 @@ Request body:
 Response:
 
 ```json
-{
-  "chain": "ackinacki-mainnet",
-  "nodeEndpoint": "https://mainnet.ackinacki.org",
-  "privateNoteAddress": "0:private-note-address",
-  "method": "cancelBatch",
-  "params": {
-    "event_id": "12345678901234567890",
-    "oracle_list_hash": "98765432109876543210",
-    "token_type": 3,
-    "orderIds": ["123456789", "123456790"]
+[
+  {
+    "marketAddress": "0:market-address",
+    "symbol": "PM-2026-ELECTION-YES",
+    "orderId": "123456789",
+    "price": "0.615",
+    "origQty": "1.500000",
+    "executedQty": "0.000000",
+    "status": "CANCELED",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "BUY",
+    "time": 1710000000000,
+    "updateTime": 1710000010000
   },
-  "unsignedMessage": "base64-or-chain-specific-payload"
-}
+  {
+    "marketAddress": "0:market-address",
+    "symbol": "PM-2026-ELECTION-YES",
+    "orderId": "123456790",
+    "price": "0.620",
+    "origQty": "0.750000",
+    "executedQty": "0.000000",
+    "status": "CANCELED",
+    "timeInForce": "POST_ONLY",
+    "type": "LIMIT",
+    "side": "SELL",
+    "time": 1710000000000,
+    "updateTime": 1710000010000
+  }
+]
 ```
 
-`params` contract method:
-
-```solidity
-PrivateNote.cancelBatch(
-  uint256 event_id,
-  uint256 oracle_list_hash,
-  uint32 token_type,
-  uint128[] orderIds
-)
-```
-
-## Order Read Endpoints
-
-### Orders In Order Book
+### Cancel All Open Orders On Symbol
 
 ```http
-GET /api/v1/openOrders
+DELETE /api/v1/openOrders
 ```
 
-Fetch orders that are currently in the order book for the API token's `userId`.
+Security: `TRADE`
 
-Query parameters:
+Cancel all open orders on one market symbol.
+
+Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `symbol` | STRING | NO | Outcome symbol. If omitted, returns orders for all symbols. |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
 
 Response:
 
 ```json
 [
   {
-    "symbol": "PM-2026-ELECTION-YES-USDC",
-    "outcomeId": 1,
+    "marketAddress": "0:market-address",
+    "symbol": "PM-2026-ELECTION-YES",
     "orderId": "123456789",
-    "side": "BUY",
-    "orderType": "LIMIT",
     "price": "0.615",
-    "quantity": "100.00",
-    "epochId": "42"
+    "origQty": "1.500000",
+    "executedQty": "0.000000",
+    "status": "CANCELED",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "BUY",
+    "time": 1710000000000,
+    "updateTime": 1710000010000
   }
 ]
 ```
+
+### Current Open Orders
+
+```http
+GET /api/v1/openOrders
+```
+
+Security: `USER_DATA`
+
+Fetch currently open orders.
+
+Parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns open orders for all markets. |
+| `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+Response:
+
+```json
+[
+  {
+    "marketAddress": "0:market-address",
+    "symbol": "PM-2026-ELECTION-YES",
+    "orderId": "123456789",
+    "price": "0.615",
+    "origQty": "1.500000",
+    "executedQty": "0.500000",
+    "status": "PARTIALLY_FILLED",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "BUY",
+    "time": 1710000000000,
+    "updateTime": 1710000001000
+  }
+]
+```
+
+### Closed And Canceled Orders
+
+```http
+GET /api/v1/allOrders
+```
+
+Security: `USER_DATA`
+
+Fetch filled and canceled order history.
+
+Parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns history for all markets. |
+| `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
+| `status` | ENUM | NO | Filter by status: `FILLED`, `CANCELED`, or `REJECTED`. |
+| `startTime` | LONG | NO | Start time in milliseconds. |
+| `endTime` | LONG | NO | End time in milliseconds. |
+| `limit` | INT | NO | Number of orders. Default: `100`. Max: `1000`. |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+Response:
+
+```json
+[
+  {
+    "marketAddress": "0:market-address",
+    "symbol": "PM-2026-ELECTION-YES",
+    "orderId": "123456789",
+    "price": "0.615",
+    "origQty": "1.500000",
+    "executedQty": "1.500000",
+    "status": "FILLED",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "side": "BUY",
+    "time": 1710000000000,
+    "updateTime": 1710000100000
+  }
+]
+```
+
+## Validation Rules
+
+Order creation MUST validate:
+
+| Rule | Source |
+| --- | --- |
+| `marketAddress` exists | `/api/v1/markets` |
+| `symbol` exists within the selected market | `/api/v1/markets` |
+| The selected market has `status = TRADING` | `/api/v1/markets` |
+| For `LIMIT` orders, `price` decimal places do not exceed `pricePrecision` | `/api/v1/markets` |
+| For `LIMIT` orders, `price` is a multiple of `tickSize` | `/api/v1/markets` |
+| `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/markets` |
+| `quantity` is a multiple of `stepSize` | `/api/v1/markets` |
+| For `LIMIT` orders, `price * quantity` is at least `minNotional` | `/api/v1/markets` |
+| For `MARKET` buy orders, `quantity` in the market `quoteAsset` is at least `minNotional` | `/api/v1/markets` |
+| For `MARKET` buy orders, `quantityPrecision` and `stepSize` apply to the quote-asset spend amount, not to outcome-token units | `/api/v1/markets` |
+| Account has enough available balance | `/api/v1/account` |
+
+## Minimal Trading Scope
+
+Supported in this API version:
+
+- Limit and market orders.
+- Buy and sell sides only.
+- `GTC`, `IOC`, `FOK`, and `POST_ONLY` for limit orders.
+- Public market data.
+- Account balances.
+- Open order and closed order history.
+- Single and batch order creation.
+- Single, batch, and symbol-wide order cancellation.
+
+Not Included in this API version:
+
+- WebSocket for fills.
+- Maker and taker fees per market. This can be exposed either in `/api/v1/markets` as `makerFee` and `takerFee`, or via a separate `/api/v1/fees` endpoint.
