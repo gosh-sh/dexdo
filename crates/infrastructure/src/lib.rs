@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod database;
+pub mod decoder;
 pub mod graphql;
 pub mod indexer_repo;
 pub mod rows;

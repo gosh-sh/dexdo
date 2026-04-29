@@ -6,7 +6,11 @@ use serde_json::Value;
 use sqlx::PgPool;
 use sqlx::Postgres;
 use sqlx::Transaction;
+use tracing::debug;
+use tracing::warn;
 
+use crate::decoder::DecodedEvent;
+use crate::decoder::Decoder;
 use crate::graphql::EventEdge;
 
 #[derive(Debug, Clone)]
@@ -18,6 +22,8 @@ pub struct IndexerRepository {
 pub struct PagePersistResult {
     pub inserted: u64,
     pub skipped: u64,
+    pub decoded: u64,
+    pub undecoded: u64,
 }
 
 impl IndexerRepository {
@@ -40,24 +46,37 @@ impl IndexerRepository {
         stream_name: &str,
         edges: &[EventEdge],
         end_cursor: Option<&str>,
+        decoder: &Decoder,
     ) -> anyhow::Result<PagePersistResult> {
         let mut tx: Transaction<'_, Postgres> = self.pool.begin().await.context("begin tx")?;
         let mut result = PagePersistResult::default();
 
         for edge in edges {
-            let body = edge.node.body.clone().unwrap_or(Value::Null);
+            let body_value = edge.node.body.clone().unwrap_or(Value::Null);
+            let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref());
+            if decoded.is_some() {
+                result.decoded += 1;
+            } else {
+                result.undecoded += 1;
+            }
+
+            let event_type = decoded.as_ref().map(|d| d.event_type.clone());
+            let decoded_value = decoded.map(|d| d.value);
+
             let affected = sqlx::query(
                 r#"insert into raw_events
-                       (msg_id, created_at_chain, src_address, dst_address, event_type, body_json)
-                   values ($1, to_timestamp($2), $3, $4, $5, $6)
+                       (msg_id, created_at_chain, src_address, dst_address,
+                        event_type, body_json, decoded)
+                   values ($1, to_timestamp($2), $3, $4, $5, $6, $7)
                    on conflict (msg_id) do nothing"#,
             )
             .bind(&edge.node.msg_id)
             .bind(parse_unix_seconds(edge.node.created_at.as_ref()))
             .bind(edge.node.src.as_deref())
             .bind(edge.node.dst.as_deref())
-            .bind::<Option<&str>>(None)
-            .bind(body)
+            .bind(event_type)
+            .bind(body_value)
+            .bind(decoded_value)
             .execute(&mut *tx)
             .await
             .with_context(|| format!("insert raw_events msg_id={}", edge.node.msg_id))?
@@ -87,6 +106,18 @@ impl IndexerRepository {
         tx.commit().await.context("commit tx")?;
         Ok(result)
     }
+}
+
+fn try_decode(decoder: &Decoder, msg_id: &str, body: Option<&Value>) -> Option<DecodedEvent> {
+    let body_str = body?.as_str()?;
+    match decoder.decode_event_body(body_str) {
+        Ok(decoded) => decoded,
+        Err(err) => {
+            warn!(msg_id, ?err, "decode body failed");
+            None
+        }
+    }
+    .inspect(|d| debug!(msg_id, event_type = %d.event_type, "decoded event"))
 }
 
 fn parse_unix_seconds(value: Option<&Value>) -> Option<f64> {

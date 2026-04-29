@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use dodex_infrastructure::config::IndexerConfig;
 use dodex_infrastructure::database;
+use dodex_infrastructure::decoder::Decoder;
 use dodex_infrastructure::graphql::EventsPage;
 use dodex_infrastructure::graphql::GraphqlClient;
 use dodex_infrastructure::indexer_repo::IndexerRepository;
@@ -38,6 +39,8 @@ async fn main() -> anyhow::Result<()> {
     let pool = database::build_pool(&config.common.database).await?;
     database::run_migrations(&pool).await?;
     let repo = IndexerRepository::new(pool);
+    let decoder = Decoder::new()?;
+    info!(known_events = decoder.known_events(), "abi decoder initialized");
 
     let mut cursor = repo.load_cursor(STREAM_NAME).await?;
     info!(cursor = cursor.as_deref().unwrap_or(""), "indexer resumed from cursor");
@@ -70,12 +73,14 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if let Some(client) = client.as_ref() {
-            match drain_events(client, &repo, cfg.graphql.page_size, &mut cursor).await {
+            match drain_events(client, &repo, &decoder, cfg.graphql.page_size, &mut cursor).await {
                 Ok(stats) => {
                     info!(
                         edges = stats.edges,
                         inserted = stats.inserted,
                         skipped = stats.skipped,
+                        decoded = stats.decoded,
+                        undecoded = stats.undecoded,
                         pages = stats.pages,
                         cursor = cursor.as_deref().unwrap_or(""),
                         "indexer tick"
@@ -96,12 +101,15 @@ struct DrainStats {
     edges: usize,
     inserted: u64,
     skipped: u64,
+    decoded: u64,
+    undecoded: u64,
     pages: u32,
 }
 
 async fn drain_events(
     client: &GraphqlClient,
     repo: &IndexerRepository,
+    decoder: &Decoder,
     page_size: u32,
     cursor: &mut Option<String>,
 ) -> anyhow::Result<DrainStats> {
@@ -113,9 +121,11 @@ async fn drain_events(
         stats.edges += page.edges.len();
 
         let end_cursor = page.page_info.end_cursor.as_deref();
-        let persisted = repo.persist_page(STREAM_NAME, &page.edges, end_cursor).await?;
+        let persisted = repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder).await?;
         stats.inserted += persisted.inserted;
         stats.skipped += persisted.skipped;
+        stats.decoded += persisted.decoded;
+        stats.undecoded += persisted.undecoded;
 
         if let Some(end) = page.page_info.end_cursor.clone() {
             *cursor = Some(end);
