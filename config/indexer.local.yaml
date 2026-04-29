@@ -3,7 +3,7 @@ app:
   log_level: info
 
 database:
-  url: postgresql://indexer.dngmarvcxzmyesxaohvg:VWVxaXVKZUo1Yk16Qk14Wm0jOTV1cksh@aws-1-eu-central-1.pooler.supabase.com:5432/postgres
+  url: postgresql://indexer.dngmarvcxzmyesxaohvg:TestPass12345@aws-1-eu-central-1.pooler.supabase.com:5432/postgres
   max_connections: 10
   min_connections: 1
   connect_timeout_ms: 3000
