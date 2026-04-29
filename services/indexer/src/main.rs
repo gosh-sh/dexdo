@@ -81,6 +81,9 @@ async fn main() -> anyhow::Result<()> {
                         skipped = stats.skipped,
                         decoded = stats.decoded,
                         undecoded = stats.undecoded,
+                        projected = stats.projected,
+                        projection_deferred = stats.projection_deferred,
+                        projection_failed = stats.projection_failed,
                         pages = stats.pages,
                         cursor = cursor.as_deref().unwrap_or(""),
                         "indexer tick"
@@ -103,6 +106,9 @@ struct DrainStats {
     skipped: u64,
     decoded: u64,
     undecoded: u64,
+    projected: u64,
+    projection_deferred: u64,
+    projection_failed: u64,
     pages: u32,
 }
 
@@ -126,6 +132,9 @@ async fn drain_events(
         stats.skipped += persisted.skipped;
         stats.decoded += persisted.decoded;
         stats.undecoded += persisted.undecoded;
+        stats.projected += persisted.projected;
+        stats.projection_deferred += persisted.projection_deferred;
+        stats.projection_failed += persisted.projection_failed;
 
         if let Some(end) = page.page_info.end_cursor.clone() {
             *cursor = Some(end);

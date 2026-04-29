@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use serde_json::Value;
+use sqlx::Acquire;
 use sqlx::PgPool;
 use sqlx::Postgres;
 use sqlx::Transaction;
@@ -12,6 +13,8 @@ use tracing::warn;
 use crate::decoder::DecodedEvent;
 use crate::decoder::Decoder;
 use crate::graphql::EventEdge;
+use crate::projectors;
+use crate::projectors::ProjectionOutcome;
 
 #[derive(Debug, Clone)]
 pub struct IndexerRepository {
@@ -24,6 +27,9 @@ pub struct PagePersistResult {
     pub skipped: u64,
     pub decoded: u64,
     pub undecoded: u64,
+    pub projected: u64,
+    pub projection_deferred: u64,
+    pub projection_failed: u64,
 }
 
 impl IndexerRepository {
@@ -61,7 +67,7 @@ impl IndexerRepository {
             }
 
             let event_type = decoded.as_ref().map(|d| d.event_type.clone());
-            let decoded_value = decoded.map(|d| d.value);
+            let decoded_value = decoded.as_ref().map(|d| d.value.clone());
 
             let affected = sqlx::query(
                 r#"insert into raw_events
@@ -86,6 +92,34 @@ impl IndexerRepository {
                 result.skipped += 1;
             } else {
                 result.inserted += affected;
+            }
+
+            if let Some(decoded_event) = decoded.as_ref() {
+                let mut sp = tx.begin().await.context("projector savepoint begin")?;
+                let outcome = projectors::project_event(&mut sp, decoded_event, &edge.node).await;
+                match outcome {
+                    Ok(ProjectionOutcome::Applied) => {
+                        sp.commit().await.context("projector savepoint release")?;
+                        result.projected += 1;
+                    }
+                    Ok(ProjectionOutcome::Deferred) => {
+                        sp.commit().await.context("projector savepoint release")?;
+                        result.projection_deferred += 1;
+                    }
+                    Ok(ProjectionOutcome::Unknown) => {
+                        sp.commit().await.context("projector savepoint release")?;
+                    }
+                    Err(err) => {
+                        drop(sp);
+                        result.projection_failed += 1;
+                        warn!(
+                            msg_id = %edge.node.msg_id,
+                            event_type = %decoded_event.event_type,
+                            ?err,
+                            "projector failed; raw event still persisted, savepoint rolled back"
+                        );
+                    }
+                }
             }
         }
 

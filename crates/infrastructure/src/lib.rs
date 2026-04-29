@@ -6,6 +6,7 @@ pub mod database;
 pub mod decoder;
 pub mod graphql;
 pub mod indexer_repo;
+pub mod projectors;
 pub mod rows;
 pub mod signal;
 pub mod stub;
