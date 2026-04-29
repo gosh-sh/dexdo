@@ -2,6 +2,9 @@
 //
 
 pub mod config;
+pub mod database;
+pub mod graphql;
+pub mod indexer_repo;
 pub mod rows;
 pub mod signal;
 pub mod stub;
