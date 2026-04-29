@@ -4,3 +4,4 @@ internal-docs/
 .codex
 .claude
 target/
+config/indexer.stage.supabase.yaml
