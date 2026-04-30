@@ -11,16 +11,18 @@ use dodex_application::GetDepthUseCase;
 use dodex_application::GetMarketsQuery;
 use dodex_application::GetMarketsUseCase;
 use dodex_domain::DomainError;
-use dodex_domain::MarketId;
+use dodex_domain::MarketAddress;
 use dodex_domain::Symbol;
 use dodex_infrastructure::config::ApiConfig;
 use dodex_infrastructure::signal::run_config_reload_loop;
 use dodex_infrastructure::stub::StubReadModelRepository;
+use salvo::http::StatusCode;
 use salvo::prelude::*;
 use salvo::writing::Json;
 use salvo_extra::affix_state::inject;
 use serde::Serialize;
 use tokio::sync::RwLock;
+use tracing::error;
 use tracing::info;
 
 #[derive(Clone)]
@@ -38,18 +40,16 @@ struct MarketsResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MarketDto {
-    market_id: String,
-    name: String,
-    status: String,
     quote_asset: String,
     market_address: String,
+    market_name: String,
+    status: String,
     outcomes: Vec<OutcomeDto>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OutcomeDto {
-    outcome_id: u32,
     outcome_name: String,
     symbol: String,
     price_precision: u8,
@@ -63,10 +63,46 @@ struct OutcomeDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DepthResponse {
+    market_address: String,
     symbol: String,
     last_update_id: u64,
     bids: Vec<[String; 2]>,
     asks: Vec<[String; 2]>,
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    code: i32,
+    msg: &'static str,
+}
+
+#[derive(Debug)]
+struct ApiError(DomainError);
+
+impl ApiError {
+    fn status(&self) -> StatusCode {
+        match self.0 {
+            DomainError::AuthRequired
+            | DomainError::TimestampOutsideRecvWindow
+            | DomainError::InvalidSignature => StatusCode::UNAUTHORIZED,
+            DomainError::UnknownOrder => StatusCode::NOT_FOUND,
+            DomainError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::BAD_REQUEST,
+        }
+    }
+}
+
+impl From<DomainError> for ApiError {
+    fn from(value: DomainError) -> Self {
+        Self(value)
+    }
+}
+
+impl Scribe for ApiError {
+    fn render(self, res: &mut Response) {
+        res.status_code(self.status());
+        res.render(Json(ErrorBody { code: self.0.code(), msg: self.0.msg() }));
+    }
 }
 
 #[handler]
@@ -78,29 +114,37 @@ async fn readiness() -> &'static str {
 async fn get_markets(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<MarketsResponse>, StatusError> {
-    let state = depot.obtain::<AppState>().map_err(|_| internal_error())?.clone();
-    let market_id = req.query::<String>("marketId").map(MarketId);
+) -> Result<Json<MarketsResponse>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let market_address = req.query::<String>("marketAddress").map(MarketAddress);
 
     let use_case = GetMarketsUseCase::new(state.repo);
     let market_items =
-        use_case.execute(GetMarketsQuery { market_id }).await.map_err(|_| internal_error())?;
+        use_case.execute(GetMarketsQuery { market_address }).await.map_err(|err| {
+            error!(?err, "list_markets failed");
+            ApiError::from(DomainError::Unexpected)
+        })?;
 
     let payload = MarketsResponse {
         server_time: now_millis(),
         markets: market_items
             .into_iter()
             .map(|market| MarketDto {
-                market_id: market.market_id.0,
-                name: market.name,
-                status: market.status,
                 quote_asset: market.quote_asset,
-                market_address: market.market_address,
+                market_address: market.market_address.0,
+                market_name: market.market_name.0,
+                status: market.status,
                 outcomes: market
                     .outcomes
                     .into_iter()
                     .map(|outcome| OutcomeDto {
-                        outcome_id: outcome.outcome_id,
                         outcome_name: outcome.outcome_name,
                         symbol: outcome.symbol.0,
                         price_precision: outcome.price_precision,
@@ -119,31 +163,46 @@ async fn get_markets(
 }
 
 #[handler]
-async fn get_depth(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<DepthResponse>, StatusError> {
-    let state = depot.obtain::<AppState>().map_err(|_| internal_error())?.clone();
+async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthResponse>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let market_address = non_empty_query(req, "marketAddress")
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
     let symbol =
-        req.query::<String>("symbol").ok_or_else(|| api_error(DomainError::MissingParameter))?;
+        non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
 
     let limit = req.query::<u16>("limit").unwrap_or(100).min(1000);
-    if symbol.trim().is_empty() {
-        return Err(api_error(DomainError::InvalidSymbol));
-    }
 
     let use_case = GetDepthUseCase::new(state.repo);
     let snapshot = use_case
-        .execute(GetDepthQuery { symbol: Symbol(symbol), limit })
+        .execute(GetDepthQuery {
+            market_address: MarketAddress(market_address),
+            symbol: Symbol(symbol),
+            limit,
+        })
         .await
-        .map_err(|_| internal_error())?;
+        .map_err(|err| {
+            error!(?err, "get_depth failed");
+            ApiError::from(DomainError::Unexpected)
+        })?;
 
     Ok(Json(DepthResponse {
+        market_address: snapshot.market_address.0,
         symbol: snapshot.symbol.0,
         last_update_id: snapshot.last_update_id,
         bids: snapshot.bids.into_iter().map(|level| [level.price, level.quantity]).collect(),
         asks: snapshot.asks.into_iter().map(|level| [level.price, level.quantity]).collect(),
     }))
+}
+
+fn non_empty_query(req: &mut Request, key: &str) -> Option<String> {
+    req.query::<String>(key).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 #[tokio::main]
@@ -177,19 +236,4 @@ async fn main() -> anyhow::Result<()> {
 
 fn now_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or_default()
-}
-
-fn internal_error() -> StatusError {
-    StatusError::internal_server_error()
-}
-
-fn api_error(err: DomainError) -> StatusError {
-    let msg = match err {
-        DomainError::MissingParameter => (-1102, "Mandatory parameter was not sent."),
-        DomainError::InvalidSymbol => (-1121, "Invalid symbol."),
-        DomainError::Unexpected => (-1000, "Unknown error."),
-    }
-    .1;
-
-    StatusError::bad_request().brief(msg)
 }
