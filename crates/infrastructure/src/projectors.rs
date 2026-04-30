@@ -1,7 +1,9 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use anyhow::anyhow;
 use anyhow::Context;
+use num_bigint::BigUint;
 use serde_json::Value;
 use sqlx::Postgres;
 use sqlx::Transaction;
@@ -23,13 +25,20 @@ pub async fn project_event(
     event: &DecodedEvent,
     node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
+    let context = || format!("project {} (msg_id={})", event.event_type, node.msg_id);
     match event.event_type.as_str() {
-        "RootOracle.OracleDeployed" => apply_oracle_deployed(tx, event, node)
-            .await
-            .with_context(|| format!("project {} (msg_id={})", event.event_type, node.msg_id)),
-        "Oracle.OracleEventListDeployed" => apply_oracle_event_list_deployed(tx, event, node)
-            .await
-            .with_context(|| format!("project {} (msg_id={})", event.event_type, node.msg_id)),
+        "RootOracle.OracleDeployed" => {
+            apply_oracle_deployed(tx, event, node).await.with_context(context)
+        }
+        "Oracle.OracleEventListDeployed" => {
+            apply_oracle_event_list_deployed(tx, event, node).await.with_context(context)
+        }
+        "OracleEventList.EventAdded" => {
+            apply_event_added(tx, event, node).await.with_context(context)
+        }
+        "OracleEventList.EventConfirmed" => {
+            apply_event_confirmed(tx, event, node).await.with_context(context)
+        }
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }
@@ -111,6 +120,160 @@ async fn apply_oracle_event_list_deployed(
     Ok(ProjectionOutcome::Applied)
 }
 
+async fn apply_event_added(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let eventlist_address =
+        node.src.as_deref().context("EventAdded: src missing on event message")?;
+
+    let event_id_hex = field_str(&event.value, "eventId")?;
+    let event_id_decimal = uint256_hex_to_decimal(event_id_hex)?;
+
+    let event_name = field_str(&event.value, "eventName")?;
+    let oracle_fee = field_str(&event.value, "oracleFee")?;
+    let deadline_raw = field_str(&event.value, "deadline")?;
+    let deadline: i64 = deadline_raw
+        .parse()
+        .with_context(|| format!("parse EventAdded.deadline = {deadline_raw}"))?;
+
+    let parent: Option<(i64,)> =
+        sqlx::query_as("select id from oracle_event_lists where address = $1")
+            .bind(eventlist_address)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("lookup oracle_event_lists id by address")?;
+
+    let Some((eventlist_id,)) = parent else {
+        warn!(
+            eventlist_address,
+            msg_id = %node.msg_id,
+            "EventAdded observed before parent OracleEventListDeployed; deferring"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    };
+
+    sqlx::query(
+        r#"insert into oracle_events
+               (eventlist_id, internal_id_in_eventlist, event_name,
+                oracle_fee, deadline, last_seen_at, updated_at)
+           values ($1, $2::numeric, $3, $4::numeric, $5, now(), now())
+           on conflict (eventlist_id, internal_id_in_eventlist) do update
+               set event_name = excluded.event_name,
+                   oracle_fee = excluded.oracle_fee,
+                   deadline = excluded.deadline,
+                   is_deleted = false,
+                   last_seen_at = now(),
+                   updated_at = now()"#,
+    )
+    .bind(eventlist_id)
+    .bind(&event_id_decimal)
+    .bind(event_name)
+    .bind(oracle_fee)
+    .bind(deadline)
+    .execute(&mut **tx)
+    .await
+    .context("upsert oracle_events on EventAdded")?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_event_confirmed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let eventlist_address =
+        node.src.as_deref().context("EventConfirmed: src missing on event message")?;
+
+    let event_id_hex = field_str(&event.value, "eventId")?;
+    let event_id_decimal = uint256_hex_to_decimal(event_id_hex)?;
+    let pmp_address = field_str(&event.value, "pmpAddress")?;
+
+    let parent: Option<(i64,)> =
+        sqlx::query_as("select id from oracle_event_lists where address = $1")
+            .bind(eventlist_address)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("lookup oracle_event_lists id by address")?;
+
+    let Some((eventlist_id,)) = parent else {
+        warn!(
+            eventlist_address,
+            msg_id = %node.msg_id,
+            "EventConfirmed observed before parent OracleEventListDeployed; deferring"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    };
+
+    let updated = sqlx::query(
+        r#"update oracle_events
+              set confirmed_pmp_address = $1,
+                  confirmed_at = now(),
+                  updated_at = now()
+            where eventlist_id = $2
+              and internal_id_in_eventlist = $3::numeric"#,
+    )
+    .bind(pmp_address)
+    .bind(eventlist_id)
+    .bind(&event_id_decimal)
+    .execute(&mut **tx)
+    .await
+    .context("update oracle_events on EventConfirmed")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(
+            eventlist_address,
+            event_id = %event_id_decimal,
+            pmp_address,
+            msg_id = %node.msg_id,
+            "EventConfirmed observed before EventAdded; deferring"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    }
+
+    Ok(ProjectionOutcome::Applied)
+}
+
 fn field_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
     value.get(key).and_then(Value::as_str).with_context(|| format!("missing field `{key}`"))
+}
+
+fn uint256_hex_to_decimal(value: &str) -> anyhow::Result<String> {
+    // tvm_abi serialises uint256 as "0x" + 64 lowercase hex chars.
+    let stripped = value.strip_prefix("0x").unwrap_or(value);
+    let big = BigUint::parse_bytes(stripped.as_bytes(), 16)
+        .ok_or_else(|| anyhow!("invalid uint256 hex: {value}"))?;
+    Ok(big.to_str_radix(10))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_uint256_hex_to_decimal() {
+        let zero = "0x0000000000000000000000000000000000000000000000000000000000000000";
+        let one = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let u64_max = "0x000000000000000000000000000000000000000000000000ffffffffffffffff";
+        let u256_max = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+        assert_eq!(uint256_hex_to_decimal(zero).unwrap(), "0");
+        assert_eq!(uint256_hex_to_decimal(one).unwrap(), "1");
+        assert_eq!(uint256_hex_to_decimal(u64_max).unwrap(), "18446744073709551615");
+        assert_eq!(
+            uint256_hex_to_decimal(u256_max).unwrap(),
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+        );
+        // accepts also no-prefix form
+        assert_eq!(uint256_hex_to_decimal("ff").unwrap(), "255");
+    }
+
+    #[test]
+    fn rejects_invalid_hex() {
+        assert!(uint256_hex_to_decimal("0xZZ").is_err());
+        assert!(uint256_hex_to_decimal("not_hex").is_err());
+    }
 }

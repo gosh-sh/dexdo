@@ -490,6 +490,7 @@ dependencies = [
  "base64",
  "dodex-application",
  "dodex-domain",
+ "num-bigint",
  "reqwest",
  "serde",
  "serde_json",
