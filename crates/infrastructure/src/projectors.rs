@@ -39,6 +39,9 @@ pub async fn project_event(
         "OracleEventList.EventConfirmed" => {
             apply_event_confirmed(tx, event, node).await.with_context(context)
         }
+        "PrivateNote.PMPDeployed" => {
+            apply_pmp_deployed(tx, event, node).await.with_context(context)
+        }
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }
@@ -237,11 +240,74 @@ async fn apply_event_confirmed(
     Ok(ProjectionOutcome::Applied)
 }
 
+async fn apply_pmp_deployed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let pmp_address = field_str(&event.value, "pmpAddress")?;
+
+    let event_id_hex = field_str(&event.value, "eventId")?;
+    let event_id_decimal = uint256_hex_to_decimal(event_id_hex)?;
+
+    let token_type_raw = field_str(&event.value, "tokenType")?;
+    let token_type: i32 = token_type_raw
+        .parse()
+        .with_context(|| format!("parse PMPDeployed.tokenType = {token_type_raw}"))?;
+
+    // Resolve token_code via ref_tokens. If the token is unknown — defer; the
+    // ref_tokens row may show up later (manual seed update or new migration).
+    let token: Option<(String,)> =
+        sqlx::query_as("select token_code from ref_tokens where token_type = $1")
+            .bind(token_type)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("lookup ref_tokens by token_type")?;
+
+    let Some((token_code,)) = token else {
+        warn!(
+            pmp_address,
+            token_type,
+            msg_id = %node.msg_id,
+            "PMPDeployed for unknown token_type; deferring until ref_tokens has it"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    };
+
+    let oracle_event_lists = event.value.get("oracleEventLists").cloned().unwrap_or(Value::Null);
+    let oracle_fee = event.value.get("oracleFee").cloned().unwrap_or(Value::Null);
+
+    sqlx::query(
+        r#"insert into markets
+               (pmp_address, event_id, token_type, token_code,
+                oracle_event_lists_json, oracle_fee_json, updated_at)
+           values ($1, $2::numeric, $3, $4, $5, $6, now())
+           on conflict (pmp_address) do update
+               set event_id = excluded.event_id,
+                   token_type = excluded.token_type,
+                   token_code = excluded.token_code,
+                   oracle_event_lists_json = excluded.oracle_event_lists_json,
+                   oracle_fee_json = excluded.oracle_fee_json,
+                   updated_at = now()"#,
+    )
+    .bind(pmp_address)
+    .bind(&event_id_decimal)
+    .bind(token_type)
+    .bind(&token_code)
+    .bind(oracle_event_lists)
+    .bind(oracle_fee)
+    .execute(&mut **tx)
+    .await
+    .context("upsert markets on PMPDeployed")?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
 fn field_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
     value.get(key).and_then(Value::as_str).with_context(|| format!("missing field `{key}`"))
 }
 
-fn uint256_hex_to_decimal(value: &str) -> anyhow::Result<String> {
+pub fn uint256_hex_to_decimal(value: &str) -> anyhow::Result<String> {
     // tvm_abi serialises uint256 as "0x" + 64 lowercase hex chars.
     let stripped = value.strip_prefix("0x").unwrap_or(value);
     let big = BigUint::parse_bytes(stripped.as_bytes(), 16)

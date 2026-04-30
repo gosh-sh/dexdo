@@ -17,6 +17,9 @@ sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tvm_abi.workspace = true
+tvm_block.workspace = true
+tvm_executor.workspace = true
 tvm_types.workspace = true
+tvm_vm.workspace = true
 dodex-application = { path = "../application" }
 dodex-domain = { path = "../domain" }

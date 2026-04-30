@@ -45,6 +45,7 @@ pub struct DecodedEvent {
     pub value: Value,
 }
 
+#[derive(Clone)]
 pub struct Decoder {
     contracts: HashMap<&'static str, Contract>,
     event_index: HashMap<u32, (&'static str, String)>,
@@ -81,6 +82,12 @@ impl Decoder {
 
     pub fn known_events(&self) -> usize {
         self.event_index.len()
+    }
+
+    /// Borrow the parsed `Contract` for a given dex kind (e.g. `"PMP"`).
+    /// Used by the reconciler to drive off-chain getters.
+    pub fn contract(&self, kind: &str) -> Option<&Contract> {
+        self.contracts.get(kind)
     }
 
     pub fn decode_event_body(&self, body_base64: &str) -> anyhow::Result<Option<DecodedEvent>> {

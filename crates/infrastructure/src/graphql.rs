@@ -33,6 +33,16 @@ const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
   }
 }"#;
 
+const ACCOUNT_BOC_QUERY: &str = r#"query AccountBoc($address: String!) {
+  blockchain {
+    account(address: $address) {
+      info {
+        boc
+      }
+    }
+  }
+}"#;
+
 #[derive(Debug, Clone)]
 pub struct GraphqlClient {
     http: Client,
@@ -81,6 +91,37 @@ impl GraphqlClient {
         let data = response.data.context("graphql response missing data")?;
         Ok(data.blockchain.events)
     }
+
+    /// Fetches the account state BOC (base64) for off-chain getter execution.
+    /// Returns `None` if the account does not exist or has not been deployed yet.
+    pub async fn fetch_account_boc(&self, address: &str) -> anyhow::Result<Option<String>> {
+        let payload = json!({
+            "query": ACCOUNT_BOC_QUERY,
+            "variables": { "address": address },
+        });
+
+        let response: GraphqlResponse<AccountBocData> = self
+            .http
+            .post(&self.endpoint)
+            .json(&payload)
+            .send()
+            .await
+            .context("graphql account request failed")?
+            .error_for_status()
+            .context("graphql account returned http error")?
+            .json()
+            .await
+            .context("graphql account response is not valid json")?;
+
+        if let Some(errors) = response.errors {
+            if !errors.is_empty() {
+                bail!("graphql account errors: {errors:?}");
+            }
+        }
+
+        let data = response.data.context("graphql account response missing data")?;
+        Ok(data.blockchain.account.and_then(|a| a.info.and_then(|i| i.boc)))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +147,29 @@ struct EventsData {
 #[derive(Debug, Deserialize)]
 struct Blockchain {
     events: EventsPage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountBocData {
+    blockchain: AccountBocBlockchain,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountBocBlockchain {
+    #[serde(default)]
+    account: Option<AccountBocNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountBocNode {
+    #[serde(default)]
+    info: Option<AccountBocInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountBocInfo {
+    #[serde(default)]
+    boc: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

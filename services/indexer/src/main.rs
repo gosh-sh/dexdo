@@ -11,6 +11,7 @@ use dodex_infrastructure::decoder::Decoder;
 use dodex_infrastructure::graphql::EventsPage;
 use dodex_infrastructure::graphql::GraphqlClient;
 use dodex_infrastructure::indexer_repo::IndexerRepository;
+use dodex_infrastructure::reconciler::MarketReconciler;
 use dodex_infrastructure::signal::run_config_reload_loop;
 use tokio::sync::RwLock;
 use tracing::error;
@@ -38,9 +39,21 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = database::build_pool(&config.common.database).await?;
     database::run_migrations(&pool).await?;
-    let repo = IndexerRepository::new(pool);
+    let repo = IndexerRepository::new(pool.clone());
     let decoder = Decoder::new()?;
     info!(known_events = decoder.known_events(), "abi decoder initialized");
+
+    // Spawn the market reconciler as an independent task. It keeps its own
+    // GraphQL client and Decoder instance, so config-reload that swaps the
+    // main-loop client does not disturb mid-run reconciliation.
+    let reconciler_graphql = GraphqlClient::new(
+        config.graphql.endpoint.clone(),
+        Duration::from_millis(config.graphql.request_timeout_ms),
+    )?;
+    let reconciler = MarketReconciler::new(pool.clone(), reconciler_graphql, decoder.clone());
+    let reconciler_interval = Duration::from_millis(config.indexer.reconciliation_interval_ms);
+    tokio::spawn(reconciler.run_loop(reconciler_interval));
+    info!(interval_ms = config.indexer.reconciliation_interval_ms, "market reconciler started");
 
     let mut cursor = repo.load_cursor(STREAM_NAME).await?;
     info!(cursor = cursor.as_deref().unwrap_or(""), "indexer resumed from cursor");
