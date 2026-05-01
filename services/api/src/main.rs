@@ -10,10 +10,13 @@ use dodex_application::GetDepthQuery;
 use dodex_application::GetDepthUseCase;
 use dodex_application::GetMarketsQuery;
 use dodex_application::GetMarketsUseCase;
+use dodex_application::MarketReadRepository;
 use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
 use dodex_domain::Symbol;
 use dodex_infrastructure::config::ApiConfig;
+use dodex_infrastructure::database::build_pool;
+use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
 use dodex_infrastructure::signal::run_config_reload_loop;
 use dodex_infrastructure::stub::StubReadModelRepository;
 use salvo::http::StatusCode;
@@ -25,9 +28,11 @@ use tokio::sync::RwLock;
 use tracing::error;
 use tracing::info;
 
+type SharedRepo = Arc<dyn MarketReadRepository + Send + Sync>;
+
 #[derive(Clone)]
 struct AppState {
-    repo: StubReadModelRepository,
+    repo: SharedRepo,
 }
 
 #[derive(Serialize)]
@@ -218,7 +223,16 @@ async fn main() -> anyhow::Result<()> {
         env::var("APP_CONFIG").unwrap_or_else(|_| "config/api.local.yaml".to_string());
     let config = ApiConfig::load_from_path(&config_path)?;
     let config_state = Arc::new(RwLock::new(config.clone()));
-    let state = AppState { repo: StubReadModelRepository };
+
+    let repo: SharedRepo = if config.common.features.stub_mode {
+        info!("api running with stub read-model repository");
+        Arc::new(StubReadModelRepository)
+    } else {
+        let pool = build_pool(&config.common.database).await?;
+        info!("api running with postgres read-model repository");
+        Arc::new(PostgresReadModelRepository::new(pool))
+    };
+    let state = AppState { repo };
 
     tokio::spawn(run_config_reload_loop(config_path.clone(), Arc::clone(&config_state), "api"));
 

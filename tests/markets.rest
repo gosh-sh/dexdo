@@ -1,0 +1,25 @@
+# GET /api/v1/markets — manual smoke checks for the markets read-model
+# Compatibility: VS Code REST Client, JetBrains HTTP Client
+
+@host = http://localhost:8080
+@marketAddress = 0:b286c2c1996fe90fe5ed06679115f8b9be4b3184accfb84ac22308cad5d81a48
+
+### list all markets
+GET {{host}}/api/v1/markets
+Accept: application/json
+
+### fetch a single market by marketAddress
+GET {{host}}/api/v1/markets?marketAddress={{marketAddress}}
+Accept: application/json
+
+### unknown marketAddress -> { serverTime, markets: [] }
+GET {{host}}/api/v1/markets?marketAddress=0:does-not-exist
+Accept: application/json
+
+### empty marketAddress -> filter applies as `pmp_address = ''`, returns { serverTime, markets: [] }
+GET {{host}}/api/v1/markets?marketAddress=
+Accept: application/json
+
+### ignored unknown query params, list all markets
+GET {{host}}/api/v1/markets?limit=50&foo=bar
+Accept: application/json

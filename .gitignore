@@ -5,3 +5,4 @@ internal-docs/
 .claude
 target/
 config/indexer.stage.supabase.yaml
+config/api.stage.supabase.yaml

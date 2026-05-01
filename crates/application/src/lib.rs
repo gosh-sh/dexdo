@@ -1,6 +1,8 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::Market;
@@ -20,6 +22,25 @@ pub trait MarketReadRepository: Send + Sync {
         symbol: &Symbol,
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error>;
+}
+
+#[async_trait]
+impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
+    async fn list_markets(
+        &self,
+        market_address: Option<&MarketAddress>,
+    ) -> Result<Vec<Market>, anyhow::Error> {
+        (**self).list_markets(market_address).await
+    }
+
+    async fn get_depth(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        limit: u16,
+    ) -> Result<DepthSnapshot, anyhow::Error> {
+        (**self).get_depth(market_address, symbol, limit).await
+    }
 }
 
 #[derive(Debug, Clone)]
