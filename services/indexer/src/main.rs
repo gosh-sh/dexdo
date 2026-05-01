@@ -1,6 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,10 +87,22 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if let Some(client) = client.as_ref() {
-            match drain_events(client, &repo, &decoder, cfg.graphql.page_size, &mut cursor).await {
+            let ignored: HashSet<&str> =
+                cfg.indexer.ignored_addresses.iter().map(String::as_str).collect();
+            match drain_events(
+                client,
+                &repo,
+                &decoder,
+                cfg.graphql.page_size,
+                &ignored,
+                &mut cursor,
+            )
+            .await
+            {
                 Ok(stats) => {
                     info!(
                         edges = stats.edges,
+                        ignored = stats.ignored,
                         inserted = stats.inserted,
                         skipped = stats.skipped,
                         decoded = stats.decoded,
@@ -115,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Debug, Default)]
 struct DrainStats {
     edges: usize,
+    ignored: u64,
     inserted: u64,
     skipped: u64,
     decoded: u64,
@@ -130,14 +144,27 @@ async fn drain_events(
     repo: &IndexerRepository,
     decoder: &Decoder,
     page_size: u32,
+    ignored_src: &HashSet<&str>,
     cursor: &mut Option<String>,
 ) -> anyhow::Result<DrainStats> {
     let mut stats = DrainStats::default();
 
     while stats.pages < MAX_PAGES_PER_TICK {
-        let page: EventsPage = client.fetch_events(page_size, cursor.as_deref()).await?;
+        let mut page: EventsPage = client.fetch_events(page_size, cursor.as_deref()).await?;
         stats.pages += 1;
-        stats.edges += page.edges.len();
+        let edges_seen = page.edges.len();
+        stats.edges += edges_seen;
+
+        // Filter on src only: events are outbound externals from a contract.
+        // Cursor still advances on the original page, so we will not re-fetch
+        // the noise on the next tick.
+        if !ignored_src.is_empty() {
+            page.edges.retain(|edge| match edge.node.src.as_deref() {
+                Some(src) => !ignored_src.contains(src),
+                None => true,
+            });
+        }
+        stats.ignored += (edges_seen - page.edges.len()) as u64;
 
         let end_cursor = page.page_info.end_cursor.as_deref();
         let persisted = repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder).await?;

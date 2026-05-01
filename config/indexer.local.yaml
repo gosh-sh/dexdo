@@ -17,6 +17,11 @@ indexer:
   polling_interval_ms: 3000
   depth_refresh_interval_ms: 5000
   reconciliation_interval_ms: 60000
+  # Source addresses whose events are dropped before raw_events insert and
+  # projector dispatch. Keep this list narrow — only addresses that emit
+  # confirmed noise.
+  ignored_addresses:
+    - "0:1111111111111111111111111111111111111111111111111111111111111111"
 
 features:
   stub_mode: true

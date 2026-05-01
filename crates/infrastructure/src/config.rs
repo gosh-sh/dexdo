@@ -65,6 +65,12 @@ pub struct IndexerSection {
     pub polling_interval_ms: u64,
     pub depth_refresh_interval_ms: u64,
     pub reconciliation_interval_ms: u64,
+    /// Source addresses whose events must be skipped entirely:
+    /// edges with matching `node.src` are dropped before raw_events insert
+    /// and projector dispatch. Useful to silence well-known noise contracts
+    /// (system / null-route addresses) without polluting the read-model.
+    #[serde(default)]
+    pub ignored_addresses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +214,50 @@ graphql:
         let err = serde_yaml::from_str::<ApiConfig>(&raw).unwrap_err();
 
         assert!(err.to_string().contains("graphql"));
+    }
+
+    #[test]
+    fn indexer_config_parses_ignored_addresses() {
+        let raw = format!(
+            "{COMMON}
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
+indexer:
+  polling_interval_ms: 3000
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+  ignored_addresses:
+    - \"0:1111111111111111111111111111111111111111111111111111111111111111\"
+    - \"0:11111111111111111111111111111111111111111111111111111111111111ff\"
+"
+        );
+
+        let cfg: IndexerConfig = serde_yaml::from_str(&raw).unwrap();
+
+        assert_eq!(cfg.indexer.ignored_addresses.len(), 2);
+        assert!(cfg.indexer.ignored_addresses.iter().any(|a| a.ends_with("11ff")));
+    }
+
+    #[test]
+    fn indexer_config_defaults_ignored_addresses_to_empty() {
+        let raw = format!(
+            "{COMMON}
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
+indexer:
+  polling_interval_ms: 3000
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+"
+        );
+
+        let cfg: IndexerConfig = serde_yaml::from_str(&raw).unwrap();
+
+        assert!(cfg.indexer.ignored_addresses.is_empty());
     }
 
     #[test]
