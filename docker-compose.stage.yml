@@ -1,0 +1,10 @@
+services:
+  api:
+    environment:
+      APP_CONFIG: /app/config/api.stage.supabase.yaml
+      RUST_LOG: info
+
+  indexer:
+    environment:
+      APP_CONFIG: /app/config/indexer.stage.supabase.yaml
+      RUST_LOG: trace

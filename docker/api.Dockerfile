@@ -1,9 +1,11 @@
 FROM rust:1.95.0-bookworm AS builder
 WORKDIR /app
 
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY services ./services
+COPY contracts ./contracts
+COPY migrations ./migrations
 
 RUN cargo build --release -p dodex-api
 
