@@ -18,7 +18,6 @@
       - [Field Reference](#field-reference)
       - [Timings](#timings)
       - [Event](#event)
-      - [Liquidity](#liquidity)
       - [Terminal](#terminal)
       - [Semantic Invariants](#semantic-invariants)
       - [Out of Scope](#out-of-scope)
@@ -87,8 +86,7 @@ floating-point precision loss.
 
 Dodex uses the following market identifiers:
 
-- `marketAddress` is used in requests and identifies one market for trading. It equals the `orderBookAddress` returned by `/api/v1/markets`. Example: `0:market-address`.
-- `pmpAddress` is the address of the Prediction Market Pool contract. It is the metadata anchor for the market and the target of `setStake`. Returned by `/api/v1/markets`.
+- `marketAddress` is the address of the Prediction Market Pool contract. It is the stable market identifier across the entire lifecycle, the metadata anchor, and the target of `setStake`. Used in all requests. Example: `0:market-address`.
 - `orderBookAddress` is the address of the OrderBook contract used for placing orders. It is `null` until the market reaches `TRADING` (`PoolsFrozen` event received). Returned by `/api/v1/markets`.
 - `marketName` is the market name. Example: `PM-2026-ELECTION`.
 - `symbol` is the outcome-token symbol and is formed as `<marketName>-<OUTCOME_NAME>`. Example: `PM-2026-ELECTION-YES`.
@@ -241,7 +239,7 @@ Recommended common error codes:
 GET /api/v1/markets
 ```
 
-Fetch available prediction markets, their outcomes, lifecycle phase, timings, oracle event metadata, and liquidity metrics.
+Fetch available prediction markets, their outcomes, lifecycle phase, timings, and oracle event metadata.
 
 A market in Dodex has a finite lifecycle anchored to an oracle event. The lifecycle has nine phases — see [Market Status](#market-status). The backend computes the phase from indexed contract events (`EventConfirmed`, `TimingsSet`, `PoolsFrozen`, `Resolved`, `PMPCancelled`, `EventCancelled`) and the latest `TimingsSet` and returns it as a string. Clients MUST treat the value as opaque and not derive it from raw timings.
 
@@ -254,7 +252,7 @@ Query parameters:
 | `quoteAsset` | STRING | NO | Filter by quote asset. Example: `USDC`. |
 | `oracleName` | STRING | NO | Filter by oracle name. |
 | `closingBefore` | LONG | NO | Return only markets with `timings.resultEnd < closingBefore` (unix seconds). |
-| `sort` | STRING | NO | Sort field. One of: `resultStart` (default, ASC), `volume24h` (DESC), `createdAt` (DESC). |
+| `sort` | STRING | NO | Sort field. One of: `resultStart` (default, ASC), `createdAt` (DESC). |
 | `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. |
 | `limit` | INT | NO | Page size. Default: `50`. Max: `200`. |
 
@@ -267,7 +265,7 @@ Response:
   "hasMore": false,
   "markets": [
     {
-      "pmpAddress": "0:b286...",
+      "marketAddress": "0:b286...",
       "orderBookAddress": "0:c12d...",
       "marketName": "PM-2026-ELECTION",
       "status": "TRADING",
@@ -288,13 +286,6 @@ Response:
         "oracleName": "ElectionOracle",
         "oracleAddress": "0:oracle-addr",
         "oracleFee": "100"
-      },
-      "liquidity": {
-        "totalPool": "12500.00",
-        "outcomePools": ["7800.00", "4700.00"],
-        "lastPrices": ["0.624", "0.376"],
-        "volume24h": "3450.50",
-        "trades24h": 142
       },
       "terminal": null,
       "outcomes": [
@@ -351,8 +342,8 @@ A market is in exactly one of nine phases.
 | `serverTime` | LONG | Unix timestamp in seconds. |
 | `nextCursor` | STRING \| null | Pagination cursor for the next page. `null` when `hasMore` is `false`. |
 | `hasMore` | BOOLEAN | Whether more pages follow. |
-| `pmpAddress` | STRING | Address of the Prediction Market Pool contract. Used for `setStake` and as the metadata anchor. |
-| `orderBookAddress` | STRING \| null | Address of the OrderBook contract. `null` until `timings.frozenAt != null`. The PMP knows the order-book address ahead of time, but the contract is not deployed at that address until `PoolsFrozen` is emitted. |
+| `marketAddress` | STRING | Address of the Prediction Market Pool contract. The stable market identifier; used for `setStake` and as the metadata anchor. |
+| `orderBookAddress` | STRING \| null | Address of the OrderBook contract used for placing orders. `null` until `timings.frozenAt != null`. The PMP knows the order-book address ahead of time, but the contract is not deployed at that address until `PoolsFrozen` is emitted. |
 | `marketName` | STRING | Technical market name. Not the user-facing title; see `event.eventName`. |
 | `status` | ENUM | Market phase. See [Market Status](#market-status). |
 | `quoteAsset` | STRING | Quote-asset symbol for display. |
@@ -360,7 +351,6 @@ A market is in exactly one of nine phases.
 | `createdAt` | LONG | Unix seconds. Block timestamp of the `EventConfirmed` event. Used for sorting by recency. |
 | `timings` | OBJECT \| null | See [Timings](#timings). `null` when `status == "PENDING"`. |
 | `event` | OBJECT | See [Event](#event). |
-| `liquidity` | OBJECT \| null | See [Liquidity](#liquidity). `null` for `PENDING` and `UPCOMING`. |
 | `terminal` | OBJECT \| null | See [Terminal](#terminal). `null` for non-terminal statuses. |
 | `outcomes` | ARRAY | Outcome-token descriptors. |
 | `outcomes[].outcomeId` | INT | `u32` outcome ID accepted by `setStake`, `OrderPlaced.outcomeId`, and `Resolved.outcomeId`. Clients MUST use this field, not the array index. |
@@ -404,29 +394,21 @@ All timestamps are unix seconds.
 
 Sourced from `OracleEventList.EventAdded(eventId, eventName, oracleFee, deadline)` and `addEvent.describe`. `eventName` and `description` are the user-facing labels for the market.
 
-#### Liquidity
-
-All amounts are normalized decimal strings (not raw `uint128`). JSON numbers lose precision on `uint128` and surface raw scaled integers to users.
-
-```json
-{
-  "totalPool": "12500.00",
-  "outcomePools": ["7800.00", "4700.00"],
-  "lastPrices": ["0.624", "0.376"],
-  "volume24h": "3450.50",
-  "trades24h": 142
-}
-```
-
-`outcomePools` and `lastPrices` are aligned with `outcomes[]` in `outcomeId` order.
-
-Nullability:
-- `liquidity == null` for `PENDING` and `UPCOMING` (no pools yet).
-- For `AWAITING_FREEZE`: pools exist but no trades yet — `lastPrices: null`, `volume24h: "0"`, `trades24h: 0`.
-
 #### Terminal
 
-`null` for non-terminal statuses. Otherwise:
+Describes how the market ended. A market reaches a terminal state exactly once and stays there forever — no further events change it.
+
+`terminal` is `null` while the market is alive (`status` ∈ `PENDING`, `UPCOMING`, `STAKING`, `AWAITING_FREEZE`, `TRADING`, `RESOLVING`) and is populated when `status` ∈ `RESOLVED`, `CANCELLED`, `EXPIRED`. The `status` field tells the client _that_ the market is terminal; `terminal` tells the client _how_ — the winning outcome, the reason for cancellation, and when it happened. These details are computed by the backend from contract events and cannot be derived client-side.
+
+Mapping from `status` to `kind`:
+
+| `status` | `terminal.kind` | Trigger |
+| --- | --- | --- |
+| `RESOLVED` | `RESOLVED` | `PMP.Resolved` event received. Sets `resolvedOutcomeId`. |
+| `CANCELLED` | `CANCELLED` | `PMP.PMPCancelled` or `OracleEventList.EventCancelled` received. Sets `cancelReason`. |
+| `EXPIRED` | `EXPIRED` | `serverTime >= timings.resultEnd` reached without resolution. |
+
+Example for a resolved market (`status == "RESOLVED"`):
 
 ```json
 {
@@ -437,12 +419,29 @@ Nullability:
 }
 ```
 
+Example for a cancelled market (`status == "CANCELLED"`):
+
+```json
+{
+  "kind": "CANCELLED",
+  "at": 1710003500,
+  "resolvedOutcomeId": null,
+  "cancelReason": "EVENT_CANCELLED"
+}
+```
+
+Example for a non-terminal market (any of the six live statuses, including the top-level `/markets` example which is `TRADING`):
+
+```json
+"terminal": null
+```
+
 | Field | Type | Description |
 | --- | --- | --- |
-| `kind` | ENUM | `RESOLVED`, `CANCELLED`, or `EXPIRED`. |
-| `at` | LONG | Unix seconds when the terminal state was reached. |
-| `resolvedOutcomeId` | INT \| null | Winning outcome. Present only when `kind == "RESOLVED"`. |
-| `cancelReason` | ENUM \| null | `PMP_CANCELLED` or `EVENT_CANCELLED`. Present only when `kind == "CANCELLED"`. The two reasons originate in different contract events and have different UI meaning. |
+| `kind` | ENUM | `RESOLVED`, `CANCELLED`, or `EXPIRED`. Mirrors `status` (see table above). |
+| `at` | LONG | Unix seconds. Block timestamp of the event that put the market into the terminal state (or, for `EXPIRED`, the moment `serverTime` first crossed `timings.resultEnd`). |
+| `resolvedOutcomeId` | INT \| null | The winning outcome's `outcomeId`. Present only when `kind == "RESOLVED"`; `null` otherwise. Without it the client cannot know which side won. |
+| `cancelReason` | ENUM \| null | `PMP_CANCELLED` (this specific market was cancelled by the PMP) or `EVENT_CANCELLED` (the underlying oracle event was cancelled, which kills every market attached to it). Present only when `kind == "CANCELLED"`; `null` otherwise. The two reasons come from different contract events and have different UI meaning — distinguish them in copy. |
 
 #### Semantic Invariants
 
@@ -954,7 +953,7 @@ Order creation MUST validate:
 
 | Rule | Source |
 | --- | --- |
-| `marketAddress` exists and equals the market's `orderBookAddress` | `/api/v1/markets` |
+| `marketAddress` exists | `/api/v1/markets` |
 | `symbol` exists within the selected market | `/api/v1/markets` |
 | The selected market has `status == "TRADING"` (any other phase rejects order placement) | `/api/v1/markets` |
 | For `LIMIT` orders, `price` decimal places do not exceed `pricePrecision` | `/api/v1/markets` |
