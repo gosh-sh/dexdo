@@ -1,26 +1,20 @@
 - [Dodex REST API Specification](#dodex-rest-api-specification)
-  - [Reference Style](#reference-style)
   - [Base URL](#base-url)
   - [Data Types](#data-types)
   - [Symbol Model](#symbol-model)
   - [Security Types](#security-types)
     - [Signature Formation](#signature-formation)
-  - [Common Enums](#common-enums)
-    - [Order Side](#order-side)
-    - [Order Type](#order-type)
-    - [Time In Force](#time-in-force)
-    - [Order Status](#order-status)
   - [Error Response](#error-response)
   - [Endpoint Summary](#endpoint-summary)
   - [Market Data Endpoints](#market-data-endpoints)
     - [Markets](#markets)
-      - [Market Status](#market-status)
-      - [Field Reference](#field-reference)
-      - [Timings](#timings)
-      - [Event](#event)
-      - [Terminal](#terminal)
-      - [Semantic Invariants](#semantic-invariants)
-      - [Out of Scope](#out-of-scope)
+      - [Common Enums](#common-enums)
+        - [Market Status](#market-status)
+      - [Common Objects](#common-objects)
+        - [Timings](#timings)
+        - [Event](#event)
+        - [Terminal](#terminal)
+        - [Outcome](#outcome)
     - [Order Book](#order-book)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
@@ -32,28 +26,18 @@
     - [Cancel All Open Orders On Symbol](#cancel-all-open-orders-on-symbol)
     - [Current Open Orders](#current-open-orders)
     - [Closed And Canceled Orders](#closed-and-canceled-orders)
+    - [Common Enums](#common-enums-1)
+      - [Order Side](#order-side)
+      - [Order Type](#order-type)
+      - [Time In Force](#time-in-force)
+      - [Order Status](#order-status)
   - [Validation Rules](#validation-rules)
-  - [Minimal Trading Scope](#minimal-trading-scope)
 
 # Dodex REST API Specification
 
 Status: Draft
 
-This document defines the minimal REST API required for basic spot-style trading on Dodex.
-The API shape follows the Binance Spot REST style where useful, but intentionally removes
-advanced order types, margin, OCO, strategy parameters, iceberg orders, STP, trailing stops,
-and other non-basic trading features.
-
-## Reference Style
-
-- Binance Spot REST general API information:
-  https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-api-information
-- Binance Spot REST market data endpoints:
-  https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints
-- Binance Spot REST trading endpoints:
-  https://developers.binance.com/docs/binance-spot-api-docs/rest-api/trading-endpoints
-- Binance Spot REST account endpoints:
-  https://developers.binance.com/docs/binance-spot-api-docs/rest-api/account-endpoints
+This document defines the public REST interface required for basic spot-style trading on Dodex.
 
 ## Base URL
 
@@ -86,8 +70,8 @@ floating-point precision loss.
 
 Dodex uses the following market identifiers:
 
-- `marketAddress` is the address of the Prediction Market Pool contract. It is the stable market identifier across the entire lifecycle, the metadata anchor, and the target of `setStake`. Used in all requests. Example: `0:market-address`.
-- `orderBookAddress` is the address of the OrderBook contract used for placing orders. It is `null` until the market reaches `TRADING` (`PoolsFrozen` event received). Returned by `/api/v1/markets`.
+- `marketAddress` is the stable market identifier across the entire lifecycle. Used in all market-specific requests. Example: `0:market-address`.
+- `orderBookAddress` is the order-book address returned by `/api/v1/markets`. It is always present in the API response; clients MUST use `status` to determine whether the order book is currently available for trading.
 - `marketName` is the market name. Example: `PM-2026-ELECTION`.
 - `symbol` is the outcome-token symbol and is formed as `<marketName>-<OUTCOME_NAME>`. Example: `PM-2026-ELECTION-YES`.
 
@@ -154,43 +138,6 @@ signature = HMAC_SHA256(
 )
 ```
 
-## Common Enums
-
-### Order Side
-
-| Value | Description |
-| --- | --- |
-| `BUY` | Buy the selected outcome token using the market quote asset. |
-| `SELL` | Sell the selected outcome token for the market quote asset. |
-
-### Order Type
-
-| Value | Description |
-| --- | --- |
-| `LIMIT` | Limit order. Unfilled quantity remains in the order book. |
-| `MARKET` | Market order. Matches available liquidity and does not rest in the order book. |
-
-### Time In Force
-
-`timeInForce` values:
-
-| Value | Description |
-| --- | --- |
-| `GTC` | Good Til Canceled. An order will be on the book unless the order is canceled. |
-| `IOC` | Immediate Or Cancel. An order will try to fill the order as much as it can before the order expires. |
-| `FOK` | Fill or Kill. An order will expire if the full order cannot be filled upon execution. |
-| `POST_ONLY` | Post Only. An order must rest on the book and will be canceled if it would immediately match. |
-
-### Order Status
-
-| Value | Description |
-| --- | --- |
-| `NEW` | Order is open and has no fills. |
-| `PARTIALLY_FILLED` | Order is open and partially filled. |
-| `FILLED` | Order is completely filled. |
-| `CANCELED` | Order was canceled by the user or system. |
-| `REJECTED` | Order was rejected and was not opened. |
-
 ## Error Response
 
 All errors use the same response format.
@@ -241,7 +188,7 @@ GET /api/v1/markets
 
 Fetch available prediction markets, their outcomes, lifecycle phase, timings, and oracle event metadata.
 
-A market in Dodex has a finite lifecycle anchored to an oracle event. The lifecycle has nine phases — see [Market Status](#market-status). The backend computes the phase from indexed contract events (`EventConfirmed`, `TimingsSet`, `PoolsFrozen`, `Resolved`, `PMPCancelled`, `EventCancelled`) and the latest `TimingsSet` and returns it as a string. Clients MUST treat the value as opaque and not derive it from raw timings.
+A market in Dodex has a finite lifecycle anchored to an oracle event. The lifecycle has nine phases — see [Market Status](#market-status). Clients MUST treat `status` as an opaque enum value and not derive it from raw timings.
 
 Query parameters:
 
@@ -317,45 +264,46 @@ Response:
 }
 ```
 
-`serverTime` is unix **seconds**, not milliseconds. The contract operates in seconds (`block.timestamp` is `uint64` seconds), so all timestamps in this endpoint are seconds-based to avoid client-side conversions and off-by-one drift on second boundaries. `serverTime` and `status` MUST be evaluated from a single `now` value within one request so that the response is internally consistent.
+Response fields:
 
-#### Market Status
+| Field | Type | Description |
+| --- | --- | --- |
+| `serverTime` | LONG | Unix timestamp in seconds. All timestamp fields returned by `/api/v1/markets` are unix seconds unless explicitly stated otherwise. |
+| `nextCursor` | STRING \| null | Pagination cursor for the next page. `null` when `hasMore` is `false`. |
+| `hasMore` | BOOLEAN | Whether more pages follow. |
+| `marketAddress` | STRING | Stable market identifier. |
+| `orderBookAddress` | STRING | Order-book address. Always returned; availability depends on market `status`. |
+| `marketName` | STRING | Technical market name. Not the user-facing title; see `event.eventName`. |
+| `status` | ENUM | Market phase. See [Market Status](#market-status). |
+| `quoteAsset` | STRING | Quote-asset symbol for display. |
+| `tokenType` | INT | Numeric quote-asset token type. |
+| `createdAt` | LONG | Unix seconds. Market creation timestamp. Used for sorting by recency. |
+| `timings` | OBJECT \| null | See [Timings](#timings). `null` when `status == "PENDING"`. |
+| `event` | OBJECT | See [Event](#event). |
+| `terminal` | OBJECT \| null | See [Terminal](#terminal). `null` for non-terminal statuses. |
+| `outcomes` | ARRAY | Outcome-token descriptors. See [Outcome](#outcome). |
+
+#### Common Enums
+
+##### Market Status
 
 A market is in exactly one of nine phases.
 
 | Value | Description |
 | --- | --- |
-| `PENDING` | PMP created (`EventConfirmed`); the oracle has not set timings yet. `timings` is `null`. |
-| `UPCOMING` | `TimingsSet` received, `serverTime < timings.stakeStart`. |
-| `STAKING` | `timings.stakeStart <= serverTime < timings.stakeEnd`, `PoolsFrozen` not received. |
-| `AWAITING_FREEZE` | `serverTime >= timings.stakeEnd`, `PoolsFrozen` not received. |
-| `TRADING` | `PoolsFrozen` received, `serverTime < timings.resultStart`. |
-| `RESOLVING` | `serverTime >= timings.resultStart`, `Resolved` not received. |
-| `RESOLVED` | Terminal. `Resolved` event received. |
-| `CANCELLED` | Terminal. `PMPCancelled` or `EventCancelled` received. |
-| `EXPIRED` | Terminal. `serverTime >= timings.resultEnd` without resolution (rare). |
+| `PENDING` | Market exists, but timings are not set yet. `timings` is `null`. |
+| `UPCOMING` | Timings are set and staking has not started yet. |
+| `STAKING` | Staking is open. |
+| `AWAITING_FREEZE` | Staking has ended and trading has not started yet. |
+| `TRADING` | Orders may be placed. |
+| `RESOLVING` | Trading is closed and the market is waiting for resolution. |
+| `RESOLVED` | Terminal. Market has a winning outcome. |
+| `CANCELLED` | Terminal. Market or underlying event was cancelled. |
+| `EXPIRED` | Terminal. Market reached the result deadline without resolution. |
 
-#### Field Reference
+#### Common Objects
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `serverTime` | LONG | Unix timestamp in seconds. |
-| `nextCursor` | STRING \| null | Pagination cursor for the next page. `null` when `hasMore` is `false`. |
-| `hasMore` | BOOLEAN | Whether more pages follow. |
-| `marketAddress` | STRING | Address of the Prediction Market Pool contract. The stable market identifier; used for `setStake` and as the metadata anchor. |
-| `orderBookAddress` | STRING \| null | Address of the OrderBook contract used for placing orders. `null` until `timings.frozenAt != null`. The PMP knows the order-book address ahead of time, but the contract is not deployed at that address until `PoolsFrozen` is emitted. |
-| `marketName` | STRING | Technical market name. Not the user-facing title; see `event.eventName`. |
-| `status` | ENUM | Market phase. See [Market Status](#market-status). |
-| `quoteAsset` | STRING | Quote-asset symbol for display. |
-| `tokenType` | INT | Numeric token type accepted by `setStake.token_type`. |
-| `createdAt` | LONG | Unix seconds. Block timestamp of the `EventConfirmed` event. Used for sorting by recency. |
-| `timings` | OBJECT \| null | See [Timings](#timings). `null` when `status == "PENDING"`. |
-| `event` | OBJECT | See [Event](#event). |
-| `terminal` | OBJECT \| null | See [Terminal](#terminal). `null` for non-terminal statuses. |
-| `outcomes` | ARRAY | Outcome-token descriptors. |
-| `outcomes[].outcomeId` | INT | `u32` outcome ID accepted by `setStake`, `OrderPlaced.outcomeId`, and `Resolved.outcomeId`. Clients MUST use this field, not the array index. |
-
-#### Timings
+##### Timings
 
 All timestamps are unix seconds.
 
@@ -369,17 +317,17 @@ All timestamps are unix seconds.
 }
 ```
 
-| Field | Source | Nullability |
+| Field | Type | Description |
 | --- | --- | --- |
-| `stakeStart` | Latest `PMP.TimingsSet` | Always present when `timings != null`. |
-| `stakeEnd` | Latest `PMP.TimingsSet` | Always present when `timings != null`. |
-| `resultStart` | Latest `PMP.TimingsSet` | Always present when `timings != null`. The contract may emit `TimingsSet` repeatedly while `serverTime < resultStart`; take the latest by block time. |
-| `resultEnd` | Latest `PMP.TimingsSet` | Always present when `timings != null`. |
-| `frozenAt` | Block timestamp of `PMP.PoolsFrozen` | `null` for `UPCOMING`, `STAKING`, `AWAITING_FREEZE`. |
+| `stakeStart` | LONG | Unix seconds. Always present when `timings != null`. |
+| `stakeEnd` | LONG | Unix seconds. Always present when `timings != null`. |
+| `resultStart` | LONG | Unix seconds. Always present when `timings != null`. |
+| `resultEnd` | LONG | Unix seconds. Always present when `timings != null`. |
+| `frozenAt` | LONG \| null | Unix seconds. `null` before the order book is active. |
 
 `timings` itself is `null` only for `PENDING`.
 
-#### Event
+##### Event
 
 ```json
 {
@@ -392,21 +340,21 @@ All timestamps are unix seconds.
 }
 ```
 
-Sourced from `OracleEventList.EventAdded(eventId, eventName, oracleFee, deadline)` and `addEvent.describe`. `eventName` and `description` are the user-facing labels for the market.
+`eventName` and `description` are the user-facing labels for the market.
 
-#### Terminal
+##### Terminal
 
-Describes how the market ended. A market reaches a terminal state exactly once and stays there forever — no further events change it.
+Describes how the market ended.
 
-`terminal` is `null` while the market is alive (`status` ∈ `PENDING`, `UPCOMING`, `STAKING`, `AWAITING_FREEZE`, `TRADING`, `RESOLVING`) and is populated when `status` ∈ `RESOLVED`, `CANCELLED`, `EXPIRED`. The `status` field tells the client _that_ the market is terminal; `terminal` tells the client _how_ — the winning outcome, the reason for cancellation, and when it happened. These details are computed by the backend from contract events and cannot be derived client-side.
+`terminal` is `null` while the market is alive (`status` ∈ `PENDING`, `UPCOMING`, `STAKING`, `AWAITING_FREEZE`, `TRADING`, `RESOLVING`) and is populated when `status` ∈ `RESOLVED`, `CANCELLED`, `EXPIRED`. The `status` field tells the client _that_ the market is terminal; `terminal` tells the client _how_ — the winning outcome, the reason for cancellation, and when it happened.
 
 Mapping from `status` to `kind`:
 
-| `status` | `terminal.kind` | Trigger |
+| `status` | `terminal.kind` | Description |
 | --- | --- | --- |
-| `RESOLVED` | `RESOLVED` | `PMP.Resolved` event received. Sets `resolvedOutcomeId`. |
-| `CANCELLED` | `CANCELLED` | `PMP.PMPCancelled` or `OracleEventList.EventCancelled` received. Sets `cancelReason`. |
-| `EXPIRED` | `EXPIRED` | `serverTime >= timings.resultEnd` reached without resolution. |
+| `RESOLVED` | `RESOLVED` | `resolvedOutcomeId` is set. |
+| `CANCELLED` | `CANCELLED` | `cancelReason` is set. |
+| `EXPIRED` | `EXPIRED` | Market reached `timings.resultEnd` without resolution. |
 
 Example for a resolved market (`status == "RESOLVED"`):
 
@@ -439,27 +387,37 @@ Example for a non-terminal market (any of the six live statuses, including the t
 | Field | Type | Description |
 | --- | --- | --- |
 | `kind` | ENUM | `RESOLVED`, `CANCELLED`, or `EXPIRED`. Mirrors `status` (see table above). |
-| `at` | LONG | Unix seconds. Block timestamp of the event that put the market into the terminal state (or, for `EXPIRED`, the moment `serverTime` first crossed `timings.resultEnd`). |
+| `at` | LONG | Unix seconds. Time when the market entered the terminal state. |
 | `resolvedOutcomeId` | INT \| null | The winning outcome's `outcomeId`. Present only when `kind == "RESOLVED"`; `null` otherwise. Without it the client cannot know which side won. |
-| `cancelReason` | ENUM \| null | `PMP_CANCELLED` (this specific market was cancelled by the PMP) or `EVENT_CANCELLED` (the underlying oracle event was cancelled, which kills every market attached to it). Present only when `kind == "CANCELLED"`; `null` otherwise. The two reasons come from different contract events and have different UI meaning — distinguish them in copy. |
+| `cancelReason` | ENUM \| null | `PMP_CANCELLED` or `EVENT_CANCELLED`. Present only when `kind == "CANCELLED"`; `null` otherwise. |
 
-#### Semantic Invariants
+##### Outcome
 
-The backend MUST guarantee the following on every response. These invariants protect clients against indexer desyncs; if any is violated, the backend MUST fail the request closed rather than return an inconsistent market:
+```json
+{
+  "outcomeId": 0,
+  "outcomeName": "NO",
+  "symbol": "PM-2026-ELECTION-NO",
+  "pricePrecision": 3,
+  "quantityPrecision": 2,
+  "tickSize": "0.001",
+  "stepSize": "0.01",
+  "minNotional": "1",
+  "maxBatchSize": 5
+}
+```
 
-1. `status == "TRADING"` ⇒ `timings.frozenAt != null && serverTime < timings.resultStart`
-2. `status == "RESOLVING"` ⇒ `timings.frozenAt != null && timings.resultStart <= serverTime < timings.resultEnd`
-3. `status == "PENDING"` ⇒ `timings == null`
-4. `status == "RESOLVED"` ⇒ `terminal.kind == "RESOLVED" && timings.frozenAt != null` (resolution always follows freeze; see `PMP.sol:1005`)
-5. `orderBookAddress != null` ⇔ `timings.frozenAt != null`
-
-#### Out of Scope
-
-The endpoint does NOT return:
-
-- Derived fields (`tradingDuration`, `phaseStartedAt`, `timeRemaining`, `expectedTradingStart`). Clients compute these from `timings` and `serverTime`. Duplicating them server-side creates a desync source.
-- History of `TimingsSet` updates. The contract permits updating `resultStart` while it has not been reached; the endpoint always returns the latest `TimingsSet`. If history becomes necessary it will live under `/api/v1/markets/{address}/timings/history`.
-- Raw contract flags (`approved`, `frozen`, `numberOfOracleEvents`). Clients act on `status`. A future `/api/v1/markets/{address}/raw` endpoint may expose them for debugging.
+| Field | Type | Description |
+| --- | --- | --- |
+| `outcomeId` | INT | Stable outcome ID. Clients MUST use this field, not the array index. |
+| `outcomeName` | STRING | Outcome name. |
+| `symbol` | STRING | Outcome-token symbol used in trading and order-book requests. |
+| `pricePrecision` | INT | Maximum number of decimal places accepted for order prices. |
+| `quantityPrecision` | INT | Maximum number of decimal places accepted for order quantities. |
+| `tickSize` | DECIMAL | Minimum price increment. |
+| `stepSize` | DECIMAL | Minimum quantity increment. |
+| `minNotional` | DECIMAL | Minimum accepted notional value for an order. |
+| `maxBatchSize` | INT | Maximum number of orders accepted in one batch request for this outcome. |
 
 ### Order Book
 
@@ -573,10 +531,10 @@ Body parameters:
 | `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
-| `side` | ENUM | YES | `BUY` or `SELL`. |
+| `side` | ENUM | YES | Order side. See [Order Side](#order-side). |
 | `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
-| `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
+| `type` | ENUM | NO | Order type. See [Order Type](#order-type). Default: `LIMIT`. |
 | `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
 
 Signed query parameters:
@@ -670,10 +628,10 @@ Each order item:
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
-| `side` | ENUM | YES | `BUY` or `SELL`. |
+| `side` | ENUM | YES | Order side. See [Order Side](#order-side). |
 | `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
-| `type` | ENUM | NO | Supported values: `LIMIT`, `MARKET`. Default: `LIMIT`. |
+| `type` | ENUM | NO | Order type. See [Order Type](#order-type). Default: `LIMIT`. |
 | `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
 
 Signed query parameters:
@@ -918,7 +876,7 @@ Parameters:
 | --- | --- | --- | --- |
 | `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns history for all markets. |
 | `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
-| `status` | ENUM | NO | Filter by status: `FILLED`, `CANCELED`, or `REJECTED`. |
+| `status` | ENUM | NO | Filter by order status. See [Order Status](#order-status). Supported filters: `FILLED`, `CANCELED`, `REJECTED`. |
 | `startTime` | LONG | NO | Start time in milliseconds. |
 | `endTime` | LONG | NO | End time in milliseconds. |
 | `limit` | INT | NO | Number of orders. Default: `100`. Max: `1000`. |
@@ -947,6 +905,43 @@ Response:
 ]
 ```
 
+### Common Enums
+
+#### Order Side
+
+| Value | Description |
+| --- | --- |
+| `BUY` | Buy the selected outcome token using the market quote asset. |
+| `SELL` | Sell the selected outcome token for the market quote asset. |
+
+#### Order Type
+
+| Value | Description |
+| --- | --- |
+| `LIMIT` | Limit order. Unfilled quantity remains in the order book. |
+| `MARKET` | Market order. Matches available liquidity and does not rest in the order book. |
+
+#### Time In Force
+
+`timeInForce` values:
+
+| Value | Description |
+| --- | --- |
+| `GTC` | Good Til Canceled. An order will be on the book unless the order is canceled. |
+| `IOC` | Immediate Or Cancel. An order will try to fill the order as much as it can before the order expires. |
+| `FOK` | Fill or Kill. An order will expire if the full order cannot be filled upon execution. |
+| `POST_ONLY` | Post Only. An order must rest on the book and will be canceled if it would immediately match. |
+
+#### Order Status
+
+| Value | Description |
+| --- | --- |
+| `NEW` | Order is open and has no fills. |
+| `PARTIALLY_FILLED` | Order is open and partially filled. |
+| `FILLED` | Order is completely filled. |
+| `CANCELED` | Order was canceled by the user or system. |
+| `REJECTED` | Order was rejected and was not opened. |
+
 ## Validation Rules
 
 Order creation MUST validate:
@@ -964,21 +959,3 @@ Order creation MUST validate:
 | For `MARKET` buy orders, `quantity` in the market `quoteAsset` is at least `minNotional` | `/api/v1/markets` |
 | For `MARKET` buy orders, `quantityPrecision` and `stepSize` apply to the quote-asset spend amount, not to outcome-token units | `/api/v1/markets` |
 | Account has enough available balance | `/api/v1/account` |
-
-## Minimal Trading Scope
-
-Supported in this API version:
-
-- Limit and market orders.
-- Buy and sell sides only.
-- `GTC`, `IOC`, `FOK`, and `POST_ONLY` for limit orders.
-- Public market data.
-- Account balances.
-- Open order and closed order history.
-- Single and batch order creation.
-- Single, batch, and symbol-wide order cancellation.
-
-Not Included in this API version:
-
-- WebSocket for fills.
-- Maker and taker fees per market. This can be exposed either in `/api/v1/markets` as `makerFee` and `takerFee`, or via a separate `/api/v1/fees` endpoint.
