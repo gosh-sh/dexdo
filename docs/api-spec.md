@@ -14,6 +14,14 @@
   - [Endpoint Summary](#endpoint-summary)
   - [Market Data Endpoints](#market-data-endpoints)
     - [Markets](#markets)
+      - [Market Status](#market-status)
+      - [Field Reference](#field-reference)
+      - [Timings](#timings)
+      - [Event](#event)
+      - [Liquidity](#liquidity)
+      - [Terminal](#terminal)
+      - [Semantic Invariants](#semantic-invariants)
+      - [Out of Scope](#out-of-scope)
     - [Order Book](#order-book)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
@@ -79,7 +87,9 @@ floating-point precision loss.
 
 Dodex uses the following market identifiers:
 
-- `marketAddress` is the unique on-chain address of the market and is used in requests. Example: `0:market-address`.
+- `marketAddress` is used in requests and identifies one market for trading. It equals the `orderBookAddress` returned by `/api/v1/markets`. Example: `0:market-address`.
+- `pmpAddress` is the address of the Prediction Market Pool contract. It is the metadata anchor for the market and the target of `setStake`. Returned by `/api/v1/markets`.
+- `orderBookAddress` is the address of the OrderBook contract used for placing orders. It is `null` until the market reaches `TRADING` (`PoolsFrozen` event received). Returned by `/api/v1/markets`.
 - `marketName` is the market name. Example: `PM-2026-ELECTION`.
 - `symbol` is the outcome-token symbol and is formed as `<marketName>-<OUTCOME_NAME>`. Example: `PM-2026-ELECTION-YES`.
 
@@ -231,27 +241,65 @@ Recommended common error codes:
 GET /api/v1/markets
 ```
 
-Fetch available prediction markets and their outcomes.
+Fetch available prediction markets, their outcomes, lifecycle phase, timings, oracle event metadata, and liquidity metrics.
+
+A market in Dodex has a finite lifecycle anchored to an oracle event. The lifecycle has nine phases — see [Market Status](#market-status). The backend computes the phase from indexed contract events (`EventConfirmed`, `TimingsSet`, `PoolsFrozen`, `Resolved`, `PMPCancelled`, `EventCancelled`) and the latest `TimingsSet` and returns it as a string. Clients MUST treat the value as opaque and not derive it from raw timings.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | NO | Return one market only. |
+| `marketAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
+| `status` | STRING | NO | Comma-separated list of statuses to include. Example: `TRADING,AWAITING_FREEZE`. |
+| `quoteAsset` | STRING | NO | Filter by quote asset. Example: `USDC`. |
+| `oracleName` | STRING | NO | Filter by oracle name. |
+| `closingBefore` | LONG | NO | Return only markets with `timings.resultEnd < closingBefore` (unix seconds). |
+| `sort` | STRING | NO | Sort field. One of: `resultStart` (default, ASC), `volume24h` (DESC), `createdAt` (DESC). |
+| `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. |
+| `limit` | INT | NO | Page size. Default: `50`. Max: `200`. |
 
 Response:
 
 ```json
 {
-  "serverTime": 1710000000000,
+  "serverTime": 1710000000,
+  "nextCursor": "eyJ...",
+  "hasMore": false,
   "markets": [
     {
-      "quoteAsset": "USDC",
-      "marketAddress": "0:market-address",
+      "pmpAddress": "0:b286...",
+      "orderBookAddress": "0:c12d...",
       "marketName": "PM-2026-ELECTION",
       "status": "TRADING",
+      "quoteAsset": "USDC",
+      "tokenType": 1,
+      "createdAt": 1709980000,
+      "timings": {
+        "stakeStart": 1709990000,
+        "stakeEnd": 1709991800,
+        "resultStart": 1710008000,
+        "resultEnd": 1710011600,
+        "frozenAt": 1709991850
+      },
+      "event": {
+        "eventId": "0xabc...",
+        "eventName": "2026 US Presidential Election",
+        "description": "Will candidate X win?",
+        "oracleName": "ElectionOracle",
+        "oracleAddress": "0:oracle-addr",
+        "oracleFee": "100"
+      },
+      "liquidity": {
+        "totalPool": "12500.00",
+        "outcomePools": ["7800.00", "4700.00"],
+        "lastPrices": ["0.624", "0.376"],
+        "volume24h": "3450.50",
+        "trades24h": 142
+      },
+      "terminal": null,
       "outcomes": [
         {
+          "outcomeId": 0,
           "outcomeName": "NO",
           "symbol": "PM-2026-ELECTION-NO",
           "pricePrecision": 3,
@@ -262,6 +310,7 @@ Response:
           "maxBatchSize": 5
         },
         {
+          "outcomeId": 1,
           "outcomeName": "YES",
           "symbol": "PM-2026-ELECTION-YES",
           "pricePrecision": 3,
@@ -276,6 +325,142 @@ Response:
   ]
 }
 ```
+
+`serverTime` is unix **seconds**, not milliseconds. The contract operates in seconds (`block.timestamp` is `uint64` seconds), so all timestamps in this endpoint are seconds-based to avoid client-side conversions and off-by-one drift on second boundaries. `serverTime` and `status` MUST be evaluated from a single `now` value within one request so that the response is internally consistent.
+
+#### Market Status
+
+A market is in exactly one of nine phases.
+
+| Value | Description |
+| --- | --- |
+| `PENDING` | PMP created (`EventConfirmed`); the oracle has not set timings yet. `timings` is `null`. |
+| `UPCOMING` | `TimingsSet` received, `serverTime < timings.stakeStart`. |
+| `STAKING` | `timings.stakeStart <= serverTime < timings.stakeEnd`, `PoolsFrozen` not received. |
+| `AWAITING_FREEZE` | `serverTime >= timings.stakeEnd`, `PoolsFrozen` not received. |
+| `TRADING` | `PoolsFrozen` received, `serverTime < timings.resultStart`. |
+| `RESOLVING` | `serverTime >= timings.resultStart`, `Resolved` not received. |
+| `RESOLVED` | Terminal. `Resolved` event received. |
+| `CANCELLED` | Terminal. `PMPCancelled` or `EventCancelled` received. |
+| `EXPIRED` | Terminal. `serverTime >= timings.resultEnd` without resolution (rare). |
+
+#### Field Reference
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `serverTime` | LONG | Unix timestamp in seconds. |
+| `nextCursor` | STRING \| null | Pagination cursor for the next page. `null` when `hasMore` is `false`. |
+| `hasMore` | BOOLEAN | Whether more pages follow. |
+| `pmpAddress` | STRING | Address of the Prediction Market Pool contract. Used for `setStake` and as the metadata anchor. |
+| `orderBookAddress` | STRING \| null | Address of the OrderBook contract. `null` until `timings.frozenAt != null`. The PMP knows the order-book address ahead of time, but the contract is not deployed at that address until `PoolsFrozen` is emitted. |
+| `marketName` | STRING | Technical market name. Not the user-facing title; see `event.eventName`. |
+| `status` | ENUM | Market phase. See [Market Status](#market-status). |
+| `quoteAsset` | STRING | Quote-asset symbol for display. |
+| `tokenType` | INT | Numeric token type accepted by `setStake.token_type`. |
+| `createdAt` | LONG | Unix seconds. Block timestamp of the `EventConfirmed` event. Used for sorting by recency. |
+| `timings` | OBJECT \| null | See [Timings](#timings). `null` when `status == "PENDING"`. |
+| `event` | OBJECT | See [Event](#event). |
+| `liquidity` | OBJECT \| null | See [Liquidity](#liquidity). `null` for `PENDING` and `UPCOMING`. |
+| `terminal` | OBJECT \| null | See [Terminal](#terminal). `null` for non-terminal statuses. |
+| `outcomes` | ARRAY | Outcome-token descriptors. |
+| `outcomes[].outcomeId` | INT | `u32` outcome ID accepted by `setStake`, `OrderPlaced.outcomeId`, and `Resolved.outcomeId`. Clients MUST use this field, not the array index. |
+
+#### Timings
+
+All timestamps are unix seconds.
+
+```json
+{
+  "stakeStart": 1709990000,
+  "stakeEnd": 1709991800,
+  "resultStart": 1710008000,
+  "resultEnd": 1710011600,
+  "frozenAt": 1709991850
+}
+```
+
+| Field | Source | Nullability |
+| --- | --- | --- |
+| `stakeStart` | Latest `PMP.TimingsSet` | Always present when `timings != null`. |
+| `stakeEnd` | Latest `PMP.TimingsSet` | Always present when `timings != null`. |
+| `resultStart` | Latest `PMP.TimingsSet` | Always present when `timings != null`. The contract may emit `TimingsSet` repeatedly while `serverTime < resultStart`; take the latest by block time. |
+| `resultEnd` | Latest `PMP.TimingsSet` | Always present when `timings != null`. |
+| `frozenAt` | Block timestamp of `PMP.PoolsFrozen` | `null` for `UPCOMING`, `STAKING`, `AWAITING_FREEZE`. |
+
+`timings` itself is `null` only for `PENDING`.
+
+#### Event
+
+```json
+{
+  "eventId": "0xabc...",
+  "eventName": "2026 US Presidential Election",
+  "description": "Will candidate X win?",
+  "oracleName": "ElectionOracle",
+  "oracleAddress": "0:oracle-addr",
+  "oracleFee": "100"
+}
+```
+
+Sourced from `OracleEventList.EventAdded(eventId, eventName, oracleFee, deadline)` and `addEvent.describe`. `eventName` and `description` are the user-facing labels for the market.
+
+#### Liquidity
+
+All amounts are normalized decimal strings (not raw `uint128`). JSON numbers lose precision on `uint128` and surface raw scaled integers to users.
+
+```json
+{
+  "totalPool": "12500.00",
+  "outcomePools": ["7800.00", "4700.00"],
+  "lastPrices": ["0.624", "0.376"],
+  "volume24h": "3450.50",
+  "trades24h": 142
+}
+```
+
+`outcomePools` and `lastPrices` are aligned with `outcomes[]` in `outcomeId` order.
+
+Nullability:
+- `liquidity == null` for `PENDING` and `UPCOMING` (no pools yet).
+- For `AWAITING_FREEZE`: pools exist but no trades yet — `lastPrices: null`, `volume24h: "0"`, `trades24h: 0`.
+
+#### Terminal
+
+`null` for non-terminal statuses. Otherwise:
+
+```json
+{
+  "kind": "RESOLVED",
+  "at": 1710010000,
+  "resolvedOutcomeId": 1,
+  "cancelReason": null
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `kind` | ENUM | `RESOLVED`, `CANCELLED`, or `EXPIRED`. |
+| `at` | LONG | Unix seconds when the terminal state was reached. |
+| `resolvedOutcomeId` | INT \| null | Winning outcome. Present only when `kind == "RESOLVED"`. |
+| `cancelReason` | ENUM \| null | `PMP_CANCELLED` or `EVENT_CANCELLED`. Present only when `kind == "CANCELLED"`. The two reasons originate in different contract events and have different UI meaning. |
+
+#### Semantic Invariants
+
+The backend MUST guarantee the following on every response. These invariants protect clients against indexer desyncs; if any is violated, the backend MUST fail the request closed rather than return an inconsistent market:
+
+1. `status == "TRADING"` ⇒ `timings.frozenAt != null && serverTime < timings.resultStart`
+2. `status == "RESOLVING"` ⇒ `timings.frozenAt != null && timings.resultStart <= serverTime < timings.resultEnd`
+3. `status == "PENDING"` ⇒ `timings == null`
+4. `status == "RESOLVED"` ⇒ `terminal.kind == "RESOLVED" && timings.frozenAt != null` (resolution always follows freeze; see `PMP.sol:1005`)
+5. `orderBookAddress != null` ⇔ `timings.frozenAt != null`
+
+#### Out of Scope
+
+The endpoint does NOT return:
+
+- Derived fields (`tradingDuration`, `phaseStartedAt`, `timeRemaining`, `expectedTradingStart`). Clients compute these from `timings` and `serverTime`. Duplicating them server-side creates a desync source.
+- History of `TimingsSet` updates. The contract permits updating `resultStart` while it has not been reached; the endpoint always returns the latest `TimingsSet`. If history becomes necessary it will live under `/api/v1/markets/{address}/timings/history`.
+- Raw contract flags (`approved`, `frozen`, `numberOfOracleEvents`). Clients act on `status`. A future `/api/v1/markets/{address}/raw` endpoint may expose them for debugging.
 
 ### Order Book
 
@@ -769,9 +954,9 @@ Order creation MUST validate:
 
 | Rule | Source |
 | --- | --- |
-| `marketAddress` exists | `/api/v1/markets` |
+| `marketAddress` exists and equals the market's `orderBookAddress` | `/api/v1/markets` |
 | `symbol` exists within the selected market | `/api/v1/markets` |
-| The selected market has `status = TRADING` | `/api/v1/markets` |
+| The selected market has `status == "TRADING"` (any other phase rejects order placement) | `/api/v1/markets` |
 | For `LIMIT` orders, `price` decimal places do not exceed `pricePrecision` | `/api/v1/markets` |
 | For `LIMIT` orders, `price` is a multiple of `tickSize` | `/api/v1/markets` |
 | `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/markets` |
