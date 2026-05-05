@@ -1,25 +1,89 @@
 # GET /api/v1/markets — manual smoke checks for the markets read-model
 # Compatibility: VS Code REST Client, JetBrains HTTP Client
+#
+# Response shape: { serverTime (unix seconds), nextCursor, hasMore, markets[] }.
+# Each market includes: marketAddress, orderBookAddress, marketName, status,
+# quoteAsset, tokenType, createdAt, timings|null, event, terminal|null, outcomes[].
 
 @host = http://localhost:8080
 @marketAddress = 0:b286c2c1996fe90fe5ed06679115f8b9be4b3184accfb84ac22308cad5d81a48
 
-### list all markets
+### list with defaults: sort=resultStart asc, limit=50
 GET {{host}}/api/v1/markets
 Accept: application/json
 
-### fetch a single market by marketAddress
+### explicit limit
+GET {{host}}/api/v1/markets?limit=5
+Accept: application/json
+
+### sort by createdAt desc
+GET {{host}}/api/v1/markets?sort=createdAt&limit=5
+Accept: application/json
+
+### filter by single status
+GET {{host}}/api/v1/markets?status=TRADING
+Accept: application/json
+
+### filter by multiple statuses (comma-separated)
+GET {{host}}/api/v1/markets?status=TRADING,RESOLVING,AWAITING_FREEZE
+Accept: application/json
+
+### filter by quoteAsset
+GET {{host}}/api/v1/markets?quoteAsset=USDC
+Accept: application/json
+
+### filter by oracleName (joined via oracle_events → oracles)
+GET {{host}}/api/v1/markets?oracleName=ElectionOracle
+Accept: application/json
+
+### filter by closingBefore (unix seconds): markets with result_end < value
+GET {{host}}/api/v1/markets?closingBefore=1735689600
+Accept: application/json
+
+### combined filter + sort + limit
+GET {{host}}/api/v1/markets?status=TRADING&quoteAsset=USDC&sort=createdAt&limit=10
+Accept: application/json
+
+### pagination — first page (copy nextCursor from response into the next request)
+GET {{host}}/api/v1/markets?limit=2
+Accept: application/json
+
+### pagination — second page (replace `<cursor>` with nextCursor from above)
+GET {{host}}/api/v1/markets?limit=2&cursor=<cursor>
+Accept: application/json
+
+### single-market lookup by marketAddress
 GET {{host}}/api/v1/markets?marketAddress={{marketAddress}}
 Accept: application/json
 
-### unknown marketAddress -> { serverTime, markets: [] }
+### unknown marketAddress → { serverTime, nextCursor: null, hasMore: false, markets: [] }
 GET {{host}}/api/v1/markets?marketAddress=0:does-not-exist
 Accept: application/json
 
-### empty marketAddress -> filter applies as `pmp_address = ''`, returns { serverTime, markets: [] }
+### empty marketAddress → trimmed to none, falls through to listing path
 GET {{host}}/api/v1/markets?marketAddress=
 Accept: application/json
 
-### ignored unknown query params, list all markets
+### unknown query params are ignored (handler only reads named keys)
 GET {{host}}/api/v1/markets?limit=50&foo=bar
+Accept: application/json
+
+### invalid status value → 400 (status not in the nine-phase enum)
+GET {{host}}/api/v1/markets?status=NOT_A_STATUS
+Accept: application/json
+
+### invalid sort value → 400
+GET {{host}}/api/v1/markets?sort=alphabetical
+Accept: application/json
+
+### marketAddress + filter → 400 (mutually exclusive)
+GET {{host}}/api/v1/markets?marketAddress={{marketAddress}}&status=TRADING
+Accept: application/json
+
+### marketAddress + pagination → 400 (mutually exclusive)
+GET {{host}}/api/v1/markets?marketAddress={{marketAddress}}&limit=10
+Accept: application/json
+
+### marketAddress + cursor → 400 (mutually exclusive)
+GET {{host}}/api/v1/markets?marketAddress={{marketAddress}}&cursor=abc
 Accept: application/json
