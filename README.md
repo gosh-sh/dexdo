@@ -3,7 +3,9 @@
 REST API and chain indexer for prediction markets on the Acki Nacki blockchain. The
 backend exposes a Binance-style spot trading contract (`/api/v1/markets`, `/depth`,
 `/account`, `/order`, `/batchOrders`, `/openOrders`, `/allOrders`) over a read-model
-materialized from on-chain events.
+materialized from on-chain events. Currently delivered: `/api/v1/markets` (with
+lifecycle status, timings, oracle event metadata, terminal info, and cursor
+pagination); `/depth` is wired but its read-model is not built yet.
 
 ## Architecture
 
@@ -71,15 +73,16 @@ The default config path is `config/<service>.local.yaml`; override with
 
 ## Running locally
 
-The api currently uses a stub repository, so it can run without a real database.
-The indexer needs a Supabase Postgres connection.
+Both processes need a Postgres connection. The indexer applies migrations on
+startup, so point both at the same database. For local development a plain
+docker-postgres is enough; for stage we use Supabase via the connection pooler.
 
 ```sh
-# api (stub data, no DB required)
-cargo run -p dodex-api
-
-# indexer (requires DB and network)
+# indexer (writes to DB, pulls from GraphQL)
 cargo run -p dodex-indexer
+
+# api (reads from DB)
+cargo run -p dodex-api
 ```
 
 If the indexer fails with `permission denied for schema public` on first run,
@@ -92,14 +95,29 @@ for the exact SQL.
 ```sh
 cargo test --workspace --lib
 cargo +nightly fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+## Deployment
+
+Stage runs via `docker compose` with an override file:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.stage.yml up -d --build
+```
+
+Host preparation (apt + docker + repo clone + config templating) is automated
+in `deploy/ansible/`; see `deploy/ansible/playbook.yml`.
 
 ## Documentation
 
 - [docs/api-spec.md](docs/api-spec.md) — public REST contract (markets, depth,
   account, orders, batchOrders, openOrders, allOrders) with HMAC auth.
-- [docs/technical-spec-market-data.md](docs/technical-spec-market-data.md),
-  [docs/GRAPHQL.md](docs/GRAPHQL.md) — auxiliary specs.
+- [docs/tech-spec.md](docs/tech-spec.md), [docs/GRAPHQL.md](docs/GRAPHQL.md),
+  [docs/dex-events-routing.md](docs/dex-events-routing.md) — auxiliary specs.
+- [services/api/README.md](services/api/README.md),
+  [services/indexer/README.md](services/indexer/README.md) — per-service
+  internals.
 
 ## License
 

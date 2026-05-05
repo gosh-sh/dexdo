@@ -3,35 +3,52 @@
 The indexer is the writer side of the Dodex backend. It pulls the global event
 stream from Acki Nacki GraphQL, decodes message bodies against vendored ABIs,
 and projects decoded events into the Supabase read-model that `services/api`
-serves to clients.
+serves to clients. A separate market reconciler runs in parallel and fills in
+fields that are not carried by events (timings, on-chain state) by calling
+on-chain getters off-line via a local TVM runner.
 
 ## Pipeline
 
-Each tick of the indexer loop runs the following stages, all wired in
+Each tick of the main indexer loop runs the following stages, all wired in
 `services/indexer/src/main.rs` with primitives in `crates/infrastructure/`:
 
 1. **Fetch** — `GraphqlClient::fetch_events(first, after)` issues a relay-style
    `blockchain.events` query (`crates/infrastructure/src/graphql.rs`). It paginates
    until `hasNextPage = false` or `MAX_PAGES_PER_TICK = 100` is hit.
-2. **Persist raw** — `IndexerRepository::persist_page` inserts every edge into
+2. **Filter** — edges with `node.src` in `indexer.ignored_addresses` are dropped
+   before persistence. The cursor still advances on the original page.
+3. **Persist raw** — `IndexerRepository::persist_page` inserts every edge into
    `raw_events` with `on conflict (msg_id) do nothing` and upserts the cursor in
    `indexer_cursors` in the same Postgres transaction. Page-atomic: a crash in
    the middle of a page replays the whole page on restart, deduped by `msg_id`.
-3. **Decode** — `Decoder` (see `crates/infrastructure/src/decoder.rs`) tries to
+4. **Decode** — `Decoder` (see `crates/infrastructure/src/decoder.rs`) tries to
    decode `body` (base64 BOC) against the eight dex ABIs vendored in
    `contracts/abi/dex/`. On match, `event_type` is set to `<Contract>.<EventName>`
    and `decoded` jsonb is populated. Unknown-id events stay with both columns
    `NULL`, so they can be re-decoded later if the ABI set is extended.
-4. **Project** — `projectors::project_event` dispatches by `event_type` and
+5. **Project** — `projectors::project_event` dispatches by `event_type` and
    updates the read-model tables. Each projector runs inside a **savepoint**
    (`Transaction::begin()` from `sqlx::Acquire`); if a projector errors, the
    savepoint rolls back, the raw row stays committed, and the rest of the page
    keeps going.
-5. **Sleep** — wait `indexer.polling_interval_ms` and tick again.
+6. **Sleep** — wait `indexer.polling_interval_ms` and tick again.
 
 Cursor is persisted in `indexer_cursors` under `stream_name = "blockchain_events"`
 and reloaded on startup via `IndexerRepository::load_cursor`, so restarts resume
 where the previous run left off.
+
+## Market reconciler
+
+`MarketReconciler` (`crates/infrastructure/src/reconciler.rs`) runs as an
+independent task spawned from `services/indexer/src/main.rs` on the
+`indexer.reconciliation_interval_ms` cadence (default 60 s). It scans `markets`
+for rows with `last_reconciled_at IS NULL`, fetches the corresponding account
+BOC via GraphQL, and runs PMP off-line getters (`getDetails`,
+`getOrderBookAddress`) through `tvm_runner`. The result fills `market_id`,
+`name`, `oracle_list_hash`, timings (when available), `orderbook_address`, and
+flips `last_reconciled_at`. It owns its own `GraphqlClient` and `Decoder`
+clones, so a config-reload that swaps the main-loop client does not disturb
+mid-run reconciliation.
 
 ## Decoder
 
@@ -53,10 +70,10 @@ sibling clone of the contracts repo. Bumping the ABI version means dropping new
 JSONs into `contracts/abi/dex/` and recompiling. The underlying TVM crates are
 pinned via tag in the workspace `Cargo.toml`.
 
-Currently the index covers 42 events across the eight dex contracts (PMP,
-PrivateNote, OrderBook, Oracle, OracleEventList, RootOracle, RootPN, Nullifier).
-System / non-dex messages observed in the chain do not match any id and are
-silently skipped (counted as `undecoded` in the per-tick log).
+The index covers 42 events across the eight dex contracts (PMP, PrivateNote,
+OrderBook, Oracle, OracleEventList, RootOracle, RootPN, Nullifier). System /
+non-dex messages observed in the chain do not match any id and are silently
+skipped (counted as `undecoded` in the per-tick log).
 
 ## Projectors
 
@@ -65,21 +82,30 @@ Lives in `crates/infrastructure/src/projectors.rs`. Single dispatch entry
 
 - `Applied` — read-model write succeeded.
 - `Deferred` — a parent record is missing (e.g. `OracleEventListDeployed`
-  arrives before the corresponding `OracleDeployed`). Logged at warn, raw row
-  still persists, will be picked up on the next pass.
+  arrives before the corresponding `OracleDeployed`, or a PMP lifecycle event
+  fires before `PMPDeployed`). Logged at warn, raw row still persists, will be
+  picked up on the next pass.
 - `Unknown` — `event_type` is not in the whitelist yet.
 
 Implemented today:
 
-| Event                              | Target table          | Notes                                                                                  |
-| ---------------------------------- | --------------------- | -------------------------------------------------------------------------------------- |
-| `RootOracle.OracleDeployed`        | `oracles`             | upsert by `address`; `name`/`pubkey`/`deploy_msg_id` use `coalesce` to keep known data |
-| `Oracle.OracleEventListDeployed`   | `oracle_event_lists`  | upsert by `msg_id`; `oracle_id` resolved via `oracles.address = node.src`              |
+| Event                            | Target table         | Notes                                                                                  |
+| -------------------------------- | -------------------- | -------------------------------------------------------------------------------------- |
+| `RootOracle.OracleDeployed`      | `oracles`            | upsert by `address`; `name`/`pubkey`/`deploy_msg_id` use `coalesce` to keep known data |
+| `Oracle.OracleEventListDeployed` | `oracle_event_lists` | upsert by `msg_id`; `oracle_id` resolved via `oracles.address = node.src`              |
+| `OracleEventList.EventAdded`     | `oracle_events`      | upsert by `(eventlist_id, internal_id_in_eventlist)`; clears `is_deleted`              |
+| `OracleEventList.EventConfirmed` | `oracle_events`      | sets `confirmed_pmp_address` + `confirmed_at`                                          |
+| `PrivateNote.PMPDeployed`        | `markets`            | upsert by `pmp_address`; resolves `token_code` via `ref_tokens`                        |
+| `PMP.TimingsSet`                 | `markets`            | writes stake/result timings, sets `approved = true`                                    |
+| `PMP.PoolsFrozen`                | `markets`            | writes `frozen_at` from `node.created_at`                                              |
+| `PMP.Resolved`                   | `markets`            | writes `resolved_at` + `resolved_outcome_id`                                           |
+| `PMP.EventCancelled`             | `markets`            | writes `cancelled_at` + `cancel_reason = 'EVENT_CANCELLED'`                            |
+| `PMP.PMPCancelled`               | `markets`            | writes `cancelled_at` + `cancel_reason = 'PMP_CANCELLED'`                              |
 
 TODO:
- - `EventAdded` / `EventConfirmed` → `oracle_events`;
- - `PrivateNote.PMPDeployed` plus `PMP.getDetails()` reconciliation → `markets` / `market_outcomes`;
- - `OrderBook.*` events plus periodic `_state` snapshots → `order_book_snapshots`.
+
+- `OrderBook.*` (`OrderPlaced`, `OrderCancelled`, `OrderFilled`, …) → a
+  `live_orders` table aggregated into `order_book_snapshots` for `/depth`.
 
 ## Database and migrations
 
@@ -95,6 +121,14 @@ Today's migrations:
   `dst_address`, `event_type` since these are not always known at ingestion.
 - `0003_raw_events_decoded.sql` — adds `raw_events.decoded jsonb` and a partial
   index on `event_type` for projector-side scans.
+- `0004_oracle_events_confirmed.sql` — adds `confirmed_pmp_address`/`confirmed_at`
+  to `oracle_events` and an index for the API-side join.
+- `0005_markets_relax_required.sql` — drops `NOT NULL` on `markets.market_id`,
+  `name`, `oracle_list_hash`; adds `last_reconciled_at`, `oracle_event_lists_json`,
+  `oracle_fee_json` for the reconciler.
+- `0006_markets_lifecycle.sql` — adds `frozen_at`, `resolved_at`,
+  `resolved_outcome_id`, `cancelled_at`, `cancel_reason` for the nine-phase
+  market lifecycle and a partial terminal index.
 
 ### Supabase permissions
 
@@ -140,10 +174,13 @@ indexer:
   polling_interval_ms: 3000
   depth_refresh_interval_ms: 5000
   reconciliation_interval_ms: 60000
-
-features:
-  stub_mode: true
+  ignored_addresses:
+    - "0:1111111111111111111111111111111111111111111111111111111111111111"
 ```
+
+`indexer.ignored_addresses` is a narrow allowlist of source addresses whose
+events are dropped before `raw_events` insert and projector dispatch — only
+addresses that emit confirmed noise (system / null-route).
 
 Send `SIGUSR1` to the running process to reload the config; the GraphQL client
 and Postgres pool are rebuilt only if their respective parameters changed.
@@ -157,6 +194,7 @@ cargo run -p dodex-indexer
 Per-tick log line includes:
 
 - `edges` / `pages` — fetched from GraphQL.
+- `ignored` — edges dropped via `ignored_addresses`.
 - `inserted` / `skipped` — written vs deduped against `raw_events`.
 - `decoded` / `undecoded` — bodies the ABI matched vs not.
 - `projected` / `projection_deferred` / `projection_failed` — projector outcomes.
@@ -173,6 +211,7 @@ select event_type, count(*) from raw_events
   order by count(*) desc;
 select count(*) from oracles;
 select count(*) from oracle_event_lists;
+select count(*) from markets where last_reconciled_at is not null;
 ```
 
 ## Crate layout the indexer depends on
@@ -184,6 +223,8 @@ crates/infrastructure/src/
 ├── database.rs      sqlx Pg pool + sqlx::migrate!
 ├── graphql.rs       reqwest + relay pagination over blockchain.events
 ├── decoder.rs       tvm_abi-based BOC decoder, ABI v2.4
+├── tvm_runner.rs    off-chain TVM getter execution against account BOC
+├── reconciler.rs    market reconciler (PMP getDetails / getOrderBookAddress)
 ├── indexer_repo.rs  raw_events / indexer_cursors persistence + projector dispatch
 └── projectors.rs    Event → read-model writers, savepoint-isolated
 ```
@@ -198,4 +239,7 @@ Unit-level, all in `crates/infrastructure`:
   nullable node fields.
 - `indexer_repo::tests` — `parse_unix_seconds` for int / float / string
   timestamps.
+- `projectors::tests` — `uint256_hex_to_decimal` parsing and rejection.
+- `reconciler::tests` — power-of-ten decimal rendering for tick / step sizes.
+- `tvm_runner::tests` — invalid account BOC and unknown function rejection.
 - `config::tests` — schema separation between `ApiConfig` and `IndexerConfig`.
