@@ -154,7 +154,7 @@ fn try_decode(decoder: &Decoder, msg_id: &str, body: Option<&Value>) -> Option<D
     .inspect(|d| debug!(msg_id, event_type = %d.event_type, "decoded event"))
 }
 
-fn parse_unix_seconds(value: Option<&Value>) -> Option<f64> {
+pub(crate) fn parse_unix_seconds(value: Option<&Value>) -> Option<f64> {
     let value = value?;
     if let Some(n) = value.as_i64() {
         return Some(n as f64);

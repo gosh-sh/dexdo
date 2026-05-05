@@ -82,10 +82,10 @@ impl GraphqlClient {
             .await
             .context("graphql response is not valid json")?;
 
-        if let Some(errors) = response.errors {
-            if !errors.is_empty() {
-                bail!("graphql errors: {errors:?}");
-            }
+        if let Some(errors) = response.errors
+            && !errors.is_empty()
+        {
+            bail!("graphql errors: {errors:?}");
         }
 
         let data = response.data.context("graphql response missing data")?;
@@ -113,10 +113,10 @@ impl GraphqlClient {
             .await
             .context("graphql account response is not valid json")?;
 
-        if let Some(errors) = response.errors {
-            if !errors.is_empty() {
-                bail!("graphql account errors: {errors:?}");
-            }
+        if let Some(errors) = response.errors
+            && !errors.is_empty()
+        {
+            bail!("graphql account errors: {errors:?}");
         }
 
         let data = response.data.context("graphql account response missing data")?;

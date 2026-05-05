@@ -5,16 +5,44 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dodex_domain::DepthSnapshot;
-use dodex_domain::Market;
 use dodex_domain::MarketAddress;
+use dodex_domain::MarketStatus;
+use dodex_domain::MarketsPage;
 use dodex_domain::Symbol;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MarketsSort {
+    #[default]
+    ResultStartAsc,
+    CreatedAtDesc,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MarketsFilter {
+    pub statuses: Vec<MarketStatus>,
+    pub quote_asset: Option<String>,
+    pub oracle_name: Option<String>,
+    pub closing_before: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketsListing {
+    pub filter: MarketsFilter,
+    pub sort: MarketsSort,
+    pub cursor: Option<String>,
+    pub limit: u16,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone)]
+pub enum MarketsRequest {
+    One { market_address: MarketAddress, now: i64 },
+    Listing(MarketsListing),
+}
 
 #[async_trait]
 pub trait MarketReadRepository: Send + Sync {
-    async fn list_markets(
-        &self,
-        market_address: Option<&MarketAddress>,
-    ) -> Result<Vec<Market>, anyhow::Error>;
+    async fn list_markets(&self, request: &MarketsRequest) -> Result<MarketsPage, anyhow::Error>;
 
     async fn get_depth(
         &self,
@@ -26,11 +54,8 @@ pub trait MarketReadRepository: Send + Sync {
 
 #[async_trait]
 impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
-    async fn list_markets(
-        &self,
-        market_address: Option<&MarketAddress>,
-    ) -> Result<Vec<Market>, anyhow::Error> {
-        (**self).list_markets(market_address).await
+    async fn list_markets(&self, request: &MarketsRequest) -> Result<MarketsPage, anyhow::Error> {
+        (**self).list_markets(request).await
     }
 
     async fn get_depth(
@@ -41,11 +66,6 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
     ) -> Result<DepthSnapshot, anyhow::Error> {
         (**self).get_depth(market_address, symbol, limit).await
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct GetMarketsQuery {
-    pub market_address: Option<MarketAddress>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,8 +89,8 @@ impl<R> GetMarketsUseCase<R>
 where
     R: MarketReadRepository,
 {
-    pub async fn execute(&self, query: GetMarketsQuery) -> Result<Vec<Market>, anyhow::Error> {
-        self.repo.list_markets(query.market_address.as_ref()).await
+    pub async fn execute(&self, request: MarketsRequest) -> Result<MarketsPage, anyhow::Error> {
+        self.repo.list_markets(&request).await
     }
 }
 

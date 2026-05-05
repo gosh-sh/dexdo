@@ -29,7 +29,6 @@ pub struct IndexerConfig {
 pub struct CommonSection {
     pub app: AppSection,
     pub database: DatabaseSection,
-    pub features: FeatureSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,11 +70,6 @@ pub struct IndexerSection {
     /// (system / null-route addresses) without polluting the read-model.
     #[serde(default)]
     pub ignored_addresses: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeatureSection {
-    pub stub_mode: bool,
 }
 
 impl ApiConfig {
@@ -154,8 +148,6 @@ database:
   max_connections: 10
   min_connections: 1
   connect_timeout_ms: 3000
-features:
-  stub_mode: true
 "#;
 
     #[test]

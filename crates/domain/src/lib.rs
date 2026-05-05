@@ -46,13 +46,130 @@ pub struct Outcome {
     pub max_batch_size: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MarketStatus {
+    Pending,
+    Upcoming,
+    Staking,
+    AwaitingFreeze,
+    Trading,
+    Resolving,
+    Resolved,
+    Cancelled,
+    Expired,
+}
+
+impl MarketStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Upcoming => "UPCOMING",
+            Self::Staking => "STAKING",
+            Self::AwaitingFreeze => "AWAITING_FREEZE",
+            Self::Trading => "TRADING",
+            Self::Resolving => "RESOLVING",
+            Self::Resolved => "RESOLVED",
+            Self::Cancelled => "CANCELLED",
+            Self::Expired => "EXPIRED",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "PENDING" => Some(Self::Pending),
+            "UPCOMING" => Some(Self::Upcoming),
+            "STAKING" => Some(Self::Staking),
+            "AWAITING_FREEZE" => Some(Self::AwaitingFreeze),
+            "TRADING" => Some(Self::Trading),
+            "RESOLVING" => Some(Self::Resolving),
+            "RESOLVED" => Some(Self::Resolved),
+            "CANCELLED" => Some(Self::Cancelled),
+            "EXPIRED" => Some(Self::Expired),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Timings {
+    pub stake_start: i64,
+    pub stake_end: i64,
+    pub result_start: i64,
+    pub result_end: i64,
+    pub frozen_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketEvent {
+    pub event_id: String,
+    pub event_name: Option<String>,
+    pub description: Option<String>,
+    pub oracle_name: Option<String>,
+    pub oracle_address: Option<String>,
+    pub oracle_fee: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TerminalKind {
+    Resolved,
+    Cancelled,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CancelReason {
+    PmpCancelled,
+    EventCancelled,
+}
+
+impl CancelReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PmpCancelled => "PMP_CANCELLED",
+            Self::EventCancelled => "EVENT_CANCELLED",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "PMP_CANCELLED" => Some(Self::PmpCancelled),
+            "EVENT_CANCELLED" => Some(Self::EventCancelled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Terminal {
+    pub kind: TerminalKind,
+    pub at: i64,
+    pub resolved_outcome_id: Option<u32>,
+    pub cancel_reason: Option<CancelReason>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Market {
     pub market_address: MarketAddress,
+    pub order_book_address: Option<String>,
     pub market_name: MarketName,
-    pub status: String,
+    pub status: MarketStatus,
     pub quote_asset: String,
+    pub token_type: i32,
+    pub created_at: i64,
+    pub timings: Option<Timings>,
+    pub event: MarketEvent,
+    pub terminal: Option<Terminal>,
     pub outcomes: Vec<Outcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketsPage {
+    pub markets: Vec<Market>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

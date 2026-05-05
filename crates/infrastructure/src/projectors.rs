@@ -11,6 +11,7 @@ use tracing::warn;
 
 use crate::decoder::DecodedEvent;
 use crate::graphql::EventNode;
+use crate::indexer_repo::parse_unix_seconds;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionOutcome {
@@ -41,6 +42,15 @@ pub async fn project_event(
         }
         "PrivateNote.PMPDeployed" => {
             apply_pmp_deployed(tx, event, node).await.with_context(context)
+        }
+        "PMP.TimingsSet" => apply_timings_set(tx, event, node).await.with_context(context),
+        "PMP.PoolsFrozen" => apply_pools_frozen(tx, node).await.with_context(context),
+        "PMP.Resolved" => apply_resolved(tx, event, node).await.with_context(context),
+        "PMP.EventCancelled" => {
+            apply_pmp_cancellation(tx, node, "EVENT_CANCELLED").await.with_context(context)
+        }
+        "PMP.PMPCancelled" => {
+            apply_pmp_cancellation(tx, node, "PMP_CANCELLED").await.with_context(context)
         }
         _ => Ok(ProjectionOutcome::Unknown),
     }
@@ -301,6 +311,147 @@ async fn apply_pmp_deployed(
     .context("upsert markets on PMPDeployed")?;
 
     Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_timings_set(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let pmp_address = node.src.as_deref().context("TimingsSet: src missing on event message")?;
+
+    let stake_start = parse_u64_field(&event.value, "stakeStart")?;
+    let stake_end = parse_u64_field(&event.value, "stakeEnd")?;
+    let result_start = parse_u64_field(&event.value, "resultStart")?;
+    let result_end = parse_u64_field(&event.value, "resultEnd")?;
+
+    let updated = sqlx::query(
+        r#"update markets
+              set stake_start = $1,
+                  stake_end = $2,
+                  result_start = $3,
+                  result_end = $4,
+                  approved = true,
+                  updated_at = now()
+            where pmp_address = $5"#,
+    )
+    .bind(stake_start)
+    .bind(stake_end)
+    .bind(result_start)
+    .bind(result_end)
+    .bind(pmp_address)
+    .execute(&mut **tx)
+    .await
+    .context("update markets on TimingsSet")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(pmp_address, msg_id = %node.msg_id, "TimingsSet observed before PMPDeployed; deferring");
+        return Ok(ProjectionOutcome::Deferred);
+    }
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_pools_frozen(
+    tx: &mut Transaction<'_, Postgres>,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let pmp_address = node.src.as_deref().context("PoolsFrozen: src missing on event message")?;
+    let frozen_at = node_unix_seconds(node);
+
+    let updated = sqlx::query(
+        r#"update markets
+              set frozen_at = coalesce(frozen_at, $1),
+                  updated_at = now()
+            where pmp_address = $2"#,
+    )
+    .bind(frozen_at)
+    .bind(pmp_address)
+    .execute(&mut **tx)
+    .await
+    .context("update markets on PoolsFrozen")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(pmp_address, msg_id = %node.msg_id, "PoolsFrozen observed before PMPDeployed; deferring");
+        return Ok(ProjectionOutcome::Deferred);
+    }
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_resolved(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let pmp_address = node.src.as_deref().context("Resolved: src missing on event message")?;
+    let outcome_id_raw = field_str(&event.value, "outcomeId")?;
+    let outcome_id: i32 = outcome_id_raw
+        .parse()
+        .with_context(|| format!("parse Resolved.outcomeId = {outcome_id_raw}"))?;
+    let resolved_at = node_unix_seconds(node);
+
+    let updated = sqlx::query(
+        r#"update markets
+              set resolved_at = coalesce(resolved_at, $1),
+                  resolved_outcome_id = $2,
+                  updated_at = now()
+            where pmp_address = $3"#,
+    )
+    .bind(resolved_at)
+    .bind(outcome_id)
+    .bind(pmp_address)
+    .execute(&mut **tx)
+    .await
+    .context("update markets on Resolved")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(pmp_address, msg_id = %node.msg_id, "Resolved observed before PMPDeployed; deferring");
+        return Ok(ProjectionOutcome::Deferred);
+    }
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_pmp_cancellation(
+    tx: &mut Transaction<'_, Postgres>,
+    node: &EventNode,
+    reason: &str,
+) -> anyhow::Result<ProjectionOutcome> {
+    let pmp_address =
+        node.src.as_deref().context("Cancellation event: src missing on event message")?;
+    let cancelled_at = node_unix_seconds(node);
+
+    let updated = sqlx::query(
+        r#"update markets
+              set is_cancelled = true,
+                  cancelled_at = coalesce(cancelled_at, $1),
+                  cancel_reason = coalesce(cancel_reason, $2),
+                  updated_at = now()
+            where pmp_address = $3"#,
+    )
+    .bind(cancelled_at)
+    .bind(reason)
+    .bind(pmp_address)
+    .execute(&mut **tx)
+    .await
+    .context("update markets on cancellation event")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(pmp_address, msg_id = %node.msg_id, reason, "cancellation observed before PMPDeployed; deferring");
+        return Ok(ProjectionOutcome::Deferred);
+    }
+    Ok(ProjectionOutcome::Applied)
+}
+
+fn parse_u64_field(value: &Value, key: &str) -> anyhow::Result<i64> {
+    let raw = field_str(value, key)?;
+    raw.parse::<i64>().with_context(|| format!("parse {key} = {raw}"))
+}
+
+fn node_unix_seconds(node: &EventNode) -> Option<i64> {
+    parse_unix_seconds(node.created_at.as_ref()).map(|v| v as i64)
 }
 
 fn field_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {

@@ -11,5 +11,4 @@ pub mod projectors;
 pub mod reconciler;
 pub mod rows;
 pub mod signal;
-pub mod stub;
 pub mod tvm_runner;

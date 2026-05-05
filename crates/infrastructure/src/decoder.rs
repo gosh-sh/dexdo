@@ -140,7 +140,8 @@ mod tests {
         let pmp_event_ids: Vec<_> = decoder
             .event_index
             .iter()
-            .filter_map(|(id, (kind, name))| (*kind == "PMP").then(|| (*id, name.clone())))
+            .filter(|(_, (kind, _))| *kind == "PMP")
+            .map(|(id, (_, name))| (*id, name.clone()))
             .collect();
         assert!(pmp_event_ids.iter().any(|(_, n)| n == "Resolved"));
         assert!(pmp_event_ids.iter().any(|(_, n)| n == "ApprovedByOracle"));
