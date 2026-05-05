@@ -7,4 +7,4 @@ services:
   indexer:
     environment:
       APP_CONFIG: /app/config/indexer.stage.supabase.yaml
-      RUST_LOG: trace
+      RUST_LOG: info
