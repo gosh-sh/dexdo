@@ -52,6 +52,17 @@ pub async fn project_event(
         "PMP.PMPCancelled" => {
             apply_pmp_cancellation(tx, node, "PMP_CANCELLED").await.with_context(context)
         }
+        "OrderBook.OrderPlaced" => apply_order_placed(tx, event, node).await.with_context(context),
+        "OrderBook.OrderFilled" => apply_order_filled(tx, event, node).await.with_context(context),
+        "OrderBook.OrderCancelled" => {
+            apply_order_cancelled(tx, event, node).await.with_context(context)
+        }
+        // Observability-only OrderBook events; state of the book does not change.
+        "OrderBook.PartialFill"
+        | "OrderBook.FullyFilled"
+        | "OrderBook.Queued"
+        | "OrderBook.Rejected"
+        | "OrderBook.CallbackBounced" => Ok(ProjectionOutcome::Applied),
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }
@@ -443,6 +454,154 @@ async fn apply_pmp_cancellation(
         return Ok(ProjectionOutcome::Deferred);
     }
     Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_order_placed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let orderbook_address =
+        node.src.as_deref().context("OrderPlaced: src missing on event message")?;
+
+    let order_id = uint_field_to_decimal(&event.value, "orderId")?;
+    let outcome_id_raw = field_str(&event.value, "outcomeId")?;
+    let outcome_id: i32 = outcome_id_raw
+        .parse()
+        .with_context(|| format!("parse OrderPlaced.outcomeId = {outcome_id_raw}"))?;
+    let is_buy = event
+        .value
+        .get("isBuy")
+        .and_then(Value::as_bool)
+        .context("OrderPlaced: missing field `isBuy`")?;
+    let price = uint_field_to_decimal(&event.value, "price")?;
+    let amount = uint_field_to_decimal(&event.value, "amount")?;
+    let client_order_id = field_str(&event.value, "clientOrderId").ok().map(String::from);
+    let last_event_lt = node_unix_seconds(node);
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_remaining, client_order_id, status, last_event_lt, updated_at)
+           values ($1, $2::numeric, $3, $4, $5::numeric,
+                   $6::numeric, $7, 'OPEN', $8, now())
+           on conflict (orderbook_address, order_id) do update
+               set outcome_id = excluded.outcome_id,
+                   is_buy = excluded.is_buy,
+                   price = excluded.price,
+                   amount_remaining = excluded.amount_remaining,
+                   client_order_id = excluded.client_order_id,
+                   status = 'OPEN',
+                   last_event_lt = greatest(live_orders.last_event_lt, excluded.last_event_lt),
+                   updated_at = now()"#,
+    )
+    .bind(orderbook_address)
+    .bind(&order_id)
+    .bind(outcome_id)
+    .bind(is_buy)
+    .bind(&price)
+    .bind(&amount)
+    .bind(client_order_id)
+    .bind(last_event_lt)
+    .execute(&mut **tx)
+    .await
+    .context("upsert live_orders on OrderPlaced")?;
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_order_filled(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let orderbook_address =
+        node.src.as_deref().context("OrderFilled: src missing on event message")?;
+    let order_id = uint_field_to_decimal(&event.value, "orderId")?;
+    let filled_amount = uint_field_to_decimal(&event.value, "filledAmount")?;
+    let last_event_lt = node_unix_seconds(node);
+
+    let updated = sqlx::query(
+        r#"update live_orders
+              set amount_remaining = greatest(amount_remaining - $3::numeric, 0),
+                  status = case
+                      when amount_remaining - $3::numeric <= 0 then 'FILLED'
+                      else status
+                  end,
+                  last_event_lt = greatest(last_event_lt, $4),
+                  updated_at = now()
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(orderbook_address)
+    .bind(&order_id)
+    .bind(&filled_amount)
+    .bind(last_event_lt)
+    .execute(&mut **tx)
+    .await
+    .context("update live_orders on OrderFilled")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            msg_id = %node.msg_id,
+            "OrderFilled observed before OrderPlaced; deferring"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    }
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_order_cancelled(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let orderbook_address =
+        node.src.as_deref().context("OrderCancelled: src missing on event message")?;
+    let order_id = uint_field_to_decimal(&event.value, "orderId")?;
+    let last_event_lt = node_unix_seconds(node);
+
+    let updated = sqlx::query(
+        r#"update live_orders
+              set status = 'CANCELLED',
+                  amount_remaining = 0,
+                  last_event_lt = greatest(last_event_lt, $3),
+                  updated_at = now()
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(orderbook_address)
+    .bind(&order_id)
+    .bind(last_event_lt)
+    .execute(&mut **tx)
+    .await
+    .context("update live_orders on OrderCancelled")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            msg_id = %node.msg_id,
+            "OrderCancelled observed before OrderPlaced; deferring"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    }
+    Ok(ProjectionOutcome::Applied)
+}
+
+fn uint_field_to_decimal(value: &Value, key: &str) -> anyhow::Result<String> {
+    let raw = field_str(value, key)?;
+    if raw.starts_with("0x") || raw.starts_with("0X") {
+        uint256_hex_to_decimal(raw)
+    } else {
+        // Decoder returns small uints (uint128 / uint64) as decimal strings.
+        // Validate by re-parsing through BigUint to reject non-numerics.
+        BigUint::parse_bytes(raw.as_bytes(), 10)
+            .map(|b| b.to_str_radix(10))
+            .ok_or_else(|| anyhow!("invalid uint field `{key}`: {raw}"))
+    }
 }
 
 fn parse_u64_field(value: &Value, key: &str) -> anyhow::Result<i64> {

@@ -137,7 +137,7 @@ impl ApiError {
             DomainError::AuthRequired
             | DomainError::TimestampOutsideRecvWindow
             | DomainError::InvalidSignature => StatusCode::UNAUTHORIZED,
-            DomainError::UnknownOrder => StatusCode::NOT_FOUND,
+            DomainError::UnknownOrder | DomainError::InvalidMarketOrSymbol => StatusCode::NOT_FOUND,
             DomainError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::BAD_REQUEST,
         }
@@ -335,6 +335,9 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
         })
         .await
         .map_err(|err| {
+            if let Some(domain) = err.downcast_ref::<DomainError>() {
+                return ApiError::from(*domain);
+            }
             error!(?err, "get_depth failed");
             ApiError::from(DomainError::Unexpected)
         })?;

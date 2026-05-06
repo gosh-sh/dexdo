@@ -101,11 +101,20 @@ Implemented today:
 | `PMP.Resolved`                   | `markets`            | writes `resolved_at` + `resolved_outcome_id`                                           |
 | `PMP.EventCancelled`             | `markets`            | writes `cancelled_at` + `cancel_reason = 'EVENT_CANCELLED'`                            |
 | `PMP.PMPCancelled`               | `markets`            | writes `cancelled_at` + `cancel_reason = 'PMP_CANCELLED'`                              |
+| `OrderBook.OrderPlaced`          | `live_orders`        | upsert as `OPEN`; `amount_remaining = amount`                                          |
+| `OrderBook.OrderFilled`          | `live_orders`        | decrement `amount_remaining`; flip to `FILLED` at zero                                 |
+| `OrderBook.OrderCancelled`       | `live_orders`        | flip to `CANCELLED`, zero `amount_remaining`                                           |
+
+Observability-only OrderBook events (`PartialFill`, `FullyFilled`, `Queued`,
+`Rejected`, `CallbackBounced`) are accepted as `Applied` without writing — the
+state of the book does not depend on them.
 
 TODO:
 
-- `OrderBook.*` (`OrderPlaced`, `OrderCancelled`, `OrderFilled`, …) → a
-  `live_orders` table aggregated into `order_book_snapshots` for `/depth`.
+- Materialise depth into `order_book_snapshots` on a refresh worker (currently
+  the API aggregates `live_orders` on the fly per request).
+- Per-orderbook monotonic nonce for `lastUpdateId` (today: `max(last_event_lt)`
+  across the book, derived from `node.created_at`).
 
 ## Database and migrations
 
@@ -129,6 +138,9 @@ Today's migrations:
 - `0006_markets_lifecycle.sql` — adds `frozen_at`, `resolved_at`,
   `resolved_outcome_id`, `cancelled_at`, `cancel_reason` for the nine-phase
   market lifecycle and a partial terminal index.
+- `0007_live_orders.sql` — `live_orders` table for the order-book read-model
+  (PK `(orderbook_address, order_id)`, partial index on `OPEN` rows for
+  per-side aggregation).
 
 ### Supabase permissions
 

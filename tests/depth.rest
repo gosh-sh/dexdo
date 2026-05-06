@@ -1,0 +1,38 @@
+# GET /api/v1/depth — manual smoke checks for the order-book read-model
+# Compatibility: VS Code REST Client, JetBrains HTTP Client
+#
+# Response shape: { marketAddress, symbol, lastUpdateId (bigint), bids[], asks[] }.
+# Each bid/ask item is [price, quantity] strings. Empty book -> empty arrays,
+# lastUpdateId = 0.
+
+@host = http://localhost:8080
+@marketAddress = 0:b286c2c1996fe90fe5ed06679115f8b9be4b3184accfb84ac22308cad5d81a48
+@symbol = PM-2026-ELECTION-YES
+
+### default depth (limit=100)
+GET {{host}}/api/v1/depth?marketAddress={{marketAddress}}&symbol={{symbol}}
+Accept: application/json
+
+### explicit limit
+GET {{host}}/api/v1/depth?marketAddress={{marketAddress}}&symbol={{symbol}}&limit=10
+Accept: application/json
+
+### limit clamped at 1000
+GET {{host}}/api/v1/depth?marketAddress={{marketAddress}}&symbol={{symbol}}&limit=5000
+Accept: application/json
+
+### unknown market -> 404 InvalidMarketOrSymbol
+GET {{host}}/api/v1/depth?marketAddress=0:does-not-exist&symbol={{symbol}}
+Accept: application/json
+
+### unknown symbol -> 404 InvalidMarketOrSymbol
+GET {{host}}/api/v1/depth?marketAddress={{marketAddress}}&symbol=PM-DOES-NOT-EXIST
+Accept: application/json
+
+### missing marketAddress -> 400 MissingParameter
+GET {{host}}/api/v1/depth?symbol={{symbol}}
+Accept: application/json
+
+### missing symbol -> 400 MissingParameter
+GET {{host}}/api/v1/depth?marketAddress={{marketAddress}}
+Accept: application/json

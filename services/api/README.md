@@ -11,7 +11,7 @@ state, or BOC decoding — that is the indexer's job.
 | ------ | ------------------- | ------------------------------------------------------- |
 | GET    | `/readiness`        | Liveness probe; always returns `200 ok`.                |
 | GET    | `/api/v1/markets`   | Implemented. Lifecycle, timings, oracle event, terminal. |
-| GET    | `/api/v1/depth`     | Wired; read-model not built yet (returns `500`).         |
+| GET    | `/api/v1/depth`     | Implemented. On-the-fly aggregation over `live_orders`.  |
 
 ## `GET /api/v1/markets`
 
@@ -84,11 +84,37 @@ visited yet) never reach clients.
 
 ## `GET /api/v1/depth`
 
-Route is registered, the `MarketReadRepository::get_depth` contract is in
-place, but the postgres-backed implementation returns
-`Err("depth read-model is not implemented yet")`. Live order projection,
-aggregation into `order_book_snapshots`, and a refresh worker are tracked in
-the indexer roadmap.
+Returns bids and asks for one outcome of one market, aggregated on the fly
+from `live_orders`. Required query params: `marketAddress`, `symbol`.
+Optional `limit` (default 100, max 1000).
+
+Resolution: `marketAddress` + `symbol` → `(orderbook_address, outcome_id)`
+through `markets ⨝ market_outcomes`, with `last_reconciled_at IS NOT NULL`.
+A miss returns `404` (`InvalidMarketOrSymbol`). When the market exists but
+its OrderBook has not been deployed yet (no `orderbook_address`), the
+response is an empty book with `lastUpdateId = 0`.
+
+Aggregation: `SUM(amount_remaining) GROUP BY (is_buy, price)` over rows with
+`status = 'OPEN' AND amount_remaining > 0`. The sort is numerical (parsed
+through `BigUint`, not lexicographic) so `uint256` prices order correctly:
+bids descending, asks ascending. The `limit` is applied per side after the
+sort.
+
+`lastUpdateId` is `MAX(last_event_lt)` across the orderbook (currently
+`node.created_at` in unix seconds, populated by the OrderBook projectors).
+This is enough for the spec's `bigint` contract; if a depth-diff stream
+lands later, swap the source for a per-orderbook nonce without touching
+the API contract.
+
+Behind the scenes the indexer projects three OrderBook events into
+`live_orders`:
+
+- `OrderPlaced` — upsert a row in `OPEN`.
+- `OrderFilled` — decrement `amount_remaining`; flip to `FILLED` at zero.
+- `OrderCancelled` — flip to `CANCELLED`, zero `amount_remaining`.
+
+`PartialFill` / `FullyFilled` / `Queued` / `Rejected` / `CallbackBounced`
+are observability-only and intentionally skipped.
 
 ## Architecture
 

@@ -210,7 +210,7 @@ pub struct OracleEvent {
     pub outcome_names: serde_json::Value,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DomainError {
     #[error("mandatory parameter was not sent")]
     MissingParameter,

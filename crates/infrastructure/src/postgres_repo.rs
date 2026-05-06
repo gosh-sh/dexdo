@@ -14,6 +14,7 @@ use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
+use dodex_domain::DomainError;
 use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketEvent;
@@ -21,6 +22,7 @@ use dodex_domain::MarketName;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
 use dodex_domain::Outcome;
+use dodex_domain::PriceLevel;
 use dodex_domain::Symbol;
 use dodex_domain::Terminal;
 use dodex_domain::TerminalKind;
@@ -93,12 +95,113 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
     async fn get_depth(
         &self,
-        _market_address: &MarketAddress,
-        _symbol: &Symbol,
-        _limit: u16,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error> {
-        Err(anyhow!("depth read-model is not implemented yet"))
+        let target: Option<(String, i32)> = sqlx::query_as(
+            r#"select m.orderbook_address, mo.outcome_id
+                 from markets m
+                 join market_outcomes mo on mo.market_id_fk = m.id
+                where m.pmp_address = $1
+                  and mo.symbol = $2
+                  and m.last_reconciled_at is not null"#,
+        )
+        .bind(market_address.0.as_str())
+        .bind(symbol.0.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("resolve orderbook_address from (marketAddress, symbol)")?;
+
+        let Some((orderbook_address, outcome_id)) = target else {
+            return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
+        };
+        let Some(orderbook_address) = filter_orderbook(orderbook_address) else {
+            // Market exists but its OrderBook has not been deployed yet
+            // (reconciler ran before PoolsFrozen). No live orders possible.
+            return Ok(DepthSnapshot {
+                market_address: market_address.clone(),
+                symbol: symbol.clone(),
+                last_update_id: 0,
+                bids: vec![],
+                asks: vec![],
+            });
+        };
+
+        let limit = limit.max(1) as i64;
+
+        let rows: Vec<DepthLevelRow> = sqlx::query_as(
+            r#"select is_buy, price::text as price, sum(amount_remaining)::text as quantity
+                 from live_orders
+                where orderbook_address = $1
+                  and outcome_id = $2
+                  and status = 'OPEN'
+                  and amount_remaining > 0
+                group by is_buy, price"#,
+        )
+        .bind(&orderbook_address)
+        .bind(outcome_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("aggregate live_orders for depth")?;
+
+        let mut bids: Vec<PriceLevel> = Vec::new();
+        let mut asks: Vec<PriceLevel> = Vec::new();
+        for row in rows {
+            let level = PriceLevel { price: row.price, quantity: row.quantity };
+            if row.is_buy {
+                bids.push(level);
+            } else {
+                asks.push(level);
+            }
+        }
+        bids.sort_by(|a, b| compare_decimals_desc(&a.price, &b.price));
+        asks.sort_by(|a, b| compare_decimals_asc(&a.price, &b.price));
+        bids.truncate(limit as usize);
+        asks.truncate(limit as usize);
+
+        let last_update_id: Option<i64> = sqlx::query_scalar(
+            "select coalesce(max(last_event_lt), 0) from live_orders where orderbook_address = $1",
+        )
+        .bind(&orderbook_address)
+        .fetch_one(&self.pool)
+        .await
+        .context("compute last_update_id")?;
+
+        Ok(DepthSnapshot {
+            market_address: market_address.clone(),
+            symbol: symbol.clone(),
+            last_update_id: last_update_id.unwrap_or(0).max(0) as u64,
+            bids,
+            asks,
+        })
     }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct DepthLevelRow {
+    is_buy: bool,
+    price: String,
+    quantity: String,
+}
+
+fn filter_orderbook(s: String) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn compare_decimals_asc(a: &str, b: &str) -> std::cmp::Ordering {
+    let lhs = BigUint::parse_bytes(a.as_bytes(), 10).unwrap_or_default();
+    let rhs = BigUint::parse_bytes(b.as_bytes(), 10).unwrap_or_default();
+    lhs.cmp(&rhs)
+}
+
+fn compare_decimals_desc(a: &str, b: &str) -> std::cmp::Ordering {
+    compare_decimals_asc(b, a)
 }
 
 impl PostgresReadModelRepository {
@@ -557,5 +660,28 @@ mod tests {
     fn numeric_to_hex_works() {
         assert_eq!(numeric_to_hex("0").unwrap(), "0x0");
         assert_eq!(numeric_to_hex("255").unwrap(), "0xff");
+    }
+
+    #[test]
+    fn decimal_compare_handles_uint256_strings() {
+        // Lexicographic ordering would put "9" before "10"; we sort numerically.
+        assert_eq!(compare_decimals_asc("9", "10"), std::cmp::Ordering::Less, "ascending: 9 < 10");
+        assert_eq!(
+            compare_decimals_desc("9", "10"),
+            std::cmp::Ordering::Greater,
+            "descending: 9 > 10"
+        );
+
+        // Numbers that exceed i128 must still compare correctly.
+        let big = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        assert_eq!(compare_decimals_asc("1", big), std::cmp::Ordering::Less);
+        assert_eq!(compare_decimals_asc(big, big), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn filter_orderbook_drops_blank() {
+        assert!(filter_orderbook("".into()).is_none());
+        assert!(filter_orderbook("   ".into()).is_none());
+        assert_eq!(filter_orderbook("0:abc".into()).as_deref(), Some("0:abc"));
     }
 }
