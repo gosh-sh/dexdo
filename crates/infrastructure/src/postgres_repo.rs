@@ -107,10 +107,9 @@ impl PostgresReadModelRepository {
         now: i64,
     ) -> Result<MarketsPage, anyhow::Error> {
         let row: Option<MarketRow> = sqlx::query_as(&market_select_sql(
-            "where m.last_reconciled_at is not null and m.pmp_address = $2",
+            "where m.last_reconciled_at is not null and m.pmp_address = $1",
             "limit 1",
         ))
-        .bind(now)
         .bind(market_address.0.as_str())
         .fetch_optional(&self.pool)
         .await
@@ -329,6 +328,12 @@ fn assemble_market(
             row.pmp_address
         )
     })?;
+    let order_book_address = row.orderbook_address.clone().ok_or_else(|| {
+        anyhow!(
+            "market {} has last_reconciled_at set but orderbook_address is NULL",
+            row.pmp_address
+        )
+    })?;
 
     let status = derive_status(&row, now);
     let timings = build_timings(&row, status);
@@ -344,7 +349,7 @@ fn assemble_market(
 
     Ok(Market {
         market_address: MarketAddress(row.pmp_address),
-        order_book_address: row.orderbook_address,
+        order_book_address,
         market_name: MarketName(market_name),
         status,
         quote_asset: row.token_code,
@@ -424,7 +429,7 @@ fn build_terminal(row: &MarketRow, status: MarketStatus, now: i64) -> Option<Ter
 fn numeric_to_hex(decimal: &str) -> Result<String, anyhow::Error> {
     let big = BigUint::parse_bytes(decimal.as_bytes(), 10)
         .ok_or_else(|| anyhow!("invalid numeric: {decimal}"))?;
-    Ok(format!("0x{}", big.to_str_radix(16)))
+    Ok(format!("0x{:0>64}", big.to_str_radix(16)))
 }
 
 #[derive(Debug, Clone)]
@@ -552,7 +557,13 @@ mod tests {
 
     #[test]
     fn numeric_to_hex_works() {
-        assert_eq!(numeric_to_hex("0").unwrap(), "0x0");
-        assert_eq!(numeric_to_hex("255").unwrap(), "0xff");
+        assert_eq!(
+            numeric_to_hex("0").unwrap(),
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            numeric_to_hex("255").unwrap(),
+            "0x00000000000000000000000000000000000000000000000000000000000000ff"
+        );
     }
 }

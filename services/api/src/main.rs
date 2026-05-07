@@ -56,7 +56,7 @@ struct MarketsResponse {
 #[serde(rename_all = "camelCase")]
 struct MarketDto {
     market_address: String,
-    order_book_address: Option<String>,
+    order_book_address: String,
     market_name: String,
     status: &'static str,
     quote_asset: String,
@@ -225,14 +225,16 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
             .split(',')
             .map(|v| v.trim())
             .filter(|v| !v.is_empty())
-            .map(|v| MarketStatus::parse(v).ok_or(ApiError::from(DomainError::MissingParameter)))
+            .map(|v| {
+                MarketStatus::parse(v).ok_or(ApiError::from(DomainError::InvalidMarketOrSymbol))
+            })
             .collect::<Result<Vec<_>, _>>()?,
         None => Vec::new(),
     };
     let sort = match sort_param.as_deref() {
         None | Some("resultStart") => MarketsSort::ResultStartAsc,
         Some("createdAt") => MarketsSort::CreatedAtDesc,
-        Some(_) => return Err(ApiError::from(DomainError::MissingParameter)),
+        Some(_) => return Err(ApiError::from(DomainError::InvalidMarketOrSymbol)),
     };
     let limit = limit_param.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
