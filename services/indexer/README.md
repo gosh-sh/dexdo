@@ -95,7 +95,7 @@ Implemented today:
 | `Oracle.OracleEventListDeployed` | `oracle_event_lists` | upsert by `msg_id`; `oracle_id` resolved via `oracles.address = node.src`              |
 | `OracleEventList.EventAdded`     | `oracle_events`      | upsert by `(eventlist_id, internal_id_in_eventlist)`; clears `is_deleted`              |
 | `OracleEventList.EventConfirmed` | `oracle_events`      | sets `confirmed_pmp_address` + `confirmed_at`                                          |
-| `PrivateNote.PMPDeployed`        | `markets`            | upsert by `pmp_address`; resolves `token_code` via `ref_tokens`                        |
+| `PrivateNote.PMPDeployed`        | `markets`            | upsert by `pmp_address`; resolves `token_code` via `ref_tokens`; `created_at` from `node.created_at` (not overwritten on conflict) |
 | `PMP.TimingsSet`                 | `markets`            | writes stake/result timings, sets `approved = true`                                    |
 | `PMP.PoolsFrozen`                | `markets`            | writes `frozen_at` from `node.created_at`                                              |
 | `PMP.Resolved`                   | `markets`            | writes `resolved_at` + `resolved_outcome_id`                                           |

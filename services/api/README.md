@@ -46,7 +46,7 @@ array of markets. Every market carries `marketAddress`, `orderBookAddress`,
 The api computes `status` in Rust against a single `now = serverTime` so the
 response is internally consistent. Order of checks (first match wins):
 
-1. `cancelled_at` set or `is_cancelled` → `CANCELLED`.
+1. `cancelled_at` set → `CANCELLED`.
 2. `resolved_at` set → `RESOLVED`.
 3. `stake_start` is null → `PENDING`.
 4. `now > result_end` → `EXPIRED`.

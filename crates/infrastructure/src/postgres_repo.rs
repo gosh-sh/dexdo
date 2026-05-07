@@ -48,7 +48,6 @@ struct MarketRow {
     token_type: i32,
     token_code: String,
     event_id: String,
-    is_cancelled: bool,
     stake_start: Option<i64>,
     stake_end: Option<i64>,
     result_start: Option<i64>,
@@ -288,7 +287,6 @@ fn market_select_sql(where_clause: &str, tail: &str) -> String {
                m.token_type                                  as token_type,
                m.token_code                                  as token_code,
                m.event_id::text                              as event_id,
-               m.is_cancelled                                as is_cancelled,
                m.stake_start                                 as stake_start,
                m.stake_end                                   as stake_end,
                m.result_start                                as result_start,
@@ -360,7 +358,7 @@ fn assemble_market(
 }
 
 fn derive_status(row: &MarketRow, now: i64) -> MarketStatus {
-    if row.cancelled_at.is_some() || row.is_cancelled {
+    if row.cancelled_at.is_some() {
         return MarketStatus::Cancelled;
     }
     if row.resolved_at.is_some() {
@@ -468,7 +466,6 @@ mod tests {
             token_type: 3,
             token_code: "USDC".into(),
             event_id: "1".into(),
-            is_cancelled: false,
             stake_start,
             stake_end,
             result_start,
