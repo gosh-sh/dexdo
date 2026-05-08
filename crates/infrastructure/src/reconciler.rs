@@ -42,6 +42,16 @@ pub struct ReconcileStats {
     pub failed: u64,
 }
 
+/// Outcome of attempting to reconcile a single market. Distinguishes the
+/// "BOC not yet available on the node" path from "reconciled successfully":
+/// a missing BOC must trip the failure-backoff so the row drops off the
+/// front of the next sweep, otherwise a pending market stuck on
+/// `account_boc = null` would starve every later row in the queue.
+enum MarketReconcileOutcome {
+    Reconciled,
+    NoBoc,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct PendingMarket {
     id: i64,
@@ -85,8 +95,20 @@ impl MarketReconciler {
         for market in pending {
             stats.scanned += 1;
             match self.reconcile_one(&market).await {
-                Ok(true) => stats.reconciled += 1,
-                Ok(false) => stats.skipped += 1,
+                Ok(MarketReconcileOutcome::Reconciled) => stats.reconciled += 1,
+                Ok(MarketReconcileOutcome::NoBoc) => {
+                    stats.skipped += 1;
+                    // Push the row to the back of the queue: without this it
+                    // would keep selecting first under `nulls first, id asc`
+                    // every tick and starve every later pending market.
+                    if let Err(stamp_err) = self.stamp_failure(market.id).await {
+                        warn!(
+                            market_id = market.id,
+                            ?stamp_err,
+                            "failed to stamp reconcile backoff for missing BOC"
+                        );
+                    }
+                }
                 Err(err) => {
                     stats.failed += 1;
                     warn!(market_id = market.id, pmp_address = %market.pmp_address, ?err, "reconcile failed");
@@ -141,7 +163,7 @@ impl MarketReconciler {
         }
     }
 
-    async fn reconcile_one(&self, market: &PendingMarket) -> Result<bool> {
+    async fn reconcile_one(&self, market: &PendingMarket) -> Result<MarketReconcileOutcome> {
         let Some(account_boc) = self
             .graphql
             .fetch_account_boc(&market.pmp_address)
@@ -149,7 +171,7 @@ impl MarketReconciler {
             .context("fetch account boc")?
         else {
             debug!(pmp_address = %market.pmp_address, "no account boc available yet");
-            return Ok(false);
+            return Ok(MarketReconcileOutcome::NoBoc);
         };
 
         let pmp =
@@ -177,7 +199,7 @@ impl MarketReconciler {
         .context("stamp last_reconciled_at")?;
         tx.commit().await.context("reconcile tx commit")?;
 
-        Ok(true)
+        Ok(MarketReconcileOutcome::Reconciled)
     }
 }
 

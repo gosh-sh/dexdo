@@ -45,6 +45,16 @@ pub struct OelReconcileStats {
     pub events_filled: u64,
 }
 
+/// Outcome of attempting to reconcile a single OEL. Distinguishes the
+/// "BOC not yet available on the node" path from "BOC fetched, this many
+/// child rows updated": a missing BOC must trip the failure-backoff so the
+/// row drops off the front of the next sweep, otherwise a pending OEL
+/// stuck on `account_boc = null` would starve every later row in the queue.
+enum OelReconcileOutcome {
+    Reconciled(u64),
+    NoBoc,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct PendingOel {
     id: i64,
@@ -93,7 +103,7 @@ impl OracleEventListReconciler {
         for oel in pending {
             stats.scanned += 1;
             match self.reconcile_one(&oel).await {
-                Ok(filled) => {
+                Ok(OelReconcileOutcome::Reconciled(filled)) => {
                     if filled > 0 {
                         stats.reconciled += 1;
                         stats.events_filled += filled;
@@ -105,6 +115,20 @@ impl OracleEventListReconciler {
                             oel_id = oel.id,
                             ?clear_err,
                             "failed to clear oel reconcile failure marker"
+                        );
+                    }
+                }
+                Ok(OelReconcileOutcome::NoBoc) => {
+                    stats.skipped += 1;
+                    // Push to the back of the queue: do NOT clear any prior
+                    // failure marker (the previous code did, which left the
+                    // row first under `nulls first, id asc` next tick) and
+                    // stamp a fresh one so the cooldown window kicks in.
+                    if let Err(stamp_err) = self.stamp_failure(oel.id).await {
+                        warn!(
+                            oel_id = oel.id,
+                            ?stamp_err,
+                            "failed to stamp oel reconcile backoff for missing BOC"
                         );
                     }
                 }
@@ -174,12 +198,12 @@ impl OracleEventListReconciler {
         }
     }
 
-    async fn reconcile_one(&self, oel: &PendingOel) -> Result<u64> {
+    async fn reconcile_one(&self, oel: &PendingOel) -> Result<OelReconcileOutcome> {
         let Some(account_boc) =
             self.graphql.fetch_account_boc(&oel.address).await.context("fetch oel account boc")?
         else {
             debug!(oel_address = %oel.address, "no oel account boc available yet");
-            return Ok(0);
+            return Ok(OelReconcileOutcome::NoBoc);
         };
 
         let oel_contract = self
@@ -194,7 +218,7 @@ impl OracleEventListReconciler {
             parse_events_map(&raw).with_context(|| format!("parse _events for {}", oel.address))?;
 
         if items.is_empty() {
-            return Ok(0);
+            return Ok(OelReconcileOutcome::Reconciled(0));
         }
 
         let mut tx = self.pool.begin().await.context("oel reconcile tx begin")?;
@@ -204,7 +228,7 @@ impl OracleEventListReconciler {
         }
         tx.commit().await.context("oel reconcile tx commit")?;
 
-        Ok(filled)
+        Ok(OelReconcileOutcome::Reconciled(filled))
     }
 }
 
