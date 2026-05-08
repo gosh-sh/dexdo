@@ -60,7 +60,12 @@ struct MarketRow {
     cancelled_at: Option<i64>,
     cancel_reason: Option<String>,
     is_cancelled: bool,
+    // Seconds since epoch — exposed in the API response as `Market.created_at`.
     created_at_unix: i64,
+    // Microseconds since epoch — internal sort/cursor key for `CreatedAtDesc`.
+    // Sub-second precision avoids the keyset bug where two markets created in
+    // the same second could be skipped or duplicated across page boundaries.
+    created_at_micros: i64,
     event_name: Option<String>,
     event_description: Option<String>,
     oracle_name: Option<String>,
@@ -308,7 +313,7 @@ impl PostgresReadModelRepository {
             rows.last().map(|row| {
                 let sort_key = match listing.sort {
                     MarketsSort::ResultStartAsc => row.result_start.unwrap_or(i64::MAX),
-                    MarketsSort::CreatedAtDesc => row.created_at_unix,
+                    MarketsSort::CreatedAtDesc => row.created_at_micros,
                 };
                 encode_cursor(sort_key, row.id)
             })
@@ -412,7 +417,8 @@ fn market_select_sql(where_clause: &str, tail: &str) -> String {
                m.cancelled_at                                as cancelled_at,
                m.cancel_reason                               as cancel_reason,
                m.is_cancelled                                as is_cancelled,
-               extract(epoch from m.created_at)::bigint      as created_at_unix,
+               extract(epoch from m.created_at)::bigint                  as created_at_unix,
+               (extract(epoch from m.created_at) * 1000000)::bigint      as created_at_micros,
                oe.event_name                                 as event_name,
                oe.describe                                   as event_description,
                o.name                                        as oracle_name,
@@ -474,7 +480,7 @@ fn build_listing_query(listing: &MarketsListing) -> Result<(String, Vec<Param>),
             }
             MarketsSort::CreatedAtDesc => {
                 where_parts.push(format!(
-                    "(extract(epoch from m.created_at)::bigint, m.id) < (${key_idx}, ${id_idx})"
+                    "((extract(epoch from m.created_at) * 1000000)::bigint, m.id) < (${key_idx}, ${id_idx})"
                 ));
             }
         }
@@ -485,7 +491,16 @@ fn build_listing_query(listing: &MarketsListing) -> Result<(String, Vec<Param>),
         MarketsSort::ResultStartAsc => {
             "order by coalesce(m.result_start, 9223372036854775807) asc, m.id asc"
         }
-        MarketsSort::CreatedAtDesc => "order by m.created_at desc, m.id desc",
+        // Sort and cursor share the same microsecond bigint expression
+        // (see `MarketRow::created_at_micros` and the keyset predicate
+        // above). Earlier the cursor encoded whole seconds while ORDER BY
+        // ran on raw `timestamptz`, so two markets created in the same
+        // second could be skipped or duplicated across pages. `m.id desc`
+        // is the tiebreaker for the (rare) collisions that survive
+        // microsecond resolution.
+        MarketsSort::CreatedAtDesc => {
+            "order by (extract(epoch from m.created_at) * 1000000)::bigint desc, m.id desc"
+        }
     };
     let limit_clause = format!("limit {}", limit + 1);
 
@@ -681,6 +696,7 @@ mod tests {
             cancel_reason: None,
             is_cancelled: false,
             created_at_unix: 0,
+            created_at_micros: 0,
             event_name: None,
             event_description: None,
             oracle_name: None,
@@ -945,6 +961,35 @@ mod tests {
     fn listing_query_cursor_only() {
         let l = listing(MarketsFilter::default(), Some(encode_cursor(1_700_000_000, 7)));
         assert_placeholders_match_params("cursor only", &l);
+    }
+
+    #[test]
+    fn listing_query_created_at_desc_order_matches_cursor_key() {
+        // Regression: ordering by `m.created_at desc` while comparing the
+        // cursor against `extract(epoch ...)::bigint` (whole seconds) made
+        // keyset pagination skip/duplicate rows that shared an epoch second.
+        // Sort key and cursor key must be the same microsecond expression.
+        let mut l = listing(MarketsFilter::default(), Some(encode_cursor(1_700_000_000, 7)));
+        l.sort = MarketsSort::CreatedAtDesc;
+        let (sql, _) = build_listing_query(&l).unwrap();
+        assert!(
+            sql.contains(
+                "order by (extract(epoch from m.created_at) * 1000000)::bigint desc, m.id desc"
+            ),
+            "ORDER BY must use the microsecond bigint expression; sql=\n{sql}"
+        );
+        assert!(
+            sql.contains("((extract(epoch from m.created_at) * 1000000)::bigint, m.id) <"),
+            "cursor predicate must compare on the same microsecond expression; sql=\n{sql}"
+        );
+        assert!(
+            !sql.contains("order by m.created_at"),
+            "raw timestamptz ordering would re-introduce the keyset bug; sql=\n{sql}"
+        );
+        assert!(
+            !sql.contains("order by extract(epoch from m.created_at)::bigint"),
+            "seconds-only ordering would re-introduce the keyset bug; sql=\n{sql}"
+        );
     }
 
     #[test]
