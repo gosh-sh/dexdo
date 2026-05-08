@@ -62,10 +62,11 @@ impl OracleEventListReconciler {
         Self { pool, graphql, decoder }
     }
 
-    /// Single sweep: pulls OELs that have at least one child event with
-    /// `describe is null`, runs `_events` per OEL, and fills the metadata
-    /// for matching `oracle_events` rows. Each OEL runs in its own
-    /// transaction so one broken contract does not block its siblings.
+    /// Single sweep: pulls OELs that have at least one child event still
+    /// missing reconciler-only metadata (`describe` OR `trust_addr`), runs
+    /// `_events` per OEL, and fills the matching `oracle_events` rows. Each
+    /// OEL runs in its own transaction so one broken contract does not block
+    /// its siblings.
     pub async fn run_once(&self) -> Result<OelReconcileStats> {
         let mut stats = OelReconcileStats::default();
         // Anti-starvation: same shape as `MarketReconciler::run_once`. Skip
@@ -78,7 +79,8 @@ impl OracleEventListReconciler {
                        or oel.last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
                   and exists (
                       select 1 from oracle_events oe
-                       where oe.eventlist_id = oel.id and oe.describe is null
+                       where oe.eventlist_id = oel.id
+                         and (oe.describe is null or oe.trust_addr is null)
                   )
                 order by oel.last_reconcile_failed_at nulls first, oel.id asc
                 limit $1"#
