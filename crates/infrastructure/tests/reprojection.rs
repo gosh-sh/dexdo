@@ -257,10 +257,16 @@ async fn unknown_event_type_is_marked_processed() {
 
     purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id.as_str())]).await;
 
-    // OrderBook.OrderPlaced is decoded by the ABI but has no projector wired
-    // up yet → projectors::project_event returns Unknown.
-    insert_raw(&pool, &msg_id, "0:reproj_unknown_event_src", "OrderBook.OrderPlaced", &json!({}))
-        .await;
+    // Nullifier.VoucherGenerated is decoded by the ABI but has no projector
+    // wired up → projectors::project_event returns Unknown.
+    insert_raw(
+        &pool,
+        &msg_id,
+        "0:reproj_unknown_event_src",
+        "Nullifier.VoucherGenerated",
+        &json!({}),
+    )
+    .await;
 
     repo.reproject_pending(1000).await.expect("reproject");
 
