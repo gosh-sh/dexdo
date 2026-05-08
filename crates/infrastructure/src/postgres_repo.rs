@@ -100,6 +100,25 @@ impl MarketReadRepository for PostgresReadModelRepository {
     }
 }
 
+fn filter_orderbook(s: String) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn compare_decimals_asc(a: &str, b: &str) -> std::cmp::Ordering {
+    let lhs = BigUint::parse_bytes(a.as_bytes(), 10).unwrap_or_default();
+    let rhs = BigUint::parse_bytes(b.as_bytes(), 10).unwrap_or_default();
+    lhs.cmp(&rhs)
+}
+
+fn compare_decimals_desc(a: &str, b: &str) -> std::cmp::Ordering {
+    compare_decimals_asc(b, a)
+}
+
 impl PostgresReadModelRepository {
     async fn fetch_one(
         &self,
@@ -127,58 +146,7 @@ impl PostgresReadModelRepository {
 
     async fn fetch_listing(&self, listing: &MarketsListing) -> Result<MarketsPage, anyhow::Error> {
         let limit = listing.limit.max(1) as i64;
-
-        let mut where_parts: Vec<String> = vec!["m.last_reconciled_at is not null".to_string()];
-        let mut params: Vec<Param> = vec![Param::BigInt(listing.now)]; // $1
-
-        if !listing.filter.statuses.is_empty() {
-            let status_strs: Vec<String> =
-                listing.filter.statuses.iter().map(|s| s.as_str().to_string()).collect();
-            params.push(Param::TextArray(status_strs));
-            where_parts.push(format!("({STATUS_CASE}) = any(${})", params.len()));
-        }
-        if let Some(qa) = &listing.filter.quote_asset {
-            params.push(Param::Text(qa.clone()));
-            where_parts.push(format!("m.token_code = ${}", params.len()));
-        }
-        if let Some(name) = &listing.filter.oracle_name {
-            params.push(Param::Text(name.clone()));
-            where_parts.push(format!("o.name = ${}", params.len()));
-        }
-        if let Some(closing_before) = listing.filter.closing_before {
-            params.push(Param::BigInt(closing_before));
-            where_parts.push(format!("m.result_end < ${}", params.len()));
-        }
-        if let Some(cursor) = &listing.cursor {
-            let decoded = decode_cursor(cursor)?;
-            params.push(Param::BigInt(decoded.sort_key_i64));
-            let key_idx = params.len();
-            params.push(Param::BigInt(decoded.id));
-            let id_idx = params.len();
-            match listing.sort {
-                MarketsSort::ResultStartAsc => {
-                    where_parts.push(format!(
-                        "(coalesce(m.result_start, 9223372036854775807), m.id) > (${key_idx}, ${id_idx})"
-                    ));
-                }
-                MarketsSort::CreatedAtDesc => {
-                    where_parts.push(format!(
-                        "(extract(epoch from m.created_at)::bigint, m.id) < (${key_idx}, ${id_idx})"
-                    ));
-                }
-            }
-        }
-
-        let where_clause = format!("where {}", where_parts.join(" and "));
-        let order_clause = match listing.sort {
-            MarketsSort::ResultStartAsc => {
-                "order by coalesce(m.result_start, 9223372036854775807) asc, m.id asc"
-            }
-            MarketsSort::CreatedAtDesc => "order by m.created_at desc, m.id desc",
-        };
-        let limit_clause = format!("limit {}", limit + 1);
-
-        let sql = market_select_sql(&where_clause, &format!("{order_clause} {limit_clause}"));
+        let (sql, params) = build_listing_query(listing)?;
         let mut query = sqlx::query_as::<_, MarketRow>(&sql);
         for p in &params {
             query = match p {
@@ -315,6 +283,65 @@ enum Param {
     BigInt(i64),
     Text(String),
     TextArray(Vec<String>),
+}
+
+fn build_listing_query(listing: &MarketsListing) -> Result<(String, Vec<Param>), anyhow::Error> {
+    let limit = listing.limit.max(1) as i64;
+
+    let mut where_parts: Vec<String> = vec!["m.last_reconciled_at is not null".to_string()];
+    let mut params: Vec<Param> = Vec::new();
+
+    if !listing.filter.statuses.is_empty() {
+        // STATUS_CASE references $1 directly, so `now` must be the first bind here.
+        params.push(Param::BigInt(listing.now));
+        let status_strs: Vec<String> =
+            listing.filter.statuses.iter().map(|s| s.as_str().to_string()).collect();
+        params.push(Param::TextArray(status_strs));
+        where_parts.push(format!("({STATUS_CASE}) = any(${})", params.len()));
+    }
+    if let Some(qa) = &listing.filter.quote_asset {
+        params.push(Param::Text(qa.clone()));
+        where_parts.push(format!("m.token_code = ${}", params.len()));
+    }
+    if let Some(name) = &listing.filter.oracle_name {
+        params.push(Param::Text(name.clone()));
+        where_parts.push(format!("o.name = ${}", params.len()));
+    }
+    if let Some(closing_before) = listing.filter.closing_before {
+        params.push(Param::BigInt(closing_before));
+        where_parts.push(format!("m.result_end < ${}", params.len()));
+    }
+    if let Some(cursor) = &listing.cursor {
+        let decoded = decode_cursor(cursor)?;
+        params.push(Param::BigInt(decoded.sort_key_i64));
+        let key_idx = params.len();
+        params.push(Param::BigInt(decoded.id));
+        let id_idx = params.len();
+        match listing.sort {
+            MarketsSort::ResultStartAsc => {
+                where_parts.push(format!(
+                    "(coalesce(m.result_start, 9223372036854775807), m.id) > (${key_idx}, ${id_idx})"
+                ));
+            }
+            MarketsSort::CreatedAtDesc => {
+                where_parts.push(format!(
+                    "(extract(epoch from m.created_at)::bigint, m.id) < (${key_idx}, ${id_idx})"
+                ));
+            }
+        }
+    }
+
+    let where_clause = format!("where {}", where_parts.join(" and "));
+    let order_clause = match listing.sort {
+        MarketsSort::ResultStartAsc => {
+            "order by coalesce(m.result_start, 9223372036854775807) asc, m.id asc"
+        }
+        MarketsSort::CreatedAtDesc => "order by m.created_at desc, m.id desc",
+    };
+    let limit_clause = format!("limit {}", limit + 1);
+
+    let sql = market_select_sql(&where_clause, &format!("{order_clause} {limit_clause}"));
+    Ok((sql, params))
 }
 
 fn assemble_market(
@@ -456,6 +483,7 @@ fn decode_cursor(raw: &str) -> Result<DecodedCursor, anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dodex_application::MarketsFilter;
 
     fn row(
         stake_start: Option<i64>,
@@ -565,5 +593,138 @@ mod tests {
             numeric_to_hex("255").unwrap(),
             "0x00000000000000000000000000000000000000000000000000000000000000ff"
         );
+    }
+
+    #[test]
+    fn decimal_compare_handles_uint256_strings() {
+        // Lexicographic ordering would put "9" before "10"; we sort numerically.
+        assert_eq!(compare_decimals_asc("9", "10"), std::cmp::Ordering::Less, "ascending: 9 < 10");
+        assert_eq!(
+            compare_decimals_desc("9", "10"),
+            std::cmp::Ordering::Greater,
+            "descending: 9 > 10"
+        );
+
+        // Numbers that exceed i128 must still compare correctly.
+        let big = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        assert_eq!(compare_decimals_asc("1", big), std::cmp::Ordering::Less);
+        assert_eq!(compare_decimals_asc(big, big), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn filter_orderbook_drops_blank() {
+        assert!(filter_orderbook("".into()).is_none());
+        assert!(filter_orderbook("   ".into()).is_none());
+        assert_eq!(filter_orderbook("0:abc".into()).as_deref(), Some("0:abc"));
+    }
+
+    fn placeholder_indices(sql: &str) -> std::collections::BTreeSet<usize> {
+        let mut indices = std::collections::BTreeSet::new();
+        let bytes = sql.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                let num: usize =
+                    std::str::from_utf8(&bytes[start..end]).unwrap().parse().unwrap();
+                indices.insert(num);
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
+        indices
+    }
+
+    fn listing(filter: MarketsFilter, cursor: Option<String>) -> MarketsListing {
+        MarketsListing { filter, sort: MarketsSort::ResultStartAsc, cursor, limit: 50, now: 1_700_000_000 }
+    }
+
+    fn assert_placeholders_match_params(label: &str, listing: &MarketsListing) {
+        let (sql, params) = build_listing_query(listing).expect(label);
+        let used = placeholder_indices(&sql);
+        let expected: std::collections::BTreeSet<usize> = (1..=params.len()).collect();
+        assert_eq!(
+            used, expected,
+            "{label}: placeholders in SQL must equal {{1..=params.len()}}; sql=\n{sql}\nparams={params:?}"
+        );
+    }
+
+    #[test]
+    fn listing_query_default_has_no_params() {
+        // Regression: previously bound `now` as $1 even when STATUS_CASE was absent,
+        // producing 08P01 "bind message supplies 1 parameters, but prepared statement requires 0".
+        let l = listing(MarketsFilter::default(), None);
+        let (sql, params) = build_listing_query(&l).unwrap();
+        assert!(params.is_empty(), "no filters → no binds; got {params:?}");
+        assert!(placeholder_indices(&sql).is_empty(), "no filters → no $N in SQL");
+    }
+
+    #[test]
+    fn listing_query_quote_asset_only() {
+        let l = listing(
+            MarketsFilter { quote_asset: Some("USDC".into()), ..MarketsFilter::default() },
+            None,
+        );
+        assert_placeholders_match_params("quoteAsset only", &l);
+    }
+
+    #[test]
+    fn listing_query_oracle_name_only() {
+        let l = listing(
+            MarketsFilter { oracle_name: Some("Oracle".into()), ..MarketsFilter::default() },
+            None,
+        );
+        assert_placeholders_match_params("oracleName only", &l);
+    }
+
+    #[test]
+    fn listing_query_closing_before_only() {
+        let l = listing(
+            MarketsFilter { closing_before: Some(1_700_000_000), ..MarketsFilter::default() },
+            None,
+        );
+        assert_placeholders_match_params("closingBefore only", &l);
+    }
+
+    #[test]
+    fn listing_query_status_only_uses_dollar_one_for_now() {
+        let l = listing(
+            MarketsFilter {
+                statuses: vec![MarketStatus::Trading],
+                ..MarketsFilter::default()
+            },
+            None,
+        );
+        let (sql, params) = build_listing_query(&l).unwrap();
+        // STATUS_CASE hardcodes $1 for `now`; with status filter, $1 must be referenced.
+        assert!(placeholder_indices(&sql).contains(&1), "STATUS_CASE must reference $1");
+        assert_eq!(params.len(), 2, "expected [now, statuses]");
+        assert_placeholders_match_params("status only", &l);
+    }
+
+    #[test]
+    fn listing_query_cursor_only() {
+        let l = listing(MarketsFilter::default(), Some(encode_cursor(1_700_000_000, 7)));
+        assert_placeholders_match_params("cursor only", &l);
+    }
+
+    #[test]
+    fn listing_query_full_combo() {
+        let mut l = listing(
+            MarketsFilter {
+                statuses: vec![MarketStatus::Trading, MarketStatus::Resolving],
+                quote_asset: Some("USDC".into()),
+                oracle_name: Some("Oracle".into()),
+                closing_before: Some(1_700_000_000),
+            },
+            Some(encode_cursor(1_700_000_000, 7)),
+        );
+        l.sort = MarketsSort::CreatedAtDesc;
+        assert_placeholders_match_params("full combo", &l);
     }
 }
