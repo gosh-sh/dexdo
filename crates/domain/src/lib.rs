@@ -153,7 +153,7 @@ pub struct Terminal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Market {
     pub market_address: MarketAddress,
-    pub order_book_address: Option<String>,
+    pub order_book_address: String,
     pub market_name: MarketName,
     pub status: MarketStatus,
     pub quote_asset: String,

@@ -46,7 +46,7 @@ array of markets. Every market carries `marketAddress`, `orderBookAddress`,
 The api computes `status` in Rust against a single `now = serverTime` so the
 response is internally consistent. Order of checks (first match wins):
 
-1. `cancelled_at` set or `is_cancelled` → `CANCELLED`.
+1. `cancelled_at` set → `CANCELLED`.
 2. `resolved_at` set → `RESOLVED`.
 3. `stake_start` is null → `PENDING`.
 4. `now > result_end` → `EXPIRED`.
@@ -80,7 +80,7 @@ visited yet) never reach clients.
 ### Identifier formats
 
 `event_id` in Postgres is `numeric(78,0)`; the api re-encodes it as
-`0x<hex>` for the response, matching the spec.
+`0x` + 64 zero-padded hex chars (uint256), matching the on-chain shape.
 
 ## `GET /api/v1/depth`
 

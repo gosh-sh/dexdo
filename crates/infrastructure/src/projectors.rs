@@ -297,19 +297,23 @@ async fn apply_pmp_deployed(
 
     let oracle_event_lists = event.value.get("oracleEventLists").cloned().unwrap_or(Value::Null);
     let oracle_fee = event.value.get("oracleFee").cloned().unwrap_or(Value::Null);
+    let block_unix = node_unix_seconds(node);
 
     sqlx::query(
         r#"insert into markets
                (pmp_address, event_id, token_type, token_code,
-                oracle_event_lists_json, oracle_fee_json, updated_at)
-           values ($1, $2::numeric, $3, $4, $5, $6, now())
+                oracle_event_lists_json, oracle_fee_json,
+                created_at, updated_at)
+           values ($1, $2::numeric, $3, $4, $5, $6,
+                   coalesce(to_timestamp($7::bigint), now()),
+                   coalesce(to_timestamp($7::bigint), now()))
            on conflict (pmp_address) do update
                set event_id = excluded.event_id,
                    token_type = excluded.token_type,
                    token_code = excluded.token_code,
                    oracle_event_lists_json = excluded.oracle_event_lists_json,
                    oracle_fee_json = excluded.oracle_fee_json,
-                   updated_at = now()"#,
+                   updated_at = excluded.updated_at"#,
     )
     .bind(pmp_address)
     .bind(&event_id_decimal)
@@ -317,6 +321,7 @@ async fn apply_pmp_deployed(
     .bind(&token_code)
     .bind(oracle_event_lists)
     .bind(oracle_fee)
+    .bind(block_unix)
     .execute(&mut **tx)
     .await
     .context("upsert markets on PMPDeployed")?;

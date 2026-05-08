@@ -50,7 +50,6 @@ struct MarketRow {
     token_type: i32,
     token_code: String,
     event_id: String,
-    is_cancelled: bool,
     stake_start: Option<i64>,
     stake_end: Option<i64>,
     result_start: Option<i64>,
@@ -211,10 +210,9 @@ impl PostgresReadModelRepository {
         now: i64,
     ) -> Result<MarketsPage, anyhow::Error> {
         let row: Option<MarketRow> = sqlx::query_as(&market_select_sql(
-            "where m.last_reconciled_at is not null and m.pmp_address = $2",
+            "where m.last_reconciled_at is not null and m.pmp_address = $1",
             "limit 1",
         ))
-        .bind(now)
         .bind(market_address.0.as_str())
         .fetch_optional(&self.pool)
         .await
@@ -391,7 +389,6 @@ fn market_select_sql(where_clause: &str, tail: &str) -> String {
                m.token_type                                  as token_type,
                m.token_code                                  as token_code,
                m.event_id::text                              as event_id,
-               m.is_cancelled                                as is_cancelled,
                m.stake_start                                 as stake_start,
                m.stake_end                                   as stake_end,
                m.result_start                                as result_start,
@@ -434,6 +431,12 @@ fn assemble_market(
             row.pmp_address
         )
     })?;
+    let order_book_address = row.orderbook_address.clone().ok_or_else(|| {
+        anyhow!(
+            "market {} has last_reconciled_at set but orderbook_address is NULL",
+            row.pmp_address
+        )
+    })?;
 
     let status = derive_status(&row, now);
     let timings = build_timings(&row, status);
@@ -449,7 +452,7 @@ fn assemble_market(
 
     Ok(Market {
         market_address: MarketAddress(row.pmp_address),
-        order_book_address: row.orderbook_address,
+        order_book_address,
         market_name: MarketName(market_name),
         status,
         quote_asset: row.token_code,
@@ -463,7 +466,7 @@ fn assemble_market(
 }
 
 fn derive_status(row: &MarketRow, now: i64) -> MarketStatus {
-    if row.cancelled_at.is_some() || row.is_cancelled {
+    if row.cancelled_at.is_some() {
         return MarketStatus::Cancelled;
     }
     if row.resolved_at.is_some() {
@@ -529,7 +532,7 @@ fn build_terminal(row: &MarketRow, status: MarketStatus, now: i64) -> Option<Ter
 fn numeric_to_hex(decimal: &str) -> Result<String, anyhow::Error> {
     let big = BigUint::parse_bytes(decimal.as_bytes(), 10)
         .ok_or_else(|| anyhow!("invalid numeric: {decimal}"))?;
-    Ok(format!("0x{}", big.to_str_radix(16)))
+    Ok(format!("0x{:0>64}", big.to_str_radix(16)))
 }
 
 #[derive(Debug, Clone)]
@@ -571,7 +574,6 @@ mod tests {
             token_type: 3,
             token_code: "USDC".into(),
             event_id: "1".into(),
-            is_cancelled: false,
             stake_start,
             stake_end,
             result_start,
@@ -658,8 +660,14 @@ mod tests {
 
     #[test]
     fn numeric_to_hex_works() {
-        assert_eq!(numeric_to_hex("0").unwrap(), "0x0");
-        assert_eq!(numeric_to_hex("255").unwrap(), "0xff");
+        assert_eq!(
+            numeric_to_hex("0").unwrap(),
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            numeric_to_hex("255").unwrap(),
+            "0x00000000000000000000000000000000000000000000000000000000000000ff"
+        );
     }
 
     #[test]
