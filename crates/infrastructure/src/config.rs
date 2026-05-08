@@ -41,6 +41,9 @@ pub struct AppSection {
 pub struct ServerSection {
     pub host: String,
     pub port: u16,
+    // TODO: not wired into the Salvo router yet — declared for forward
+    // compatibility. When wiring it up, use a hoop that runs each handler
+    // under `tokio::time::timeout` and responds 504 on elapsed.
     pub request_timeout_ms: u64,
 }
 
@@ -108,7 +111,12 @@ impl ApiConfig {
 
     fn validate(&self) -> anyhow::Result<()> {
         self.common.validate()?;
+        anyhow::ensure!(!self.server.host.is_empty(), "server.host must not be empty");
         anyhow::ensure!(self.server.port > 0, "server.port must be non-zero");
+        anyhow::ensure!(
+            self.server.request_timeout_ms > 0,
+            "server.request_timeout_ms must be > 0"
+        );
         Ok(())
     }
 }
@@ -122,7 +130,34 @@ impl IndexerConfig {
 
     fn validate(&self) -> anyhow::Result<()> {
         self.common.validate()?;
+        anyhow::ensure!(!self.graphql.endpoint.is_empty(), "graphql.endpoint must not be empty");
         anyhow::ensure!(self.graphql.page_size > 0, "graphql.page_size must be positive");
+        anyhow::ensure!(
+            self.graphql.request_timeout_ms > 0,
+            "graphql.request_timeout_ms must be > 0"
+        );
+        let i = &self.indexer;
+        anyhow::ensure!(i.polling_interval_ms > 0, "indexer.polling_interval_ms must be > 0");
+        anyhow::ensure!(
+            i.depth_refresh_interval_ms > 0,
+            "indexer.depth_refresh_interval_ms must be > 0"
+        );
+        anyhow::ensure!(
+            i.reconciliation_interval_ms > 0,
+            "indexer.reconciliation_interval_ms must be > 0"
+        );
+        anyhow::ensure!(
+            i.reprojection_interval_ms > 0,
+            "indexer.reprojection_interval_ms must be > 0"
+        );
+        anyhow::ensure!(
+            i.reprojection_batch_size > 0,
+            "indexer.reprojection_batch_size must be > 0"
+        );
+        anyhow::ensure!(
+            i.oracle_event_list_reconciliation_interval_ms > 0,
+            "indexer.oracle_event_list_reconciliation_interval_ms must be > 0"
+        );
         Ok(())
     }
 }
@@ -146,9 +181,19 @@ impl ReloadableConfig for IndexerConfig {
 impl CommonSection {
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.app.env.is_empty(), "app.env must not be empty");
+        anyhow::ensure!(!self.app.log_level.is_empty(), "app.log_level must not be empty");
+        anyhow::ensure!(!self.database.url.is_empty(), "database.url must not be empty");
+        anyhow::ensure!(
+            self.database.max_connections > 0,
+            "database.max_connections must be > 0"
+        );
         anyhow::ensure!(
             self.database.max_connections >= self.database.min_connections,
             "database.max_connections must be >= database.min_connections"
+        );
+        anyhow::ensure!(
+            self.database.connect_timeout_ms > 0,
+            "database.connect_timeout_ms must be > 0"
         );
         Ok(())
     }
@@ -301,5 +346,77 @@ indexer:
         let err = serde_yaml::from_str::<IndexerConfig>(&raw).unwrap_err();
 
         assert!(err.to_string().contains("server"));
+    }
+
+    fn api_config_with(database_url: &str, request_timeout_ms: u64) -> ApiConfig {
+        let raw = format!(
+            r#"
+app:
+  env: local
+  log_level: info
+database:
+  url: "{database_url}"
+  max_connections: 10
+  min_connections: 1
+  connect_timeout_ms: 3000
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: {request_timeout_ms}
+"#
+        );
+        serde_yaml::from_str(&raw).expect("parse")
+    }
+
+    #[test]
+    fn api_validate_rejects_empty_database_url() {
+        let cfg = api_config_with("", 5000);
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("database.url"), "got: {err}");
+    }
+
+    #[test]
+    fn api_validate_rejects_zero_request_timeout() {
+        let cfg = api_config_with("postgres://x", 0);
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("server.request_timeout_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn indexer_validate_rejects_zero_intervals() {
+        let raw = format!(
+            "{COMMON}
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
+indexer:
+  polling_interval_ms: 0
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+"
+        );
+        let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("polling_interval_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn indexer_validate_rejects_empty_graphql_endpoint() {
+        let raw = format!(
+            "{COMMON}
+graphql:
+  endpoint: \"\"
+  page_size: 100
+  request_timeout_ms: 10000
+indexer:
+  polling_interval_ms: 3000
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+"
+        );
+        let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("graphql.endpoint"), "got: {err}");
     }
 }
