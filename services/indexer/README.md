@@ -249,8 +249,28 @@ indexer:
 events are dropped before `raw_events` insert and projector dispatch — only
 addresses that emit confirmed noise (system / null-route).
 
-Send `SIGUSR1` to the running process to reload the config; the GraphQL client
-and Postgres pool are rebuilt only if their respective parameters changed.
+Send `SIGUSR1` to the running process to reload the config (handled by
+`signal::run_config_reload_loop` in `crates/infrastructure/src/signal.rs`,
+which re-parses the YAML and swaps the `Arc<RwLock<IndexerConfig>>` shared
+state). What the new values actually affect is narrower than a full restart:
+
+| Knob                                              | On `SIGUSR1`                                                                                                |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `graphql.endpoint`                                | Picked up by the **main loop only** — its GraphQL client is rebuilt when endpoint/timeout differ from the live values (`services/indexer/src/main.rs:100-118`). |
+| `graphql.request_timeout_ms`                      | Same — main loop only.                                                                                      |
+| `graphql.page_size`                               | Read fresh each tick of the main loop.                                                                      |
+| `indexer.polling_interval_ms`                     | Read fresh each tick of the main loop.                                                                      |
+| `indexer.ignored_addresses`                       | Read fresh each tick of the main loop.                                                                      |
+| `indexer.reconciliation_interval_ms`              | **Pinned at startup** for `MarketReconciler`. Restart to change.                                            |
+| `indexer.reprojection_interval_ms` / `_batch_size`| **Pinned at startup** for the reprojection loop. Restart to change.                                         |
+| `indexer.oracle_event_list_reconciliation_interval_ms` | **Pinned at startup** for `OracleEventListReconciler`. Restart to change.                              |
+| `graphql.*` for the **reconciler / OEL reconciler** GraphQL clients | **Pinned at startup**. They keep their own `GraphqlClient` instance, frozen at the value the process saw on boot — restart to swap their endpoint or timeout. |
+| `database.*` (URL, pool sizes, connect timeout)   | **Pinned at startup**. The `sqlx::PgPool` is built once before the main loop and shared by every task; SIGUSR1 does not rebuild it. Restart to change DB connection params. |
+
+In short: SIGUSR1 only retunes the **main fetch loop** (endpoint, timeout,
+page size, polling cadence, ignore list). Anything that affects the
+reconciler tasks, the reprojection loop, or the database pool requires a
+process restart.
 
 ## Running
 
