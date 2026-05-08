@@ -183,7 +183,16 @@ impl IndexerRepository {
     /// Picks rows where `processed_at is null` in chain-arrival order so a
     /// previously-deferred parent gets its first chance before children retry.
     /// Stored `decoded` jsonb is reused — bodies are not re-decoded.
+    ///
+    /// Uses `for update skip locked` and runs the whole batch inside a single
+    /// transaction so concurrent reproject workers (or a parallel test
+    /// harness) cannot pick up the same row and apply a non-idempotent
+    /// projector twice — without the lock, an `OrderFilled` could subtract
+    /// `filledAmount` from `live_orders` more than once.
     pub async fn reproject_pending(&self, batch_size: u32) -> anyhow::Result<ReprojectionStats> {
+        let mut tx: Transaction<'_, Postgres> =
+            self.pool.begin().await.context("reproject tx begin")?;
+
         let rows: Vec<PendingRow> = sqlx::query_as(
             r#"select id,
                       msg_id,
@@ -197,10 +206,11 @@ impl IndexerRepository {
                   and event_type is not null
                   and decoded is not null
                 order by created_at_chain asc nulls last, id asc
-                limit $1"#,
+                limit $1
+                for update skip locked"#,
         )
         .bind(i64::from(batch_size))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .context("select pending raw_events")?;
 
@@ -211,7 +221,6 @@ impl IndexerRepository {
                 continue;
             };
 
-            let mut tx = self.pool.begin().await.context("reproject tx begin")?;
             let mut sp = tx.begin().await.context("reproject savepoint begin")?;
             let outcome = projectors::project_event(&mut sp, &event, &node).await;
             match outcome {
@@ -240,8 +249,9 @@ impl IndexerRepository {
                     );
                 }
             }
-            tx.commit().await.context("reproject tx commit")?;
         }
+
+        tx.commit().await.context("reproject tx commit")?;
         Ok(stats)
     }
 

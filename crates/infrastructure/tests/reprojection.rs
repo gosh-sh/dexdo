@@ -7,6 +7,11 @@
 // prefixes for msg_ids and addresses so they can run concurrently against
 // the same database without colliding.
 //
+// Tests serialise on REPROJECTION_LOCK because reproject_pending uses
+// `for update skip locked` — a parallel test could otherwise observe a
+// half-applied state (its row locked by another test's outer transaction
+// that has not committed yet).
+//
 //   TEST_DATABASE_URL=postgres://user:pass@localhost:5432/db \
 //       cargo test -p dodex-infrastructure --test reprojection
 
@@ -18,6 +23,9 @@ use dodex_infrastructure::indexer_repo::IndexerRepository;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tokio::sync::Mutex;
+
+static REPROJECTION_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn setup() -> Option<PgPool> {
     let url = match env::var("TEST_DATABASE_URL") {
@@ -76,6 +84,7 @@ async fn processed_at_is_set(pool: &PgPool, msg_id: &str) -> bool {
 
 #[tokio::test]
 async fn applied_outcome_stamps_processed_at_and_writes_read_model() {
+    let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
     let repo = IndexerRepository::new(pool.clone());
 
@@ -115,6 +124,7 @@ async fn applied_outcome_stamps_processed_at_and_writes_read_model() {
 
 #[tokio::test]
 async fn deferred_row_is_replayed_after_parent_arrives() {
+    let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
     let repo = IndexerRepository::new(pool.clone());
 
@@ -187,6 +197,7 @@ async fn deferred_row_is_replayed_after_parent_arrives() {
 
 #[tokio::test]
 async fn already_processed_rows_are_not_picked_up() {
+    let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
     let repo = IndexerRepository::new(pool.clone());
 
@@ -249,6 +260,7 @@ async fn already_processed_rows_are_not_picked_up() {
 
 #[tokio::test]
 async fn unknown_event_type_is_marked_processed() {
+    let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
     let repo = IndexerRepository::new(pool.clone());
 
@@ -283,6 +295,7 @@ async fn orderfilled_deferred_replays_after_orderplaced() {
     // and the next reprojection sweep — once the live_orders row exists —
     // must apply it. Without this, /api/v1/depth would inflate liquidity by
     // ignoring fills that landed out of order on the wire.
+    let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
     let repo = IndexerRepository::new(pool.clone());
 

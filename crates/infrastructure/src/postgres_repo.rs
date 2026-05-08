@@ -99,7 +99,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
         symbol: &Symbol,
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error> {
-        let target: Option<(String, i32)> = sqlx::query_as(
+        // markets.orderbook_address is nullable (migration 0001) — decode it
+        // as Option<String> so a NULL row does not surface as a sqlx decode
+        // error. NULL and blank strings collapse into the same empty-book
+        // path documented in services/api/README.md.
+        let target: Option<(Option<String>, i32)> = sqlx::query_as(
             r#"select m.orderbook_address, mo.outcome_id
                  from markets m
                  join market_outcomes mo on mo.market_id_fk = m.id
@@ -116,7 +120,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         let Some((orderbook_address, outcome_id)) = target else {
             return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
         };
-        let Some(orderbook_address) = filter_orderbook(orderbook_address) else {
+        let Some(orderbook_address) = orderbook_address.and_then(filter_orderbook) else {
             // Market exists but its OrderBook has not been deployed yet
             // (reconciler ran before PoolsFrozen). No live orders possible.
             return Ok(DepthSnapshot {
