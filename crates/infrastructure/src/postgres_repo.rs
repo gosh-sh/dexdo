@@ -57,6 +57,7 @@ struct MarketRow {
     resolved_outcome_id: Option<i32>,
     cancelled_at: Option<i64>,
     cancel_reason: Option<String>,
+    is_cancelled: bool,
     created_at_unix: i64,
     event_name: Option<String>,
     event_description: Option<String>,
@@ -100,6 +101,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
     }
 }
 
+#[cfg(test)]
 fn filter_orderbook(s: String) -> Option<String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -109,12 +111,14 @@ fn filter_orderbook(s: String) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn compare_decimals_asc(a: &str, b: &str) -> std::cmp::Ordering {
     let lhs = BigUint::parse_bytes(a.as_bytes(), 10).unwrap_or_default();
     let rhs = BigUint::parse_bytes(b.as_bytes(), 10).unwrap_or_default();
     lhs.cmp(&rhs)
 }
 
+#[cfg(test)]
 fn compare_decimals_desc(a: &str, b: &str) -> std::cmp::Ordering {
     compare_decimals_asc(b, a)
 }
@@ -232,8 +236,15 @@ impl PostgresReadModelRepository {
     }
 }
 
+// `m.is_cancelled` is the on-chain flag pulled by the reconciler via
+// `PMP.getDetails().isCancelled`. The cancellation event projector stamps both
+// `cancelled_at` and `is_cancelled`; the reconciler stamps `is_cancelled`
+// (plus a discovery timestamp into `cancelled_at` when null) even if the
+// cancellation event was missed or has not been replayed yet — surfacing
+// either signal keeps the API consistent with the on-chain terminal state
+// the spec requires for CANCELLED markets.
 const STATUS_CASE: &str = r#"case
-        when m.cancelled_at is not null then 'CANCELLED'
+        when m.cancelled_at is not null or m.is_cancelled then 'CANCELLED'
         when m.resolved_at is not null then 'RESOLVED'
         when m.stake_start is null then 'PENDING'
         when $1 > m.result_end then 'EXPIRED'
@@ -263,6 +274,7 @@ fn market_select_sql(where_clause: &str, tail: &str) -> String {
                m.resolved_outcome_id                         as resolved_outcome_id,
                m.cancelled_at                                as cancelled_at,
                m.cancel_reason                               as cancel_reason,
+               m.is_cancelled                                as is_cancelled,
                extract(epoch from m.created_at)::bigint      as created_at_unix,
                oe.event_name                                 as event_name,
                oe.describe                                   as event_description,
@@ -390,7 +402,13 @@ fn assemble_market(
 }
 
 fn derive_status(row: &MarketRow, now: i64) -> MarketStatus {
-    if row.cancelled_at.is_some() {
+    // Either signal is enough to flip the market terminal: `cancelled_at` is
+    // set by the cancellation-event projector, `is_cancelled` is set by the
+    // reconciler from `PMP.getDetails().isCancelled`. If the event was never
+    // observed (or has not been replayed yet) the on-chain flag is still
+    // authoritative, and the API spec requires the CANCELLED + terminal
+    // response for cancelled markets.
+    if row.cancelled_at.is_some() || row.is_cancelled {
         return MarketStatus::Cancelled;
     }
     if row.resolved_at.is_some() {
@@ -482,8 +500,9 @@ fn decode_cursor(raw: &str) -> Result<DecodedCursor, anyhow::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use dodex_application::MarketsFilter;
+
+    use super::*;
 
     fn row(
         stake_start: Option<i64>,
@@ -508,6 +527,7 @@ mod tests {
             resolved_outcome_id: None,
             cancelled_at: None,
             cancel_reason: None,
+            is_cancelled: false,
             created_at_unix: 0,
             event_name: None,
             event_description: None,
@@ -576,6 +596,38 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_status_from_reconciler_flag_only() {
+        // Reconciler observes `isCancelled = true` from PMP.getDetails() but
+        // the cancellation event hasn't materialised (or never will): the
+        // API must still return CANCELLED so the response carries the
+        // terminal state mandated by docs/api-spec.md §Terminal.
+        let mut r = row(Some(200), Some(300), Some(400), Some(500));
+        r.is_cancelled = true;
+        assert_eq!(derive_status(&r, 250), MarketStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancelled_flag_outranks_resolved() {
+        // Symmetric to `cancelled_overrides_resolved` but when the only
+        // cancellation signal is the reconciler-set flag.
+        let mut r = row(Some(200), Some(300), Some(400), Some(500));
+        r.resolved_at = Some(450);
+        r.is_cancelled = true;
+        assert_eq!(derive_status(&r, 250), MarketStatus::Cancelled);
+    }
+
+    #[test]
+    fn status_case_sql_checks_is_cancelled() {
+        // Regression: the SQL CASE that drives `status=…` filter pushdown
+        // must mirror Rust's derive_status. If this drifts, listing endpoints
+        // can return rows whose Rust-derived status fails the SQL filter.
+        assert!(
+            STATUS_CASE.contains("m.is_cancelled"),
+            "STATUS_CASE must surface m.is_cancelled, got:\n{STATUS_CASE}"
+        );
+    }
+
+    #[test]
     fn cursor_roundtrip() {
         let encoded = encode_cursor(1_710_000_000, 42);
         let decoded = decode_cursor(&encoded).unwrap();
@@ -629,8 +681,7 @@ mod tests {
                 while end < bytes.len() && bytes[end].is_ascii_digit() {
                     end += 1;
                 }
-                let num: usize =
-                    std::str::from_utf8(&bytes[start..end]).unwrap().parse().unwrap();
+                let num: usize = std::str::from_utf8(&bytes[start..end]).unwrap().parse().unwrap();
                 indices.insert(num);
                 i = end;
             } else {
@@ -641,7 +692,13 @@ mod tests {
     }
 
     fn listing(filter: MarketsFilter, cursor: Option<String>) -> MarketsListing {
-        MarketsListing { filter, sort: MarketsSort::ResultStartAsc, cursor, limit: 50, now: 1_700_000_000 }
+        MarketsListing {
+            filter,
+            sort: MarketsSort::ResultStartAsc,
+            cursor,
+            limit: 50,
+            now: 1_700_000_000,
+        }
     }
 
     fn assert_placeholders_match_params(label: &str, listing: &MarketsListing) {
@@ -694,10 +751,7 @@ mod tests {
     #[test]
     fn listing_query_status_only_uses_dollar_one_for_now() {
         let l = listing(
-            MarketsFilter {
-                statuses: vec![MarketStatus::Trading],
-                ..MarketsFilter::default()
-            },
+            MarketsFilter { statuses: vec![MarketStatus::Trading], ..MarketsFilter::default() },
             None,
         );
         let (sql, params) = build_listing_query(&l).unwrap();

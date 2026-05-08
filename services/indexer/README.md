@@ -319,3 +319,11 @@ Scenarios covered:
   timestamp nor the read-model is touched.
 - `Unknown` event types still receive `processed_at` so the retry queue
   drains.
+
+A second integration suite, `crates/infrastructure/tests/markets_status.rs`,
+exercises the read path (`PostgresReadModelRepository`) and pins the contract
+that a market with `is_cancelled = true` and `cancelled_at = null` (the
+reconciler-only path, when the cancellation event is missed or hasn't been
+replayed) is still surfaced as `CANCELLED` to the API and matches the
+`status=CANCELLED` listing filter. It also asserts the reconciler's
+"stamp `cancelled_at` on first observation, never overwrite" idempotency.

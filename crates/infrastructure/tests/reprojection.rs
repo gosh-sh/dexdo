@@ -13,12 +13,11 @@
 use std::env;
 use std::time::Duration;
 
+use dodex_infrastructure::database;
+use dodex_infrastructure::indexer_repo::IndexerRepository;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-
-use dodex_infrastructure::database;
-use dodex_infrastructure::indexer_repo::IndexerRepository;
 
 async fn setup() -> Option<PgPool> {
     let url = match env::var("TEST_DATABASE_URL") {
@@ -103,18 +102,14 @@ async fn applied_outcome_stamps_processed_at_and_writes_read_model() {
 
     repo.reproject_pending(1000).await.expect("reproject");
 
-    assert!(
-        processed_at_is_set(&pool, &msg_id).await,
-        "Applied outcome must stamp processed_at"
-    );
+    assert!(processed_at_is_set(&pool, &msg_id).await, "Applied outcome must stamp processed_at");
 
-    let oracle_exists: bool = sqlx::query_scalar(
-        "select exists(select 1 from oracles where address = $1)",
-    )
-    .bind(&oracle_addr)
-    .fetch_one(&pool)
-    .await
-    .expect("oracle exists");
+    let oracle_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from oracles where address = $1)")
+            .bind(&oracle_addr)
+            .fetch_one(&pool)
+            .await
+            .expect("oracle exists");
     assert!(oracle_exists, "projector must populate oracles on Applied");
 }
 
@@ -153,13 +148,12 @@ async fn deferred_row_is_replayed_after_parent_arrives() {
         "deferred row must keep processed_at null until the parent appears"
     );
 
-    let evlist_count: i64 = sqlx::query_scalar(
-        "select count(*) from oracle_event_lists where address = $1",
-    )
-    .bind(&eventlist_addr)
-    .fetch_one(&pool)
-    .await
-    .expect("count event lists pass 1");
+    let evlist_count: i64 =
+        sqlx::query_scalar("select count(*) from oracle_event_lists where address = $1")
+            .bind(&eventlist_addr)
+            .fetch_one(&pool)
+            .await
+            .expect("count event lists pass 1");
     assert_eq!(evlist_count, 0, "no projection should happen while parent is missing");
 
     // Insert the parent oracle directly (simulating the OracleDeployed projector).
@@ -182,13 +176,12 @@ async fn deferred_row_is_replayed_after_parent_arrives() {
         "processed_at must be stamped once the parent is present"
     );
 
-    let evlist_count: i64 = sqlx::query_scalar(
-        "select count(*) from oracle_event_lists where address = $1",
-    )
-    .bind(&eventlist_addr)
-    .fetch_one(&pool)
-    .await
-    .expect("count event lists pass 2");
+    let evlist_count: i64 =
+        sqlx::query_scalar("select count(*) from oracle_event_lists where address = $1")
+            .bind(&eventlist_addr)
+            .fetch_one(&pool)
+            .await
+            .expect("count event lists pass 2");
     assert_eq!(evlist_count, 1, "Applied outcome must populate oracle_event_lists");
 }
 
@@ -234,29 +227,24 @@ async fn already_processed_rows_are_not_picked_up() {
 
     repo.reproject_pending(1000).await.expect("reproject");
 
-    let processed_at_str: String = sqlx::query_scalar(
-        "select processed_at::text from raw_events where msg_id = $1",
-    )
-    .bind(&msg_id)
-    .fetch_one(&pool)
-    .await
-    .expect("read processed_at");
+    let processed_at_str: String =
+        sqlx::query_scalar("select processed_at::text from raw_events where msg_id = $1")
+            .bind(&msg_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read processed_at");
     assert!(
         processed_at_str.starts_with("2020-01-01"),
         "processed_at on already-processed row must not be overwritten, got {processed_at_str}"
     );
 
-    let oracle_exists: bool = sqlx::query_scalar(
-        "select exists(select 1 from oracles where address = $1)",
-    )
-    .bind(&oracle_addr)
-    .fetch_one(&pool)
-    .await
-    .expect("oracle exists");
-    assert!(
-        !oracle_exists,
-        "projector must not run for rows that already carry processed_at"
-    );
+    let oracle_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from oracles where address = $1)")
+            .bind(&oracle_addr)
+            .fetch_one(&pool)
+            .await
+            .expect("oracle exists");
+    assert!(!oracle_exists, "projector must not run for rows that already carry processed_at");
 }
 
 #[tokio::test]
@@ -271,14 +259,8 @@ async fn unknown_event_type_is_marked_processed() {
 
     // OrderBook.OrderPlaced is decoded by the ABI but has no projector wired
     // up yet → projectors::project_event returns Unknown.
-    insert_raw(
-        &pool,
-        &msg_id,
-        "0:reproj_unknown_event_src",
-        "OrderBook.OrderPlaced",
-        &json!({}),
-    )
-    .await;
+    insert_raw(&pool, &msg_id, "0:reproj_unknown_event_src", "OrderBook.OrderPlaced", &json!({}))
+        .await;
 
     repo.reproject_pending(1000).await.expect("reproject");
 

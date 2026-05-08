@@ -174,10 +174,7 @@ impl IndexerRepository {
     /// Picks rows where `processed_at is null` in chain-arrival order so a
     /// previously-deferred parent gets its first chance before children retry.
     /// Stored `decoded` jsonb is reused — bodies are not re-decoded.
-    pub async fn reproject_pending(
-        &self,
-        batch_size: u32,
-    ) -> anyhow::Result<ReprojectionStats> {
+    pub async fn reproject_pending(&self, batch_size: u32) -> anyhow::Result<ReprojectionStats> {
         let rows: Vec<PendingRow> = sqlx::query_as(
             r#"select id,
                       msg_id,
@@ -271,12 +268,7 @@ fn pending_row_to_inputs(row: &PendingRow) -> Option<(DecodedEvent, EventNode)> 
     let event_type = row.event_type.clone()?;
     let value = row.decoded.clone().unwrap_or(Value::Null);
 
-    let event = DecodedEvent {
-        contract_kind: "",
-        event_name: String::new(),
-        event_type,
-        value,
-    };
+    let event = DecodedEvent { contract_kind: "", event_name: String::new(), event_type, value };
     let node = EventNode {
         msg_id: row.msg_id.clone(),
         src: row.src_address.clone(),
@@ -305,10 +297,7 @@ async fn mark_processed_by_msg_id(
     Ok(())
 }
 
-async fn mark_processed_by_id(
-    tx: &mut Transaction<'_, Postgres>,
-    id: i64,
-) -> anyhow::Result<()> {
+async fn mark_processed_by_id(tx: &mut Transaction<'_, Postgres>, id: i64) -> anyhow::Result<()> {
     sqlx::query(
         r#"update raw_events
               set processed_at = now()
@@ -425,10 +414,7 @@ mod tests {
         assert!(node.src_dapp_id.is_none());
         assert!(node.body.is_none());
         // Round-trips through serde_json::Number, which preserves f64.
-        assert_eq!(
-            node.created_at.as_ref().and_then(Value::as_f64),
-            Some(1_700_000_000.5)
-        );
+        assert_eq!(node.created_at.as_ref().and_then(Value::as_f64), Some(1_700_000_000.5));
     }
 
     #[test]
