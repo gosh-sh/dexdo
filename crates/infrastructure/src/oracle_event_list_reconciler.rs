@@ -31,6 +31,10 @@ use crate::tvm_runner::run_getter;
 
 const BATCH_SIZE: i64 = 16;
 const OEL_KIND: &str = "OracleEventList";
+// Cooldown window after a failed OEL reconcile attempt — same anti-starvation
+// logic as `MarketReconciler::FAILURE_BACKOFF_INTERVAL_SQL`. Keeps a few
+// permanently broken `_events` getters from blocking the rest of the queue.
+const FAILURE_BACKOFF_INTERVAL_SQL: &str = "5 minutes";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OelReconcileStats {
@@ -64,14 +68,21 @@ impl OracleEventListReconciler {
     /// transaction so one broken contract does not block its siblings.
     pub async fn run_once(&self) -> Result<OelReconcileStats> {
         let mut stats = OelReconcileStats::default();
-        let pending: Vec<PendingOel> = sqlx::query_as(
-            r#"select distinct oel.id, oel.address
+        // Anti-starvation: same shape as `MarketReconciler::run_once`. Skip
+        // OELs whose last failure is still inside the backoff window, and
+        // among the rest run never-failed first, then cooled-down failures.
+        let pending: Vec<PendingOel> = sqlx::query_as(&format!(
+            r#"select oel.id, oel.address
                  from oracle_event_lists oel
-                 join oracle_events oe on oe.eventlist_id = oel.id
-                where oe.describe is null
-                order by oel.id asc
-                limit $1"#,
-        )
+                where (oel.last_reconcile_failed_at is null
+                       or oel.last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
+                  and exists (
+                      select 1 from oracle_events oe
+                       where oe.eventlist_id = oel.id and oe.describe is null
+                  )
+                order by oel.last_reconcile_failed_at nulls first, oel.id asc
+                limit $1"#
+        ))
         .bind(BATCH_SIZE)
         .fetch_all(&self.pool)
         .await
@@ -87,15 +98,57 @@ impl OracleEventListReconciler {
                     } else {
                         stats.skipped += 1;
                     }
+                    if let Err(clear_err) = self.clear_failure(oel.id).await {
+                        warn!(
+                            oel_id = oel.id,
+                            ?clear_err,
+                            "failed to clear oel reconcile failure marker"
+                        );
+                    }
                 }
                 Err(err) => {
                     stats.failed += 1;
                     warn!(oel_id = oel.id, oel_address = %oel.address, ?err, "oel reconcile failed");
+                    if let Err(stamp_err) = self.stamp_failure(oel.id).await {
+                        warn!(
+                            oel_id = oel.id,
+                            ?stamp_err,
+                            "failed to stamp oel reconcile failure marker"
+                        );
+                    }
                 }
             }
         }
 
         Ok(stats)
+    }
+
+    async fn stamp_failure(&self, oel_id: i64) -> Result<()> {
+        sqlx::query(
+            r#"update oracle_event_lists
+                  set last_reconcile_failed_at = now(),
+                      reconcile_attempts = reconcile_attempts + 1
+                where id = $1"#,
+        )
+        .bind(oel_id)
+        .execute(&self.pool)
+        .await
+        .context("stamp oel reconcile failure")?;
+        Ok(())
+    }
+
+    async fn clear_failure(&self, oel_id: i64) -> Result<()> {
+        sqlx::query(
+            r#"update oracle_event_lists
+                  set last_reconcile_failed_at = null
+                where id = $1
+                  and last_reconcile_failed_at is not null"#,
+        )
+        .bind(oel_id)
+        .execute(&self.pool)
+        .await
+        .context("clear oel reconcile failure")?;
+        Ok(())
     }
 
     /// Hot loop, runs forever until cancelled.
