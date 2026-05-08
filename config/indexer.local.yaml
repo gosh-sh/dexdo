@@ -20,6 +20,10 @@ indexer:
   # Cadence and batch size for the deferred-projection retry pass.
   reprojection_interval_ms: 30000
   reprojection_batch_size: 500
+  # Cadence for the OracleEventList reconciler that fills oracle_events.describe
+  # (and trust_addr) by calling OEL._events getter — `EventAdded` does not
+  # carry these fields, they live only in contract state.
+  oracle_event_list_reconciliation_interval_ms: 60000
   # Source addresses whose events are dropped before raw_events insert and
   # projector dispatch. Keep this list narrow — only addresses that emit
   # confirmed noise.

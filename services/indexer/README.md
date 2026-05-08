@@ -52,6 +52,34 @@ flips `last_reconciled_at`. It owns its own `GraphqlClient` and `Decoder`
 clones, so a config-reload that swaps the main-loop client does not disturb
 mid-run reconciliation.
 
+The reconciler is also the only place that observes `PMP.getDetails().isCancelled`.
+When it flips `markets.is_cancelled = true` and `markets.cancelled_at` is still
+NULL (cancellation event was missed or has not been replayed), it stamps
+`cancelled_at = extract(epoch from now())::bigint` so the API can fill
+`terminal.at`. Coalesce-style: an event-derived (chain) timestamp is never
+overwritten, and the discovery timestamp is never moved forward on a second
+pass. The read-side mirrors this in `derive_status` and the SQL `STATUS_CASE`,
+so either signal flips the market to `CANCELLED`.
+
+## OracleEventList reconciler
+
+`OracleEventListReconciler` (`crates/infrastructure/src/oracle_event_list_reconciler.rs`)
+fills metadata that lives in OEL contract state but is **not** carried by the
+`EventAdded` event — most importantly `oracle_events.describe`, which the API
+exposes as `event.description` (docs/api-spec.md §Event), plus `trust_addr`.
+Spawned from `services/indexer/src/main.rs` on the
+`indexer.oracle_event_list_reconciliation_interval_ms` cadence (default 60 s).
+
+Each sweep selects up to 16 OELs that have at least one child `oracle_events`
+row with `describe IS NULL`, ordered by `oel.id` (backed by partial index
+`oracle_events_describe_pending_idx` from migration `0008_*`). For each OEL it
+fetches the account BOC, runs the `_events` getter via `tvm_runner`, walks the
+returned `map(uint256, tuple)`, and updates each child row with `coalesce`
+semantics so already-recorded values are never overwritten. The
+`describe IS NULL OR trust_addr IS NULL` predicate keeps the write idempotent —
+once both fields are populated the row drops out of the partial index and is
+not visited again.
+
 ## Decoder
 
 `Decoder::new()` loads ABIs through `include_str!` from `contracts/abi/dex/`
@@ -162,6 +190,9 @@ Today's migrations:
   `raw_events_pending_projection_idx` (partial, on
   `(created_at_chain, id) where processed_at is null and event_type is not
   null and decoded is not null`) backing the deferred-projection retry loop.
+- `0008_oracle_events_describe_idx.sql` — adds
+  `oracle_events_describe_pending_idx` (partial, on `eventlist_id where
+  describe is null`) backing the OracleEventList reconciler.
 
 ### Supabase permissions
 
@@ -209,6 +240,7 @@ indexer:
   reconciliation_interval_ms: 60000
   reprojection_interval_ms: 30000
   reprojection_batch_size: 500
+  oracle_event_list_reconciliation_interval_ms: 60000
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
 ```
@@ -285,6 +317,9 @@ Unit-level, all in `crates/infrastructure`:
   src/dst).
 - `projectors::tests` — `uint256_hex_to_decimal` parsing and rejection.
 - `reconciler::tests` — power-of-ten decimal rendering for tick / step sizes.
+- `oracle_event_list_reconciler::tests` — `_events` getter response parsing:
+  describe / trustAddr extraction, empty-string vs null normalisation,
+  invalid-hex key rejection.
 - `tvm_runner::tests` — invalid account BOC and unknown function rejection.
 - `config::tests` — schema separation between `ApiConfig` and `IndexerConfig`.
 
@@ -327,3 +362,9 @@ reconciler-only path, when the cancellation event is missed or hasn't been
 replayed) is still surfaced as `CANCELLED` to the API and matches the
 `status=CANCELLED` listing filter. It also asserts the reconciler's
 "stamp `cancelled_at` on first observation, never overwrite" idempotency.
+
+A third suite, `crates/infrastructure/tests/oel_reconciler.rs`, pins the
+DB-write contract of the OracleEventList reconciler: the SQL emitted by
+`apply_event_metadata` fills `describe` / `trust_addr` when null, never
+overwrites already-populated values, and partially fills the missing field
+when only one of the two is set.
