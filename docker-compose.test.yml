@@ -1,0 +1,43 @@
+# Throw-away Postgres for the dodex-infrastructure integration tests
+# (`crates/infrastructure/tests/reprojection.rs`). Schema is created by
+# `sqlx::migrate!`, so this file only needs to bring up an empty database
+# the suite is allowed to migrate.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d --wait
+#   export TEST_DATABASE_URL=postgres://dodex:dodex@localhost:55432/dodex_test
+#   cargo test -p dodex-infrastructure --test reprojection
+#   docker compose -f docker-compose.test.yml down
+#
+# Port 55432 (not the default 5432) so this stack can coexist with any host
+# Postgres or with the dev compose. Storage is tmpfs — the database is reset
+# every time the container restarts, which is what we want for tests.
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: dodex-postgres-test
+    environment:
+      POSTGRES_USER: dodex
+      POSTGRES_PASSWORD: dodex
+      POSTGRES_DB: dodex_test
+      # Speed up boot: the test DB does not need crash-safety.
+      POSTGRES_INITDB_ARGS: "--no-sync"
+    command:
+      - postgres
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+    ports:
+      - "55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dodex -d dodex_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s

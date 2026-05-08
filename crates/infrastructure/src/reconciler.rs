@@ -160,6 +160,13 @@ async fn write_market_state(
     let result_end: Option<i64> = field_str(details, "resultEnd")?.parse().ok();
     let orderbook_address = field_str(orderbook, "orderBookAddress")?;
 
+    // When the reconciler is the first to observe a cancellation (event lost
+    // or not yet replayed) we also stamp `cancelled_at` so the API can populate
+    // `terminal.at`. Coalesce-style: if the cancellation-event projector has
+    // already set a chain-derived timestamp, keep it — `now()` is only the
+    // fallback for the "event missed entirely" path. Conversely, if the chain
+    // says the market is no longer cancelled we leave `cancelled_at` alone:
+    // we never erase a previously-recorded cancellation timestamp.
     sqlx::query(
         r#"update markets
               set market_id = $1,
@@ -167,6 +174,10 @@ async fn write_market_state(
                   oracle_list_hash = $2::numeric,
                   approved = $3,
                   is_cancelled = $4,
+                  cancelled_at = case
+                      when $4 and cancelled_at is null then extract(epoch from now())::bigint
+                      else cancelled_at
+                  end,
                   num_outcomes = $5,
                   stake_start = $6,
                   stake_end = $7,

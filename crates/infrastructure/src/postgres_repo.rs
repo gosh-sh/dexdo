@@ -59,6 +59,7 @@ struct MarketRow {
     resolved_outcome_id: Option<i32>,
     cancelled_at: Option<i64>,
     cancel_reason: Option<String>,
+    is_cancelled: bool,
     created_at_unix: i64,
     event_name: Option<String>,
     event_description: Option<String>,
@@ -230,58 +231,7 @@ impl PostgresReadModelRepository {
 
     async fn fetch_listing(&self, listing: &MarketsListing) -> Result<MarketsPage, anyhow::Error> {
         let limit = listing.limit.max(1) as i64;
-
-        let mut where_parts: Vec<String> = vec!["m.last_reconciled_at is not null".to_string()];
-        let mut params: Vec<Param> = vec![Param::BigInt(listing.now)]; // $1
-
-        if !listing.filter.statuses.is_empty() {
-            let status_strs: Vec<String> =
-                listing.filter.statuses.iter().map(|s| s.as_str().to_string()).collect();
-            params.push(Param::TextArray(status_strs));
-            where_parts.push(format!("({STATUS_CASE}) = any(${})", params.len()));
-        }
-        if let Some(qa) = &listing.filter.quote_asset {
-            params.push(Param::Text(qa.clone()));
-            where_parts.push(format!("m.token_code = ${}", params.len()));
-        }
-        if let Some(name) = &listing.filter.oracle_name {
-            params.push(Param::Text(name.clone()));
-            where_parts.push(format!("o.name = ${}", params.len()));
-        }
-        if let Some(closing_before) = listing.filter.closing_before {
-            params.push(Param::BigInt(closing_before));
-            where_parts.push(format!("m.result_end < ${}", params.len()));
-        }
-        if let Some(cursor) = &listing.cursor {
-            let decoded = decode_cursor(cursor)?;
-            params.push(Param::BigInt(decoded.sort_key_i64));
-            let key_idx = params.len();
-            params.push(Param::BigInt(decoded.id));
-            let id_idx = params.len();
-            match listing.sort {
-                MarketsSort::ResultStartAsc => {
-                    where_parts.push(format!(
-                        "(coalesce(m.result_start, 9223372036854775807), m.id) > (${key_idx}, ${id_idx})"
-                    ));
-                }
-                MarketsSort::CreatedAtDesc => {
-                    where_parts.push(format!(
-                        "(extract(epoch from m.created_at)::bigint, m.id) < (${key_idx}, ${id_idx})"
-                    ));
-                }
-            }
-        }
-
-        let where_clause = format!("where {}", where_parts.join(" and "));
-        let order_clause = match listing.sort {
-            MarketsSort::ResultStartAsc => {
-                "order by coalesce(m.result_start, 9223372036854775807) asc, m.id asc"
-            }
-            MarketsSort::CreatedAtDesc => "order by m.created_at desc, m.id desc",
-        };
-        let limit_clause = format!("limit {}", limit + 1);
-
-        let sql = market_select_sql(&where_clause, &format!("{order_clause} {limit_clause}"));
+        let (sql, params) = build_listing_query(listing)?;
         let mut query = sqlx::query_as::<_, MarketRow>(&sql);
         for p in &params {
             query = match p {
@@ -367,8 +317,15 @@ impl PostgresReadModelRepository {
     }
 }
 
+// `m.is_cancelled` is the on-chain flag pulled by the reconciler via
+// `PMP.getDetails().isCancelled`. The cancellation event projector stamps both
+// `cancelled_at` and `is_cancelled`; the reconciler stamps `is_cancelled`
+// (plus a discovery timestamp into `cancelled_at` when null) even if the
+// cancellation event was missed or has not been replayed yet — surfacing
+// either signal keeps the API consistent with the on-chain terminal state
+// the spec requires for CANCELLED markets.
 const STATUS_CASE: &str = r#"case
-        when m.cancelled_at is not null then 'CANCELLED'
+        when m.cancelled_at is not null or m.is_cancelled then 'CANCELLED'
         when m.resolved_at is not null then 'RESOLVED'
         when m.stake_start is null then 'PENDING'
         when $1 > m.result_end then 'EXPIRED'
@@ -398,6 +355,7 @@ fn market_select_sql(where_clause: &str, tail: &str) -> String {
                m.resolved_outcome_id                         as resolved_outcome_id,
                m.cancelled_at                                as cancelled_at,
                m.cancel_reason                               as cancel_reason,
+               m.is_cancelled                                as is_cancelled,
                extract(epoch from m.created_at)::bigint      as created_at_unix,
                oe.event_name                                 as event_name,
                oe.describe                                   as event_description,
@@ -418,6 +376,65 @@ enum Param {
     BigInt(i64),
     Text(String),
     TextArray(Vec<String>),
+}
+
+fn build_listing_query(listing: &MarketsListing) -> Result<(String, Vec<Param>), anyhow::Error> {
+    let limit = listing.limit.max(1) as i64;
+
+    let mut where_parts: Vec<String> = vec!["m.last_reconciled_at is not null".to_string()];
+    let mut params: Vec<Param> = Vec::new();
+
+    if !listing.filter.statuses.is_empty() {
+        // STATUS_CASE references $1 directly, so `now` must be the first bind here.
+        params.push(Param::BigInt(listing.now));
+        let status_strs: Vec<String> =
+            listing.filter.statuses.iter().map(|s| s.as_str().to_string()).collect();
+        params.push(Param::TextArray(status_strs));
+        where_parts.push(format!("({STATUS_CASE}) = any(${})", params.len()));
+    }
+    if let Some(qa) = &listing.filter.quote_asset {
+        params.push(Param::Text(qa.clone()));
+        where_parts.push(format!("m.token_code = ${}", params.len()));
+    }
+    if let Some(name) = &listing.filter.oracle_name {
+        params.push(Param::Text(name.clone()));
+        where_parts.push(format!("o.name = ${}", params.len()));
+    }
+    if let Some(closing_before) = listing.filter.closing_before {
+        params.push(Param::BigInt(closing_before));
+        where_parts.push(format!("m.result_end < ${}", params.len()));
+    }
+    if let Some(cursor) = &listing.cursor {
+        let decoded = decode_cursor(cursor)?;
+        params.push(Param::BigInt(decoded.sort_key_i64));
+        let key_idx = params.len();
+        params.push(Param::BigInt(decoded.id));
+        let id_idx = params.len();
+        match listing.sort {
+            MarketsSort::ResultStartAsc => {
+                where_parts.push(format!(
+                    "(coalesce(m.result_start, 9223372036854775807), m.id) > (${key_idx}, ${id_idx})"
+                ));
+            }
+            MarketsSort::CreatedAtDesc => {
+                where_parts.push(format!(
+                    "(extract(epoch from m.created_at)::bigint, m.id) < (${key_idx}, ${id_idx})"
+                ));
+            }
+        }
+    }
+
+    let where_clause = format!("where {}", where_parts.join(" and "));
+    let order_clause = match listing.sort {
+        MarketsSort::ResultStartAsc => {
+            "order by coalesce(m.result_start, 9223372036854775807) asc, m.id asc"
+        }
+        MarketsSort::CreatedAtDesc => "order by m.created_at desc, m.id desc",
+    };
+    let limit_clause = format!("limit {}", limit + 1);
+
+    let sql = market_select_sql(&where_clause, &format!("{order_clause} {limit_clause}"));
+    Ok((sql, params))
 }
 
 fn assemble_market(
@@ -466,7 +483,13 @@ fn assemble_market(
 }
 
 fn derive_status(row: &MarketRow, now: i64) -> MarketStatus {
-    if row.cancelled_at.is_some() {
+    // Either signal is enough to flip the market terminal: `cancelled_at` is
+    // set by the cancellation-event projector, `is_cancelled` is set by the
+    // reconciler from `PMP.getDetails().isCancelled`. If the event was never
+    // observed (or has not been replayed yet) the on-chain flag is still
+    // authoritative, and the API spec requires the CANCELLED + terminal
+    // response for cancelled markets.
+    if row.cancelled_at.is_some() || row.is_cancelled {
         return MarketStatus::Cancelled;
     }
     if row.resolved_at.is_some() {
@@ -558,6 +581,8 @@ fn decode_cursor(raw: &str) -> Result<DecodedCursor, anyhow::Error> {
 
 #[cfg(test)]
 mod tests {
+    use dodex_application::MarketsFilter;
+
     use super::*;
 
     fn row(
@@ -583,6 +608,7 @@ mod tests {
             resolved_outcome_id: None,
             cancelled_at: None,
             cancel_reason: None,
+            is_cancelled: false,
             created_at_unix: 0,
             event_name: None,
             event_description: None,
@@ -651,6 +677,38 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_status_from_reconciler_flag_only() {
+        // Reconciler observes `isCancelled = true` from PMP.getDetails() but
+        // the cancellation event hasn't materialised (or never will): the
+        // API must still return CANCELLED so the response carries the
+        // terminal state mandated by docs/api-spec.md §Terminal.
+        let mut r = row(Some(200), Some(300), Some(400), Some(500));
+        r.is_cancelled = true;
+        assert_eq!(derive_status(&r, 250), MarketStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancelled_flag_outranks_resolved() {
+        // Symmetric to `cancelled_overrides_resolved` but when the only
+        // cancellation signal is the reconciler-set flag.
+        let mut r = row(Some(200), Some(300), Some(400), Some(500));
+        r.resolved_at = Some(450);
+        r.is_cancelled = true;
+        assert_eq!(derive_status(&r, 250), MarketStatus::Cancelled);
+    }
+
+    #[test]
+    fn status_case_sql_checks_is_cancelled() {
+        // Regression: the SQL CASE that drives `status=…` filter pushdown
+        // must mirror Rust's derive_status. If this drifts, listing endpoints
+        // can return rows whose Rust-derived status fails the SQL filter.
+        assert!(
+            STATUS_CASE.contains("m.is_cancelled"),
+            "STATUS_CASE must surface m.is_cancelled, got:\n{STATUS_CASE}"
+        );
+    }
+
+    #[test]
     fn cursor_roundtrip() {
         let encoded = encode_cursor(1_710_000_000, 42);
         let decoded = decode_cursor(&encoded).unwrap();
@@ -691,5 +749,117 @@ mod tests {
         assert!(filter_orderbook("".into()).is_none());
         assert!(filter_orderbook("   ".into()).is_none());
         assert_eq!(filter_orderbook("0:abc".into()).as_deref(), Some("0:abc"));
+    }
+
+    fn placeholder_indices(sql: &str) -> std::collections::BTreeSet<usize> {
+        let mut indices = std::collections::BTreeSet::new();
+        let bytes = sql.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                let num: usize = std::str::from_utf8(&bytes[start..end]).unwrap().parse().unwrap();
+                indices.insert(num);
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
+        indices
+    }
+
+    fn listing(filter: MarketsFilter, cursor: Option<String>) -> MarketsListing {
+        MarketsListing {
+            filter,
+            sort: MarketsSort::ResultStartAsc,
+            cursor,
+            limit: 50,
+            now: 1_700_000_000,
+        }
+    }
+
+    fn assert_placeholders_match_params(label: &str, listing: &MarketsListing) {
+        let (sql, params) = build_listing_query(listing).expect(label);
+        let used = placeholder_indices(&sql);
+        let expected: std::collections::BTreeSet<usize> = (1..=params.len()).collect();
+        assert_eq!(
+            used, expected,
+            "{label}: placeholders in SQL must equal {{1..=params.len()}}; sql=\n{sql}\nparams={params:?}"
+        );
+    }
+
+    #[test]
+    fn listing_query_default_has_no_params() {
+        // Regression: previously bound `now` as $1 even when STATUS_CASE was absent,
+        // producing 08P01 "bind message supplies 1 parameters, but prepared statement requires 0".
+        let l = listing(MarketsFilter::default(), None);
+        let (sql, params) = build_listing_query(&l).unwrap();
+        assert!(params.is_empty(), "no filters → no binds; got {params:?}");
+        assert!(placeholder_indices(&sql).is_empty(), "no filters → no $N in SQL");
+    }
+
+    #[test]
+    fn listing_query_quote_asset_only() {
+        let l = listing(
+            MarketsFilter { quote_asset: Some("USDC".into()), ..MarketsFilter::default() },
+            None,
+        );
+        assert_placeholders_match_params("quoteAsset only", &l);
+    }
+
+    #[test]
+    fn listing_query_oracle_name_only() {
+        let l = listing(
+            MarketsFilter { oracle_name: Some("Oracle".into()), ..MarketsFilter::default() },
+            None,
+        );
+        assert_placeholders_match_params("oracleName only", &l);
+    }
+
+    #[test]
+    fn listing_query_closing_before_only() {
+        let l = listing(
+            MarketsFilter { closing_before: Some(1_700_000_000), ..MarketsFilter::default() },
+            None,
+        );
+        assert_placeholders_match_params("closingBefore only", &l);
+    }
+
+    #[test]
+    fn listing_query_status_only_uses_dollar_one_for_now() {
+        let l = listing(
+            MarketsFilter { statuses: vec![MarketStatus::Trading], ..MarketsFilter::default() },
+            None,
+        );
+        let (sql, params) = build_listing_query(&l).unwrap();
+        // STATUS_CASE hardcodes $1 for `now`; with status filter, $1 must be referenced.
+        assert!(placeholder_indices(&sql).contains(&1), "STATUS_CASE must reference $1");
+        assert_eq!(params.len(), 2, "expected [now, statuses]");
+        assert_placeholders_match_params("status only", &l);
+    }
+
+    #[test]
+    fn listing_query_cursor_only() {
+        let l = listing(MarketsFilter::default(), Some(encode_cursor(1_700_000_000, 7)));
+        assert_placeholders_match_params("cursor only", &l);
+    }
+
+    #[test]
+    fn listing_query_full_combo() {
+        let mut l = listing(
+            MarketsFilter {
+                statuses: vec![MarketStatus::Trading, MarketStatus::Resolving],
+                quote_asset: Some("USDC".into()),
+                oracle_name: Some("Oracle".into()),
+                closing_before: Some(1_700_000_000),
+            },
+            Some(encode_cursor(1_700_000_000, 7)),
+        );
+        l.sort = MarketsSort::CreatedAtDesc;
+        assert_placeholders_match_params("full combo", &l);
     }
 }

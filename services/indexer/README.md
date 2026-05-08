@@ -30,7 +30,9 @@ Each tick of the main indexer loop runs the following stages, all wired in
    updates the read-model tables. Each projector runs inside a **savepoint**
    (`Transaction::begin()` from `sqlx::Acquire`); if a projector errors, the
    savepoint rolls back, the raw row stays committed, and the rest of the page
-   keeps going.
+   keeps going. On `Applied` / `Unknown` the row's `processed_at` is stamped;
+   on `Deferred` / projector error it stays `null` so the reprojection loop
+   picks it up later (see below).
 6. **Sleep** — wait `indexer.polling_interval_ms` and tick again.
 
 Cursor is persisted in `indexer_cursors` under `stream_name = "blockchain_events"`
@@ -49,6 +51,34 @@ BOC via GraphQL, and runs PMP off-line getters (`getDetails`,
 flips `last_reconciled_at`. It owns its own `GraphqlClient` and `Decoder`
 clones, so a config-reload that swaps the main-loop client does not disturb
 mid-run reconciliation.
+
+The reconciler is also the only place that observes `PMP.getDetails().isCancelled`.
+When it flips `markets.is_cancelled = true` and `markets.cancelled_at` is still
+NULL (cancellation event was missed or has not been replayed), it stamps
+`cancelled_at = extract(epoch from now())::bigint` so the API can fill
+`terminal.at`. Coalesce-style: an event-derived (chain) timestamp is never
+overwritten, and the discovery timestamp is never moved forward on a second
+pass. The read-side mirrors this in `derive_status` and the SQL `STATUS_CASE`,
+so either signal flips the market to `CANCELLED`.
+
+## OracleEventList reconciler
+
+`OracleEventListReconciler` (`crates/infrastructure/src/oracle_event_list_reconciler.rs`)
+fills metadata that lives in OEL contract state but is **not** carried by the
+`EventAdded` event — most importantly `oracle_events.describe`, which the API
+exposes as `event.description` (docs/api-spec.md §Event), plus `trust_addr`.
+Spawned from `services/indexer/src/main.rs` on the
+`indexer.oracle_event_list_reconciliation_interval_ms` cadence (default 60 s).
+
+Each sweep selects up to 16 OELs that have at least one child `oracle_events`
+row with `describe IS NULL`, ordered by `oel.id` (backed by partial index
+`oracle_events_describe_pending_idx` from migration `0008_*`). For each OEL it
+fetches the account BOC, runs the `_events` getter via `tvm_runner`, walks the
+returned `map(uint256, tuple)`, and updates each child row with `coalesce`
+semantics so already-recorded values are never overwritten. The
+`describe IS NULL OR trust_addr IS NULL` predicate keeps the write idempotent —
+once both fields are populated the row drops out of the partial index and is
+not visited again.
 
 ## Decoder
 
@@ -80,12 +110,14 @@ skipped (counted as `undecoded` in the per-tick log).
 Lives in `crates/infrastructure/src/projectors.rs`. Single dispatch entry
 `project_event(tx, decoded, node) -> ProjectionOutcome`. Outcomes:
 
-- `Applied` — read-model write succeeded.
+- `Applied` — read-model write succeeded; `raw_events.processed_at` is stamped.
 - `Deferred` — a parent record is missing (e.g. `OracleEventListDeployed`
   arrives before the corresponding `OracleDeployed`, or a PMP lifecycle event
-  fires before `PMPDeployed`). Logged at warn, raw row still persists, will be
-  picked up on the next pass.
-- `Unknown` — `event_type` is not in the whitelist yet.
+  fires before `PMPDeployed`). Logged at warn, raw row still persists with
+  `processed_at = null`, and the reprojection loop replays it on its next
+  sweep — see *Deferred-projection retry* below.
+- `Unknown` — `event_type` is not in the whitelist yet; `processed_at` is
+  stamped so it will not be replayed.
 
 Implemented today:
 
@@ -116,6 +148,31 @@ TODO:
 - Per-orderbook monotonic nonce for `lastUpdateId` (today: `max(last_event_lt)`
   across the book, derived from `node.created_at`).
 
+## Deferred-projection retry
+
+`IndexerRepository::run_reprojection_loop` runs as an independent task spawned
+from `services/indexer/src/main.rs` on the
+`indexer.reprojection_interval_ms` cadence (default 30 s). It scans
+`raw_events` for rows where `processed_at is null and event_type is not null
+and decoded is not null`, ordered by `created_at_chain asc, id asc` so that an
+out-of-order parent that just arrived gets its first chance before its
+children retry. The query is backed by the partial index
+`raw_events_pending_projection_idx` (migration `0007_*`).
+
+For each row the loop reconstructs a `DecodedEvent` from the stored `decoded`
+jsonb (no re-decoding of bodies) plus an `EventNode` from
+`msg_id`/`src_address`/`dst_address`/`created_at_chain`, runs `project_event`
+in a savepoint, and:
+
+- on `Applied` / `Unknown` — stamps `processed_at = now()`;
+- on `Deferred` / projector error — leaves `processed_at` null for another
+  pass.
+
+Projectors are idempotent (upserts), so replaying a row that has already been
+applied via the main loop or a previous sweep is safe but a no-op. The batch
+size is bounded by `indexer.reprojection_batch_size` (default 500). When the
+backlog is empty the sweep logs at `debug` only.
+
 ## Database and migrations
 
 The indexer applies SQL migrations from `migrations/` automatically at startup
@@ -138,7 +195,14 @@ Today's migrations:
 - `0006_markets_lifecycle.sql` — adds `frozen_at`, `resolved_at`,
   `resolved_outcome_id`, `cancelled_at`, `cancel_reason` for the nine-phase
   market lifecycle and a partial terminal index.
-- `0007_live_orders.sql` — `live_orders` table for the order-book read-model
+- `0007_raw_events_pending_idx.sql` — adds
+  `raw_events_pending_projection_idx` (partial, on
+  `(created_at_chain, id) where processed_at is null and event_type is not
+  null and decoded is not null`) backing the deferred-projection retry loop.
+- `0008_oracle_events_describe_idx.sql` — adds
+  `oracle_events_describe_pending_idx` (partial, on `eventlist_id where
+  describe is null`) backing the OracleEventList reconciler.
+- `0009_live_orders.sql` — `live_orders` table for the order-book read-model
   (PK `(orderbook_address, order_id)`, partial index on `OPEN` rows for
   per-side aggregation).
 
@@ -186,6 +250,9 @@ indexer:
   polling_interval_ms: 3000
   depth_refresh_interval_ms: 5000
   reconciliation_interval_ms: 60000
+  reprojection_interval_ms: 30000
+  reprojection_batch_size: 500
+  oracle_event_list_reconciliation_interval_ms: 60000
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
 ```
@@ -194,8 +261,28 @@ indexer:
 events are dropped before `raw_events` insert and projector dispatch — only
 addresses that emit confirmed noise (system / null-route).
 
-Send `SIGUSR1` to the running process to reload the config; the GraphQL client
-and Postgres pool are rebuilt only if their respective parameters changed.
+Send `SIGUSR1` to the running process to reload the config (handled by
+`signal::run_config_reload_loop` in `crates/infrastructure/src/signal.rs`,
+which re-parses the YAML and swaps the `Arc<RwLock<IndexerConfig>>` shared
+state). What the new values actually affect is narrower than a full restart:
+
+| Knob                                              | On `SIGUSR1`                                                                                                |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `graphql.endpoint`                                | Picked up by the **main loop only** — its GraphQL client is rebuilt when endpoint/timeout differ from the live values (`services/indexer/src/main.rs:100-118`). |
+| `graphql.request_timeout_ms`                      | Same — main loop only.                                                                                      |
+| `graphql.page_size`                               | Read fresh each tick of the main loop.                                                                      |
+| `indexer.polling_interval_ms`                     | Read fresh each tick of the main loop.                                                                      |
+| `indexer.ignored_addresses`                       | Read fresh each tick of the main loop.                                                                      |
+| `indexer.reconciliation_interval_ms`              | **Pinned at startup** for `MarketReconciler`. Restart to change.                                            |
+| `indexer.reprojection_interval_ms` / `_batch_size`| **Pinned at startup** for the reprojection loop. Restart to change.                                         |
+| `indexer.oracle_event_list_reconciliation_interval_ms` | **Pinned at startup** for `OracleEventListReconciler`. Restart to change.                              |
+| `graphql.*` for the **reconciler / OEL reconciler** GraphQL clients | **Pinned at startup**. They keep their own `GraphqlClient` instance, frozen at the value the process saw on boot — restart to swap their endpoint or timeout. |
+| `database.*` (URL, pool sizes, connect timeout)   | **Pinned at startup**. The `sqlx::PgPool` is built once before the main loop and shared by every task; SIGUSR1 does not rebuild it. Restart to change DB connection params. |
+
+In short: SIGUSR1 only retunes the **main fetch loop** (endpoint, timeout,
+page size, polling cadence, ignore list). Anything that affects the
+reconciler tasks, the reprojection loop, or the database pool requires a
+process restart.
 
 ## Running
 
@@ -219,6 +306,13 @@ select count(*) from raw_events;
 select stream_name, cursor, updated_at from indexer_cursors;
 select event_type, count(*) from raw_events
   where event_type is not null
+  group by event_type
+  order by count(*) desc;
+-- pending reprojection backlog
+select event_type, count(*) from raw_events
+  where processed_at is null
+    and event_type is not null
+    and decoded is not null
   group by event_type
   order by count(*) desc;
 select count(*) from oracles;
@@ -250,8 +344,59 @@ Unit-level, all in `crates/infrastructure`:
 - `graphql::tests` — JSON deserialisation of `EventsPage`, error envelopes,
   nullable node fields.
 - `indexer_repo::tests` — `parse_unix_seconds` for int / float / string
-  timestamps.
+  timestamps; `pending_row_to_inputs` field mapping for the reprojection
+  loop (full payload, missing `event_type`, NaN/Inf timestamps, nullable
+  src/dst).
 - `projectors::tests` — `uint256_hex_to_decimal` parsing and rejection.
 - `reconciler::tests` — power-of-ten decimal rendering for tick / step sizes.
+- `oracle_event_list_reconciler::tests` — `_events` getter response parsing:
+  describe / trustAddr extraction, empty-string vs null normalisation,
+  invalid-hex key rejection.
 - `tvm_runner::tests` — invalid account BOC and unknown function rejection.
 - `config::tests` — schema separation between `ApiConfig` and `IndexerConfig`.
+
+End-to-end coverage of the reprojection loop lives in
+`crates/infrastructure/tests/reprojection.rs`. It is gated on
+`TEST_DATABASE_URL`; when the variable is unset every test prints a skip
+notice and returns early, so `cargo test` still passes without a database.
+Tests use unique per-test prefixes for `msg_id` and addresses so they can
+run concurrently against the same database without colliding.
+
+The repo ships a throw-away Postgres for this in `docker-compose.test.yml`
+(port 55432, tmpfs storage, fsync off — schema is created by
+`sqlx::migrate!` on first connect):
+
+```sh
+docker compose -f docker-compose.test.yml up -d --wait
+export TEST_DATABASE_URL=postgres://dodex:dodex@localhost:55432/dodex_test
+cargo test -p dodex-infrastructure --test reprojection -- --nocapture
+docker compose -f docker-compose.test.yml down
+```
+
+If you prefer to point at an existing database, just export
+`TEST_DATABASE_URL` to its URL — the suite calls `database::run_migrations`
+on connect, so the role must own the `public` schema.
+
+Scenarios covered:
+- `Applied` outcome stamps `processed_at` and writes the read-model row.
+- A `Deferred` `OracleEventListDeployed` keeps `processed_at = null` until
+  its parent `OracleDeployed` materialises, then is applied on the next
+  sweep.
+- Rows that already carry `processed_at` are not picked up — neither the
+  timestamp nor the read-model is touched.
+- `Unknown` event types still receive `processed_at` so the retry queue
+  drains.
+
+A second integration suite, `crates/infrastructure/tests/markets_status.rs`,
+exercises the read path (`PostgresReadModelRepository`) and pins the contract
+that a market with `is_cancelled = true` and `cancelled_at = null` (the
+reconciler-only path, when the cancellation event is missed or hasn't been
+replayed) is still surfaced as `CANCELLED` to the API and matches the
+`status=CANCELLED` listing filter. It also asserts the reconciler's
+"stamp `cancelled_at` on first observation, never overwrite" idempotency.
+
+A third suite, `crates/infrastructure/tests/oel_reconciler.rs`, pins the
+DB-write contract of the OracleEventList reconciler: the SQL emitted by
+`apply_event_metadata` fills `describe` / `trust_addr` when null, never
+overwrites already-populated values, and partially fills the missing field
+when only one of the two is set.

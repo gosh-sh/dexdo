@@ -64,12 +64,39 @@ pub struct IndexerSection {
     pub polling_interval_ms: u64,
     pub depth_refresh_interval_ms: u64,
     pub reconciliation_interval_ms: u64,
+    /// Cadence of the deferred-projection retry pass. Background loop scans
+    /// `raw_events` rows whose `processed_at` is still null and re-runs the
+    /// projector against stored `decoded` jsonb, in chain-arrival order.
+    #[serde(default = "default_reprojection_interval_ms")]
+    pub reprojection_interval_ms: u64,
+    /// Maximum rows replayed per reprojection sweep. Bounded so a long idle
+    /// backlog does not block the rest of the indexer for too long.
+    #[serde(default = "default_reprojection_batch_size")]
+    pub reprojection_batch_size: u32,
+    /// Cadence of the OracleEventList reconciler. Calls `_events` getter on
+    /// OEL contracts that still have child `oracle_events` rows with
+    /// `describe is null` (the `EventAdded` event does not carry `describe`,
+    /// `count`, or `trustAddr` — they live only in contract state).
+    #[serde(default = "default_oel_reconciliation_interval_ms")]
+    pub oracle_event_list_reconciliation_interval_ms: u64,
     /// Source addresses whose events must be skipped entirely:
     /// edges with matching `node.src` are dropped before raw_events insert
     /// and projector dispatch. Useful to silence well-known noise contracts
     /// (system / null-route addresses) without polluting the read-model.
     #[serde(default)]
     pub ignored_addresses: Vec<String>,
+}
+
+fn default_reprojection_interval_ms() -> u64 {
+    30_000
+}
+
+fn default_reprojection_batch_size() -> u32 {
+    500
+}
+
+fn default_oel_reconciliation_interval_ms() -> u64 {
+    60_000
 }
 
 impl ApiConfig {

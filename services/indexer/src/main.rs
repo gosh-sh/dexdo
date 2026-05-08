@@ -12,6 +12,7 @@ use dodex_infrastructure::decoder::Decoder;
 use dodex_infrastructure::graphql::EventsPage;
 use dodex_infrastructure::graphql::GraphqlClient;
 use dodex_infrastructure::indexer_repo::IndexerRepository;
+use dodex_infrastructure::oracle_event_list_reconciler::OracleEventListReconciler;
 use dodex_infrastructure::reconciler::MarketReconciler;
 use dodex_infrastructure::signal::run_config_reload_loop;
 use tokio::sync::RwLock;
@@ -55,6 +56,36 @@ async fn main() -> anyhow::Result<()> {
     let reconciler_interval = Duration::from_millis(config.indexer.reconciliation_interval_ms);
     tokio::spawn(reconciler.run_loop(reconciler_interval));
     info!(interval_ms = config.indexer.reconciliation_interval_ms, "market reconciler started");
+
+    // Spawn the deferred-projection retry pass. Replays raw_events rows whose
+    // projector returned `Deferred` (or failed) once their parent records show
+    // up. Idempotent — projectors are upserts.
+    let reprojector = repo.clone();
+    let reprojection_interval = Duration::from_millis(config.indexer.reprojection_interval_ms);
+    let reprojection_batch_size = config.indexer.reprojection_batch_size;
+    tokio::spawn(reprojector.run_reprojection_loop(reprojection_interval, reprojection_batch_size));
+    info!(
+        interval_ms = config.indexer.reprojection_interval_ms,
+        batch_size = reprojection_batch_size,
+        "reprojection loop started"
+    );
+
+    // Spawn the OracleEventList reconciler. Fills `oracle_events.describe`
+    // (and `trust_addr`) by calling the OEL `_events` getter — these fields
+    // live in contract state but are not carried by the `EventAdded` event.
+    let oel_graphql = GraphqlClient::new(
+        config.graphql.endpoint.clone(),
+        Duration::from_millis(config.graphql.request_timeout_ms),
+    )?;
+    let oel_reconciler =
+        OracleEventListReconciler::new(pool.clone(), oel_graphql, decoder.clone());
+    let oel_interval =
+        Duration::from_millis(config.indexer.oracle_event_list_reconciliation_interval_ms);
+    tokio::spawn(oel_reconciler.run_loop(oel_interval));
+    info!(
+        interval_ms = config.indexer.oracle_event_list_reconciliation_interval_ms,
+        "oracle event list reconciler started"
+    );
 
     let mut cursor = repo.load_cursor(STREAM_NAME).await?;
     info!(cursor = cursor.as_deref().unwrap_or(""), "indexer resumed from cursor");
