@@ -119,6 +119,15 @@ impl IndexerRepository {
                 result.inserted += affected;
             }
 
+            // Skip projection on conflict: either the row was already projected
+            // (processed_at is set) or it is queued for retry — reproject_pending
+            // will pick it up. Re-running the projector here is unsafe because
+            // OrderBook arms are not idempotent (re-subtracted fills, OPEN reset
+            // by a duplicate OrderPlaced).
+            if affected == 0 {
+                continue;
+            }
+
             if let Some(decoded_event) = decoded.as_ref() {
                 let mut sp = tx.begin().await.context("projector savepoint begin")?;
                 let outcome = projectors::project_event(&mut sp, decoded_event, &edge.node).await;
