@@ -142,24 +142,46 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
         let limit = limit.max(1) as i64;
 
+        // Push the top-N per side into Postgres. Two UNION ALL'd subqueries
+        // each apply ORDER BY price + LIMIT inside the database, so the API
+        // never materialises the full open book in memory. Sorting on the
+        // numeric `price` column is exact (no string compare) and the
+        // `live_orders_open_book_idx` partial index covers it.
         let rows: Vec<DepthLevelRow> = sqlx::query_as(
-            r#"select is_buy, price::text as price, sum(amount_remaining)::text as quantity
-                 from live_orders
-                where orderbook_address = $1
-                  and outcome_id = $2
-                  and status = 'OPEN'
-                  and amount_remaining > 0
-                group by is_buy, price"#,
+            r#"(select true  as is_buy, price::text as price,
+                       sum(amount_remaining)::text as quantity
+                  from live_orders
+                 where orderbook_address = $1
+                   and outcome_id = $2
+                   and status = 'OPEN'
+                   and amount_remaining > 0
+                   and is_buy
+                 group by price
+                 order by price desc
+                 limit $3)
+               union all
+               (select false as is_buy, price::text as price,
+                       sum(amount_remaining)::text as quantity
+                  from live_orders
+                 where orderbook_address = $1
+                   and outcome_id = $2
+                   and status = 'OPEN'
+                   and amount_remaining > 0
+                   and not is_buy
+                 group by price
+                 order by price asc
+                 limit $3)"#,
         )
         .bind(&orderbook_address)
         .bind(outcome_id)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .context("aggregate live_orders for depth")?;
 
-        // Sort first on raw uint strings (compare_decimals_* parses through
-        // BigUint) so the order is exact, then scale to DECIMAL strings.
-        // Scaling before sort would force decimal-aware comparison.
+        // Postgres returned each side already ordered (bids desc, asks asc)
+        // and capped at `limit`. We just split into two vectors preserving
+        // arrival order and scale below.
         let mut bids: Vec<PriceLevel> = Vec::new();
         let mut asks: Vec<PriceLevel> = Vec::new();
         for row in rows {
@@ -170,10 +192,6 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 asks.push(level);
             }
         }
-        bids.sort_by(|a, b| compare_decimals_desc(&a.price, &b.price));
-        asks.sort_by(|a, b| compare_decimals_asc(&a.price, &b.price));
-        bids.truncate(limit as usize);
-        asks.truncate(limit as usize);
 
         let price_scale = u32::try_from(price_precision.max(0)).unwrap_or(0);
         let quantity_scale = u32::try_from(quantity_precision.max(0)).unwrap_or(0);
@@ -232,16 +250,6 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
         let split = raw.len() - p;
         format!("{}.{}", &raw[..split], &raw[split..])
     }
-}
-
-fn compare_decimals_asc(a: &str, b: &str) -> std::cmp::Ordering {
-    let lhs = BigUint::parse_bytes(a.as_bytes(), 10).unwrap_or_default();
-    let rhs = BigUint::parse_bytes(b.as_bytes(), 10).unwrap_or_default();
-    lhs.cmp(&rhs)
-}
-
-fn compare_decimals_desc(a: &str, b: &str) -> std::cmp::Ordering {
-    compare_decimals_asc(b, a)
 }
 
 impl PostgresReadModelRepository {
@@ -488,12 +496,12 @@ fn assemble_market(
             row.pmp_address
         )
     })?;
-    let order_book_address = row.orderbook_address.clone().ok_or_else(|| {
-        anyhow!(
-            "market {} has last_reconciled_at set but orderbook_address is NULL",
-            row.pmp_address
-        )
-    })?;
+    // `orderbook_address` is allowed to be NULL: the reconciler can run
+    // before the on-chain OrderBook contract is deployed, and the API
+    // surfaces the gap as `orderBookAddress: null` rather than hiding the
+    // market. `filter_orderbook` collapses blank/whitespace-only strings
+    // into the same nullable contract.
+    let order_book_address = row.orderbook_address.clone().and_then(filter_orderbook);
 
     let status = derive_status(&row, now);
     let timings = build_timings(&row, status);
@@ -610,12 +618,23 @@ fn encode_cursor(sort_key: i64, id: i64) -> String {
 }
 
 fn decode_cursor(raw: &str) -> Result<DecodedCursor, anyhow::Error> {
-    let bytes = URL_SAFE_NO_PAD.decode(raw).context("cursor is not valid base64")?;
-    let s = std::str::from_utf8(&bytes).context("cursor is not utf-8")?;
-    let (key, id) = s.split_once(':').context("cursor missing separator")?;
+    // Any failure here is the client's fault (the cursor came from a previous
+    // response and they shouldn't be hand-crafting it). Wrap the typed
+    // `DomainError::InvalidParameter` as the chain root so the API handler's
+    // `downcast_ref::<DomainError>()` produces a 400; the human-readable
+    // cause is preserved as a context layer for logs.
+    decode_cursor_inner(raw).map_err(|cause| {
+        anyhow::Error::from(DomainError::InvalidParameter).context(format!("cursor: {cause}"))
+    })
+}
+
+fn decode_cursor_inner(raw: &str) -> Result<DecodedCursor, anyhow::Error> {
+    let bytes = URL_SAFE_NO_PAD.decode(raw).context("not valid base64")?;
+    let s = std::str::from_utf8(&bytes).context("not utf-8")?;
+    let (key, id) = s.split_once(':').context("missing separator")?;
     Ok(DecodedCursor {
-        sort_key_i64: key.parse().context("cursor sort_key not i64")?,
-        id: id.parse().context("cursor id not i64")?,
+        sort_key_i64: key.parse().context("sort_key not i64")?,
+        id: id.parse().context("id not i64")?,
     })
 }
 
@@ -766,22 +785,6 @@ mod tests {
             numeric_to_hex("255").unwrap(),
             "0x00000000000000000000000000000000000000000000000000000000000000ff"
         );
-    }
-
-    #[test]
-    fn decimal_compare_handles_uint256_strings() {
-        // Lexicographic ordering would put "9" before "10"; we sort numerically.
-        assert_eq!(compare_decimals_asc("9", "10"), std::cmp::Ordering::Less, "ascending: 9 < 10");
-        assert_eq!(
-            compare_decimals_desc("9", "10"),
-            std::cmp::Ordering::Greater,
-            "descending: 9 > 10"
-        );
-
-        // Numbers that exceed i128 must still compare correctly.
-        let big = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
-        assert_eq!(compare_decimals_asc("1", big), std::cmp::Ordering::Less);
-        assert_eq!(compare_decimals_asc(big, big), std::cmp::Ordering::Equal);
     }
 
     #[test]

@@ -171,8 +171,12 @@ database:
   connect_timeout_ms: 3000
 ```
 
-Send `SIGUSR1` to the running process to reload the config; the Postgres pool
-is rebuilt only if its parameters changed.
+The API is restart-to-reconfigure: every request path reads values that were
+captured when the process started (database pool, listen host/port, server
+timeouts), so there is no SIGUSR1 reload loop here. Restart the service to
+pick up edits to `config/api.<env>.yaml`. (The indexer **does** support
+SIGUSR1; its background tasks read live config — see
+`services/indexer/README.md`.)
 
 ## Running
 

@@ -31,7 +31,7 @@ Not included in this API version:
 
 ## Market Identity
 
-`marketAddress` is the address of the Prediction Market Pool contract. It is the stable market identifier across the entire lifecycle, the metadata anchor, and the target of `setStake`. `orderBookAddress` is the deterministic OrderBook contract address used for placing orders. It is always returned by `/api/v1/markets`; the PMP can know the order-book address ahead of time, but the contract is not deployed at that address until freeze. Public API requests that target one order book use `marketAddress` and `symbol`, and order-book availability is determined from market `status`.
+`marketAddress` is the address of the Prediction Market Pool contract. It is the stable market identifier across the entire lifecycle, the metadata anchor, and the target of `setStake`. `orderBookAddress` is the deterministic OrderBook contract address used for placing orders. The PMP can know it ahead of time, but the contract is not deployed at that address until freeze; while the indexer has not yet observed the OrderBook deploy for a market, `/api/v1/markets` returns `orderBookAddress: null`. Public API requests that target one order book use `marketAddress` and `symbol`, and order-book availability is determined from market `status`.
 
 The public symbol is formed as:
 
@@ -108,7 +108,7 @@ Semantic invariants:
 2. `status == "RESOLVING"` implies `timings.frozenAt != null && timings.resultStart <= serverTime < timings.resultEnd`.
 3. `status == "PENDING"` implies `timings == null`.
 4. `status == "RESOLVED"` implies `terminal.kind == "RESOLVED" && timings.frozenAt != null`; resolution always follows freeze, see `PMP.sol:1005`.
-5. `orderBookAddress` is always present; order-book availability implies `timings.frozenAt != null` and the appropriate market `status`.
+5. `orderBookAddress` is `null` until the OrderBook contract is observed on-chain; once non-null it is stable. Order-book availability still implies `timings.frozenAt != null` and the appropriate market `status` — a non-null `orderBookAddress` alone does not imply the book is open.
 
 If any invariant is violated, the backend MUST fail the request closed rather than return an inconsistent market. This protects clients against indexer desyncs.
 

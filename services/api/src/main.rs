@@ -26,13 +26,11 @@ use dodex_domain::Timings;
 use dodex_infrastructure::config::ApiConfig;
 use dodex_infrastructure::database::build_pool;
 use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
-use dodex_infrastructure::signal::run_config_reload_loop;
 use salvo::http::StatusCode;
 use salvo::prelude::*;
 use salvo::writing::Json;
 use salvo_extra::affix_state::inject;
 use serde::Serialize;
-use tokio::sync::RwLock;
 use tracing::error;
 use tracing::info;
 
@@ -56,7 +54,10 @@ struct MarketsResponse {
 #[serde(rename_all = "camelCase")]
 struct MarketDto {
     market_address: String,
-    order_book_address: String,
+    // `None` while the OrderBook contract has not been deployed for this PMP
+    // yet (reconciler ran before deploy). Clients gate trading on `status`,
+    // not on the presence of this field.
+    order_book_address: Option<String>,
     market_name: String,
     status: &'static str,
     quote_asset: String,
@@ -183,6 +184,12 @@ async fn get_markets(
 
     let use_case = GetMarketsUseCase::new(state.repo);
     let page = use_case.execute(request).await.map_err(|err| {
+        // Repo emits typed DomainError variants for client-input failures
+        // (e.g. cursor decode failure → InvalidParameter). Surface those as
+        // their proper HTTP status; everything else is a real 500.
+        if let Some(domain) = err.downcast_ref::<DomainError>() {
+            return ApiError::from(*domain);
+        }
         error!(?err, "list_markets failed");
         ApiError::from(DomainError::Unexpected)
     })?;
@@ -201,10 +208,10 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
     let status = non_empty_query(req, "status");
     let quote_asset = non_empty_query(req, "quoteAsset");
     let oracle_name = non_empty_query(req, "oracleName");
-    let closing_before = req.query::<i64>("closingBefore");
+    let closing_before = optional_typed_query::<i64>(req, "closingBefore")?;
     let sort_param = non_empty_query(req, "sort");
     let cursor = non_empty_query(req, "cursor");
-    let limit_param = req.query::<u16>("limit");
+    let limit_param = optional_typed_query::<u16>(req, "limit")?;
 
     if let Some(addr) = market_address {
         if status.is_some()
@@ -326,7 +333,7 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
     let symbol =
         non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
 
-    let limit = req.query::<u16>("limit").unwrap_or(100).min(1000);
+    let limit = optional_typed_query::<u16>(req, "limit")?.unwrap_or(100).min(1000);
 
     let use_case = GetDepthUseCase::new(state.repo);
     let snapshot = use_case
@@ -357,6 +364,25 @@ fn non_empty_query(req: &mut Request, key: &str) -> Option<String> {
     req.query::<String>(key).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// Parse an optional typed query parameter the strict way:
+/// absent → `Ok(None)`, present-but-blank → `Ok(None)`, present-but-unparseable
+/// → `Err(InvalidParameter)`. The default Salvo `req.query::<T>` swallows parse
+/// failures and returns `None`, which is a footgun for a public API: callers
+/// silently get the default value back instead of `400`.
+fn optional_typed_query<T: std::str::FromStr>(
+    req: &mut Request,
+    key: &str,
+) -> Result<Option<T>, ApiError> {
+    let Some(raw) = req.query::<String>(key) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed.parse::<T>().map(Some).map_err(|_| ApiError::from(DomainError::InvalidParameter))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -369,14 +395,17 @@ async fn main() -> anyhow::Result<()> {
     let config_path =
         env::var("APP_CONFIG").unwrap_or_else(|_| "config/api.local.yaml".to_string());
     let config = ApiConfig::load_from_path(&config_path)?;
-    let config_state = Arc::new(RwLock::new(config.clone()));
 
     let pool = build_pool(&config.common.database).await?;
     info!("api running with postgres read-model repository");
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool));
     let state = AppState { repo };
 
-    tokio::spawn(run_config_reload_loop(config_path.clone(), Arc::clone(&config_state), "api"));
+    // The API is intentionally restart-to-reconfigure. None of the live
+    // request paths read runtime config — pool, server bind, request_timeout
+    // are all baked at startup — so a SIGUSR1 reload-loop would be cargo-cult.
+    // The indexer keeps its loop because its background tasks do consume new
+    // config (graphql endpoint/timeouts, ignored_addresses, intervals).
 
     let router = Router::new()
         .hoop(inject(state))

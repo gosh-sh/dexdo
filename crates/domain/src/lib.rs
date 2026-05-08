@@ -153,7 +153,11 @@ pub struct Terminal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Market {
     pub market_address: MarketAddress,
-    pub order_book_address: String,
+    /// `None` until the on-chain OrderBook is deployed for this PMP. The
+    /// reconciler can populate every other PMP-state field via `getDetails`
+    /// before the OrderBook contract exists on-chain, so this stays nullable
+    /// in the public contract; clients gate trading availability on `status`.
+    pub order_book_address: Option<String>,
     pub market_name: MarketName,
     pub status: MarketStatus,
     pub quote_asset: String,
@@ -214,6 +218,8 @@ pub struct OracleEvent {
 pub enum DomainError {
     #[error("mandatory parameter was not sent")]
     MissingParameter,
+    #[error("invalid value for a query parameter")]
+    InvalidParameter,
     #[error("invalid market or symbol")]
     InvalidMarketOrSymbol,
     #[error("authentication required")]
@@ -242,6 +248,7 @@ impl DomainError {
             Self::MissingParameter => -1102,
             Self::PrecisionExceeded => -1111,
             Self::InvalidMarketOrSymbol => -1121,
+            Self::InvalidParameter => -1130,
             Self::OrderValidationFailed => -2010,
             Self::UnknownOrder => -2011,
         }
@@ -256,6 +263,7 @@ impl DomainError {
             Self::MissingParameter => "Mandatory parameter was not sent.",
             Self::PrecisionExceeded => "Precision is over the maximum defined for this asset.",
             Self::InvalidMarketOrSymbol => "Invalid market or symbol.",
+            Self::InvalidParameter => "Invalid value for a query parameter.",
             Self::OrderValidationFailed => "Order would immediately fail validation.",
             Self::UnknownOrder => "Unknown order.",
         }
