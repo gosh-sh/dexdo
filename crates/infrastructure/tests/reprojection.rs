@@ -275,3 +275,87 @@ async fn unknown_event_type_is_marked_processed() {
         "Unknown outcome must stamp processed_at to keep the row out of the retry queue"
     );
 }
+
+#[tokio::test]
+async fn orderfilled_deferred_replays_after_orderplaced() {
+    // Locks in the OrderBook deferred-replay contract: an OrderFilled that
+    // arrives before its OrderPlaced must stay queued (processed_at = null),
+    // and the next reprojection sweep — once the live_orders row exists —
+    // must apply it. Without this, /api/v1/depth would inflate liquidity by
+    // ignoring fills that landed out of order on the wire.
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_deferred_orderfilled";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "42";
+    let msg_id = format!("{test}-fill-msg");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+    });
+    insert_raw(&pool, &msg_id, &orderbook_addr, "OrderBook.OrderFilled", &decoded).await;
+
+    // Pass 1: live_orders has no matching row → Deferred.
+    repo.reproject_pending(1000).await.expect("reproject pass 1");
+    assert!(
+        !processed_at_is_set(&pool, &msg_id).await,
+        "deferred OrderFilled must keep processed_at null until the order exists"
+    );
+
+    let live_count: i64 =
+        sqlx::query_scalar("select count(*) from live_orders where orderbook_address = $1")
+            .bind(&orderbook_addr)
+            .fetch_one(&pool)
+            .await
+            .expect("count live_orders pass 1");
+    assert_eq!(live_count, 0, "no live_orders row should exist before OrderPlaced lands");
+
+    // Insert the parent live_orders row directly (simulating the OrderPlaced
+    // projector). amount_remaining = 100 so the deferred fill of 30 will leave
+    // 70 once the replay applies.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_remaining, status, last_event_lt)
+           values ($1, $2::numeric, 1, true, 100::numeric,
+                   100::numeric, 'OPEN', 1700000000)"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    // Pass 2: parent now exists → fill applies.
+    repo.reproject_pending(1000).await.expect("reproject pass 2");
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "processed_at must be stamped once the order exists and the fill applies"
+    );
+
+    let row: (String, String) = sqlx::query_as(
+        "select amount_remaining::text, status from live_orders
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read live_orders state");
+    assert_eq!(
+        row.0, "70",
+        "deferred OrderFilled must subtract filledAmount from amount_remaining once replayed"
+    );
+    assert_eq!(row.1, "OPEN", "partial fill must keep the order OPEN");
+}
