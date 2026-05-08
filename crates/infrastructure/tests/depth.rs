@@ -160,9 +160,9 @@ async fn depth_returns_human_decimal_levels() {
     // raw 10000 -> "100.00". Two bids (so depth has something to sort) plus
     // one ask to cover both branches.
     let levels = [
-        (true, "614", "10000"),  // bid: price 6.14, qty 100.00
-        (true, "613", "2550"),   // bid: price 6.13, qty 25.50
-        (false, "616", "5000"),  // ask: price 6.16, qty 50.00
+        (true, "614", "10000"), // bid: price 6.14, qty 100.00
+        (true, "613", "2550"),  // bid: price 6.13, qty 25.50
+        (false, "616", "5000"), // ask: price 6.16, qty 50.00
     ];
     for (idx, (is_buy, price, amount)) in levels.iter().enumerate() {
         sqlx::query(

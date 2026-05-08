@@ -9,10 +9,9 @@
 use std::env;
 use std::time::Duration;
 
+use dodex_infrastructure::database;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-
-use dodex_infrastructure::database;
 
 async fn setup() -> Option<PgPool> {
     let url = match env::var("TEST_DATABASE_URL") {

@@ -190,8 +190,8 @@ impl OracleEventListReconciler {
         let raw = run_getter(oel_contract, &account_boc, "_events", &json!({}))
             .with_context(|| format!("_events getter for {}", oel.address))?;
 
-        let items = parse_events_map(&raw)
-            .with_context(|| format!("parse _events for {}", oel.address))?;
+        let items =
+            parse_events_map(&raw).with_context(|| format!("parse _events for {}", oel.address))?;
 
         if items.is_empty() {
             return Ok(0);

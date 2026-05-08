@@ -197,9 +197,8 @@ async fn write_market_state(
     // fell back to 0 / NULL on parse error and then stamped the row reconciled,
     // which silently locked in incomplete data forever. Propagating the error
     // keeps the row pending and lets the failure-tracking path retry it.
-    let num_outcomes: i32 = field_str(details, "numOutcomes")?
-        .parse()
-        .context("parse numOutcomes")?;
+    let num_outcomes: i32 =
+        field_str(details, "numOutcomes")?.parse().context("parse numOutcomes")?;
     let stake_start: i64 = field_str(details, "stakeStart")?.parse().context("parse stakeStart")?;
     let stake_end: i64 = field_str(details, "stakeEnd")?.parse().context("parse stakeEnd")?;
     let result_start: i64 =

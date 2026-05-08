@@ -183,10 +183,7 @@ impl CommonSection {
         anyhow::ensure!(!self.app.env.is_empty(), "app.env must not be empty");
         anyhow::ensure!(!self.app.log_level.is_empty(), "app.log_level must not be empty");
         anyhow::ensure!(!self.database.url.is_empty(), "database.url must not be empty");
-        anyhow::ensure!(
-            self.database.max_connections > 0,
-            "database.max_connections must be > 0"
-        );
+        anyhow::ensure!(self.database.max_connections > 0, "database.max_connections must be > 0");
         anyhow::ensure!(
             self.database.max_connections >= self.database.min_connections,
             "database.max_connections must be >= database.min_connections"

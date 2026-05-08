@@ -77,8 +77,7 @@ async fn main() -> anyhow::Result<()> {
         config.graphql.endpoint.clone(),
         Duration::from_millis(config.graphql.request_timeout_ms),
     )?;
-    let oel_reconciler =
-        OracleEventListReconciler::new(pool.clone(), oel_graphql, decoder.clone());
+    let oel_reconciler = OracleEventListReconciler::new(pool.clone(), oel_graphql, decoder.clone());
     let oel_interval =
         Duration::from_millis(config.indexer.oracle_event_list_reconciliation_interval_ms);
     tokio::spawn(oel_reconciler.run_loop(oel_interval));
