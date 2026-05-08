@@ -12,10 +12,14 @@ services:
       - ./config:/app/config:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "dodex-api", "--help"]
+      # Probe the running API rather than spawning a second `dodex-api`
+      # process: the binary ignores CLI args and would just try to bind
+      # 8080 again (or hang) on every healthcheck.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/readiness"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
 
   indexer:
     build:

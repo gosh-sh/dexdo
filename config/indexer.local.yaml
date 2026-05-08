@@ -3,7 +3,10 @@ app:
   log_level: info
 
 database:
-  url: postgresql://indexer.dngmarvcxzmyesxaohvg:TestPass12345@aws-1-eu-central-1.pooler.supabase.com:5432/postgres
+  # Local Postgres convention, matching `config/api.local.yaml`. Override
+  # `APP_CONFIG` (or this URL in your own untracked copy) to point at a
+  # remote pooler — do NOT commit live credentials back into this file.
+  url: postgres://postgres:postgres@localhost:5432/dodex
   max_connections: 10
   min_connections: 1
   connect_timeout_ms: 3000
