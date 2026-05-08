@@ -26,6 +26,13 @@ use crate::tvm_runner::run_getter;
 
 const BATCH_SIZE: i64 = 16;
 const PMP_KIND: &str = "PMP";
+// Cooldown window after a failed reconcile attempt. A market that just failed
+// is excluded from the candidate set for this long, so a few permanently
+// broken contracts cannot keep starving newer pending rows behind them. The
+// value is intentionally several reconciler ticks long but short enough that
+// transient failures (graphql timeouts, brief node hiccups) recover within a
+// minute or two.
+const FAILURE_BACKOFF_INTERVAL_SQL: &str = "5 minutes";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReconcileStats {
@@ -57,12 +64,19 @@ impl MarketReconciler {
     /// its own transaction so a single broken contract does not block siblings.
     pub async fn run_once(&self) -> Result<ReconcileStats> {
         let mut stats = ReconcileStats::default();
-        let pending: Vec<PendingMarket> = sqlx::query_as(
+        // Two anti-starvation rules baked into the SELECT:
+        //   1. Filter out rows whose last failure is still inside the backoff
+        //      window — they will not be retried this tick at all.
+        //   2. Order never-failed rows ahead of cooled-down failed rows
+        //      (`nulls first`). Within each group, oldest id first.
+        let pending: Vec<PendingMarket> = sqlx::query_as(&format!(
             r#"select id, pmp_address from markets
                where last_reconciled_at is null
-               order by id asc
-               limit $1"#,
-        )
+                 and (last_reconcile_failed_at is null
+                      or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
+               order by last_reconcile_failed_at nulls first, id asc
+               limit $1"#
+        ))
         .bind(BATCH_SIZE)
         .fetch_all(&self.pool)
         .await
@@ -76,11 +90,32 @@ impl MarketReconciler {
                 Err(err) => {
                     stats.failed += 1;
                     warn!(market_id = market.id, pmp_address = %market.pmp_address, ?err, "reconcile failed");
+                    if let Err(stamp_err) = self.stamp_failure(market.id).await {
+                        warn!(
+                            market_id = market.id,
+                            ?stamp_err,
+                            "failed to stamp reconcile failure marker"
+                        );
+                    }
                 }
             }
         }
 
         Ok(stats)
+    }
+
+    async fn stamp_failure(&self, market_id: i64) -> Result<()> {
+        sqlx::query(
+            r#"update markets
+                  set last_reconcile_failed_at = now(),
+                      reconcile_attempts = reconcile_attempts + 1
+                where id = $1"#,
+        )
+        .bind(market_id)
+        .execute(&self.pool)
+        .await
+        .context("stamp reconcile failure")?;
+        Ok(())
     }
 
     /// Hot loop, runs forever until cancelled.
@@ -130,7 +165,11 @@ impl MarketReconciler {
         write_market_state(&mut tx, market.id, &details, &orderbook).await?;
         write_market_outcomes(&mut tx, market.id, &market.pmp_address, &details).await?;
         sqlx::query(
-            "update markets set last_reconciled_at = now(), updated_at = now() where id = $1",
+            r#"update markets
+                  set last_reconciled_at = now(),
+                      updated_at = now(),
+                      last_reconcile_failed_at = null
+                where id = $1"#,
         )
         .bind(market.id)
         .execute(&mut *tx)
@@ -153,11 +192,19 @@ async fn write_market_state(
     let oracle_list_hash_decimal = uint256_hex_to_decimal(oracle_list_hash_hex)?;
     let approved = field_bool(details, "approved")?;
     let is_cancelled = field_bool(details, "isCancelled")?;
-    let num_outcomes: i32 = field_str(details, "numOutcomes")?.parse().unwrap_or(0);
-    let stake_start: Option<i64> = field_str(details, "stakeStart")?.parse().ok();
-    let stake_end: Option<i64> = field_str(details, "stakeEnd")?.parse().ok();
-    let result_start: Option<i64> = field_str(details, "resultStart")?.parse().ok();
-    let result_end: Option<i64> = field_str(details, "resultEnd")?.parse().ok();
+    // Strict parsing: a parse failure here means the detokenized getter output
+    // disagrees with the ABI (or the ABI changed under us). The original code
+    // fell back to 0 / NULL on parse error and then stamped the row reconciled,
+    // which silently locked in incomplete data forever. Propagating the error
+    // keeps the row pending and lets the failure-tracking path retry it.
+    let num_outcomes: i32 = field_str(details, "numOutcomes")?
+        .parse()
+        .context("parse numOutcomes")?;
+    let stake_start: i64 = field_str(details, "stakeStart")?.parse().context("parse stakeStart")?;
+    let stake_end: i64 = field_str(details, "stakeEnd")?.parse().context("parse stakeEnd")?;
+    let result_start: i64 =
+        field_str(details, "resultStart")?.parse().context("parse resultStart")?;
+    let result_end: i64 = field_str(details, "resultEnd")?.parse().context("parse resultEnd")?;
     let orderbook_address = field_str(orderbook, "orderBookAddress")?;
 
     // When the reconciler is the first to observe a cancellation (event lost

@@ -71,14 +71,16 @@ Spawned from `services/indexer/src/main.rs` on the
 `indexer.oracle_event_list_reconciliation_interval_ms` cadence (default 60 s).
 
 Each sweep selects up to 16 OELs that have at least one child `oracle_events`
-row with `describe IS NULL`, ordered by `oel.id` (backed by partial index
-`oracle_events_describe_pending_idx` from migration `0008_*`). For each OEL it
-fetches the account BOC, runs the `_events` getter via `tvm_runner`, walks the
-returned `map(uint256, tuple)`, and updates each child row with `coalesce`
-semantics so already-recorded values are never overwritten. The
-`describe IS NULL OR trust_addr IS NULL` predicate keeps the write idempotent —
-once both fields are populated the row drops out of the partial index and is
-not visited again.
+row still missing reconciler-only metadata — `describe IS NULL OR trust_addr
+IS NULL` — ordered by failure recency then `oel.id` (backed by partial index
+`oracle_events_pending_meta_idx` from migration `0010_*`, which replaced the
+narrower `describe`-only index from `0008_*`). For each OEL it fetches the
+account BOC, runs the `_events` getter via `tvm_runner`, walks the returned
+`map(uint256, tuple)`, and updates each child row with `coalesce` semantics
+so already-recorded values are never overwritten. The same
+`describe IS NULL OR trust_addr IS NULL` predicate guards the UPDATE so the
+write is idempotent — once both fields are populated the row drops out of the
+partial index and is not visited again.
 
 ## Decoder
 
