@@ -170,10 +170,19 @@ in a savepoint, and:
 - on `Deferred` / projector error — leaves `processed_at` null for another
   pass.
 
-Projectors are idempotent (upserts), so replaying a row that has already been
-applied via the main loop or a previous sweep is safe but a no-op. The batch
-size is bounded by `indexer.reprojection_batch_size` (default 500). When the
-backlog is empty the sweep logs at `debug` only.
+The projector itself is **not** idempotent across all event types — re-running
+`OrderBook.OrderPlaced` would reset `status = 'OPEN'` and overwrite
+`amount_remaining`, and re-running `OrderBook.OrderFilled` would subtract
+`filledAmount` again. The harness instead guarantees at-most-once dispatch:
+
+- the main ingestion loop inserts `raw_events` with `on conflict (msg_id) do
+  nothing` and skips the projector entirely when the row was already present
+  (`crates/infrastructure/src/indexer_repo.rs`);
+- the reprojection sweep only picks rows with `processed_at is null`, so once
+  a row is stamped it is not re-dispatched.
+
+The batch size is bounded by `indexer.reprojection_batch_size` (default 500).
+When the backlog is empty the sweep logs at `debug` only.
 
 ## Database and migrations
 
@@ -207,6 +216,13 @@ Today's migrations:
 - `0009_live_orders.sql` — `live_orders` table for the order-book read-model
   (PK `(orderbook_address, order_id)`, partial index on `OPEN` rows for
   per-side aggregation).
+- `0010_oracle_events_pending_idx_widen.sql` — replaces
+  `oracle_events_describe_pending_idx` (from `0008_*`) with the broader
+  `oracle_events_pending_meta_idx` so the OEL reconciler's
+  `describe is null or trust_addr is null` predicate stays index-backed.
+- `0011_reconciler_failure_tracking.sql` — adds `last_reconcile_failed_at` and
+  `reconcile_attempts` to `markets` and `oracle_event_lists` so failed rows
+  are pushed to the back of the reconciler queue with a cooldown window.
 
 ### Supabase permissions
 

@@ -179,9 +179,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .await
         .context("aggregate live_orders for depth")?;
 
-        // Postgres returned each side already ordered (bids desc, asks asc)
-        // and capped at `limit`. We just split into two vectors preserving
-        // arrival order and scale below.
+        // Each inner subquery applied ORDER BY + LIMIT, but UNION ALL does not
+        // guarantee that ordering is preserved in the outer result. Re-sort
+        // each side explicitly: bids descending by price, asks ascending. The
+        // raw `price` column is a non-negative integer string, so BigUint
+        // gives an exact numeric compare without depending on string length.
         let mut bids: Vec<PriceLevel> = Vec::new();
         let mut asks: Vec<PriceLevel> = Vec::new();
         for row in rows {
@@ -192,6 +194,12 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 asks.push(level);
             }
         }
+        bids.sort_by_cached_key(|l| {
+            std::cmp::Reverse(BigUint::parse_bytes(l.price.as_bytes(), 10).unwrap_or_default())
+        });
+        asks.sort_by_cached_key(|l| {
+            BigUint::parse_bytes(l.price.as_bytes(), 10).unwrap_or_default()
+        });
 
         let price_scale = u32::try_from(price_precision.max(0)).unwrap_or(0);
         let quantity_scale = u32::try_from(quantity_precision.max(0)).unwrap_or(0);
