@@ -264,8 +264,16 @@ async fn write_market_outcomes(
         .as_object()
         .ok_or_else(|| anyhow!("getDetails.outcomeNames is not an object"))?;
 
-    let token_params: Option<(i32, i32)> = sqlx::query_as(
-        r#"select rt.price_precision, rt.quantity_precision
+    // Pull both display precisions (driving tick/step) and the trading-rule
+    // fields from ref_tokens. `min_notional` is stored as a raw uint scaled by
+    // 10^decimals (the asset's on-chain decimals, *not* `quantity_precision`,
+    // which is a coarser display knob — for USDC decimals=6 / qtyPrec=2, raw
+    // 1_000_000 must render as "1.000000" = 1 USDC, not "10000.00").
+    let token_params: Option<(i32, i32, i32, String)> = sqlx::query_as(
+        r#"select rt.price_precision,
+                  rt.quantity_precision,
+                  rt.decimals,
+                  rt.min_notional::text
              from markets m
              join ref_tokens rt on rt.token_type = m.token_type
             where m.id = $1"#,
@@ -275,17 +283,23 @@ async fn write_market_outcomes(
     .await
     .context("select token params")?;
 
-    let Some((price_precision, quantity_precision)) = token_params else {
+    let Some((price_precision, quantity_precision, token_decimals, min_notional_raw)) =
+        token_params
+    else {
         return Err(anyhow!("ref_tokens lookup returned no row for market id {market_id}"));
     };
 
-    // Trading-parameter bridge from ref_tokens to API representation. tick_size /
-    // step_size come from precision exponents; min_notional and max_batch_size
-    // are placeholders matching the stub until ref_tokens carries them in human
-    // representation (see Stage 13 in the architecture plan).
+    // Trading-parameter bridge from ref_tokens to API representation. tick_size
+    // and step_size are render-precision exponents; min_notional comes per-token
+    // from ref_tokens and gets scaled to a DECIMAL string here so the API can
+    // bind it straight to the response.
     let tick_size = power_of_ten_neg(price_precision as u32);
     let step_size = power_of_ten_neg(quantity_precision as u32);
-    let min_notional = "1".to_string();
+    let min_notional = scale_uint_to_decimal(&min_notional_raw, token_decimals.max(0) as u32);
+    // `max_batch_size` is intentionally global today — it caps batch endpoints
+    // at the API layer, not a per-token chain rule, and `ref_tokens` has no
+    // column for it. Centralising as a constant keeps the contract honest;
+    // when batch endpoints land, this should move to api config.
     let max_batch_size: i32 = 5;
 
     for (outcome_id_str, outcome_name_value) in map {
@@ -354,6 +368,25 @@ fn power_of_ten_neg(precision: u32) -> String {
     s
 }
 
+/// Render a raw decimal-integer string as a fixed-point DECIMAL with `scale`
+/// digits after the dot. Pure string arithmetic — works for arbitrarily large
+/// `numeric(78,0)` values from `ref_tokens.min_notional` without going through
+/// floats. Examples: `("1000000", 6) -> "1.000000"`, `("1234", 6) -> "0.001234"`,
+/// `("0", 6) -> "0.000000"`, `("42", 0) -> "42"`.
+fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
+    if scale == 0 {
+        return raw.to_string();
+    }
+    let p = scale as usize;
+    if raw.len() <= p {
+        let zeros = "0".repeat(p - raw.len());
+        format!("0.{zeros}{raw}")
+    } else {
+        let split = raw.len() - p;
+        format!("{}.{}", &raw[..split], &raw[split..])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +398,26 @@ mod tests {
         assert_eq!(power_of_ten_neg(2), "0.01");
         assert_eq!(power_of_ten_neg(3), "0.001");
         assert_eq!(power_of_ten_neg(6), "0.000001");
+    }
+
+    #[test]
+    fn scale_uint_to_decimal_matches_ref_tokens_seed() {
+        // ref_tokens seed values from migrations/0001_init_read_model.sql:144.
+        // These pin the API-facing min_notional contract: clients use it to
+        // validate orders, so a regression here is a public-API regression.
+        assert_eq!(scale_uint_to_decimal("1000000", 6), "1.000000"); // USDC
+        assert_eq!(scale_uint_to_decimal("10000000000", 9), "10.000000000"); // NACKL
+        assert_eq!(scale_uint_to_decimal("100000000000", 9), "100.000000000"); // SHELL
+    }
+
+    #[test]
+    fn scale_uint_to_decimal_handles_edge_cases() {
+        assert_eq!(scale_uint_to_decimal("0", 6), "0.000000");
+        assert_eq!(scale_uint_to_decimal("1", 6), "0.000001");
+        assert_eq!(scale_uint_to_decimal("123", 6), "0.000123");
+        // scale = 0: pass-through.
+        assert_eq!(scale_uint_to_decimal("42", 0), "42");
+        // raw longer than scale: split, no leading zeros.
+        assert_eq!(scale_uint_to_decimal("1234567", 6), "1.234567");
     }
 }

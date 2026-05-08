@@ -376,7 +376,7 @@ const STATUS_CASE: &str = r#"case
         when m.cancelled_at is not null or m.is_cancelled then 'CANCELLED'
         when m.resolved_at is not null then 'RESOLVED'
         when m.stake_start is null then 'PENDING'
-        when $1 > m.result_end then 'EXPIRED'
+        when $1 >= m.result_end then 'EXPIRED'
         when $1 >= m.result_start then 'RESOLVING'
         when m.frozen_at is not null then 'TRADING'
         when $1 >= m.stake_end then 'AWAITING_FREEZE'
@@ -550,7 +550,11 @@ fn derive_status(row: &MarketRow, now: i64) -> MarketStatus {
     let result_start = row.result_start.unwrap_or(stake_end);
     let result_end = row.result_end.unwrap_or(result_start);
 
-    if now > result_end {
+    // Spec (docs/api-spec.md §Market Status): EXPIRED applies once the market
+    // has *reached* `resultEnd`, not strictly past it. Both this branch and
+    // the SQL `STATUS_CASE` use `>=` so `?status=EXPIRED` filtering and
+    // Rust-derived status agree on the boundary.
+    if now >= result_end {
         MarketStatus::Expired
     } else if now >= result_start {
         MarketStatus::Resolving
@@ -718,6 +722,22 @@ mod tests {
     fn expired_after_result_end() {
         let r = row(Some(200), Some(300), Some(400), Some(500));
         assert_eq!(derive_status(&r, 600), MarketStatus::Expired);
+    }
+
+    #[test]
+    fn expired_at_result_end_boundary() {
+        // Spec: EXPIRED applies once the market reaches `resultEnd`. `now == result_end`
+        // must flip to EXPIRED; the previous `>` boundary kept it RESOLVING by one
+        // tick. This pins the inclusive boundary against future regressions.
+        let r = row(Some(200), Some(300), Some(400), Some(500));
+        assert_eq!(derive_status(&r, 500), MarketStatus::Expired);
+    }
+
+    #[test]
+    fn resolving_just_before_result_end() {
+        // Sanity check: one second before `resultEnd` is still RESOLVING.
+        let r = row(Some(200), Some(300), Some(400), Some(500));
+        assert_eq!(derive_status(&r, 499), MarketStatus::Resolving);
     }
 
     #[test]

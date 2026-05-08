@@ -53,7 +53,7 @@ response is internally consistent. Order of checks (first match wins):
    terminal state when the event was missed or has not been replayed yet.
 2. `resolved_at` set → `RESOLVED`.
 3. `stake_start` is null → `PENDING`.
-4. `now > result_end` → `EXPIRED`.
+4. `now >= result_end` → `EXPIRED`.
 5. `now >= result_start` → `RESOLVING`.
 6. `frozen_at` set → `TRADING`.
 7. `now >= stake_end` → `AWAITING_FREEZE`.
