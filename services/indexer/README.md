@@ -30,7 +30,9 @@ Each tick of the main indexer loop runs the following stages, all wired in
    updates the read-model tables. Each projector runs inside a **savepoint**
    (`Transaction::begin()` from `sqlx::Acquire`); if a projector errors, the
    savepoint rolls back, the raw row stays committed, and the rest of the page
-   keeps going.
+   keeps going. On `Applied` / `Unknown` the row's `processed_at` is stamped;
+   on `Deferred` / projector error it stays `null` so the reprojection loop
+   picks it up later (see below).
 6. **Sleep** — wait `indexer.polling_interval_ms` and tick again.
 
 Cursor is persisted in `indexer_cursors` under `stream_name = "blockchain_events"`
@@ -80,12 +82,14 @@ skipped (counted as `undecoded` in the per-tick log).
 Lives in `crates/infrastructure/src/projectors.rs`. Single dispatch entry
 `project_event(tx, decoded, node) -> ProjectionOutcome`. Outcomes:
 
-- `Applied` — read-model write succeeded.
+- `Applied` — read-model write succeeded; `raw_events.processed_at` is stamped.
 - `Deferred` — a parent record is missing (e.g. `OracleEventListDeployed`
   arrives before the corresponding `OracleDeployed`, or a PMP lifecycle event
-  fires before `PMPDeployed`). Logged at warn, raw row still persists, will be
-  picked up on the next pass.
-- `Unknown` — `event_type` is not in the whitelist yet.
+  fires before `PMPDeployed`). Logged at warn, raw row still persists with
+  `processed_at = null`, and the reprojection loop replays it on its next
+  sweep — see *Deferred-projection retry* below.
+- `Unknown` — `event_type` is not in the whitelist yet; `processed_at` is
+  stamped so it will not be replayed.
 
 Implemented today:
 
@@ -106,6 +110,31 @@ TODO:
 
 - `OrderBook.*` (`OrderPlaced`, `OrderCancelled`, `OrderFilled`, …) → a
   `live_orders` table aggregated into `order_book_snapshots` for `/depth`.
+
+## Deferred-projection retry
+
+`IndexerRepository::run_reprojection_loop` runs as an independent task spawned
+from `services/indexer/src/main.rs` on the
+`indexer.reprojection_interval_ms` cadence (default 30 s). It scans
+`raw_events` for rows where `processed_at is null and event_type is not null
+and decoded is not null`, ordered by `created_at_chain asc, id asc` so that an
+out-of-order parent that just arrived gets its first chance before its
+children retry. The query is backed by the partial index
+`raw_events_pending_projection_idx` (migration `0007_*`).
+
+For each row the loop reconstructs a `DecodedEvent` from the stored `decoded`
+jsonb (no re-decoding of bodies) plus an `EventNode` from
+`msg_id`/`src_address`/`dst_address`/`created_at_chain`, runs `project_event`
+in a savepoint, and:
+
+- on `Applied` / `Unknown` — stamps `processed_at = now()`;
+- on `Deferred` / projector error — leaves `processed_at` null for another
+  pass.
+
+Projectors are idempotent (upserts), so replaying a row that has already been
+applied via the main loop or a previous sweep is safe but a no-op. The batch
+size is bounded by `indexer.reprojection_batch_size` (default 500). When the
+backlog is empty the sweep logs at `debug` only.
 
 ## Database and migrations
 
@@ -129,6 +158,10 @@ Today's migrations:
 - `0006_markets_lifecycle.sql` — adds `frozen_at`, `resolved_at`,
   `resolved_outcome_id`, `cancelled_at`, `cancel_reason` for the nine-phase
   market lifecycle and a partial terminal index.
+- `0007_raw_events_pending_idx.sql` — adds
+  `raw_events_pending_projection_idx` (partial, on
+  `(created_at_chain, id) where processed_at is null and event_type is not
+  null and decoded is not null`) backing the deferred-projection retry loop.
 
 ### Supabase permissions
 
@@ -174,6 +207,8 @@ indexer:
   polling_interval_ms: 3000
   depth_refresh_interval_ms: 5000
   reconciliation_interval_ms: 60000
+  reprojection_interval_ms: 30000
+  reprojection_batch_size: 500
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
 ```
@@ -209,6 +244,13 @@ select event_type, count(*) from raw_events
   where event_type is not null
   group by event_type
   order by count(*) desc;
+-- pending reprojection backlog
+select event_type, count(*) from raw_events
+  where processed_at is null
+    and event_type is not null
+    and decoded is not null
+  group by event_type
+  order by count(*) desc;
 select count(*) from oracles;
 select count(*) from oracle_event_lists;
 select count(*) from markets where last_reconciled_at is not null;
@@ -238,8 +280,33 @@ Unit-level, all in `crates/infrastructure`:
 - `graphql::tests` — JSON deserialisation of `EventsPage`, error envelopes,
   nullable node fields.
 - `indexer_repo::tests` — `parse_unix_seconds` for int / float / string
-  timestamps.
+  timestamps; `pending_row_to_inputs` field mapping for the reprojection
+  loop (full payload, missing `event_type`, NaN/Inf timestamps, nullable
+  src/dst).
 - `projectors::tests` — `uint256_hex_to_decimal` parsing and rejection.
 - `reconciler::tests` — power-of-ten decimal rendering for tick / step sizes.
 - `tvm_runner::tests` — invalid account BOC and unknown function rejection.
 - `config::tests` — schema separation between `ApiConfig` and `IndexerConfig`.
+
+End-to-end coverage of the reprojection loop lives in
+`crates/infrastructure/tests/reprojection.rs`. It is gated on
+`TEST_DATABASE_URL`; when the variable is unset every test prints a skip
+notice and returns early, so `cargo test` still passes without a database.
+Tests use unique per-test prefixes for `msg_id` and addresses so they can
+run concurrently against the same database without colliding.
+
+```sh
+# point at a database the suite is allowed to migrate
+export TEST_DATABASE_URL=postgres://user:pass@localhost:5432/dodex_test
+cargo test -p dodex-infrastructure --test reprojection -- --nocapture
+```
+
+Scenarios covered:
+- `Applied` outcome stamps `processed_at` and writes the read-model row.
+- A `Deferred` `OracleEventListDeployed` keeps `processed_at = null` until
+  its parent `OracleDeployed` materialises, then is applied on the next
+  sweep.
+- Rows that already carry `processed_at` are not picked up — neither the
+  timestamp nor the read-model is touched.
+- `Unknown` event types still receive `processed_at` so the retry queue
+  drains.

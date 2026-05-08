@@ -56,6 +56,19 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(reconciler.run_loop(reconciler_interval));
     info!(interval_ms = config.indexer.reconciliation_interval_ms, "market reconciler started");
 
+    // Spawn the deferred-projection retry pass. Replays raw_events rows whose
+    // projector returned `Deferred` (or failed) once their parent records show
+    // up. Idempotent — projectors are upserts.
+    let reprojector = repo.clone();
+    let reprojection_interval = Duration::from_millis(config.indexer.reprojection_interval_ms);
+    let reprojection_batch_size = config.indexer.reprojection_batch_size;
+    tokio::spawn(reprojector.run_reprojection_loop(reprojection_interval, reprojection_batch_size));
+    info!(
+        interval_ms = config.indexer.reprojection_interval_ms,
+        batch_size = reprojection_batch_size,
+        "reprojection loop started"
+    );
+
     let mut cursor = repo.load_cursor(STREAM_NAME).await?;
     info!(cursor = cursor.as_deref().unwrap_or(""), "indexer resumed from cursor");
 
