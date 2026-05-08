@@ -103,8 +103,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // as Option<String> so a NULL row does not surface as a sqlx decode
         // error. NULL and blank strings collapse into the same empty-book
         // path documented in services/api/README.md.
-        let target: Option<(Option<String>, i32)> = sqlx::query_as(
-            r#"select m.orderbook_address, mo.outcome_id
+        // Pull (price|quantity)_precision from market_outcomes too: live_orders
+        // stores raw uint256/uint128 integers as the contract emitted them, so
+        // the API must scale by 10^-precision to honour the DECIMAL contract
+        // in docs/api-spec.md (e.g. raw "61400" with price_precision=2 -> "614.00").
+        let target: Option<(Option<String>, i32, i32, i32)> = sqlx::query_as(
+            r#"select m.orderbook_address,
+                      mo.outcome_id,
+                      mo.price_precision,
+                      mo.quantity_precision
                  from markets m
                  join market_outcomes mo on mo.market_id_fk = m.id
                 where m.pmp_address = $1
@@ -117,7 +124,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .await
         .context("resolve orderbook_address from (marketAddress, symbol)")?;
 
-        let Some((orderbook_address, outcome_id)) = target else {
+        let Some((orderbook_address, outcome_id, price_precision, quantity_precision)) = target
+        else {
             return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
         };
         let Some(orderbook_address) = orderbook_address.and_then(filter_orderbook) else {
@@ -149,6 +157,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .await
         .context("aggregate live_orders for depth")?;
 
+        // Sort first on raw uint strings (compare_decimals_* parses through
+        // BigUint) so the order is exact, then scale to DECIMAL strings.
+        // Scaling before sort would force decimal-aware comparison.
         let mut bids: Vec<PriceLevel> = Vec::new();
         let mut asks: Vec<PriceLevel> = Vec::new();
         for row in rows {
@@ -163,6 +174,13 @@ impl MarketReadRepository for PostgresReadModelRepository {
         asks.sort_by(|a, b| compare_decimals_asc(&a.price, &b.price));
         bids.truncate(limit as usize);
         asks.truncate(limit as usize);
+
+        let price_scale = u32::try_from(price_precision.max(0)).unwrap_or(0);
+        let quantity_scale = u32::try_from(quantity_precision.max(0)).unwrap_or(0);
+        for level in bids.iter_mut().chain(asks.iter_mut()) {
+            level.price = scale_uint_to_decimal(&level.price, price_scale);
+            level.quantity = scale_uint_to_decimal(&level.quantity, quantity_scale);
+        }
 
         let last_update_id: Option<i64> = sqlx::query_scalar(
             "select coalesce(max(last_event_lt), 0) from live_orders where orderbook_address = $1",
@@ -195,6 +213,24 @@ fn filter_orderbook(s: String) -> Option<String> {
         None
     } else {
         Some(s)
+    }
+}
+
+/// Scales a non-negative integer represented as a decimal string by 10^-scale,
+/// returning a fixed-point DECIMAL string with `scale` digits after the point.
+/// Used to render live_orders.price / amount_remaining (stored as raw contract
+/// uint256/uint128 integers) as the human DECIMAL the API spec mandates.
+fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
+    if scale == 0 {
+        return raw.to_string();
+    }
+    let p = scale as usize;
+    if raw.len() <= p {
+        let zeros = "0".repeat(p - raw.len());
+        format!("0.{zeros}{raw}")
+    } else {
+        let split = raw.len() - p;
+        format!("{}.{}", &raw[..split], &raw[split..])
     }
 }
 
@@ -753,6 +789,34 @@ mod tests {
         assert!(filter_orderbook("".into()).is_none());
         assert!(filter_orderbook("   ".into()).is_none());
         assert_eq!(filter_orderbook("0:abc".into()).as_deref(), Some("0:abc"));
+    }
+
+    #[test]
+    fn scale_uint_to_decimal_handles_all_magnitudes() {
+        // scale = 0 is a passthrough.
+        assert_eq!(scale_uint_to_decimal("100", 0), "100");
+        assert_eq!(scale_uint_to_decimal("0", 0), "0");
+
+        // raw shorter than the scale → zero-padded fractional, integer part
+        // becomes "0".
+        assert_eq!(scale_uint_to_decimal("0", 2), "0.00");
+        assert_eq!(scale_uint_to_decimal("5", 2), "0.05");
+        assert_eq!(scale_uint_to_decimal("50", 2), "0.50");
+
+        // raw longer than the scale → split at len - scale.
+        assert_eq!(scale_uint_to_decimal("614", 3), "0.614");
+        assert_eq!(scale_uint_to_decimal("61400", 2), "614.00");
+        assert_eq!(scale_uint_to_decimal("12345", 2), "123.45");
+        assert_eq!(scale_uint_to_decimal("10000", 2), "100.00");
+
+        // uint256-sized input keeps every digit, just inserts a decimal
+        // point at len - scale.
+        let big = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        let scaled = scale_uint_to_decimal(big, 18);
+        assert_eq!(
+            scaled,
+            "115792089237316195423570985008687907853269984665640564039457.584007913129639935"
+        );
     }
 
     fn placeholder_indices(sql: &str) -> std::collections::BTreeSet<usize> {

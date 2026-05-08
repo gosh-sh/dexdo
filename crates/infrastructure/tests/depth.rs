@@ -134,3 +134,66 @@ async fn blank_orderbook_address_returns_empty_book() {
     assert!(depth.bids.is_empty());
     assert!(depth.asks.is_empty());
 }
+
+#[tokio::test]
+async fn depth_returns_human_decimal_levels() {
+    // live_orders stores raw uint128/uint256 integers as the contract emits
+    // them; the API spec (docs/api-spec.md:54, :440) requires DECIMAL strings
+    // ("0.614", "100.00"). Pin the scaling through (price|quantity)_precision
+    // from market_outcomes so a regression to raw `price::text` would fail.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_decimal_levels_pmp";
+    let symbol = "DEPTH_DECIMAL_LEVELS_YES";
+    let orderbook = "0:depth_decimal_levels_book";
+    purge_market(&pool, pmp, symbol).await;
+    sqlx::query("delete from live_orders where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge live_orders");
+    insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
+
+    // market_outcomes inserted by insert_market_with_outcome uses
+    // price_precision = 2, quantity_precision = 2. raw 614 -> "6.14",
+    // raw 10000 -> "100.00". Two bids (so depth has something to sort) plus
+    // one ask to cover both branches.
+    let levels = [
+        (true, "614", "10000"),  // bid: price 6.14, qty 100.00
+        (true, "613", "2550"),   // bid: price 6.13, qty 25.50
+        (false, "616", "5000"),  // ask: price 6.16, qty 50.00
+    ];
+    for (idx, (is_buy, price, amount)) in levels.iter().enumerate() {
+        sqlx::query(
+            r#"insert into live_orders
+                   (orderbook_address, order_id, outcome_id, is_buy, price,
+                    amount_remaining, status, last_event_lt)
+               values ($1, $2::numeric, 1, $3, $4::numeric, $5::numeric, 'OPEN', $6)"#,
+        )
+        .bind(orderbook)
+        .bind(idx as i64 + 1)
+        .bind(*is_buy)
+        .bind(*price)
+        .bind(*amount)
+        .bind(1_700_000_000_i64 + idx as i64)
+        .execute(&pool)
+        .await
+        .expect("insert live_orders");
+    }
+
+    let depth = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect("get_depth");
+
+    assert_eq!(depth.bids.len(), 2);
+    assert_eq!(depth.asks.len(), 1);
+    // Bids descending by price.
+    assert_eq!(depth.bids[0].price, "6.14");
+    assert_eq!(depth.bids[0].quantity, "100.00");
+    assert_eq!(depth.bids[1].price, "6.13");
+    assert_eq!(depth.bids[1].quantity, "25.50");
+    assert_eq!(depth.asks[0].price, "6.16");
+    assert_eq!(depth.asks[0].quantity, "50.00");
+}
