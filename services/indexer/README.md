@@ -295,11 +295,20 @@ notice and returns early, so `cargo test` still passes without a database.
 Tests use unique per-test prefixes for `msg_id` and addresses so they can
 run concurrently against the same database without colliding.
 
+The repo ships a throw-away Postgres for this in `docker-compose.test.yml`
+(port 55432, tmpfs storage, fsync off — schema is created by
+`sqlx::migrate!` on first connect):
+
 ```sh
-# point at a database the suite is allowed to migrate
-export TEST_DATABASE_URL=postgres://user:pass@localhost:5432/dodex_test
+docker compose -f docker-compose.test.yml up -d --wait
+export TEST_DATABASE_URL=postgres://dodex:dodex@localhost:55432/dodex_test
 cargo test -p dodex-infrastructure --test reprojection -- --nocapture
+docker compose -f docker-compose.test.yml down
 ```
+
+If you prefer to point at an existing database, just export
+`TEST_DATABASE_URL` to its URL — the suite calls `database::run_migrations`
+on connect, so the role must own the `public` schema.
 
 Scenarios covered:
 - `Applied` outcome stamps `processed_at` and writes the read-model row.
