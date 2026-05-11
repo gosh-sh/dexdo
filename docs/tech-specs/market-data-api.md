@@ -116,7 +116,7 @@ The API issues one SQL query that produces both sides of the book in a single ro
 2. Groups by `price`, sums `amount_remaining` — multiple resting orders at one price collapse into a single level. Clients see "quantity available at this price", not the underlying orders.
 3. Orders by price (bids descending, asks ascending) and applies `LIMIT $limit`.
 
-Pushing the top-N into Postgres keeps the API from materialising the full open book in memory; the partial index `live_orders_open_book_idx` (`WHERE status = 'OPEN'`) covers exactly this query shape.
+Postgres applies the sort and `LIMIT` while reading, so the API receives only the top N price levels per side instead of loading the full open book into memory. The partial index `live_orders_open_book_idx` (`WHERE status = 'OPEN'`) is designed for this depth query.
 
 After the database returns, each side is re-sorted in Rust using exact-numeric `BigUint` comparison — lexicographic string comparison would silently misrank prices of different lengths (`"100" < "99"` lexicographically). Each `[price, quantity]` is then scaled to a fixed-point decimal using the outcome's `price_precision` and `quantity_precision`. The result matches the `[price, quantity]` shape in [api-spec.md](../api-spec.md).
 
