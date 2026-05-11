@@ -211,7 +211,10 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
     let closing_before = optional_typed_query::<i64>(req, "closingBefore")?;
     let sort_param = non_empty_query(req, "sort");
     let cursor = non_empty_query(req, "cursor");
-    let limit_param = optional_typed_query::<u16>(req, "limit")?;
+    // Parse `limit` permissively as i64 so out-of-u16-range values (e.g.
+    // `limit=99999`) clamp to MAX_LIMIT instead of failing with 400. Only
+    // non-numeric input still returns InvalidParameter.
+    let limit_param = optional_typed_query::<i64>(req, "limit")?;
 
     if let Some(addr) = market_address {
         if status.is_some()
@@ -243,7 +246,9 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
         Some("createdAt") => MarketsSort::CreatedAtDesc,
         Some(_) => return Err(ApiError::from(DomainError::InvalidMarketOrSymbol)),
     };
-    let limit = limit_param.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let limit = limit_param
+        .map(|v| v.clamp(1, MAX_LIMIT as i64) as u16)
+        .unwrap_or(DEFAULT_LIMIT);
 
     Ok(MarketsRequest::Listing(MarketsListing {
         filter: MarketsFilter { statuses, quote_asset, oracle_name, closing_before },
@@ -333,7 +338,10 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
     let symbol =
         non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
 
-    let limit = optional_typed_query::<u16>(req, "limit")?.unwrap_or(100).min(1000);
+    // Parse as i64 so values >u16::MAX clamp to 1000 rather than 400ing.
+    let limit = optional_typed_query::<i64>(req, "limit")?
+        .map(|v| v.clamp(1, 1000) as u16)
+        .unwrap_or(100);
 
     let use_case = GetDepthUseCase::new(state.repo);
     let snapshot = use_case

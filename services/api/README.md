@@ -104,11 +104,13 @@ through `BigUint`, not lexicographic) so `uint256` prices order correctly:
 bids descending, asks ascending. The `limit` is applied per side after the
 sort.
 
-`lastUpdateId` is `MAX(last_event_lt)` across the orderbook (currently
-`node.created_at` in unix seconds, populated by the OrderBook projectors).
+`lastUpdateId` is `MAX(last_event_lt)` over `live_orders` filtered to
+`(orderbook_address, outcome_id)` — same scope as the depth response, so a
+quiet outcome never inherits a sibling outcome's sequence number. The value
+is `node.created_at` in unix seconds, populated by the OrderBook projectors.
 This is enough for the spec's `bigint` contract; if a depth-diff stream
-lands later, swap the source for a per-orderbook nonce without touching
-the API contract.
+lands later, swap the source for a per-(orderbook, outcome) nonce without
+touching the API contract.
 
 Behind the scenes the indexer projects three OrderBook events into
 `live_orders`:

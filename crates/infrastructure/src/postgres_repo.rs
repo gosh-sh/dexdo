@@ -213,10 +213,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
             level.quantity = scale_uint_to_decimal(&level.quantity, quantity_scale);
         }
 
+        // Scope to (orderbook, outcome_id): the depth response is per-outcome,
+        // so a quiet outcome must not surface a sequence number from a sibling
+        // outcome's activity on the same orderbook.
         let last_update_id: Option<i64> = sqlx::query_scalar(
-            "select coalesce(max(last_event_lt), 0) from live_orders where orderbook_address = $1",
+            "select coalesce(max(last_event_lt), 0) from live_orders \
+             where orderbook_address = $1 and outcome_id = $2",
         )
         .bind(&orderbook_address)
+        .bind(outcome_id)
         .fetch_one(&self.pool)
         .await
         .context("compute last_update_id")?;

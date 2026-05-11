@@ -197,3 +197,84 @@ async fn depth_returns_human_decimal_levels() {
     assert_eq!(depth.asks[0].price, "6.16");
     assert_eq!(depth.asks[0].quantity, "50.00");
 }
+
+#[tokio::test]
+async fn last_update_id_is_scoped_per_outcome() {
+    // Regression: lastUpdateId used to aggregate `max(last_event_lt)` across
+    // the whole orderbook, so a quiet outcome would surface the sequence
+    // number from a sibling outcome's activity. The fix scopes the aggregate
+    // to (orderbook_address, outcome_id); this test pins that contract.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_last_update_per_outcome_pmp";
+    let yes_symbol = "DEPTH_LAST_UPDATE_PER_OUTCOME_YES";
+    let no_symbol = "DEPTH_LAST_UPDATE_PER_OUTCOME_NO";
+    let orderbook = "0:depth_last_update_per_outcome_book";
+
+    // Purge both outcome rows and any leftover orders before re-seeding.
+    for symbol in [yes_symbol, no_symbol] {
+        purge_market(&pool, pmp, symbol).await;
+    }
+    sqlx::query("delete from live_orders where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge live_orders");
+
+    // Insert the market plus the YES outcome (outcome_id = 1) via the
+    // existing helper, then add a sibling NO outcome (outcome_id = 2) on the
+    // same orderbook.
+    insert_market_with_outcome(&pool, pmp, yes_symbol, Some(orderbook)).await;
+    let market_id: i64 = sqlx::query_scalar("select id from markets where pmp_address = $1")
+        .bind(pmp)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch market id");
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 2, 'NO', $3,
+                   2, 2, '0.01', '0.01',
+                   '1.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(no_symbol)
+    .execute(&pool)
+    .await
+    .expect("insert NO outcome");
+
+    // Only the NO outcome (outcome_id = 2) has activity. If the aggregate
+    // leaks across outcomes, YES will pick up last_event_lt = 1_800_000_000.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_remaining, status, last_event_lt)
+           values ($1, 1::numeric, 2, true, 500::numeric, 100::numeric,
+                   'OPEN', 1800000000)"#,
+    )
+    .bind(orderbook)
+    .execute(&pool)
+    .await
+    .expect("insert NO-side order");
+
+    let yes_depth = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(yes_symbol.into()), 100)
+        .await
+        .expect("get_depth YES");
+    assert_eq!(
+        yes_depth.last_update_id, 0,
+        "YES outcome has no orders, so its lastUpdateId must not borrow from NO"
+    );
+    assert!(yes_depth.bids.is_empty());
+    assert!(yes_depth.asks.is_empty());
+
+    let no_depth = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(no_symbol.into()), 100)
+        .await
+        .expect("get_depth NO");
+    assert_eq!(no_depth.last_update_id, 1_800_000_000);
+}
