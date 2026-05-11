@@ -1,10 +1,10 @@
 # Market Data — Indexer: Backend Notes
 
-Implementation-facing notes for the indexer side of the market-data path. This document covers how data gets *into* the read-model: ingestion from shellnet, projection of contract events, and reconciliation of fields that events alone do not carry. The HTTP layer that serves these tables is described in [market-data-api.md](market-data-api.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md).
+Implementation-facing notes for the indexer side of the market-data path. This document covers how data gets *into* the read-model: ingestion from events stream, projection of contract events, and reconciliation of fields that events alone do not carry. The HTTP layer that serves these tables is described in [market-data-api.md](market-data-api.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md).
 
 ## Ingestion
 
-The indexer follows a GraphQL message-edge stream from shellnet. Every edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema.
+The indexer follows a GraphQL message-edge stream. Every edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema.
 
 Sequence per edge:
 
@@ -53,7 +53,7 @@ Two reconcilers fill metadata that the event stream alone does not carry. Both r
 
 For each [`markets`](data-schema.md#markets) row that needs catch-up, the reconciler:
 
-1. Fetches the PMP account BOC from shellnet.
+1. Fetches the PMP account BOC from chain.
 2. Runs `PMP.getDetails()` off-chain through the local TVM emulator (`crates/infrastructure/src/tvm_runner.rs`).
 3. Runs `PMP.getOrderBookAddress()` the same way.
 4. Writes `market_id`, `name`, `oracle_list_hash`, `approved`, `is_cancelled`, `num_outcomes`, and outcome rows in [`market_outcomes`](data-schema.md#market_outcomes).

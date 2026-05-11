@@ -358,7 +358,7 @@ crates/infrastructure/src/
 Unit-level, all in `crates/infrastructure`:
 
 - `decoder::tests` — ABI loading and event-id index build, base64 error path,
-  unknown-id passthrough on a real shellnet body.
+  unknown-id passthrough on a real events body.
 - `graphql::tests` — JSON deserialisation of `EventsPage`, error envelopes,
   nullable node fields.
 - `indexer_repo::tests` — `parse_unix_seconds` for int / float / string

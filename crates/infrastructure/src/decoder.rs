@@ -151,7 +151,7 @@ mod tests {
     fn unknown_event_id_returns_none() {
         let decoder = Decoder::new().unwrap();
 
-        // body BOC observed in shellnet from src=0:111...111 (system msg).
+        // body BOC observed in chain from src=0:111...111 (system msg).
         // Its event id is not in the dex ABIs, so we must return Ok(None).
         let body = "te6ccgEBAgEAOAABTiEI6kGAF2XiReIi2UGGm9TvRXJAgoqOxOYUQGiHnYczEQPg+AhhEAEAF6AAAAACMteYg9IABA==";
         let decoded = decoder.decode_event_body(body).unwrap();

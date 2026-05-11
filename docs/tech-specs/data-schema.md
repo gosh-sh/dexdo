@@ -67,7 +67,7 @@ Resume-points per ingestion stream. The indexer's main fetch loop persists the c
 | Column | Type | Notes |
 | --- | --- | --- |
 | `stream_name` | `text` PK | Logical stream identifier (e.g. one per filter-set the indexer subscribes to). |
-| `cursor` | `text` | Opaque GraphQL cursor returned by shellnet. |
+| `cursor` | `text` | Opaque cursor returned by GraphQL server. |
 | `last_seen_lt` | `text` | Last observed logical time. Reserved for diagnostics. |
 | `updated_at` | `timestamptz` | Last successful page commit. |
 
