@@ -1,4 +1,4 @@
-# Data Schema: Backend Notes
+# Data Schema Technical Specification
 
 Postgres tables that back the DODEX read-model and indexer. Source of truth is the migration set under `/migrations`; this document describes intent and field semantics. Schema changes ship as numbered migration files (`NNNN_*.sql`) and are applied by `sqlx::migrate!` at service startup (`crates/infrastructure/src/database.rs`).
 
@@ -8,7 +8,7 @@ Tables fall into four buckets:
 | --- | --- | --- |
 | Reference data | `ref_tokens` | Seeded by migrations; read-only at runtime. |
 | Indexer infrastructure | `raw_events`, `indexer_cursors` | Indexer ingestion path. |
-| Read-model — discovery | `oracles`, `oracle_event_lists`, `oracle_events` | Indexer projectors + OEL reconciler. |
+| Read-model — discovery | `oracles`, `oracle_event_lists`, `oracle_events` | Indexer projectors + OracleEventList reconciler. |
 | Read-model — markets | `markets`, `market_outcomes`, `live_orders`, `order_book_snapshots` | Indexer projectors + market reconciler. |
 
 ## Glossary
@@ -18,8 +18,6 @@ Tables fall into four buckets:
 **Projector** — code that handles one decoded chain event and writes the corresponding read-model change. For example, the `OrderBook.OrderPlaced` event creates or refreshes a row in `live_orders`.
 
 **Reconciler** — background indexer task that periodically reads contract state through getters and fills fields that events alone do not provide. The market reconciler reads PMP state (`getDetails`, `getOrderBookAddress`) and updates `markets` / `market_outcomes`. The OracleEventList reconciler reads `_events` from each EventList contract and fills missing event metadata in `oracle_events`, such as `describe` and `trust_addr`.
-
-**OEL / OracleEventList** — contract that stores a list of oracle events for one oracle. In this schema it is represented by `oracle_event_lists`; each event inside it is represented by a child row in `oracle_events`.
 
 ## Reference data
 
@@ -120,7 +118,7 @@ Index: `oracle_event_lists_oracle_id_idx` speeds up loading all EventList rows f
 The actual events inside each EventList. Two writers:
 
 - **Projector** writes `event_name`, `oracle_fee`, `deadline`, and the `confirmed_*` columns from the `EventAdded` and `EventConfirmed` events.
-- **OEL reconciler** fills the metadata that lives only in `OracleEventList._events` getter state: `describe` and `trust_addr`.
+- **OracleEventList reconciler** fills the metadata that lives only in `OracleEventList._events` getter state: `describe` and `trust_addr`.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -130,7 +128,7 @@ The actual events inside each EventList. Two writers:
 | `event_name` | `text` | From the `EventAdded` event. Surfaces as `event.eventName`. |
 | `oracle_fee` | `numeric(78,0)` | From the `EventAdded` event. |
 | `deadline` | `bigint` | Event deadline (unix seconds). |
-| `describe` | `text` | Event description — reconciler-only field. NULL until OEL reconciler runs. |
+| `describe` | `text` | Event description — reconciler-only field. NULL until OracleEventList reconciler runs. |
 | `count` | `numeric(78,0)` | Reserved metadata field from `_events`. |
 | `trust_addr` | `text` | Reconciler-only field. Optional on chain — may stay NULL even after reconciliation (see migration 0012). |
 | `outcome_names_jsonb` | `jsonb` default `'{}'::jsonb` | Outcome label map (`outcomeId → name`). |
@@ -138,7 +136,7 @@ The actual events inside each EventList. Two writers:
 | `last_seen_at` | `timestamptz` | Updated on every projector pass that touches the row. |
 | `confirmed_pmp_address` (added 0004) | `text` | Set by the `EventConfirmed` event. Links an event to the PMP that markets it. |
 | `confirmed_at` (added 0004) | `timestamptz` | Stamp time (currently wall-clock; see review note in `docs/review-fixes-2026-05-11.md`). |
-| `meta_reconciled_at` (added 0012) | `timestamptz` | Per-row marker — set unconditionally by the OEL reconciler after a successful getter pass, even when `describe`/`trust_addr` come back NULL on chain. Drives the pending-row predicate so legitimately-null fields don't cause infinite re-fetch. |
+| `meta_reconciled_at` (added 0012) | `timestamptz` | Per-row marker — set unconditionally by the OracleEventList reconciler after a successful getter pass, even when `describe`/`trust_addr` come back NULL on chain. Drives the pending-row predicate so legitimately-null fields don't cause infinite re-fetch. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Indices:
@@ -148,7 +146,7 @@ Indices:
 | `oracle_events_eventlist_id_idx` | Speeds up loading all event rows for one EventList. |
 | `oracle_events_deadline_idx` | Time-window queries. |
 | `oracle_events_confirmed_pmp_idx` (partial: `confirmed_pmp_address IS NOT NULL`) | Reverse-lookup from PMP back to event. |
-| `oracle_events_pending_meta_idx` (partial: `meta_reconciled_at IS NULL`) | Drives the OEL reconciler's pending-row SELECT. Replaced the original `describe IS NULL`-only index in migration 0012. |
+| `oracle_events_pending_meta_idx` (partial: `meta_reconciled_at IS NULL`) | Drives the OracleEventList reconciler's pending-row SELECT. Replaced the original `describe IS NULL`-only index in migration 0012. |
 
 ## Read-model — markets
 

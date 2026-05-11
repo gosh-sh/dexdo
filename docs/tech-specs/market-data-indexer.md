@@ -1,6 +1,48 @@
-# Market Data — Indexer: Backend Notes
+# Market Data Indexer Technical Specification
 
-Implementation-facing notes for the indexer side of the market-data path. This document covers how data gets *into* the read-model: ingestion from events stream, projection of contract events, and reconciliation of fields that events alone do not carry. The HTTP layer that serves these tables is described in [market-data-api.md](market-data-api.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md).
+Implementation-facing requirements for the indexer side of the market-data path. This document covers how data gets *into* the read-model: ingestion from events stream, projection of contract events, and reconciliation of fields that events alone do not carry. The HTTP layer that serves these tables is described in [market-data-api.md](market-data-api.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md).
+
+## Glossary
+
+**Read-model** — Postgres tables prepared for API reads. The indexer builds them from chain events and contract state.
+
+**Raw event** — one message from the chain event stream stored in `raw_events`, decoded or not. It is kept so projections can be retried or rebuilt later.
+
+**Projector** — code that applies one decoded on-chain event to the read-model. For example, the `OrderBook.OrderPlaced` event updates `live_orders`.
+
+**Reconciler** — background task that periodically reads contract state through getters and fills fields that events alone do not provide.
+
+**Reconciliation** — the process where reconcilers periodically fetch contract state and copy missing fields into the read-model. It complements event projection because some fields are available only through getters, not through chain events.
+
+**Reprojection** — retry pass for `raw_events` rows that were decoded but could not be applied yet, usually because a child event arrived before its parent row existed.
+
+**BOC** — serialized contract state fetched from GraphQL and passed to the local TVM runner so getters can be executed off-chain.
+
+## Data Flow
+
+```mermaid
+flowchart LR
+    chain[Acki Nacki GraphQL event stream] --> ingest[Indexer fetch loop]
+    ingest --> raw[raw_events]
+    raw --> decoder[ABI decoder]
+    decoder --> projectors[Projectors]
+    projectors --> discovery[oracles / oracle_event_lists / oracle_events]
+    projectors --> markets[markets]
+    projectors --> orders[live_orders]
+    raw --> retry[Reprojection loop]
+    retry --> projectors
+
+    chain_state[GraphQL account BOC lookup] --> market_reconciler[Market reconciler]
+    chain_state --> oel_reconciler[OracleEventList reconciler]
+    market_reconciler --> markets
+    market_reconciler --> outcomes[market_outcomes]
+    oel_reconciler --> discovery
+
+    discovery --> api[Market-data API]
+    markets --> api
+    outcomes --> api
+    orders --> api
+```
 
 ## Ingestion
 
@@ -21,7 +63,7 @@ Lifecycle events drive transitions on [`markets`](data-schema.md#markets) and th
 | --- | --- |
 | `RootOracle.OracleDeployed` | Inserts into [`oracles`](data-schema.md#oracles). Sets `address`, `name`, `pubkey`. |
 | `Oracle.OracleEventListDeployed` | Inserts [`oracle_event_lists`](data-schema.md#oracle_event_lists) under the parent oracle. |
-| `OracleEventList.EventAdded` | Upserts [`oracle_events`](data-schema.md#oracle_events) with `event_name`, `oracle_fee`, `deadline`. Does NOT carry `describe` or `trust_addr` — those come from the OEL reconciler. |
+| `OracleEventList.EventAdded` | Upserts [`oracle_events`](data-schema.md#oracle_events) with `event_name`, `oracle_fee`, `deadline`. Does NOT carry `describe` or `trust_addr` — those come from the OracleEventList reconciler. |
 | `OracleEventList.EventConfirmed` | Stamps `oracle_events.confirmed_pmp_address` and `confirmed_at`. Links an event to the PMP that will market it. |
 | `PrivateNote.PMPDeployed` | Inserts a row in [`markets`](data-schema.md#markets) with `pmp_address`, `event_id`, `token_type`, `token_code`. Lifecycle columns (`stake_*`, `result_*`, `frozen_at`, etc.) stay NULL — they belong to later events. The row is invisible to the API until the reconciler stamps `last_reconciled_at`. |
 | `PMP.TimingsSet` | Updates `stake_start`, `stake_end`, `result_start`, `result_end`, sets `approved = true`. May fire repeatedly while `now < resultStart` — keep the latest by block time. This projector is the **sole writer** of the four timing columns. |
@@ -69,13 +111,13 @@ Queue ordering (the SELECT in `MarketReconciler::run_once`):
 - A row enters the queue when `last_reconciled_at IS NULL` (never reconciled) OR when `frozen_at IS NOT NULL AND orderbook_address IS NULL` (`PoolsFrozen` landed since the last pass — re-queue to stamp the address).
 - Failed rows go to the back via `nulls first` ordering on `last_reconcile_failed_at`. A 5-minute backoff filter excludes recently-failed rows entirely so they don't dominate the batch.
 
-### OEL reconciler
+### OracleEventList reconciler
 
-For each [`oracle_event_lists`](data-schema.md#oracle_event_lists) row that has at least one event still missing reconciler-only metadata, the OEL reconciler runs `OracleEventList._events` and fills `describe` / `trust_addr` per event.
+For each [`oracle_event_lists`](data-schema.md#oracle_event_lists) row that has at least one event still missing reconciler-only metadata, the OracleEventList reconciler runs `OracleEventList._events` and fills `describe` / `trust_addr` per event.
 
 Key column: [`oracle_events.meta_reconciled_at`](data-schema.md#oracle_events). The reconciler stamps this **unconditionally** on every successful pass — even when the on-chain `trustAddr` is legitimately null, the marker is set so the row drops out of the pending queue. The marker replaced an earlier `describe IS NULL OR trust_addr IS NULL` predicate that never cleared for events with null on-chain metadata; the change shipped in migration 0012 with a backfill that stamps `meta_reconciled_at` for rows that already had either field populated.
 
-The pending-row predicate is:
+The reconciler selects an OracleEventList when this condition is true:
 
 ```sql
 exists (select 1 from oracle_events oe
@@ -100,7 +142,7 @@ Reconciler-side failures use a separate mechanism — `last_reconcile_failed_at`
 | --- | --- |
 | `markets.orderbook_address IS NOT NULL ⇒ frozen_at IS NOT NULL` | Reconciler `CASE WHEN frozen_at IS NOT NULL THEN $X ELSE orderbook_address END` clause. Backfilled by migration 0013. |
 | Lifecycle timings (`stake_*`, `result_*`) are projector-only | Reconciler does not write these columns. |
-| `oracle_events.meta_reconciled_at` set after every successful reconciler pass | OEL reconciler UPDATE always stamps it. |
+| `oracle_events.meta_reconciled_at` set after every successful reconciler pass | OracleEventList reconciler UPDATE always stamps it. |
 | `live_orders.last_event_lt` monotonic per row | `greatest(existing, new)` on every UPDATE. |
 | Cancellation reason matches its source | Projector picks `PMP_CANCELLED` or `EVENT_CANCELLED` based on event type, never NULL. |
 

@@ -1,6 +1,6 @@
-# Market Data — API: Backend Notes
+# Market Data API Technical Specification
 
-Implementation-facing notes for the HTTP layer that serves the market-data read-model. The public contract (URLs, field names, parameter rules, error shapes, response examples) lives in [api-spec.md](../api-spec.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md). The write side — how those tables get populated — is in [market-data-indexer.md](market-data-indexer.md).
+Implementation-facing requirements for the HTTP layer that serves the market-data read-model. The public contract (URLs, field names, parameter rules, error shapes, response examples) lives in [api-spec.md](../api-spec.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md). The write side — how those tables get populated — is in [market-data-indexer.md](market-data-indexer.md).
 
 ## Glossary
 
@@ -58,7 +58,7 @@ For each row in the page, the API:
 4. Joins [`market_outcomes`](data-schema.md#market_outcomes) for the outcomes array, including per-outcome `pricePrecision`, `tickSize`, `stepSize`, `minNotional`, `maxBatchSize`.
 5. Joins [`oracles`](data-schema.md#oracles) + [`oracle_events`](data-schema.md#oracle_events) for the `event.*` block (`eventName`, `description`, `oracleName`, `oracleAddress`, `oracleFee`).
 
-`description` and other reconciler-only fields rely on data filled by the OEL reconciler — they may be null briefly after a market is discovered but before the reconciler-side metadata lands.
+`description` and other reconciler-only fields rely on data filled by the OracleEventList reconciler — they may be null briefly after a market is discovered but before the reconciler-side metadata lands.
 
 ### Pagination
 

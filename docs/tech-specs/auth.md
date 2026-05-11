@@ -1,6 +1,6 @@
-# Authentication: Backend Notes
+# Authentication Technical Specification
 
-This document contains implementation-facing notes for the DODEX authentication backend. The public HTTP contract — `X-DODEX-APIKEY` header, `signature`/`timestamp`/`recvWindow` query parameters, signature formula, and error codes — lives in [api-spec.md](../api-spec.md).
+This document defines the implementation-facing requirements for DODEX authentication. The public HTTP contract — `X-DODEX-APIKEY` header, `signature`/`timestamp`/`recvWindow` query parameters, signature formula, and error codes — lives in [api-spec.md](../api-spec.md).
 
 ## User Model
 
