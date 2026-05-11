@@ -72,11 +72,18 @@ impl OracleEventListReconciler {
         Self { pool, graphql, decoder }
     }
 
-    /// Single sweep: pulls OELs that have at least one child event still
-    /// missing reconciler-only metadata (`describe` OR `trust_addr`), runs
-    /// `_events` per OEL, and fills the matching `oracle_events` rows. Each
-    /// OEL runs in its own transaction so one broken contract does not block
-    /// its siblings.
+    /// Single sweep: pulls OELs that have at least one child event whose
+    /// reconciler-only metadata has not been fetched yet (`meta_reconciled_at
+    /// is null`), runs `_events` per OEL, and stamps the matching
+    /// `oracle_events` rows. Each OEL runs in its own transaction so one
+    /// broken contract does not block its siblings.
+    ///
+    /// We key the pending predicate on `meta_reconciled_at` rather than on
+    /// `describe`/`trust_addr` being null because both fields are nullable on
+    /// chain (see migration 0012). Using the value of the field as a proxy
+    /// for "reconciliation attempted" left rows with legitimately-null
+    /// `trustAddr` matching the predicate forever and starved out the
+    /// `LIMIT 16` batch.
     pub async fn run_once(&self) -> Result<OelReconcileStats> {
         let mut stats = OelReconcileStats::default();
         // Anti-starvation: same shape as `MarketReconciler::run_once`. Skip
@@ -90,7 +97,7 @@ impl OracleEventListReconciler {
                   and exists (
                       select 1 from oracle_events oe
                        where oe.eventlist_id = oel.id
-                         and (oe.describe is null or oe.trust_addr is null)
+                         and oe.meta_reconciled_at is null
                   )
                 order by oel.last_reconcile_failed_at nulls first, oel.id asc
                 limit $1"#
@@ -276,20 +283,24 @@ async fn apply_event_metadata(
     eventlist_id: i64,
     item: &EventMetadata,
 ) -> Result<u64> {
-    if item.describe.is_none() && item.trust_addr.is_none() {
-        return Ok(0);
-    }
     // `coalesce(existing, $new)` semantics: never overwrite a value already
     // recorded. The on-chain map is the only source of truth for these fields,
     // and once set they do not change — events are immutable once added.
+    //
+    // `meta_reconciled_at` is set unconditionally even when both fields parse
+    // to None — that signals "getter ran and the chain returned null/empty
+    // for this event", which is a valid terminal state. Keying the SELECT
+    // predicate on a null *field* instead would re-pick this row every sweep.
+    // The WHERE guard `meta_reconciled_at is null` keeps repeat runs idempotent.
     let updated = sqlx::query(
         r#"update oracle_events
               set describe = coalesce(describe, $1),
                   trust_addr = coalesce(trust_addr, $2),
+                  meta_reconciled_at = now(),
                   updated_at = now()
             where eventlist_id = $3
               and internal_id_in_eventlist = $4::numeric
-              and (describe is null or trust_addr is null)"#,
+              and meta_reconciled_at is null"#,
     )
     .bind(item.describe.as_deref())
     .bind(item.trust_addr.as_deref())

@@ -235,16 +235,14 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
             .split(',')
             .map(|v| v.trim())
             .filter(|v| !v.is_empty())
-            .map(|v| {
-                MarketStatus::parse(v).ok_or(ApiError::from(DomainError::InvalidMarketOrSymbol))
-            })
+            .map(|v| MarketStatus::parse(v).ok_or(ApiError::from(DomainError::InvalidParameter)))
             .collect::<Result<Vec<_>, _>>()?,
         None => Vec::new(),
     };
     let sort = match sort_param.as_deref() {
         None | Some("resultStart") => MarketsSort::ResultStartAsc,
         Some("createdAt") => MarketsSort::CreatedAtDesc,
-        Some(_) => return Err(ApiError::from(DomainError::InvalidMarketOrSymbol)),
+        Some(_) => return Err(ApiError::from(DomainError::InvalidParameter)),
     };
     let limit = limit_param
         .map(|v| v.clamp(1, MAX_LIMIT as i64) as u16)

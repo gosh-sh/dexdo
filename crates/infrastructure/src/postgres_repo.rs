@@ -390,16 +390,22 @@ impl PostgresReadModelRepository {
 // cancellation event was missed or has not been replayed yet — surfacing
 // either signal keeps the API consistent with the on-chain terminal state
 // the spec requires for CANCELLED markets.
+// PoolsFrozen gates the post-freeze branch. Per docs/tech-spec.md invariant
+// #2 ("status == RESOLVING implies frozenAt != null"), RESOLVING and EXPIRED
+// must not be reachable while frozen_at is null — that scenario is
+// AWAITING_FREEZE indefinitely (tech-spec.md:76). Without this gate the SQL
+// `?status=RESOLVING` filter would match rows whose Rust-derived `frozenAt`
+// is still null, exposing a state the spec forbids.
 const STATUS_CASE: &str = r#"case
         when m.cancelled_at is not null or m.is_cancelled then 'CANCELLED'
         when m.resolved_at is not null then 'RESOLVED'
         when m.stake_start is null then 'PENDING'
+        when m.frozen_at is null and $1 >= m.stake_end then 'AWAITING_FREEZE'
+        when m.frozen_at is null and $1 >= m.stake_start then 'STAKING'
+        when m.frozen_at is null then 'UPCOMING'
         when $1 >= m.result_end then 'EXPIRED'
         when $1 >= m.result_start then 'RESOLVING'
-        when m.frozen_at is not null then 'TRADING'
-        when $1 >= m.stake_end then 'AWAITING_FREEZE'
-        when $1 >= m.stake_start then 'STAKING'
-        else 'UPCOMING'
+        else 'TRADING'
       end"#;
 
 fn market_select_sql(where_clause: &str, tail: &str) -> String {
@@ -578,6 +584,24 @@ fn derive_status(row: &MarketRow, now: i64) -> MarketStatus {
     let result_start = row.result_start.unwrap_or(stake_end);
     let result_end = row.result_end.unwrap_or(result_start);
 
+    // PoolsFrozen gate: tech-spec.md invariant #2 ties RESOLVING (and by
+    // extension the post-result_end EXPIRED) to `frozenAt != null`, and
+    // tech-spec.md:76 keeps unfrozen markets in AWAITING_FREEZE regardless
+    // of how far past `stakeEnd` server time is. If freeze was never
+    // observed we stay in the pre-freeze branch indefinitely; otherwise the
+    // listing endpoint would return a market whose Rust-derived status
+    // disagrees with its `frozenAt = null` timings and trips the API spec's
+    // status⇄timings consistency contract.
+    if row.frozen_at.is_none() {
+        if now >= stake_end {
+            return MarketStatus::AwaitingFreeze;
+        } else if now >= stake_start {
+            return MarketStatus::Staking;
+        } else {
+            return MarketStatus::Upcoming;
+        }
+    }
+
     // Spec (docs/api-spec.md §Market Status): EXPIRED applies once the market
     // has *reached* `resultEnd`, not strictly past it. Both this branch and
     // the SQL `STATUS_CASE` use `>=` so `?status=EXPIRED` filtering and
@@ -586,14 +610,8 @@ fn derive_status(row: &MarketRow, now: i64) -> MarketStatus {
         MarketStatus::Expired
     } else if now >= result_start {
         MarketStatus::Resolving
-    } else if row.frozen_at.is_some() {
-        MarketStatus::Trading
-    } else if now >= stake_end {
-        MarketStatus::AwaitingFreeze
-    } else if now >= stake_start {
-        MarketStatus::Staking
     } else {
-        MarketStatus::Upcoming
+        MarketStatus::Trading
     }
 }
 
@@ -743,13 +761,15 @@ mod tests {
 
     #[test]
     fn resolving_after_result_start() {
-        let r = row(Some(200), Some(300), Some(400), Some(500));
+        let mut r = row(Some(200), Some(300), Some(400), Some(500));
+        r.frozen_at = Some(310);
         assert_eq!(derive_status(&r, 450), MarketStatus::Resolving);
     }
 
     #[test]
     fn expired_after_result_end() {
-        let r = row(Some(200), Some(300), Some(400), Some(500));
+        let mut r = row(Some(200), Some(300), Some(400), Some(500));
+        r.frozen_at = Some(310);
         assert_eq!(derive_status(&r, 600), MarketStatus::Expired);
     }
 
@@ -758,15 +778,27 @@ mod tests {
         // Spec: EXPIRED applies once the market reaches `resultEnd`. `now == result_end`
         // must flip to EXPIRED; the previous `>` boundary kept it RESOLVING by one
         // tick. This pins the inclusive boundary against future regressions.
-        let r = row(Some(200), Some(300), Some(400), Some(500));
+        let mut r = row(Some(200), Some(300), Some(400), Some(500));
+        r.frozen_at = Some(310);
         assert_eq!(derive_status(&r, 500), MarketStatus::Expired);
     }
 
     #[test]
     fn resolving_just_before_result_end() {
         // Sanity check: one second before `resultEnd` is still RESOLVING.
-        let r = row(Some(200), Some(300), Some(400), Some(500));
+        let mut r = row(Some(200), Some(300), Some(400), Some(500));
+        r.frozen_at = Some(310);
         assert_eq!(derive_status(&r, 499), MarketStatus::Resolving);
+    }
+
+    #[test]
+    fn awaiting_freeze_holds_past_result_start_without_freeze() {
+        // tech-spec.md invariant #2: RESOLVING implies frozenAt != null. With
+        // PoolsFrozen still unobserved the market must stay AWAITING_FREEZE
+        // regardless of how far past result_start/result_end we are.
+        let r = row(Some(200), Some(300), Some(400), Some(500));
+        assert_eq!(derive_status(&r, 450), MarketStatus::AwaitingFreeze);
+        assert_eq!(derive_status(&r, 600), MarketStatus::AwaitingFreeze);
     }
 
     #[test]

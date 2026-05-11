@@ -102,10 +102,11 @@ async fn apply(
         r#"update oracle_events
               set describe = coalesce(describe, $1),
                   trust_addr = coalesce(trust_addr, $2),
+                  meta_reconciled_at = now(),
                   updated_at = now()
             where eventlist_id = $3
               and internal_id_in_eventlist = $4::numeric
-              and (describe is null or trust_addr is null)"#,
+              and meta_reconciled_at is null"#,
     )
     .bind(describe)
     .bind(trust_addr)
@@ -167,11 +168,10 @@ async fn does_not_overwrite_existing_values() {
     let first = apply(&pool, eventlist_id, event_id, Some("Original"), Some("0xaaa")).await;
     assert_eq!(first, 1);
 
-    // Second pass with different values must be a no-op — describe and
-    // trust_addr are already populated, so the WHERE guard
-    // (`describe is null or trust_addr is null`) excludes the row.
+    // Second pass with different values must be a no-op — the WHERE guard
+    // (`meta_reconciled_at is null`) excludes the row once the marker is set.
     let second = apply(&pool, eventlist_id, event_id, Some("Replaced"), Some("0xbbb")).await;
-    assert_eq!(second, 0, "non-null fields must not be overwritten");
+    assert_eq!(second, 0, "rows already stamped meta_reconciled_at must be skipped");
 
     let row: (Option<String>, Option<String>) = sqlx::query_as(
         "select describe, trust_addr from oracle_events
@@ -201,7 +201,9 @@ async fn fills_only_missing_field_when_partially_set() {
     let (_oracle_id, eventlist_id) =
         seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
 
-    // Pre-set describe only; trust_addr remains null.
+    // Pre-set describe only; trust_addr and meta_reconciled_at remain null.
+    // This models the legacy state from before migration 0012 where a row
+    // could have describe populated without the reconciler-progress marker.
     sqlx::query(
         "update oracle_events set describe = 'Already known'
                 where eventlist_id = $1 and internal_id_in_eventlist = $2::numeric",
@@ -214,7 +216,7 @@ async fn fills_only_missing_field_when_partially_set() {
 
     let updated =
         apply(&pool, eventlist_id, event_id, Some("Should not stick"), Some("0xnewtrust")).await;
-    assert_eq!(updated, 1, "row matches the partial-fill predicate");
+    assert_eq!(updated, 1, "unstamped row matches the pending predicate");
 
     let row: (Option<String>, Option<String>) = sqlx::query_as(
         "select describe, trust_addr from oracle_events
@@ -228,4 +230,42 @@ async fn fills_only_missing_field_when_partially_set() {
 
     assert_eq!(row.0.as_deref(), Some("Already known"), "describe must not be overwritten");
     assert_eq!(row.1.as_deref(), Some("0xnewtrust"), "trust_addr must be filled");
+}
+
+#[tokio::test]
+async fn null_chain_metadata_clears_pending_predicate() {
+    // Regression: before migration 0012 the pending predicate
+    // `describe is null or trust_addr is null` matched forever when the
+    // on-chain getter legitimately returned null for `trustAddr` (or empty
+    // `describe`). The OEL reconciler then re-selected the same rows every
+    // sweep and starved later OELs out of the `LIMIT 16` batch. With the
+    // `meta_reconciled_at` marker a single pass with all-None metadata must
+    // remove the row from the pending set.
+    let Some(pool) = setup().await else { return };
+
+    let test = "oel_reconcile_null_chain_meta";
+    let oracle_addr = format!("0:{test}_oracle");
+    let oracle_name = format!("{test}-oracle");
+    let eventlist_addr = format!("0:{test}_evlist");
+    let event_id = "4";
+
+    purge(&pool, &oracle_addr, &eventlist_addr).await;
+    let (_oracle_id, eventlist_id) =
+        seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
+
+    let updated = apply(&pool, eventlist_id, event_id, None, None).await;
+    assert_eq!(updated, 1, "first pass with null metadata must still stamp the marker");
+
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from oracle_events
+                where eventlist_id = $1 and meta_reconciled_at is null",
+    )
+    .bind(eventlist_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count pending");
+    assert_eq!(pending, 0, "row must drop out of the pending set after one pass");
+
+    let second = apply(&pool, eventlist_id, event_id, None, None).await;
+    assert_eq!(second, 0, "second pass must be a no-op — no starvation loop");
 }
