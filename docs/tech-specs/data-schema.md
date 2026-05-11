@@ -113,7 +113,7 @@ Each oracle owns a sequence of EventList contracts created by the `Oracle.Oracle
 | `last_reconcile_failed_at` (added 0011) | `timestamptz` | Stamped when a reconcile attempt fails. Used for backoff and queue ordering. |
 | `reconcile_attempts` (added 0011) | `integer` default `0` | Diagnostic counter for permanently broken EventLists. |
 
-Index: `oracle_event_lists_oracle_id_idx` for parent fan-out.
+Index: `oracle_event_lists_oracle_id_idx` speeds up loading all EventList rows for one oracle.
 
 ### `oracle_events`
 
@@ -145,7 +145,7 @@ Indices:
 
 | Index | Purpose |
 | --- | --- |
-| `oracle_events_eventlist_id_idx` | Parent fan-out. |
+| `oracle_events_eventlist_id_idx` | Speeds up loading all event rows for one EventList. |
 | `oracle_events_deadline_idx` | Time-window queries. |
 | `oracle_events_confirmed_pmp_idx` (partial: `confirmed_pmp_address IS NOT NULL`) | Reverse-lookup from PMP back to event. |
 | `oracle_events_pending_meta_idx` (partial: `meta_reconciled_at IS NULL`) | Drives the OEL reconciler's pending-row SELECT. Replaced the original `describe IS NULL`-only index in migration 0012. |
@@ -212,7 +212,7 @@ One row per outcome of each market. Source for outcome listings and the per-outc
 | `max_batch_size` | `integer` | Max orders per batch request for this outcome. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
-Index: `market_outcomes_market_id_fk_idx` for parent fan-out. Symbol is globally unique by construction.
+Index: `market_outcomes_market_id_fk_idx` speeds up loading all outcome rows for one market. Symbol is globally unique by construction.
 
 ### `live_orders`
 
