@@ -153,10 +153,10 @@ pub struct Terminal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Market {
     pub market_address: MarketAddress,
-    /// `None` until the on-chain OrderBook is deployed for this PMP. The
-    /// reconciler can populate every other PMP-state field via `getDetails`
-    /// before the OrderBook contract exists on-chain, so this stays nullable
-    /// in the public contract; clients gate trading availability on `status`.
+    /// `None` only while the backend has not resolved the deterministic
+    /// OrderBook address yet. The address may be known before the OrderBook
+    /// contract is active on-chain; clients gate trading availability on
+    /// `status`.
     pub order_book_address: Option<String>,
     pub market_name: MarketName,
     pub status: MarketStatus,
