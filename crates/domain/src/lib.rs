@@ -234,6 +234,13 @@ pub enum DomainError {
     OrderValidationFailed,
     #[error("unknown order")]
     UnknownOrder,
+    /// The read-model row violates a tech-spec invariant (e.g. RESOLVED with
+    /// `frozenAt = null`, CANCELLED with `cancelReason = null`). Per
+    /// docs/tech-spec.md:113 these rows MUST be rejected rather than
+    /// serialized — the indexer is mid-replay and a consistent view is not
+    /// available yet. Surfaces as a 503 so clients know to retry.
+    #[error("market read-model is temporarily inconsistent")]
+    MarketInconsistent,
     #[error("unexpected domain error")]
     Unexpected,
 }
@@ -249,6 +256,7 @@ impl DomainError {
             Self::PrecisionExceeded => -1111,
             Self::InvalidMarketOrSymbol => -1121,
             Self::InvalidParameter => -1130,
+            Self::MarketInconsistent => -1500,
             Self::OrderValidationFailed => -2010,
             Self::UnknownOrder => -2011,
         }
@@ -264,6 +272,7 @@ impl DomainError {
             Self::PrecisionExceeded => "Precision is over the maximum defined for this asset.",
             Self::InvalidMarketOrSymbol => "Invalid market or symbol.",
             Self::InvalidParameter => "Invalid value for a query parameter.",
+            Self::MarketInconsistent => "Market data is temporarily inconsistent.",
             Self::OrderValidationFailed => "Order would immediately fail validation.",
             Self::UnknownOrder => "Unknown order.",
         }

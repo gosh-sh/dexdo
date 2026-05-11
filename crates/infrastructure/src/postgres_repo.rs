@@ -540,6 +540,14 @@ fn assemble_market(
     let status = derive_status(&row, now);
     let timings = build_timings(&row, status);
     let terminal = build_terminal(&row, status, now);
+    // tech-spec.md:113 — invariant violations MUST fail the request closed.
+    // Validate the *built* DTO rather than the raw row: `build_terminal` can
+    // silently swallow a bad `cancel_reason` string via
+    // `and_then(CancelReason::parse)` (turning it into `cancelReason: null`),
+    // and a non-PENDING status with one NULL timing column lands as
+    // `timings: null` after `build_timings` returns `None`. Both shapes
+    // violate the API contract.
+    validate_invariants(status, &timings, &terminal).map_err(|err| anyhow!(err))?;
     let event = MarketEvent {
         event_id: numeric_to_hex(&row.event_id)?,
         event_name: row.event_name,
@@ -613,6 +621,85 @@ fn derive_status(row: &MarketRow, now: i64) -> MarketStatus {
     } else {
         MarketStatus::Trading
     }
+}
+
+/// Cross-checks the assembled DTO against the API/tech-spec invariants. Per
+/// `docs/tech-spec.md:113`, an inconsistent row MUST be rejected rather than
+/// serialized. Called from `assemble_market` after `derive_status`,
+/// `build_timings`, and `build_terminal` have run; it validates the shapes
+/// they produce, not the raw `MarketRow`, because the build helpers can
+/// silently elide invalid fields (e.g. `CancelReason::parse` collapses an
+/// unknown string into `None`, and `build_timings` returns `None` if any of
+/// the four timing columns is NULL).
+fn validate_invariants(
+    status: MarketStatus,
+    timings: &Option<Timings>,
+    terminal: &Option<Terminal>,
+) -> Result<(), DomainError> {
+    // api-spec.md:328: "timings itself is null only for PENDING."
+    // tech-spec.md:109 invariant #3: PENDING ⇒ timings == null.
+    if matches!(status, MarketStatus::Pending) != timings.is_none() {
+        return Err(DomainError::MarketInconsistent);
+    }
+    // api-spec.md:349: terminal is non-null iff status ∈ {RESOLVED, CANCELLED,
+    // EXPIRED}. Anything else is a shape we promised never to serialize.
+    let is_terminal_status =
+        matches!(status, MarketStatus::Resolved | MarketStatus::Cancelled | MarketStatus::Expired);
+    if is_terminal_status != terminal.is_some() {
+        return Err(DomainError::MarketInconsistent);
+    }
+
+    match status {
+        MarketStatus::Resolved => {
+            // tech-spec.md:110 invariant #4: RESOLVED ⇒ frozenAt != null.
+            // api-spec.md:391: `resolvedOutcomeId` is the whole point of the
+            // terminal block — without it the client cannot know which side won.
+            let t = timings.as_ref().expect("timings checked non-null above");
+            let term = terminal.as_ref().expect("terminal checked non-null above");
+            if t.frozen_at.is_none()
+                || !matches!(term.kind, TerminalKind::Resolved)
+                || term.resolved_outcome_id.is_none()
+            {
+                return Err(DomainError::MarketInconsistent);
+            }
+        }
+        MarketStatus::Cancelled => {
+            // tech-spec.md:103: cancelReason MUST distinguish PMP_CANCELLED vs
+            // EVENT_CANCELLED. A NULL on the row OR an unknown string on the
+            // row both manifest here as `cancel_reason.is_none()` after
+            // `build_terminal`'s `CancelReason::parse` filter.
+            let term = terminal.as_ref().expect("terminal checked non-null above");
+            if !matches!(term.kind, TerminalKind::Cancelled) || term.cancel_reason.is_none() {
+                return Err(DomainError::MarketInconsistent);
+            }
+        }
+        MarketStatus::Expired => {
+            // EXPIRED is a time-driven terminal; the rest of the invariant
+            // (timings present + correct kind) is covered by the cross-checks
+            // above plus this `kind` match.
+            let term = terminal.as_ref().expect("terminal checked non-null above");
+            if !matches!(term.kind, TerminalKind::Expired) {
+                return Err(DomainError::MarketInconsistent);
+            }
+        }
+        MarketStatus::Trading | MarketStatus::Resolving => {
+            // tech-spec.md invariants #1, #2: these statuses imply
+            // frozenAt != null. `derive_status` already gates on this (see
+            // the `row.frozen_at.is_none()` branch), but assert here so the
+            // contract holds even if a future refactor of derive_status
+            // forgets the gate.
+            let t = timings.as_ref().expect("timings checked non-null above");
+            if t.frozen_at.is_none() {
+                return Err(DomainError::MarketInconsistent);
+            }
+        }
+        MarketStatus::Pending
+        | MarketStatus::Upcoming
+        | MarketStatus::Staking
+        | MarketStatus::AwaitingFreeze => {}
+    }
+
+    Ok(())
 }
 
 fn build_timings(row: &MarketRow, status: MarketStatus) -> Option<Timings> {
@@ -835,6 +922,175 @@ mod tests {
         r.resolved_at = Some(450);
         r.is_cancelled = true;
         assert_eq!(derive_status(&r, 250), MarketStatus::Cancelled);
+    }
+
+    // ------------------------------------------------------------------
+    // validate_invariants — pins the fail-closed contract from
+    // docs/tech-spec.md:113 against the built DTO shape.
+    // ------------------------------------------------------------------
+
+    fn timings_full(frozen: Option<i64>) -> Timings {
+        Timings {
+            stake_start: 100,
+            stake_end: 200,
+            result_start: 300,
+            result_end: 400,
+            frozen_at: frozen,
+        }
+    }
+
+    fn terminal_resolved(outcome: Option<u32>) -> Terminal {
+        Terminal {
+            kind: TerminalKind::Resolved,
+            at: 350,
+            resolved_outcome_id: outcome,
+            cancel_reason: None,
+        }
+    }
+
+    fn terminal_cancelled(reason: Option<CancelReason>) -> Terminal {
+        Terminal {
+            kind: TerminalKind::Cancelled,
+            at: 150,
+            resolved_outcome_id: None,
+            cancel_reason: reason,
+        }
+    }
+
+    #[test]
+    fn validate_pending_with_timings_fails() {
+        // api-spec.md:328 / invariant #3: timings must be null IFF PENDING.
+        let err = validate_invariants(
+            MarketStatus::Pending,
+            &Some(timings_full(None)),
+            &None,
+        )
+        .unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn validate_non_pending_with_null_timings_fails() {
+        // Catches the `build_timings -> None` path when a non-PENDING status
+        // is paired with one NULL timing column. The reviewer's reported
+        // shape: terminal/non-pending status surfacing with `timings: null`.
+        let err =
+            validate_invariants(MarketStatus::AwaitingFreeze, &None, &None).unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn validate_resolved_without_outcome_id_fails() {
+        // api-spec.md:391: `resolvedOutcomeId` MUST be set when kind=RESOLVED.
+        // `build_terminal` just maps `Option<i32> -> Option<u32>`, so a NULL
+        // `resolved_outcome_id` row used to surface as a Resolved terminal
+        // with `resolvedOutcomeId: null` — the client cannot tell who won.
+        let err = validate_invariants(
+            MarketStatus::Resolved,
+            &Some(timings_full(Some(250))),
+            &Some(terminal_resolved(None)),
+        )
+        .unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn validate_resolved_without_freeze_fails() {
+        // Mirrors the integration test `resolved_without_freeze_fails_closed`
+        // — invariant #4. Pinned at unit level too because the validation now
+        // lives here, not inline in `assemble_market`.
+        let err = validate_invariants(
+            MarketStatus::Resolved,
+            &Some(timings_full(None)),
+            &Some(terminal_resolved(Some(1))),
+        )
+        .unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn validate_cancelled_without_reason_fails() {
+        // The reviewer's new case: a CANCELLED row whose `cancel_reason`
+        // column is a string outside `{PMP_CANCELLED, EVENT_CANCELLED}` is
+        // parsed to `None` by `build_terminal::CancelReason::parse`. Looking
+        // at `row.cancel_reason.is_none()` alone (the previous check) would
+        // miss this — the row has a value, just an invalid one. Validating
+        // the *built* DTO catches it.
+        let err = validate_invariants(
+            MarketStatus::Cancelled,
+            &Some(timings_full(Some(250))),
+            &Some(terminal_cancelled(None)),
+        )
+        .unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn validate_terminal_status_without_terminal_block_fails() {
+        let err = validate_invariants(
+            MarketStatus::Expired,
+            &Some(timings_full(Some(250))),
+            &None,
+        )
+        .unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn validate_live_status_with_terminal_block_fails() {
+        // api-spec.md:349: terminal is null while market is alive.
+        let err = validate_invariants(
+            MarketStatus::Trading,
+            &Some(timings_full(Some(250))),
+            &Some(terminal_resolved(Some(1))),
+        )
+        .unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn validate_trading_without_freeze_fails() {
+        // Defense in depth: derive_status already gates TRADING/RESOLVING on
+        // frozen_at != null, but the validator asserts it independently so a
+        // future change to derive_status cannot silently break the contract.
+        let err = validate_invariants(
+            MarketStatus::Trading,
+            &Some(timings_full(None)),
+            &None,
+        )
+        .unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn validate_consistent_shapes_pass() {
+        // Sanity checks that the validator does not over-fire.
+        validate_invariants(MarketStatus::Pending, &None, &None).unwrap();
+        validate_invariants(MarketStatus::Staking, &Some(timings_full(None)), &None).unwrap();
+        validate_invariants(MarketStatus::Trading, &Some(timings_full(Some(250))), &None).unwrap();
+        validate_invariants(
+            MarketStatus::Resolved,
+            &Some(timings_full(Some(250))),
+            &Some(terminal_resolved(Some(1))),
+        )
+        .unwrap();
+        validate_invariants(
+            MarketStatus::Cancelled,
+            &Some(timings_full(Some(250))),
+            &Some(terminal_cancelled(Some(CancelReason::PmpCancelled))),
+        )
+        .unwrap();
+        validate_invariants(
+            MarketStatus::Expired,
+            &Some(timings_full(Some(250))),
+            &Some(Terminal {
+                kind: TerminalKind::Expired,
+                at: 400,
+                resolved_outcome_id: None,
+                cancel_reason: None,
+            }),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -79,9 +79,18 @@ impl MarketReconciler {
         //      window — they will not be retried this tick at all.
         //   2. Order never-failed rows ahead of cooled-down failed rows
         //      (`nulls first`). Within each group, oldest id first.
+        // Two reasons a row enters the queue:
+        //   - never reconciled (`last_reconciled_at is null`); or
+        //   - already reconciled, but `PoolsFrozen` has since landed (so the
+        //     OrderBook contract is now observed on-chain per
+        //     dex-events-routing.md:77) and `orderbook_address` is still
+        //     null because the previous reconcile pass refused to stamp it
+        //     pre-freeze. tech-spec.md invariant #5: stay null until
+        //     observed; PoolsFrozen is the observation signal.
         let pending: Vec<PendingMarket> = sqlx::query_as(&format!(
             r#"select id, pmp_address from markets
-               where last_reconciled_at is null
+               where (last_reconciled_at is null
+                      or (frozen_at is not null and orderbook_address is null))
                  and (last_reconcile_failed_at is null
                       or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
                order by last_reconcile_failed_at nulls first, id asc
@@ -221,11 +230,15 @@ async fn write_market_state(
     // keeps the row pending and lets the failure-tracking path retry it.
     let num_outcomes: i32 =
         field_str(details, "numOutcomes")?.parse().context("parse numOutcomes")?;
-    let stake_start: i64 = field_str(details, "stakeStart")?.parse().context("parse stakeStart")?;
-    let stake_end: i64 = field_str(details, "stakeEnd")?.parse().context("parse stakeEnd")?;
-    let result_start: i64 =
-        field_str(details, "resultStart")?.parse().context("parse resultStart")?;
-    let result_end: i64 = field_str(details, "resultEnd")?.parse().context("parse resultEnd")?;
+    // Timings (`stakeStart`/`stakeEnd`/`resultStart`/`resultEnd`) are
+    // intentionally NOT read from `getDetails()` here. On a pre-`TimingsSet`
+    // PMP the getter returns contract defaults (zeros), which used to land in
+    // the row and make `derive_status` flip straight to AWAITING_FREEZE —
+    // violating tech-spec.md invariant #3 ("status == PENDING implies
+    // timings == null") and the PENDING definition at tech-spec.md:73
+    // ("EventConfirmed received; no TimingsSet yet"). The `apply_timings_set`
+    // projector (projectors.rs:332-363) is the sole writer of those columns;
+    // until it fires, the row stays NULL-timings → PENDING.
     let orderbook_address = field_str(orderbook, "orderBookAddress")?;
 
     // When the reconciler is the first to observe a cancellation (event lost
@@ -235,6 +248,14 @@ async fn write_market_state(
     // fallback for the "event missed entirely" path. Conversely, if the chain
     // says the market is no longer cancelled we leave `cancelled_at` alone:
     // we never erase a previously-recorded cancellation timestamp.
+    // `orderbook_address` is gated on `frozen_at != null`. The PMP getter is
+    // deterministic and would happily return the precomputed address even
+    // pre-freeze, but tech-spec.md invariant #5 requires the read-model to
+    // hold the column null until the OrderBook contract is observed on-chain.
+    // PoolsFrozen fires after the OrderBook is deployed (see
+    // dex-events-routing.md:77), so `frozen_at` is the observation signal.
+    // Once stamped the value is stable — the getter is deterministic, and
+    // the run_once SELECT only re-queues rows where the column is still null.
     sqlx::query(
         r#"update markets
               set market_id = $1,
@@ -247,22 +268,17 @@ async fn write_market_state(
                       else cancelled_at
                   end,
                   num_outcomes = $5,
-                  stake_start = $6,
-                  stake_end = $7,
-                  result_start = $8,
-                  result_end = $9,
-                  orderbook_address = $10
-            where id = $11"#,
+                  orderbook_address = case
+                      when frozen_at is not null then $6
+                      else orderbook_address
+                  end
+            where id = $7"#,
     )
     .bind(market_name)
     .bind(&oracle_list_hash_decimal)
     .bind(approved)
     .bind(is_cancelled)
     .bind(num_outcomes)
-    .bind(stake_start)
-    .bind(stake_end)
-    .bind(result_start)
-    .bind(result_end)
     .bind(orderbook_address)
     .bind(market_id)
     .execute(&mut **tx)

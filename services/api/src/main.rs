@@ -139,6 +139,11 @@ impl ApiError {
             | DomainError::TimestampOutsideRecvWindow
             | DomainError::InvalidSignature => StatusCode::UNAUTHORIZED,
             DomainError::UnknownOrder | DomainError::InvalidMarketOrSymbol => StatusCode::NOT_FOUND,
+            // Transient indexer state (e.g. RESOLVED row whose PoolsFrozen
+            // has not been replayed yet). 503 tells the client to retry —
+            // the underlying inconsistency clears as the indexer catches up.
+            // See docs/tech-spec.md:113 ("fail the request closed").
+            DomainError::MarketInconsistent => StatusCode::SERVICE_UNAVAILABLE,
             DomainError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::BAD_REQUEST,
         }
