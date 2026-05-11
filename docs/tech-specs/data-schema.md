@@ -15,7 +15,7 @@ Tables fall into four buckets:
 
 **Read-model** — Postgres tables prepared for API reads. They are derived from chain events and contract state so the API can answer requests without decoding the blockchain state on every call.
 
-**Projector** — code that handles one decoded chain event and writes the corresponding read-model change. For example, `OrderBook.OrderPlaced` creates or refreshes a row in `live_orders`.
+**Projector** — code that handles one decoded chain event and writes the corresponding read-model change. For example, the `OrderBook.OrderPlaced` event creates or refreshes a row in `live_orders`.
 
 **Reconciler** — background indexer task that periodically reads contract state through getters and fills fields that events alone do not provide. The market reconciler reads PMP state (`getDetails`, `getOrderBookAddress`) and updates `markets` / `market_outcomes`. The OracleEventList reconciler reads `_events` from each EventList contract and fills missing event metadata in `oracle_events`, such as `describe` and `trust_addr`.
 
@@ -87,7 +87,7 @@ The discovery side of the indexer tracks oracles, their event lists, and the eve
 
 ### `oracles`
 
-One row per oracle service the system knows about. Populated by `RootOracle.OracleDeployed` (and back-filled from `EventList` parent lookups).
+One row per oracle service the system knows about. Populated by the `RootOracle.OracleDeployed` event and back-filled from `EventList` parent lookups.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -100,7 +100,7 @@ One row per oracle service the system knows about. Populated by `RootOracle.Orac
 
 ### `oracle_event_lists`
 
-Each oracle owns a sequence of EventList contracts (`Oracle.OracleEventListDeployed`). The indexer's OracleEventList reconciler processes one EventList at a time: it reads that contract's `_events` getter and updates the related `oracle_events` rows with metadata such as `describe` and `trust_addr`.
+Each oracle owns a sequence of EventList contracts created by the `Oracle.OracleEventListDeployed` event. The indexer's OracleEventList reconciler processes one EventList at a time: it reads that contract's `_events` getter and updates the related `oracle_events` rows with metadata such as `describe` and `trust_addr`.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -119,7 +119,7 @@ Index: `oracle_event_lists_oracle_id_idx` for parent fan-out.
 
 The actual events inside each EventList. Two writers:
 
-- **Projector** writes `event_name`, `oracle_fee`, `deadline`, and the `confirmed_*` columns from `EventAdded` / `EventConfirmed`.
+- **Projector** writes `event_name`, `oracle_fee`, `deadline`, and the `confirmed_*` columns from the `EventAdded` and `EventConfirmed` events.
 - **OEL reconciler** fills the metadata that lives only in `OracleEventList._events` getter state: `describe` and `trust_addr`.
 
 | Column | Type | Notes |
@@ -127,8 +127,8 @@ The actual events inside each EventList. Two writers:
 | `id` | `bigserial` PK | Internal FK target. |
 | `eventlist_id` | `bigint` FK → `oracle_event_lists(id)` ON DELETE CASCADE | Parent EventList. |
 | `internal_id_in_eventlist` | `numeric(78,0)` | Event id within the EventList. The pair `(eventlist_id, internal_id_in_eventlist)` is UNIQUE. |
-| `event_name` | `text` | From `EventAdded`. Surfaces as `event.eventName`. |
-| `oracle_fee` | `numeric(78,0)` | From `EventAdded`. |
+| `event_name` | `text` | From the `EventAdded` event. Surfaces as `event.eventName`. |
+| `oracle_fee` | `numeric(78,0)` | From the `EventAdded` event. |
 | `deadline` | `bigint` | Event deadline (unix seconds). |
 | `describe` | `text` | Event description — reconciler-only field. NULL until OEL reconciler runs. |
 | `count` | `numeric(78,0)` | Reserved metadata field from `_events`. |
@@ -136,7 +136,7 @@ The actual events inside each EventList. Two writers:
 | `outcome_names_jsonb` | `jsonb` default `'{}'::jsonb` | Outcome label map (`outcomeId → name`). |
 | `is_deleted` | `boolean` default `false` | Soft-delete flag for events that disappear from the EventList. |
 | `last_seen_at` | `timestamptz` | Updated on every projector pass that touches the row. |
-| `confirmed_pmp_address` (added 0004) | `text` | Set by `EventConfirmed`. Links an event to the PMP that markets it. |
+| `confirmed_pmp_address` (added 0004) | `text` | Set by the `EventConfirmed` event. Links an event to the PMP that markets it. |
 | `confirmed_at` (added 0004) | `timestamptz` | Stamp time (currently wall-clock; see review note in `docs/review-fixes-2026-05-11.md`). |
 | `meta_reconciled_at` (added 0012) | `timestamptz` | Per-row marker — set unconditionally by the OEL reconciler after a successful getter pass, even when `describe`/`trust_addr` come back NULL on chain. Drives the pending-row predicate so legitimately-null fields don't cause infinite re-fetch. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
@@ -154,7 +154,7 @@ Indices:
 
 ### `markets`
 
-One row per PMP (Prediction Market Pool) contract observed on chain. Discovered by `PMPDeployed`, completed by the market reconciler reading `PMP.getDetails()`, transitioned through lifecycle events (`TimingsSet`, `PoolsFrozen`, `Resolved`, `PMPCancelled`, `EventCancelled`). Hidden from the public API until `last_reconciled_at` is non-null.
+One row per PMP (Prediction Market Pool) contract observed on chain. Discovered by the `PMPDeployed` event, completed by the market reconciler reading `PMP.getDetails()`, and transitioned by the `TimingsSet` event, the `PoolsFrozen` event, the `Resolved` event, the `PMPCancelled` event, and the `EventCancelled` event. Hidden from the public API until `last_reconciled_at` is non-null.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -167,17 +167,17 @@ One row per PMP (Prediction Market Pool) contract observed on chain. Discovered 
 | `event_id` | `numeric(78,0)` | Oracle event id this market resolves against. |
 | `oracle_list_hash` | `numeric(78,0)` (nullable per 0005) | EventList hash used in OrderBook derivation. NULL pre-reconcile. |
 | `orderbook_address` | `text` (nullable) | The deterministic OrderBook address. Written by the reconciler **only when `frozen_at IS NOT NULL`** (migration 0013, H1 fix) — until then this column stays NULL and the API reports `orderBookAddress: null`. |
-| `approved` | `boolean` default `false` | Approval flag from `getDetails()`; flipped to `true` on `TimingsSet`. |
+| `approved` | `boolean` default `false` | Approval flag from `getDetails()`; flipped to `true` by the `TimingsSet` event. |
 | `is_cancelled` | `boolean` default `false` | On-chain cancellation flag from `getDetails()`. Either this or `cancelled_at` being set is enough to flip the derived status to `CANCELLED`. |
-| `stake_start` / `stake_end` / `result_start` / `result_end` | `bigint` (nullable) | Lifecycle timings (unix seconds). Written only by `TimingsSet`; reconciler does **not** touch these (H2 fix). NULL on all four = PENDING. |
+| `stake_start` / `stake_end` / `result_start` / `result_end` | `bigint` (nullable) | Lifecycle timings (unix seconds). Written only by the `TimingsSet` event; reconciler does **not** touch these (H2 fix). NULL on all four = PENDING. |
 | `num_outcomes` | `integer` default `0` | Outcome count from `getDetails()`. |
-| `oracle_event_lists_json` (added 0005) | `jsonb` | Auxiliary data from `PMPDeployed` for outcome-resolution. |
+| `oracle_event_lists_json` (added 0005) | `jsonb` | Auxiliary data from the `PMPDeployed` event for outcome-resolution. |
 | `oracle_fee_json` (added 0005) | `jsonb` | Same. |
 | `last_reconciled_at` (added 0005) | `timestamptz` | Stamped by the market reconciler after a successful pass. The public API filters on `last_reconciled_at IS NOT NULL` — markets without this are invisible to clients. |
-| `frozen_at` (added 0006) | `bigint` | `PoolsFrozen` block timestamp. Required for any post-freeze status (TRADING / RESOLVING / EXPIRED / RESOLVED). |
-| `resolved_at` (added 0006) | `bigint` | `PMP.Resolved` block timestamp. |
+| `frozen_at` (added 0006) | `bigint` | Block timestamp of the `PoolsFrozen` event. Required for any post-freeze status (TRADING / RESOLVING / EXPIRED / RESOLVED). |
+| `resolved_at` (added 0006) | `bigint` | Block timestamp of the `PMP.Resolved` event. |
 | `resolved_outcome_id` (added 0006) | `integer` | Winning outcome id. |
-| `cancelled_at` (added 0006) | `bigint` | Block timestamp of `PMP.PMPCancelled` or `PMP.EventCancelled`. May also be back-filled to `now()` by the reconciler if the chain flag flipped before the event was replayed. |
+| `cancelled_at` (added 0006) | `bigint` | Block timestamp of the `PMP.PMPCancelled` or `PMP.EventCancelled` event. May also be back-filled to `now()` by the reconciler if the chain flag flipped before the event was replayed. |
 | `cancel_reason` (added 0006) | `text` | `'PMP_CANCELLED'` or `'EVENT_CANCELLED'`. Required when `cancelled_at` is set; the API fails closed (HTTP 503) when CANCELLED is derived without a valid reason. |
 | `last_reconcile_failed_at` (added 0011) | `timestamptz` | Backoff bookkeeping for the market reconciler. |
 | `reconcile_attempts` (added 0011) | `integer` default `0` | Diagnostic counter. |
@@ -216,7 +216,7 @@ Index: `market_outcomes_market_id_fk_idx` for parent fan-out. Symbol is globally
 
 ### `live_orders`
 
-Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, mutated in place as `OrderPlaced` / `OrderFilled` / `OrderCancelled` events arrive. Never deleted — FILLED / CANCELLED rows stay for sequence-number monotonicity (the depth handler reads `max(last_event_lt)` over **all** rows for the `(orderbook, outcome)` pair).
+Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, mutated in place as the `OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Never deleted — FILLED / CANCELLED rows stay for sequence-number monotonicity (the depth handler reads `max(last_event_lt)` over **all** rows for the `(orderbook, outcome)` pair).
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -225,7 +225,7 @@ Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, m
 | `outcome_id` | `integer` | Which outcome this order is on. |
 | `is_buy` | `boolean` | Side. `true` = bid, `false` = ask. |
 | `price` | `numeric(78,0)` | Order price as the contract emitted it (raw uint256). Scaled to a decimal at API render time. |
-| `amount_remaining` | `numeric(78,0)` | Quantity still open. Set on `OrderPlaced`, decremented on `OrderFilled`, zeroed on `OrderCancelled`. |
+| `amount_remaining` | `numeric(78,0)` | Quantity still open. Set by the `OrderPlaced` event, decremented by the `OrderFilled` event, zeroed by the `OrderCancelled` event. |
 | `client_order_id` | `text` | Optional client-supplied id. |
 | `status` | `text` CHECK `IN ('OPEN', 'FILLED', 'CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. |
 | `last_event_lt` | `bigint` | Chain block timestamp of the most recent event that touched this order. Monotonic via `greatest(existing, new)` on every write — protects against out-of-order delivery. Feeds `lastUpdateId` in depth responses. |
