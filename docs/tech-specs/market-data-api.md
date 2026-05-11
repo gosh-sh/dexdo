@@ -2,17 +2,33 @@
 
 Implementation-facing notes for the HTTP layer that serves the market-data read-model. The public contract (URLs, field names, parameter rules, error shapes, response examples) lives in [api-spec.md](../api-spec.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md). The write side — how those tables get populated — is in [market-data-indexer.md](market-data-indexer.md).
 
+## Glossary
+
+**Read-model** — Postgres tables prepared for API reads. The indexer builds these tables from chain events and contract state; the API reads them instead of querying contracts directly.
+
+**Market row** — one row in the `markets` table. It represents one PMP contract and is the main source for `/api/v1/markets`.
+
+**Reconciled market** — a market row with `last_reconciled_at IS NOT NULL`. This means the market reconciler has already read the PMP state and filled the fields required for public responses. `/api/v1/markets` hides markets until this is true.
+
+**Lifecycle status** — the public market phase returned as `status`: `PENDING`, `UPCOMING`, `STAKING`, `AWAITING_FREEZE`, `TRADING`, `RESOLVING`, `RESOLVED`, `CANCELLED`, or `EXPIRED`. It is computed by the API from the market row and current request time; it is not stored as a separate database column.
+
+**serverTime** — the unix-seconds timestamp captured once at the start of a `/api/v1/markets` request. The API returns it in the response and uses the same value to compute lifecycle status.
+
+**Depth** — the `/api/v1/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
+
+**DTO** — Data Transfer Object. In this document it means the API response object after the backend has assembled it from database rows, but before it is serialized to JSON and sent to the client.
+
 ## Market identity
 
-The backend treats `marketAddress` as the PMP address. `orderBookAddress` is `null` until the indexer observes `PMP.PoolsFrozen` on chain; once non-null it is stable. The write-side gate is described in [market-data-indexer.md](market-data-indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
+The backend treats `marketAddress` as the PMP address. `orderBookAddress` is `null` until the indexer observes the `PMP.PoolsFrozen` event on chain; once non-null it is stable. The write-side gate is described in [market-data-indexer.md](market-data-indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
 
 ## `/api/v1/markets`
 
-Lifecycle status is computed from the indexed row at request time. The handler captures one unix-seconds `now` value and uses it for both `serverTime` and status derivation so a response cannot cross a lifecycle boundary halfway through rendering.
+Lifecycle status is not stored as a separate database column. The API computes it for each request from the indexed market row and a single unix-seconds `now` value. The same `now` is returned as `serverTime` and used for status calculation, so one response cannot mix timestamps from both sides of a lifecycle boundary.
 
 ### Visibility filter
 
-The listing query carries `WHERE m.last_reconciled_at IS NOT NULL`. Markets that the indexer has discovered (`PMPDeployed` arrived) but not yet reconciled are hidden — clients only see markets the backend can describe fully. See [market-data-indexer.md](market-data-indexer.md#visibility-gate) for the symmetric write-side rule.
+The SQL query behind `GET /api/v1/markets` includes `WHERE m.last_reconciled_at IS NOT NULL`. Markets that the indexer has discovered (the `PMPDeployed` event arrived) but not yet reconciled are hidden — clients only see markets the backend can describe fully. See [market-data-indexer.md](market-data-indexer.md#visibility-gate) for the symmetric write-side rule.
 
 ### Status derivation
 
@@ -30,7 +46,7 @@ Source: a row in [`markets`](data-schema.md#markets) plus the request `now`. Ord
    - `now ≥ result_start` → `RESOLVING`.
    - Otherwise → `TRADING`.
 
-The same logic is mirrored in the SQL `STATUS_CASE` used by the `?status=` filter pushdown, so the listing predicate cannot drift from the Rust-side derivation.
+The same logic is mirrored in the SQL `STATUS_CASE` used by the `?status=` filter pushdown, so the SQL filter cannot drift from the Rust-side derivation.
 
 ### Building the response
 
@@ -59,10 +75,10 @@ After building the DTO, the API checks the assembled shape against spec invarian
 
 | Rule | Source |
 | --- | --- |
-| `timings` is null IFF status is PENDING | api-spec §Timings: "`timings` itself is `null` only for `PENDING`." |
-| `terminal` is non-null IFF status ∈ {RESOLVED, CANCELLED, EXPIRED} | api-spec §Terminal |
-| RESOLVED requires `frozen_at`, kind=RESOLVED, **`resolvedOutcomeId`** set | api-spec §Terminal ("without it the client cannot know which side won") |
-| CANCELLED requires kind=CANCELLED and a **valid** `cancelReason` (PMP_CANCELLED or EVENT_CANCELLED) | api-spec §Terminal: cancelReason must distinguish source |
+| `timings` is null exactly when status is PENDING | [api-spec Timings](../api-spec.md#timings): "`timings` itself is `null` only for `PENDING`." |
+| `terminal` is non-null exactly when status is RESOLVED, CANCELLED, or EXPIRED | [api-spec Terminal](../api-spec.md#terminal) |
+| RESOLVED requires `frozen_at`, kind=RESOLVED, **`resolvedOutcomeId`** set | [api-spec Terminal](../api-spec.md#terminal) ("without it the client cannot know which side won") |
+| CANCELLED requires kind=CANCELLED and a **valid** `cancelReason` (PMP_CANCELLED or EVENT_CANCELLED) | [api-spec Terminal](../api-spec.md#terminal): cancelReason must distinguish source |
 | EXPIRED requires kind=EXPIRED | spec consistency |
 | TRADING / RESOLVING require `frozen_at` | spec consistency with `frozenAt != null` for post-freeze statuses |
 
@@ -76,7 +92,7 @@ The matching write-side rules are in [market-data-indexer.md](market-data-indexe
 | --- | --- | --- |
 | Market not found / not yet reconciled | `InvalidMarketOrSymbol` | 404 |
 | Invalid `status` / `sort` enum value | `InvalidParameter` | 400 |
-| Mutually exclusive params (`marketAddress` together with listing filters) | `MissingParameter` | 400 |
+| Mutually exclusive params (`marketAddress` together with list filters) | `MissingParameter` | 400 |
 | Corrupted cursor | `InvalidParameter` (from cursor decode) | 400 |
 | Invariant violation on built DTO | `MarketInconsistent` | 503 |
 
@@ -115,7 +131,7 @@ The maximum `live_orders.last_event_lt` over rows for this `(orderbook_address, 
 1. `bids` sorted by price descending; `asks` ascending. Comparison is exact-numeric.
 2. Each price level surfaces as one `[price, quantity]` entry. Quantity is the sum across every resting order at that price.
 3. `lastUpdateId` is scoped to `(orderbook_address, outcome_id)`. It is `0` when no OrderBook event has touched this pair yet, and never decreases between successive snapshots.
-4. A non-null `orderBookAddress` on the underlying market is necessary for non-empty depth but not sufficient — orders only land after `PoolsFrozen` is observed and clients start posting.
+4. A non-null `orderBookAddress` on the underlying market is necessary for non-empty depth but not sufficient — orders only land after the `PoolsFrozen` event is observed and clients start posting.
 
 ### Error mapping
 
