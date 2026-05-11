@@ -54,9 +54,9 @@ struct MarketsResponse {
 #[serde(rename_all = "camelCase")]
 struct MarketDto {
     market_address: String,
-    // `None` while the OrderBook contract has not been deployed for this PMP
-    // yet (reconciler ran before deploy). Clients gate trading on `status`,
-    // not on the presence of this field.
+    // `None` only while the backend has not resolved the deterministic
+    // OrderBook address yet. Clients gate trading on `status`, not on the
+    // presence of this field.
     order_book_address: Option<String>,
     market_name: String,
     status: &'static str,

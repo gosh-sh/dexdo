@@ -90,10 +90,10 @@ async fn insert_market_with_outcome(
 
 #[tokio::test]
 async fn null_orderbook_address_returns_empty_book() {
-    // services/api/README.md:97-99 contracts that an existing market whose
-    // OrderBook has not been deployed yet must yield an empty book with
+    // services/api/README.md contracts that an existing market whose
+    // orderbook address has not been resolved must yield an empty book with
     // lastUpdateId = 0. markets.orderbook_address is nullable in migration
-    // 0001, so a literal NULL must take the same path as a blank string —
+    // 0001, so a literal NULL must take the same path as a blank string -
     // not surface as a sqlx decode error.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());

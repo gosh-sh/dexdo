@@ -95,8 +95,8 @@ Optional `limit` (default 100, max 1000).
 Resolution: `marketAddress` + `symbol` → `(orderbook_address, outcome_id)`
 through `markets ⨝ market_outcomes`, with `last_reconciled_at IS NOT NULL`.
 A miss returns `404` (`InvalidMarketOrSymbol`). When the market exists but
-its OrderBook has not been deployed yet (no `orderbook_address`), the
-response is an empty book with `lastUpdateId = 0`.
+the backend has not resolved an `orderbook_address`, the response is an empty
+book with `lastUpdateId = 0`.
 
 Aggregation: `SUM(amount_remaining) GROUP BY (is_buy, price)` over rows with
 `status = 'OPEN' AND amount_remaining > 0`. The sort is numerical (parsed
