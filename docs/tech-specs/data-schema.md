@@ -11,6 +11,16 @@ Tables fall into four buckets:
 | Read-model — discovery | `oracles`, `oracle_event_lists`, `oracle_events` | Indexer projectors + OEL reconciler. |
 | Read-model — markets | `markets`, `market_outcomes`, `live_orders`, `order_book_snapshots` | Indexer projectors + market reconciler. |
 
+## Glossary
+
+**Read-model** — Postgres tables prepared for API reads. They are derived from chain events and contract state so the API can answer requests without decoding the blockchain state on every call.
+
+**Projector** — code that handles one decoded chain event and writes the corresponding read-model change. For example, `OrderBook.OrderPlaced` creates or refreshes a row in `live_orders`.
+
+**Reconciler** — background indexer task that periodically reads contract state through getters and fills fields that events alone do not provide. The market reconciler reads PMP state (`getDetails`, `getOrderBookAddress`) and updates `markets` / `market_outcomes`. The OracleEventList reconciler reads `_events` from each EventList contract and fills missing event metadata in `oracle_events`, such as `describe` and `trust_addr`.
+
+**OEL / OracleEventList** — contract that stores a list of oracle events for one oracle. In this schema it is represented by `oracle_event_lists`; each event inside it is represented by a child row in `oracle_events`.
+
 ## Reference data
 
 ### `ref_tokens`
@@ -90,7 +100,7 @@ One row per oracle service the system knows about. Populated by `RootOracle.Orac
 
 ### `oracle_event_lists`
 
-Each oracle owns a sequence of EventList contracts (`Oracle.OracleEventListDeployed`). Reconciler fanout for event metadata happens at this granularity.
+Each oracle owns a sequence of EventList contracts (`Oracle.OracleEventListDeployed`). The indexer's OracleEventList reconciler processes one EventList at a time: it reads that contract's `_events` getter and updates the related `oracle_events` rows with metadata such as `describe` and `trust_addr`.
 
 | Column | Type | Notes |
 | --- | --- | --- |
