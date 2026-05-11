@@ -107,7 +107,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // markets.orderbook_address is nullable (migration 0001) — decode it
         // as Option<String> so a NULL row does not surface as a sqlx decode
         // error. NULL and blank strings collapse into the same empty-book
-        // path documented in services/api/README.md.
+        // path documented in services/api/README.md. In normal reconciled
+        // rows this address is deterministic and can be present before the
+        // on-chain book is active.
         // Pull (price|quantity)_precision from market_outcomes too: live_orders
         // stores raw uint256/uint128 integers as the contract emitted them, so
         // the API must scale by 10^-precision to honour the DECIMAL contract
@@ -134,8 +136,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
             return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
         };
         let Some(orderbook_address) = orderbook_address.and_then(filter_orderbook) else {
-            // Market exists but its OrderBook has not been deployed yet
-            // (reconciler ran before PoolsFrozen). No live orders possible.
+            // Market exists but the backend has not resolved an orderbook
+            // address. No live orders can be associated with it.
             return Ok(DepthSnapshot {
                 market_address: market_address.clone(),
                 symbol: symbol.clone(),
@@ -530,11 +532,9 @@ fn assemble_market(
             row.pmp_address
         )
     })?;
-    // `orderbook_address` is allowed to be NULL: the reconciler can run
-    // before the on-chain OrderBook contract is deployed, and the API
-    // surfaces the gap as `orderBookAddress: null` rather than hiding the
-    // market. `filter_orderbook` collapses blank/whitespace-only strings
-    // into the same nullable contract.
+    // `orderbook_address` is allowed to be NULL while the backend has not
+    // resolved the deterministic address. `filter_orderbook` collapses
+    // blank/whitespace-only strings into the same nullable contract.
     let order_book_address = row.orderbook_address.clone().and_then(filter_orderbook);
 
     let status = derive_status(&row, now);
