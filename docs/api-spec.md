@@ -151,17 +151,26 @@ All errors use the same response format.
 
 Recommended common error codes:
 
-| Code | Message |
-| --- | --- |
-| `-1000` | Unknown error. |
-| `-1002` | Authentication required. |
-| `-1021` | Timestamp outside recvWindow. |
-| `-1022` | Invalid signature. |
-| `-1102` | Mandatory parameter was not sent. |
-| `-1111` | Precision is over the maximum defined for this asset. |
-| `-1121` | Invalid market or symbol. |
-| `-2010` | Order would immediately fail validation. |
-| `-2011` | Unknown order. |
+| Code | Message | HTTP |
+| --- | --- | --- |
+| `-1000` | Unknown error. | 500 |
+| `-1002` | Auth required. | 401 |
+| `-1003` | Auth envelope incomplete. | 401 |
+| `-1021` | Timestamp outside recvWindow. | 401 |
+| `-1022` | Invalid signature. | 401 |
+| `-1102` | Mandatory parameter was not sent. | 400 |
+| `-1111` | Precision is over the maximum defined for this asset. | 400 |
+| `-1121` | Invalid market or symbol. | 400 |
+| `-2010` | Order would immediately fail validation. | 400 |
+| `-2011` | Unknown order. | 404 |
+
+Authentication errors are split intentionally: `-1003` signals a malformed
+request envelope (missing or unparseable `X-DODEX-APIKEY`, `timestamp`,
+`signature`, or `recvWindow`) — the server could not even attempt
+verification. `-1002` signals that verification was attempted and the
+credential was rejected (unknown api_key, disabled key, or key lacks the
+required permission). `msg` returns generic copy and never identifies which
+envelope field failed or why a credential was rejected.
 
 ## Endpoint Summary
 
