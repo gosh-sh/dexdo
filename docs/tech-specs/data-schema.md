@@ -2,7 +2,7 @@
 
 Postgres tables that back the DODEX read-model and indexer. Source of truth is the migration set under `/migrations`; this document describes intent and field semantics. Schema changes ship as numbered migration files (`NNNN_*.sql`) and are applied by `sqlx::migrate!` at service startup (`crates/infrastructure/src/database.rs`).
 
-Tables fall into four buckets:
+Tables fall into five buckets:
 
 | Bucket | Tables | Owner |
 | --- | --- | --- |
@@ -10,6 +10,7 @@ Tables fall into four buckets:
 | Indexer infrastructure | `raw_events`, `indexer_cursors` | Indexer ingestion path. |
 | Read-model — discovery | `oracles`, `oracle_event_lists`, `oracle_events` | Indexer projectors + OracleEventList reconciler. |
 | Read-model — markets | `markets`, `market_outcomes`, `live_orders`, `order_book_snapshots` | Indexer projectors + market reconciler. |
+| Authentication and credentials | `accounts`, `api_keys` | Operator-provisioned; read on every signed request by the auth middleware. |
 
 ## Glossary
 
@@ -245,6 +246,45 @@ Reserved table for cached depth snapshots. Not used by the current depth handler
 | `bids_jsonb` / `asks_jsonb` | `jsonb` default `'[]'::jsonb` | |
 | `updated_at` | `timestamptz` | |
 
+## Authentication and credentials
+
+Identity and credential storage for the auth middleware. See [auth.md](./auth.md) for the user model, request-verification pipeline, and error mapping. Introduced by migration `0017_accounts_and_api_keys.sql`.
+
+### `accounts`
+
+One row per logical user. Holds the custodied trading PrivateNote inline; multiple PNs per account are not supported in this version and replacing the PN is operator-only via direct UPDATE on this row.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `uuid` PK default `gen_random_uuid()` | Stable `accountId` surfaced to clients. The only identifier that crosses the API boundary. |
+| `label` | `text` (nullable) | Operator-facing label. Not exposed by the API. |
+| `pn_address` | `text` UNIQUE | Address of the trading PrivateNote bound to this account. Source of balances for `GET /api/v1/account`. |
+| `pn_pubkey` | `numeric(78, 0)` | PN signing pubkey. |
+| `pn_seckey_enc` | `bytea` | PN signing seckey, encrypted at rest under the backend master key (`crates/infrastructure/src/crypto.rs`). Never read by the API; used by the trading path to submit transactions. |
+| `pn_dih` | `numeric(78, 0)` UNIQUE | Deploy-init hash of the PN. Disambiguates PNs that may share an address across redeploys. |
+| `disabled_at` | `timestamptz` (nullable) | Soft-disable marker. NULL = active. |
+| `created_at` | `timestamptz` default `now()` | Bookkeeping. |
+
+### `api_keys`
+
+API credential pairs. Multiple per account, each with its own permission set. The api_secret is generated at issuance and only the ciphertext is stored; the cleartext is shown to the operator once and cannot be recovered later.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `bigserial` PK | Internal identifier. Never surfaced. |
+| `account_id` | `uuid` FK → `accounts(id)` ON DELETE CASCADE | Owning account. |
+| `api_key` | `text` | Public half of the credential pair; sent by clients in the `X-DODEX-APIKEY` header. |
+| `api_secret_enc` | `bytea` | Encrypted api_secret. Decrypted in-process to recompute the request HMAC. |
+| `permissions` | `auth_permission[]` default `{USER_DATA}` | Subset of the `auth_permission` enum (`USER_DATA`, `TRADE`). Endpoints declare a required permission; auth rejects with `-1002` if the key lacks it. |
+| `disabled_at` | `timestamptz` (nullable) | Soft-disable marker. Disabled keys are rejected with `-1002`. NULL = active. |
+| `last_used_at` | `timestamptz` (nullable) | Stamped by the auth middleware on successful verification. Used for operator audits and stale-key cleanup. |
+| `created_at` | `timestamptz` default `now()` | Bookkeeping. |
+
+Indices:
+
+- `api_keys_api_key_active_idx` — UNIQUE partial index on `(api_key) WHERE disabled_at IS NULL`. Lets the auth middleware look up an active credential by `api_key` in O(1) without colliding with historical disabled rows that may have reused the same string (irrelevant in practice with 256-bit random keys, but the partial predicate captures the exact invariant).
+- `api_keys_account_id_idx` — supports operator queries that list all keys under an account.
+
 ## System tables
 
 `_sqlx_migrations` is created and maintained by `sqlx::migrate!`. It records which migration files have been applied. Do not touch it in application code.
@@ -258,4 +298,4 @@ Every schema change ships as a new numbered migration file. Conventions:
 - Partial indices are preferred over full ones for "pending row" predicates; they shrink with reconciliation progress.
 - Add a header comment on every migration explaining *why* the change is needed and which code path requires it. Migrations are read by reviewers and operators as much as the code is.
 
-The full migration set (`migrations/0001_*.sql` … `migrations/0013_*.sql`) is the canonical reference; this document summarises intent but does not replace it.
+The full migration set (`migrations/0001_*.sql` … `migrations/0017_*.sql`) is the canonical reference; this document summarises intent but does not replace it.

@@ -1,102 +1,51 @@
 # Dodex Backend
 
-REST API and chain indexer for prediction markets on the Acki Nacki blockchain. The
-backend exposes a Binance-style spot trading contract (`/api/v1/markets`, `/depth`,
-`/account`, `/order`, `/batchOrders`, `/openOrders`, `/allOrders`) over a read-model
-materialized from on-chain events. Currently delivered: `/api/v1/markets` (with
-lifecycle status, timings, oracle event metadata, terminal info, and cursor
-pagination); `/depth` is wired but its read-model is not built yet.
-
 ## Architecture
 
-The system is split into two independent processes that share a Supabase Postgres
-read-model. Data flow:
+Two independent processes that share a Postgres read-model:
 
 ```text
-Acki Nacki GraphQL  →  indexer  →  Supabase Postgres (read-model)  →  api  →  REST clients
+Acki Nacki GraphQL  →  indexer  →  Postgres (read-model)  →  api  →  REST clients
 ```
 
-- **`services/api`** (Salvo) — read-only HTTP server. Never touches GraphQL or BOC
-  decoding; serves market metadata and order-book snapshots straight from Postgres.
-- **`services/indexer`** — ingests `blockchain.events` from Acki Nacki GraphQL,
-  decodes message bodies against vendored ABIs (TVM ABI v2.4 via `tvm_abi` /
-  `tvm_types` from the [tvm-sdk](https://github.com/tvmlabs/tvm-sdk)), and projects
-  decoded events into the read-model. Per-page atomicity with savepoint isolation
-  per projector.
-- **Supabase Postgres** — single source of truth for the API. Schema lives in
-  `migrations/`; the indexer applies migrations automatically on startup via
-  `sqlx::migrate!`.
+- **`services/api`** — HTTP server. Serves market metadata and order-book snapshots from Postgres, and gates private endpoints behind HMAC authentication.
+- **`services/indexer`** — ingests chain events, decodes them, and projects them into the read-model.
+- **Postgres** — single source of truth for the API. The indexer applies migrations on startup.
 
-Splitting `api` and `indexer` keeps user-facing latency independent of chain
-ingestion, makes either side independently scalable, and lets us replay
-projectors against `raw_events` without re-fetching from the chain.
+Splitting `api` and `indexer` keeps user-facing latency independent of chain ingestion and lets either side scale independently.
 
 ## Repository layout
 
 ```text
 .
-├── services/
-│   ├── api/          Salvo HTTP server (read-only)
-│   └── indexer/      Chain ingestion + decoder + projectors  (see services/indexer/README.md)
-├── crates/
-│   ├── domain/       Value objects, entities, domain errors
-│   ├── application/  Use cases, ports to infrastructure
-│   └── infrastructure/  sqlx repositories, GraphQL client, ABI decoder, projectors,
-│                        config loader, SIGUSR1 reload
-├── contracts/
-│   ├── *.sol         On-chain contracts (PMP, Oracle, OrderBook, …)
-│   └── abi/dex/      Vendored ABI v2.4 JSONs consumed by the decoder
+├── services/         Service binaries (api, indexer)
+├── crates/           Shared library crates (domain, application, infrastructure)
+├── contracts/        On-chain Solidity contracts and ABIs
 ├── config/           YAML config files (per-service, per-environment)
-├── migrations/       SQL migrations (numbered NNNN_*.sql, auto-applied by indexer)
-└── docs/             Architecture plan, API spec, gap analysis
+├── migrations/       SQL migrations
+└── docs/             api-spec.md (public REST contract), tech-specs/, contract-specs/
 ```
 
-## Tech stack
-
-- **Rust** (edition 2024), `cargo workspace`.
-- **Salvo** for HTTP, **sqlx** (Postgres + rustls) for the database.
-- **reqwest** for the GraphQL client.
-- **tvm_abi** + **tvm_types** (low-level TVM crates from
-  [tvmlabs/tvm-sdk](https://github.com/tvmlabs/tvm-sdk)) for decoding event BOCs.
-- **Supabase Postgres** as the read-model store; migrations applied on boot.
+Per-component internals are documented in each service's `README.md`.
 
 ## Configuration
 
-YAML per service per environment, e.g. `config/api.local.yaml`,
-`config/indexer.local.yaml`. The schema is enforced via `serde(deny_unknown_fields)`
-so that mismatched sections fail fast at load time. Both services support
-`SIGUSR1` to reload config without restart; on reload, external clients (HTTP,
-GraphQL, Postgres pool) are rebuilt only if their parameters changed.
-
-The default config path is `config/<service>.local.yaml`; override with
-`APP_CONFIG=/path/to/file.yaml`.
+YAML per service per environment, e.g. `config/api.local.yaml`. The default path is `config/<service>.local.yaml`; override with `APP_CONFIG=/path/to/file.yaml`.
 
 ## Running locally
 
-Both processes need a Postgres connection. The indexer applies migrations on
-startup, so point both at the same database. For local development a plain
-docker-postgres is enough; for stage we use Supabase via the connection pooler.
+Both processes need a Postgres connection. Point both at the same database; the indexer applies migrations on startup.
 
 ```sh
-# indexer (writes to DB, pulls from GraphQL)
 cargo run -p dodex-indexer
-
-# api (reads from DB)
 cargo run -p dodex-api
 ```
-
-If the indexer fails with `permission denied for schema public` on first run,
-grant the application role usage/create on `public` once from a Supabase admin
-session — see [services/indexer/README.md](services/indexer/README.md#supabase-permissions)
-for the exact SQL.
 
 ## Tests and formatting
 
 ### Test Postgres
 
-Most integration tests need a real Postgres. The repo ships a disposable test
-database in `docker-compose.test.yml` on port `55432`; schema is created by
-`sqlx::migrate!` on first connect. Start it before running the full suite:
+Integration tests need a real Postgres. A disposable test database is shipped in `docker-compose.test.yml` on port `55432`:
 
 ```sh
 docker compose -f docker-compose.test.yml up -d --wait
@@ -105,9 +54,7 @@ cargo test
 docker compose -f docker-compose.test.yml down
 ```
 
-The committed `.env` already contains the same `TEST_DATABASE_URL` for local
-tests. Export the variable yourself when pointing tests at another database; the
-role must own `public` because tests run migrations on connect.
+The committed `.env` already contains the same `TEST_DATABASE_URL`. Export it yourself when pointing tests at another database.
 
 ```sh
 cargo test --workspace --lib
@@ -117,24 +64,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Deployment
 
-Stage runs via `docker compose` with an override file:
-
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.stage.yml up -d --build
 ```
 
-Host preparation (apt + docker + repo clone + config templating) is automated
-in `deploy/ansible/`; see `deploy/ansible/playbook.yml`.
+Host preparation is automated in `deploy/ansible/`.
 
 ## Documentation
 
-- [docs/api-spec.md](docs/api-spec.md) — public REST contract (markets, depth,
-  account, orders, batchOrders, openOrders, allOrders) with HMAC auth.
-- [docs/tech-spec.md](docs/tech-spec.md), [docs/GRAPHQL.md](docs/GRAPHQL.md),
-  [docs/dex-events-routing.md](docs/dex-events-routing.md) — auxiliary specs.
-- [services/api/README.md](services/api/README.md),
-  [services/indexer/README.md](services/indexer/README.md) — per-service
-  internals.
+- [docs/api-spec.md](docs/api-spec.md) — public REST contract.
+- [docs/tech-specs/](docs/tech-specs/) — implementation tech-specs (auth, data schema, market data, trading).
+- [docs/contract-specs/](docs/contract-specs/) — on-chain contracts and event routing.
+- [services/api/README.md](services/api/README.md), [services/indexer/README.md](services/indexer/README.md) — per-service internals.
+
+## For contributors and AI agents
+
+[`AGENT_REQUIREMENTS.md`](AGENT_REQUIREMENTS.md) is the entry point for anyone (human or AI) making changes here. It defines the documentation contract, including the mandatory pre-commit sweep over `docs/`, component READMEs, and this root `README.md`.
 
 ## License
 

@@ -10,7 +10,9 @@ The public REST API contract is [`docs/api-spec.md`](docs/api-spec.md); do not e
 
 ## Before every `git commit`
 
-Re-read **every** file under `docs/` and the `README.md` of every touched component, then update each one the staged diff invalidates. Default is "check all"; only skip a doc after re-reading it and confirming it is unaffected.
+Re-read **every** file under `docs/`, the root [`README.md`](README.md), and the `README.md` of every touched component, then update each one the staged diff invalidates. Default is "check all"; only skip a doc after re-reading it and confirming it is unaffected.
+
+The root `README.md` is the project's high-level entry point — keep its architecture overview, repository layout, configuration / running-locally / test instructions, and the "Documentation" section in sync with the actual code, doc structure, and config files. Stale links or removed files referenced from the README are bugs.
 
 This includes terminology renames (e.g. `OEL` -> `OracleEventList`) and schema/field shape changes - propagate them across all docs, not just the file whose name matches the code change.
 

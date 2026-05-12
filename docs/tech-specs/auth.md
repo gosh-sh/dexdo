@@ -52,7 +52,7 @@ Error mapping:
 
 All four errors return HTTP `401 Unauthorized`. The split between `-1003` and `-1002` is intentional: `-1003` says the server could not even attempt verification (client-side request-shape bug), while `-1002` says verification was attempted and the credential was rejected. Splitting them lets clients and ops distinguish broken SDKs from unauthorized callers.
 
-The `msg` field never identifies which specific envelope field is missing or why a credential was rejected. It returns generic copy (`"Auth envelope incomplete"`, `"Auth required"`) so the response does not help an attacker probe the request shape. Specific reasons are recorded in server-side logs for alerting.
+The `msg` field never identifies which specific envelope field is missing or why a credential was rejected. It returns generic copy (`"Required auth parameter missing."` for `-1003`, `"Authentication required."` for `-1002`, `"Timestamp outside recvWindow."` for `-1021`, `"Invalid signature."` for `-1022`) so the response does not help an attacker probe the request shape. Specific reasons are recorded in server-side logs for alerting.
 
 A malformed `recvWindow` (present but not a non-negative integer) is rejected with `-1003` rather than silently falling back to the default. Silent fallback would mask client SDK bugs and surface later as confusing `-1021` errors when the chosen default does not match the client's expected tolerance.
 

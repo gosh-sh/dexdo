@@ -154,8 +154,8 @@ Recommended common error codes:
 | Code | Message | HTTP |
 | --- | --- | --- |
 | `-1000` | Unknown error. | 500 |
-| `-1002` | Auth required. | 401 |
-| `-1003` | Auth envelope incomplete. | 401 |
+| `-1002` | Authentication required. | 401 |
+| `-1003` | Required auth parameter missing. | 401 |
 | `-1021` | Timestamp outside recvWindow. | 401 |
 | `-1022` | Invalid signature. | 401 |
 | `-1102` | Mandatory parameter was not sent. | 400 |
