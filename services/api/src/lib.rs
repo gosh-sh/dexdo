@@ -84,7 +84,7 @@ struct MarketDto {
     // `None` only while the backend has not resolved the deterministic
     // OrderBook address yet. Clients gate trading on `status`, not on the
     // presence of this field.
-    order_book_address: Option<String>,
+    order_book_address: String,
     market_name: String,
     status: &'static str,
     quote_asset: String,
@@ -112,9 +112,15 @@ struct EventDto {
     event_id: String,
     event_name: Option<String>,
     description: Option<String>,
-    oracle_name: Option<String>,
-    oracle_address: Option<String>,
-    oracle_fee: Option<String>,
+    oracles: Vec<OracleDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OracleDto {
+    name: Option<String>,
+    address: Option<String>,
+    fee: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -145,7 +151,7 @@ struct OutcomeDto {
 struct DepthResponse {
     market_address: String,
     symbol: String,
-    last_update_id: u64,
+    last_update_id: String,
     bids: Vec<[String; 2]>,
     asks: Vec<[String; 2]>,
 }
@@ -319,9 +325,11 @@ fn event_to_dto(e: MarketEvent) -> EventDto {
         event_id: e.event_id,
         event_name: e.event_name,
         description: e.description,
-        oracle_name: e.oracle_name,
-        oracle_address: e.oracle_address,
-        oracle_fee: e.oracle_fee,
+        oracles: e
+            .oracles
+            .into_iter()
+            .map(|o| OracleDto { name: o.name, address: o.address, fee: o.fee })
+            .collect(),
     }
 }
 

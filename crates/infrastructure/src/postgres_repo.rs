@@ -322,7 +322,8 @@ impl PostgresReadModelRepository {
 
         let mut outcomes = self.fetch_outcomes(&[row.id]).await?;
         let market_outcomes = outcomes.remove(&row.id).unwrap_or_default();
-        let mut oracle_blocks = self.fetch_oracle_events(std::slice::from_ref(&row.pmp_address)).await?;
+        let mut oracle_blocks =
+            self.fetch_oracle_events(std::slice::from_ref(&row.pmp_address)).await?;
         let oracle_block = oracle_blocks.remove(&row.pmp_address).unwrap_or_default();
         let market = assemble_market(row, market_outcomes, oracle_block, now)?;
         Ok(MarketsPage { markets: vec![market], next_cursor: None, has_more: false })
