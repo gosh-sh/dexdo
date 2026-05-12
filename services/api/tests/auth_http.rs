@@ -205,6 +205,33 @@ async fn malformed_recv_window_returns_1003() {
     assert_eq!(body.code, -1003);
 }
 
+#[tokio::test]
+async fn body_exceeding_cap_returns_1009() {
+    // The hoop caps body reads at 64 KB before HMAC compute so an
+    // attacker can't tie up the pool with arbitrary uploads. A signed
+    // request whose body breaches the cap must be rejected with
+    // -1009 / HTTP 413 instead of a generic 500.
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let body = vec![b'x'; 128 * 1024];
+    let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
+    let sig = sign(SEED_API_SECRET, &canonical, &body);
+
+    let mut resp = TestClient::post("http://test/api/v1/order")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .add_header("content-type", "application/octet-stream", true)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .body(body)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::PAYLOAD_TOO_LARGE));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1009);
+}
+
 // ---- happy path ---------------------------------------------------------
 
 #[tokio::test]
@@ -302,9 +329,12 @@ async fn insert_readonly_key(pool: &PgPool, kek: &Kek, api_key: &str, secret_hex
 }
 
 async fn cleanup_readonly_key(pool: &PgPool, api_key: &str) {
-    sqlx::query("delete from api_keys where api_key = $1")
-        .bind(api_key)
-        .execute(pool)
-        .await
-        .expect("cleanup readonly api_key");
+    // Cleanup runs ahead of the assertion so a failed assertion does not
+    // leak fixtures. Best-effort: a panic here would mask the real
+    // assertion message, so swallow and warn instead.
+    if let Err(err) =
+        sqlx::query("delete from api_keys where api_key = $1").bind(api_key).execute(pool).await
+    {
+        eprintln!("cleanup readonly api_key failed: {err}");
+    }
 }

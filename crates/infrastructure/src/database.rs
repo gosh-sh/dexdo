@@ -16,7 +16,7 @@ pub async fn build_pool(cfg: &DatabaseSection) -> anyhow::Result<PgPool> {
         .acquire_timeout(Duration::from_millis(cfg.connect_timeout_ms))
         .connect(&cfg.url)
         .await
-        .context("connect supabase")
+        .context("connect postgres")
 }
 
 pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {

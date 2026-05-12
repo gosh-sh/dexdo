@@ -319,10 +319,10 @@ fn validate(parsed: SeedData) -> Result<ValidatedSeedData> {
     let mut accounts = Vec::with_capacity(parsed.accounts.len());
     for account in parsed.accounts {
         let pn_address = account.pn_address;
-        BigUint::parse_bytes(account.pn_pubkey_dec.as_bytes(), 10)
-            .with_context(|| format!("pn_pubkey_dec for {pn_address} must be a decimal uint256"))?;
-        BigUint::parse_bytes(account.pn_dih_dec.as_bytes(), 10)
-            .with_context(|| format!("pn_dih_dec for {pn_address} must be a decimal uint256"))?;
+        parse_uint256_dec(&account.pn_pubkey_dec)
+            .with_context(|| format!("pn_pubkey_dec for {pn_address} must fit numeric(78,0)"))?;
+        parse_uint256_dec(&account.pn_dih_dec)
+            .with_context(|| format!("pn_dih_dec for {pn_address} must fit numeric(78,0)"))?;
         let pn_seckey = hex::decode(&account.pn_seckey_hex)
             .with_context(|| format!("pn_seckey_hex for {pn_address} must be valid hex"))?;
 
@@ -353,6 +353,18 @@ fn validate(parsed: SeedData) -> Result<ValidatedSeedData> {
         });
     }
     Ok(ValidatedSeedData { accounts })
+}
+
+/// Parse a decimal `uint256` and reject values that would overflow
+/// the column at INSERT. `numeric(78, 0)` holds 78 digits; 256-bit
+/// values fit in 78 digits, but a longer-string input that happened
+/// to be all digits would pass `BigUint::parse_bytes` and then fail
+/// later with a much less clear Postgres-side error.
+fn parse_uint256_dec(s: &str) -> Result<BigUint> {
+    let n = BigUint::parse_bytes(s.as_bytes(), 10)
+        .context("value must be a decimal non-negative integer")?;
+    anyhow::ensure!(n.bits() <= 256, "value exceeds 256 bits");
+    Ok(n)
 }
 
 async fn upsert_account(

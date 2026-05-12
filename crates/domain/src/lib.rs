@@ -323,6 +323,11 @@ pub enum DomainError {
     /// unaffected.
     #[error("required auth parameter missing")]
     AuthEnvelopeIncomplete,
+    /// Body exceeded the server-side size cap. HTTP 413, our own
+    /// extension code (the api-spec error table covers Binance-compatible
+    /// codes; payload-size rejection is not part of that contract).
+    #[error("request body too large")]
+    RequestTooLarge,
     #[error("timestamp outside recvWindow")]
     TimestampOutsideRecvWindow,
     #[error("invalid signature")]
@@ -350,6 +355,7 @@ impl DomainError {
             Self::Unexpected => -1000,
             Self::AuthRequired => -1002,
             Self::AuthEnvelopeIncomplete => -1003,
+            Self::RequestTooLarge => -1009,
             Self::TimestampOutsideRecvWindow => -1021,
             Self::InvalidSignature => -1022,
             Self::MissingParameter => -1102,
@@ -367,6 +373,7 @@ impl DomainError {
             Self::Unexpected => "Unknown error.",
             Self::AuthRequired => "Authentication required.",
             Self::AuthEnvelopeIncomplete => "Required auth parameter missing.",
+            Self::RequestTooLarge => "Request body too large.",
             Self::TimestampOutsideRecvWindow => "Timestamp outside recvWindow.",
             Self::InvalidSignature => "Invalid signature.",
             Self::MissingParameter => "Mandatory parameter was not sent.",

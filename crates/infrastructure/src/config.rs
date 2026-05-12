@@ -568,11 +568,11 @@ auth:
 
     #[test]
     fn auth_validate_rejects_zero_max() {
-        let s = valid_auth_section(0, 0);
+        // Use a non-zero default so the validator does not short-circuit
+        // on the default check before reaching the max check.
+        let s = valid_auth_section(5_000, 0);
         let err = s.validate().unwrap_err();
-        // `default == 0` is hit first by the order of checks, but the
-        // important thing is that a zero-max config is rejected.
-        assert!(err.to_string().contains("recv_window"), "got: {err}");
+        assert!(err.to_string().contains("max_recv_window_ms"), "got: {err}");
     }
 
     #[test]

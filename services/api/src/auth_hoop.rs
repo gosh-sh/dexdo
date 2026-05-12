@@ -24,6 +24,11 @@ use crate::AppState;
 
 const HEADER_API_KEY: &str = "x-dodex-apikey";
 
+/// Maximum body bytes the auth pipeline will read. Even a maxed-out
+/// batch order is well under this; anything larger is rejected with
+/// `-1009 / HTTP 413` before it touches the HMAC or pool.
+const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+
 /// Authenticates one inbound request. On success the resolved
 /// `AuthContext` is placed into the depot for downstream handlers; on
 /// failure a 401 response with the spec error body is rendered and the
@@ -35,8 +40,8 @@ pub async fn authenticate(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
-    let state = match depot.obtain::<AppState>() {
-        Ok(s) => s.clone(),
+    let authenticator = match depot.obtain::<AppState>() {
+        Ok(state) => state.authenticator.clone(),
         Err(err) => {
             error!(?err, "auth hoop: AppState missing from depot");
             reject(res, ctrl, DomainError::Unexpected);
@@ -52,7 +57,7 @@ pub async fn authenticate(
         }
     };
 
-    match state.authenticator.authenticate(request).await {
+    match authenticator.authenticate(request).await {
         Ok(ctx) => {
             depot.inject(ctx);
         }
@@ -104,11 +109,22 @@ async fn build_request(req: &mut Request) -> Result<AuthenticateRequest, DomainE
     // Salvo caches the parsed bytes on the request, so a downstream
     // handler that calls `req.parse_json()` gets the same buffer
     // without a second read off the wire. This preserves the spec's
-    // "never re-serialize JSON" property for HMAC verification.
-    let body = req.payload().await.map(|b| b.to_vec()).map_err(|err| {
-        error!(?err, "auth hoop: failed to read request body");
-        DomainError::Unexpected
+    // "never re-serialize JSON" property for HMAC verification. The
+    // explicit cap protects the pool from arbitrary-size uploads;
+    // exceeding it surfaces as `-1009 / HTTP 413` instead of a generic
+    // 500 so misbehaving clients see an actionable error.
+    let body = req.payload_with_max_size(MAX_REQUEST_BODY_BYTES).await.map_err(|err| {
+        // Salvo wraps `http_body_util::LengthLimitError` in
+        // `ParseError::Other`; matching on the rendered message keeps
+        // us decoupled from `http_body_util` as a direct dependency.
+        if err.to_string().contains("length limit") {
+            DomainError::RequestTooLarge
+        } else {
+            error!(?err, "auth hoop: failed to read request body");
+            DomainError::Unexpected
+        }
     })?;
+    let body = body.to_vec();
 
     Ok(AuthenticateRequest {
         api_key,

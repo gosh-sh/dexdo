@@ -48,7 +48,7 @@ use tracing::info;
 use uuid::Uuid;
 
 #[doc(hidden)]
-pub type SharedRepo = Arc<dyn MarketReadRepository + Send + Sync>;
+pub type SharedRepo = Arc<dyn MarketReadRepository>;
 #[doc(hidden)]
 pub type SharedAuth = Arc<dyn Authenticator>;
 
@@ -81,9 +81,6 @@ struct MarketsResponse {
 #[serde(rename_all = "camelCase")]
 struct MarketDto {
     market_address: String,
-    // `None` only while the backend has not resolved the deterministic
-    // OrderBook address yet. Clients gate trading on `status`, not on the
-    // presence of this field.
     order_book_address: String,
     market_name: String,
     status: &'static str,
@@ -172,11 +169,10 @@ impl ApiError {
             | DomainError::AuthEnvelopeIncomplete
             | DomainError::TimestampOutsideRecvWindow
             | DomainError::InvalidSignature => StatusCode::UNAUTHORIZED,
+            DomainError::RequestTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             DomainError::UnknownOrder | DomainError::InvalidMarketOrSymbol => StatusCode::NOT_FOUND,
-            // Transient indexer state (e.g. RESOLVED row whose PoolsFrozen
-            // has not been replayed yet). 503 tells the client to retry —
-            // the underlying inconsistency clears as the indexer catches up.
-            // See docs/tech-spec.md:113 ("fail the request closed").
+            // Transient indexer state — fail closed, client retries when
+            // the indexer catches up.
             DomainError::MarketInconsistent => StatusCode::SERVICE_UNAVAILABLE,
             DomainError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::BAD_REQUEST,
