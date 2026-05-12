@@ -18,10 +18,6 @@
 
 - [contract-specs/](contract-specs/) — on-chain DODEX contracts. Event routing in [dex-events-routing.md](contract-specs/dex-events-routing.md); flow/object diagrams as HTML and drawio.
 
-## Plan
-
-- [plan.md](plan.md) — active multi-step implementation plan, per development area.
-
 ## Conventions
 
 - **One logical component → one tech-spec file.** Read API, write API, and indexer are each one file. Shared files (`data-schema.md`, `auth.md`) carry contributions from both developers; resolve conflicts on a per-section basis.

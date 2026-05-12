@@ -16,7 +16,6 @@ All notable changes to DODEX are recorded here. Entries are date-based.
 ### Added
 
 - `docs/README.md` — documentation map with file ownership.
-- `docs/plan.md` — per-developer implementation plan.
 - `CHANGELOG.md` (this file).
 
 ### Removed

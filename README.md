@@ -11,7 +11,6 @@ On-chain DODEX contracts live under `contracts/`.
 
 - [docs/api-spec.md](docs/api-spec.md) — public REST API contract.
 - [docs/README.md](docs/README.md) — documentation map and file ownership.
-- [docs/plan.md](docs/plan.md) — active implementation plan, per development area.
 - [AGENT_REQUIREMENTS.md](AGENT_REQUIREMENTS.md) — rules for any agent making repository changes.
 
 ## Repository layout
