@@ -160,7 +160,7 @@ Recommended common error codes:
 | `-1022` | Invalid signature. | 401 |
 | `-1102` | Mandatory parameter was not sent. | 400 |
 | `-1111` | Precision is over the maximum defined for this asset. | 400 |
-| `-1121` | Invalid market or symbol. | 400 |
+| `-1121` | Invalid market or symbol. | 404 |
 | `-2010` | Order would immediately fail validation. | 400 |
 | `-2011` | Unknown order. | 404 |
 
@@ -886,6 +886,7 @@ Response:
     "marketAddress": "0:market-address",
     "symbol": "PM-2026-ELECTION-YES",
     "orderId": "123456789",
+    "clientOrderId": "mm-order-0001",
     "price": "0.615",
     "origQty": "1.500000",
     "executedQty": "0.500000",

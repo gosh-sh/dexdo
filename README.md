@@ -92,6 +92,23 @@ for the exact SQL.
 
 ## Tests and formatting
 
+### Test Postgres
+
+Most integration tests need a real Postgres. The repo ships a disposable test
+database in `docker-compose.test.yml` on port `55432`; schema is created by
+`sqlx::migrate!` on first connect. Start it before running the full suite:
+
+```sh
+docker compose -f docker-compose.test.yml up -d --wait
+export TEST_DATABASE_URL=postgres://dodex:dodex@localhost:55432/dodex_test
+cargo test
+docker compose -f docker-compose.test.yml down
+```
+
+The committed `.env` already contains the same `TEST_DATABASE_URL` for local
+tests. Export the variable yourself when pointing tests at another database; the
+role must own `public` because tests run migrations on connect.
+
 ```sh
 cargo test --workspace --lib
 cargo +nightly fmt --all -- --check

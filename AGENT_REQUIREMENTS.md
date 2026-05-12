@@ -15,3 +15,5 @@ Re-read **every** file under `docs/` and the `README.md` of every touched compon
 This includes terminology renames (e.g. `OEL` -> `OracleEventList`) and schema/field shape changes - propagate them across all docs, not just the file whose name matches the code change.
 
 If a doc is now obsolete and has no salvageable content, delete it and remove references in the same commit.
+
+Before running the full test suite or DB-backed integration tests, start the disposable test Postgres as described in [`README.md#test-postgres`](README.md#test-postgres).
