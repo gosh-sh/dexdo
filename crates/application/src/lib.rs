@@ -50,6 +50,36 @@ impl AuthContext {
     }
 }
 
+/// Inputs the HTTP layer hands to the authenticator. The service stays
+/// thin: it extracts these fields out of the Salvo request and passes
+/// them in unaltered. `raw_query_string` is canonicalized inside the
+/// authenticator so the canonical/HMAC concern does not leak into the
+/// service layer; `body` is the on-the-wire byte sequence (never
+/// re-serialized JSON).
+#[derive(Debug, Clone)]
+pub struct AuthenticateRequest {
+    pub api_key: String,
+    pub timestamp_ms: i64,
+    pub recv_window_ms: Option<u64>,
+    pub signature_hex: String,
+    pub raw_query_string: String,
+    pub body: Vec<u8>,
+    pub now_ms: i64,
+}
+
+/// Verifies one HMAC-authenticated request and resolves it to the
+/// account's [`AuthContext`]. Matches the verification pipeline in
+/// `docs/tech-specs/auth.md §Authentication`. Implementations are
+/// expected to be cheap to clone (e.g. wrap a connection pool in
+/// `Arc`) so the trait object can sit in app state.
+#[async_trait]
+pub trait Authenticator: Send + Sync {
+    async fn authenticate(
+        &self,
+        request: AuthenticateRequest,
+    ) -> Result<AuthContext, DomainError>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MarketsSort {
     #[default]

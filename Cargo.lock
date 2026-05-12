@@ -1440,12 +1440,15 @@ dependencies = [
  "dodex-application",
  "dodex-domain",
  "hex",
+ "hmac",
  "num-bigint 0.4.6",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "tokio",
  "tracing",
  "tvm_abi",
@@ -1453,6 +1456,7 @@ dependencies = [
  "tvm_executor",
  "tvm_types",
  "tvm_vm",
+ "uuid",
  "zeroize",
 ]
 
@@ -4810,6 +4814,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
  "webpki-roots 0.26.11",
 ]
 
@@ -4890,6 +4895,7 @@ dependencies = [
  "stringprep",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -4927,6 +4933,7 @@ dependencies = [
  "stringprep",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -4952,6 +4959,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
