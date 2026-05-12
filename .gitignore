@@ -1,8 +1,6 @@
 .DS_Store
 .temp/
 internal-docs/
-.codex
-.claude
 target/
 config/indexer.stage.supabase.yaml
 config/api.stage.supabase.yaml
