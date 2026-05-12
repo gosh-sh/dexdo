@@ -85,9 +85,15 @@ struct EventDto {
     event_id: String,
     event_name: Option<String>,
     description: Option<String>,
-    oracle_name: Option<String>,
-    oracle_address: Option<String>,
-    oracle_fee: Option<String>,
+    oracles: Vec<OracleDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OracleDto {
+    name: Option<String>,
+    address: Option<String>,
+    fee: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -293,9 +299,11 @@ fn event_to_dto(e: MarketEvent) -> EventDto {
         event_id: e.event_id,
         event_name: e.event_name,
         description: e.description,
-        oracle_name: e.oracle_name,
-        oracle_address: e.oracle_address,
-        oracle_fee: e.oracle_fee,
+        oracles: e
+            .oracles
+            .into_iter()
+            .map(|o| OracleDto { name: o.name, address: o.address, fee: o.fee })
+            .collect(),
     }
 }
 

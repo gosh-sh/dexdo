@@ -197,7 +197,7 @@ Query parameters:
 | `marketAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
 | `status` | STRING | NO | Comma-separated list of statuses to include. Example: `TRADING,AWAITING_FREEZE`. |
 | `quoteAsset` | STRING | NO | Filter by quote asset. Example: `USDC`. |
-| `oracleName` | STRING | NO | Filter by oracle name. |
+| `oracleName` | STRING | NO | Filter by oracle name. A market matches if **any** of its confirming oracles has this name — a multi-oracle PMP is included as long as one of its `event.oracles[]` entries matches. |
 | `closingBefore` | LONG | NO | Return only markets with `timings.resultEnd < closingBefore` (unix seconds). |
 | `sort` | STRING | NO | Sort field. One of: `resultStart` (default, ASC), `createdAt` (DESC). |
 | `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. |
@@ -336,15 +336,37 @@ All timestamps are unix seconds.
   "eventId": "0xabc...",
   "eventName": "2026 US Presidential Election",
   "description": "Will candidate X win?",
-  "oracles": [{
-    "name": "ElectionOracle",
-    "address": "0:oracle-addr",
-    "fee": "100"
-  }]
+  "oracles": [
+    {
+      "name": "ElectionOracle",
+      "address": "0:oracle-a",
+      "fee": "100"
+    },
+    {
+        "name": "BackupElectionOracle",
+        "address": "0:oracle-b",
+        "fee": "200"
+    }
+  ]
 }
 ```
 
-`eventName` and `description` are the user-facing labels for the market.
+| Field | Type | Description |
+| --- | --- | --- |
+| `eventId` | STRING | `0x`-prefixed uint256 hex digest. Computed on-chain as a hash of `eventName`, `description`, `deadline`, `outcomeNames`; therefore identical across every oracle that confirms the same event. |
+| `eventName` | STRING \| null | User-facing event title. Shared across all confirming oracles by the hash invariant above. `null` until at least one `EventAdded` has landed. |
+| `description` | STRING \| null | User-facing description. Same shared-by-hash invariant as `eventName`. |
+| `oracles` | ARRAY of [OracleEntry](#oracleentry) | One entry per oracle that confirmed this PMP. A PMP can require confirmation from multiple `OracleEventList` contracts; each adds an entry with its own `fee`. Empty array means no oracle has confirmed yet (the row exists in `markets` but no `EventConfirmed` has landed). |
+
+###### OracleEntry
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | STRING \| null | Oracle name from `oracles.name`. `null` if the indexer has not yet reconciled the oracle row. |
+| `address` | STRING \| null | Oracle contract address. |
+| `fee` | DECIMAL \| null | Oracle fee for this confirmation, as a uint128 decimal string. Different oracles can charge different fees for the same event. |
+
+If any two entries in `oracles[]` for the same market disagree on `eventName` or `description`, the backend fails the request closed with `MarketInconsistent` (HTTP 503) — that disagreement contradicts the hash invariant and indicates indexer corruption.
 
 ##### Terminal
 

@@ -19,6 +19,7 @@ use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketEvent;
 use dodex_domain::MarketName;
+use dodex_domain::OracleEntry;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
 use dodex_domain::Outcome;
@@ -66,11 +67,33 @@ struct MarketRow {
     // Sub-second precision avoids the keyset bug where two markets created in
     // the same second could be skipped or duplicated across page boundaries.
     created_at_micros: i64,
+}
+
+/// One row from the per-market oracle confirmation fetch. A PMP can be
+/// confirmed by multiple `OracleEventList` contracts (see
+/// `PrivateNote.PMPDeployed.oracleEventLists: address[]`), so each
+/// `pmp_address` can produce N rows here. `event_name` / `event_description`
+/// are derived from `eventId = hash(eventName, description, deadline,
+/// outcomeNames)` and MUST be identical across all rows for the same
+/// `pmp_address`; `aggregate_oracle_events` validates that and fails closed
+/// (`MarketInconsistent`) on mismatch.
+#[derive(Debug, sqlx::FromRow)]
+struct OracleEventJoinRow {
+    pmp_address: String,
     event_name: Option<String>,
     event_description: Option<String>,
     oracle_name: Option<String>,
     oracle_address: Option<String>,
     oracle_fee: Option<String>,
+}
+
+/// Aggregated oracle confirmation block for a single market. Built from
+/// 0..N rows of `OracleEventJoinRow` sharing the same `pmp_address`.
+#[derive(Debug, Default)]
+struct OracleEventBlock {
+    event_name: Option<String>,
+    event_description: Option<String>,
+    oracles: Vec<OracleEntry>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -295,7 +318,9 @@ impl PostgresReadModelRepository {
 
         let mut outcomes = self.fetch_outcomes(&[row.id]).await?;
         let market_outcomes = outcomes.remove(&row.id).unwrap_or_default();
-        let market = assemble_market(row, market_outcomes, now)?;
+        let mut oracle_blocks = self.fetch_oracle_events(&[row.pmp_address.clone()]).await?;
+        let oracle_block = oracle_blocks.remove(&row.pmp_address).unwrap_or_default();
+        let market = assemble_market(row, market_outcomes, oracle_block, now)?;
         Ok(MarketsPage { markets: vec![market], next_cursor: None, has_more: false })
     }
 
@@ -332,11 +357,14 @@ impl PostgresReadModelRepository {
 
         let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
         let mut outcomes_by_market = self.fetch_outcomes(&ids).await?;
+        let pmp_addresses: Vec<String> = rows.iter().map(|r| r.pmp_address.clone()).collect();
+        let mut oracle_blocks = self.fetch_oracle_events(&pmp_addresses).await?;
 
         let mut markets = Vec::with_capacity(rows.len());
         for row in rows {
             let outcomes = outcomes_by_market.remove(&row.id).unwrap_or_default();
-            markets.push(assemble_market(row, outcomes, listing.now)?);
+            let oracle_block = oracle_blocks.remove(&row.pmp_address).unwrap_or_default();
+            markets.push(assemble_market(row, outcomes, oracle_block, listing.now)?);
         }
 
         Ok(MarketsPage { markets, next_cursor, has_more })
@@ -385,6 +413,96 @@ impl PostgresReadModelRepository {
         }
         Ok(by_market)
     }
+
+    /// One round-trip per page that returns every confirmed `oracle_events`
+    /// row for the listed markets, joined with `oracle_event_lists` and
+    /// `oracles` for naming. Groups the rows in Rust and validates the
+    /// hash-derived invariant `event_name == … and describe == …` across
+    /// every row sharing the same `pmp_address` (a PMP can confirm against
+    /// multiple `OracleEventList` contracts per
+    /// `PMPDeployed.oracleEventLists: address[]`; `event_id =
+    /// hash(eventName, description, deadline, outcomeNames)`, so the
+    /// per-list metadata must match by construction). Returns
+    /// `DomainError::MarketInconsistent` on mismatch so the API fails
+    /// closed (HTTP 503) rather than picking an arbitrary row.
+    async fn fetch_oracle_events(
+        &self,
+        pmp_addresses: &[String],
+    ) -> Result<HashMap<String, OracleEventBlock>, anyhow::Error> {
+        if pmp_addresses.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<OracleEventJoinRow> = sqlx::query_as(
+            r#"select oe.confirmed_pmp_address              as pmp_address,
+                      oe.event_name                         as event_name,
+                      oe.describe                           as event_description,
+                      o.name                                as oracle_name,
+                      o.address                             as oracle_address,
+                      oe.oracle_fee::text                   as oracle_fee
+                 from oracle_events oe
+                 left join oracle_event_lists oel on oel.id = oe.eventlist_id
+                 left join oracles o on o.id = oel.oracle_id
+                where oe.confirmed_pmp_address = any($1)
+                order by oe.confirmed_pmp_address, oe.confirmed_at nulls last, oe.id"#,
+        )
+        .bind(pmp_addresses)
+        .fetch_all(&self.pool)
+        .await
+        .context("select oracle_events for pmp addresses")?;
+
+        aggregate_oracle_events(rows)
+    }
+}
+
+/// Group `OracleEventJoinRow` rows by `pmp_address`, validating the
+/// hash-derived invariant that `event_name`/`description` are equal across
+/// every row sharing the same `pmp_address` (see `fetch_oracle_events`).
+/// NULL values are tolerated as "not yet observed" (EventAdded lag against
+/// EventConfirmed for one of the lists); only conflicting non-NULL values
+/// trigger `MarketInconsistent`.
+fn aggregate_oracle_events(
+    rows: Vec<OracleEventJoinRow>,
+) -> Result<HashMap<String, OracleEventBlock>, anyhow::Error> {
+    let mut by_pmp: HashMap<String, OracleEventBlock> = HashMap::new();
+    for row in rows {
+        let block = by_pmp.entry(row.pmp_address.clone()).or_default();
+        unify_optional(&mut block.event_name, row.event_name, "event_name", &row.pmp_address)?;
+        unify_optional(
+            &mut block.event_description,
+            row.event_description,
+            "description",
+            &row.pmp_address,
+        )?;
+        block.oracles.push(OracleEntry {
+            name: row.oracle_name,
+            address: row.oracle_address,
+            fee: row.oracle_fee,
+        });
+    }
+    Ok(by_pmp)
+}
+
+fn unify_optional(
+    slot: &mut Option<String>,
+    incoming: Option<String>,
+    field: &str,
+    pmp_address: &str,
+) -> Result<(), anyhow::Error> {
+    let Some(value) = incoming else { return Ok(()) };
+    match slot {
+        Some(existing) if *existing != value => Err(anyhow!(DomainError::MarketInconsistent))
+            .with_context(|| {
+                format!(
+                    "oracle_events.{field} disagrees across rows for pmp_address={pmp_address}: \
+                     {existing:?} vs {value:?}"
+                )
+            }),
+        Some(_) => Ok(()),
+        None => {
+            *slot = Some(value);
+            Ok(())
+        }
+    }
 }
 
 // `m.is_cancelled` is the on-chain flag pulled by the reconciler via
@@ -413,6 +531,11 @@ const STATUS_CASE: &str = r#"case
       end"#;
 
 fn market_select_sql(where_clause: &str, tail: &str) -> String {
+    // Oracle/event fields are fetched in a separate batch (see
+    // `fetch_oracle_events`) so a multi-oracle PMP (`PMPDeployed.oracleEventLists:
+    // address[]`) does not duplicate the market row. Joining `oracle_events`
+    // here would multiply each market by N (one per confirmed list), which
+    // would inflate `has_more`/cursor and surface duplicates in the listing.
     format!(
         r#"select
                m.id                                          as id,
@@ -433,16 +556,8 @@ fn market_select_sql(where_clause: &str, tail: &str) -> String {
                m.cancel_reason                               as cancel_reason,
                m.is_cancelled                                as is_cancelled,
                extract(epoch from m.created_at)::bigint                  as created_at_unix,
-               (extract(epoch from m.created_at) * 1000000)::bigint      as created_at_micros,
-               oe.event_name                                 as event_name,
-               oe.describe                                   as event_description,
-               o.name                                        as oracle_name,
-               o.address                                     as oracle_address,
-               oe.oracle_fee::text                           as oracle_fee
+               (extract(epoch from m.created_at) * 1000000)::bigint      as created_at_micros
              from markets m
-             left join oracle_events oe on oe.confirmed_pmp_address = m.pmp_address
-             left join oracle_event_lists oel on oel.id = oe.eventlist_id
-             left join oracles o on o.id = oel.oracle_id
              {where_clause}
              {tail}"#
     )
@@ -474,8 +589,18 @@ fn build_listing_query(listing: &MarketsListing) -> Result<(String, Vec<Param>),
         where_parts.push(format!("m.token_code = ${}", params.len()));
     }
     if let Some(name) = &listing.filter.oracle_name {
+        // Multi-oracle markets carry N rows in `oracle_events`. Matching with
+        // EXISTS keeps the listing one-row-per-market while still surfacing
+        // the market if any of its oracles matches the filter.
         params.push(Param::Text(name.clone()));
-        where_parts.push(format!("o.name = ${}", params.len()));
+        where_parts.push(format!(
+            "exists (select 1 from oracle_events oe \
+                       join oracle_event_lists oel on oel.id = oe.eventlist_id \
+                       join oracles o on o.id = oel.oracle_id \
+                      where oe.confirmed_pmp_address = m.pmp_address \
+                        and o.name = ${})",
+            params.len()
+        ));
     }
     if let Some(closing_before) = listing.filter.closing_before {
         params.push(Param::BigInt(closing_before));
@@ -526,6 +651,7 @@ fn build_listing_query(listing: &MarketsListing) -> Result<(String, Vec<Param>),
 fn assemble_market(
     row: MarketRow,
     outcomes: Vec<Outcome>,
+    oracle_block: OracleEventBlock,
     now: i64,
 ) -> Result<Market, anyhow::Error> {
     let market_name = row.market_name.clone().ok_or_else(|| {
@@ -552,11 +678,9 @@ fn assemble_market(
     validate_invariants(status, &timings, &terminal).map_err(|err| anyhow!(err))?;
     let event = MarketEvent {
         event_id: numeric_to_hex(&row.event_id)?,
-        event_name: row.event_name,
-        description: row.event_description,
-        oracle_name: row.oracle_name,
-        oracle_address: row.oracle_address,
-        oracle_fee: row.oracle_fee,
+        event_name: oracle_block.event_name,
+        description: oracle_block.event_description,
+        oracles: oracle_block.oracles,
     };
 
     Ok(Market {
@@ -809,11 +933,6 @@ mod tests {
             is_cancelled: false,
             created_at_unix: 0,
             created_at_micros: 0,
-            event_name: None,
-            event_description: None,
-            oracle_name: None,
-            oracle_address: None,
-            oracle_fee: None,
         }
     }
 

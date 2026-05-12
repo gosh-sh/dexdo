@@ -105,9 +105,24 @@ pub struct MarketEvent {
     pub event_id: String,
     pub event_name: Option<String>,
     pub description: Option<String>,
-    pub oracle_name: Option<String>,
-    pub oracle_address: Option<String>,
-    pub oracle_fee: Option<String>,
+    pub oracles: Vec<OracleEntry>,
+}
+
+/// One confirmation source for a `MarketEvent`. A PMP can confirm against
+/// multiple `OracleEventList` contracts (see `PMPDeployed.oracleEventLists:
+/// address[]`), each contributing a row here. `eventName`/`description` are
+/// not duplicated — `eventId` is `hash(eventName, description, deadline,
+/// outcomeNames)`, so all confirmation sources for the same `eventId` agree
+/// on the shared event metadata by construction.
+///
+/// Fields are unprefixed (`name`/`address`/`fee`): the surrounding
+/// `event.oracles[]` array provides the qualifier, so `oracleName` etc.
+/// would be redundant on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleEntry {
+    pub name: Option<String>,
+    pub address: Option<String>,
+    pub fee: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

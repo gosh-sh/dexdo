@@ -28,7 +28,9 @@ Query parameters:
   `UPCOMING`, `STAKING`, `AWAITING_FREEZE`, `TRADING`, `RESOLVING`, `RESOLVED`,
   `CANCELLED`, `EXPIRED`).
 - `quoteAsset` — exact match against `markets.token_code` (`USDC`, `NACKL`, …).
-- `oracleName` — exact match against the joined `oracles.name`.
+- `oracleName` — match against any oracle that confirmed the PMP (EXISTS over
+  `oracle_events` ⨝ `oracle_event_lists` ⨝ `oracles`). A multi-oracle PMP
+  matches as long as one of its confirmations has the requested name.
 - `closingBefore` — unix seconds; keeps markets with `result_end < value`.
 - `sort` — `resultStart` (default, ASC) or `createdAt` (DESC).
 - `cursor` — opaque cursor returned by a previous page.
