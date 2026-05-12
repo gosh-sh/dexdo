@@ -16,3 +16,4 @@ database:
 auth:
   default_recv_window_ms: 5000
   max_recv_window_ms: 60000
+  seed_accounts: true

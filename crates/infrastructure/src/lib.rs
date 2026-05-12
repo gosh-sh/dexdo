@@ -5,6 +5,7 @@ pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod database;
+pub mod seed;
 pub mod decoder;
 pub mod graphql;
 pub mod indexer_repo;

@@ -71,7 +71,9 @@ const MAX_RECV_WINDOW_MS: u64 = 60_000;
 /// HMAC validity window settings. Field names follow `api-spec.md`
 /// semantics: `default_*` is what the middleware applies when a request
 /// omits `recvWindow`; `max_*` is the clamp the middleware enforces on
-/// any client-supplied `recvWindow`.
+/// any client-supplied `recvWindow`. `seed_accounts` triggers a
+/// hard-coded test-credential insert on api bootstrap; off by default,
+/// devops controls it per environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSection {
@@ -79,6 +81,8 @@ pub struct AuthSection {
     pub default_recv_window_ms: u64,
     #[serde(default = "default_max_recv_window_ms")]
     pub max_recv_window_ms: u64,
+    #[serde(default)]
+    pub seed_accounts: bool,
 }
 
 impl Default for AuthSection {
@@ -86,6 +90,7 @@ impl Default for AuthSection {
         Self {
             default_recv_window_ms: DEFAULT_RECV_WINDOW_MS,
             max_recv_window_ms: MAX_RECV_WINDOW_MS,
+            seed_accounts: false,
         }
     }
 }
@@ -503,28 +508,44 @@ auth:
 
     #[test]
     fn auth_validate_rejects_max_above_spec_ceiling() {
-        let s = AuthSection { default_recv_window_ms: 5_000, max_recv_window_ms: 120_000 };
+        let s = AuthSection {
+            default_recv_window_ms: 5_000,
+            max_recv_window_ms: 120_000,
+            seed_accounts: false,
+        };
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("60000"), "got: {err}");
     }
 
     #[test]
     fn auth_validate_rejects_default_above_max() {
-        let s = AuthSection { default_recv_window_ms: 30_000, max_recv_window_ms: 10_000 };
+        let s = AuthSection {
+            default_recv_window_ms: 30_000,
+            max_recv_window_ms: 10_000,
+            seed_accounts: false,
+        };
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("must be <="), "got: {err}");
     }
 
     #[test]
     fn auth_validate_rejects_zero_default() {
-        let s = AuthSection { default_recv_window_ms: 0, max_recv_window_ms: 60_000 };
+        let s = AuthSection {
+            default_recv_window_ms: 0,
+            max_recv_window_ms: 60_000,
+            seed_accounts: false,
+        };
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("default_recv_window_ms"), "got: {err}");
     }
 
     #[test]
     fn auth_validate_rejects_zero_max() {
-        let s = AuthSection { default_recv_window_ms: 0, max_recv_window_ms: 0 };
+        let s = AuthSection {
+            default_recv_window_ms: 0,
+            max_recv_window_ms: 0,
+            seed_accounts: false,
+        };
         let err = s.validate().unwrap_err();
         // `default == 0` is hit first by the order of checks, but the
         // important thing is that a zero-max config is rejected.
