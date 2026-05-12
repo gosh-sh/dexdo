@@ -92,7 +92,7 @@ One row per oracle service the system knows about. Populated by the `RootOracle.
 | --- | --- | --- |
 | `id` | `bigserial` PK | Internal FK target. |
 | `name` | `text` UNIQUE | Oracle name as registered on chain (e.g. `ElectionOracle`). |
-| `address` | `text` UNIQUE | Oracle contract address. Source for `event.oracleAddress`. |
+| `address` | `text` UNIQUE | Oracle contract address. |
 | `deploy_msg_id` | `text` UNIQUE (nullable) | Message id of the deploy event. NULL if the oracle was discovered indirectly. |
 | `pubkey` | `text` | Oracle pubkey from the deploy event. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
@@ -165,7 +165,7 @@ One row per PMP (Prediction Market Pool) contract observed on chain. Discovered 
 | `token_code` | `text` | Quote-asset code (denormalised from `ref_tokens` for read speed). |
 | `event_id` | `numeric(78,0)` | Oracle event id this market resolves against. |
 | `oracle_list_hash` | `numeric(78,0)` (nullable per 0005) | EventList hash used in OrderBook derivation. NULL pre-reconcile. |
-| `orderbook_address` | `text` (nullable) | The deterministic OrderBook address. Written by the reconciler **only when `frozen_at IS NOT NULL`** (migration 0013, H1 fix) — until then this column stays NULL and the API reports `orderBookAddress: null`. |
+| `orderbook_address` | `text` (nullable) | The deterministic OrderBook address returned by `PMP.getOrderBookAddress()`. Written by the market reconciler on the first successful pass, including pre-`PoolsFrozen` rows. Nullable only during the pre-reconcile window; migration 0014 enforces `last_reconciled_at IS NULL OR orderbook_address IS NOT NULL`, so every market visible to the API has a non-null `orderBookAddress`. |
 | `approved` | `boolean` default `false` | Approval flag from `getDetails()`; flipped to `true` by the `TimingsSet` event. |
 | `is_cancelled` | `boolean` default `false` | On-chain cancellation flag from `getDetails()`. Either this or `cancelled_at` being set is enough to flip the derived status to `CANCELLED`. |
 | `stake_start` / `stake_end` / `result_start` / `result_end` | `bigint` (nullable) | Lifecycle timings (unix seconds). Written only by the `TimingsSet` event; reconciler does **not** touch these (H2 fix). NULL on all four = PENDING. |
