@@ -85,7 +85,7 @@ OrderBook events drive [`live_orders`](data-schema.md#live_orders), the per-orde
 
 `PartialFill` / `FullyFilled` are derived aggregates the contract emits for MM-friendly UX; the underlying state is already captured by `OrderFilled`. `Queued` / `Rejected` happen at queue level, before any order id is assigned. `CallbackBounced` is a diagnostic — OrderBook state is not auto-rolled back, and the bounced credit needs operator-driven recovery.
 
-Event ordering is anchored on `raw_events.chain_order` (set from the GraphQL gateway's `msg_chain_order`). The live persist path inserts edges in chain order; the reproject loop sorts deferred rows by `chain_order asc`. That gives `OrderPlaced → OrderFilled → OrderCancelled` the correct natural sequence even when the gateway delivers them in a different order — applying Fill before its parent Place no longer corrupts state. `greatest(existing, new)` on `last_chain_order` is a belt-and-suspenders monotonicity guard for the row's column, not the primary correctness mechanism.
+Event ordering is anchored on `raw_events.chain_order` (set from the GraphQL gateway's `msg_chain_order`). The GraphQL events connection already returns edges in strict `msg_chain_order` order, and pagination preserves that order across pages; the live persist path therefore projects newly fetched edges in the received order. The reproject loop sorts deferred rows by `chain_order asc` because it reads from Postgres rather than directly from the ordered GraphQL page. Together these rules give `OrderPlaced → OrderFilled → OrderCancelled` the correct natural sequence. `greatest(existing, new)` on `last_chain_order` is a belt-and-suspenders monotonicity guard for the row's column, not the primary correctness mechanism.
 
 ## Reconciliation
 
