@@ -88,10 +88,16 @@ async fn build_request(req: &mut Request) -> Result<AuthenticateRequest, DomainE
         .ok_or(DomainError::AuthEnvelopeIncomplete)?;
 
     // `recvWindow` is optional per the spec; absence means "use the
-    // server-side default". A non-numeric value is treated as absent
-    // rather than 400-ing so a malformed client sees the same -1003
-    // it gets for any other envelope issue.
-    let recv_window_ms = req.query::<u64>("recvWindow");
+    // server-side default". A present-but-malformed value is rejected
+    // with the same `-1003` the other envelope parameters use rather
+    // than silently falling back to the default — silent fallback
+    // would mask client SDK bugs and surface later as confusing
+    // `-1021` errors when the chosen default does not match the
+    // client's expected tolerance.
+    let recv_window_ms = match req.queries().get("recvWindow") {
+        None => None,
+        Some(raw) => Some(raw.parse::<u64>().map_err(|_| DomainError::AuthEnvelopeIncomplete)?),
+    };
 
     let raw_query_string = req.uri().query().unwrap_or("").to_string();
 

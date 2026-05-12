@@ -179,6 +179,32 @@ async fn recv_window_overshoot_silently_clamps() {
     assert_eq!(resp.status_code, Some(StatusCode::OK));
 }
 
+#[tokio::test]
+async fn malformed_recv_window_returns_1003() {
+    // A present-but-unparseable `recvWindow` must be rejected rather
+    // than silently falling back to the server-side default; silent
+    // fallback would mask client SDK bugs and surface later as
+    // confusing -1021 errors. The signature is correctly built over
+    // the same canonical string the client sent, so the only thing
+    // that can reject the request is the envelope parse.
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let canonical = canonical_query(&[("recvWindow", "abc"), ("timestamp", &ts.to_string())]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::post("http://test/api/v1/order")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .query("recvWindow", "abc")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1003);
+}
+
 // ---- happy path ---------------------------------------------------------
 
 #[tokio::test]
