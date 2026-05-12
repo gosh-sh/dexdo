@@ -5,11 +5,7 @@
 // in `docs/api-spec.md`. The user model and the verification pipeline
 // are described in `docs/tech-specs/auth.md`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use dodex_application::AuthContext;
@@ -37,12 +33,6 @@ type HmacSha256 = Hmac<Sha256>;
 /// so a client up to one second in the future is still in band.
 const FORWARD_SKEW_TOLERANCE_MS: i64 = 1_000;
 
-/// Cooldown between `last_used_at` writes for the same api_key.
-/// Without coalescing, a busy market-maker bot would issue one DB
-/// write per request per key and could saturate the pool; with this
-/// window the column is "fresh within a minute" instead of "exact".
-const LAST_USED_COOLDOWN: Duration = Duration::from_secs(60);
-
 /// Single-row lookup result joining `api_keys` with its parent
 /// `accounts` row. Both `disabled_at` predicates are part of the
 /// `WHERE` so a missing row already means "no active credential".
@@ -65,9 +55,6 @@ pub struct PostgresAuthenticator {
     kek: Arc<Kek>,
     default_recv_window_ms: u64,
     max_recv_window_ms: u64,
-    /// Tracks the last time we issued an UPDATE for each api_key so that
-    /// repeated authentications coalesce into one write per cooldown.
-    last_used_bumps: Arc<Mutex<HashMap<i64, Instant>>>,
 }
 
 impl PostgresAuthenticator {
@@ -77,25 +64,6 @@ impl PostgresAuthenticator {
             kek,
             default_recv_window_ms: config.default_recv_window_ms,
             max_recv_window_ms: config.max_recv_window_ms,
-            last_used_bumps: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// Returns `true` at most once per `LAST_USED_COOLDOWN` per api_key.
-    /// A poisoned mutex (which would only happen if a previous holder
-    /// panicked) falls through to "bump anyway" — correctness leans on
-    /// the DB, not on this throttle.
-    fn should_bump_last_used(&self, api_key_id: i64) -> bool {
-        let now = Instant::now();
-        let Ok(mut map) = self.last_used_bumps.lock() else {
-            return true;
-        };
-        match map.get(&api_key_id) {
-            Some(prev) if now.duration_since(*prev) < LAST_USED_COOLDOWN => false,
-            _ => {
-                map.insert(api_key_id, now);
-                true
-            }
         }
     }
 
@@ -247,24 +215,19 @@ impl Authenticator for PostgresAuthenticator {
             );
         }
 
-        // 8. Fire-and-forget last_used_at bump, throttled per-key so a
-        //    busy bot does not turn this into one DB write per request.
-        //    Observability only — DB hiccup here must not fail the
-        //    request.
-        if self.should_bump_last_used(row.api_key_id) {
-            let pool = self.pool.clone();
-            let api_key_id = row.api_key_id;
-            tokio::spawn(async move {
-                if let Err(e) =
-                    sqlx::query("update api_keys set last_used_at = now() where id = $1")
-                        .bind(api_key_id)
-                        .execute(&pool)
-                        .await
-                {
-                    tracing::warn!(error = ?e, api_key_id, "last_used_at bump failed");
-                }
-            });
-        }
+        // 8. Fire-and-forget last_used_at bump. Observability only —
+        //    DB hiccup here must not fail the request.
+        let pool = self.pool.clone();
+        let api_key_id = row.api_key_id;
+        tokio::spawn(async move {
+            if let Err(e) = sqlx::query("update api_keys set last_used_at = now() where id = $1")
+                .bind(api_key_id)
+                .execute(&pool)
+                .await
+            {
+                tracing::warn!(error = ?e, api_key_id, "last_used_at bump failed");
+            }
+        });
 
         Ok(AuthContext {
             account_id: row.account_id,
