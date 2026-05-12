@@ -6,3 +6,9 @@ internal-docs/
 target/
 config/indexer.stage.supabase.yaml
 config/api.stage.supabase.yaml
+# `.env` itself is committed (local-only test credentials); any
+# developer- or environment-specific overrides must stay local so an
+# accidental real secret cannot land in git.
+.env.local
+.env.stage
+.env.prod

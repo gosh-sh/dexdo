@@ -475,6 +475,13 @@ pub fn build_router(state: AppState) -> Router {
 /// stays a single line and every meaningful step is testable in
 /// isolation.
 pub async fn run() -> anyhow::Result<()> {
+    // Pick up a `.env` if it sits next to the binary or in any parent
+    // directory of the working tree. The committed `.env` carries the
+    // local-development KEK and DB URL; production environments
+    // override the same variables through their secret-management
+    // system, and the dotenvy call is a no-op when no file is found.
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
