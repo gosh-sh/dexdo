@@ -288,7 +288,11 @@ impl PostgresReadModelRepository {
         .context("select single market")?;
 
         let Some(row) = row else {
-            return Ok(MarketsPage { markets: vec![], next_cursor: None, has_more: false });
+            // Single-market lookup: an unknown / not-yet-reconciled address is
+            // a client-side miss, not an empty listing. Surface it as a typed
+            // domain error so the API handler maps it to 404, mirroring the
+            // /api/v1/depth contract above.
+            return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
         };
 
         let mut outcomes = self.fetch_outcomes(&[row.id]).await?;

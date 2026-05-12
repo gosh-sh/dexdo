@@ -430,3 +430,22 @@ async fn cancelled_with_garbage_reason_fails_closed() {
     let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
     assert_eq!(*domain, DomainError::MarketInconsistent);
 }
+
+#[tokio::test]
+async fn unknown_market_address_returns_invalid_market_or_symbol() {
+    // tech-specs/market-data-api.md error mapping: a single-market lookup for
+    // an unknown / not-yet-reconciled `marketAddress` must surface as
+    // `InvalidMarketOrSymbol` (→ HTTP 404), not an empty success page —
+    // mirrors the /api/v1/depth contract.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "unknown";
+    purge_market(&pool, pmp).await;
+
+    let request =
+        MarketsRequest::One { market_address: MarketAddress(pmp.into()), now: 1_700_000_150 };
+    let err = repo.list_markets(&request).await.expect_err("unknown market must error");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::InvalidMarketOrSymbol);
+}
