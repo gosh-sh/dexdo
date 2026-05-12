@@ -2,6 +2,9 @@
 .temp/
 internal-docs/
 target/
+.claude/roles/
+.claude/commands.txt
+.claude/skills/reviewer-core/
 config/indexer.stage.supabase.yaml
 config/api.stage.supabase.yaml
 # `.env.example` is committed as a template; the real `.env` and any
@@ -10,3 +13,4 @@ config/api.stage.supabase.yaml
 .env.local
 .env.stage
 .env.prod
+plan.md
