@@ -16,7 +16,9 @@ use dodex_domain::Permission;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use sqlx::PgPool;
+use sqlx::Postgres;
 use sqlx::Row;
+use sqlx::Transaction;
 use tracing::debug;
 use tracing::info;
 use uuid::Uuid;
@@ -175,33 +177,72 @@ const SEED_DATA: &str = r#"{
   ]
 }"#;
 
+// ---- Public shape of the seed payload. Exposed so integration tests
+// can build their own UUID-prefixed fixtures and run them through
+// `apply_seed` without colliding with the baked JSON; production code
+// only uses the no-argument `seed_accounts` entry point. ----
+
+#[doc(hidden)]
 #[derive(Debug, Deserialize)]
-struct SeedData {
-    accounts: Vec<SeedAccount>,
+pub struct SeedData {
+    pub accounts: Vec<SeedAccount>,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Deserialize)]
-struct SeedAccount {
-    label: Option<String>,
-    pn_address: String,
+pub struct SeedAccount {
+    pub label: Option<String>,
+    pub pn_address: String,
     /// uint256 public key in decimal, ready for the `numeric(78,0)`
     /// `accounts.pn_pubkey` column.
-    pn_pubkey_dec: String,
+    pub pn_pubkey_dec: String,
     /// 32-byte ed25519 private key, hex-encoded. Gets encrypted under
     /// the KEK at seed time.
-    pn_seckey_hex: String,
+    pub pn_seckey_hex: String,
     /// deposit_identifier_hash from `RootPN.PrivateNoteDeployed`, in
     /// decimal.
-    pn_dih_dec: String,
-    api_keys: Vec<SeedApiKey>,
+    pub pn_dih_dec: String,
+    pub api_keys: Vec<SeedApiKey>,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Deserialize)]
-struct SeedApiKey {
-    api_key: String,
+pub struct SeedApiKey {
+    pub api_key: String,
     /// 32-byte api_secret hex, encrypted under the KEK at seed time.
-    api_secret_hex: String,
-    permissions: Vec<String>,
+    pub api_secret_hex: String,
+    pub permissions: Vec<String>,
+}
+
+// ---- Validated shape: every field is already normalised into the form
+// the DB writer expects. `validate` is a pure function with no I/O, so
+// any malformed entry in the baked JSON aborts startup before the
+// first INSERT and a partial DB state is impossible. ----
+
+#[derive(Debug)]
+struct ValidatedSeedData {
+    accounts: Vec<ValidatedSeedAccount>,
+}
+
+#[derive(Debug)]
+struct ValidatedSeedAccount {
+    label: Option<String>,
+    pn_address: String,
+    /// Already verified to parse as a decimal uint256.
+    pn_pubkey_dec: String,
+    /// Hex-decoded; encrypted into a KEK envelope at insert time.
+    pn_seckey: Vec<u8>,
+    /// Already verified to parse as a decimal uint256.
+    pn_dih_dec: String,
+    api_keys: Vec<ValidatedSeedApiKey>,
+}
+
+#[derive(Debug)]
+struct ValidatedSeedApiKey {
+    api_key: String,
+    /// Hex-decoded; encrypted into a KEK envelope at insert time.
+    api_secret: Vec<u8>,
+    permissions: Vec<Permission>,
 }
 
 /// Aggregate insert/skip counters returned to the caller for the
@@ -214,55 +255,113 @@ pub struct SeedReport {
     pub api_keys_skipped: u64,
 }
 
-/// Apply the hard-coded seed credentials against `pool`. Idempotent:
-/// re-running with the same JSON produces a `*_skipped` count equal to
-/// the row count and no inserts.
+/// Production entry. Parses the binary-embedded JSON and applies it
+/// through `apply_seed`. The pipeline is documented on `apply_seed`.
 pub async fn seed_accounts(pool: &PgPool, kek: &Kek) -> Result<SeedReport> {
-    let data: SeedData =
+    let parsed: SeedData =
         serde_json::from_str(SEED_DATA).context("parse hard-coded seed_data.json")?;
+    apply_seed(pool, kek, parsed).await
+}
 
+/// Apply an arbitrary `SeedData` payload against `pool`. Used by
+/// `seed_accounts` for the production baked-in JSON and by integration
+/// tests for UUID-prefixed fixtures.
+///
+/// Pipeline:
+///
+/// 1. Validate every field (numerics, hex, permission labels) into
+///    `ValidatedSeedData` — any failure here returns `Err` before a
+///    single DB statement runs, so a malformed payload never produces
+///    a partial DB state.
+/// 2. Apply every INSERT inside a single Postgres transaction. A
+///    mid-apply failure rolls everything back automatically when the
+///    `Transaction` drops without `commit()`.
+///
+/// Idempotent on re-run: `ON CONFLICT DO NOTHING` on both tables, with
+/// `*_skipped` counters reporting the no-ops.
+#[doc(hidden)]
+pub async fn apply_seed(pool: &PgPool, kek: &Kek, data: SeedData) -> Result<SeedReport> {
+    let validated = validate(data).context("validate seed payload")?;
+
+    let mut tx = pool.begin().await.context("begin seed transaction")?;
     let mut report = SeedReport::default();
 
-    for account in &data.accounts {
-        let account_id = upsert_account(pool, kek, account, &mut report)
+    for account in &validated.accounts {
+        let account_id = upsert_account(&mut tx, kek, account, &mut report)
             .await
             .with_context(|| format!("seed account {}", account.pn_address))?;
 
         for key in &account.api_keys {
-            upsert_api_key(pool, kek, account_id, key, &mut report)
+            upsert_api_key(&mut tx, kek, account_id, key, &mut report)
                 .await
                 .with_context(|| format!("seed api_key {}", key.api_key))?;
         }
     }
+
+    tx.commit().await.context("commit seed transaction")?;
 
     info!(
         accounts_inserted = report.accounts_inserted,
         accounts_skipped = report.accounts_skipped,
         api_keys_inserted = report.api_keys_inserted,
         api_keys_skipped = report.api_keys_skipped,
-        "seeded test credentials",
+        "seeded credentials",
     );
 
     Ok(report)
 }
 
+/// Walk the parsed JSON and reject any field that cannot be applied.
+/// Pure function — no I/O, no encryption, no DB. The api will refuse
+/// to start if this returns `Err`, which is the loudest possible
+/// signal that someone edited `SEED_DATA` incorrectly.
+fn validate(parsed: SeedData) -> Result<ValidatedSeedData> {
+    let mut accounts = Vec::with_capacity(parsed.accounts.len());
+    for account in parsed.accounts {
+        let pn_address = account.pn_address;
+        BigUint::parse_bytes(account.pn_pubkey_dec.as_bytes(), 10)
+            .with_context(|| format!("pn_pubkey_dec for {pn_address} must be a decimal uint256"))?;
+        BigUint::parse_bytes(account.pn_dih_dec.as_bytes(), 10)
+            .with_context(|| format!("pn_dih_dec for {pn_address} must be a decimal uint256"))?;
+        let pn_seckey = hex::decode(&account.pn_seckey_hex)
+            .with_context(|| format!("pn_seckey_hex for {pn_address} must be valid hex"))?;
+
+        let mut api_keys = Vec::with_capacity(account.api_keys.len());
+        for key in account.api_keys {
+            if key.permissions.is_empty() {
+                bail!("api_key {} has no permissions", key.api_key);
+            }
+            let mut permissions = Vec::with_capacity(key.permissions.len());
+            for label in &key.permissions {
+                match Permission::parse(label) {
+                    Some(p) => permissions.push(p),
+                    None => bail!("api_key {}: unknown permission {label:?}", key.api_key),
+                }
+            }
+            let api_secret = hex::decode(&key.api_secret_hex)
+                .with_context(|| format!("api_secret_hex for {} must be valid hex", key.api_key))?;
+            api_keys.push(ValidatedSeedApiKey { api_key: key.api_key, api_secret, permissions });
+        }
+
+        accounts.push(ValidatedSeedAccount {
+            label: account.label,
+            pn_address,
+            pn_pubkey_dec: account.pn_pubkey_dec,
+            pn_seckey,
+            pn_dih_dec: account.pn_dih_dec,
+            api_keys,
+        });
+    }
+    Ok(ValidatedSeedData { accounts })
+}
+
 async fn upsert_account(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     kek: &Kek,
-    account: &SeedAccount,
+    account: &ValidatedSeedAccount,
     report: &mut SeedReport,
 ) -> Result<Uuid> {
-    // Validate the numeric strings up-front — empty or malformed values
-    // would otherwise surface as a PG cast error, which is harder to
-    // attribute to a specific seed row.
-    BigUint::parse_bytes(account.pn_pubkey_dec.as_bytes(), 10)
-        .context("pn_pubkey_dec must be a decimal uint256")?;
-    BigUint::parse_bytes(account.pn_dih_dec.as_bytes(), 10)
-        .context("pn_dih_dec must be a decimal uint256")?;
-
-    let pn_seckey =
-        hex::decode(&account.pn_seckey_hex).context("pn_seckey_hex must be valid hex")?;
-    let pn_seckey_enc = crypto::seal(kek, &pn_seckey).context("encrypt pn_seckey")?;
+    let pn_seckey_enc = crypto::seal(kek, &account.pn_seckey).context("encrypt pn_seckey")?;
 
     let row = sqlx::query(
         r#"insert into accounts
@@ -276,7 +375,7 @@ async fn upsert_account(
     .bind(&account.pn_pubkey_dec)
     .bind(&pn_seckey_enc)
     .bind(&account.pn_dih_dec)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .context("insert account")?;
 
@@ -289,7 +388,7 @@ async fn upsert_account(
         // Row already exists — fetch its id so the api_keys can attach.
         let id: Uuid = sqlx::query_scalar("select id from accounts where pn_address = $1")
             .bind(&account.pn_address)
-            .fetch_one(pool)
+            .fetch_one(&mut **tx)
             .await
             .context("look up existing account by pn_address")?;
         report.accounts_skipped += 1;
@@ -299,26 +398,14 @@ async fn upsert_account(
 }
 
 async fn upsert_api_key(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     kek: &Kek,
     account_id: Uuid,
-    key: &SeedApiKey,
+    key: &ValidatedSeedApiKey,
     report: &mut SeedReport,
 ) -> Result<()> {
-    if key.permissions.is_empty() {
-        bail!("api_key {} has no permissions", key.api_key);
-    }
-    let mut perms: Vec<String> = Vec::with_capacity(key.permissions.len());
-    for label in &key.permissions {
-        match Permission::parse(label) {
-            Some(p) => perms.push(p.as_str().to_string()),
-            None => bail!("api_key {}: unknown permission {label:?}", key.api_key),
-        }
-    }
-
-    let api_secret =
-        hex::decode(&key.api_secret_hex).context("api_secret_hex must be valid hex")?;
-    let api_secret_enc = crypto::seal(kek, &api_secret).context("encrypt api_secret")?;
+    let perms: Vec<String> = key.permissions.iter().map(|p| p.as_str().to_string()).collect();
+    let api_secret_enc = crypto::seal(kek, &key.api_secret).context("encrypt api_secret")?;
 
     // Partial-unique index `(api_key) WHERE disabled_at IS NULL` is the
     // conflict target; PG 11+ supports it via the matching WHERE clause.
@@ -332,7 +419,7 @@ async fn upsert_api_key(
     .bind(&key.api_key)
     .bind(&api_secret_enc)
     .bind(&perms)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .context("insert api_key")?;
 
@@ -350,35 +437,77 @@ async fn upsert_api_key(
 mod tests {
     use super::*;
 
-    #[test]
-    fn baked_seed_data_parses() {
-        // Compile-time guarantee: the embedded JSON deserialises into
-        // the expected shape. Anyone editing seed_data.json gets a
-        // clear test failure rather than a confusing runtime error on
-        // first boot.
-        let data: SeedData = serde_json::from_str(SEED_DATA).expect("seed_data.json must parse");
-        assert!(!data.accounts.is_empty(), "baked seed has zero accounts");
-        for account in &data.accounts {
-            assert!(!account.pn_address.is_empty());
-            BigUint::parse_bytes(account.pn_pubkey_dec.as_bytes(), 10)
-                .unwrap_or_else(|| panic!("pn_pubkey_dec not decimal for {}", account.pn_address));
-            BigUint::parse_bytes(account.pn_dih_dec.as_bytes(), 10)
-                .unwrap_or_else(|| panic!("pn_dih_dec not decimal for {}", account.pn_address));
-            hex::decode(&account.pn_seckey_hex).unwrap_or_else(|e| {
-                panic!("pn_seckey_hex not valid for {}: {e}", account.pn_address)
-            });
-            assert!(!account.api_keys.is_empty(), "{} has no api_keys", account.pn_address);
-            for key in &account.api_keys {
-                hex::decode(&key.api_secret_hex).unwrap_or_else(|e| {
-                    panic!("api_secret_hex not valid for {}: {e}", key.api_key)
-                });
-                assert!(!key.permissions.is_empty(), "{} has no permissions", key.api_key);
-                for perm in &key.permissions {
-                    Permission::parse(perm).unwrap_or_else(|| {
-                        panic!("unknown permission {perm:?} for {}", key.api_key)
-                    });
-                }
-            }
+    fn one_good_account() -> SeedAccount {
+        SeedAccount {
+            label: Some("fixture".into()),
+            pn_address: "0:fixture".into(),
+            pn_pubkey_dec: "1".into(),
+            pn_seckey_hex: "00".repeat(32),
+            pn_dih_dec: "2".into(),
+            api_keys: vec![SeedApiKey {
+                api_key: "dk_live_fixture".into(),
+                api_secret_hex: "00".repeat(32),
+                permissions: vec!["USER_DATA".into(), "TRADE".into()],
+            }],
         }
+    }
+
+    #[test]
+    fn baked_seed_data_validates() {
+        // The embedded JSON parses into the raw shape and survives the
+        // full validation pipeline. Editing SEED_DATA into something
+        // malformed gets a clear test failure here rather than a
+        // confusing runtime error on first boot.
+        let data: SeedData = serde_json::from_str(SEED_DATA).expect("seed_data.json must parse");
+        let validated = validate(data).expect("seed_data.json must validate");
+        assert_eq!(validated.accounts.len(), 10, "baked seed must contain ten accounts");
+    }
+
+    #[test]
+    fn validate_rejects_non_decimal_pn_pubkey() {
+        let mut acc = one_good_account();
+        acc.pn_pubkey_dec = "not-a-number".into();
+        let err = validate(SeedData { accounts: vec![acc] }).unwrap_err();
+        assert!(format!("{err:#}").contains("pn_pubkey_dec"), "got: {err:#}");
+    }
+
+    #[test]
+    fn validate_rejects_non_decimal_pn_dih() {
+        let mut acc = one_good_account();
+        acc.pn_dih_dec = "0xdeadbeef".into();
+        let err = validate(SeedData { accounts: vec![acc] }).unwrap_err();
+        assert!(format!("{err:#}").contains("pn_dih_dec"), "got: {err:#}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_hex_seckey() {
+        let mut acc = one_good_account();
+        acc.pn_seckey_hex = "not-hex-at-all".into();
+        let err = validate(SeedData { accounts: vec![acc] }).unwrap_err();
+        assert!(format!("{err:#}").contains("pn_seckey_hex"), "got: {err:#}");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_permission() {
+        let mut acc = one_good_account();
+        acc.api_keys[0].permissions = vec!["SUPER_ADMIN".into()];
+        let err = validate(SeedData { accounts: vec![acc] }).unwrap_err();
+        assert!(format!("{err:#}").contains("unknown permission"), "got: {err:#}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_permissions() {
+        let mut acc = one_good_account();
+        acc.api_keys[0].permissions = vec![];
+        let err = validate(SeedData { accounts: vec![acc] }).unwrap_err();
+        assert!(format!("{err:#}").contains("no permissions"), "got: {err:#}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_hex_secret() {
+        let mut acc = one_good_account();
+        acc.api_keys[0].api_secret_hex = "zz".into();
+        let err = validate(SeedData { accounts: vec![acc] }).unwrap_err();
+        assert!(format!("{err:#}").contains("api_secret_hex"), "got: {err:#}");
     }
 }

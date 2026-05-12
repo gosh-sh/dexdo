@@ -11,6 +11,7 @@ use common::now_ms;
 use common::sign;
 use common::SEED_API_KEY;
 use common::SEED_API_SECRET;
+use dodex_infrastructure::crypto::Kek;
 use salvo::http::StatusCode;
 use salvo::test::ResponseExt;
 use salvo::test::TestClient;
@@ -215,17 +216,20 @@ async fn user_data_only_key_returns_1002_on_trade_route() {
     // account and tear it down at the end.
     let Some((service, pool, kek)) = common::setup().await else { return };
 
+    // Uuid-suffix the readonly key so parallel runs (and any future
+    // re-entrancy of this test) never share the row.
+    let scope = uuid::Uuid::new_v4().simple().to_string();
     let readonly_secret_hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-    let readonly_api_key = "dk_live_test_readonly_zz";
+    let readonly_api_key = format!("dk_test_readonly_{scope}");
 
-    insert_readonly_key(&pool, &kek, readonly_api_key, readonly_secret_hex).await;
+    insert_readonly_key(&pool, &kek, &readonly_api_key, readonly_secret_hex).await;
 
     let ts = now_ms();
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(readonly_secret_hex, &canonical, b"");
 
     let mut resp = TestClient::post("http://test/api/v1/order")
-        .add_header("X-DODEX-APIKEY", readonly_api_key, true)
+        .add_header("X-DODEX-APIKEY", readonly_api_key.as_str(), true)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -237,7 +241,7 @@ async fn user_data_only_key_returns_1002_on_trade_route() {
 
     // Cleanup before any assertion so a failure does not leak fixture
     // rows into the next run of this same test.
-    cleanup_readonly_key(&pool, readonly_api_key).await;
+    cleanup_readonly_key(&pool, &readonly_api_key).await;
 
     assert_eq!(status, Some(StatusCode::UNAUTHORIZED));
     assert_eq!(body.code, -1002);
@@ -278,5 +282,3 @@ async fn cleanup_readonly_key(pool: &PgPool, api_key: &str) {
         .await
         .expect("cleanup readonly api_key");
 }
-
-use dodex_infrastructure::crypto::Kek;

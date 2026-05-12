@@ -15,7 +15,6 @@ create table accounts (
     pn_pubkey       numeric(78, 0)     not null,
     pn_seckey_enc   bytea              not null,
     pn_dih          numeric(78, 0)     not null unique,
-    key_version     int                not null default 1,
     disabled_at     timestamptz,
     created_at      timestamptz        not null default now()
 );
@@ -28,7 +27,6 @@ create table api_keys (
     api_key         text               not null,
     api_secret_enc  bytea              not null,
     permissions     auth_permission[]  not null default array['USER_DATA'::auth_permission],
-    key_version     int                not null default 1,
     disabled_at     timestamptz,
     last_used_at    timestamptz,
     created_at      timestamptz        not null default now()

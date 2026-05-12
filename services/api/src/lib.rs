@@ -157,10 +157,10 @@ struct ErrorBody {
 }
 
 #[derive(Debug)]
-pub struct ApiError(DomainError);
+pub(crate) struct ApiError(DomainError);
 
 impl ApiError {
-    pub fn status(&self) -> StatusCode {
+    pub(crate) fn status(&self) -> StatusCode {
         match self.0 {
             DomainError::AuthRequired
             | DomainError::AuthEnvelopeIncomplete

@@ -175,7 +175,12 @@ impl Authenticator for PostgresAuthenticator {
 
         // 7. Parse permissions. Unknown enum labels are skipped with a
         //    warn so a stale binary still serves USER_DATA / TRADE
-        //    correctly after a forward-compatible enum extension.
+        //    correctly after a forward-compatible enum extension. If
+        //    *every* label is unknown, the row is now effectively
+        //    bricked (every `ctx.require(...)` will return -1002) —
+        //    that is the actionable signal for operators, so escalate
+        //    to `error!` rather than letting it hide behind a flurry
+        //    of per-label `warn!` lines.
         let permissions: Vec<Permission> = row
             .permissions
             .iter()
@@ -191,6 +196,15 @@ impl Authenticator for PostgresAuthenticator {
                 }
             })
             .collect();
+        if permissions.is_empty() && !row.permissions.is_empty() {
+            tracing::error!(
+                api_key_id = row.api_key_id,
+                account_id = %row.account_id,
+                labels = ?row.permissions,
+                "auth: api_key has no recognized permissions after filtering — \
+                 binary is likely stale relative to the DB enum",
+            );
+        }
 
         // 8. Fire-and-forget last_used_at bump. Observability only —
         //    DB hiccup here must not fail the request.
@@ -303,12 +317,16 @@ fn verify_hmac(
 
 /// Masked form of an api_key for logging. Shows the first 8 and last 4
 /// characters of long keys so operators can correlate without exposing
-/// the full credential.
+/// the full credential. A non-ASCII byte sitting at either slice
+/// boundary would otherwise panic the worker via the byte-indexing
+/// `&api_key[..]` — defensively fall back to `***` for any value that
+/// is not safe to slice at those offsets, even though our own
+/// generator only ever emits ASCII hex.
 fn mask(api_key: &str) -> String {
-    if api_key.len() < 12 {
+    let len = api_key.len();
+    if len < 12 || !api_key.is_char_boundary(8) || !api_key.is_char_boundary(len - 4) {
         return "***".to_string();
     }
-    let len = api_key.len();
     format!("{}...{}", &api_key[..8], &api_key[len - 4..])
 }
 
@@ -518,5 +536,22 @@ mod tests {
     #[test]
     fn mask_redacts_short_key() {
         assert_eq!(mask("short"), "***");
+    }
+
+    #[test]
+    fn mask_redacts_non_ascii_input() {
+        // A malicious client could put non-ASCII bytes into
+        // X-DODEX-APIKEY; the masker must not panic on byte-index
+        // slicing at a multibyte boundary.
+        //
+        // Construct a value where byte index 8 falls *inside* a
+        // multibyte UTF-8 char: 7 ASCII bytes, then "ё" (2 bytes
+        // spanning indices 7..=8), then a 4-byte ASCII suffix. The
+        // mask must detect the bad boundary and return "***" rather
+        // than panic on `&s[..8]`.
+        let key = "abcdefgё1234";
+        assert_eq!(key.len(), 13, "construction precondition");
+        assert!(!key.is_char_boundary(8), "byte 8 must split the 'ё'");
+        assert_eq!(mask(key), "***");
     }
 }
