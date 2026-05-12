@@ -1,96 +1,110 @@
-# Marshall
+# DODEX
 
-Marshall is an internal execution bot.
+Backend for DODEX — a decentralized exchange on the Acki Nacki chain. Two Rust services share a Postgres read-model:
 
-Documentation entry points:
-- [docs/README.md](docs/README.md) — documentation map
-- [docs/product-spec.md](docs/product-spec.md) — product behavior
-- [docs/worker/technical-spec.md](docs/worker/technical-spec.md) — technical structure and invariants
+- `services/api` — HTTP service serving the public REST API.
+- `services/indexer` — chain-event ingestor that builds the Postgres read-model.
+
+On-chain DODEX contracts live under `contracts/`.
+
+## Documentation
+
+- [docs/api-spec.md](docs/api-spec.md) — public REST API contract.
+- [docs/README.md](docs/README.md) — documentation map and file ownership.
+- [docs/plan.md](docs/plan.md) — active implementation plan, per development area.
+- [AGENT_REQUIREMENTS.md](AGENT_REQUIREMENTS.md) — rules for any agent making repository changes.
+
+## Repository layout
+
+```
+crates/
+  domain/            # domain types
+  application/       # use cases
+  infrastructure/    # adapters (Postgres, TVM runner, GraphQL gateway)
+services/
+  api/               # REST API service
+  indexer/           # chain-event indexer
+contracts/           # on-chain DODEX contracts (TVM)
+docs/                # specs and plans (see docs/README.md)
+migrations/          # SQL migrations applied by sqlx::migrate! at startup
+config/              # service config files (api.<env>.yaml, indexer.<env>.yaml)
+scripts/             # operational scripts
+tests/               # repo-level integration fixtures (REST .rest files, e2e)
+```
 
 ## Configuration
 
-- **Non-sensitive settings** are in `config.json` at the repo root (e.g. `sqlitePath`, poll interval, Linear filters, ETA model).
-- **Secrets** are in `.env` or environment variables: `DISCORD_BOT_TOKEN`, `LINEAR_API_KEY`, `OPENAI_API_KEY`. Copy `.env.example` to `.env` and fill in only what you need.
+Per-service config files live under `config/`:
 
-## User Mapping
+- `config/api.<env>.yaml` — consumed by `services/api`.
+- `config/indexer.<env>.yaml` — consumed by `services/indexer`.
 
-User mappings (Linear ↔ Discord) are stored in `user_map.csv` at the repo root. The file is committed and loaded automatically on app startup.
+Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override at runtime with `APP_CONFIG=/path/to/file.yaml`.
 
-**To add or update a mapping:**
-1. Edit `user_map.csv` (uncomment example rows or add new rows)
-2. Restart the app (`npm run dev` or restart Docker)
-3. Mappings are automatically imported and upserted into SQLite
+Secrets and environment-specific values live in `.env`:
 
-**CSV format:**
-```csv
-linear_user_id,discord_user_id,discord_username,timezone
-abc123,456789012345678901,username#1234,Europe/Belgrade
+```sh
+cp .env.example .env
 ```
 
-- `linear_user_id`: Required. Linear user ID (from Linear API/user object)
-- `discord_user_id`: Required. Discord user ID (numeric, 17-19 digits)
-- `discord_username`: Optional. Discord username for reference (e.g., "username#1234")
-- `timezone`: Optional. IANA timezone (e.g., "Europe/Belgrade", "America/New_York")
+The `.env` file is gitignored; the committed `.env.example` is the template.
 
-**How to find Discord user_id:**
-- Enable Developer Mode in Discord (Settings → Advanced → Developer Mode)
-- Right-click a user → Copy User ID (or use `\@username` in a message and copy the ID)
-- The ID is a numeric string (17-19 digits)
+## Build
 
-Lines starting with `#` and blank lines are ignored.
+```sh
+cargo build --workspace
+```
 
-## Local Development
+## Lint and format
 
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
 
-2. Copy environment file (for secrets only):
-   ```bash
-   cp .env.example .env
-   ```
+## Test Postgres
 
-3. Run migrations:
-   ```bash
-   npm run migrate
-   ```
+The full test suite needs a disposable Postgres. Bring it up with the test compose file:
 
-4. Start development server:
-   ```bash
-   npm run dev
-   ```
+```sh
+docker compose -f docker-compose.test.yml up -d --wait
+```
+
+`TEST_DATABASE_URL` is read from `.env` (copied from `.env.example` on first checkout). The test database role must own `public` because the test suite runs migrations on connect.
+
+Tear it down with:
+
+```sh
+docker compose -f docker-compose.test.yml down
+```
 
 ## Tests
 
-Run tests:
-```bash
-npm test
+Unit tests (no database required):
+
+```sh
+cargo test --workspace --lib
 ```
 
-## Docker
+DB-backed integration tests (test Postgres up first, see above):
 
-Build and run with Docker Compose:
-```bash
-docker compose up --build
+```sh
+cargo test --workspace --tests
 ```
 
-The app reads `config.json`; the default `sqlitePath` is `./data/marshall.sqlite`. The compose file mounts a volume at `/app/data`, so the database is persisted.
+Per-service narrower runs are described in [services/api/README.md](services/api/README.md) and [services/indexer/README.md](services/indexer/README.md).
 
-### SQLite Database Location
+## Running locally
 
-- **Local**: `./data/marshall.sqlite` (set in `config.json`)
-- **Docker**: `/app/data/marshall.sqlite` (persisted via volume `marshall-data` mounted at `/app/data`)
+After `cargo build --workspace`:
 
-## Verifying initial DMs (Step 4)
+```sh
+cargo run -p dodex-api
+cargo run -p dodex-indexer
+```
 
-For the bot to send initial DMs you need:
+The API needs Postgres running and the indexer feeding it; see the service READMEs for the bring-up sequence.
 
-- **DISCORD_BOT_TOKEN** — Bot token from Discord Developer Portal. In the Discord Developer Portal, enable **Message Content Intent** for the bot so it can read DM content.
-- **LINEAR_API_KEY** — So the poller can fetch issues and assignees
-- **user_map.csv** — At least one row mapping a Linear assignee `linear_user_id` to a Discord `discord_user_id` (that assignee must be on a matching REQ-1 issue)
+## License
 
-After a poll cycle where a matching issue had a mapped assignee and no outstanding request:
-
-- **requests**: `SELECT * FROM requests WHERE prompt_kind = 'initial';` — one row per initial DM attempt (`send_status` = `sent` or `failed`).
-- **issue_engagements**: `SELECT * FROM issue_engagements WHERE state = 'waiting_reply';` — one row per issue we sent an initial DM for (until a reply is handled or a follow-up is scheduled).
+See [LICENSE.md](LICENSE.md).

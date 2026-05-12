@@ -1,6 +1,6 @@
 # Market Data API Technical Specification
 
-Implementation-facing requirements for the HTTP layer that serves the market-data read-model. The public contract (URLs, field names, parameter rules, error shapes, response examples) lives in [api-spec.md](../api-spec.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md). The write side — how those tables get populated — is in [market-data-indexer.md](market-data-indexer.md).
+Implementation-facing requirements for the HTTP layer that serves the market-data read-model. The public contract (URLs, field names, parameter rules, error shapes, response examples) lives in [api-spec.md](../api-spec.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md). The write side — how those tables get populated — is in [indexer.md](indexer.md).
 
 ## Glossary
 
@@ -20,7 +20,7 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 ## Market identity
 
-The backend treats `marketAddress` as the PMP address. `orderBookAddress` is the deterministic address returned by `PMP.getOrderBookAddress()` and is stamped on the first successful reconciler pass — pre-`PoolsFrozen` rows already carry it (migration 0014 enforces the invariant `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL` via a CHECK constraint). The pre-reconcile window between `PMPDeployed` and the first reconciler pass is the only state where the column is legitimately null, and such rows are hidden from the API by the `last_reconciled_at IS NOT NULL` visibility filter. The write-side flow is described in [market-data-indexer.md](market-data-indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
+The backend treats `marketAddress` as the PMP address. `orderBookAddress` is the deterministic address returned by `PMP.getOrderBookAddress()` and is stamped on the first successful reconciler pass — pre-`PoolsFrozen` rows already carry it (migration 0014 enforces the invariant `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL` via a CHECK constraint). The pre-reconcile window between `PMPDeployed` and the first reconciler pass is the only state where the column is legitimately null, and such rows are hidden from the API by the `last_reconciled_at IS NOT NULL` visibility filter. The write-side flow is described in [indexer.md](indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
 
 ## `/api/v1/markets`
 
@@ -28,7 +28,7 @@ Lifecycle status is not stored as a separate database column. The API computes i
 
 ### Visibility filter
 
-The SQL query behind `GET /api/v1/markets` includes `WHERE m.last_reconciled_at IS NOT NULL`. Markets that the indexer has discovered (the `PMPDeployed` event arrived) but not yet reconciled are hidden — clients only see markets the backend can describe fully. See [market-data-indexer.md](market-data-indexer.md#visibility-gate) for the symmetric write-side rule.
+The SQL query behind `GET /api/v1/markets` includes `WHERE m.last_reconciled_at IS NOT NULL`. Markets that the indexer has discovered (the `PMPDeployed` event arrived) but not yet reconciled are hidden — clients only see markets the backend can describe fully. See [indexer.md](indexer.md#visibility-gate) for the symmetric write-side rule.
 
 ### Status derivation
 
@@ -86,7 +86,7 @@ After building the DTO, the API checks the assembled shape against spec invarian
 
 The validation works on the *built* DTO rather than the raw row so that downstream silent-elision bugs are caught — for example, an unknown `cancel_reason` string would be parsed to `None` and serialized as `cancelReason: null`; the validator rejects the assembled DTO instead of the raw column being non-null.
 
-The matching write-side rules are in [market-data-indexer.md](market-data-indexer.md#schema-invariants---write-side).
+The matching write-side rules are in [indexer.md](indexer.md#schema-invariants---write-side).
 
 ### Error mapping
 
@@ -100,7 +100,7 @@ The matching write-side rules are in [market-data-indexer.md](market-data-indexe
 
 ## `/api/v1/depth`
 
-Returns the top of the order book for one outcome of one market: a snapshot of resting bids and asks, the quantity available at each price level, and a sequence number the client uses to tell whether the snapshot has moved since the previous response. The endpoint never queries the contract at request time — every level shown is the projection of indexed `OrderBook` events into a per-order read-model (see [market-data-indexer.md](market-data-indexer.md#projection--order-events)).
+Returns the top of the order book for one outcome of one market: a snapshot of resting bids and asks, the quantity available at each price level, and a sequence number the client uses to tell whether the snapshot has moved since the previous response. The endpoint never queries the contract at request time — every level shown is the projection of indexed `OrderBook` events into a per-order read-model (see [indexer.md](indexer.md#projection--order-events)).
 
 ### Resolution
 
@@ -126,7 +126,7 @@ After the database returns, each side is re-sorted in Rust using exact-numeric `
 
 `max(live_orders.last_chain_order)` over rows for this `(orderbook_address, outcome_id)` pair. `last_chain_order` is the lex-sortable chain-order string (`msg_chain_order` from the GraphQL gateway) of the most recent event that touched the row; the public `lastUpdateId` is therefore a STRING, not an integer (see [api-spec.md §Order Book](../api-spec.md#order-book)). The per-outcome scope is intentional: a single OrderBook serves multiple outcomes, and a per-orderbook cursor would let a quiet outcome inherit activity from sibling outcomes.
 
-Empty string means no OrderBook event has touched this pair yet. The value never lex-decreases between successive snapshots — `last_chain_order` is updated via `greatest(existing, new)` on the write side, and the reproject loop applies events in `chain_order` so the natural arrival order is already monotonic (see [market-data-indexer.md](market-data-indexer.md#projection--order-events)).
+Empty string means no OrderBook event has touched this pair yet. The value never lex-decreases between successive snapshots — `last_chain_order` is updated via `greatest(existing, new)` on the write side, and the reproject loop applies events in `chain_order` so the natural arrival order is already monotonic (see [indexer.md](indexer.md#projection--order-events)).
 
 ### Invariants
 
@@ -143,3 +143,21 @@ Empty string means no OrderBook event has touched this pair yet. The value never
 | Reconciled market with NULL/blank `orderbook_address` | `MarketInconsistent` | 503 |
 | Missing `marketAddress` or `symbol` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
+
+## `/api/v1/account`
+
+See [api-spec §Account Balance](../api-spec.md#account-balance) for the public contract. Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
+
+_Implementation tech spec to be filled in._
+
+## `/api/v1/openOrders` (GET)
+
+See [api-spec §Current Open Orders](../api-spec.md#current-open-orders) for the public contract.
+
+_Implementation tech spec to be filled in._
+
+## `/api/v1/allOrders`
+
+See [api-spec §Closed And Canceled Orders](../api-spec.md#closed-and-canceled-orders) for the public contract.
+
+_Implementation tech spec to be filled in._
