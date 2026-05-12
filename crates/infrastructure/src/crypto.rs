@@ -40,16 +40,6 @@ impl std::fmt::Debug for Kek {
 }
 
 impl Kek {
-    /// Read the KEK from an environment variable. The value must be 64 hex
-    /// characters (32 bytes). Whitespace around the value is tolerated so a
-    /// trailing newline from a CLI export does not break startup.
-    pub fn from_env(var_name: &str) -> Result<Self> {
-        let value = std::env::var(var_name)
-            .with_context(|| format!("environment variable `{var_name}` is not set"))?;
-        Self::from_hex(&value)
-            .with_context(|| format!("environment variable `{var_name}` is not a valid KEK"))
-    }
-
     /// Parse a KEK from a hex string. Must decode to exactly 32 bytes.
     pub fn from_hex(s: &str) -> Result<Self> {
         let bytes = hex::decode(s.trim()).context("KEK must be valid hex")?;

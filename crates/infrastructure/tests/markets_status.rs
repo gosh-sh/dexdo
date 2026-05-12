@@ -21,6 +21,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
 async fn setup() -> Option<PgPool> {
+    let _ = dotenvy::dotenv();
     let url = match env::var("TEST_DATABASE_URL") {
         Ok(v) if !v.is_empty() => v,
         _ => {

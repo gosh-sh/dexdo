@@ -491,13 +491,6 @@ pub fn build_router(state: AppState) -> Router {
 /// stays a single line and every meaningful step is testable in
 /// isolation.
 pub async fn run() -> anyhow::Result<()> {
-    // Pick up a `.env` if it sits next to the binary or in any parent
-    // directory of the working tree. The committed `.env` carries the
-    // local-development KEK and DB URL; production environments
-    // override the same variables through their secret-management
-    // system, and the dotenvy call is a no-op when no file is found.
-    let _ = dotenvy::dotenv();
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -509,14 +502,7 @@ pub async fn run() -> anyhow::Result<()> {
         env::var("APP_CONFIG").unwrap_or_else(|_| "config/api.local.yaml".to_string());
     let config = ApiConfig::load_from_path(&config_path)?;
 
-    // Fail-fast on missing/invalid KEK rather than booting an API
-    // that would 500 on the first authenticated request. The whole
-    // custody story depends on this key, so refusing to start without
-    // it is the correct posture.
-    let kek = Arc::new(
-        Kek::from_env("DODEX_KEK_HEX")
-            .context("DODEX_KEK_HEX environment variable is required to start the api")?,
-    );
+    let kek = Arc::new(Kek::from_hex(&config.auth.kek_hex).context("auth.kek_hex")?);
 
     let pool = build_pool(&config.common.database).await?;
 

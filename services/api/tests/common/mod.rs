@@ -40,9 +40,7 @@ pub const SEED_API_KEY: &str = "dk_live_test_001";
 pub const SEED_API_SECRET: &str =
     "1de6fc5cf8899e7f1dacf449fe46c3c88854478b7fcd9dd26c664535ee589966";
 
-/// Fixed KEK for tests. Production loads it from `DODEX_KEK_HEX`; the
-/// test value is deterministic so re-running the suite against the
-/// same test DB keeps the seeded ciphertexts decryptable.
+/// Fixed KEK for tests so seeded ciphertexts decrypt across runs.
 pub fn test_kek() -> Arc<Kek> {
     Arc::new(Kek::from_hex(&"ab".repeat(32)).expect("test kek"))
 }
@@ -70,6 +68,7 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>)> {
 
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
     let auth_config = AuthSection {
+        kek_hex: "ab".repeat(32),
         default_recv_window_ms: 5_000,
         max_recv_window_ms: 60_000,
         seed_accounts: false,

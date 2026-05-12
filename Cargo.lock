@@ -1481,6 +1481,7 @@ dependencies = [
  "base64",
  "dodex-application",
  "dodex-domain",
+ "dotenvy",
  "hex",
  "hmac",
  "num-bigint 0.4.6",

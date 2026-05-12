@@ -25,10 +25,19 @@ Config sections:
 - `database`: Postgres URL and pool settings.
 - `auth`: HMAC recvWindow limits and local seed-account toggle.
 
-Environment variables:
+The `auth.kek_hex` field is the 32-byte master key used to encrypt
+`api_secret` and `pn_seckey` at rest. `config/api.local.yaml` ships a
+shared dev value; stage and prod configs carry their own KEKs assembled
+by CI from the secret store.
 
-- `DODEX_KEK_HEX`: required by the API process; local development gets it from the committed `.env`.
-- `TEST_DATABASE_URL`: used by DB-backed tests; local development gets it from the committed `.env`.
+Local-only env vars (`TEST_DATABASE_URL`) live in `.env`. The file is
+gitignored; copy from the committed template on first checkout:
+
+```sh
+cp .env.example .env
+```
+
+CI sets the same variables directly in its workflow env block.
 
 ## Running
 
@@ -58,10 +67,12 @@ DB-backed API tests:
 
 ```sh
 docker compose -f docker-compose.test.yml up -d --wait
-export TEST_DATABASE_URL=postgres://dodex:dodex@localhost:55432/dodex_test
 cargo test -p dodex-api --tests -- --test-threads=1
 docker compose -f docker-compose.test.yml down
 ```
+
+Every test binary loads `.env` via `dotenvy::dotenv()` at setup, so no
+manual `export` is required after the first-checkout `cp .env.example .env`.
 
 The test database role must own `public` because the test suite runs migrations
 on connect.

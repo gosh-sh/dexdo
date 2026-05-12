@@ -48,13 +48,13 @@ cargo run -p dodex-api
 Integration tests need a real Postgres. A disposable test database is shipped in `docker-compose.test.yml` on port `55432`:
 
 ```sh
+cp .env.example .env          # first checkout only
 docker compose -f docker-compose.test.yml up -d --wait
-export TEST_DATABASE_URL=postgres://dodex:dodex@localhost:55432/dodex_test
 cargo test
 docker compose -f docker-compose.test.yml down
 ```
 
-The committed `.env` already contains the same `TEST_DATABASE_URL`. Export it yourself when pointing tests at another database.
+`.env` is gitignored; `.env.example` is the committed template with the default `TEST_DATABASE_URL`. Every test binary loads `.env` via `dotenvy::dotenv()` at setup, so no manual `export` is required. Edit `.env` locally to point tests at another database; CI sets `TEST_DATABASE_URL` directly in its workflow env block.
 
 ```sh
 cargo test --workspace --lib

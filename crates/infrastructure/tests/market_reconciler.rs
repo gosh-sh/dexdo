@@ -19,6 +19,7 @@ use sqlx::PgPool;
 use sqlx::Row;
 
 async fn setup() -> Option<PgPool> {
+    let _ = dotenvy::dotenv();
     let url = match env::var("TEST_DATABASE_URL") {
         Ok(v) if !v.is_empty() => v,
         _ => {

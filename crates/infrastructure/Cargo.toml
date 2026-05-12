@@ -30,3 +30,6 @@ sha2 = "0.10"
 subtle = "2.6"
 dodex-application = { path = "../application" }
 dodex-domain = { path = "../domain" }
+
+[dev-dependencies]
+dotenvy.workspace = true

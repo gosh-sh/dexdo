@@ -13,11 +13,6 @@ pub struct ApiConfig {
     #[serde(flatten)]
     pub common: CommonSection,
     pub server: ServerSection,
-    /// HMAC auth tuning. Optional in the YAML — the defaults match the
-    /// public spec (5 s default window, 60 s ceiling). Operators can
-    /// tighten either knob; loosening past the spec ceiling fails
-    /// validation.
-    #[serde(default)]
     pub auth: AuthSection,
 }
 
@@ -68,31 +63,19 @@ pub struct DatabaseSection {
 const DEFAULT_RECV_WINDOW_MS: u64 = 5_000;
 const MAX_RECV_WINDOW_MS: u64 = 60_000;
 
-/// HMAC validity window settings. Field names follow `api-spec.md`
-/// semantics: `default_*` is what the middleware applies when a request
-/// omits `recvWindow`; `max_*` is the clamp the middleware enforces on
-/// any client-supplied `recvWindow`. `seed_accounts` triggers a
-/// hard-coded test-credential insert on api bootstrap; off by default,
-/// devops controls it per environment.
+/// `kek_hex` is the at-rest encryption key (32 bytes / 64 hex chars).
+/// Every environment supplies its own; `config/api.local.yaml` ships
+/// a shared dev value, stage/prod configs are assembled by CI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSection {
+    pub kek_hex: String,
     #[serde(default = "default_recv_window_ms")]
     pub default_recv_window_ms: u64,
     #[serde(default = "default_max_recv_window_ms")]
     pub max_recv_window_ms: u64,
     #[serde(default)]
     pub seed_accounts: bool,
-}
-
-impl Default for AuthSection {
-    fn default() -> Self {
-        Self {
-            default_recv_window_ms: DEFAULT_RECV_WINDOW_MS,
-            max_recv_window_ms: MAX_RECV_WINDOW_MS,
-            seed_accounts: false,
-        }
-    }
 }
 
 fn default_recv_window_ms() -> u64 {
@@ -172,6 +155,8 @@ impl ApiConfig {
 
 impl AuthSection {
     fn validate(&self) -> anyhow::Result<()> {
+        crate::crypto::Kek::from_hex(&self.kek_hex)
+            .map_err(|err| anyhow::anyhow!("auth.kek_hex is not a valid KEK: {err}"))?;
         anyhow::ensure!(self.default_recv_window_ms > 0, "auth.default_recv_window_ms must be > 0");
         anyhow::ensure!(self.max_recv_window_ms > 0, "auth.max_recv_window_ms must be > 0");
         anyhow::ensure!(
@@ -294,6 +279,8 @@ server:
   host: 0.0.0.0
   port: 8080
   request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
 "
         );
 
@@ -332,6 +319,8 @@ server:
   host: 0.0.0.0
   port: 8080
   request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
 graphql:
   endpoint: https://graphql.example.invalid
   page_size: 100
@@ -427,6 +416,8 @@ server:
   host: 0.0.0.0
   port: 8080
   request_timeout_ms: {request_timeout_ms}
+auth:
+  kek_hex: "{TEST_KEK_HEX}"
 "#
         );
         serde_yaml::from_str(&raw).expect("parse")
@@ -465,11 +456,20 @@ indexer:
         assert!(err.to_string().contains("polling_interval_ms"), "got: {err}");
     }
 
+    /// Any 64-char hex; the bytes are irrelevant for config-shape tests.
+    const TEST_KEK_HEX: &str = "abababababababababababababababababababababababababababababababab";
+
+    fn valid_auth_section(default_ms: u64, max_ms: u64) -> AuthSection {
+        AuthSection {
+            kek_hex: TEST_KEK_HEX.to_string(),
+            default_recv_window_ms: default_ms,
+            max_recv_window_ms: max_ms,
+            seed_accounts: false,
+        }
+    }
+
     #[test]
-    fn api_config_defaults_auth_section_when_absent() {
-        // The YAML may omit the `auth:` block entirely; the defaults
-        // match the public spec (5 s / 60 s) so an upgraded operator
-        // does not need to touch their config file.
+    fn api_config_rejects_yaml_without_auth_section() {
         let raw = format!(
             "{COMMON}
 server:
@@ -478,10 +478,8 @@ server:
   request_timeout_ms: 5000
 "
         );
-        let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
-        assert_eq!(cfg.auth.default_recv_window_ms, 5_000);
-        assert_eq!(cfg.auth.max_recv_window_ms, 60_000);
-        cfg.validate().unwrap();
+        let err = serde_yaml::from_str::<ApiConfig>(&raw).unwrap_err();
+        assert!(err.to_string().contains("auth"), "got: {err}");
     }
 
     #[test]
@@ -493,6 +491,7 @@ server:
   port: 8080
   request_timeout_ms: 5000
 auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
   default_recv_window_ms: 2000
   max_recv_window_ms: 30000
 "
@@ -504,42 +503,72 @@ auth:
     }
 
     #[test]
-    fn auth_validate_rejects_max_above_spec_ceiling() {
+    fn api_config_defaults_recv_window_when_only_kek_given() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(cfg.auth.default_recv_window_ms, 5_000);
+        assert_eq!(cfg.auth.max_recv_window_ms, 60_000);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn auth_validate_rejects_malformed_kek() {
         let s = AuthSection {
+            kek_hex: "not hex".to_string(),
             default_recv_window_ms: 5_000,
-            max_recv_window_ms: 120_000,
+            max_recv_window_ms: 60_000,
             seed_accounts: false,
         };
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("kek_hex"), "got: {err}");
+    }
+
+    #[test]
+    fn auth_validate_rejects_wrong_length_kek() {
+        let s = AuthSection {
+            // 30 bytes, not 32.
+            kek_hex: "ab".repeat(30),
+            default_recv_window_ms: 5_000,
+            max_recv_window_ms: 60_000,
+            seed_accounts: false,
+        };
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("kek_hex"), "got: {err}");
+    }
+
+    #[test]
+    fn auth_validate_rejects_max_above_spec_ceiling() {
+        let s = valid_auth_section(5_000, 120_000);
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("60000"), "got: {err}");
     }
 
     #[test]
     fn auth_validate_rejects_default_above_max() {
-        let s = AuthSection {
-            default_recv_window_ms: 30_000,
-            max_recv_window_ms: 10_000,
-            seed_accounts: false,
-        };
+        let s = valid_auth_section(30_000, 10_000);
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("must be <="), "got: {err}");
     }
 
     #[test]
     fn auth_validate_rejects_zero_default() {
-        let s = AuthSection {
-            default_recv_window_ms: 0,
-            max_recv_window_ms: 60_000,
-            seed_accounts: false,
-        };
+        let s = valid_auth_section(0, 60_000);
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("default_recv_window_ms"), "got: {err}");
     }
 
     #[test]
     fn auth_validate_rejects_zero_max() {
-        let s =
-            AuthSection { default_recv_window_ms: 0, max_recv_window_ms: 0, seed_accounts: false };
+        let s = valid_auth_section(0, 0);
         let err = s.validate().unwrap_err();
         // `default == 0` is hit first by the order of checks, but the
         // important thing is that a zero-max config is rejected.

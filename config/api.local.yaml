@@ -14,6 +14,8 @@ database:
   connect_timeout_ms: 3000
 
 auth:
+  # Local-dev KEK shared via this file; stage/prod configs ship their own.
+  kek_hex: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
   default_recv_window_ms: 5000
   max_recv_window_ms: 60000
   seed_accounts: true
