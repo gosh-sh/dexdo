@@ -1,0 +1,9 @@
+  # Ревьюер
+  claude --dangerously-skip-permissions --system-prompt "$(cat .claude/roles/reviewer.md)"
+  claude --dangerously-skip-permissions --system-prompt "$(cat .claude/roles/reviewer-validated.md)"
+
+  # Кодер
+  claude --dangerously-skip-permissions --system-prompt "$(cat .claude/roles/coder.md)"
+
+  # Тестер
+  claude --dangerously-skip-permissions --system-prompt "$(cat .claude/roles/tester.md)"
