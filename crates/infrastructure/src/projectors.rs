@@ -482,12 +482,13 @@ async fn apply_order_placed(
     let price = uint_field_to_decimal(&event.value, "price")?;
     let amount = uint_field_to_decimal(&event.value, "amount")?;
     let client_order_id = field_str(&event.value, "clientOrderId").ok().map(String::from);
-    let last_event_lt = node_unix_seconds(node);
+    let chain_order = node_chain_order(node, "OrderPlaced")?;
 
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, client_order_id, status, last_event_lt, updated_at)
+                amount_remaining, client_order_id, status, last_chain_order,
+                updated_at)
            values ($1, $2::numeric, $3, $4, $5::numeric,
                    $6::numeric, $7, 'OPEN', $8, now())
            on conflict (orderbook_address, order_id) do update
@@ -497,7 +498,8 @@ async fn apply_order_placed(
                    amount_remaining = excluded.amount_remaining,
                    client_order_id = excluded.client_order_id,
                    status = 'OPEN',
-                   last_event_lt = greatest(live_orders.last_event_lt, excluded.last_event_lt),
+                   last_chain_order = greatest(live_orders.last_chain_order,
+                                               excluded.last_chain_order),
                    updated_at = now()"#,
     )
     .bind(orderbook_address)
@@ -507,7 +509,7 @@ async fn apply_order_placed(
     .bind(&price)
     .bind(&amount)
     .bind(client_order_id)
-    .bind(last_event_lt)
+    .bind(chain_order)
     .execute(&mut **tx)
     .await
     .context("upsert live_orders on OrderPlaced")?;
@@ -524,7 +526,7 @@ async fn apply_order_filled(
         node.src.as_deref().context("OrderFilled: src missing on event message")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let filled_amount = uint_field_to_decimal(&event.value, "filledAmount")?;
-    let last_event_lt = node_unix_seconds(node);
+    let chain_order = node_chain_order(node, "OrderFilled")?;
 
     let updated = sqlx::query(
         r#"update live_orders
@@ -533,14 +535,14 @@ async fn apply_order_filled(
                       when amount_remaining - $3::numeric <= 0 then 'FILLED'
                       else status
                   end,
-                  last_event_lt = greatest(last_event_lt, $4),
+                  last_chain_order = greatest(last_chain_order, $4),
                   updated_at = now()
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
     .bind(&filled_amount)
-    .bind(last_event_lt)
+    .bind(chain_order)
     .execute(&mut **tx)
     .await
     .context("update live_orders on OrderFilled")?
@@ -566,19 +568,19 @@ async fn apply_order_cancelled(
     let orderbook_address =
         node.src.as_deref().context("OrderCancelled: src missing on event message")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
-    let last_event_lt = node_unix_seconds(node);
+    let chain_order = node_chain_order(node, "OrderCancelled")?;
 
     let updated = sqlx::query(
         r#"update live_orders
               set status = 'CANCELLED',
                   amount_remaining = 0,
-                  last_event_lt = greatest(last_event_lt, $3),
+                  last_chain_order = greatest(last_chain_order, $3),
                   updated_at = now()
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
-    .bind(last_event_lt)
+    .bind(chain_order)
     .execute(&mut **tx)
     .await
     .context("update live_orders on OrderCancelled")?
@@ -616,6 +618,18 @@ fn parse_u64_field(value: &Value, key: &str) -> anyhow::Result<i64> {
 
 fn node_unix_seconds(node: &EventNode) -> Option<i64> {
     parse_unix_seconds(node.created_at.as_ref()).map(|v| v as i64)
+}
+
+/// Returns the strict-monotonic chain-order key (`msg_chain_order` from the
+/// GraphQL gateway). Missing on a row that reaches the projector is an
+/// invariant violation — `persist_page` drops events without it and
+/// `pending_row_to_inputs` pulls it out of the NOT NULL column. Bubble up as
+/// an error so the projector fails the row instead of silently writing a
+/// stale value.
+fn node_chain_order(node: &EventNode, event_label: &str) -> anyhow::Result<String> {
+    node.msg_chain_order
+        .clone()
+        .with_context(|| format!("{event_label}: msg_chain_order missing on EventNode"))
 }
 
 fn field_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {

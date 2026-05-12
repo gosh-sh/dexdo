@@ -124,7 +124,7 @@ struct OutcomeDto {
 struct DepthResponse {
     market_address: String,
     symbol: String,
-    last_update_id: u64,
+    last_update_id: String,
     bids: Vec<[String; 2]>,
     asks: Vec<[String; 2]>,
 }

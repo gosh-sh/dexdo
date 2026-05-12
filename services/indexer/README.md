@@ -147,8 +147,6 @@ TODO:
 
 - Materialise depth into `order_book_snapshots` on a refresh worker (currently
   the API aggregates `live_orders` on the fly per request).
-- Per-orderbook monotonic nonce for `lastUpdateId` (today: `max(last_event_lt)`
-  across the book, derived from `node.created_at`).
 
 ## Deferred-projection retry
 
@@ -156,15 +154,19 @@ TODO:
 from `services/indexer/src/main.rs` on the
 `indexer.reprojection_interval_ms` cadence (default 30 s). It scans
 `raw_events` for rows where `processed_at is null and event_type is not null
-and decoded is not null`, ordered by `created_at_chain asc, id asc` so that an
+and decoded is not null`, ordered by `chain_order asc` (migration 0016 — the
+gateway-provided `msg_chain_order`, globally unique and lex-sortable) so an
 out-of-order parent that just arrived gets its first chance before its
-children retry. The query is backed by the partial index
-`raw_events_pending_projection_idx` (migration `0007_*`).
+children retry. `chain_order` is the only sort key because it is strict-total
+on its own; the prior `created_at_chain asc, id asc` combo could place
+same-second siblings out of chain order and corrupt OrderBook state. The
+query is backed by `raw_events_chain_order_idx` and the existing partial
+`raw_events_pending_projection_idx`.
 
 For each row the loop reconstructs a `DecodedEvent` from the stored `decoded`
 jsonb (no re-decoding of bodies) plus an `EventNode` from
-`msg_id`/`src_address`/`dst_address`/`created_at_chain`, runs `project_event`
-in a savepoint, and:
+`msg_id`/`chain_order`/`src_address`/`dst_address`/`created_at_chain`, runs
+`project_event` in a savepoint, and:
 
 - on `Applied` / `Unknown` — stamps `processed_at = now()`;
 - on `Deferred` / projector error — leaves `processed_at` null for another
@@ -223,6 +225,26 @@ Today's migrations:
 - `0011_reconciler_failure_tracking.sql` — adds `last_reconcile_failed_at` and
   `reconcile_attempts` to `markets` and `oracle_event_lists` so failed rows
   are pushed to the back of the reconciler queue with a cooldown window.
+- `0012_oracle_events_meta_reconciled_at.sql` — stamps a marker on every
+  successful OEL reconcile so events with legitimately-null on-chain metadata
+  exit the pending queue.
+- `0013_orderbook_address_observed_only.sql` — superseded by `0014_*`; left in
+  place to keep migration numbering stable. Backfilled pre-freeze
+  `orderbook_address` to NULL under the old "observed only" policy.
+- `0014_orderbook_address_deterministic.sql` — un-stamps `last_reconciled_at`
+  on legacy null-address rows so the next reconcile pass re-fills the
+  deterministic getter value; adds CHECK constraint
+  `markets_orderbook_address_set_after_reconcile` pinning
+  `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`.
+- `0015_indexer_cursors_drop_last_seen_lt.sql` — drops the unused
+  `indexer_cursors.last_seen_lt` placeholder.
+- `0016_chain_order.sql` — introduces strict chain-order ordering. Adds
+  `raw_events.chain_order text NOT NULL` (gateway `msg_chain_order`) with an
+  index, and replaces `live_orders.last_event_lt bigint` (unix-seconds) with
+  `last_chain_order text NOT NULL` (same chain key, surfaced as the public
+  `lastUpdateId` STRING). **Reindex required** — the migration truncates
+  `raw_events`, `live_orders`, and `indexer_cursors` because the new
+  NOT-NULL key lives on chain messages, not in any local data.
 
 ### Supabase permissions
 

@@ -201,7 +201,13 @@ pub struct PriceLevel {
 pub struct DepthSnapshot {
     pub market_address: MarketAddress,
     pub symbol: Symbol,
-    pub last_update_id: u64,
+    /// Opaque chain-order cursor. Lex-comparable string sourced from
+    /// `live_orders.last_chain_order` (which itself comes from the GraphQL
+    /// gateway's `msg_chain_order` on every order event). Empty string when
+    /// no order event has touched this `(orderbook, outcome)` pair yet.
+    /// Clients should treat it as an opaque token: equality detects "no
+    /// change", lex order detects "moved forward".
+    pub last_update_id: String,
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
 }

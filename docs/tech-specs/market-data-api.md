@@ -123,15 +123,15 @@ After the database returns, each side is re-sorted in Rust using exact-numeric `
 
 ### `lastUpdateId`
 
-The maximum `live_orders.last_event_lt` over rows for this `(orderbook_address, outcome_id)` pair. The per-outcome scope is intentional: a single OrderBook serves multiple outcomes, and a per-orderbook sequence would let a quiet outcome inherit activity from sibling outcomes — clients comparing snapshots would see the number advance with no corresponding change to their depth.
+`max(live_orders.last_chain_order)` over rows for this `(orderbook_address, outcome_id)` pair. `last_chain_order` is the lex-sortable chain-order string (`msg_chain_order` from the GraphQL gateway) of the most recent event that touched the row; the public `lastUpdateId` is therefore a STRING, not an integer (see [api-spec.md §Order Book](../api-spec.md#order-book)). The per-outcome scope is intentional: a single OrderBook serves multiple outcomes, and a per-orderbook cursor would let a quiet outcome inherit activity from sibling outcomes.
 
-`0` means no OrderBook event has touched this pair yet. The value never decreases between successive snapshots — `last_event_lt` is updated via `greatest(existing, new)` on the write side (see [market-data-indexer.md](market-data-indexer.md#projection--order-events)).
+Empty string means no OrderBook event has touched this pair yet. The value never lex-decreases between successive snapshots — `last_chain_order` is updated via `greatest(existing, new)` on the write side, and the reproject loop applies events in `chain_order` so the natural arrival order is already monotonic (see [market-data-indexer.md](market-data-indexer.md#projection--order-events)).
 
 ### Invariants
 
 1. `bids` sorted by price descending; `asks` ascending. Comparison is exact-numeric.
 2. Each price level surfaces as one `[price, quantity]` entry. Quantity is the sum across every resting order at that price.
-3. `lastUpdateId` is scoped to `(orderbook_address, outcome_id)`. It is `0` when no OrderBook event has touched this pair yet, and never decreases between successive snapshots.
+3. `lastUpdateId` is scoped to `(orderbook_address, outcome_id)`. It is an empty string when no OrderBook event has touched this pair yet, and never lex-decreases between successive snapshots.
 4. A non-null `orderBookAddress` on the underlying market is necessary for non-empty depth but not sufficient — orders only land after the `PoolsFrozen` event is observed and clients start posting.
 
 ### Error mapping

@@ -100,7 +100,7 @@ A miss returns `404` (`InvalidMarketOrSymbol`). A reconciled market is
 guaranteed to carry `orderbook_address` (migration 0014 CHECK); a NULL or
 blank value at this point is treated as `MarketInconsistent` → 503. The
 legitimate empty-book case is "address stamped, no `OrderPlaced` events
-yet" — the response is empty `bids` / `asks` with `lastUpdateId = 0`.
+yet" — the response is empty `bids` / `asks` with `lastUpdateId = ""`.
 
 Aggregation: `SUM(amount_remaining) GROUP BY (is_buy, price)` over rows with
 `status = 'OPEN' AND amount_remaining > 0`. The sort is numerical (parsed
@@ -108,13 +108,12 @@ through `BigUint`, not lexicographic) so `uint256` prices order correctly:
 bids descending, asks ascending. The `limit` is applied per side after the
 sort.
 
-`lastUpdateId` is `MAX(last_event_lt)` over `live_orders` filtered to
+`lastUpdateId` is `MAX(last_chain_order)` over `live_orders` filtered to
 `(orderbook_address, outcome_id)` — same scope as the depth response, so a
-quiet outcome never inherits a sibling outcome's sequence number. The value
-is `node.created_at` in unix seconds, populated by the OrderBook projectors.
-This is enough for the spec's `bigint` contract; if a depth-diff stream
-lands later, swap the source for a per-(orderbook, outcome) nonce without
-touching the API contract.
+quiet outcome never inherits a sibling outcome's cursor. The value is the
+gateway's `msg_chain_order` of the most recent event that touched any row
+in the pair, surfaced as a STRING opaque cursor (api-spec.md). Lex order
+detects "moved forward"; equality detects "no change".
 
 Behind the scenes the indexer projects three OrderBook events into
 `live_orders`:

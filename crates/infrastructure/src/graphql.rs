@@ -18,6 +18,7 @@ const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
         cursor
         node {
           msg_id
+          msg_chain_order
           src
           src_dapp_id
           dst
@@ -189,6 +190,15 @@ pub struct EventEdge {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EventNode {
     pub msg_id: String,
+    /// Global lex-sortable chain order. Required for strict projection
+    /// ordering — `created_at` timestamps collide within a second and drift
+    /// across shards, so any reproject sweep that orders on time can apply
+    /// `OrderFilled` before its parent `OrderPlaced` and corrupt
+    /// `live_orders` state. The GraphQL gateway returns this on every
+    /// message edge; an event without it is unusable and the indexer drops
+    /// the row with a warning.
+    #[serde(default)]
+    pub msg_chain_order: Option<String>,
     #[serde(default)]
     pub src: Option<String>,
     #[serde(default)]
@@ -224,6 +234,7 @@ mod tests {
                                 "cursor": "cursor-1",
                                 "node": {
                                     "msg_id": "msg-1",
+                                    "msg_chain_order": "5f8000000000000003",
                                     "src": "0:src",
                                     "src_dapp_id": "dapp-1",
                                     "dst": "0:dst",

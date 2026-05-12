@@ -78,14 +78,14 @@ OrderBook events drive [`live_orders`](data-schema.md#live_orders), the per-orde
 
 | Event | Effect |
 | --- | --- |
-| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'` and full `amount_remaining`. `last_event_lt` set to the chain timestamp. A conflict on `(orderbook_address, order_id)` resets the row to OPEN. |
-| `OrderBook.OrderFilled` | Decrements `amount_remaining` by `filledAmount`. Flips `status` to `FILLED` when the remainder reaches zero. Updates `last_event_lt` via `greatest(existing, new)`. |
-| `OrderBook.OrderCancelled` | `status = 'CANCELLED'`, `amount_remaining = 0`, monotonic `last_event_lt` update. |
+| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'` and full `amount_remaining`. `last_chain_order` set to the event's `msg_chain_order`. A conflict on `(orderbook_address, order_id)` resets the row to OPEN. |
+| `OrderBook.OrderFilled` | Decrements `amount_remaining` by `filledAmount`. Flips `status` to `FILLED` when the remainder reaches zero. Updates `last_chain_order` via `greatest(existing, new)` (lex compare). |
+| `OrderBook.OrderCancelled` | `status = 'CANCELLED'`, `amount_remaining = 0`, monotonic `last_chain_order` update. |
 | `OrderBook.PartialFill` / `FullyFilled` / `Queued` / `Rejected` / `CallbackBounced` | Observability-only. The row is recorded in `raw_events` for audit but no read-model table is touched. |
 
 `PartialFill` / `FullyFilled` are derived aggregates the contract emits for MM-friendly UX; the underlying state is already captured by `OrderFilled`. `Queued` / `Rejected` happen at queue level, before any order id is assigned. `CallbackBounced` is a diagnostic — OrderBook state is not auto-rolled back, and the bounced credit needs operator-driven recovery.
 
-Out-of-order delivery from the chain is handled exclusively through the `greatest(existing, new)` clause on `last_event_lt`. The depth handler relies on this for a monotonic `lastUpdateId`; see [market-data-api.md](market-data-api.md#lastupdateid).
+Event ordering is anchored on `raw_events.chain_order` (set from the GraphQL gateway's `msg_chain_order`). The live persist path inserts edges in chain order; the reproject loop sorts deferred rows by `chain_order asc`. That gives `OrderPlaced → OrderFilled → OrderCancelled` the correct natural sequence even when the gateway delivers them in a different order — applying Fill before its parent Place no longer corrupts state. `greatest(existing, new)` on `last_chain_order` is a belt-and-suspenders monotonicity guard for the row's column, not the primary correctness mechanism.
 
 ## Reconciliation
 
@@ -143,7 +143,7 @@ Reconciler-side failures use a separate mechanism — `last_reconcile_failed_at`
 | `markets.last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL` | Migration-0014 CHECK constraint `markets_orderbook_address_set_after_reconcile`. The reconciler writes `orderbook_address` unconditionally from `getOrderBookAddress()`. |
 | Lifecycle timings (`stake_*`, `result_*`) are projector-only | Reconciler does not write these columns. |
 | `oracle_events.meta_reconciled_at` set after every successful reconciler pass | OracleEventList reconciler UPDATE always stamps it. |
-| `live_orders.last_event_lt` monotonic per row | `greatest(existing, new)` on every UPDATE. |
+| `live_orders.last_chain_order` lex-monotonic per row | `greatest(existing, new)` on every UPDATE; chain-order sorted reproject keeps natural arrival order monotonic too. |
 | Cancellation reason matches its source | Projector picks `PMP_CANCELLED` or `EVENT_CANCELLED` based on event type, never NULL. |
 
 The API enforces complementary read-side invariants on the assembled DTO — see [market-data-api.md](market-data-api.md#fail-closed-validation). Together they guarantee that an inconsistent indexer state (e.g. `PMP.Resolved` indexed before `PoolsFrozen`) cannot leak into a client response.

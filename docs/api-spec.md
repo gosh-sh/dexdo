@@ -467,7 +467,7 @@ Response:
 {
   "marketAddress": "0:market-address",
   "symbol": "PM-2026-ELECTION-YES",
-  "lastUpdateId": 1027024,
+  "lastUpdateId": "5f8000000000017c5a",
   "bids": [
     ["0.614", "100.00"],
     ["0.613", "25.50"]
@@ -478,6 +478,10 @@ Response:
   ]
 }
 ```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `lastUpdateId` | STRING | Opaque chain-order cursor. Lex-comparable: a larger string means a newer event has touched this `(marketAddress, symbol)`. Empty string when no order event has landed yet. Clients SHOULD compare for equality to detect "no change" and string-lex order to detect "moved forward"; they SHOULD NOT parse it as an integer. |
 
 Each bid or ask item is:
 

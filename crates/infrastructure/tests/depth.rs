@@ -139,7 +139,7 @@ async fn fresh_orderbook_without_orders_returns_empty_book() {
         .await
         .expect("fresh orderbook with no orders must serve empty book");
 
-    assert_eq!(depth.last_update_id, 0);
+    assert_eq!(depth.last_update_id, "");
     assert!(depth.bids.is_empty());
     assert!(depth.asks.is_empty());
 }
@@ -177,7 +177,7 @@ async fn depth_returns_human_decimal_levels() {
         sqlx::query(
             r#"insert into live_orders
                    (orderbook_address, order_id, outcome_id, is_buy, price,
-                    amount_remaining, status, last_event_lt)
+                    amount_remaining, status, last_chain_order)
                values ($1, $2::numeric, 1, $3, $4::numeric, $5::numeric, 'OPEN', $6)"#,
         )
         .bind(orderbook)
@@ -185,7 +185,7 @@ async fn depth_returns_human_decimal_levels() {
         .bind(*is_buy)
         .bind(*price)
         .bind(*amount)
-        .bind(1_700_000_000_i64 + idx as i64)
+        .bind(format!("5f8000000000{:06}", idx))
         .execute(&pool)
         .await
         .expect("insert live_orders");
@@ -209,10 +209,11 @@ async fn depth_returns_human_decimal_levels() {
 
 #[tokio::test]
 async fn last_update_id_is_scoped_per_outcome() {
-    // Regression: lastUpdateId used to aggregate `max(last_event_lt)` across
-    // the whole orderbook, so a quiet outcome would surface the sequence
-    // number from a sibling outcome's activity. The fix scopes the aggregate
-    // to (orderbook_address, outcome_id); this test pins that contract.
+    // Regression: lastUpdateId used to aggregate `max(last_chain_order)`
+    // across the whole orderbook, so a quiet outcome would surface the
+    // cursor from a sibling outcome's activity. The fix scopes the
+    // aggregate to (orderbook_address, outcome_id); this test pins that
+    // contract.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -257,15 +258,17 @@ async fn last_update_id_is_scoped_per_outcome() {
     .expect("insert NO outcome");
 
     // Only the NO outcome (outcome_id = 2) has activity. If the aggregate
-    // leaks across outcomes, YES will pick up last_event_lt = 1_800_000_000.
+    // leaks across outcomes, YES will pick up the NO-side chain_order.
+    let no_chain_order = "5f8000000000000bb8";
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, status, last_event_lt)
+                amount_remaining, status, last_chain_order)
            values ($1, 1::numeric, 2, true, 500::numeric, 100::numeric,
-                   'OPEN', 1800000000)"#,
+                   'OPEN', $2)"#,
     )
     .bind(orderbook)
+    .bind(no_chain_order)
     .execute(&pool)
     .await
     .expect("insert NO-side order");
@@ -275,7 +278,7 @@ async fn last_update_id_is_scoped_per_outcome() {
         .await
         .expect("get_depth YES");
     assert_eq!(
-        yes_depth.last_update_id, 0,
+        yes_depth.last_update_id, "",
         "YES outcome has no orders, so its lastUpdateId must not borrow from NO"
     );
     assert!(yes_depth.bids.is_empty());
@@ -285,5 +288,5 @@ async fn last_update_id_is_scoped_per_outcome() {
         .get_depth(&MarketAddress(pmp.into()), &Symbol(no_symbol.into()), 100)
         .await
         .expect("get_depth NO");
-    assert_eq!(no_depth.last_update_id, 1_800_000_000);
+    assert_eq!(no_depth.last_update_id, no_chain_order);
 }

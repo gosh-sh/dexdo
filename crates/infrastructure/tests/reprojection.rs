@@ -60,11 +60,15 @@ async fn insert_raw(
 ) {
     sqlx::query(
         r#"insert into raw_events
-               (msg_id, created_at_chain, src_address, dst_address,
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
                 event_type, body_json, decoded)
-           values ($1, to_timestamp($2), $3, $3, $4, '{}'::jsonb, $5)"#,
+           values ($1, $2, to_timestamp($3), $4, $4, $5, '{}'::jsonb, $6)"#,
     )
     .bind(msg_id)
+    // Per-msg deterministic key; lex-sortable so reproject ORDER BY chain_order
+    // gives a stable order. Real payloads come from the GraphQL gateway's
+    // `msg_chain_order` field.
+    .bind(format!("5f80{msg_id:0>28}"))
     .bind(1_700_000_000_f64)
     .bind(src)
     .bind(event_type)
@@ -223,11 +227,13 @@ async fn already_processed_rows_are_not_picked_up() {
 
     sqlx::query(
         r#"insert into raw_events
-               (msg_id, created_at_chain, src_address, dst_address,
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
                 event_type, body_json, decoded, processed_at)
-           values ($1, to_timestamp(1700000000), $2, $2, $3, '{}'::jsonb, $4, $5::timestamptz)"#,
+           values ($1, $2, to_timestamp(1700000000), $3, $3, $4, '{}'::jsonb, $5,
+                   $6::timestamptz)"#,
     )
     .bind(&msg_id)
+    .bind(format!("5f80{msg_id:0>28}"))
     .bind(&oracle_addr)
     .bind("RootOracle.OracleDeployed")
     .bind(&decoded)
@@ -340,9 +346,9 @@ async fn orderfilled_deferred_replays_after_orderplaced() {
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, status, last_event_lt)
+                amount_remaining, status, last_chain_order)
            values ($1, $2::numeric, 1, true, 100::numeric,
-                   100::numeric, 'OPEN', 1700000000)"#,
+                   100::numeric, 'OPEN', '5f800000000000000001')"#,
     )
     .bind(&orderbook_addr)
     .bind(order_id)

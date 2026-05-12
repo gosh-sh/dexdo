@@ -237,10 +237,12 @@ impl MarketReadRepository for PostgresReadModelRepository {
         }
 
         // Scope to (orderbook, outcome_id): the depth response is per-outcome,
-        // so a quiet outcome must not surface a sequence number from a sibling
-        // outcome's activity on the same orderbook.
-        let last_update_id: Option<i64> = sqlx::query_scalar(
-            "select coalesce(max(last_event_lt), 0) from live_orders \
+        // so a quiet outcome must not surface a chain-order cursor from a
+        // sibling outcome's activity on the same orderbook. `last_chain_order`
+        // is a lex-comparable string (gateway `msg_chain_order`), so the SQL
+        // `max(text)` returns the highest chain-order across all touches.
+        let last_update_id: Option<String> = sqlx::query_scalar(
+            "select max(last_chain_order) from live_orders \
              where orderbook_address = $1 and outcome_id = $2",
         )
         .bind(&orderbook_address)
@@ -252,7 +254,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
         Ok(DepthSnapshot {
             market_address: market_address.clone(),
             symbol: symbol.clone(),
-            last_update_id: last_update_id.unwrap_or(0).max(0) as u64,
+            // Empty string == "no order event has touched this pair yet";
+            // documented in DepthSnapshot::last_update_id.
+            last_update_id: last_update_id.unwrap_or_default(),
             bids,
             asks,
         })

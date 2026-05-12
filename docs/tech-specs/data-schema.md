@@ -48,9 +48,10 @@ The append-only event log. Every message edge the indexer pulls from the GraphQL
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | `bigserial` PK | Insertion order; tiebreaker for chain-time ordering. |
+| `id` | `bigserial` PK | Insertion order. Not used for ordering — that's `chain_order` below. |
 | `msg_id` | `text` UNIQUE | Chain-side message id. Prevents duplicate ingestion across overlapping page fetches. |
-| `created_at_chain` | `timestamptz` | Chain block timestamp from the GraphQL `created_at` field. Nullable — preserved as-is when the indexer receives a null/unparseable timestamp. |
+| `chain_order` | `text` NOT NULL (added in 0016) | Global lex-sortable chain order from the GraphQL gateway's `msg_chain_order`. The strict-monotonic projection key — `created_at_chain` collides within one second and drifts across shards, so any reproject sweep that ordered on time could apply `OrderFilled` before its parent `OrderPlaced`. Required on every row; edges arriving without it are dropped at ingest. |
+| `created_at_chain` | `timestamptz` | Chain block timestamp from the GraphQL `created_at` field. Kept for diagnostics/analytics only — not load-bearing for ordering. Nullable, preserved as-is. |
 | `src_address` | `text` (nullable per 0002) | Source contract address (the contract that emitted the event). |
 | `dst_address` | `text` (nullable per 0002) | Destination address from the message header. |
 | `event_type` | `text` (nullable per 0002) | `"<ContractKind>.<EventName>"`, e.g. `OrderBook.OrderPlaced`. NULL when decoding failed or the body was not an event message. |
@@ -65,7 +66,8 @@ Indices:
 | --- | --- |
 | `raw_events_event_type_idx` | General `event_type` scans (debug, analytics). |
 | `raw_events_event_type_decoded_idx` (partial, `event_type IS NOT NULL`) | Same scope but optimised for decoded rows. |
-| `raw_events_created_at_chain_idx` (desc) | Time-window queries. |
+| `raw_events_created_at_chain_idx` (desc) | Time-window queries (analytics only). |
+| `raw_events_chain_order_idx` (added in 0016) | Backs the reproject `ORDER BY chain_order asc`. |
 | `raw_events_pending_projection_idx` (partial: `processed_at IS NULL AND event_type IS NOT NULL AND decoded IS NOT NULL`) | Drives reprojection (`crates/infrastructure/src/indexer_repo.rs::reproject_pending`). |
 
 ### `indexer_cursors`
@@ -213,7 +215,7 @@ Index: `market_outcomes_market_id_fk_idx` speeds up loading all outcome rows for
 
 ### `live_orders`
 
-Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, mutated in place as the `OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Never deleted — FILLED / CANCELLED rows stay for sequence-number monotonicity (the depth handler reads `max(last_event_lt)` over **all** rows for the `(orderbook, outcome)` pair).
+Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, mutated in place as the `OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Never deleted — FILLED / CANCELLED rows stay for cursor monotonicity (the depth handler reads `max(last_chain_order)` over **all** rows for the `(orderbook, outcome)` pair).
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -225,7 +227,7 @@ Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, m
 | `amount_remaining` | `numeric(78,0)` | Quantity still open. Set by the `OrderPlaced` event, decremented by the `OrderFilled` event, zeroed by the `OrderCancelled` event. |
 | `client_order_id` | `text` | Optional client-supplied id. |
 | `status` | `text` CHECK `IN ('OPEN', 'FILLED', 'CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. |
-| `last_event_lt` | `bigint` | Chain block timestamp of the most recent event that touched this order. Monotonic via `greatest(existing, new)` on every write — protects against out-of-order delivery. Feeds `lastUpdateId` in depth responses. |
+| `last_chain_order` | `text` NOT NULL | Chain-order key (`msg_chain_order` from the gateway) of the most recent event that touched this order. Lex-monotonic via `greatest(existing, new)` on every write. Feeds `lastUpdateId` in depth responses as a STRING. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Index: `live_orders_open_book_idx` — partial, `(orderbook_address, outcome_id, is_buy, price desc) WHERE status = 'OPEN'`. Sized for the depth query: top-N levels per side per outcome.

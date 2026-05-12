@@ -50,6 +50,7 @@ pub struct ReprojectionStats {
 struct PendingRow {
     id: i64,
     msg_id: String,
+    chain_order: String,
     src_address: Option<String>,
     dst_address: Option<String>,
     event_type: Option<String>,
@@ -83,6 +84,21 @@ impl IndexerRepository {
         let mut result = PagePersistResult::default();
 
         for edge in edges {
+            // `chain_order` is the projection-ordering key (migration 0016).
+            // The GraphQL gateway promises it on every message edge; an event
+            // without it is unusable here — the reproject SQL orders by
+            // `chain_order` and would either misplace this row or fail on the
+            // NOT NULL constraint. Drop the edge with a warning rather than
+            // synthesise a fake key.
+            let Some(chain_order) = edge.node.msg_chain_order.as_deref() else {
+                result.undecoded += 1;
+                warn!(
+                    msg_id = %edge.node.msg_id,
+                    "GraphQL event edge missing msg_chain_order; dropping row"
+                );
+                continue;
+            };
+
             let body_value = edge.node.body.clone().unwrap_or(Value::Null);
             let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref());
             if decoded.is_some() {
@@ -96,12 +112,13 @@ impl IndexerRepository {
 
             let affected = sqlx::query(
                 r#"insert into raw_events
-                       (msg_id, created_at_chain, src_address, dst_address,
-                        event_type, body_json, decoded)
-                   values ($1, to_timestamp($2), $3, $4, $5, $6, $7)
+                       (msg_id, chain_order, created_at_chain, src_address,
+                        dst_address, event_type, body_json, decoded)
+                   values ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8)
                    on conflict (msg_id) do nothing"#,
             )
             .bind(&edge.node.msg_id)
+            .bind(chain_order)
             .bind(parse_unix_seconds(edge.node.created_at.as_ref()))
             .bind(edge.node.src.as_deref())
             .bind(edge.node.dst.as_deref())
@@ -196,6 +213,7 @@ impl IndexerRepository {
         let rows: Vec<PendingRow> = sqlx::query_as(
             r#"select id,
                       msg_id,
+                      chain_order,
                       src_address,
                       dst_address,
                       event_type,
@@ -205,7 +223,7 @@ impl IndexerRepository {
                 where processed_at is null
                   and event_type is not null
                   and decoded is not null
-                order by created_at_chain asc nulls last, id asc
+                order by chain_order asc
                 limit $1
                 for update skip locked"#,
         )
@@ -290,6 +308,7 @@ fn pending_row_to_inputs(row: &PendingRow) -> Option<(DecodedEvent, EventNode)> 
     let event = DecodedEvent { contract_kind: "", event_name: String::new(), event_type, value };
     let node = EventNode {
         msg_id: row.msg_id.clone(),
+        msg_chain_order: Some(row.chain_order.clone()),
         src: row.src_address.clone(),
         src_dapp_id: None,
         dst: row.dst_address.clone(),
@@ -403,6 +422,7 @@ mod tests {
         PendingRow {
             id: 42,
             msg_id: "msg-42".to_string(),
+            chain_order: "5f8000000000000003".to_string(),
             src_address: Some("0:src".to_string()),
             dst_address: Some("0:dst".to_string()),
             event_type: event_type.map(str::to_string),
