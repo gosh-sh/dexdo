@@ -79,8 +79,7 @@ async fn build_request(req: &mut Request) -> Result<AuthenticateRequest, DomainE
         .ok_or(DomainError::AuthEnvelopeIncomplete)?
         .to_string();
 
-    let timestamp_ms =
-        req.query::<i64>("timestamp").ok_or(DomainError::AuthEnvelopeIncomplete)?;
+    let timestamp_ms = req.query::<i64>("timestamp").ok_or(DomainError::AuthEnvelopeIncomplete)?;
 
     let signature_hex = req
         .query::<String>("signature")

@@ -6,11 +6,11 @@
 
 mod common;
 
-use common::SEED_API_KEY;
-use common::SEED_API_SECRET;
 use common::canonical_query;
 use common::now_ms;
 use common::sign;
+use common::SEED_API_KEY;
+use common::SEED_API_SECRET;
 use salvo::http::StatusCode;
 use salvo::test::ResponseExt;
 use salvo::test::TestClient;
@@ -20,6 +20,10 @@ use sqlx::PgPool;
 #[derive(Debug, Deserialize)]
 struct ErrorBody {
     code: i32,
+    // Deserialised so serde does not error on the field but unused —
+    // the tests assert only on `code`. Hard-pinning the text would
+    // couple tests to the human-readable copy in `DomainError::msg`.
+    #[allow(dead_code)]
     msg: String,
 }
 
@@ -41,8 +45,8 @@ async fn missing_apikey_header_returns_1003() {
 
     let mut resp = TestClient::post("http://test/api/v1/order")
         .query("recvWindow", "5000")
-        .query("timestamp", &ts.to_string())
-        .query("signature", &sig)
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
         .send(&service)
         .await;
 
@@ -59,7 +63,7 @@ async fn missing_signature_returns_1003() {
     let mut resp = TestClient::post("http://test/api/v1/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "5000")
-        .query("timestamp", &ts.to_string())
+        .query("timestamp", ts.to_string())
         .send(&service)
         .await;
 
@@ -98,8 +102,8 @@ async fn unknown_apikey_returns_1002() {
     let mut resp = TestClient::post("http://test/api/v1/order")
         .add_header("X-DODEX-APIKEY", "dk_live_unknown_999", true)
         .query("recvWindow", "5000")
-        .query("timestamp", &ts.to_string())
-        .query("signature", &sig)
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
         .send(&service)
         .await;
 
@@ -121,8 +125,8 @@ async fn stale_timestamp_returns_1021() {
     let mut resp = TestClient::post("http://test/api/v1/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "5000")
-        .query("timestamp", &ts.to_string())
-        .query("signature", &sig)
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
         .send(&service)
         .await;
 
@@ -143,8 +147,8 @@ async fn wrong_signature_returns_1022() {
     let mut resp = TestClient::post("http://test/api/v1/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "5000")
-        .query("timestamp", &ts.to_string())
-        .query("signature", &bad_sig)
+        .query("timestamp", ts.to_string())
+        .query("signature", bad_sig)
         .send(&service)
         .await;
 
@@ -166,8 +170,8 @@ async fn recv_window_overshoot_silently_clamps() {
     let resp = TestClient::post("http://test/api/v1/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "999999")
-        .query("timestamp", &ts.to_string())
-        .query("signature", &sig)
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
         .send(&service)
         .await;
 
@@ -186,8 +190,8 @@ async fn valid_signature_returns_200_with_account_id() {
     let mut resp = TestClient::post("http://test/api/v1/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "5000")
-        .query("timestamp", &ts.to_string())
-        .query("signature", &sig)
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
         .send(&service)
         .await;
 
@@ -211,8 +215,7 @@ async fn user_data_only_key_returns_1002_on_trade_route() {
     // account and tear it down at the end.
     let Some((service, pool, kek)) = common::setup().await else { return };
 
-    let readonly_secret_hex =
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    let readonly_secret_hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     let readonly_api_key = "dk_live_test_readonly_zz";
 
     insert_readonly_key(&pool, &kek, readonly_api_key, readonly_secret_hex).await;
@@ -224,8 +227,8 @@ async fn user_data_only_key_returns_1002_on_trade_route() {
     let mut resp = TestClient::post("http://test/api/v1/order")
         .add_header("X-DODEX-APIKEY", readonly_api_key, true)
         .query("recvWindow", "5000")
-        .query("timestamp", &ts.to_string())
-        .query("signature", &sig)
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
         .send(&service)
         .await;
 
@@ -247,12 +250,11 @@ async fn insert_readonly_key(pool: &PgPool, kek: &Kek, api_key: &str, secret_hex
 
     // Pick any seeded account; permissions live on api_keys, not on
     // the account, so the choice does not affect the test.
-    let account_id: uuid::Uuid = sqlx::query_scalar(
-        "select id from accounts where label = 'test-mm-001'",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("seeded account exists");
+    let account_id: uuid::Uuid =
+        sqlx::query_scalar("select id from accounts where label = 'test-mm-001'")
+            .fetch_one(pool)
+            .await
+            .expect("seeded account exists");
 
     let secret = hex::decode(secret_hex).unwrap();
     let secret_enc = crypto::seal(kek, &secret).expect("seal readonly secret");

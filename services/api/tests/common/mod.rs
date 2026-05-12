@@ -15,10 +15,10 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use dodex_api::testkit::build_router;
 use dodex_api::testkit::AppState;
 use dodex_api::testkit::SharedAuth;
 use dodex_api::testkit::SharedRepo;
-use dodex_api::testkit::build_router;
 use dodex_infrastructure::auth::PostgresAuthenticator;
 use dodex_infrastructure::config::AuthSection;
 use dodex_infrastructure::crypto::Kek;
@@ -29,8 +29,8 @@ use hmac::Hmac;
 use hmac::Mac;
 use salvo::Service;
 use sha2::Sha256;
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 
 pub type HmacSha256 = Hmac<Sha256>;
 
@@ -91,11 +91,8 @@ pub fn now_ms() -> i64 {
 /// rejoin with `&` without re-encoding. Matches the server-side
 /// `canonical_query_string` in `infrastructure::auth`.
 pub fn canonical_query(pairs: &[(&str, &str)]) -> String {
-    let mut filtered: Vec<(&str, &str)> = pairs
-        .iter()
-        .copied()
-        .filter(|(k, _)| *k != "signature")
-        .collect();
+    let mut filtered: Vec<(&str, &str)> =
+        pairs.iter().copied().filter(|(k, _)| *k != "signature").collect();
     filtered.sort_by(|a, b| a.0.cmp(b.0));
     filtered.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&")
 }

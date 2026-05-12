@@ -9,9 +9,9 @@
 // module and the `seed_accounts` config field can be removed without
 // touching the rest of the auth pipeline.
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 use dodex_domain::Permission;
 use num_bigint::BigUint;
 use serde::Deserialize;
@@ -287,12 +287,11 @@ async fn upsert_account(
         Ok(id)
     } else {
         // Row already exists — fetch its id so the api_keys can attach.
-        let id: Uuid =
-            sqlx::query_scalar("select id from accounts where pn_address = $1")
-                .bind(&account.pn_address)
-                .fetch_one(pool)
-                .await
-                .context("look up existing account by pn_address")?;
+        let id: Uuid = sqlx::query_scalar("select id from accounts where pn_address = $1")
+            .bind(&account.pn_address)
+            .fetch_one(pool)
+            .await
+            .context("look up existing account by pn_address")?;
         report.accounts_skipped += 1;
         debug!(account_id = %id, pn_address = %account.pn_address, "seed: account already exists");
         Ok(id)
@@ -357,24 +356,22 @@ mod tests {
         // the expected shape. Anyone editing seed_data.json gets a
         // clear test failure rather than a confusing runtime error on
         // first boot.
-        let data: SeedData =
-            serde_json::from_str(SEED_DATA).expect("seed_data.json must parse");
+        let data: SeedData = serde_json::from_str(SEED_DATA).expect("seed_data.json must parse");
         assert!(!data.accounts.is_empty(), "baked seed has zero accounts");
         for account in &data.accounts {
             assert!(!account.pn_address.is_empty());
-            BigUint::parse_bytes(account.pn_pubkey_dec.as_bytes(), 10).unwrap_or_else(|| {
-                panic!("pn_pubkey_dec not decimal for {}", account.pn_address)
-            });
-            BigUint::parse_bytes(account.pn_dih_dec.as_bytes(), 10).unwrap_or_else(|| {
-                panic!("pn_dih_dec not decimal for {}", account.pn_address)
-            });
+            BigUint::parse_bytes(account.pn_pubkey_dec.as_bytes(), 10)
+                .unwrap_or_else(|| panic!("pn_pubkey_dec not decimal for {}", account.pn_address));
+            BigUint::parse_bytes(account.pn_dih_dec.as_bytes(), 10)
+                .unwrap_or_else(|| panic!("pn_dih_dec not decimal for {}", account.pn_address));
             hex::decode(&account.pn_seckey_hex).unwrap_or_else(|e| {
                 panic!("pn_seckey_hex not valid for {}: {e}", account.pn_address)
             });
             assert!(!account.api_keys.is_empty(), "{} has no api_keys", account.pn_address);
             for key in &account.api_keys {
-                hex::decode(&key.api_secret_hex)
-                    .unwrap_or_else(|e| panic!("api_secret_hex not valid for {}: {e}", key.api_key));
+                hex::decode(&key.api_secret_hex).unwrap_or_else(|e| {
+                    panic!("api_secret_hex not valid for {}: {e}", key.api_key)
+                });
                 assert!(!key.permissions.is_empty(), "{} has no permissions", key.api_key);
                 for perm in &key.permissions {
                     Permission::parse(perm).unwrap_or_else(|| {

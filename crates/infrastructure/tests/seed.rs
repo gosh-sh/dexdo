@@ -12,8 +12,8 @@ use std::time::Duration;
 use dodex_infrastructure::crypto::Kek;
 use dodex_infrastructure::database;
 use dodex_infrastructure::seed;
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 
 async fn setup() -> Option<PgPool> {
     let url = match env::var("TEST_DATABASE_URL") {

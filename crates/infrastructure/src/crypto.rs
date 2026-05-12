@@ -7,17 +7,17 @@
 // the scheme: a future v2 row decrypts under a new KEK while v1 rows
 // keep decrypting under the original.
 
-use aes_gcm::Aes256Gcm;
-use aes_gcm::Key;
-use aes_gcm::Nonce;
 use aes_gcm::aead::Aead;
 use aes_gcm::aead::AeadCore;
 use aes_gcm::aead::KeyInit;
 use aes_gcm::aead::OsRng;
-use anyhow::Context;
-use anyhow::Result;
+use aes_gcm::Aes256Gcm;
+use aes_gcm::Key;
+use aes_gcm::Nonce;
 use anyhow::anyhow;
 use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use zeroize::ZeroizeOnDrop;
 
 const KEK_LEN: usize = 32;

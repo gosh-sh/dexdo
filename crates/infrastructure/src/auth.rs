@@ -67,10 +67,7 @@ impl PostgresAuthenticator {
         }
     }
 
-    async fn load_credential(
-        &self,
-        api_key: &str,
-    ) -> Result<Option<CredentialRow>, DomainError> {
+    async fn load_credential(&self, api_key: &str) -> Result<Option<CredentialRow>, DomainError> {
         // Single JOIN: any combination of unknown api_key, disabled api_key,
         // or disabled parent account collapses into "no row" and -1002
         // without leaking which signal was missing.
@@ -108,10 +105,7 @@ impl PostgresAuthenticator {
 
 #[async_trait]
 impl Authenticator for PostgresAuthenticator {
-    async fn authenticate(
-        &self,
-        request: AuthenticateRequest,
-    ) -> Result<AuthContext, DomainError> {
+    async fn authenticate(&self, request: AuthenticateRequest) -> Result<AuthContext, DomainError> {
         // 1. Resolve effective recvWindow. Silent clamp to the
         //    operator-configured maximum (itself bounded at the spec
         //    ceiling by config validation) — clients that overshoot get
@@ -158,9 +152,7 @@ impl Authenticator for PostgresAuthenticator {
 
         // 5. Canonicalize the query and verify the signature.
         let canonical = canonical_query_string(&request.raw_query_string);
-        if let Err(err) =
-            verify_hmac(&canonical, &request.body, &secret, &request.signature_hex)
-        {
+        if let Err(err) = verify_hmac(&canonical, &request.body, &secret, &request.signature_hex) {
             tracing::warn!(
                 api_key_id = row.api_key_id,
                 account_id = %row.account_id,
@@ -244,7 +236,7 @@ fn canonical_query_string(raw_query: &str) -> String {
     let mut pairs: Vec<(&str, &str, bool)> = raw_query
         .split('&')
         .filter_map(|kv| match kv.split_once('=') {
-            Some((k, v)) if k == "signature" => None,
+            Some(("signature", _)) => None,
             Some((k, v)) => Some((k, v, true)),
             None if kv == "signature" => None,
             None => Some((kv, "", false)),

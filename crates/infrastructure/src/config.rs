@@ -172,10 +172,7 @@ impl ApiConfig {
 
 impl AuthSection {
     fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.default_recv_window_ms > 0,
-            "auth.default_recv_window_ms must be > 0"
-        );
+        anyhow::ensure!(self.default_recv_window_ms > 0, "auth.default_recv_window_ms must be > 0");
         anyhow::ensure!(self.max_recv_window_ms > 0, "auth.max_recv_window_ms must be > 0");
         anyhow::ensure!(
             self.max_recv_window_ms <= MAX_RECV_WINDOW_MS,
@@ -541,11 +538,8 @@ auth:
 
     #[test]
     fn auth_validate_rejects_zero_max() {
-        let s = AuthSection {
-            default_recv_window_ms: 0,
-            max_recv_window_ms: 0,
-            seed_accounts: false,
-        };
+        let s =
+            AuthSection { default_recv_window_ms: 0, max_recv_window_ms: 0, seed_accounts: false };
         let err = s.validate().unwrap_err();
         // `default == 0` is hit first by the order of checks, but the
         // important thing is that a zero-max config is rejected.

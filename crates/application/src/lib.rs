@@ -46,7 +46,11 @@ impl AuthContext {
     /// when the key does not carry it; the api error layer maps that to
     /// `-1002 / 401` per `docs/api-spec.md`.
     pub fn require(&self, perm: Permission) -> Result<(), DomainError> {
-        if self.has_permission(perm) { Ok(()) } else { Err(DomainError::AuthRequired) }
+        if self.has_permission(perm) {
+            Ok(())
+        } else {
+            Err(DomainError::AuthRequired)
+        }
     }
 }
 
@@ -74,10 +78,7 @@ pub struct AuthenticateRequest {
 /// `Arc`) so the trait object can sit in app state.
 #[async_trait]
 pub trait Authenticator: Send + Sync {
-    async fn authenticate(
-        &self,
-        request: AuthenticateRequest,
-    ) -> Result<AuthContext, DomainError>;
+    async fn authenticate(&self, request: AuthenticateRequest) -> Result<AuthContext, DomainError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

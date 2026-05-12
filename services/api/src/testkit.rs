@@ -6,10 +6,10 @@
 // them through this path.
 
 #[doc(hidden)]
+pub use crate::build_router;
+#[doc(hidden)]
 pub use crate::AppState;
 #[doc(hidden)]
 pub use crate::SharedAuth;
 #[doc(hidden)]
 pub use crate::SharedRepo;
-#[doc(hidden)]
-pub use crate::build_router;
