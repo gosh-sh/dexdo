@@ -168,11 +168,14 @@ pub struct Terminal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Market {
     pub market_address: MarketAddress,
-    /// `None` only while the backend has not resolved the deterministic
-    /// OrderBook address yet. The address may be known before the OrderBook
-    /// contract is active on-chain; clients gate trading availability on
-    /// `status`.
-    pub order_book_address: Option<String>,
+    /// Deterministic OrderBook address from `PMP.getOrderBookAddress()`,
+    /// stamped on the first reconcile (migration 0014 CHECK constraint
+    /// pins `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT
+    /// NULL`). Always present on markets visible to the API — a NULL or
+    /// blank value at this point is treated as `MarketInconsistent` →
+    /// HTTP 503 by `assemble_market` / depth path. Clients gate trading
+    /// availability on `status`, not on this field's presence.
+    pub order_book_address: String,
     pub market_name: MarketName,
     pub status: MarketStatus,
     pub quote_asset: String,

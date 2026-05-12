@@ -19,9 +19,9 @@ use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketEvent;
 use dodex_domain::MarketName;
-use dodex_domain::OracleEntry;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
+use dodex_domain::OracleEntry;
 use dodex_domain::Outcome;
 use dodex_domain::PriceLevel;
 use dodex_domain::Symbol;
@@ -322,7 +322,7 @@ impl PostgresReadModelRepository {
 
         let mut outcomes = self.fetch_outcomes(&[row.id]).await?;
         let market_outcomes = outcomes.remove(&row.id).unwrap_or_default();
-        let mut oracle_blocks = self.fetch_oracle_events(&[row.pmp_address.clone()]).await?;
+        let mut oracle_blocks = self.fetch_oracle_events(std::slice::from_ref(&row.pmp_address)).await?;
         let oracle_block = oracle_blocks.remove(&row.pmp_address).unwrap_or_default();
         let market = assemble_market(row, market_outcomes, oracle_block, now)?;
         Ok(MarketsPage { markets: vec![market], next_cursor: None, has_more: false })
@@ -664,10 +664,22 @@ fn assemble_market(
             row.pmp_address
         )
     })?;
-    // `orderbook_address` is allowed to be NULL while the backend has not
-    // resolved the deterministic address. `filter_orderbook` collapses
-    // blank/whitespace-only strings into the same nullable contract.
-    let order_book_address = row.orderbook_address.clone().and_then(filter_orderbook);
+    // The listing/single-market queries already filter
+    // `m.last_reconciled_at IS NOT NULL`, and the migration-0014 CHECK
+    // pins `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`.
+    // A NULL therefore cannot reach this point. A blank/whitespace-only
+    // string slips past the CHECK but breaks the public contract that
+    // visible markets always carry an order-book address — surface it as
+    // `MarketInconsistent` (503), mirroring the depth handler's treatment
+    // of the same corruption.
+    let order_book_address = match row.orderbook_address.clone().and_then(filter_orderbook) {
+        Some(addr) => addr,
+        None => {
+            return Err(anyhow!(DomainError::MarketInconsistent)).with_context(|| {
+                format!("market {} has blank orderbook_address", row.pmp_address)
+            });
+        }
+    };
 
     let status = derive_status(&row, now);
     let timings = build_timings(&row, status);
@@ -1085,12 +1097,8 @@ mod tests {
     #[test]
     fn validate_pending_with_timings_fails() {
         // api-spec.md:328 / invariant #3: timings must be null IFF PENDING.
-        let err = validate_invariants(
-            MarketStatus::Pending,
-            &Some(timings_full(None)),
-            &None,
-        )
-        .unwrap_err();
+        let err = validate_invariants(MarketStatus::Pending, &Some(timings_full(None)), &None)
+            .unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
     }
 
@@ -1099,8 +1107,7 @@ mod tests {
         // Catches the `build_timings -> None` path when a non-PENDING status
         // is paired with one NULL timing column. The reviewer's reported
         // shape: terminal/non-pending status surfacing with `timings: null`.
-        let err =
-            validate_invariants(MarketStatus::AwaitingFreeze, &None, &None).unwrap_err();
+        let err = validate_invariants(MarketStatus::AwaitingFreeze, &None, &None).unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
     }
 
@@ -1152,12 +1159,8 @@ mod tests {
 
     #[test]
     fn validate_terminal_status_without_terminal_block_fails() {
-        let err = validate_invariants(
-            MarketStatus::Expired,
-            &Some(timings_full(Some(250))),
-            &None,
-        )
-        .unwrap_err();
+        let err = validate_invariants(MarketStatus::Expired, &Some(timings_full(Some(250))), &None)
+            .unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
     }
 
@@ -1178,12 +1181,8 @@ mod tests {
         // Defense in depth: derive_status already gates TRADING/RESOLVING on
         // frozen_at != null, but the validator asserts it independently so a
         // future change to derive_status cannot silently break the contract.
-        let err = validate_invariants(
-            MarketStatus::Trading,
-            &Some(timings_full(None)),
-            &None,
-        )
-        .unwrap_err();
+        let err = validate_invariants(MarketStatus::Trading, &Some(timings_full(None)), &None)
+            .unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
     }
 

@@ -117,7 +117,7 @@ async fn fresh_orderbook_without_orders_returns_empty_book() {
     // Legitimate empty-book case after migration 0014: a reconciled market
     // has its deterministic `orderbook_address` stamped on the first pass,
     // but no `OrderBook.OrderPlaced` events have landed yet. The depth
-    // response shape (empty bids/asks, `lastUpdateId = 0`) must still work —
+    // response shape (empty bids/asks, `lastUpdateId = ""`) must still work —
     // it just now stems from "no rows in live_orders" rather than "no
     // address resolved".
     let Some(pool) = setup().await else { return };

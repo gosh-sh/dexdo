@@ -454,3 +454,29 @@ async fn unknown_market_address_returns_invalid_market_or_symbol() {
     let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
     assert_eq!(*domain, DomainError::InvalidMarketOrSymbol);
 }
+
+#[tokio::test]
+async fn blank_orderbook_address_fails_closed_in_markets() {
+    // Migration-0014 CHECK forbids NULL `orderbook_address` on reconciled
+    // rows but a whitespace-only string slips past it. The depth path
+    // already treats this as `MarketInconsistent`; `/api/v1/markets` must
+    // fail closed too — silently serializing `orderBookAddress: null`
+    // would break the public contract that visible markets always carry
+    // the address.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let test = "markets_blank_orderbook_address";
+    let pmp = format!("0:{test}_pmp");
+    let market_name = format!("{test}-market");
+    let orderbook = "   "; // blank — CHECK allows, business contract does not.
+
+    purge_market(&pool, &pmp).await;
+    insert_market(&pool, &pmp, &market_name, orderbook, false, None).await;
+
+    let request =
+        MarketsRequest::One { market_address: MarketAddress(pmp.clone()), now: 1_700_000_150 };
+    let err = repo.list_markets(&request).await.expect_err("blank orderbook must fail closed");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::MarketInconsistent);
+}

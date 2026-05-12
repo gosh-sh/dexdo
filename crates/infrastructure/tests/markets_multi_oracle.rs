@@ -368,10 +368,8 @@ async fn mismatched_event_name_fails_closed() {
 
     let request =
         MarketsRequest::One { market_address: MarketAddress(pmp.into()), now: 1_700_000_150 };
-    let err = repo
-        .list_markets(&request)
-        .await
-        .expect_err("mismatched event_name must fail closed");
+    let err =
+        repo.list_markets(&request).await.expect_err("mismatched event_name must fail closed");
     let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
     assert_eq!(*domain, DomainError::MarketInconsistent);
 }
@@ -424,10 +422,8 @@ async fn mismatched_description_fails_closed() {
 
     let request =
         MarketsRequest::One { market_address: MarketAddress(pmp.into()), now: 1_700_000_150 };
-    let err = repo
-        .list_markets(&request)
-        .await
-        .expect_err("mismatched description must fail closed");
+    let err =
+        repo.list_markets(&request).await.expect_err("mismatched description must fail closed");
     let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
     assert_eq!(*domain, DomainError::MarketInconsistent);
 }

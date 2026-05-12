@@ -51,6 +51,14 @@ pub struct OelReconcileStats {
 /// row drops off the front of the next sweep, otherwise a pending OEL
 /// stuck on `account_boc = null` would starve every later row in the queue.
 enum OelReconcileOutcome {
+    /// The reconciler ran end-to-end and matched `n` pending child rows.
+    /// `Reconciled(0)` means the OEL was in the pending queue but the
+    /// `_events` getter response did not stamp any child — either the map
+    /// is empty, or every item in it targets a child that is already
+    /// `meta_reconciled_at IS NOT NULL`. Both shapes mean the indexed BOC
+    /// lags the event stream that put the pending child into our DB; the
+    /// outer loop treats this like `NoBoc` and stamps failure backoff so
+    /// the OEL does not starve later rows behind the `LIMIT 16` batch.
     Reconciled(u64),
     NoBoc,
 }
@@ -112,17 +120,36 @@ impl OracleEventListReconciler {
             match self.reconcile_one(&oel).await {
                 Ok(OelReconcileOutcome::Reconciled(filled)) => {
                     if filled > 0 {
+                        // Progress made: at least one child row's
+                        // `meta_reconciled_at` was stamped this pass. Clear
+                        // any prior failure marker so the OEL competes for
+                        // the front of the queue again.
                         stats.reconciled += 1;
                         stats.events_filled += filled;
+                        if let Err(clear_err) = self.clear_failure(oel.id).await {
+                            warn!(
+                                oel_id = oel.id,
+                                ?clear_err,
+                                "failed to clear oel reconcile failure marker"
+                            );
+                        }
                     } else {
+                        // No child stamped despite the OEL being in the
+                        // pending queue. Indexed BOC lags the event stream:
+                        // the `_events` map is empty or only contains older
+                        // entries that are already `meta_reconciled_at IS
+                        // NOT NULL`. Without a backoff this OEL would be
+                        // selected every sweep (the pending SELECT still
+                        // matches it) and crowd out later rows behind the
+                        // LIMIT 16 batch until the chain catches up.
                         stats.skipped += 1;
-                    }
-                    if let Err(clear_err) = self.clear_failure(oel.id).await {
-                        warn!(
-                            oel_id = oel.id,
-                            ?clear_err,
-                            "failed to clear oel reconcile failure marker"
-                        );
+                        if let Err(stamp_err) = self.stamp_failure(oel.id).await {
+                            warn!(
+                                oel_id = oel.id,
+                                ?stamp_err,
+                                "failed to stamp oel reconcile backoff after no-progress pass"
+                            );
+                        }
                     }
                 }
                 Ok(OelReconcileOutcome::NoBoc) => {
@@ -224,10 +251,10 @@ impl OracleEventListReconciler {
         let items =
             parse_events_map(&raw).with_context(|| format!("parse _events for {}", oel.address))?;
 
-        if items.is_empty() {
-            return Ok(OelReconcileOutcome::Reconciled(0));
-        }
-
+        // `filled == 0` after the loop is the chain-lag signal: either
+        // `items` is empty, or every item points to a child that is already
+        // `meta_reconciled_at IS NOT NULL`. The outer loop turns it into a
+        // failure-backoff stamp; see the `Reconciled(0)` branch there.
         let mut tx = self.pool.begin().await.context("oel reconcile tx begin")?;
         let mut filled = 0u64;
         for item in &items {

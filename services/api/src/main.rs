@@ -57,7 +57,7 @@ struct MarketDto {
     // `None` only while the backend has not resolved the deterministic
     // OrderBook address yet. Clients gate trading on `status`, not on the
     // presence of this field.
-    order_book_address: Option<String>,
+    order_book_address: String,
     market_name: String,
     status: &'static str,
     quote_asset: String,
@@ -255,9 +255,7 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
         Some("createdAt") => MarketsSort::CreatedAtDesc,
         Some(_) => return Err(ApiError::from(DomainError::InvalidParameter)),
     };
-    let limit = limit_param
-        .map(|v| v.clamp(1, MAX_LIMIT as i64) as u16)
-        .unwrap_or(DEFAULT_LIMIT);
+    let limit = limit_param.map(|v| v.clamp(1, MAX_LIMIT as i64) as u16).unwrap_or(DEFAULT_LIMIT);
 
     Ok(MarketsRequest::Listing(MarketsListing {
         filter: MarketsFilter { statuses, quote_asset, oracle_name, closing_before },
@@ -350,9 +348,8 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
         non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
 
     // Parse as i64 so values >u16::MAX clamp to 1000 rather than 400ing.
-    let limit = optional_typed_query::<i64>(req, "limit")?
-        .map(|v| v.clamp(1, 1000) as u16)
-        .unwrap_or(100);
+    let limit =
+        optional_typed_query::<i64>(req, "limit")?.map(|v| v.clamp(1, 1000) as u16).unwrap_or(100);
 
     let use_case = GetDepthUseCase::new(state.repo);
     let snapshot = use_case

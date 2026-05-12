@@ -125,6 +125,11 @@ exists (select 1 from oracle_events oe
            and oe.meta_reconciled_at is null)
 ```
 
+Two anti-starvation outcomes share the failure-backoff path with the market reconciler (`last_reconcile_failed_at`, 5-minute cooldown):
+
+- **`NoBoc`** — the OEL account BOC is not yet available from the gateway.
+- **`Reconciled(0)` — no-progress pass.** The BOC is queryable but the run does not stamp any child. Two shapes collapse into this: an empty `_events` map, and a non-empty map whose items all target children that are already `meta_reconciled_at IS NOT NULL`. Both mean the indexed contract state lags the event stream — `EventAdded` persisted a pending child that `_events` does not yet reflect. Without the backoff the OEL would be picked every sweep (the pending SELECT still matches it) and starve later rows behind the LIMIT 16 batch until the node catches up.
+
 ## Failure handling
 
 Two outcomes leave a `raw_events` row pending:
