@@ -21,5 +21,8 @@ tvm_block.workspace = true
 tvm_executor.workspace = true
 tvm_types.workspace = true
 tvm_vm.workspace = true
+zeroize.workspace = true
+aes-gcm = "0.10"
+hex = "0.4"
 dodex-application = { path = "../application" }
 dodex-domain = { path = "../domain" }

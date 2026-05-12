@@ -30,6 +30,7 @@ salvo_extra = "0.74"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 base64 = "0.22"
 num-bigint = "0.4"
+zeroize = { version = "1.8", features = ["derive"] }
 tvm_abi = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v2.24.20.an' }
 tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v2.24.20.an' }
 tvm_executor = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v2.24.20.an' }
