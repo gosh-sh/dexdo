@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+uuid.workspace = true
 dodex-domain = { path = "../domain" }

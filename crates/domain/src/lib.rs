@@ -4,6 +4,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
+use zeroize::ZeroizeOnDrop;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MarketAddress(pub String);
@@ -238,6 +239,70 @@ pub struct OracleEvent {
     pub outcome_names: serde_json::Value,
 }
 
+/// Access level associated with an api_key. Mirrors the public
+/// `USER_DATA` / `TRADE` security levels in `docs/api-spec.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Permission {
+    UserData,
+    Trade,
+}
+
+impl Permission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserData => "USER_DATA",
+            Self::Trade => "TRADE",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "USER_DATA" => Some(Self::UserData),
+            "TRADE" => Some(Self::Trade),
+            _ => None,
+        }
+    }
+}
+
+/// Byte buffer that zeroes its contents on drop. Used for plaintext
+/// secrets (decrypted api_secret, decrypted pn_seckey) that must not
+/// linger in memory after they are no longer needed. The `Debug`
+/// implementation redacts the bytes so accidental `tracing` or `dbg!`
+/// calls cannot leak the material.
+#[derive(Clone, ZeroizeOnDrop)]
+pub struct SensitiveBytes(Vec<u8>);
+
+impl SensitiveBytes {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for SensitiveBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SensitiveBytes(<redacted, {} bytes>)", self.0.len())
+    }
+}
+
+impl From<Vec<u8>> for SensitiveBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::new(bytes)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DomainError {
     #[error("mandatory parameter was not sent")]
@@ -300,5 +365,55 @@ impl DomainError {
             Self::OrderValidationFailed => "Order would immediately fail validation.",
             Self::UnknownOrder => "Unknown order.",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_as_str_round_trip() {
+        for p in [Permission::UserData, Permission::Trade] {
+            assert_eq!(Permission::parse(p.as_str()), Some(p));
+        }
+    }
+
+    #[test]
+    fn permission_parse_rejects_unknown() {
+        assert_eq!(Permission::parse(""), None);
+        assert_eq!(Permission::parse("user_data"), None); // case sensitive
+        assert_eq!(Permission::parse("ADMIN"), None);
+    }
+
+    #[test]
+    fn sensitive_bytes_debug_redacts() {
+        // The secret bytes themselves MUST NOT appear in Debug output —
+        // not in length-of-original form, not in any encoded form. A
+        // distinctive plaintext makes a regression here obvious.
+        let secret = b"super-secret-api-secret-xyz".to_vec();
+        let s = SensitiveBytes::new(secret.clone());
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("redacted"), "expected redaction marker, got: {dbg}");
+        assert!(!dbg.contains("super-secret"), "plaintext leaked into Debug: {dbg}");
+        assert!(dbg.contains(&secret.len().to_string()));
+    }
+
+    #[test]
+    fn sensitive_bytes_basic_accessors() {
+        let s = SensitiveBytes::new(vec![1, 2, 3]);
+        assert_eq!(s.len(), 3);
+        assert!(!s.is_empty());
+        assert_eq!(s.as_slice(), &[1, 2, 3]);
+
+        let empty = SensitiveBytes::new(vec![]);
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn sensitive_bytes_from_vec() {
+        let s: SensitiveBytes = vec![0xab, 0xcd].into();
+        assert_eq!(s.as_slice(), &[0xab, 0xcd]);
     }
 }

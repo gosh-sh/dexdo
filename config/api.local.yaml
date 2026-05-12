@@ -12,3 +12,7 @@ database:
   max_connections: 10
   min_connections: 1
   connect_timeout_ms: 3000
+
+auth:
+  default_recv_window_ms: 5000
+  max_recv_window_ms: 60000

@@ -13,6 +13,12 @@ pub struct ApiConfig {
     #[serde(flatten)]
     pub common: CommonSection,
     pub server: ServerSection,
+    /// HMAC auth tuning. Optional in the YAML — the defaults match the
+    /// public spec (5 s default window, 60 s ceiling). Operators can
+    /// tighten either knob; loosening past the spec ceiling fails
+    /// validation.
+    #[serde(default)]
+    pub auth: AuthSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +59,43 @@ pub struct DatabaseSection {
     pub max_connections: u32,
     pub min_connections: u32,
     pub connect_timeout_ms: u64,
+}
+
+/// `recvWindow` constants mandated by `docs/api-spec.md §Security
+/// Types`: client-side default is 5 s, server-side ceiling is 60 s.
+/// Operators may tighten either knob in config; loosening the ceiling
+/// past `MAX_RECV_WINDOW_MS` fails validation.
+const DEFAULT_RECV_WINDOW_MS: u64 = 5_000;
+const MAX_RECV_WINDOW_MS: u64 = 60_000;
+
+/// HMAC validity window settings. Field names follow `api-spec.md`
+/// semantics: `default_*` is what the middleware applies when a request
+/// omits `recvWindow`; `max_*` is the clamp the middleware enforces on
+/// any client-supplied `recvWindow`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthSection {
+    #[serde(default = "default_recv_window_ms")]
+    pub default_recv_window_ms: u64,
+    #[serde(default = "default_max_recv_window_ms")]
+    pub max_recv_window_ms: u64,
+}
+
+impl Default for AuthSection {
+    fn default() -> Self {
+        Self {
+            default_recv_window_ms: DEFAULT_RECV_WINDOW_MS,
+            max_recv_window_ms: MAX_RECV_WINDOW_MS,
+        }
+    }
+}
+
+fn default_recv_window_ms() -> u64 {
+    DEFAULT_RECV_WINDOW_MS
+}
+
+fn default_max_recv_window_ms() -> u64 {
+    MAX_RECV_WINDOW_MS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +159,28 @@ impl ApiConfig {
         anyhow::ensure!(
             self.server.request_timeout_ms > 0,
             "server.request_timeout_ms must be > 0"
+        );
+        self.auth.validate()?;
+        Ok(())
+    }
+}
+
+impl AuthSection {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.default_recv_window_ms > 0,
+            "auth.default_recv_window_ms must be > 0"
+        );
+        anyhow::ensure!(self.max_recv_window_ms > 0, "auth.max_recv_window_ms must be > 0");
+        anyhow::ensure!(
+            self.max_recv_window_ms <= MAX_RECV_WINDOW_MS,
+            "auth.max_recv_window_ms must be <= {MAX_RECV_WINDOW_MS} (spec maximum)"
+        );
+        anyhow::ensure!(
+            self.default_recv_window_ms <= self.max_recv_window_ms,
+            "auth.default_recv_window_ms ({}) must be <= auth.max_recv_window_ms ({})",
+            self.default_recv_window_ms,
+            self.max_recv_window_ms,
         );
         Ok(())
     }
@@ -396,6 +461,74 @@ indexer:
         let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("polling_interval_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn api_config_defaults_auth_section_when_absent() {
+        // The YAML may omit the `auth:` block entirely; the defaults
+        // match the public spec (5 s / 60 s) so an upgraded operator
+        // does not need to touch their config file.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(cfg.auth.default_recv_window_ms, 5_000);
+        assert_eq!(cfg.auth.max_recv_window_ms, 60_000);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn api_config_parses_explicit_auth_section() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  default_recv_window_ms: 2000
+  max_recv_window_ms: 30000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(cfg.auth.default_recv_window_ms, 2_000);
+        assert_eq!(cfg.auth.max_recv_window_ms, 30_000);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn auth_validate_rejects_max_above_spec_ceiling() {
+        let s = AuthSection { default_recv_window_ms: 5_000, max_recv_window_ms: 120_000 };
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("60000"), "got: {err}");
+    }
+
+    #[test]
+    fn auth_validate_rejects_default_above_max() {
+        let s = AuthSection { default_recv_window_ms: 30_000, max_recv_window_ms: 10_000 };
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("must be <="), "got: {err}");
+    }
+
+    #[test]
+    fn auth_validate_rejects_zero_default() {
+        let s = AuthSection { default_recv_window_ms: 0, max_recv_window_ms: 60_000 };
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("default_recv_window_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn auth_validate_rejects_zero_max() {
+        let s = AuthSection { default_recv_window_ms: 0, max_recv_window_ms: 0 };
+        let err = s.validate().unwrap_err();
+        // `default == 0` is hit first by the order of checks, but the
+        // important thing is that a zero-max config is rejected.
+        assert!(err.to_string().contains("recv_window"), "got: {err}");
     }
 
     #[test]
