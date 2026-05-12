@@ -94,9 +94,11 @@ Optional `limit` (default 100, max 1000).
 
 Resolution: `marketAddress` + `symbol` → `(orderbook_address, outcome_id)`
 through `markets ⨝ market_outcomes`, with `last_reconciled_at IS NOT NULL`.
-A miss returns `404` (`InvalidMarketOrSymbol`). When the market exists but
-the backend has not resolved an `orderbook_address`, the response is an empty
-book with `lastUpdateId = 0`.
+A miss returns `404` (`InvalidMarketOrSymbol`). A reconciled market is
+guaranteed to carry `orderbook_address` (migration 0014 CHECK); a NULL or
+blank value at this point is treated as `MarketInconsistent` → 503. The
+legitimate empty-book case is "address stamped, no `OrderPlaced` events
+yet" — the response is empty `bids` / `asks` with `lastUpdateId = 0`.
 
 Aggregation: `SUM(amount_remaining) GROUP BY (is_buy, price)` over rows with
 `status = 'OPEN' AND amount_remaining > 0`. The sort is numerical (parsed

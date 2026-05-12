@@ -261,15 +261,20 @@ async fn pending_status_when_reconciled_without_timings() {
 
     purge_market(&pool, &pmp).await;
     // Mirror what reconciler writes when no TimingsSet has been observed:
-    // last_reconciled_at populated, but stake_*/result_* left NULL.
+    // `last_reconciled_at` populated, `orderbook_address` stamped from the
+    // deterministic getter (migration 0014 CHECK requires it whenever
+    // `last_reconciled_at` is set), but `stake_*`/`result_*` left NULL.
+    let orderbook = format!("0:{test}_book");
     sqlx::query(
         r#"insert into markets
                (pmp_address, market_id, name, token_type, token_code,
-                event_id, oracle_list_hash, last_reconciled_at)
-           values ($1, $2, $2, 3, 'USDC', 1::numeric, 0::numeric, now())"#,
+                event_id, oracle_list_hash, orderbook_address,
+                last_reconciled_at)
+           values ($1, $2, $2, 3, 'USDC', 1::numeric, 0::numeric, $3, now())"#,
     )
     .bind(&pmp)
     .bind(&market_name)
+    .bind(&orderbook)
     .execute(&pool)
     .await
     .expect("insert pre-timings market");

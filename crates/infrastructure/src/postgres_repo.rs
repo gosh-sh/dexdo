@@ -104,12 +104,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
         symbol: &Symbol,
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error> {
-        // markets.orderbook_address is nullable (migration 0001) — decode it
-        // as Option<String> so a NULL row does not surface as a sqlx decode
-        // error. NULL and blank strings collapse into the same empty-book
-        // path documented in services/api/README.md. In normal reconciled
-        // rows this address is deterministic and can be present before the
-        // on-chain book is active.
+        // markets.orderbook_address is nullable in the schema (migration 0001)
+        // because the `PMPDeployed` projector inserts a row before the
+        // reconciler runs. The migration-0014 CHECK constraint pins
+        // `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`,
+        // and the SQL below filters to reconciled rows — so a NULL (or blank)
+        // address here is an invariant violation, not a legitimate empty-book
+        // state. Decoded as `Option<String>` only to surface that violation as
+        // a typed `MarketInconsistent` instead of a sqlx decode error.
+        //
         // Pull (price|quantity)_precision from market_outcomes too: live_orders
         // stores raw uint256/uint128 integers as the contract emitted them, so
         // the API must scale by 10^-precision to honour the DECIMAL contract
@@ -136,15 +139,10 @@ impl MarketReadRepository for PostgresReadModelRepository {
             return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
         };
         let Some(orderbook_address) = orderbook_address.and_then(filter_orderbook) else {
-            // Market exists but the backend has not resolved an orderbook
-            // address. No live orders can be associated with it.
-            return Ok(DepthSnapshot {
-                market_address: market_address.clone(),
-                symbol: symbol.clone(),
-                last_update_id: 0,
-                bids: vec![],
-                asks: vec![],
-            });
+            // Reconciled market without a usable orderbook address: violates
+            // the migration-0014 invariant. Fail closed (HTTP 503) instead of
+            // serving an empty book that would silently hide the corruption.
+            return Err(anyhow!(DomainError::MarketInconsistent));
         };
 
         let limit = limit.max(1) as i64;

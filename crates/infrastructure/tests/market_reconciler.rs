@@ -1,11 +1,13 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
-// Integration tests for the MarketReconciler's observed-only contract on
-// `orderbook_address` (tech-spec.md invariant #5). The full reconciler path
-// requires graphql/decoder plumbing; here we exercise just the SQL the
-// reconciler emits — the SELECT predicate that decides which rows enter the
-// queue, and the UPDATE that decides whether to stamp the column. Mirrors
-// the same "test the SQL contract" approach as
+// Integration tests for the MarketReconciler SQL contract after the
+// migration-0014 invariant flip: `orderbook_address` is stamped on the first
+// successful reconcile (the PMP getter is deterministic) and the CHECK
+// constraint forbids reconciled rows from having a NULL address. The full
+// reconciler path requires graphql/decoder plumbing; here we exercise just
+// the SQL the reconciler emits — the SELECT predicate that decides which
+// rows enter the queue and the UPDATE that writes the address. Mirrors the
+// "test the SQL contract" approach used in
 // `crates/infrastructure/tests/oel_reconciler.rs`.
 
 use std::env;
@@ -75,8 +77,7 @@ async fn seed_market(
 async fn pending_ids(pool: &PgPool) -> Vec<i64> {
     let rows = sqlx::query(
         r#"select id from markets
-           where (last_reconciled_at is null
-                  or (frozen_at is not null and orderbook_address is null))
+           where last_reconciled_at is null
              and (last_reconcile_failed_at is null
                   or last_reconcile_failed_at < now() - interval '5 minutes')
            order by last_reconcile_failed_at nulls first, id asc"#,
@@ -98,10 +99,7 @@ async fn reconcile_update(pool: &PgPool, market_id: i64, orderbook_address: &str
                   approved = true,
                   is_cancelled = false,
                   num_outcomes = 2,
-                  orderbook_address = case
-                      when frozen_at is not null then $1
-                      else orderbook_address
-                  end,
+                  orderbook_address = $1,
                   last_reconciled_at = now()
             where id = $2"#,
     )
@@ -121,12 +119,12 @@ async fn read_orderbook_address(pool: &PgPool, market_id: i64) -> Option<String>
 }
 
 #[tokio::test]
-async fn pre_freeze_reconcile_does_not_stamp_orderbook() {
-    // tech-spec.md invariant #5: `orderBookAddress` MUST be null until the
-    // OrderBook is observed on-chain. PoolsFrozen is that signal (see
-    // dex-events-routing.md:77 — "after deploy OrderBook"). A reconcile pass
-    // on a row without `frozen_at` must leave the column null even though
-    // `PMP.getOrderBookAddress()` would happily return the precomputed value.
+async fn pre_freeze_reconcile_stamps_orderbook() {
+    // `PMP.getOrderBookAddress()` is deterministic (contracts/PMP.sol:1360) and
+    // returns the precomputed address even before PoolsFrozen lands. The
+    // reconciler stamps that address on the first pass; the public api-spec.md
+    // contract requires `orderBookAddress` to be present for any reconciled
+    // market. Migration 0014's CHECK constraint pins this invariant.
     let Some(pool) = setup().await else { return };
 
     let pmp = "0:reconciler_pre_freeze";
@@ -136,9 +134,9 @@ async fn pre_freeze_reconcile_does_not_stamp_orderbook() {
     reconcile_update(&pool, id, "0:deterministic_precomputed").await;
 
     assert_eq!(
-        read_orderbook_address(&pool, id).await,
-        None,
-        "reconciler must not stamp orderbook_address before PoolsFrozen"
+        read_orderbook_address(&pool, id).await.as_deref(),
+        Some("0:deterministic_precomputed"),
+        "reconciler must stamp the deterministic orderbook_address even pre-freeze"
     );
 }
 
@@ -155,117 +153,66 @@ async fn post_freeze_reconcile_stamps_orderbook() {
     assert_eq!(
         read_orderbook_address(&pool, id).await.as_deref(),
         Some("0:deployed_orderbook"),
-        "once frozen_at is set the reconciler must stamp orderbook_address"
+        "post-freeze reconcile stamps orderbook_address (same path as pre-freeze)"
     );
 }
 
 #[tokio::test]
-async fn already_reconciled_row_is_requeued_when_freeze_lands() {
-    // The regression this pins: a market is reconciled before PoolsFrozen
-    // (so `last_reconciled_at` is set and `orderbook_address` is null).
-    // Then PoolsFrozen lands and stamps `frozen_at`. The widened SELECT
-    // predicate must re-queue this row so the next sweep can stamp
-    // `orderbook_address`. Without the widening the row would stay in the
-    // "already reconciled" pool forever and `orderBookAddress` would never
-    // surface on the API.
+async fn reconciled_row_drops_out_of_queue_permanently() {
+    // After migration 0014 the queue predicate is just `last_reconciled_at IS
+    // NULL`: the deterministic getter returns the same address on every pass,
+    // so there is no later re-queue trigger. PoolsFrozen landing afterwards
+    // must NOT pull the row back into the queue.
     let Some(pool) = setup().await else { return };
 
-    let pmp = "0:reconciler_requeue";
+    let pmp = "0:reconciler_no_requeue";
     purge(&pool, pmp).await;
-    // First reconcile pass happened, but pre-freeze — orderbook null.
-    let id = seed_market(&pool, pmp, true, None, None).await;
 
-    // No freeze yet → row stays out of the queue.
+    // Never-reconciled row sits in the queue.
+    let id = seed_market(&pool, pmp, false, None, None).await;
+    assert!(pending_ids(&pool).await.contains(&id), "fresh row must be queued");
+
+    // First reconcile pass stamps the address and last_reconciled_at.
+    reconcile_update(&pool, id, "0:deterministic_precomputed").await;
     assert!(
         !pending_ids(&pool).await.contains(&id),
-        "fully-reconciled row without freeze must not be in the queue"
+        "first reconcile must drop the row from the queue"
     );
 
-    // PoolsFrozen lands.
+    // PoolsFrozen lands later — must not re-queue.
     sqlx::query("update markets set frozen_at = $1 where id = $2")
         .bind(1_700_000_250_i64)
         .bind(id)
         .execute(&pool)
         .await
         .expect("set frozen_at");
-
-    assert!(
-        pending_ids(&pool).await.contains(&id),
-        "row with frozen_at set and orderbook_address null must be re-queued"
-    );
-
-    // Second pass stamps the address.
-    reconcile_update(&pool, id, "0:deployed_orderbook").await;
-    assert_eq!(read_orderbook_address(&pool, id).await.as_deref(), Some("0:deployed_orderbook"));
-
-    // After the stamp the row leaves the queue.
     assert!(
         !pending_ids(&pool).await.contains(&id),
-        "row with orderbook_address stamped must drop out of the queue"
+        "PoolsFrozen does not re-queue a row whose address is already stamped"
     );
 }
 
 #[tokio::test]
-async fn migration_0013_backfills_legacy_pre_freeze_orderbook() {
-    // Migration 0013 backfills NULL into `orderbook_address` for rows that
-    // were stamped under the old behaviour (pre-freeze, precomputed
-    // address). The migration runs once at boot via `database::run_migrations`,
-    // so by the time `setup()` returns the column is already cleared on any
-    // legacy state. To exercise the backfill we re-introduce the legacy
-    // shape and run the same UPDATE the migration ships.
+async fn check_constraint_blocks_reconciled_row_without_orderbook() {
+    // The migration-0014 CHECK constraint is the schema-level pin of the
+    // "reconciled ⇒ has orderbook_address" invariant. Stamping
+    // `last_reconciled_at` on a row that still has a NULL address must fail
+    // with a CHECK violation, so the depth fail-closed path can rely on the
+    // invariant rather than re-validating it on every read.
     let Some(pool) = setup().await else { return };
 
-    let pmp = "0:reconciler_backfill";
+    let pmp = "0:reconciler_check_constraint";
     purge(&pool, pmp).await;
-    let id = seed_market(&pool, pmp, true, None, Some("0:legacy_precomputed")).await;
+    let id = seed_market(&pool, pmp, false, None, None).await;
 
-    sqlx::query(
-        "update markets
-            set orderbook_address = null
-          where frozen_at is null
-            and orderbook_address is not null",
-    )
-    .execute(&pool)
-    .await
-    .expect("apply migration 0013 backfill");
-
-    assert_eq!(
-        read_orderbook_address(&pool, id).await,
-        None,
-        "migration 0013 must clear pre-freeze orderbook_address values"
-    );
-}
-
-#[tokio::test]
-async fn migration_0013_leaves_post_freeze_orderbook_alone() {
-    // The "once non-null it is stable" half of invariant #5: post-freeze
-    // rows must not be touched by the backfill.
-    let Some(pool) = setup().await else { return };
-
-    let pmp = "0:reconciler_backfill_keep";
-    purge(&pool, pmp).await;
-    let id = seed_market(
-        &pool,
-        pmp,
-        true,
-        Some(1_700_000_250),
-        Some("0:legitimately_observed"),
-    )
-    .await;
-
-    sqlx::query(
-        "update markets
-            set orderbook_address = null
-          where frozen_at is null
-            and orderbook_address is not null",
-    )
-    .execute(&pool)
-    .await
-    .expect("apply migration 0013 backfill");
-
-    assert_eq!(
-        read_orderbook_address(&pool, id).await.as_deref(),
-        Some("0:legitimately_observed"),
-        "migration must not clear post-freeze (observed) addresses"
+    let err = sqlx::query("update markets set last_reconciled_at = now() where id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect_err("CHECK must block reconcile-without-address");
+    let message = err.to_string();
+    assert!(
+        message.contains("markets_orderbook_address_set_after_reconcile"),
+        "expected CHECK constraint violation, got: {message}"
     );
 }

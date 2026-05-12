@@ -20,7 +20,7 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 ## Market identity
 
-The backend treats `marketAddress` as the PMP address. `orderBookAddress` is `null` until the indexer observes the `PMP.PoolsFrozen` event on chain; once non-null it is stable. The write-side gate is described in [market-data-indexer.md](market-data-indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
+The backend treats `marketAddress` as the PMP address. `orderBookAddress` is the deterministic address returned by `PMP.getOrderBookAddress()` and is stamped on the first successful reconciler pass — pre-`PoolsFrozen` rows already carry it (migration 0014 enforces the invariant `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL` via a CHECK constraint). The pre-reconcile window between `PMPDeployed` and the first reconciler pass is the only state where the column is legitimately null, and such rows are hidden from the API by the `last_reconciled_at IS NOT NULL` visibility filter. The write-side flow is described in [market-data-indexer.md](market-data-indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
 
 ## `/api/v1/markets`
 
@@ -106,7 +106,7 @@ Resolve `(marketAddress, symbol)` to `(orderbook_address, outcome_id, price_prec
 
 ### Empty-book contract
 
-If the market is reconciled but no OrderBook has been observed on-chain yet (`orderbook_address` still null — see [market-data-indexer.md](market-data-indexer.md#market-reconciler) for when this flips), return a structurally well-formed empty snapshot: empty `bids`, empty `asks`, `lastUpdateId = 0`. This is the steady-state shape for pre-freeze markets and is preferable to hiding the market from depth queries — the client can poll cheaply while the market is still warming up.
+A reconciled market always has an `orderbook_address`, so an empty book means exactly one thing: no `OrderBook.OrderPlaced` events have landed for `(orderbook_address, outcome_id)` yet. The response is structurally well-formed — empty `bids`, empty `asks`, `lastUpdateId = 0` — and is the steady-state shape for a market that has not yet started trading. Clients can poll cheaply while the market is warming up. A NULL or blank `orderbook_address` on a reconciled row is treated as `MarketInconsistent` (HTTP 503), not silently served as an empty book.
 
 ### Aggregation
 
@@ -138,5 +138,6 @@ The maximum `live_orders.last_event_lt` over rows for this `(orderbook_address, 
 | Condition | DomainError | HTTP |
 | --- | --- | --- |
 | Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
+| Reconciled market with NULL/blank `orderbook_address` | `MarketInconsistent` | 503 |
 | Missing `marketAddress` or `symbol` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |

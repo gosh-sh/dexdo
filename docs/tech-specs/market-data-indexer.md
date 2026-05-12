@@ -103,12 +103,12 @@ For each [`markets`](data-schema.md#markets) row that needs catch-up, the reconc
 
 Two invariants the reconciler enforces on the write side:
 
-- **`orderbook_address` is only stamped when `frozen_at IS NOT NULL`.** The getter is deterministic and would return a precomputed address even pre-freeze, but the spec requires the read-model to expose it only after on-chain observation. `PoolsFrozen` is the observation signal (emitted after the OrderBook deploys). Migration 0013 backfilled legacy pre-freeze values to NULL.
+- **`orderbook_address` is stamped on the first reconcile pass — pre-freeze rows included.** `getOrderBookAddress()` is deterministic (`contracts/PMP.sol:1360`) and returns the precomputed address regardless of `frozen_at`, so any market visible to the API carries a usable address. Migration 0014 pins this with a CHECK constraint (`last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`) and un-stamps `last_reconciled_at` on legacy rows that migration 0013 left in the (reconciled, null-address) state so the next reconciler sweep re-fills them.
 - **Timing columns (`stake_*`, `result_*`) are never written by the reconciler.** On pre-`TimingsSet` PMPs `getDetails()` returns contract-default zeros; copying those would make the API flip out of PENDING. The `TimingsSet` projector is the sole writer of those columns.
 
 Queue ordering (the SELECT in `MarketReconciler::run_once`):
 
-- A row enters the queue when `last_reconciled_at IS NULL` (never reconciled) OR when `frozen_at IS NOT NULL AND orderbook_address IS NULL` (`PoolsFrozen` landed since the last pass — re-queue to stamp the address).
+- A row enters the queue when `last_reconciled_at IS NULL` (never reconciled). The first successful pass stamps both the address and `last_reconciled_at`; the getter result is stable, so there is no later re-queue trigger.
 - Failed rows go to the back via `nulls first` ordering on `last_reconcile_failed_at`. A 5-minute backoff filter excludes recently-failed rows entirely so they don't dominate the batch.
 
 ### OracleEventList reconciler
@@ -140,7 +140,7 @@ Reconciler-side failures use a separate mechanism — `last_reconcile_failed_at`
 
 | Invariant | Enforced by |
 | --- | --- |
-| `markets.orderbook_address IS NOT NULL ⇒ frozen_at IS NOT NULL` | Reconciler `CASE WHEN frozen_at IS NOT NULL THEN $X ELSE orderbook_address END` clause. Backfilled by migration 0013. |
+| `markets.last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL` | Migration-0014 CHECK constraint `markets_orderbook_address_set_after_reconcile`. The reconciler writes `orderbook_address` unconditionally from `getOrderBookAddress()`. |
 | Lifecycle timings (`stake_*`, `result_*`) are projector-only | Reconciler does not write these columns. |
 | `oracle_events.meta_reconciled_at` set after every successful reconciler pass | OracleEventList reconciler UPDATE always stamps it. |
 | `live_orders.last_event_lt` monotonic per row | `greatest(existing, new)` on every UPDATE. |

@@ -9,6 +9,7 @@ use std::env;
 use std::time::Duration;
 
 use dodex_application::MarketReadRepository;
+use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
 use dodex_domain::Symbol;
 use dodex_infrastructure::database;
@@ -89,34 +90,12 @@ async fn insert_market_with_outcome(
 }
 
 #[tokio::test]
-async fn null_orderbook_address_returns_empty_book() {
-    // services/api/README.md contracts that an existing market whose
-    // orderbook address has not been resolved must yield an empty book with
-    // lastUpdateId = 0. markets.orderbook_address is nullable in migration
-    // 0001, so a literal NULL must take the same path as a blank string -
-    // not surface as a sqlx decode error.
-    let Some(pool) = setup().await else { return };
-    let repo = PostgresReadModelRepository::new(pool.clone());
-
-    let pmp = "0:depth_null_orderbook_pmp";
-    let symbol = "DEPTH_NULL_ORDERBOOK_YES";
-    purge_market(&pool, pmp, symbol).await;
-    insert_market_with_outcome(&pool, pmp, symbol, None).await;
-
-    let depth = repo
-        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
-        .await
-        .expect("get_depth must not error on NULL orderbook_address");
-
-    assert_eq!(depth.last_update_id, 0);
-    assert!(depth.bids.is_empty(), "bids must be empty for not-yet-deployed orderbook");
-    assert!(depth.asks.is_empty(), "asks must be empty for not-yet-deployed orderbook");
-}
-
-#[tokio::test]
-async fn blank_orderbook_address_returns_empty_book() {
-    // Same contract as the NULL case but for a whitespace-only string. Kept
-    // separate to pin both branches of `Option::and_then(filter_orderbook)`.
+async fn blank_orderbook_address_fails_closed() {
+    // Migration-0014 CHECK forbids NULL `orderbook_address` on reconciled
+    // rows. A whitespace-only string slips past the constraint but still
+    // violates the depth invariant: a reconciled market must have a usable
+    // orderbook address. The depth handler must surface this as
+    // `MarketInconsistent` (HTTP 503), not silently serve an empty book.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -125,10 +104,40 @@ async fn blank_orderbook_address_returns_empty_book() {
     purge_market(&pool, pmp, symbol).await;
     insert_market_with_outcome(&pool, pmp, symbol, Some("   ")).await;
 
+    let err = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect_err("blank orderbook_address on a reconciled market must fail closed");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::MarketInconsistent);
+}
+
+#[tokio::test]
+async fn fresh_orderbook_without_orders_returns_empty_book() {
+    // Legitimate empty-book case after migration 0014: a reconciled market
+    // has its deterministic `orderbook_address` stamped on the first pass,
+    // but no `OrderBook.OrderPlaced` events have landed yet. The depth
+    // response shape (empty bids/asks, `lastUpdateId = 0`) must still work —
+    // it just now stems from "no rows in live_orders" rather than "no
+    // address resolved".
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_fresh_orderbook_pmp";
+    let symbol = "DEPTH_FRESH_ORDERBOOK_YES";
+    let orderbook = "0:depth_fresh_orderbook_book";
+    purge_market(&pool, pmp, symbol).await;
+    sqlx::query("delete from live_orders where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge live_orders");
+    insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
+
     let depth = repo
         .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
         .await
-        .expect("get_depth must not error on blank orderbook_address");
+        .expect("fresh orderbook with no orders must serve empty book");
 
     assert_eq!(depth.last_update_id, 0);
     assert!(depth.bids.is_empty());

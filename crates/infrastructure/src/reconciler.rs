@@ -79,18 +79,14 @@ impl MarketReconciler {
         //      window — they will not be retried this tick at all.
         //   2. Order never-failed rows ahead of cooled-down failed rows
         //      (`nulls first`). Within each group, oldest id first.
-        // Two reasons a row enters the queue:
-        //   - never reconciled (`last_reconciled_at is null`); or
-        //   - already reconciled, but `PoolsFrozen` has since landed (so the
-        //     OrderBook contract is now observed on-chain per
-        //     dex-events-routing.md:77) and `orderbook_address` is still
-        //     null because the previous reconcile pass refused to stamp it
-        //     pre-freeze. tech-spec.md invariant #5: stay null until
-        //     observed; PoolsFrozen is the observation signal.
+        // A row enters the queue when it has never been reconciled
+        // (`last_reconciled_at is null`). The first successful pass stamps the
+        // deterministic `orderbook_address` from `PMP.getOrderBookAddress()`
+        // and the row drops out of the queue permanently — the getter result
+        // is stable, so there's no later re-queue trigger.
         let pending: Vec<PendingMarket> = sqlx::query_as(&format!(
             r#"select id, pmp_address from markets
-               where (last_reconciled_at is null
-                      or (frozen_at is not null and orderbook_address is null))
+               where last_reconciled_at is null
                  and (last_reconcile_failed_at is null
                       or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
                order by last_reconcile_failed_at nulls first, id asc
@@ -248,14 +244,12 @@ async fn write_market_state(
     // fallback for the "event missed entirely" path. Conversely, if the chain
     // says the market is no longer cancelled we leave `cancelled_at` alone:
     // we never erase a previously-recorded cancellation timestamp.
-    // `orderbook_address` is gated on `frozen_at != null`. The PMP getter is
-    // deterministic and would happily return the precomputed address even
-    // pre-freeze, but tech-spec.md invariant #5 requires the read-model to
-    // hold the column null until the OrderBook contract is observed on-chain.
-    // PoolsFrozen fires after the OrderBook is deployed (see
-    // dex-events-routing.md:77), so `frozen_at` is the observation signal.
-    // Once stamped the value is stable — the getter is deterministic, and
-    // the run_once SELECT only re-queues rows where the column is still null.
+    // `orderbook_address` is written unconditionally — `getOrderBookAddress()`
+    // is deterministic and returns the precomputed address even pre-freeze
+    // (contracts/PMP.sol:1360). The migration-0014 CHECK constraint pins the
+    // invariant `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`
+    // so an empty getter result fails the pass instead of producing a hidden
+    // half-state.
     sqlx::query(
         r#"update markets
               set market_id = $1,
@@ -268,10 +262,7 @@ async fn write_market_state(
                       else cancelled_at
                   end,
                   num_outcomes = $5,
-                  orderbook_address = case
-                      when frozen_at is not null then $6
-                      else orderbook_address
-                  end
+                  orderbook_address = $6
             where id = $7"#,
     )
     .bind(market_name)

@@ -71,7 +71,7 @@ floating-point precision loss.
 Dodex uses the following market identifiers:
 
 - `marketAddress` is the stable market identifier across the entire lifecycle. Used in all market-specific requests. Example: `0:market-address`.
-- `orderBookAddress` is the deterministic order-book address returned by `/api/v1/markets`. It can be non-null before the OrderBook contract is active on-chain. It is `null` only when the backend has not resolved the address yet. Clients MUST use `status` to determine whether the order book is currently available for trading; a non-null `orderBookAddress` does not by itself imply the book is open.
+- `orderBookAddress` is the deterministic order-book address returned by `/api/v1/markets`. It is always present on any market that appears in API responses — the backend stamps it on the first reconcile, before the OrderBook contract is active on-chain. The only state where it can be null internally is the pre-reconcile window, and such markets are hidden from the API. Clients MUST use `status` to determine whether the order book is currently available for trading; a non-null `orderBookAddress` does not by itself imply the book is open.
 - `marketName` is the market name. Example: `PM-2026-ELECTION`.
 - `symbol` is the outcome-token symbol and is formed as `<marketName>-<OUTCOME_NAME>`. Example: `PM-2026-ELECTION-YES`.
 
@@ -272,7 +272,7 @@ Response fields:
 | `nextCursor` | STRING \| null | Pagination cursor for the next page. `null` when `hasMore` is `false`. |
 | `hasMore` | BOOLEAN | Whether more pages follow. |
 | `marketAddress` | STRING | Stable market identifier. |
-| `orderBookAddress` | STRING \| null | Deterministic order-book address. May be non-null before the book is active; `null` means the backend has not resolved the address yet. Trading availability depends on market `status`. |
+| `orderBookAddress` | STRING | Deterministic order-book address. Always present on markets visible to the API (the backend stamps it on the first reconcile). Trading availability depends on market `status`. |
 | `marketName` | STRING | Technical market name. Not the user-facing title; see `event.eventName`. |
 | `status` | ENUM | Market phase. See [Market Status](#market-status). |
 | `quoteAsset` | STRING | Quote-asset symbol for display. |
