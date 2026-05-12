@@ -1,11 +1,16 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+mod auth_hoop;
+
 use std::env;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use anyhow::Context;
+use dodex_application::AuthContext;
+use dodex_application::Authenticator;
 use dodex_application::GetDepthQuery;
 use dodex_application::GetDepthUseCase;
 use dodex_application::GetMarketsUseCase;
@@ -19,11 +24,14 @@ use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketEvent;
 use dodex_domain::MarketStatus;
+use dodex_domain::Permission;
 use dodex_domain::Symbol;
 use dodex_domain::Terminal;
 use dodex_domain::TerminalKind;
 use dodex_domain::Timings;
+use dodex_infrastructure::auth::PostgresAuthenticator;
 use dodex_infrastructure::config::ApiConfig;
+use dodex_infrastructure::crypto::Kek;
 use dodex_infrastructure::database::build_pool;
 use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
 use salvo::http::StatusCode;
@@ -33,12 +41,15 @@ use salvo_extra::affix_state::inject;
 use serde::Serialize;
 use tracing::error;
 use tracing::info;
+use uuid::Uuid;
 
-type SharedRepo = Arc<dyn MarketReadRepository + Send + Sync>;
+pub(crate) type SharedRepo = Arc<dyn MarketReadRepository + Send + Sync>;
+pub(crate) type SharedAuth = Arc<dyn Authenticator>;
 
 #[derive(Clone)]
-struct AppState {
-    repo: SharedRepo,
+pub(crate) struct AppState {
+    pub(crate) repo: SharedRepo,
+    pub(crate) authenticator: SharedAuth,
 }
 
 #[derive(Serialize)]
@@ -136,12 +147,13 @@ struct ErrorBody {
 }
 
 #[derive(Debug)]
-struct ApiError(DomainError);
+pub(crate) struct ApiError(DomainError);
 
 impl ApiError {
-    fn status(&self) -> StatusCode {
+    pub(crate) fn status(&self) -> StatusCode {
         match self.0 {
             DomainError::AuthRequired
+            | DomainError::AuthEnvelopeIncomplete
             | DomainError::TimestampOutsideRecvWindow
             | DomainError::InvalidSignature => StatusCode::UNAUTHORIZED,
             DomainError::UnknownOrder | DomainError::InvalidMarketOrSymbol => StatusCode::NOT_FOUND,
@@ -399,6 +411,33 @@ fn optional_typed_query<T: std::str::FromStr>(
     trimmed.parse::<T>().map(Some).map_err(|_| ApiError::from(DomainError::InvalidParameter))
 }
 
+/// Placeholder response for `POST /api/v1/order` until the real
+/// order-placement pipeline lands. The route is wired now to give
+/// integrators a real authenticated endpoint to smoke-test their
+/// HMAC signing against; the response shape will change to match
+/// `docs/api-spec.md §New Order` when the real handler ships.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrderStubResponse {
+    account_id: Uuid,
+    status: &'static str,
+}
+
+/// Stub for `POST /api/v1/order`. The auth hoop has already verified
+/// the request and placed `AuthContext` in the depot; this handler
+/// enforces the spec-required `TRADE` permission and returns a
+/// placeholder body. When the real implementation lands, only the
+/// body construction below changes — the auth gate stays as-is.
+#[handler]
+async fn create_order(depot: &mut Depot) -> Result<Json<OrderStubResponse>, ApiError> {
+    let ctx = depot.obtain::<AuthContext>().map_err(|err| {
+        error!(?err, "AuthContext missing in create_order handler");
+        ApiError::from(DomainError::Unexpected)
+    })?;
+    ctx.require(Permission::Trade)?;
+    Ok(Json(OrderStubResponse { account_id: ctx.account_id, status: "STUB" }))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -412,10 +451,21 @@ async fn main() -> anyhow::Result<()> {
         env::var("APP_CONFIG").unwrap_or_else(|_| "config/api.local.yaml".to_string());
     let config = ApiConfig::load_from_path(&config_path)?;
 
+    // Fail-fast on missing/invalid KEK rather than booting an API
+    // that would 500 on the first authenticated request. The whole
+    // custody story depends on this key, so refusing to start without
+    // it is the correct posture.
+    let kek = Arc::new(
+        Kek::from_env("DODEX_KEK_HEX")
+            .context("DODEX_KEK_HEX environment variable is required to start the api")?,
+    );
+
     let pool = build_pool(&config.common.database).await?;
     info!("api running with postgres read-model repository");
-    let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool));
-    let state = AppState { repo };
+    let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
+    let authenticator: SharedAuth =
+        Arc::new(PostgresAuthenticator::new(pool, kek, &config.auth));
+    let state = AppState { repo, authenticator };
 
     // The API is intentionally restart-to-reconfigure. None of the live
     // request paths read runtime config — pool, server bind, request_timeout
@@ -423,11 +473,25 @@ async fn main() -> anyhow::Result<()> {
     // The indexer keeps its loop because its background tasks do consume new
     // config (graphql endpoint/timeouts, ignored_addresses, intervals).
 
+    // TODO(auth-phase): CORS hoop. Browsers calling private endpoints
+    // need preflight + Access-Control-Allow-* headers; the auth-error
+    // path currently returns 401 without them, which a browser client
+    // surfaces as an opaque network error rather than the spec body.
+
     let router = Router::new()
         .hoop(inject(state))
         .push(Router::with_path("readiness").get(readiness))
         .push(Router::with_path("api/v1/markets").get(get_markets))
-        .push(Router::with_path("api/v1/depth").get(get_depth));
+        .push(Router::with_path("api/v1/depth").get(get_depth))
+        .push(
+            // Subrouter scoped to private endpoints. The auth hoop runs
+            // only for routes pushed under this branch, so the public
+            // `markets` / `depth` endpoints above remain `NONE`-security
+            // per docs/api-spec.md §Endpoint Summary.
+            Router::new()
+                .hoop(auth_hoop::authenticate)
+                .push(Router::with_path("api/v1/order").post(create_order)),
+        );
 
     let acceptor = TcpListener::new((config.server.host.clone(), config.server.port)).bind().await;
     info!(host = %config.server.host, port = config.server.port, "api server starting");

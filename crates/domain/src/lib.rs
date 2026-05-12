@@ -313,6 +313,16 @@ pub enum DomainError {
     InvalidMarketOrSymbol,
     #[error("authentication required")]
     AuthRequired,
+    /// Logical extension over `docs/api-spec.md §Error Response`. The
+    /// published spec only defines `-1002` ("Authentication required")
+    /// for credential problems. We split out "auth envelope fields
+    /// missing" (no `X-DODEX-APIKEY` header, no `signature`/`timestamp`
+    /// query) from "credential not recognized" so a misconfigured
+    /// client sees a distinct, actionable error. Both still map to
+    /// HTTP 401, so clients that only inspect the status code are
+    /// unaffected.
+    #[error("required auth parameter missing")]
+    AuthEnvelopeIncomplete,
     #[error("timestamp outside recvWindow")]
     TimestampOutsideRecvWindow,
     #[error("invalid signature")]
@@ -339,6 +349,7 @@ impl DomainError {
         match self {
             Self::Unexpected => -1000,
             Self::AuthRequired => -1002,
+            Self::AuthEnvelopeIncomplete => -1003,
             Self::TimestampOutsideRecvWindow => -1021,
             Self::InvalidSignature => -1022,
             Self::MissingParameter => -1102,
@@ -355,6 +366,7 @@ impl DomainError {
         match self {
             Self::Unexpected => "Unknown error.",
             Self::AuthRequired => "Authentication required.",
+            Self::AuthEnvelopeIncomplete => "Required auth parameter missing.",
             Self::TimestampOutsideRecvWindow => "Timestamp outside recvWindow.",
             Self::InvalidSignature => "Invalid signature.",
             Self::MissingParameter => "Mandatory parameter was not sent.",
