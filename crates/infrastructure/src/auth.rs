@@ -162,7 +162,9 @@ impl Authenticator for PostgresAuthenticator {
         if let Err(err) = check_recv_window(request.now_ms, request.timestamp_ms, recv) {
             tracing::info!(
                 api_key_id = row.api_key_id,
-                delta_ms = request.now_ms - request.timestamp_ms,
+                // `saturating_sub` keeps the log infallible on
+                // adversarial `timestamp = i64::MIN` inputs.
+                delta_ms = request.now_ms.saturating_sub(request.timestamp_ms),
                 recv_window_ms = recv,
                 "auth rejected: timestamp outside recvWindow",
             );
@@ -199,15 +201,18 @@ impl Authenticator for PostgresAuthenticator {
 
         // 6. Only decrypt the trading PN key after the signature has
         //    proven the request is from the legitimate api_secret holder.
-        //    Same -1000 semantics as #4 on decrypt failure.
-        let pn_seckey = crypto::open(&self.kek, &row.pn_seckey_enc).map_err(|e| {
-            tracing::error!(
-                error = ?e,
-                account_id = %row.account_id,
-                "auth failed: cannot decrypt pn_seckey_enc",
-            );
-            DomainError::Unexpected
-        })?;
+        //    Same -1000 semantics as #4 on decrypt failure. Wrapped in
+        //    `SensitiveBytes` at the call site so the plaintext is never
+        //    held bare on the stack.
+        let pn_seckey =
+            SensitiveBytes::new(crypto::open(&self.kek, &row.pn_seckey_enc).map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    account_id = %row.account_id,
+                    "auth failed: cannot decrypt pn_seckey_enc",
+                );
+                DomainError::Unexpected
+            })?);
 
         // 7. Parse permissions. Unknown enum labels are skipped with a
         //    warn so a stale binary still serves USER_DATA / TRADE
@@ -268,7 +273,7 @@ impl Authenticator for PostgresAuthenticator {
                 pn_address: row.pn_address,
                 pn_pubkey: row.pn_pubkey,
                 pn_dih: row.pn_dih,
-                pn_seckey: SensitiveBytes::new(pn_seckey),
+                pn_seckey,
             },
             permissions,
         })
@@ -315,7 +320,12 @@ fn check_recv_window(
     timestamp_ms: i64,
     recv_window_ms: u64,
 ) -> Result<(), DomainError> {
-    let delta = now_ms - timestamp_ms;
+    // A malicious client can send `timestamp = i64::MIN`, where
+    // `now_ms - timestamp_ms` would overflow. `checked_sub` returning
+    // `None` is unambiguously outside any sane recvWindow.
+    let Some(delta) = now_ms.checked_sub(timestamp_ms) else {
+        return Err(DomainError::TimestampOutsideRecvWindow);
+    };
     let recv = recv_window_ms as i64;
     if delta < -FORWARD_SKEW_TOLERANCE_MS || delta > recv {
         return Err(DomainError::TimestampOutsideRecvWindow);
@@ -461,6 +471,20 @@ mod tests {
     fn recv_window_forward_skew_beyond_tolerance() {
         assert_eq!(
             check_recv_window(0, 1_001, 5_000),
+            Err(DomainError::TimestampOutsideRecvWindow),
+        );
+    }
+
+    #[test]
+    fn recv_window_rejects_overflowing_timestamp() {
+        // Adversarial input: `now - timestamp` would overflow i64.
+        // Must return TimestampOutsideRecvWindow, not panic / wrap.
+        assert_eq!(
+            check_recv_window(0, i64::MIN, 5_000),
+            Err(DomainError::TimestampOutsideRecvWindow),
+        );
+        assert_eq!(
+            check_recv_window(i64::MAX, -1, 5_000),
             Err(DomainError::TimestampOutsideRecvWindow),
         );
     }

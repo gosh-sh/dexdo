@@ -313,19 +313,8 @@ pub enum DomainError {
     InvalidMarketOrSymbol,
     #[error("authentication required")]
     AuthRequired,
-    /// Logical extension over `docs/api-spec.md §Error Response`. The
-    /// published spec only defines `-1002` ("Authentication required")
-    /// for credential problems. We split out "auth envelope fields
-    /// missing" (no `X-DODEX-APIKEY` header, no `signature`/`timestamp`
-    /// query) from "credential not recognized" so a misconfigured
-    /// client sees a distinct, actionable error. Both still map to
-    /// HTTP 401, so clients that only inspect the status code are
-    /// unaffected.
     #[error("required auth parameter missing")]
     AuthEnvelopeIncomplete,
-    /// Body exceeded the server-side size cap. HTTP 413, our own
-    /// extension code (the api-spec error table covers Binance-compatible
-    /// codes; payload-size rejection is not part of that contract).
     #[error("request body too large")]
     RequestTooLarge,
     #[error("timestamp outside recvWindow")]

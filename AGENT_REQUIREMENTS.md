@@ -2,6 +2,18 @@
 
 These rules apply to any AI agent that makes changes in this repository.
 
+## Avoid perfectionism
+
+Match the scope of changes to what was actually requested. Do not, without explicit ask:
+
+- refactor code that already works for a hypothetical readability win;
+- add error handling for cases that cannot happen (validated upstream, framework-guaranteed, etc.);
+- introduce new abstractions to "make this extensible later";
+- rewrite comments that aren't actually wrong;
+- add tests for code paths already covered by existing tests.
+
+When in doubt about whether a change is in scope, ask. A 50-line PR that solves the asked problem cleanly beats a 500-line PR that "also fixes a few things along the way".
+
 ## Project Documentation Rules
 
 Repository specifications live under [`docs/`](docs/), with implementation technical specs under [`docs/tech-specs/`](docs/tech-specs/).

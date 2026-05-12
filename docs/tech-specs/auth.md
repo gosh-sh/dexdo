@@ -34,7 +34,7 @@ The HMAC contract — fields, formula, and error codes — is given in [api-spec
 
 Verification runs in a fixed order. Each step fails closed with its own error code; later steps do not run:
 
-1. **Envelope assembly** — the request must carry `X-DODEX-APIKEY`, query `timestamp` (parseable as `i64`), and a non-empty query `signature`. Query `recvWindow`, if present, must be parseable as `u64`.
+1. **Envelope assembly** — the request must carry `X-DODEX-APIKEY`, query `timestamp` (parseable as `i64`), and a non-empty query `signature`. Query `recvWindow`, if present, must be parseable as `u64`. The request body is also capped at a server-side maximum (currently 64 KB); exceeding it returns `-1009 / HTTP 413` before any HMAC compute.
 2. **Credential lookup** — the api_key must match a row with `disabled_at IS NULL`.
 3. **Timestamp window** — `timestamp` must fall within `[now - recvWindow, now + 1s]` after clamping `recvWindow` to the spec maximum of `60000`. A missing `recvWindow` uses the server-side default.
 4. **Signature** — the HMAC-SHA256 over `canonicalQueryString + canonicalRequestBody` must equal the supplied `signature` under constant-time comparison.
@@ -43,20 +43,21 @@ The `canonicalQueryString` is built from the raw URL query by removing the `sign
 
 Error mapping:
 
-| Step | Condition | Code |
-| --- | --- | --- |
-| 1 | Missing or malformed `X-DODEX-APIKEY`, `timestamp`, `signature`, or `recvWindow` | `-1003` |
-| 2 | Unknown api_key or `disabled_at IS NOT NULL` | `-1002` |
-| 3 | `timestamp` outside the (clamped) recvWindow | `-1021` |
-| 4 | Signature mismatch | `-1022` |
+| Step | Condition | Code | HTTP |
+| --- | --- | --- | --- |
+| 1 | Missing or malformed `X-DODEX-APIKEY`, `timestamp`, `signature`, or `recvWindow` | `-1003` | 401 |
+| 1 | Request body exceeds the server-side cap | `-1009` | 413 |
+| 2 | Unknown api_key or `disabled_at IS NOT NULL` | `-1002` | 401 |
+| 3 | `timestamp` outside the (clamped) recvWindow | `-1021` | 401 |
+| 4 | Signature mismatch | `-1022` | 401 |
 
-All four errors return HTTP `401 Unauthorized`. The split between `-1003` and `-1002` is intentional: `-1003` says the server could not even attempt verification (client-side request-shape bug), while `-1002` says verification was attempted and the credential was rejected. Splitting them lets clients and ops distinguish broken SDKs from unauthorized callers.
+The split between `-1003` and `-1002` is intentional: `-1003` says the server could not even attempt verification (client-side request-shape bug), while `-1002` says verification was attempted and the credential was rejected. Splitting them lets clients and ops distinguish broken SDKs from unauthorized callers.
 
 The `msg` field never identifies which specific envelope field is missing or why a credential was rejected. It returns generic copy (`"Required auth parameter missing."` for `-1003`, `"Authentication required."` for `-1002`, `"Timestamp outside recvWindow."` for `-1021`, `"Invalid signature."` for `-1022`) so the response does not help an attacker probe the request shape. Specific reasons are recorded in server-side logs for alerting.
 
 A malformed `recvWindow` (present but not a non-negative integer) is rejected with `-1003` rather than silently falling back to the default. Silent fallback would mask client SDK bugs and surface later as confusing `-1021` errors when the chosen default does not match the client's expected tolerance.
 
-The api_secret never travels in any request after issuance — only the signature does. Both api_secrets and PN signing keys are stored encrypted at rest under a backend-side master key loaded from the environment.
+The api_secret never travels in any request after issuance — only the signature does. Both api_secrets and PN signing keys are stored encrypted at rest under a backend-side master key (`auth.kek_hex`) loaded from the service config. The committed `config/api.local.yaml` ships a shared dev value; stage and prod configs are assembled by CI from the secret store.
 
 ## Authorization
 
