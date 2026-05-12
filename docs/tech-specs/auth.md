@@ -30,12 +30,12 @@ Deposit and withdrawal flows are user-side and are outside the API. The user tra
 
 ## Authentication
 
-The HMAC contract — fields, formula, and error codes — is given in [api-spec.md §Security Types](../api-spec.md). The backend looks up the api_key, decrypts the matching api_secret, and recomputes the signature for each request.
+The HMAC contract — fields, formula, and error codes — is given in [api-spec.md §Security Types](../api-spec.md). The backend looks up the api_key, decrypts the matching api_secret, and recomputes the signature for each request. Authentication establishes *who* the caller is; checking whether the caller is *allowed* on a given endpoint is handled separately, in [Authorization](#authorization).
 
 Verification runs in a fixed order. Each step fails closed with its own error code; later steps do not run:
 
 1. **Envelope assembly** — the request must carry `X-DODEX-APIKEY`, query `timestamp` (parseable as `i64`), and a non-empty query `signature`. Query `recvWindow`, if present, must be parseable as `u64`.
-2. **Credential lookup** — the api_key must match a row with `disabled_at IS NULL`, and the api_key's permissions must cover the endpoint's required permission.
+2. **Credential lookup** — the api_key must match a row with `disabled_at IS NULL`.
 3. **Timestamp window** — `timestamp` must fall within `[now - recvWindow, now + 1s]` after clamping `recvWindow` to the spec maximum of `60000`. A missing `recvWindow` uses the server-side default.
 4. **Signature** — the HMAC-SHA256 over `canonicalQueryString + canonicalRequestBody` must equal the supplied `signature` under constant-time comparison.
 
@@ -46,7 +46,7 @@ Error mapping:
 | Step | Condition | Code |
 | --- | --- | --- |
 | 1 | Missing or malformed `X-DODEX-APIKEY`, `timestamp`, `signature`, or `recvWindow` | `-1003` |
-| 2 | Unknown api_key, disabled key, or key lacks the required permission | `-1002` |
+| 2 | Unknown api_key or `disabled_at IS NOT NULL` | `-1002` |
 | 3 | `timestamp` outside the (clamped) recvWindow | `-1021` |
 | 4 | Signature mismatch | `-1022` |
 
@@ -57,6 +57,16 @@ The `msg` field never identifies which specific envelope field is missing or why
 A malformed `recvWindow` (present but not a non-negative integer) is rejected with `-1003` rather than silently falling back to the default. Silent fallback would mask client SDK bugs and surface later as confusing `-1021` errors when the chosen default does not match the client's expected tolerance.
 
 The api_secret never travels in any request after issuance — only the signature does. Both api_secrets and PN signing keys are stored encrypted at rest under a backend-side master key loaded from the environment.
+
+## Authorization
+
+Authentication confirms identity; authorization decides whether that identity is allowed on a specific endpoint. The two run in series — authorization is only evaluated once authentication has produced an `AuthContext` — and they emit different error codes.
+
+Each protected endpoint declares the permission it requires (see [Permissions](#permissions)). After the authentication pipeline succeeds, the endpoint checks the resolved api_key's permission set against that requirement. A failure here returns `-1002 AUTH_REQUIRED` with HTTP `401`, identical on the wire to a credential rejection. Clients cannot tell from the response whether their key is unknown, disabled, or simply lacking the right permission — this is intentional, see the §Authentication note on `msg` opacity.
+
+Because authorization runs **after** authentication, a request that fails both checks (e.g., a `USER_DATA`-only key with a stale `timestamp` calling a `TRADE` endpoint) surfaces the authentication error first. The caller must produce a request that passes all four authentication steps before the authorization layer sees it and rejects on permission. This ordering is a deliberate authentication-before-authorization split — the same pattern used by OAuth, OIDC, and Kubernetes RBAC — not a bypass: an unauthorized request is rejected regardless of which check fires first.
+
+The check itself is enforced through a single helper in the API service so that protected handlers cannot accidentally read the `AuthContext` without naming a required permission. The handler signature carries the permission as a function argument, which means a new protected endpoint cannot compile without declaring its authorization requirement.
 
 ## Permissions
 

@@ -439,18 +439,29 @@ struct OrderStubResponse {
     status: &'static str,
 }
 
-/// Stub for `POST /api/v1/order`. The auth hoop has already verified
-/// the request and placed `AuthContext` in the depot; this handler
-/// enforces the spec-required `TRADE` permission and returns a
-/// placeholder body. When the real implementation lands, only the
-/// body construction below changes — the auth gate stays as-is.
-#[handler]
-async fn create_order(depot: &mut Depot) -> Result<Json<OrderStubResponse>, ApiError> {
+/// Read the authenticated identity from the depot and enforce the
+/// endpoint's required permission in one call. Protected handlers
+/// must call this rather than `depot.obtain::<AuthContext>()`
+/// directly: the function signature makes the permission requirement
+/// non-optional, so a new private endpoint cannot read its caller's
+/// identity without naming the authorization it requires.
+fn require_auth(depot: &Depot, permission: Permission) -> Result<&AuthContext, ApiError> {
     let ctx = depot.obtain::<AuthContext>().map_err(|err| {
-        error!(?err, "AuthContext missing in create_order handler");
+        error!(?err, "AuthContext missing in protected handler");
         ApiError::from(DomainError::Unexpected)
     })?;
-    ctx.require(Permission::Trade)?;
+    ctx.require(permission)?;
+    Ok(ctx)
+}
+
+/// Stub for `POST /api/v1/order`. The auth hoop has already verified
+/// the request and placed `AuthContext` in the depot; `require_auth`
+/// then enforces the spec-required `TRADE` permission. When the real
+/// implementation lands, only the body construction below changes —
+/// the authorization gate stays as-is.
+#[handler]
+async fn create_order(depot: &mut Depot) -> Result<Json<OrderStubResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::Trade)?;
     Ok(Json(OrderStubResponse { account_id: ctx.account_id, status: "STUB" }))
 }
 
