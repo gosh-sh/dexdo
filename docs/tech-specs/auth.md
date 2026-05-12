@@ -30,21 +30,31 @@ Deposit and withdrawal flows are user-side and are outside the API. The user tra
 
 ## Authentication
 
-The HMAC contract — fields, formula, and error codes — is given in [api-spec.md §Security Types](../api-spec.md). The backend looks up the api_key, decrypts the matching api_secret, and recomputes the signature for each request. Verification covers:
+The HMAC contract — fields, formula, and error codes — is given in [api-spec.md §Security Types](../api-spec.md). The backend looks up the api_key, decrypts the matching api_secret, and recomputes the signature for each request.
 
-1. Header `X-DODEX-APIKEY` is present and matches an `api_key` row with `disabled_at IS NULL`.
-2. `timestamp` falls within `[now - recvWindow, now + 1s]` after clamping `recvWindow` to the spec maximum of `60000`.
-3. The recomputed HMAC-SHA256 over `canonicalQueryString + canonicalRequestBody` matches the supplied `signature`.
+Verification runs in a fixed order. Each step fails closed with its own error code; later steps do not run:
 
-The `canonicalQueryString` is built from the raw URL query by removing the `signature` parameter and lexicographically sorting the remaining `key=value` pairs without re-encoding. The body is taken byte-exact as transmitted; the backend never re-serializes JSON or reorders body keys. Signature comparison is constant-time.
+1. **Envelope assembly** — the request must carry `X-DODEX-APIKEY`, query `timestamp` (parseable as `i64`), and a non-empty query `signature`. Query `recvWindow`, if present, must be parseable as `u64`.
+2. **Credential lookup** — the api_key must match a row with `disabled_at IS NULL`, and the api_key's permissions must cover the endpoint's required permission.
+3. **Timestamp window** — `timestamp` must fall within `[now - recvWindow, now + 1s]` after clamping `recvWindow` to the spec maximum of `60000`. A missing `recvWindow` uses the server-side default.
+4. **Signature** — the HMAC-SHA256 over `canonicalQueryString + canonicalRequestBody` must equal the supplied `signature` under constant-time comparison.
+
+The `canonicalQueryString` is built from the raw URL query by removing the `signature` parameter and lexicographically sorting the remaining `key=value` pairs without re-encoding. The body is taken byte-exact as transmitted; the backend never re-serializes JSON or reorders body keys.
 
 Error mapping:
 
-| Condition | Code |
-| --- | --- |
-| Missing header / unknown api_key / disabled key / missing permission | `-1002` |
-| `recvWindow` expired | `-1021` |
-| Signature mismatch | `-1022` |
+| Step | Condition | Code |
+| --- | --- | --- |
+| 1 | Missing or malformed `X-DODEX-APIKEY`, `timestamp`, `signature`, or `recvWindow` | `-1003` |
+| 2 | Unknown api_key, disabled key, or key lacks the required permission | `-1002` |
+| 3 | `timestamp` outside the (clamped) recvWindow | `-1021` |
+| 4 | Signature mismatch | `-1022` |
+
+All four errors return HTTP `401 Unauthorized`. The split between `-1003` and `-1002` is intentional: `-1003` says the server could not even attempt verification (client-side request-shape bug), while `-1002` says verification was attempted and the credential was rejected. Splitting them lets clients and ops distinguish broken SDKs from unauthorized callers.
+
+The `msg` field never identifies which specific envelope field is missing or why a credential was rejected. It returns generic copy (`"Auth envelope incomplete"`, `"Auth required"`) so the response does not help an attacker probe the request shape. Specific reasons are recorded in server-side logs for alerting.
+
+A malformed `recvWindow` (present but not a non-negative integer) is rejected with `-1003` rather than silently falling back to the default. Silent fallback would mask client SDK bugs and surface later as confusing `-1021` errors when the chosen default does not match the client's expected tolerance.
 
 The api_secret never travels in any request after issuance — only the signature does. Both api_secrets and PN signing keys are stored encrypted at rest under a backend-side master key loaded from the environment.
 
