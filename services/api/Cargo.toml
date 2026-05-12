@@ -18,3 +18,13 @@ dotenvy.workspace = true
 dodex-application = { path = "../../crates/application" }
 dodex-domain = { path = "../../crates/domain" }
 dodex-infrastructure = { path = "../../crates/infrastructure" }
+
+[dev-dependencies]
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+sqlx.workspace = true
+# Salvo's in-process `TestClient` lives behind the `test` feature. We
+# keep it out of the production build (only `logging` in workspace deps)
+# so the helper code is never shipped.
+salvo = { workspace = true, features = ["test"] }
