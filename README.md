@@ -68,14 +68,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 docker compose -f docker-compose.yml -f docker-compose.stage.yml up -d --build
 ```
 
-Host preparation is automated in `deploy/ansible/`.
-
 ## Documentation
 
-- [docs/api-spec.md](docs/api-spec.md) — public REST contract.
-- [docs/tech-specs/](docs/tech-specs/) — implementation tech-specs (auth, data schema, market data, trading).
+- [docs/api-spec.md](docs/api-spec.md) — functional REST API requirements.
+- [docs/tech-specs/](docs/tech-specs/) — implementation technical specs.
+- [docs/tech-specs/data-schema.md](docs/tech-specs/data-schema.md) — Postgres schema semantics.
 - [docs/contract-specs/](docs/contract-specs/) — on-chain contracts and event routing.
-- [services/api/README.md](services/api/README.md), [services/indexer/README.md](services/indexer/README.md) — per-service internals.
+- [services/api/README.md](services/api/README.md), [services/indexer/README.md](services/indexer/README.md) — service entry points with spec links, config, and maintenance commands.
 
 ## For contributors and AI agents
 
