@@ -230,9 +230,11 @@ Response:
         "eventId": "0xabc...",
         "eventName": "2026 US Presidential Election",
         "description": "Will candidate X win?",
-        "oracleName": "ElectionOracle",
-        "oracleAddress": "0:oracle-addr",
-        "oracleFee": "100"
+        "oracles": [{
+          "name": "ElectionOracle",
+          "address": "0:oracle-addr",
+          "fee": "100"
+        }]
       },
       "terminal": null,
       "outcomes": [
@@ -334,9 +336,11 @@ All timestamps are unix seconds.
   "eventId": "0xabc...",
   "eventName": "2026 US Presidential Election",
   "description": "Will candidate X win?",
-  "oracleName": "ElectionOracle",
-  "oracleAddress": "0:oracle-addr",
-  "oracleFee": "100"
+  "oracles": [{
+    "name": "ElectionOracle",
+    "address": "0:oracle-addr",
+    "fee": "100"
+  }]
 }
 ```
 
