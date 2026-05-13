@@ -484,15 +484,14 @@ async fn cursor_stable_under_concurrent_fills() {
 }
 
 #[tokio::test]
-async fn limit_zero_returns_missing_parameter() {
+async fn repo_returns_empty_page_for_limit_zero() {
+    // limit-range validation lives in the use case, not the repo. This test
+    // pins the repo's behaviour when supplied `limit = 0` directly: it issues
+    // a sane SQL (no rows, no next_cursor). The use-case bound check that
+    // rejects `limit = 0` with -1102 before reaching the repo is asserted in
+    // the HTTP layer tests.
     let Some(pool) = setup().await else { return };
     let _repo = PostgresReadModelRepository::new(pool.clone());
-    // limit-range validation lives in the use case, not the repo. The repo is
-    // tested directly here only to confirm that supplying `limit = 0` to the
-    // repo still issues a sane SQL (no rows, no next_cursor). The use-case
-    // bound check is asserted in HTTP layer tests.
-    //
-    // We exercise only the repo here.
     let scope = Scope::new();
     scope.cleanup(&pool).await;
     insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;

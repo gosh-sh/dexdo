@@ -1,3 +1,13 @@
+-- Pre-production-safe migration. The `add column ... not null default 0`
+-- below rewrites every row on Postgres < 11 and takes an `AccessExclusiveLock`
+-- on the table while the rewrite runs; the unqualified `UPDATE` further down
+-- and the non-`CONCURRENTLY` `CREATE INDEX` each take their own table-level
+-- locks. None of this is an issue while `live_orders` is empty (the project
+-- has no deployed indexer yet — see review thread on this commit). When the
+-- indexer ships against a database with live order data, this migration must
+-- be replayed via a follow-up 0019 that adds the column with no default,
+-- runs the backfill in batches, and creates the index `CONCURRENTLY`.
+
 alter table live_orders
     add column owner_pn_address  text,
     add column amount_initial    numeric(78, 0) not null default 0,
