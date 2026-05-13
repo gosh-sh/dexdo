@@ -876,6 +876,8 @@ Parameters:
 | --- | --- | --- | --- |
 | `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns open orders for all markets. |
 | `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
+| `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`. |
+| `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. Omit for the first page. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
 | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
@@ -885,36 +887,49 @@ Behavior:
 - If both `marketAddress` and `symbol` are omitted, returns all open orders for the authenticated account across all markets.
 - If both `marketAddress` and `symbol` are sent, returns open orders for that one market symbol.
 - If only one of `marketAddress` / `symbol` is sent, returns `-1102` with HTTP `400`.
+- If `limit` is outside `[1, 500]`, returns `-1102` with HTTP `400`.
+- If `cursor` cannot be decoded, returns `-1102` with HTTP `400`. A well-formed cursor that points past the current set of open orders is not an error — the response simply has an empty `orders` array and `nextCursor: null`.
 - If the `(marketAddress, symbol)` pair does not exist, returns `-1121` with HTTP `404`.
 - Open order statuses are `NEW` and `PARTIALLY_FILLED`.
 - Orders with status `FILLED`, `CANCELED`, or `REJECTED` are not returned.
-- Empty results are returned as `[]`.
+- Empty results are returned as `{ "orders": [], "nextCursor": null }`.
 - Results are sorted by `time ASC`, then `orderId ASC`. For all-market requests this ordering is global across all returned orders.
-- Version 1 does not paginate this endpoint.
+- Pagination is cursor-based on `(time, orderId)`. The sort key is monotonic, so concurrent fills/cancels between page reads cannot duplicate or skip rows — closed orders simply drop out.
+- The endpoint is eventually consistent: a freshly placed order may briefly not appear, between the time the public `OrderPlaced` event is indexed and the time the private confirmation that carries owner attribution is indexed.
 
 Response:
 
 ```json
-[
-  {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
-    "orderId": "123456789",
-    "clientOrderId": "mm-order-0001",
-    "price": "0.615",
-    "origQty": "1.500000",
-    "executedQty": "0.500000",
-    "status": "PARTIALLY_FILLED",
-    "timeInForce": "GTC",
-    "type": "LIMIT",
-    "side": "BUY",
-    "time": 1710000000000,
-    "updateTime": 1710000001000
-  }
-]
+{
+  "orders": [
+    {
+      "marketAddress": "0:market-address",
+      "symbol": "PM-2026-ELECTION-YES",
+      "orderId": "123456789",
+      "clientOrderId": "mm-order-0001",
+      "price": "0.615",
+      "origQty": "1.500000",
+      "executedQty": "0.500000",
+      "status": "PARTIALLY_FILLED",
+      "timeInForce": "GTC",
+      "type": "LIMIT",
+      "side": "BUY",
+      "time": 1710000000000,
+      "updateTime": 1710000001000
+    }
+  ],
+  "nextCursor": "eyJ0IjoxNzEwMDAwMDAwMDAwLCJvIjoiMTIzNDU2Nzg5In0"
+}
 ```
 
-Response fields:
+Top-level response fields:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `orders` | ARRAY | Open orders matching the filter, sorted by `time ASC`, then `orderId ASC`. Empty when there are no matches. |
+| `nextCursor` | STRING \| null | Opaque pagination cursor. `null` when the last page has been returned. |
+
+Order fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
@@ -929,8 +944,8 @@ Response fields:
 | `timeInForce` | ENUM | `GTC`. |
 | `type` | ENUM | `LIMIT`. |
 | `side` | ENUM | `BUY` or `SELL`. |
-| `time` | LONG | Order creation time in Unix milliseconds. |
-| `updateTime` | LONG | Last indexed update time in Unix milliseconds. |
+| `time` | LONG | On-chain order creation time in Unix milliseconds. Stable under indexer backlog. |
+| `updateTime` | LONG | On-chain time of the most recent book event that touched the order (place / fill / cancel), in Unix milliseconds. |
 
 ### Closed And Canceled Orders
 
