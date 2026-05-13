@@ -646,11 +646,8 @@ async fn limit_zero_returns_1102() {
     // the SQL ever runs.
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let ts = now_ms();
-    let canonical = canonical_query(&[
-        ("limit", "0"),
-        ("recvWindow", "5000"),
-        ("timestamp", &ts.to_string()),
-    ]);
+    let canonical =
+        canonical_query(&[("limit", "0"), ("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
     let mut resp = TestClient::get("http://test/api/v1/openOrders")
@@ -703,11 +700,8 @@ async fn empty_cursor_returns_1102() {
     // MissingParameter as documented.
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let ts = now_ms();
-    let canonical = canonical_query(&[
-        ("cursor", ""),
-        ("recvWindow", "5000"),
-        ("timestamp", &ts.to_string()),
-    ]);
+    let canonical =
+        canonical_query(&[("cursor", ""), ("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
     let mut resp = TestClient::get("http://test/api/v1/openOrders")

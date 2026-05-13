@@ -608,24 +608,32 @@ async fn orderplaced_chain_created_at_is_first_write_wins() {
 
     // First event: legitimate OrderPlaced establishes chain_created_at.
     insert_raw_with_ts(
-        &pool, &msg_id_first, &orderbook_addr,
-        "OrderBook.OrderPlaced", original_seconds,
+        &pool,
+        &msg_id_first,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        original_seconds,
         &json!({
             "orderId": order_id, "outcomeId": "1", "isBuy": true,
             "price": "100", "amount": "50", "clientOrderId": "c",
         }),
-    ).await;
+    )
+    .await;
 
     // Replay with an EARLIER chain time. `least(...)` would have moved
     // chain_created_at to `earlier_seconds`; `coalesce` keeps the original.
     insert_raw_with_ts(
-        &pool, &msg_id_replay, &orderbook_addr,
-        "OrderBook.OrderPlaced", earlier_seconds,
+        &pool,
+        &msg_id_replay,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        earlier_seconds,
         &json!({
             "orderId": order_id, "outcomeId": "1", "isBuy": true,
             "price": "100", "amount": "50", "clientOrderId": "c",
         }),
-    ).await;
+    )
+    .await;
 
     repo.reproject_pending(1000).await.expect("reproject");
 

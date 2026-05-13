@@ -444,24 +444,21 @@ mod tests {
 
     #[test]
     fn cursor_decode_rejects_empty_order_id() {
-        let encoded =
-            OpenOrdersCursor { order_id: "".into(), ..sample_cursor() }.encode();
+        let encoded = OpenOrdersCursor { order_id: "".into(), ..sample_cursor() }.encode();
         let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
         assert_eq!(err, DomainError::MissingParameter);
     }
 
     #[test]
     fn cursor_decode_rejects_nondecimal_order_id() {
-        let encoded =
-            OpenOrdersCursor { order_id: "abc".into(), ..sample_cursor() }.encode();
+        let encoded = OpenOrdersCursor { order_id: "abc".into(), ..sample_cursor() }.encode();
         let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
         assert_eq!(err, DomainError::MissingParameter);
     }
 
     #[test]
     fn cursor_decode_rejects_order_id_over_78_digits() {
-        let encoded =
-            OpenOrdersCursor { order_id: "1".repeat(79), ..sample_cursor() }.encode();
+        let encoded = OpenOrdersCursor { order_id: "1".repeat(79), ..sample_cursor() }.encode();
         let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
         assert_eq!(err, DomainError::MissingParameter);
     }
@@ -469,23 +466,20 @@ mod tests {
     #[test]
     fn cursor_decode_accepts_order_id_at_78_digits() {
         // 78 digits is the documented maximum that fits `numeric(78,0)`.
-        let encoded =
-            OpenOrdersCursor { order_id: "9".repeat(78), ..sample_cursor() }.encode();
+        let encoded = OpenOrdersCursor { order_id: "9".repeat(78), ..sample_cursor() }.encode();
         OpenOrdersCursor::decode(&encoded).expect("78 digits is valid");
     }
 
     #[test]
     fn cursor_decode_rejects_empty_orderbook_address() {
-        let encoded =
-            OpenOrdersCursor { orderbook_address: "".into(), ..sample_cursor() }.encode();
+        let encoded = OpenOrdersCursor { orderbook_address: "".into(), ..sample_cursor() }.encode();
         let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
         assert_eq!(err, DomainError::MissingParameter);
     }
 
     #[test]
     fn cursor_decode_rejects_negative_timestamp() {
-        let encoded =
-            OpenOrdersCursor { chain_created_at_us: -1, ..sample_cursor() }.encode();
+        let encoded = OpenOrdersCursor { chain_created_at_us: -1, ..sample_cursor() }.encode();
         let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
         assert_eq!(err, DomainError::MissingParameter);
     }
@@ -513,8 +507,7 @@ mod tests {
 
     #[test]
     fn cursor_decode_accepts_timestamp_zero() {
-        let encoded =
-            OpenOrdersCursor { chain_created_at_us: 0, ..sample_cursor() }.encode();
+        let encoded = OpenOrdersCursor { chain_created_at_us: 0, ..sample_cursor() }.encode();
         OpenOrdersCursor::decode(&encoded).expect("zero is valid");
     }
 }
