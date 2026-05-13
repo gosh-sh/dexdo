@@ -304,12 +304,14 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
         let cursor_ts_ms = query.cursor.as_ref().map(|c| c.chain_created_at_ms);
         let cursor_order_id = query.cursor.as_ref().map(|c| c.order_id.clone());
+        let cursor_orderbook = query.cursor.as_ref().map(|c| c.orderbook_address.clone());
         let limit_plus_one = i64::from(query.limit) + 1;
 
         let rows: Vec<OpenOrderRow> = match target {
             Some((orderbook_address, outcome_id)) => sqlx::query_as(
                 r#"select m.pmp_address as market_address,
                           mo.symbol as symbol,
+                          lo.orderbook_address as orderbook_address,
                           lo.order_id::text as order_id,
                           coalesce(lo.client_order_id, '') as client_order_id,
                           lo.price::text as price,
@@ -332,16 +334,17 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       and lo.orderbook_address = $2
                       and lo.outcome_id = $3
                       and ($4::bigint is null
-                           or (lo.chain_created_at, lo.order_id)
-                              > (to_timestamp($4::bigint / 1000.0), $5::numeric))
-                    order by lo.chain_created_at asc, lo.order_id asc
-                    limit $6"#,
+                           or (lo.chain_created_at, lo.order_id, lo.orderbook_address)
+                              > (to_timestamp($4::bigint / 1000.0), $5::numeric, $6::text))
+                    order by lo.chain_created_at asc, lo.order_id asc, lo.orderbook_address asc
+                    limit $7"#,
             )
             .bind(query.owner_pn_address.as_str())
             .bind(orderbook_address)
             .bind(outcome_id)
             .bind(cursor_ts_ms)
             .bind(cursor_order_id.as_deref())
+            .bind(cursor_orderbook.as_deref())
             .bind(limit_plus_one)
             .fetch_all(&self.pool)
             .await
@@ -349,6 +352,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None => sqlx::query_as(
                 r#"select m.pmp_address as market_address,
                           mo.symbol as symbol,
+                          lo.orderbook_address as orderbook_address,
                           lo.order_id::text as order_id,
                           coalesce(lo.client_order_id, '') as client_order_id,
                           lo.price::text as price,
@@ -369,14 +373,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       and lo.amount_remaining > 0
                       and m.last_reconciled_at is not null
                       and ($2::bigint is null
-                           or (lo.chain_created_at, lo.order_id)
-                              > (to_timestamp($2::bigint / 1000.0), $3::numeric))
-                    order by lo.chain_created_at asc, lo.order_id asc
-                    limit $4"#,
+                           or (lo.chain_created_at, lo.order_id, lo.orderbook_address)
+                              > (to_timestamp($2::bigint / 1000.0), $3::numeric, $4::text))
+                    order by lo.chain_created_at asc, lo.order_id asc, lo.orderbook_address asc
+                    limit $5"#,
             )
             .bind(query.owner_pn_address.as_str())
             .bind(cursor_ts_ms)
             .bind(cursor_order_id.as_deref())
+            .bind(cursor_orderbook.as_deref())
             .bind(limit_plus_one)
             .fetch_all(&self.pool)
             .await
@@ -394,6 +399,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             orders_raw.last().map(|row| OpenOrdersCursor {
                 chain_created_at_ms: row.chain_created_at_ms,
                 order_id: row.order_id.clone(),
+                orderbook_address: row.orderbook_address.clone(),
             })
         } else {
             None
@@ -419,6 +425,7 @@ struct DepthLevelRow {
 struct OpenOrderRow {
     market_address: String,
     symbol: String,
+    orderbook_address: String,
     order_id: String,
     client_order_id: String,
     price: String,

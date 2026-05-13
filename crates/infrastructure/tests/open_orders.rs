@@ -488,3 +488,64 @@ async fn limit_zero_returns_missing_parameter() {
     // pins the repo's behaviour.
     scope.cleanup(&pool).await;
 }
+
+#[tokio::test]
+async fn cross_book_tie_does_not_lose_orders_across_pages() {
+    // Regression: `live_orders.order_id` is only unique within an orderbook
+    // (PK is `(orderbook_address, order_id)`). For the all-markets variant,
+    // two orders on different books that share `(chain_created_at, order_id)`
+    // used to be filtered out together by the next-page `>` predicate. The
+    // cursor now carries `orderbook_address` as the tie-breaker.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+    insert_market(&pool, &scope.pmp_no, &scope.symbol_no, &scope.book_no).await;
+
+    // Two orders, two books, identical chain time and identical order_id —
+    // the worst case the new tie-breaker has to handle.
+    let chain_seconds = 1_700_000_050;
+    insert_order(
+        &pool, &scope.book_yes, 1, Some(&scope.owner),
+        "12345", "1000", "1000", "OPEN", chain_seconds,
+    ).await;
+    insert_order(
+        &pool, &scope.book_no, 1, Some(&scope.owner),
+        "12345", "1000", "1000", "OPEN", chain_seconds,
+    ).await;
+
+    let first = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 1,
+            cursor: None,
+        })
+        .await
+        .expect("first page");
+    assert_eq!(first.orders.len(), 1);
+    let cursor = first.next_cursor.expect("next_cursor must be set on tied page");
+
+    let second = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 1,
+            cursor: Some(cursor),
+        })
+        .await
+        .expect("second page");
+    assert_eq!(
+        second.orders.len(),
+        1,
+        "the second order at the same (chain_time, order_id) must not be skipped"
+    );
+    assert_ne!(
+        first.orders[0].market_address.0, second.orders[0].market_address.0,
+        "the two pages must surface different books"
+    );
+    assert!(second.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}

@@ -539,6 +539,7 @@ async fn cursor_with_nonnumeric_order_id_returns_1102() {
     let bad_cursor = dodex_application::OpenOrdersCursor {
         chain_created_at_ms: 0,
         order_id: "abc".into(),
+        orderbook_address: "0:book".into(),
     }
     .encode();
 

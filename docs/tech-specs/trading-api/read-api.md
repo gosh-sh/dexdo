@@ -63,10 +63,11 @@ The public `status` enum is derived from row state, not stored:
 
 ### Pagination
 
-Cursor-based on `(chain_created_at, order_id)` with strict `>` comparison. The sort key is monotonic:
+Cursor-based on `(chain_created_at, order_id, orderbook_address)` with strict `>` comparison. The sort key is monotonic:
 
 - `chain_created_at` never moves backward for a given row (`OrderPlaced` sets it once; subsequent events only update `chain_updated_at`).
 - `order_id` is unique per `orderbook_address` and stable for the life of the row.
+- `orderbook_address` is the unique tie-breaker for the all-markets variant. `(chain_created_at, order_id)` alone is not globally unique because `order_id` numbering is per-orderbook; two open orders on different books with the same chain second and identical `order_id` would otherwise have the strict `>` predicate filter out the tied row on the next page.
 
 Consequence: between two paginated reads, an order that closes simply disappears from later pages; no duplication or skipping is possible.
 
@@ -75,12 +76,12 @@ Consequence: between two paginated reads, an order that closes simply disappears
 The cursor is base64url-encoded JSON:
 
 ```json
-{"t": <chain_created_at_ms:i64>, "o": "<order_id:string>"}
+{"t": <chain_created_at_ms:i64>, "o": "<order_id:string>", "b": "<orderbook_address:string>"}
 ```
 
-`t` is unix-milliseconds, matching the response `time` field. `o` is the decimal string form of the chain-side order id (matches the public `orderId`).
+`t` is unix-milliseconds, matching the response `time` field. `o` is the decimal string form of the chain-side order id (matches the public `orderId`). `b` is the orderbook contract address that carried the order (the internal `live_orders.orderbook_address`); it is part of the cursor only to disambiguate ties and is never returned to the client outside the opaque cursor blob.
 
-Decoding is strict: invalid base64, unparseable JSON, missing field, or wrong field type → `DomainError::MissingParameter` → `-1102` / 400. A well-formed cursor whose `(t, o)` pair lies past the last currently-open row is not an error; the SQL `WHERE (chain_created_at, order_id::numeric) > ($t_ts, $o::numeric)` simply returns zero rows and `next_cursor` is `null`.
+Decoding is strict: invalid base64, unparseable JSON, missing field, wrong field type, non-decimal `o`, or empty `b` → `DomainError::MissingParameter` → `-1102` / 400. A well-formed cursor whose `(t, o, b)` triple lies past the last currently-open row is not an error; the SQL `WHERE (chain_created_at, order_id, orderbook_address) > ($t_ts, $o::numeric, $b::text)` simply returns zero rows and `next_cursor` is `null`.
 
 #### Page-size protocol
 

@@ -185,6 +185,13 @@ pub struct OpenOrdersCursor {
     pub chain_created_at_ms: i64,
     #[serde(rename = "o")]
     pub order_id: String,
+    // Orderbook address is the unique tie-breaker for the all-markets
+    // variant: `order_id` is unique only within one orderbook (PK
+    // `(orderbook_address, order_id)`), so two open orders on different
+    // books that share `(chain_created_at, order_id)` would otherwise
+    // both be filtered out by the next-page `>` predicate.
+    #[serde(rename = "b")]
+    pub orderbook_address: String,
 }
 
 impl OpenOrdersCursor {
@@ -204,6 +211,9 @@ impl OpenOrdersCursor {
         if cursor.order_id.is_empty()
             || !cursor.order_id.chars().all(|c| c.is_ascii_digit())
         {
+            return Err(DomainError::MissingParameter);
+        }
+        if cursor.orderbook_address.is_empty() {
             return Err(DomainError::MissingParameter);
         }
         Ok(cursor)
