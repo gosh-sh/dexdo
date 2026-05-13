@@ -22,6 +22,7 @@ use dodex_application::MarketsFilter;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::OpenOrdersCursor;
 use dodex_domain::DomainError;
 use dodex_domain::Market;
 use dodex_domain::MarketAddress;
@@ -172,6 +173,13 @@ struct OpenOrderResponse {
     side: &'static str,
     time: i64,
     update_time: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenOrdersPageResponse {
+    orders: Vec<OpenOrderResponse>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -425,7 +433,7 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
 async fn get_open_orders(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<Vec<OpenOrderResponse>>, ApiError> {
+) -> Result<Json<OpenOrdersPageResponse>, ApiError> {
     let ctx = require_auth(depot, Permission::UserData)?.clone();
     let state = depot
         .obtain::<AppState>()
@@ -437,17 +445,25 @@ async fn get_open_orders(
 
     let market_address = non_empty_query(req, "marketAddress").map(MarketAddress);
     let symbol = non_empty_query(req, "symbol").map(Symbol);
+    let limit = req.query::<u16>("limit");
+    let cursor = non_empty_query(req, "cursor");
 
     let use_case = GetOpenOrdersUseCase::new(state.repo);
-    let orders = use_case.execute(&ctx, market_address, symbol).await.map_err(|err| {
-        if let Some(domain) = err.downcast_ref::<DomainError>() {
-            return ApiError::from(*domain);
-        }
-        error!(?err, "get_open_orders failed");
-        ApiError::from(DomainError::Unexpected)
-    })?;
+    let page = use_case
+        .execute(&ctx, market_address, symbol, limit, cursor.as_deref())
+        .await
+        .map_err(|err| {
+            if let Some(domain) = err.downcast_ref::<DomainError>() {
+                return ApiError::from(*domain);
+            }
+            error!(?err, "get_open_orders failed");
+            ApiError::from(DomainError::Unexpected)
+        })?;
 
-    Ok(Json(orders.into_iter().map(open_order_to_dto).collect()))
+    Ok(Json(OpenOrdersPageResponse {
+        orders: page.orders.into_iter().map(open_order_to_dto).collect(),
+        next_cursor: page.next_cursor.as_ref().map(OpenOrdersCursor::encode),
+    }))
 }
 
 fn open_order_to_dto(order: OpenOrder) -> OpenOrderResponse {

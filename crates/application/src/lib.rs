@@ -4,6 +4,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use base64::Engine;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
@@ -13,6 +15,7 @@ use dodex_domain::OpenOrder;
 use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Per-request authorization state assembled by the HMAC middleware and
@@ -126,7 +129,7 @@ pub trait MarketReadRepository: Send + Sync {
     async fn list_open_orders(
         &self,
         query: &OpenOrdersQuery,
-    ) -> Result<Vec<OpenOrder>, anyhow::Error>;
+    ) -> Result<OpenOrdersPage, anyhow::Error>;
 }
 
 #[async_trait]
@@ -147,7 +150,7 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
     async fn list_open_orders(
         &self,
         query: &OpenOrdersQuery,
-    ) -> Result<Vec<OpenOrder>, anyhow::Error> {
+    ) -> Result<OpenOrdersPage, anyhow::Error> {
         (**self).list_open_orders(query).await
     }
 }
@@ -159,16 +162,48 @@ pub struct GetDepthQuery {
     pub limit: u16,
 }
 
+pub const OPEN_ORDERS_DEFAULT_LIMIT: u16 = 100;
+pub const OPEN_ORDERS_MAX_LIMIT: u16 = 500;
+
 #[derive(Debug, Clone)]
 pub struct OpenOrdersQuery {
     pub owner_pn_address: String,
     pub market: Option<OpenOrdersMarketFilter>,
+    pub limit: u16,
+    pub cursor: Option<OpenOrdersCursor>,
 }
 
 #[derive(Debug, Clone)]
 pub struct OpenOrdersMarketFilter {
     pub market_address: MarketAddress,
     pub symbol: Symbol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOrdersCursor {
+    #[serde(rename = "t")]
+    pub chain_created_at_ms: i64,
+    #[serde(rename = "o")]
+    pub order_id: String,
+}
+
+impl OpenOrdersCursor {
+    pub fn encode(&self) -> String {
+        // Infallible: serde_json on this fixed struct cannot fail.
+        let json = serde_json::to_vec(self).expect("encode OpenOrdersCursor");
+        B64.encode(json)
+    }
+
+    pub fn decode(s: &str) -> Result<Self, DomainError> {
+        let bytes = B64.decode(s).map_err(|_| DomainError::MissingParameter)?;
+        serde_json::from_slice(&bytes).map_err(|_| DomainError::MissingParameter)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenOrdersPage {
+    pub orders: Vec<OpenOrder>,
+    pub next_cursor: Option<OpenOrdersCursor>,
 }
 
 pub struct GetMarketsUseCase<R> {
@@ -228,7 +263,9 @@ where
         ctx: &AuthContext,
         market_address: Option<MarketAddress>,
         symbol: Option<Symbol>,
-    ) -> Result<Vec<OpenOrder>, anyhow::Error> {
+        limit: Option<u16>,
+        cursor: Option<&str>,
+    ) -> Result<OpenOrdersPage, anyhow::Error> {
         let market = match (market_address, symbol) {
             (None, None) => None,
             (Some(market_address), Some(symbol)) => {
@@ -237,10 +274,26 @@ where
             _ => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
         };
 
+        let limit = match limit {
+            None => OPEN_ORDERS_DEFAULT_LIMIT,
+            Some(v) if (1..=OPEN_ORDERS_MAX_LIMIT).contains(&v) => v,
+            Some(_) => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
+        };
+
+        let cursor = match cursor {
+            None => None,
+            Some(raw) => Some(
+                OpenOrdersCursor::decode(raw)
+                    .map_err(|err| anyhow::anyhow!(err))?,
+            ),
+        };
+
         self.repo
             .list_open_orders(&OpenOrdersQuery {
                 owner_pn_address: ctx.trading_pn.pn_address.clone(),
                 market,
+                limit,
+                cursor,
             })
             .await
     }

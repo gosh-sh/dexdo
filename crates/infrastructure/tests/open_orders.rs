@@ -229,25 +229,26 @@ async fn all_markets_open_orders_are_owner_scoped_sorted_and_scaled() {
     )
     .await;
 
-    let orders = repo
-        .list_open_orders(&OpenOrdersQuery { owner_pn_address: scope.owner.clone(), market: None })
+    let page = repo
+        .list_open_orders(&OpenOrdersQuery { owner_pn_address: scope.owner.clone(), market: None, limit: 100, cursor: None })
         .await
         .expect("list open orders");
 
-    assert_eq!(orders.len(), 2);
-    assert_eq!(orders[0].order_id, "1");
-    assert_eq!(orders[0].market_address.0, scope.pmp_no);
-    assert_eq!(orders[0].status.as_str(), "PARTIALLY_FILLED");
-    assert_eq!(orders[0].price, "20.000");
-    assert_eq!(orders[0].orig_qty, "5.00");
-    assert_eq!(orders[0].executed_qty, "2.00");
+    assert_eq!(page.orders.len(), 2);
+    assert_eq!(page.orders[0].order_id, "1");
+    assert_eq!(page.orders[0].market_address.0, scope.pmp_no);
+    assert_eq!(page.orders[0].status.as_str(), "PARTIALLY_FILLED");
+    assert_eq!(page.orders[0].price, "20.000");
+    assert_eq!(page.orders[0].orig_qty, "5.00");
+    assert_eq!(page.orders[0].executed_qty, "2.00");
 
-    assert_eq!(orders[1].order_id, "2");
-    assert_eq!(orders[1].market_address.0, scope.pmp_yes);
-    assert_eq!(orders[1].status.as_str(), "NEW");
-    assert_eq!(orders[1].price, "12.345");
-    assert_eq!(orders[1].orig_qty, "10.00");
-    assert_eq!(orders[1].executed_qty, "0.00");
+    assert_eq!(page.orders[1].order_id, "2");
+    assert_eq!(page.orders[1].market_address.0, scope.pmp_yes);
+    assert_eq!(page.orders[1].status.as_str(), "NEW");
+    assert_eq!(page.orders[1].price, "12.345");
+    assert_eq!(page.orders[1].orig_qty, "10.00");
+    assert_eq!(page.orders[1].executed_qty, "0.00");
+    assert!(page.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
 }
@@ -292,11 +293,14 @@ async fn market_symbol_filter_and_empty_results_work() {
                 market_address: MarketAddress(scope.pmp_yes.clone()),
                 symbol: Symbol(scope.symbol_yes.clone()),
             }),
+            limit: 100,
+            cursor: None,
         })
         .await
         .expect("filtered open orders");
-    assert_eq!(filtered.len(), 1);
-    assert_eq!(filtered[0].order_id, "10");
+    assert_eq!(filtered.orders.len(), 1);
+    assert_eq!(filtered.orders[0].order_id, "10");
+    assert!(filtered.next_cursor.is_none());
 
     let empty = repo
         .list_open_orders(&OpenOrdersQuery {
@@ -305,10 +309,13 @@ async fn market_symbol_filter_and_empty_results_work() {
                 market_address: MarketAddress(scope.pmp_yes.clone()),
                 symbol: Symbol(scope.symbol_yes.clone()),
             }),
+            limit: 100,
+            cursor: None,
         })
         .await
         .expect("empty open orders");
-    assert!(empty.is_empty());
+    assert!(empty.orders.is_empty());
+    assert!(empty.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
 }
@@ -328,6 +335,8 @@ async fn unknown_market_symbol_returns_domain_error() {
                 market_address: MarketAddress(scope.pmp_yes.clone()),
                 symbol: Symbol(format!("{}_UNKNOWN", scope.symbol_yes)),
             }),
+            limit: 100,
+            cursor: None,
         })
         .await
         .expect_err("unknown pair must fail");

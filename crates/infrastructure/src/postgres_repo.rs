@@ -12,6 +12,8 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::OpenOrdersCursor;
+use dodex_application::OpenOrdersPage;
 use dodex_application::OpenOrdersQuery;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
@@ -271,7 +273,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
     async fn list_open_orders(
         &self,
         query: &OpenOrdersQuery,
-    ) -> Result<Vec<OpenOrder>, anyhow::Error> {
+    ) -> Result<OpenOrdersPage, anyhow::Error> {
         let target = match &query.market {
             Some(filter) => {
                 let target: Option<(Option<String>, i32)> = sqlx::query_as(
@@ -300,6 +302,10 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None => None,
         };
 
+        let cursor_ts_ms = query.cursor.as_ref().map(|c| c.chain_created_at_ms);
+        let cursor_order_id = query.cursor.as_ref().map(|c| c.order_id.clone());
+        let limit_plus_one = i64::from(query.limit) + 1;
+
         let rows: Vec<OpenOrderRow> = match target {
             Some((orderbook_address, outcome_id)) => sqlx::query_as(
                 r#"select m.pmp_address as market_address,
@@ -310,8 +316,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.amount_initial::text as orig_qty,
                           greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
                           lo.is_buy as is_buy,
-                          (extract(epoch from lo.created_at) * 1000)::bigint as time_ms,
-                          (extract(epoch from lo.updated_at) * 1000)::bigint as update_time_ms,
+                          (extract(epoch from lo.chain_created_at) * 1000)::bigint as chain_created_at_ms,
+                          (extract(epoch from lo.chain_updated_at) * 1000)::bigint as chain_updated_at_ms,
                           mo.price_precision as price_precision,
                           mo.quantity_precision as quantity_precision
                      from live_orders lo
@@ -325,11 +331,18 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       and m.last_reconciled_at is not null
                       and lo.orderbook_address = $2
                       and lo.outcome_id = $3
-                    order by lo.created_at asc, lo.order_id asc"#,
+                      and ($4::bigint is null
+                           or (lo.chain_created_at, lo.order_id)
+                              > (to_timestamp($4::bigint / 1000.0), $5::numeric))
+                    order by lo.chain_created_at asc, lo.order_id asc
+                    limit $6"#,
             )
             .bind(query.owner_pn_address.as_str())
             .bind(orderbook_address)
             .bind(outcome_id)
+            .bind(cursor_ts_ms)
+            .bind(cursor_order_id.as_deref())
+            .bind(limit_plus_one)
             .fetch_all(&self.pool)
             .await
             .context("select filtered open orders")?,
@@ -342,8 +355,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.amount_initial::text as orig_qty,
                           greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
                           lo.is_buy as is_buy,
-                          (extract(epoch from lo.created_at) * 1000)::bigint as time_ms,
-                          (extract(epoch from lo.updated_at) * 1000)::bigint as update_time_ms,
+                          (extract(epoch from lo.chain_created_at) * 1000)::bigint as chain_created_at_ms,
+                          (extract(epoch from lo.chain_updated_at) * 1000)::bigint as chain_updated_at_ms,
                           mo.price_precision as price_precision,
                           mo.quantity_precision as quantity_precision
                      from live_orders lo
@@ -355,15 +368,43 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       and lo.status = 'OPEN'
                       and lo.amount_remaining > 0
                       and m.last_reconciled_at is not null
-                    order by lo.created_at asc, lo.order_id asc"#,
+                      and ($2::bigint is null
+                           or (lo.chain_created_at, lo.order_id)
+                              > (to_timestamp($2::bigint / 1000.0), $3::numeric))
+                    order by lo.chain_created_at asc, lo.order_id asc
+                    limit $4"#,
             )
             .bind(query.owner_pn_address.as_str())
+            .bind(cursor_ts_ms)
+            .bind(cursor_order_id.as_deref())
+            .bind(limit_plus_one)
             .fetch_all(&self.pool)
             .await
             .context("select all open orders")?,
         };
 
-        rows.into_iter().map(open_order_from_row).collect()
+        let limit = usize::from(query.limit);
+        let has_more = rows.len() > limit;
+        let mut orders_raw = rows;
+        if has_more {
+            orders_raw.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            orders_raw.last().map(|row| OpenOrdersCursor {
+                chain_created_at_ms: row.chain_created_at_ms,
+                order_id: row.order_id.clone(),
+            })
+        } else {
+            None
+        };
+
+        let orders = orders_raw
+            .into_iter()
+            .map(open_order_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(OpenOrdersPage { orders, next_cursor })
     }
 }
 
@@ -384,8 +425,8 @@ struct OpenOrderRow {
     orig_qty: String,
     executed_qty: String,
     is_buy: bool,
-    time_ms: i64,
-    update_time_ms: i64,
+    chain_created_at_ms: i64,
+    chain_updated_at_ms: i64,
     price_precision: i32,
     quantity_precision: i32,
 }
@@ -440,8 +481,8 @@ fn open_order_from_row(row: OpenOrderRow) -> Result<OpenOrder, anyhow::Error> {
         time_in_force: TimeInForce::Gtc,
         order_type: OrderType::Limit,
         side: if row.is_buy { OrderSide::Buy } else { OrderSide::Sell },
-        time: row.time_ms,
-        update_time: row.update_time_ms,
+        time: row.chain_created_at_ms,
+        update_time: row.chain_updated_at_ms,
     })
 }
 

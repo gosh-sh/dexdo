@@ -41,6 +41,13 @@ struct OpenOrderBody {
     update_time: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenOrdersPageBody {
+    orders: Vec<OpenOrderBody>,
+    next_cursor: Option<String>,
+}
+
 struct Scope {
     api_key: String,
     api_secret_hex: String,
@@ -161,10 +168,13 @@ async fn insert_open_order(pool: &PgPool, scope: &Scope, owner: &str) {
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, owner_pn_address,
-                client_order_id, status, last_chain_order, created_at, updated_at)
+                client_order_id, status, last_chain_order,
+                chain_created_at, chain_updated_at,
+                created_at, updated_at)
            values ($1, 42::numeric, 1, false, 12345::numeric,
                    1000::numeric, 750::numeric, $2,
                    'client-42', 'OPEN', '5f800000000000000042',
+                   to_timestamp(1700000000), to_timestamp(1700000001),
                    to_timestamp(1700000000), to_timestamp(1700000001))"#,
     )
     .bind(&scope.book)
@@ -205,24 +215,25 @@ async fn readonly_user_data_key_can_fetch_open_orders() {
         .await;
 
     let status = resp.status_code;
-    let body = resp.take_json::<Vec<OpenOrderBody>>().await.expect("open orders body");
+    let body = resp.take_json::<OpenOrdersPageBody>().await.expect("open orders body");
     scope.cleanup(&pool).await;
 
     assert_eq!(status, Some(StatusCode::OK));
-    assert_eq!(body.len(), 1);
-    assert_eq!(body[0].market_address, scope.pmp);
-    assert_eq!(body[0].symbol, scope.symbol);
-    assert_eq!(body[0].order_id, "42");
-    assert_eq!(body[0].client_order_id, "client-42");
-    assert_eq!(body[0].price, "12.345");
-    assert_eq!(body[0].orig_qty, "10.00");
-    assert_eq!(body[0].executed_qty, "2.50");
-    assert_eq!(body[0].status, "PARTIALLY_FILLED");
-    assert_eq!(body[0].time_in_force, "GTC");
-    assert_eq!(body[0].order_type, "LIMIT");
-    assert_eq!(body[0].side, "SELL");
-    assert_eq!(body[0].time, 1_700_000_000_000);
-    assert_eq!(body[0].update_time, 1_700_000_001_000);
+    assert_eq!(body.orders.len(), 1);
+    assert_eq!(body.orders[0].market_address, scope.pmp);
+    assert_eq!(body.orders[0].symbol, scope.symbol);
+    assert_eq!(body.orders[0].order_id, "42");
+    assert_eq!(body.orders[0].client_order_id, "client-42");
+    assert_eq!(body.orders[0].price, "12.345");
+    assert_eq!(body.orders[0].orig_qty, "10.00");
+    assert_eq!(body.orders[0].executed_qty, "2.50");
+    assert_eq!(body.orders[0].status, "PARTIALLY_FILLED");
+    assert_eq!(body.orders[0].time_in_force, "GTC");
+    assert_eq!(body.orders[0].order_type, "LIMIT");
+    assert_eq!(body.orders[0].side, "SELL");
+    assert_eq!(body.orders[0].time, 1_700_000_000_000);
+    assert_eq!(body.orders[0].update_time, 1_700_000_001_000);
+    assert!(body.next_cursor.is_none());
 }
 
 #[tokio::test]
@@ -310,11 +321,12 @@ async fn existing_pair_with_no_orders_returns_empty_array() {
         .await;
 
     let status = resp.status_code;
-    let body = resp.take_json::<Vec<OpenOrderBody>>().await.expect("open orders body");
+    let body = resp.take_json::<OpenOrdersPageBody>().await.expect("open orders body");
     scope.cleanup(&pool).await;
 
     assert_eq!(status, Some(StatusCode::OK));
-    assert!(body.is_empty());
+    assert!(body.orders.is_empty());
+    assert!(body.next_cursor.is_none());
 }
 
 #[tokio::test]
