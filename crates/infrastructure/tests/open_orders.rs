@@ -560,8 +560,14 @@ async fn cursor_handles_sub_millisecond_chain_timestamps() {
     insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
 
     // Two open orders in the same book whose timestamps share a millisecond
-    // but differ by 499 microseconds.
-    for (order_id, fractional_secs) in [(1_i64, 1_700_000_000.500_500_f64), (2_i64, 1_700_000_000.500_999_f64)] {
+    // but differ by 499 microseconds. Build the fractional-second f64 from
+    // an exact microsecond i64 so the f64 literal isn't rejected by clippy's
+    // excessive-precision lint.
+    for (order_id, us) in [
+        (1_i64, 1_700_000_000_500_500_i64),
+        (2_i64, 1_700_000_000_500_999_i64),
+    ] {
+        let fractional_secs = (us as f64) / 1_000_000.0;
         sqlx::query(
             r#"insert into live_orders
                    (orderbook_address, order_id, outcome_id, is_buy, price,
