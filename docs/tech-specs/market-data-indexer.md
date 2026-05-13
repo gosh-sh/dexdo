@@ -74,13 +74,18 @@ Lifecycle events drive transitions on [`markets`](data-schema.md#markets) and th
 
 ## Projection — order events
 
-OrderBook events drive [`live_orders`](data-schema.md#live_orders), the per-order read-model that backs `/api/v1/depth`. Three events mutate state; five more are observability-only.
+OrderBook events drive [`live_orders`](data-schema.md#live_orders), the
+per-order read-model that backs `/api/v1/depth` and account-scoped
+`GET /api/v1/openOrders`. Three OrderBook events mutate book state; one
+PrivateNote confirmation attaches ownership for private reads; five OrderBook
+events are observability-only.
 
 | Event | Effect |
 | --- | --- |
-| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'` and full `amount_remaining`. `last_chain_order` set to the event's `msg_chain_order`. A conflict on `(orderbook_address, order_id)` resets the row to OPEN. |
+| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'`, full `amount_initial`, and full `amount_remaining`. `owner_pn_address` remains NULL until the matching PrivateNote confirmation arrives. `last_chain_order` set to the event's `msg_chain_order`. A conflict on `(orderbook_address, order_id)` resets the row to OPEN. |
 | `OrderBook.OrderFilled` | Decrements `amount_remaining` by `filledAmount`. Flips `status` to `FILLED` when the remainder reaches zero. Updates `last_chain_order` via `greatest(existing, new)` (lex compare). |
 | `OrderBook.OrderCancelled` | `status = 'CANCELLED'`, `amount_remaining = 0`, monotonic `last_chain_order` update. |
+| `PrivateNote.OrderPlacedConfirmed` | Updates the matching `(orderBook, orderId)` row with `owner_pn_address = event.src`, where `event.src` is the authenticated account's trading PrivateNote address. If the OrderBook row has not arrived yet, the confirmation is deferred and replayed later. This ownership update does not advance `last_chain_order`, so public depth cursors continue to represent OrderBook activity only. |
 | `OrderBook.PartialFill` / `FullyFilled` / `Queued` / `Rejected` / `CallbackBounced` | Observability-only. The row is recorded in `raw_events` for audit but no read-model table is touched. |
 
 `PartialFill` / `FullyFilled` are derived aggregates the contract emits for MM-friendly UX; the underlying state is already captured by `OrderFilled`. `Queued` / `Rejected` happen at queue level, before any order id is assigned. `CallbackBounced` is a diagnostic — OrderBook state is not auto-rolled back, and the bounced credit needs operator-driven recovery.

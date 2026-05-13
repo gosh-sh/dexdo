@@ -867,7 +867,8 @@ GET /api/v1/openOrders
 
 Security: `USER_DATA`
 
-Fetch currently open orders.
+Fetch currently open orders for the authenticated account. The response never
+includes orders owned by another account.
 
 Parameters:
 
@@ -878,6 +879,18 @@ Parameters:
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
 | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+Behavior:
+
+- If both `marketAddress` and `symbol` are omitted, returns all open orders for the authenticated account across all markets.
+- If both `marketAddress` and `symbol` are sent, returns open orders for that one market symbol.
+- If only one of `marketAddress` / `symbol` is sent, returns `-1102` with HTTP `400`.
+- If the `(marketAddress, symbol)` pair does not exist, returns `-1121` with HTTP `404`.
+- Open order statuses are `NEW` and `PARTIALLY_FILLED`.
+- Orders with status `FILLED`, `CANCELED`, or `REJECTED` are not returned.
+- Empty results are returned as `[]`.
+- Results are sorted by `time ASC`, then `orderId ASC`. For all-market requests this ordering is global across all returned orders.
+- Version 1 does not paginate this endpoint.
 
 Response:
 
@@ -900,6 +913,24 @@ Response:
   }
 ]
 ```
+
+Response fields:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `marketAddress` | STRING | Market address. |
+| `symbol` | STRING | Outcome-token symbol. |
+| `orderId` | STRING | Chain-side order id. |
+| `clientOrderId` | STRING | Client-supplied id, or an empty string if absent. |
+| `price` | DECIMAL | Limit price, scaled by the outcome price precision. |
+| `origQty` | DECIMAL | Original order quantity, scaled by the outcome quantity precision. |
+| `executedQty` | DECIMAL | Filled quantity, scaled by the outcome quantity precision. |
+| `status` | ENUM | `NEW` or `PARTIALLY_FILLED`. |
+| `timeInForce` | ENUM | `GTC`. |
+| `type` | ENUM | `LIMIT`. |
+| `side` | ENUM | `BUY` or `SELL`. |
+| `time` | LONG | Order creation time in Unix milliseconds. |
+| `updateTime` | LONG | Last indexed update time in Unix milliseconds. |
 
 ### Closed And Canceled Orders
 

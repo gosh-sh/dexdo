@@ -217,6 +217,83 @@ pub struct DepthSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenOrder {
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
+    pub order_id: String,
+    pub client_order_id: String,
+    pub price: String,
+    pub orig_qty: String,
+    pub executed_qty: String,
+    pub status: OpenOrderStatus,
+    pub time_in_force: TimeInForce,
+    pub order_type: OrderType,
+    pub side: OrderSide,
+    pub time: i64,
+    pub update_time: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OpenOrderStatus {
+    New,
+    PartiallyFilled,
+}
+
+impl OpenOrderStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::New => "NEW",
+            Self::PartiallyFilled => "PARTIALLY_FILLED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TimeInForce {
+    Gtc,
+}
+
+impl TimeInForce {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Gtc => "GTC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderType {
+    Limit,
+}
+
+impl OrderType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Limit => "LIMIT",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+impl OrderSide {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Buy => "BUY",
+            Self::Sell => "SELL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Oracle {
     pub name: String,
     pub address: String,

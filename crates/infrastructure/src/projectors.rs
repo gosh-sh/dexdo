@@ -57,6 +57,9 @@ pub async fn project_event(
         "OrderBook.OrderCancelled" => {
             apply_order_cancelled(tx, event, node).await.with_context(context)
         }
+        "PrivateNote.OrderPlacedConfirmed" => {
+            apply_order_placed_confirmed(tx, event, node).await.with_context(context)
+        }
         // Observability-only OrderBook events; state of the book does not change.
         "OrderBook.PartialFill"
         | "OrderBook.FullyFilled"
@@ -487,14 +490,15 @@ async fn apply_order_placed(
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, client_order_id, status, last_chain_order,
+                amount_initial, amount_remaining, client_order_id, status, last_chain_order,
                 updated_at)
            values ($1, $2::numeric, $3, $4, $5::numeric,
-                   $6::numeric, $7, 'OPEN', $8, now())
+                   $6::numeric, $6::numeric, $7, 'OPEN', $8, now())
            on conflict (orderbook_address, order_id) do update
                set outcome_id = excluded.outcome_id,
                    is_buy = excluded.is_buy,
                    price = excluded.price,
+                   amount_initial = excluded.amount_initial,
                    amount_remaining = excluded.amount_remaining,
                    client_order_id = excluded.client_order_id,
                    status = 'OPEN',
@@ -514,6 +518,43 @@ async fn apply_order_placed(
     .await
     .context("upsert live_orders on OrderPlaced")?;
 
+    Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_order_placed_confirmed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let owner_pn_address =
+        node.src.as_deref().context("OrderPlacedConfirmed: src missing on event message")?;
+    let orderbook_address = field_str(&event.value, "orderBook")?;
+    let order_id = uint_field_to_decimal(&event.value, "orderId")?;
+
+    let updated = sqlx::query(
+        r#"update live_orders
+              set owner_pn_address = $3,
+                  updated_at = now()
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(orderbook_address)
+    .bind(&order_id)
+    .bind(owner_pn_address)
+    .execute(&mut **tx)
+    .await
+    .context("attach owner_pn_address on OrderPlacedConfirmed")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            owner_pn_address,
+            msg_id = %node.msg_id,
+            "OrderPlacedConfirmed observed before OrderPlaced; deferring"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    }
     Ok(ProjectionOutcome::Applied)
 }
 

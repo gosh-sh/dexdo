@@ -9,6 +9,7 @@ use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
+use dodex_domain::OpenOrder;
 use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
@@ -121,6 +122,11 @@ pub trait MarketReadRepository: Send + Sync {
         symbol: &Symbol,
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error>;
+
+    async fn list_open_orders(
+        &self,
+        query: &OpenOrdersQuery,
+    ) -> Result<Vec<OpenOrder>, anyhow::Error>;
 }
 
 #[async_trait]
@@ -137,6 +143,13 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
     ) -> Result<DepthSnapshot, anyhow::Error> {
         (**self).get_depth(market_address, symbol, limit).await
     }
+
+    async fn list_open_orders(
+        &self,
+        query: &OpenOrdersQuery,
+    ) -> Result<Vec<OpenOrder>, anyhow::Error> {
+        (**self).list_open_orders(query).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +157,18 @@ pub struct GetDepthQuery {
     pub market_address: MarketAddress,
     pub symbol: Symbol,
     pub limit: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenOrdersQuery {
+    pub owner_pn_address: String,
+    pub market: Option<OpenOrdersMarketFilter>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenOrdersMarketFilter {
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
 }
 
 pub struct GetMarketsUseCase<R> {
@@ -181,6 +206,43 @@ where
 {
     pub async fn execute(&self, query: GetDepthQuery) -> Result<DepthSnapshot, anyhow::Error> {
         self.repo.get_depth(&query.market_address, &query.symbol, query.limit).await
+    }
+}
+
+pub struct GetOpenOrdersUseCase<R> {
+    repo: R,
+}
+
+impl<R> GetOpenOrdersUseCase<R> {
+    pub fn new(repo: R) -> Self {
+        Self { repo }
+    }
+}
+
+impl<R> GetOpenOrdersUseCase<R>
+where
+    R: MarketReadRepository,
+{
+    pub async fn execute(
+        &self,
+        ctx: &AuthContext,
+        market_address: Option<MarketAddress>,
+        symbol: Option<Symbol>,
+    ) -> Result<Vec<OpenOrder>, anyhow::Error> {
+        let market = match (market_address, symbol) {
+            (None, None) => None,
+            (Some(market_address), Some(symbol)) => {
+                Some(OpenOrdersMarketFilter { market_address, symbol })
+            }
+            _ => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
+        };
+
+        self.repo
+            .list_open_orders(&OpenOrdersQuery {
+                owner_pn_address: ctx.trading_pn.pn_address.clone(),
+                market,
+            })
+            .await
     }
 }
 

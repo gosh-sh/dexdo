@@ -379,3 +379,70 @@ async fn orderfilled_deferred_replays_after_orderplaced() {
     );
     assert_eq!(row.1, "OPEN", "partial fill must keep the order OPEN");
 }
+
+#[tokio::test]
+async fn orderplaced_confirmed_deferred_replays_and_attaches_owner() {
+    // Private account reads depend on the PN confirmation event to attach
+    // ownership to the public OrderBook row. If the confirmation arrives first
+    // it must defer, then replay once OrderPlaced creates the live_orders row.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_deferred_orderplaced_confirmed";
+    let owner_pn = format!("0:{test}_owner");
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "77";
+    let msg_id = format!("{test}-confirm-msg");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    let decoded = json!({
+        "orderBook": orderbook_addr,
+        "orderId": order_id,
+    });
+    insert_raw(&pool, &msg_id, &owner_pn, "PrivateNote.OrderPlacedConfirmed", &decoded).await;
+
+    repo.reproject_pending(1000).await.expect("reproject pass 1");
+    assert!(
+        !processed_at_is_set(&pool, &msg_id).await,
+        "deferred OrderPlacedConfirmed must keep processed_at null until the order exists"
+    );
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status, last_chain_order)
+           values ($1, $2::numeric, 1, true, 100::numeric,
+                   100::numeric, 100::numeric, 'OPEN', '5f800000000000000077')"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    repo.reproject_pending(1000).await.expect("reproject pass 2");
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "processed_at must be stamped once the owner attachment applies"
+    );
+
+    let owner: Option<String> = sqlx::query_scalar(
+        "select owner_pn_address from live_orders
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read owner");
+    assert_eq!(owner.as_deref(), Some(owner_pn.as_str()));
+}

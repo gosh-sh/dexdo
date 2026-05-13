@@ -216,7 +216,12 @@ Index: `market_outcomes_market_id_fk_idx` speeds up loading all outcome rows for
 
 ### `live_orders`
 
-Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, mutated in place as the `OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Never deleted — FILLED / CANCELLED rows stay for cursor monotonicity (the depth handler reads `max(last_chain_order)` over **all** rows for the `(orderbook, outcome)` pair).
+Per-order read-model that backs `/api/v1/depth` and account-scoped
+`GET /api/v1/openOrders`. One row per chain-side order, mutated in place as
+the `OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Never
+deleted — FILLED / CANCELLED rows stay for cursor monotonicity (the depth
+handler reads `max(last_chain_order)` over **all** rows for the `(orderbook,
+outcome)` pair).
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -225,13 +230,20 @@ Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, m
 | `outcome_id` | `integer` | Which outcome this order is on. |
 | `is_buy` | `boolean` | Side. `true` = bid, `false` = ask. |
 | `price` | `numeric(78,0)` | Order price as the contract emitted it (raw uint256). Scaled to a decimal at API render time. |
+| `amount_initial` | `numeric(78,0)` | Original order quantity from `OrderBook.OrderPlaced`. Used with `amount_remaining` to render `origQty` and `executedQty` in account order endpoints. |
 | `amount_remaining` | `numeric(78,0)` | Quantity still open. Set by the `OrderPlaced` event, decremented by the `OrderFilled` event, zeroed by the `OrderCancelled` event. |
 | `client_order_id` | `text` | Optional client-supplied id. |
+| `owner_pn_address` | `text` | Trading PrivateNote address that owns the order. Initially NULL from `OrderBook.OrderPlaced`; attached by `PrivateNote.OrderPlacedConfirmed` using the event source address. NULL rows can still contribute to public depth, but cannot appear in account-scoped order responses. |
 | `status` | `text` CHECK `IN ('OPEN', 'FILLED', 'CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. |
-| `last_chain_order` | `text` NOT NULL | Chain-order key (`msg_chain_order` from the gateway) of the most recent event that touched this order. Lex-monotonic via `greatest(existing, new)` on every write. Feeds `lastUpdateId` in depth responses as a STRING. |
+| `last_chain_order` | `text` NOT NULL | Chain-order key (`msg_chain_order` from the gateway) of the most recent OrderBook event that touched this order. Lex-monotonic via `greatest(existing, new)` on OrderBook writes. Feeds `lastUpdateId` in depth responses as a STRING. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Index: `live_orders_open_book_idx` — partial, `(orderbook_address, outcome_id, is_buy, price desc) WHERE status = 'OPEN'`. Sized for the depth query: top-N levels per side per outcome.
+
+Index: `live_orders_open_owner_idx` — partial,
+`(owner_pn_address, status, orderbook_address, outcome_id, created_at, order_id)`
+for account-scoped open-order reads. It filters to non-NULL owners, `OPEN`
+status, and positive remaining quantity.
 
 ### `order_book_snapshots`
 

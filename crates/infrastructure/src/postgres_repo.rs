@@ -12,6 +12,7 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::OpenOrdersQuery;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -21,12 +22,17 @@ use dodex_domain::MarketEvent;
 use dodex_domain::MarketName;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
+use dodex_domain::OpenOrder;
+use dodex_domain::OpenOrderStatus;
 use dodex_domain::OracleEntry;
+use dodex_domain::OrderSide;
+use dodex_domain::OrderType;
 use dodex_domain::Outcome;
 use dodex_domain::PriceLevel;
 use dodex_domain::Symbol;
 use dodex_domain::Terminal;
 use dodex_domain::TerminalKind;
+use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
 use num_bigint::BigUint;
 use sqlx::PgPool;
@@ -261,6 +267,104 @@ impl MarketReadRepository for PostgresReadModelRepository {
             asks,
         })
     }
+
+    async fn list_open_orders(
+        &self,
+        query: &OpenOrdersQuery,
+    ) -> Result<Vec<OpenOrder>, anyhow::Error> {
+        let target = match &query.market {
+            Some(filter) => {
+                let target: Option<(Option<String>, i32)> = sqlx::query_as(
+                    r#"select m.orderbook_address,
+                              mo.outcome_id
+                         from markets m
+                         join market_outcomes mo on mo.market_id_fk = m.id
+                        where m.pmp_address = $1
+                          and mo.symbol = $2
+                          and m.last_reconciled_at is not null"#,
+                )
+                .bind(filter.market_address.0.as_str())
+                .bind(filter.symbol.0.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .context("resolve openOrders market filter")?;
+
+                let Some((orderbook_address, outcome_id)) = target else {
+                    return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
+                };
+                let Some(orderbook_address) = orderbook_address.and_then(filter_orderbook) else {
+                    return Err(anyhow!(DomainError::MarketInconsistent));
+                };
+                Some((orderbook_address, outcome_id))
+            }
+            None => None,
+        };
+
+        let rows: Vec<OpenOrderRow> = match target {
+            Some((orderbook_address, outcome_id)) => sqlx::query_as(
+                r#"select m.pmp_address as market_address,
+                          mo.symbol as symbol,
+                          lo.order_id::text as order_id,
+                          coalesce(lo.client_order_id, '') as client_order_id,
+                          lo.price::text as price,
+                          lo.amount_initial::text as orig_qty,
+                          greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
+                          lo.is_buy as is_buy,
+                          (extract(epoch from lo.created_at) * 1000)::bigint as time_ms,
+                          (extract(epoch from lo.updated_at) * 1000)::bigint as update_time_ms,
+                          mo.price_precision as price_precision,
+                          mo.quantity_precision as quantity_precision
+                     from live_orders lo
+                     join markets m on m.orderbook_address = lo.orderbook_address
+                     join market_outcomes mo
+                       on mo.market_id_fk = m.id
+                      and mo.outcome_id = lo.outcome_id
+                    where lo.owner_pn_address = $1
+                      and lo.status = 'OPEN'
+                      and lo.amount_remaining > 0
+                      and m.last_reconciled_at is not null
+                      and lo.orderbook_address = $2
+                      and lo.outcome_id = $3
+                    order by lo.created_at asc, lo.order_id asc"#,
+            )
+            .bind(query.owner_pn_address.as_str())
+            .bind(orderbook_address)
+            .bind(outcome_id)
+            .fetch_all(&self.pool)
+            .await
+            .context("select filtered open orders")?,
+            None => sqlx::query_as(
+                r#"select m.pmp_address as market_address,
+                          mo.symbol as symbol,
+                          lo.order_id::text as order_id,
+                          coalesce(lo.client_order_id, '') as client_order_id,
+                          lo.price::text as price,
+                          lo.amount_initial::text as orig_qty,
+                          greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
+                          lo.is_buy as is_buy,
+                          (extract(epoch from lo.created_at) * 1000)::bigint as time_ms,
+                          (extract(epoch from lo.updated_at) * 1000)::bigint as update_time_ms,
+                          mo.price_precision as price_precision,
+                          mo.quantity_precision as quantity_precision
+                     from live_orders lo
+                     join markets m on m.orderbook_address = lo.orderbook_address
+                     join market_outcomes mo
+                       on mo.market_id_fk = m.id
+                      and mo.outcome_id = lo.outcome_id
+                    where lo.owner_pn_address = $1
+                      and lo.status = 'OPEN'
+                      and lo.amount_remaining > 0
+                      and m.last_reconciled_at is not null
+                    order by lo.created_at asc, lo.order_id asc"#,
+            )
+            .bind(query.owner_pn_address.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .context("select all open orders")?,
+        };
+
+        rows.into_iter().map(open_order_from_row).collect()
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -268,6 +372,22 @@ struct DepthLevelRow {
     is_buy: bool,
     price: String,
     quantity: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct OpenOrderRow {
+    market_address: String,
+    symbol: String,
+    order_id: String,
+    client_order_id: String,
+    price: String,
+    orig_qty: String,
+    executed_qty: String,
+    is_buy: bool,
+    time_ms: i64,
+    update_time_ms: i64,
+    price_precision: i32,
+    quantity_precision: i32,
 }
 
 fn filter_orderbook(s: String) -> Option<String> {
@@ -294,6 +414,41 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
     } else {
         let split = raw.len() - p;
         format!("{}.{}", &raw[..split], &raw[split..])
+    }
+}
+
+fn open_order_from_row(row: OpenOrderRow) -> Result<OpenOrder, anyhow::Error> {
+    let quantity_scale = u32::try_from(row.quantity_precision.max(0)).unwrap_or(0);
+    let status = if decimal_string_is_zero(&row.executed_qty) {
+        OpenOrderStatus::New
+    } else {
+        OpenOrderStatus::PartiallyFilled
+    };
+
+    Ok(OpenOrder {
+        market_address: MarketAddress(row.market_address),
+        symbol: Symbol(row.symbol),
+        order_id: row.order_id,
+        client_order_id: row.client_order_id,
+        price: scale_uint_to_decimal(
+            &row.price,
+            u32::try_from(row.price_precision.max(0)).unwrap_or(0),
+        ),
+        orig_qty: scale_uint_to_decimal(&row.orig_qty, quantity_scale),
+        executed_qty: scale_uint_to_decimal(&row.executed_qty, quantity_scale),
+        status,
+        time_in_force: TimeInForce::Gtc,
+        order_type: OrderType::Limit,
+        side: if row.is_buy { OrderSide::Buy } else { OrderSide::Sell },
+        time: row.time_ms,
+        update_time: row.update_time_ms,
+    })
+}
+
+fn decimal_string_is_zero(s: &str) -> bool {
+    match BigUint::parse_bytes(s.as_bytes(), 10) {
+        Some(v) => v == BigUint::from(0_u8),
+        None => true,
     }
 }
 
