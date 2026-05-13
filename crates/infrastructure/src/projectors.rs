@@ -487,13 +487,16 @@ async fn apply_order_placed(
     let client_order_id = field_str(&event.value, "clientOrderId").ok().map(String::from);
     let chain_order = node_chain_order(node, "OrderPlaced")?;
 
+    let chain_seconds = node_unix_seconds(node);
+
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, client_order_id, status, last_chain_order,
-                updated_at)
+                chain_created_at, chain_updated_at, updated_at)
            values ($1, $2::numeric, $3, $4, $5::numeric,
-                   $6::numeric, $6::numeric, $7, 'OPEN', $8, now())
+                   $6::numeric, $6::numeric, $7, 'OPEN', $8,
+                   to_timestamp($9::bigint), to_timestamp($9::bigint), now())
            on conflict (orderbook_address, order_id) do update
                set outcome_id = excluded.outcome_id,
                    is_buy = excluded.is_buy,
@@ -504,6 +507,10 @@ async fn apply_order_placed(
                    status = 'OPEN',
                    last_chain_order = greatest(live_orders.last_chain_order,
                                                excluded.last_chain_order),
+                   chain_created_at = least(live_orders.chain_created_at,
+                                            excluded.chain_created_at),
+                   chain_updated_at = greatest(live_orders.chain_updated_at,
+                                               excluded.chain_updated_at),
                    updated_at = now()"#,
     )
     .bind(orderbook_address)
@@ -514,9 +521,10 @@ async fn apply_order_placed(
     .bind(&amount)
     .bind(client_order_id)
     .bind(chain_order)
+    .bind(chain_seconds)
     .execute(&mut **tx)
     .await
-    .context("upsert live_orders on OrderPlaced")?;
+    .context("upsert live_orders for OrderBook.OrderPlaced")?;
 
     Ok(ProjectionOutcome::Applied)
 }
