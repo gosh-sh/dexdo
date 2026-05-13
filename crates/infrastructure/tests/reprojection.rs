@@ -651,3 +651,65 @@ async fn ordercancelled_advances_chain_updated_at() {
 
     assert_eq!(chain_updated_ms, cancel_seconds * 1000);
 }
+
+#[tokio::test]
+async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
+    // The PN-confirm projector must not overwrite an existing owner_pn_address
+    // (defence against a second confirmation event with a different src landing
+    // on the same orderbook+orderId after a reprojection sweep).
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_confirmed_idempotent";
+    let original_owner = format!("0:{test}_owner");
+    let other_owner    = format!("0:{test}_other");
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "88";
+    let msg_id   = format!("{test}-confirm-msg");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    // Pre-create the row with the original owner already attached.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, owner_pn_address,
+                status, last_chain_order, chain_created_at, chain_updated_at)
+           values ($1, $2::numeric, 1, true, 100::numeric,
+                   100::numeric, 100::numeric, $3,
+                   'OPEN', '5f800000000000000088',
+                   to_timestamp(1700000000), to_timestamp(1700000000))"#,
+    )
+    .bind(&orderbook_addr).bind(order_id).bind(&original_owner)
+    .execute(&pool).await.expect("insert pre-attributed row");
+
+    // The PN confirmation event claims a different owner.
+    insert_raw(
+        &pool, &msg_id, &other_owner,
+        "PrivateNote.OrderPlacedConfirmed",
+        &json!({ "orderBook": orderbook_addr, "orderId": order_id }),
+    ).await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "Applied (no-op) outcome must stamp processed_at"
+    );
+
+    let owner: String = sqlx::query_scalar(
+        "select owner_pn_address from live_orders
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&orderbook_addr).bind(order_id)
+    .fetch_one(&pool).await.expect("read owner");
+    assert_eq!(owner, original_owner, "owner must not change once attributed");
+}

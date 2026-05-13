@@ -543,7 +543,9 @@ async fn apply_order_placed_confirmed(
         r#"update live_orders
               set owner_pn_address = $3,
                   updated_at = now()
-            where orderbook_address = $1 and order_id = $2::numeric"#,
+            where orderbook_address = $1
+              and order_id = $2::numeric
+              and owner_pn_address is null"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
@@ -553,7 +555,27 @@ async fn apply_order_placed_confirmed(
     .context("attach owner_pn_address on OrderPlacedConfirmed")?
     .rows_affected();
 
-    if updated == 0 {
+    if updated > 0 {
+        return Ok(ProjectionOutcome::Applied);
+    }
+
+    // Either the row doesn't exist yet (defer and retry once OrderPlaced lands)
+    // or it already has an owner attached (idempotent no-op).
+    let row_exists: bool = sqlx::query_scalar(
+        r#"select exists(
+               select 1 from live_orders
+                where orderbook_address = $1 and order_id = $2::numeric
+           )"#,
+    )
+    .bind(orderbook_address)
+    .bind(&order_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("check live_orders row existence for OrderPlacedConfirmed")?;
+
+    if row_exists {
+        Ok(ProjectionOutcome::Applied)
+    } else {
         warn!(
             orderbook_address,
             order_id = %order_id,
@@ -561,9 +583,8 @@ async fn apply_order_placed_confirmed(
             msg_id = %node.msg_id,
             "OrderPlacedConfirmed observed before OrderPlaced; deferring"
         );
-        return Ok(ProjectionOutcome::Deferred);
+        Ok(ProjectionOutcome::Deferred)
     }
-    Ok(ProjectionOutcome::Applied)
 }
 
 async fn apply_order_filled(
