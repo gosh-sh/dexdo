@@ -307,6 +307,14 @@ impl MarketReadRepository for PostgresReadModelRepository {
         let cursor_orderbook = query.cursor.as_ref().map(|c| c.orderbook_address.clone());
         let limit_plus_one = i64::from(query.limit) + 1;
 
+        // The microsecond extraction `(extract(epoch from <timestamptz>) *
+        // 1000000)::bigint` below is exact only on Postgres >= 14, where
+        // `extract(epoch ...)` returns `numeric`. On Postgres <= 13 it
+        // returned `double precision`, and the bigint cast could round by
+        // 1 µs at 2026-era timestamps — producing a cursor `t` that doesn't
+        // match the row it came from. Deployment is pinned to PG16
+        // (docker-compose.test.yml) and Supabase (PG15+), so this is safe;
+        // do not downgrade the schema target without rewriting the extraction.
         let rows: Vec<OpenOrderRow> = match target {
             Some((orderbook_address, outcome_id)) => sqlx::query_as(
                 r#"select m.pmp_address as market_address,

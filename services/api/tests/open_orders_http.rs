@@ -603,6 +603,88 @@ async fn cursor_with_overlong_order_id_returns_1102() {
 }
 
 #[tokio::test]
+async fn cursor_with_foreign_orderbook_returns_sensible_page() {
+    // The cursor `b` field is server-issued in normal flows, but it's opaque
+    // (not signed): a client can forge any value. The repo's next-page
+    // predicate compares the full tuple `(chain_created_at, order_id,
+    // orderbook_address) > (cursor.t, cursor.o, cursor.b)` and trusts what
+    // it receives. Pin behaviour: with a cursor.t strictly between two
+    // seeded rows and a foreign cursor.b, the endpoint must return the rows
+    // that sort after cursor.t — the foreign `b` is harmless because
+    // `chain_created_at` already separates the tuples. This locks in the
+    // "forged b cannot crash, 500, or skip rows it shouldn't" property.
+    let Some((service, pool, kek)) = common::setup().await else { return };
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    seed_readonly_key(&pool, &kek, &scope).await;
+    insert_market(&pool, &scope).await;
+    let owner = trading_pn(&pool).await;
+
+    for (i, t) in (1..=3i64).zip([1_700_000_010i64, 1_700_000_020, 1_700_000_030]) {
+        sqlx::query(
+            r#"insert into live_orders
+                   (orderbook_address, order_id, outcome_id, is_buy, price,
+                    amount_initial, amount_remaining, owner_pn_address,
+                    client_order_id, status, last_chain_order,
+                    chain_created_at, chain_updated_at,
+                    created_at, updated_at)
+               values ($1, $2::numeric, 1, true, 12345::numeric,
+                       1000::numeric, 1000::numeric, $3,
+                       $4, 'OPEN', $5,
+                       to_timestamp($6::bigint), to_timestamp($6::bigint),
+                       to_timestamp($6::bigint), to_timestamp($6::bigint))"#,
+        )
+        .bind(&scope.book)
+        .bind(i)
+        .bind(&owner)
+        .bind(format!("client-{i}"))
+        .bind(format!("5f8000000000000{:05}", i))
+        .bind(t)
+        .execute(&pool)
+        .await
+        .expect("insert live order");
+    }
+
+    // Cursor lands strictly between row 1 (t=1_700_000_010s) and row 2
+    // (t=1_700_000_020s). The `b` field points at an unrelated orderbook,
+    // which the repo will pass through to the tuple comparison verbatim.
+    let foreign_cursor = dodex_application::OpenOrdersCursor {
+        chain_created_at_us: 1_700_000_015_000_000,
+        order_id: "1".into(),
+        orderbook_address: "0:totally_unrelated_orderbook".into(),
+    }
+    .encode();
+
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("cursor", &foreign_cursor),
+        ("limit", "10"),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("cursor", foreign_cursor.as_str())
+        .query("limit", "10")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    let status = resp.status_code;
+    let body = resp.take_json::<OpenOrdersPageBody>().await.expect("page body");
+    scope.cleanup(&pool).await;
+
+    assert_eq!(status, Some(StatusCode::OK));
+    assert_eq!(body.orders.len(), 2);
+    assert_eq!(body.orders[0].order_id, "2");
+    assert_eq!(body.orders[1].order_id, "3");
+    assert!(body.next_cursor.is_none());
+}
+
+#[tokio::test]
 async fn cursor_with_out_of_range_timestamp_returns_1102() {
     // Regression: a structurally valid cursor with t = i64::MAX previously
     // passed validation, then the repo's `to_timestamp($ / 1000.0)` pushed
