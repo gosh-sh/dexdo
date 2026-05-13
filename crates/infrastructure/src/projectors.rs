@@ -576,15 +576,15 @@ async fn apply_order_filled(
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let filled_amount = uint_field_to_decimal(&event.value, "filledAmount")?;
     let chain_order = node_chain_order(node, "OrderFilled")?;
+    let chain_seconds = node_unix_seconds(node);
 
     let updated = sqlx::query(
         r#"update live_orders
-              set amount_remaining = greatest(amount_remaining - $3::numeric, 0),
-                  status = case
-                      when amount_remaining - $3::numeric <= 0 then 'FILLED'
-                      else status
-                  end,
+              set amount_remaining = greatest(amount_remaining - $3::numeric, 0::numeric),
+                  status = case when amount_remaining - $3::numeric <= 0
+                                then 'FILLED' else status end,
                   last_chain_order = greatest(last_chain_order, $4),
+                  chain_updated_at = greatest(chain_updated_at, to_timestamp($5::bigint)),
                   updated_at = now()
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
@@ -592,9 +592,10 @@ async fn apply_order_filled(
     .bind(&order_id)
     .bind(&filled_amount)
     .bind(chain_order)
+    .bind(chain_seconds)
     .execute(&mut **tx)
     .await
-    .context("update live_orders on OrderFilled")?
+    .context("apply OrderFilled")?
     .rows_affected();
 
     if updated == 0 {
@@ -618,21 +619,24 @@ async fn apply_order_cancelled(
         node.src.as_deref().context("OrderCancelled: src missing on event message")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let chain_order = node_chain_order(node, "OrderCancelled")?;
+    let chain_seconds = node_unix_seconds(node);
 
     let updated = sqlx::query(
         r#"update live_orders
               set status = 'CANCELLED',
                   amount_remaining = 0,
                   last_chain_order = greatest(last_chain_order, $3),
+                  chain_updated_at = greatest(chain_updated_at, to_timestamp($4::bigint)),
                   updated_at = now()
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
     .bind(chain_order)
+    .bind(chain_seconds)
     .execute(&mut **tx)
     .await
-    .context("update live_orders on OrderCancelled")?
+    .context("apply OrderCancelled")?
     .rows_affected();
 
     if updated == 0 {
