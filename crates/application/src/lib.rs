@@ -188,6 +188,11 @@ pub struct OpenOrdersMarketFilter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Reject unknown fields so future cursor-shape additions don't silently
+// accept old/foreign blobs as valid — the spec at
+// docs/tech-specs/trading-api/read-api.md treats any decode failure as
+// `-1102 / 400`.
+#[serde(deny_unknown_fields)]
 pub struct OpenOrdersCursor {
     // Unix microseconds. The column `live_orders.chain_created_at` is a
     // `timestamptz` (microsecond resolution); storing milliseconds here
@@ -438,6 +443,15 @@ mod tests {
     fn cursor_decode_rejects_wrong_field_type() {
         // `t` should be a number; pass a string.
         let encoded = B64.encode(br#"{"t":"0","o":"1","b":"0:book"}"#);
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_unknown_field() {
+        // Any extra key fails decode so future cursor-shape additions
+        // can't quietly swallow old or forged blobs.
+        let encoded = B64.encode(br#"{"t":0,"o":"1","b":"0:book","x":"oops"}"#);
         let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
         assert_eq!(err, DomainError::MissingParameter);
     }

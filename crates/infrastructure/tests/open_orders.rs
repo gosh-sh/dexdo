@@ -491,7 +491,7 @@ async fn repo_returns_empty_page_for_limit_zero() {
     // rejects `limit = 0` with -1102 before reaching the repo is asserted in
     // the HTTP layer tests.
     let Some(pool) = setup().await else { return };
-    let _repo = PostgresReadModelRepository::new(pool.clone());
+    let repo = PostgresReadModelRepository::new(pool.clone());
     let scope = Scope::new();
     scope.cleanup(&pool).await;
     insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
@@ -508,7 +508,7 @@ async fn repo_returns_empty_page_for_limit_zero() {
     )
     .await;
 
-    let page = _repo
+    let page = repo
         .list_open_orders(&OpenOrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,

@@ -493,6 +493,17 @@ async fn apply_order_placed(
     // and `node_unix_seconds` would truncate to whole seconds before the
     // bind.
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    if chain_seconds.is_none() {
+        // The row will land with NULL `chain_created_at` and stay invisible
+        // to `/openOrders` because of the partial-index predicate. The path
+        // is documented as rare; surface it so we notice if it stops being.
+        warn!(
+            orderbook_address,
+            msg_id = %node.msg_id,
+            created_at = ?node.created_at,
+            "OrderPlaced has no parseable chain time; live_orders row will be hidden from /openOrders",
+        );
+    }
 
     sqlx::query(
         r#"insert into live_orders
