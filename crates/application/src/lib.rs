@@ -381,4 +381,140 @@ mod tests {
         assert!(ctx.require(Permission::UserData).is_err());
         assert!(ctx.require(Permission::Trade).is_err());
     }
+
+    // OpenOrdersCursor codec — pure-logic guards that the openOrders
+    // endpoint relies on. The integration tests in `dodex-api` also
+    // exercise these paths through the real router, but those are gated
+    // on `TEST_DATABASE_URL` and silently skip in unenrolled CI. The
+    // tests below run unconditionally.
+
+    fn sample_cursor() -> OpenOrdersCursor {
+        OpenOrdersCursor {
+            chain_created_at_us: 1_700_000_000_500_500,
+            order_id: "42".into(),
+            orderbook_address: "0:book".into(),
+        }
+    }
+
+    #[test]
+    fn cursor_round_trips_through_encode_decode() {
+        let cursor = sample_cursor();
+        let encoded = cursor.encode();
+        let decoded = OpenOrdersCursor::decode(&encoded).expect("round-trip");
+        assert_eq!(decoded, cursor);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_invalid_base64() {
+        let err = OpenOrdersCursor::decode("not~valid~base64").unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_empty_string() {
+        // Empty base64 decodes to an empty byte string; serde_json then
+        // refuses with "unexpected end of input". Either way: -1102.
+        let err = OpenOrdersCursor::decode("").unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_unparseable_json() {
+        // Valid base64, invalid JSON.
+        let encoded = B64.encode(b"not json");
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_missing_required_field() {
+        // Drop the `b` field entirely.
+        let encoded = B64.encode(br#"{"t":0,"o":"1"}"#);
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_wrong_field_type() {
+        // `t` should be a number; pass a string.
+        let encoded = B64.encode(br#"{"t":"0","o":"1","b":"0:book"}"#);
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_empty_order_id() {
+        let encoded =
+            OpenOrdersCursor { order_id: "".into(), ..sample_cursor() }.encode();
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_nondecimal_order_id() {
+        let encoded =
+            OpenOrdersCursor { order_id: "abc".into(), ..sample_cursor() }.encode();
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_order_id_over_78_digits() {
+        let encoded =
+            OpenOrdersCursor { order_id: "1".repeat(79), ..sample_cursor() }.encode();
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_accepts_order_id_at_78_digits() {
+        // 78 digits is the documented maximum that fits `numeric(78,0)`.
+        let encoded =
+            OpenOrdersCursor { order_id: "9".repeat(78), ..sample_cursor() }.encode();
+        OpenOrdersCursor::decode(&encoded).expect("78 digits is valid");
+    }
+
+    #[test]
+    fn cursor_decode_rejects_empty_orderbook_address() {
+        let encoded =
+            OpenOrdersCursor { orderbook_address: "".into(), ..sample_cursor() }.encode();
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_negative_timestamp() {
+        let encoded =
+            OpenOrdersCursor { chain_created_at_us: -1, ..sample_cursor() }.encode();
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_rejects_timestamp_above_bound() {
+        let encoded = OpenOrdersCursor {
+            chain_created_at_us: OPEN_ORDERS_MAX_CURSOR_TS_US + 1,
+            ..sample_cursor()
+        }
+        .encode();
+        let err = OpenOrdersCursor::decode(&encoded).unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[test]
+    fn cursor_decode_accepts_timestamp_at_bound() {
+        let encoded = OpenOrdersCursor {
+            chain_created_at_us: OPEN_ORDERS_MAX_CURSOR_TS_US,
+            ..sample_cursor()
+        }
+        .encode();
+        OpenOrdersCursor::decode(&encoded).expect("bound is inclusive");
+    }
+
+    #[test]
+    fn cursor_decode_accepts_timestamp_zero() {
+        let encoded =
+            OpenOrdersCursor { chain_created_at_us: 0, ..sample_cursor() }.encode();
+        OpenOrdersCursor::decode(&encoded).expect("zero is valid");
+    }
 }

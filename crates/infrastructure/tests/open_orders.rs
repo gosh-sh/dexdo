@@ -518,10 +518,12 @@ async fn repo_returns_empty_page_for_limit_zero() {
         .await
         .expect("limit=0 yields a clean page");
     assert!(page.orders.is_empty());
-    // With limit 0 we still ask Postgres for 1 row to detect "more available",
-    // so next_cursor reflects truncation rather than presence/absence of data.
-    // The HTTP layer rejects limit=0 before reaching the repo; this test just
-    // pins the repo's behaviour.
+    // The HTTP layer rejects `limit = 0` before reaching the repo; this test
+    // just pins the repo's behaviour for the unreachable-in-prod case. With
+    // limit 0 the SQL still fetches 1 row to detect "more available", but
+    // `truncate(0)` then empties the result and `.last()` returns `None`, so
+    // `next_cursor` is `None` regardless of whether matching rows existed.
+    assert!(page.next_cursor.is_none());
     scope.cleanup(&pool).await;
 }
 
