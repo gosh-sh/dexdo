@@ -263,7 +263,7 @@ where
         ctx: &AuthContext,
         market_address: Option<MarketAddress>,
         symbol: Option<Symbol>,
-        limit: Option<u16>,
+        limit: Option<i64>,
         cursor: Option<&str>,
     ) -> Result<OpenOrdersPage, anyhow::Error> {
         let market = match (market_address, symbol) {
@@ -276,7 +276,7 @@ where
 
         let limit = match limit {
             None => OPEN_ORDERS_DEFAULT_LIMIT,
-            Some(v) if (1..=OPEN_ORDERS_MAX_LIMIT).contains(&v) => v,
+            Some(v) if (1..=i64::from(OPEN_ORDERS_MAX_LIMIT)).contains(&v) => v as u16,
             Some(_) => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
         };
 
