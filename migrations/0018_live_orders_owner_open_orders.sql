@@ -18,6 +18,13 @@ update live_orders
    set amount_initial = amount_remaining
  where amount_initial = 0;
 
+-- The query's full ORDER BY / cursor tuple is
+-- `(chain_created_at, order_id, orderbook_address)`. `orderbook_address` is
+-- intentionally not part of the index — it appears only as a heap-filter
+-- tie-breaker that disambiguates rows sharing both leading columns. Per-owner
+-- cardinality at any single `(chain_created_at, order_id)` is expected to be 1
+-- (or rare 2), so the trailing sort runs in-memory over a tiny set; widening
+-- the index would cost write amplification with no read win.
 create index if not exists live_orders_open_owner_idx
     on live_orders (owner_pn_address, chain_created_at, order_id)
     where owner_pn_address is not null

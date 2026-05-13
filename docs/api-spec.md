@@ -894,7 +894,7 @@ Behavior:
 - Orders with status `FILLED`, `CANCELED`, or `REJECTED` are not returned.
 - Empty results are returned as `{ "orders": [], "nextCursor": null }`.
 - Results are sorted by `time ASC`, then `orderId ASC`. For all-market requests this ordering is global across all returned orders.
-- Pagination is cursor-based on `(time, orderId)`. The sort key is monotonic, so concurrent fills/cancels between page reads cannot duplicate or skip rows — closed orders simply drop out.
+- Pagination is cursor-based on `(time, orderId)` plus an internal tie-breaker carried inside the opaque cursor blob. The sort key is monotonic, so concurrent fills/cancels between page reads cannot duplicate or skip rows — closed orders simply drop out.
 - The endpoint is eventually consistent: a freshly placed order may briefly not appear, between the time the public `OrderPlaced` event is indexed and the time the private confirmation that carries owner attribution is indexed.
 
 Response:

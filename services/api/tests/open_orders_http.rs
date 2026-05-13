@@ -639,6 +639,35 @@ async fn cursor_with_out_of_range_timestamp_returns_1102() {
 }
 
 #[tokio::test]
+async fn limit_zero_returns_1102() {
+    // Companion to the infra-level `repo_returns_empty_page_for_limit_zero`:
+    // the repo accepts `limit = 0` and returns a clean empty page, but the
+    // HTTP/use-case layer must reject it as out-of-range with -1102 before
+    // the SQL ever runs.
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("limit", "0"),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("limit", "0")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
 async fn unparseable_limit_returns_1102() {
     // Regression: `limit=abc` previously surfaced as -1130 (InvalidParameter)
     // via `optional_typed_query::<i64>`, breaking the openOrders error
