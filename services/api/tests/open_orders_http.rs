@@ -384,3 +384,147 @@ async fn missing_timestamp_uses_existing_auth_error() {
     let body = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(body.code, -1003);
 }
+
+#[tokio::test]
+async fn pagination_returns_next_cursor_and_finishes() {
+    let Some((service, pool, kek)) = common::setup().await else { return };
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    seed_readonly_key(&pool, &kek, &scope).await;
+    insert_market(&pool, &scope).await;
+    let owner = trading_pn(&pool).await;
+
+    for (i, t) in (1..=3i64).zip([1_700_000_010i64, 1_700_000_020, 1_700_000_030]) {
+        sqlx::query(
+            r#"insert into live_orders
+                   (orderbook_address, order_id, outcome_id, is_buy, price,
+                    amount_initial, amount_remaining, owner_pn_address,
+                    client_order_id, status, last_chain_order,
+                    chain_created_at, chain_updated_at,
+                    created_at, updated_at)
+               values ($1, $2::numeric, 1, true, 12345::numeric,
+                       1000::numeric, 1000::numeric, $3,
+                       $4, 'OPEN', $5,
+                       to_timestamp($6::bigint), to_timestamp($6::bigint),
+                       to_timestamp($6::bigint), to_timestamp($6::bigint))"#,
+        )
+        .bind(&scope.book)
+        .bind(i)
+        .bind(&owner)
+        .bind(format!("client-{i}"))
+        .bind(format!("5f8000000000000{:05}", i))
+        .bind(t)
+        .execute(&pool)
+        .await
+        .expect("insert live order");
+    }
+
+    // Page 1: limit=2.
+    let ts1 = now_ms();
+    let canonical_market = canonical_market_address(&scope.pmp);
+    let canonical = canonical_query(&[
+        ("limit", "2"),
+        ("marketAddress", &canonical_market),
+        ("recvWindow", "5000"),
+        ("symbol", &scope.symbol),
+        ("timestamp", &ts1.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("limit", "2")
+        .query("marketAddress", scope.pmp.as_str())
+        .query("symbol", scope.symbol.as_str())
+        .query("recvWindow", "5000")
+        .query("timestamp", ts1.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let page1 = resp.take_json::<OpenOrdersPageBody>().await.expect("page1");
+    assert_eq!(page1.orders.len(), 2);
+    assert_eq!(page1.orders[0].order_id, "1");
+    assert_eq!(page1.orders[1].order_id, "2");
+    let cursor = page1.next_cursor.expect("cursor on partial page");
+
+    // Page 2: pass the cursor.
+    let ts2 = now_ms();
+    let canonical_market = canonical_market_address(&scope.pmp);
+    let canonical = canonical_query(&[
+        ("cursor", &cursor),
+        ("limit", "2"),
+        ("marketAddress", &canonical_market),
+        ("recvWindow", "5000"),
+        ("symbol", &scope.symbol),
+        ("timestamp", &ts2.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("cursor", cursor.as_str())
+        .query("limit", "2")
+        .query("marketAddress", scope.pmp.as_str())
+        .query("symbol", scope.symbol.as_str())
+        .query("recvWindow", "5000")
+        .query("timestamp", ts2.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let page2 = resp.take_json::<OpenOrdersPageBody>().await.expect("page2");
+    scope.cleanup(&pool).await;
+
+    assert_eq!(page2.orders.len(), 1);
+    assert_eq!(page2.orders[0].order_id, "3");
+    assert!(page2.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn bad_limit_returns_1102() {
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("limit", "501"),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("limit", "501")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
+async fn bad_cursor_returns_1102() {
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("cursor", "not-a-valid-cursor"),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("cursor", "not-a-valid-cursor")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
