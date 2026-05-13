@@ -236,14 +236,18 @@ outcome)` pair).
 | `owner_pn_address` | `text` | Trading PrivateNote address that owns the order. Initially NULL from `OrderBook.OrderPlaced`; attached by `PrivateNote.OrderPlacedConfirmed` using the event source address. NULL rows can still contribute to public depth, but cannot appear in account-scoped order responses. |
 | `status` | `text` CHECK `IN ('OPEN', 'FILLED', 'CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. |
 | `last_chain_order` | `text` NOT NULL | Chain-order key (`msg_chain_order` from the gateway) of the most recent OrderBook event that touched this order. Lex-monotonic via `greatest(existing, new)` on OrderBook writes. Feeds `lastUpdateId` in depth responses as a STRING. |
+| `chain_created_at` | `timestamptz` | On-chain block time of the originating `OrderBook.OrderPlaced`. Drives `time` in `/api/v1/openOrders` and the primary pagination sort key. NULL on pre-migration rows. |
+| `chain_updated_at` | `timestamptz` | On-chain block time of the most recent book event that touched the order — `OrderPlaced`, `OrderFilled`, `OrderCancelled`. Advanced via `greatest(...)`. Drives `updateTime` in `/api/v1/openOrders`. NULL on pre-migration rows. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Index: `live_orders_open_book_idx` — partial, `(orderbook_address, outcome_id, is_buy, price desc) WHERE status = 'OPEN'`. Sized for the depth query: top-N levels per side per outcome.
 
 Index: `live_orders_open_owner_idx` — partial,
-`(owner_pn_address, status, orderbook_address, outcome_id, created_at, order_id)`
-for account-scoped open-order reads. It filters to non-NULL owners, `OPEN`
-status, and positive remaining quantity.
+`(owner_pn_address, chain_created_at, order_id)` partial on
+`owner_pn_address IS NOT NULL AND status = 'OPEN' AND amount_remaining > 0`.
+The seek path for the cursor-based `/api/v1/openOrders` query: the index
+sort columns align with the API's `(time, orderId)` ordering, and the
+partial predicate confines the index to rows the endpoint can return.
 
 ### `order_book_snapshots`
 
