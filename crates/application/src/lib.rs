@@ -196,7 +196,17 @@ impl OpenOrdersCursor {
 
     pub fn decode(s: &str) -> Result<Self, DomainError> {
         let bytes = B64.decode(s).map_err(|_| DomainError::MissingParameter)?;
-        serde_json::from_slice(&bytes).map_err(|_| DomainError::MissingParameter)
+        let cursor: Self =
+            serde_json::from_slice(&bytes).map_err(|_| DomainError::MissingParameter)?;
+        // `order_id` is a uint256 decimal string on the wire. Anything else
+        // would surface as a sqlx ::numeric cast failure → -1000/500 instead
+        // of the documented -1102/400 for malformed cursors.
+        if cursor.order_id.is_empty()
+            || !cursor.order_id.chars().all(|c| c.is_ascii_digit())
+        {
+            return Err(DomainError::MissingParameter);
+        }
+        Ok(cursor)
     }
 }
 

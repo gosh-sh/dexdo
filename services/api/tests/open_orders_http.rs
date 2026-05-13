@@ -530,6 +530,41 @@ async fn bad_cursor_returns_1102() {
 }
 
 #[tokio::test]
+async fn cursor_with_nonnumeric_order_id_returns_1102() {
+    // Regression: a structurally valid cursor whose `o` field is not a decimal
+    // string used to surface as -1000/500 because sqlx hit a numeric cast
+    // failure during query bind. The cursor codec now rejects it up front so
+    // the documented -1102/400 fires instead.
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let bad_cursor = dodex_application::OpenOrdersCursor {
+        chain_created_at_ms: 0,
+        order_id: "abc".into(),
+    }
+    .encode();
+
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("cursor", &bad_cursor),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("cursor", bad_cursor.as_str())
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
 async fn limit_above_u16_max_returns_1102() {
     // Regression: `limit=65536` previously fell through u16 parsing and returned
     // -1130 instead of the spec-required -1102. Confirm both `limit=501` (above
