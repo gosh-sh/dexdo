@@ -513,6 +513,71 @@ async fn orderplaced_sets_chain_timestamps_from_event_time() {
 }
 
 #[tokio::test]
+async fn orderplaced_preserves_fractional_chain_seconds() {
+    // Regression: `chain_seconds` used to be truncated to `i64` before the
+    // bind, losing the millisecond component of fractional chain times the
+    // gateway already round-trips. The projector now binds the full f64.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_chain_ts_fractional";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "12";
+    let msg_id = format!("{test}-msg");
+    let chain_seconds: f64 = 1_700_555_000.5;
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::double precision), $4, $4,
+                   'OrderBook.OrderPlaced', '{}'::jsonb, $5)"#,
+    )
+    .bind(&msg_id)
+    .bind(format!("5f80{msg_id:0>28}"))
+    .bind(chain_seconds)
+    .bind(&orderbook_addr)
+    .bind(json!({
+        "orderId": order_id,
+        "outcomeId": "1",
+        "isBuy": true,
+        "price": "100",
+        "amount": "50",
+        "clientOrderId": "client-frac",
+    }))
+    .execute(&pool)
+    .await
+    .expect("insert raw_events");
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let (chain_created_ms, chain_updated_ms): (i64, i64) = sqlx::query_as(
+        r#"select (extract(epoch from chain_created_at) * 1000)::bigint,
+                  (extract(epoch from chain_updated_at) * 1000)::bigint
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read chain ts");
+
+    assert_eq!(chain_created_ms, 1_700_555_000_500);
+    assert_eq!(chain_updated_ms, 1_700_555_000_500);
+}
+
+#[tokio::test]
 async fn orderfilled_advances_chain_updated_at() {
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };

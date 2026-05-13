@@ -487,7 +487,12 @@ async fn apply_order_placed(
     let client_order_id = field_str(&event.value, "clientOrderId").ok().map(String::from);
     let chain_order = node_chain_order(node, "OrderPlaced")?;
 
-    let chain_seconds = node_unix_seconds(node);
+    // Bind the fractional-seconds form so `chain_created_at` /
+    // `chain_updated_at` survive sub-second precision through `to_timestamp`.
+    // The openOrders endpoint returns `time` / `updateTime` in milliseconds,
+    // and `node_unix_seconds` would truncate to whole seconds before the
+    // bind.
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
 
     sqlx::query(
         r#"insert into live_orders
@@ -496,7 +501,7 @@ async fn apply_order_placed(
                 chain_created_at, chain_updated_at, updated_at)
            values ($1, $2::numeric, $3, $4, $5::numeric,
                    $6::numeric, $6::numeric, $7, 'OPEN', $8,
-                   to_timestamp($9::bigint), to_timestamp($9::bigint), now())
+                   to_timestamp($9::double precision), to_timestamp($9::double precision), now())
            on conflict (orderbook_address, order_id) do update
                set outcome_id = excluded.outcome_id,
                    is_buy = excluded.is_buy,
@@ -597,7 +602,7 @@ async fn apply_order_filled(
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let filled_amount = uint_field_to_decimal(&event.value, "filledAmount")?;
     let chain_order = node_chain_order(node, "OrderFilled")?;
-    let chain_seconds = node_unix_seconds(node);
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
 
     let updated = sqlx::query(
         r#"update live_orders
@@ -605,7 +610,7 @@ async fn apply_order_filled(
                   status = case when amount_remaining - $3::numeric <= 0
                                 then 'FILLED' else status end,
                   last_chain_order = greatest(last_chain_order, $4),
-                  chain_updated_at = greatest(chain_updated_at, to_timestamp($5::bigint)),
+                  chain_updated_at = greatest(chain_updated_at, to_timestamp($5::double precision)),
                   updated_at = now()
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
@@ -640,14 +645,14 @@ async fn apply_order_cancelled(
         node.src.as_deref().context("OrderCancelled: src missing on event message")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let chain_order = node_chain_order(node, "OrderCancelled")?;
-    let chain_seconds = node_unix_seconds(node);
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
 
     let updated = sqlx::query(
         r#"update live_orders
               set status = 'CANCELLED',
                   amount_remaining = 0,
                   last_chain_order = greatest(last_chain_order, $3),
-                  chain_updated_at = greatest(chain_updated_at, to_timestamp($4::bigint)),
+                  chain_updated_at = greatest(chain_updated_at, to_timestamp($4::double precision)),
                   updated_at = now()
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
