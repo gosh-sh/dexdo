@@ -918,7 +918,7 @@ Response:
       "updateTime": 1710000001000
     }
   ],
-  "nextCursor": "eyJ0IjoxNzEwMDAwMDAwMDAwLCJvIjoiMTIzNDU2Nzg5In0"
+  "nextCursor": "eyJ0IjoxNzEwMDAwMDAwMDAwMDAwLCJvIjoiMTIzNDU2Nzg5IiwiYiI6IjA6b3JkZXJib29rLWFkZHJlc3MifQ"
 }
 ```
 
