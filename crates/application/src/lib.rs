@@ -165,13 +165,12 @@ pub struct GetDepthQuery {
 pub const OPEN_ORDERS_DEFAULT_LIMIT: u16 = 100;
 pub const OPEN_ORDERS_MAX_LIMIT: u16 = 500;
 
-// Upper bound on `OpenOrdersCursor.chain_created_at_ms`. Plausible chain
-// timestamps fit in ~13 decimal digits; 8e15 ms ≈ year 255000 AD which is
-// well below Postgres' `to_timestamp` limit (year 294276 AD) and far above
-// any value a real chain would ever produce. Anything outside this range
-// is treated as a malformed cursor so the SQL never raises a
-// timestamp-out-of-range error.
-pub const OPEN_ORDERS_MAX_CURSOR_TS_MS: i64 = 8_000_000_000_000_000;
+// Upper bound on `OpenOrdersCursor.chain_created_at_us`. `chain_created_at`
+// is a `timestamptz` (microsecond resolution); 8e18 µs ≈ year 255000 AD,
+// far above any real chain epoch and well under Postgres' `to_timestamp`
+// limit (year 294276 AD). Anything outside this range is treated as a
+// malformed cursor so the SQL never raises a timestamp-out-of-range error.
+pub const OPEN_ORDERS_MAX_CURSOR_TS_US: i64 = 8_000_000_000_000_000_000;
 
 #[derive(Debug, Clone)]
 pub struct OpenOrdersQuery {
@@ -189,8 +188,12 @@ pub struct OpenOrdersMarketFilter {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenOrdersCursor {
+    // Unix microseconds. The column `live_orders.chain_created_at` is a
+    // `timestamptz` (microsecond resolution); storing milliseconds here
+    // would round-trip past the row's full timestamp and let the
+    // strict-`>` next-page predicate return the boundary row again.
     #[serde(rename = "t")]
-    pub chain_created_at_ms: i64,
+    pub chain_created_at_us: i64,
     #[serde(rename = "o")]
     pub order_id: String,
     // Orderbook address is the unique tie-breaker for the all-markets
@@ -228,12 +231,12 @@ impl OpenOrdersCursor {
         if cursor.orderbook_address.is_empty() {
             return Err(DomainError::MissingParameter);
         }
-        // The repo binds `chain_created_at_ms` into `to_timestamp($ / 1000.0)`.
-        // An extreme `t` value (e.g., near `i64::MAX`) would push Postgres
-        // past its timestamp range and raise a `-1000/500`. Bound the value
-        // at parse time so malformed cursors keep returning the documented
-        // `-1102/400`.
-        if !(0..=OPEN_ORDERS_MAX_CURSOR_TS_MS).contains(&cursor.chain_created_at_ms) {
+        // The repo binds `chain_created_at_us` into
+        // `to_timestamp($ / 1_000_000.0)`. An extreme `t` value (e.g., near
+        // `i64::MAX`) would push Postgres past its timestamp range and raise
+        // `-1000/500`. Bound the value at parse time so malformed cursors
+        // keep returning the documented `-1102/400`.
+        if !(0..=OPEN_ORDERS_MAX_CURSOR_TS_US).contains(&cursor.chain_created_at_us) {
             return Err(DomainError::MissingParameter);
         }
         Ok(cursor)

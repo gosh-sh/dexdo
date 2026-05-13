@@ -537,7 +537,7 @@ async fn cursor_with_nonnumeric_order_id_returns_1102() {
     // the documented -1102/400 fires instead.
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let bad_cursor = dodex_application::OpenOrdersCursor {
-        chain_created_at_ms: 0,
+        chain_created_at_us: 0,
         order_id: "abc".into(),
         orderbook_address: "0:book".into(),
     }
@@ -574,7 +574,7 @@ async fn cursor_with_overlong_order_id_returns_1102() {
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let overlong = "1".repeat(79);
     let bad_cursor = dodex_application::OpenOrdersCursor {
-        chain_created_at_ms: 0,
+        chain_created_at_us: 0,
         order_id: overlong,
         orderbook_address: "0:book".into(),
     }
@@ -610,7 +610,7 @@ async fn cursor_with_out_of_range_timestamp_returns_1102() {
     // codec now bounds the millisecond value before returning.
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let bad_cursor = dodex_application::OpenOrdersCursor {
-        chain_created_at_ms: i64::MAX,
+        chain_created_at_us: i64::MAX,
         order_id: "1".into(),
         orderbook_address: "0:book".into(),
     }

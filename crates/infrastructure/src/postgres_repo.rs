@@ -302,7 +302,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None => None,
         };
 
-        let cursor_ts_ms = query.cursor.as_ref().map(|c| c.chain_created_at_ms);
+        let cursor_ts_us = query.cursor.as_ref().map(|c| c.chain_created_at_us);
         let cursor_order_id = query.cursor.as_ref().map(|c| c.order_id.clone());
         let cursor_orderbook = query.cursor.as_ref().map(|c| c.orderbook_address.clone());
         let limit_plus_one = i64::from(query.limit) + 1;
@@ -318,8 +318,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.amount_initial::text as orig_qty,
                           greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
                           lo.is_buy as is_buy,
-                          (extract(epoch from lo.chain_created_at) * 1000)::bigint as chain_created_at_ms,
-                          (extract(epoch from lo.chain_updated_at) * 1000)::bigint as chain_updated_at_ms,
+                          (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
+                          (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
                           mo.price_precision as price_precision,
                           mo.quantity_precision as quantity_precision
                      from live_orders lo
@@ -337,14 +337,14 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       and lo.outcome_id = $3
                       and ($4::bigint is null
                            or (lo.chain_created_at, lo.order_id, lo.orderbook_address)
-                              > (to_timestamp($4::bigint / 1000.0), $5::numeric, $6::text))
+                              > (to_timestamp($4::bigint / 1000000.0), $5::numeric, $6::text))
                     order by lo.chain_created_at asc, lo.order_id asc, lo.orderbook_address asc
                     limit $7"#,
             )
             .bind(query.owner_pn_address.as_str())
             .bind(orderbook_address)
             .bind(outcome_id)
-            .bind(cursor_ts_ms)
+            .bind(cursor_ts_us)
             .bind(cursor_order_id.as_deref())
             .bind(cursor_orderbook.as_deref())
             .bind(limit_plus_one)
@@ -361,8 +361,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.amount_initial::text as orig_qty,
                           greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
                           lo.is_buy as is_buy,
-                          (extract(epoch from lo.chain_created_at) * 1000)::bigint as chain_created_at_ms,
-                          (extract(epoch from lo.chain_updated_at) * 1000)::bigint as chain_updated_at_ms,
+                          (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
+                          (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
                           mo.price_precision as price_precision,
                           mo.quantity_precision as quantity_precision
                      from live_orders lo
@@ -378,12 +378,12 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       and m.last_reconciled_at is not null
                       and ($2::bigint is null
                            or (lo.chain_created_at, lo.order_id, lo.orderbook_address)
-                              > (to_timestamp($2::bigint / 1000.0), $3::numeric, $4::text))
+                              > (to_timestamp($2::bigint / 1000000.0), $3::numeric, $4::text))
                     order by lo.chain_created_at asc, lo.order_id asc, lo.orderbook_address asc
                     limit $5"#,
             )
             .bind(query.owner_pn_address.as_str())
-            .bind(cursor_ts_ms)
+            .bind(cursor_ts_us)
             .bind(cursor_order_id.as_deref())
             .bind(cursor_orderbook.as_deref())
             .bind(limit_plus_one)
@@ -401,7 +401,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
         let next_cursor = if has_more {
             orders_raw.last().map(|row| OpenOrdersCursor {
-                chain_created_at_ms: row.chain_created_at_ms,
+                chain_created_at_us: row.chain_created_at_us,
                 order_id: row.order_id.clone(),
                 orderbook_address: row.orderbook_address.clone(),
             })
@@ -436,8 +436,12 @@ struct OpenOrderRow {
     orig_qty: String,
     executed_qty: String,
     is_buy: bool,
-    chain_created_at_ms: i64,
-    chain_updated_at_ms: i64,
+    // Microseconds since the epoch — matches the timestamptz column's
+    // native precision so the cursor predicate compares apples to apples.
+    // The API renders `time` / `updateTime` in milliseconds by dividing
+    // by 1_000 at the boundary.
+    chain_created_at_us: i64,
+    chain_updated_at_us: i64,
     price_precision: i32,
     quantity_precision: i32,
 }
@@ -492,8 +496,11 @@ fn open_order_from_row(row: OpenOrderRow) -> Result<OpenOrder, anyhow::Error> {
         time_in_force: TimeInForce::Gtc,
         order_type: OrderType::Limit,
         side: if row.is_buy { OrderSide::Buy } else { OrderSide::Sell },
-        time: row.chain_created_at_ms,
-        update_time: row.chain_updated_at_ms,
+        // The API contract is unix milliseconds; storage and cursor are at
+        // microsecond precision. Truncating div is fine — sub-ms detail is
+        // not exposed externally.
+        time: row.chain_created_at_us / 1_000,
+        update_time: row.chain_updated_at_us / 1_000,
     })
 }
 

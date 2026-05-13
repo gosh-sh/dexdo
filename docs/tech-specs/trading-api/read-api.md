@@ -76,12 +76,12 @@ Consequence: between two paginated reads, an order that closes simply disappears
 The cursor is base64url-encoded JSON:
 
 ```json
-{"t": <chain_created_at_ms:i64>, "o": "<order_id:string>", "b": "<orderbook_address:string>"}
+{"t": <chain_created_at_us:i64>, "o": "<order_id:string>", "b": "<orderbook_address:string>"}
 ```
 
-`t` is unix-milliseconds, matching the response `time` field. `o` is the decimal string form of the chain-side order id (matches the public `orderId`). `b` is the orderbook contract address that carried the order (the internal `live_orders.orderbook_address`); it is part of the cursor only to disambiguate ties and is never returned to the client outside the opaque cursor blob.
+`t` is unix-microseconds — matching `live_orders.chain_created_at`'s native `timestamptz` precision. The API renders `time` / `updateTime` as milliseconds by truncating `us / 1_000` at the response boundary; using milliseconds inside the cursor would round past sub-millisecond chain timestamps and let the strict-`>` next-page predicate return the boundary row again. `o` is the decimal string form of the chain-side order id (matches the public `orderId`). `b` is the orderbook contract address that carried the order (the internal `live_orders.orderbook_address`); it is part of the cursor only to disambiguate ties and is never returned to the client outside the opaque cursor blob.
 
-Decoding is strict: invalid base64, unparseable JSON, missing field, wrong field type, non-decimal `o`, or empty `b` → `DomainError::MissingParameter` → `-1102` / 400. A well-formed cursor whose `(t, o, b)` triple lies past the last currently-open row is not an error; the SQL `WHERE (chain_created_at, order_id, orderbook_address) > ($t_ts, $o::numeric, $b::text)` simply returns zero rows and `next_cursor` is `null`.
+Decoding is strict: invalid base64, unparseable JSON, missing field, wrong field type, non-decimal `o`, empty `b`, or a `t` outside `[0, 8e18]` → `DomainError::MissingParameter` → `-1102` / 400. A well-formed cursor whose `(t, o, b)` triple lies past the last currently-open row is not an error; the SQL `WHERE (chain_created_at, order_id, orderbook_address) > (to_timestamp($t::bigint / 1_000_000.0), $o::numeric, $b::text)` simply returns zero rows and `next_cursor` is `null`.
 
 #### Page-size protocol
 
@@ -128,8 +128,8 @@ select m.pmp_address                                                       as ma
        lo.amount_initial::text                                             as orig_qty,
        greatest(lo.amount_initial - lo.amount_remaining, 0)::text          as executed_qty,
        lo.is_buy                                                           as is_buy,
-       (extract(epoch from lo.chain_created_at) * 1000)::bigint            as time_ms,
-       (extract(epoch from lo.chain_updated_at) * 1000)::bigint            as update_time_ms,
+       (extract(epoch from lo.chain_created_at) * 1000000)::bigint         as chain_created_at_us,
+       (extract(epoch from lo.chain_updated_at) * 1000000)::bigint         as chain_updated_at_us,
        mo.price_precision                                                  as price_precision,
        mo.quantity_precision                                               as quantity_precision
   from live_orders lo
@@ -144,7 +144,8 @@ select m.pmp_address                                                       as ma
    /* filtered variant only: */
    /* and lo.orderbook_address = $2 and lo.outcome_id = $3 */
    /* if cursor present: */
-   /* and (lo.chain_created_at, lo.order_id, lo.orderbook_address) > ($t::timestamptz, $o::numeric, $b::text) */
+   /* and (lo.chain_created_at, lo.order_id, lo.orderbook_address)
+          > (to_timestamp($t::bigint / 1_000_000.0), $o::numeric, $b::text) */
  order by lo.chain_created_at asc, lo.order_id asc, lo.orderbook_address asc
  limit $limit + 1;
 ```
@@ -172,7 +173,7 @@ The index is partial so it contains only rows the endpoint can return. Cursor lo
 | Layer | File | Change |
 | --- | --- | --- |
 | Domain | `crates/domain/src/lib.rs` | `OpenOrder`, `OpenOrderStatus`, `TimeInForce`, `OrderType`, `OrderSide` (unchanged from current WIP). |
-| Application | `crates/application/src/lib.rs` | `OpenOrdersQuery { owner_pn_address, market, limit, cursor }`, `OpenOrdersCursor { chain_created_at_ms, order_id }`, `OpenOrdersPage { orders, next_cursor }`. `MarketReadRepository::list_open_orders` returns `OpenOrdersPage`. `GetOpenOrdersUseCase::execute(ctx, market_address, symbol, limit, cursor)` validates the pairing, the limit range, and decodes the cursor. |
+| Application | `crates/application/src/lib.rs` | `OpenOrdersQuery { owner_pn_address, market, limit, cursor }`, `OpenOrdersCursor { chain_created_at_us, order_id, orderbook_address }`, `OpenOrdersPage { orders, next_cursor }`. `MarketReadRepository::list_open_orders` returns `OpenOrdersPage`. `GetOpenOrdersUseCase::execute(ctx, market_address, symbol, limit, cursor)` validates the pairing, the limit range, and decodes the cursor. |
 | Infrastructure | `crates/infrastructure/src/postgres_repo.rs` | Two SQL variants (filtered / all-markets) with the cursor predicate and `LIMIT $limit + 1`. Cursor base64url JSON codec. `open_order_from_row` reads `chain_created_at` / `chain_updated_at`. |
 | Indexer | `crates/infrastructure/src/projectors.rs` | `apply_order_placed` writes `chain_created_at = node_unix_seconds(node)` on insert with `least(...)` on conflict; `chain_updated_at = greatest(...)`. `apply_order_filled` and `apply_order_cancelled` advance `chain_updated_at = greatest(chain_updated_at, $node_ts)`. `apply_order_placed_confirmed` guards with `owner_pn_address IS NULL` for idempotency; on zero rows updated, distinguish "row missing → Deferred" from "already attributed → Applied" via one follow-up `select`. Does not advance `chain_updated_at`. |
 | HTTP | `services/api/src/lib.rs` | `get_open_orders` reads `limit` (`req.query::<u16>`) and `cursor` (`non_empty_query`); passes them into the use case; returns `Json<OpenOrdersPageResponse>` with `{ orders: [...], nextCursor }` (camelCase). Router registration unchanged. |

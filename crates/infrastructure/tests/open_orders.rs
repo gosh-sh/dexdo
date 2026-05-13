@@ -546,6 +546,76 @@ async fn rows_with_null_chain_timestamps_are_excluded() {
 }
 
 #[tokio::test]
+async fn cursor_handles_sub_millisecond_chain_timestamps() {
+    // Regression: `chain_created_at` carries sub-millisecond precision
+    // (the projector now binds `parse_unix_seconds` as f64). A cursor that
+    // round-tripped through milliseconds would compare against a rounded
+    // timestamp and the strict-`>` predicate would return the boundary row
+    // again on the next page. The cursor stores microseconds so the
+    // predicate matches storage precision.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // Two open orders in the same book whose timestamps share a millisecond
+    // but differ by 499 microseconds.
+    for (order_id, fractional_secs) in [(1_i64, 1_700_000_000.500_500_f64), (2_i64, 1_700_000_000.500_999_f64)] {
+        sqlx::query(
+            r#"insert into live_orders
+                   (orderbook_address, order_id, outcome_id, is_buy, price,
+                    amount_initial, amount_remaining, owner_pn_address,
+                    client_order_id, status, last_chain_order,
+                    chain_created_at, chain_updated_at,
+                    created_at, updated_at)
+               values ($1, $2::numeric, 1, true, 12345::numeric,
+                       1000::numeric, 1000::numeric, $3,
+                       $4, 'OPEN', $5,
+                       to_timestamp($6::double precision), to_timestamp($6::double precision),
+                       now(), now())"#,
+        )
+        .bind(&scope.book_yes)
+        .bind(order_id)
+        .bind(&scope.owner)
+        .bind(format!("client-{order_id}"))
+        .bind(format!("5f8000000000000{:05}", order_id))
+        .bind(fractional_secs)
+        .execute(&pool)
+        .await
+        .expect("insert sub-ms row");
+    }
+
+    let first = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 1,
+            cursor: None,
+        })
+        .await
+        .expect("first page");
+    assert_eq!(first.orders.len(), 1);
+    assert_eq!(first.orders[0].order_id, "1");
+    let cursor = first.next_cursor.expect("next_cursor present");
+
+    let second = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 1,
+            cursor: Some(cursor),
+        })
+        .await
+        .expect("second page");
+    assert_eq!(second.orders.len(), 1, "second page must not repeat the boundary row");
+    assert_eq!(second.orders[0].order_id, "2");
+    assert!(second.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+#[tokio::test]
 async fn cross_book_tie_does_not_lose_orders_across_pages() {
     // Regression: `live_orders.order_id` is only unique within an orderbook
     // (PK is `(orderbook_address, order_id)`). For the all-markets variant,
