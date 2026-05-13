@@ -445,7 +445,7 @@ async fn get_open_orders(
 
     let market_address = non_empty_query(req, "marketAddress").map(MarketAddress);
     let symbol = non_empty_query(req, "symbol").map(Symbol);
-    let limit = req.query::<u16>("limit");
+    let limit = optional_typed_query::<u16>(req, "limit")?;
     let cursor = non_empty_query(req, "cursor");
 
     let use_case = GetOpenOrdersUseCase::new(state.repo);
