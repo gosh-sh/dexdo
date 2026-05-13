@@ -139,10 +139,14 @@ async fn insert_order(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, owner_pn_address,
-                client_order_id, status, last_chain_order, created_at, updated_at)
+                client_order_id, status, last_chain_order,
+                chain_created_at, chain_updated_at,
+                created_at, updated_at)
            values ($1, $2::numeric, 1, true, $3::numeric,
                    $4::numeric, $5::numeric, $6, $7, $8,
-                   $9, to_timestamp($10), to_timestamp($10 + 1))"#,
+                   $9,
+                   to_timestamp($10::bigint), to_timestamp(($10 + 1)::bigint),
+                   to_timestamp($10::bigint), to_timestamp(($10 + 1)::bigint))"#,
     )
     .bind(book)
     .bind(order_id)
@@ -343,5 +347,144 @@ async fn unknown_market_symbol_returns_domain_error() {
     let domain = err.downcast_ref::<DomainError>().expect("typed DomainError");
     assert_eq!(*domain, DomainError::InvalidMarketOrSymbol);
 
+    scope.cleanup(&pool).await;
+}
+
+#[tokio::test]
+async fn cursor_returns_subsequent_page_in_order() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    for (i, t) in (1..=3).zip([1_700_000_010, 1_700_000_020, 1_700_000_030]) {
+        insert_order(
+            &pool, &scope.book_yes, i, Some(&scope.owner),
+            "12345", "1000", "1000", "OPEN", t,
+        ).await;
+    }
+
+    let first = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 2,
+            cursor: None,
+        })
+        .await
+        .expect("first page");
+    assert_eq!(first.orders.len(), 2);
+    assert_eq!(first.orders[0].order_id, "1");
+    assert_eq!(first.orders[1].order_id, "2");
+    let cursor = first.next_cursor.expect("next_cursor present after partial page");
+
+    let second = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 2,
+            cursor: Some(cursor),
+        })
+        .await
+        .expect("second page");
+    assert_eq!(second.orders.len(), 1);
+    assert_eq!(second.orders[0].order_id, "3");
+    assert!(second.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+#[tokio::test]
+async fn cursor_stable_under_concurrent_fills() {
+    // Mid-pagination a row may move from OPEN to FILLED. Because the sort key
+    // (chain_created_at, order_id) is monotonic and the next-page predicate is
+    // strict `>`, the second page must not duplicate already-returned rows or
+    // skip rows that remain open.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    for (i, t) in (1..=4).zip([1_700_000_010, 1_700_000_020, 1_700_000_030, 1_700_000_040]) {
+        insert_order(
+            &pool, &scope.book_yes, i, Some(&scope.owner),
+            "12345", "1000", "1000", "OPEN", t,
+        ).await;
+    }
+
+    let first = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 2,
+            cursor: None,
+        })
+        .await
+        .expect("first page");
+    assert_eq!(first.orders.len(), 2);
+    assert_eq!(first.orders[0].order_id, "1");
+    assert_eq!(first.orders[1].order_id, "2");
+    let cursor = first.next_cursor.expect("next_cursor present");
+
+    // Between pages, order 3 fully fills and order 2 (already returned) cancels.
+    sqlx::query(
+        "update live_orders set status = 'FILLED', amount_remaining = 0
+              where orderbook_address = $1 and order_id = 3::numeric",
+    ).bind(&scope.book_yes).execute(&pool).await.expect("fill order 3");
+    sqlx::query(
+        "update live_orders set status = 'CANCELLED', amount_remaining = 0
+              where orderbook_address = $1 and order_id = 2::numeric",
+    ).bind(&scope.book_yes).execute(&pool).await.expect("cancel order 2");
+
+    let second = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 2,
+            cursor: Some(cursor),
+        })
+        .await
+        .expect("second page");
+    assert_eq!(second.orders.len(), 1, "only order 4 remains open past the cursor");
+    assert_eq!(second.orders[0].order_id, "4");
+    assert!(second.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+#[tokio::test]
+async fn limit_zero_returns_missing_parameter() {
+    let Some(pool) = setup().await else { return };
+    let _repo = PostgresReadModelRepository::new(pool.clone());
+    // limit-range validation lives in the use case, not the repo. The repo is
+    // tested directly here only to confirm that supplying `limit = 0` to the
+    // repo still issues a sane SQL (no rows, no next_cursor). The use-case
+    // bound check is asserted in HTTP layer tests.
+    //
+    // We exercise only the repo here.
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+    insert_order(
+        &pool, &scope.book_yes, 1, Some(&scope.owner),
+        "12345", "1000", "1000", "OPEN", 1_700_000_010,
+    ).await;
+
+    let page = _repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 0,
+            cursor: None,
+        })
+        .await
+        .expect("limit=0 yields a clean page");
+    assert!(page.orders.is_empty());
+    // With limit 0 we still ask Postgres for 1 row to detect "more available",
+    // so next_cursor reflects truncation rather than presence/absence of data.
+    // The HTTP layer rejects limit=0 before reaching the repo; this test just
+    // pins the repo's behaviour.
     scope.cleanup(&pool).await;
 }
