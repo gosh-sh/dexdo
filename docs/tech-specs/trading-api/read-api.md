@@ -87,7 +87,7 @@ Decoding is strict: invalid base64, unparseable JSON, missing field, wrong field
 
 - `limit` defaults to `100` when omitted.
 - Valid range is `[1, 500]`. Out-of-range → `-1102` / 400.
-- The SQL fetches `LIMIT $limit + 1`. If `$limit + 1` rows return, the last one is dropped from the response and used as `next_cursor`; otherwise `next_cursor` is `null`. The `+1` lookahead is the only way the server distinguishes "exactly `$limit` rows left" from "more available".
+- The SQL fetches `LIMIT $limit + 1`. If `$limit + 1` rows return, the last row is dropped from the response and `next_cursor` is built from the row that *remains* at position `$limit` (the last kept row); otherwise `next_cursor` is `null`. The `+1` lookahead is the only way the server distinguishes "exactly `$limit` rows left" from "more available", and building the cursor from the last kept row ensures the sentinel row reappears as the first row of the next page (strict `>` predicate against a fully-included row, never against one that was hidden).
 
 ### Auth & permissions
 
