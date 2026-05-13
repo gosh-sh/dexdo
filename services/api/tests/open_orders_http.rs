@@ -639,6 +639,63 @@ async fn cursor_with_out_of_range_timestamp_returns_1102() {
 }
 
 #[tokio::test]
+async fn unparseable_limit_returns_1102() {
+    // Regression: `limit=abc` previously surfaced as -1130 (InvalidParameter)
+    // via `optional_typed_query::<i64>`, breaking the openOrders error
+    // contract that documents -1102 for any out-of-range / malformed limit.
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("limit", "abc"),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("limit", "abc")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
+async fn empty_cursor_returns_1102() {
+    // Regression: an empty `?cursor=` used to be silently treated as "no
+    // cursor" because the handler filtered empty / whitespace-trimmed
+    // values into None. The codec now sees the empty string and returns
+    // MissingParameter as documented.
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("cursor", ""),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("cursor", "")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
 async fn limit_above_u16_max_returns_1102() {
     // Regression: `limit=65536` previously fell through u16 parsing and returned
     // -1130 instead of the spec-required -1102. Confirm both `limit=501` (above

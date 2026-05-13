@@ -445,8 +445,17 @@ async fn get_open_orders(
 
     let market_address = non_empty_query(req, "marketAddress").map(MarketAddress);
     let symbol = non_empty_query(req, "symbol").map(Symbol);
-    let limit = optional_typed_query::<i64>(req, "limit")?;
-    let cursor = non_empty_query(req, "cursor");
+    // Map any limit-parse failure to MissingParameter so the documented
+    // -1102 fires for both out-of-range (e.g., 501) and unparseable
+    // (e.g., "abc") inputs. `optional_typed_query` distinguishes them
+    // structurally as InvalidParameter (-1130), which conflicts with the
+    // openOrders error contract.
+    let limit = optional_typed_query::<i64>(req, "limit")
+        .map_err(|_| ApiError::from(DomainError::MissingParameter))?;
+    // Cursor is opaque; an empty / whitespace-only `?cursor=` is treated
+    // as malformed rather than "no cursor". Feed the raw query value to
+    // the codec so it produces the documented MissingParameter / -1102.
+    let cursor = req.query::<String>("cursor");
 
     let use_case = GetOpenOrdersUseCase::new(state.repo);
     let page = use_case
