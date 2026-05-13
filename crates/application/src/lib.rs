@@ -165,6 +165,14 @@ pub struct GetDepthQuery {
 pub const OPEN_ORDERS_DEFAULT_LIMIT: u16 = 100;
 pub const OPEN_ORDERS_MAX_LIMIT: u16 = 500;
 
+// Upper bound on `OpenOrdersCursor.chain_created_at_ms`. Plausible chain
+// timestamps fit in ~13 decimal digits; 8e15 ms ≈ year 255000 AD which is
+// well below Postgres' `to_timestamp` limit (year 294276 AD) and far above
+// any value a real chain would ever produce. Anything outside this range
+// is treated as a malformed cursor so the SQL never raises a
+// timestamp-out-of-range error.
+pub const OPEN_ORDERS_MAX_CURSOR_TS_MS: i64 = 8_000_000_000_000_000;
+
 #[derive(Debug, Clone)]
 pub struct OpenOrdersQuery {
     pub owner_pn_address: String,
@@ -218,6 +226,14 @@ impl OpenOrdersCursor {
             return Err(DomainError::MissingParameter);
         }
         if cursor.orderbook_address.is_empty() {
+            return Err(DomainError::MissingParameter);
+        }
+        // The repo binds `chain_created_at_ms` into `to_timestamp($ / 1000.0)`.
+        // An extreme `t` value (e.g., near `i64::MAX`) would push Postgres
+        // past its timestamp range and raise a `-1000/500`. Bound the value
+        // at parse time so malformed cursors keep returning the documented
+        // `-1102/400`.
+        if !(0..=OPEN_ORDERS_MAX_CURSOR_TS_MS).contains(&cursor.chain_created_at_ms) {
             return Err(DomainError::MissingParameter);
         }
         Ok(cursor)
