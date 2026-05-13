@@ -234,7 +234,12 @@ async fn all_markets_open_orders_are_owner_scoped_sorted_and_scaled() {
     .await;
 
     let page = repo
-        .list_open_orders(&OpenOrdersQuery { owner_pn_address: scope.owner.clone(), market: None, limit: 100, cursor: None })
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 100,
+            cursor: None,
+        })
         .await
         .expect("list open orders");
 
@@ -360,9 +365,17 @@ async fn cursor_returns_subsequent_page_in_order() {
 
     for (i, t) in (1..=3).zip([1_700_000_010, 1_700_000_020, 1_700_000_030]) {
         insert_order(
-            &pool, &scope.book_yes, i, Some(&scope.owner),
-            "12345", "1000", "1000", "OPEN", t,
-        ).await;
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "12345",
+            "1000",
+            "1000",
+            "OPEN",
+            t,
+        )
+        .await;
     }
 
     let first = repo
@@ -409,9 +422,17 @@ async fn cursor_stable_under_concurrent_fills() {
 
     for (i, t) in (1..=4).zip([1_700_000_010, 1_700_000_020, 1_700_000_030, 1_700_000_040]) {
         insert_order(
-            &pool, &scope.book_yes, i, Some(&scope.owner),
-            "12345", "1000", "1000", "OPEN", t,
-        ).await;
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "12345",
+            "1000",
+            "1000",
+            "OPEN",
+            t,
+        )
+        .await;
     }
 
     let first = repo
@@ -432,11 +453,19 @@ async fn cursor_stable_under_concurrent_fills() {
     sqlx::query(
         "update live_orders set status = 'FILLED', amount_remaining = 0
               where orderbook_address = $1 and order_id = 3::numeric",
-    ).bind(&scope.book_yes).execute(&pool).await.expect("fill order 3");
+    )
+    .bind(&scope.book_yes)
+    .execute(&pool)
+    .await
+    .expect("fill order 3");
     sqlx::query(
         "update live_orders set status = 'CANCELLED', amount_remaining = 0
               where orderbook_address = $1 and order_id = 2::numeric",
-    ).bind(&scope.book_yes).execute(&pool).await.expect("cancel order 2");
+    )
+    .bind(&scope.book_yes)
+    .execute(&pool)
+    .await
+    .expect("cancel order 2");
 
     let second = repo
         .list_open_orders(&OpenOrdersQuery {
@@ -468,9 +497,17 @@ async fn limit_zero_returns_missing_parameter() {
     scope.cleanup(&pool).await;
     insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "12345", "1000", "1000", "OPEN", 1_700_000_010,
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_010,
+    )
+    .await;
 
     let page = _repo
         .list_open_orders(&OpenOrdersQuery {
@@ -507,9 +544,17 @@ async fn rows_with_null_chain_timestamps_are_excluded() {
     // timestamps (invisible). Both belong to the same owner and book so the
     // only differentiator is the chain-time nullability.
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "12345", "1000", "1000", "OPEN", 1_700_000_010,
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_010,
+    )
+    .await;
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
@@ -563,10 +608,7 @@ async fn cursor_handles_sub_millisecond_chain_timestamps() {
     // but differ by 499 microseconds. Build the fractional-second f64 from
     // an exact microsecond i64 so the f64 literal isn't rejected by clippy's
     // excessive-precision lint.
-    for (order_id, us) in [
-        (1_i64, 1_700_000_000_500_500_i64),
-        (2_i64, 1_700_000_000_500_999_i64),
-    ] {
+    for (order_id, us) in [(1_i64, 1_700_000_000_500_500_i64), (2_i64, 1_700_000_000_500_999_i64)] {
         let fractional_secs = (us as f64) / 1_000_000.0;
         sqlx::query(
             r#"insert into live_orders
@@ -639,13 +681,29 @@ async fn cross_book_tie_does_not_lose_orders_across_pages() {
     // the worst case the new tie-breaker has to handle.
     let chain_seconds = 1_700_000_050;
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "12345", "1000", "1000", "OPEN", chain_seconds,
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        chain_seconds,
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_no, 1, Some(&scope.owner),
-        "12345", "1000", "1000", "OPEN", chain_seconds,
-    ).await;
+        &pool,
+        &scope.book_no,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        chain_seconds,
+    )
+    .await;
 
     let first = repo
         .list_open_orders(&OpenOrdersQuery {

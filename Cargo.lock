@@ -1446,7 +1446,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "dodex-domain",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

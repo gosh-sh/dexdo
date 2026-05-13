@@ -409,10 +409,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None
         };
 
-        let orders = orders_raw
-            .into_iter()
-            .map(open_order_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let orders =
+            orders_raw.into_iter().map(open_order_from_row).collect::<Result<Vec<_>, _>>()?;
 
         Ok(OpenOrdersPage { orders, next_cursor })
     }

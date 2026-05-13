@@ -15,7 +15,8 @@ use dodex_domain::OpenOrder;
 use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use uuid::Uuid;
 
 /// Per-request authorization state assembled by the HMAC middleware and
@@ -325,10 +326,7 @@ where
 
         let cursor = match cursor {
             None => None,
-            Some(raw) => Some(
-                OpenOrdersCursor::decode(raw)
-                    .map_err(|err| anyhow::anyhow!(err))?,
-            ),
+            Some(raw) => Some(OpenOrdersCursor::decode(raw).map_err(|err| anyhow::anyhow!(err))?),
         };
 
         self.repo

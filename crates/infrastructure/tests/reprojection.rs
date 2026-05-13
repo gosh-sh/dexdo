@@ -587,9 +587,9 @@ async fn orderfilled_advances_chain_updated_at() {
     let orderbook_addr = format!("0:{test}_book");
     let order_id = "21";
     let msg_id_place = format!("{test}-aplace-msg");
-    let msg_id_fill  = format!("{test}-bfill-msg");
+    let msg_id_fill = format!("{test}-bfill-msg");
     let place_seconds: i64 = 1_700_000_500;
-    let fill_seconds:  i64 = 1_700_000_900;
+    let fill_seconds: i64 = 1_700_000_900;
 
     purge(
         &pool,
@@ -617,7 +617,9 @@ async fn orderfilled_advances_chain_updated_at() {
         "orderId": order_id, "outcomeId": "1", "isBuy": true,
         "price": "100", "amount": "100", "clientOrderId": "c",
     }))
-    .execute(&pool).await.expect("insert place");
+    .execute(&pool)
+    .await
+    .expect("insert place");
 
     sqlx::query(
         r#"insert into raw_events
@@ -631,7 +633,9 @@ async fn orderfilled_advances_chain_updated_at() {
     .bind(fill_seconds)
     .bind(&orderbook_addr)
     .bind(json!({ "orderId": order_id, "filledAmount": "10" }))
-    .execute(&pool).await.expect("insert fill");
+    .execute(&pool)
+    .await
+    .expect("insert fill");
 
     repo.reproject_pending(1000).await.expect("reproject");
 
@@ -643,10 +647,12 @@ async fn orderfilled_advances_chain_updated_at() {
     )
     .bind(&orderbook_addr)
     .bind(order_id)
-    .fetch_one(&pool).await.expect("read ts");
+    .fetch_one(&pool)
+    .await
+    .expect("read ts");
 
     assert_eq!(chain_created_ms, place_seconds * 1000);
-    assert_eq!(chain_updated_ms, fill_seconds  * 1000);
+    assert_eq!(chain_updated_ms, fill_seconds * 1000);
 }
 
 #[tokio::test]
@@ -658,9 +664,9 @@ async fn ordercancelled_advances_chain_updated_at() {
     let test = "reproj_ordercancelled_chain_updated";
     let orderbook_addr = format!("0:{test}_book");
     let order_id = "22";
-    let msg_id_place  = format!("{test}-aplace-msg");
+    let msg_id_place = format!("{test}-aplace-msg");
     let msg_id_cancel = format!("{test}-bcancel-msg");
-    let place_seconds: i64  = 1_700_000_500;
+    let place_seconds: i64 = 1_700_000_500;
     let cancel_seconds: i64 = 1_700_000_800;
 
     purge(
@@ -688,7 +694,9 @@ async fn ordercancelled_advances_chain_updated_at() {
         "orderId": order_id, "outcomeId": "1", "isBuy": true,
         "price": "100", "amount": "100", "clientOrderId": "c",
     }))
-    .execute(&pool).await.expect("insert place");
+    .execute(&pool)
+    .await
+    .expect("insert place");
 
     sqlx::query(
         r#"insert into raw_events
@@ -702,7 +710,9 @@ async fn ordercancelled_advances_chain_updated_at() {
     .bind(cancel_seconds)
     .bind(&orderbook_addr)
     .bind(json!({ "orderId": order_id }))
-    .execute(&pool).await.expect("insert cancel");
+    .execute(&pool)
+    .await
+    .expect("insert cancel");
 
     repo.reproject_pending(1000).await.expect("reproject");
 
@@ -711,8 +721,11 @@ async fn ordercancelled_advances_chain_updated_at() {
              from live_orders
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
-    .bind(&orderbook_addr).bind(order_id)
-    .fetch_one(&pool).await.expect("read ts");
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read ts");
 
     assert_eq!(chain_updated_ms, cancel_seconds * 1000);
 }
@@ -728,10 +741,10 @@ async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
 
     let test = "reproj_orderplaced_confirmed_idempotent";
     let original_owner = format!("0:{test}_owner");
-    let other_owner    = format!("0:{test}_other");
+    let other_owner = format!("0:{test}_other");
     let orderbook_addr = format!("0:{test}_book");
     let order_id = "88";
-    let msg_id   = format!("{test}-confirm-msg");
+    let msg_id = format!("{test}-confirm-msg");
 
     purge(
         &pool,
@@ -753,15 +766,22 @@ async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
                    'OPEN', '5f800000000000000088',
                    to_timestamp(1700000000), to_timestamp(1700000000))"#,
     )
-    .bind(&orderbook_addr).bind(order_id).bind(&original_owner)
-    .execute(&pool).await.expect("insert pre-attributed row");
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .bind(&original_owner)
+    .execute(&pool)
+    .await
+    .expect("insert pre-attributed row");
 
     // The PN confirmation event claims a different owner.
     insert_raw(
-        &pool, &msg_id, &other_owner,
+        &pool,
+        &msg_id,
+        &other_owner,
         "PrivateNote.OrderPlacedConfirmed",
         &json!({ "orderBook": orderbook_addr, "orderId": order_id }),
-    ).await;
+    )
+    .await;
 
     repo.reproject_pending(1000).await.expect("reproject");
 
@@ -774,7 +794,10 @@ async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
         "select owner_pn_address from live_orders
               where orderbook_address = $1 and order_id = $2::numeric",
     )
-    .bind(&orderbook_addr).bind(order_id)
-    .fetch_one(&pool).await.expect("read owner");
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read owner");
     assert_eq!(owner, original_owner, "owner must not change once attributed");
 }
