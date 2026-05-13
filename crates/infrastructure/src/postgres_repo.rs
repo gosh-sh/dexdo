@@ -330,6 +330,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
                     where lo.owner_pn_address = $1
                       and lo.status = 'OPEN'
                       and lo.amount_remaining > 0
+                      and lo.chain_created_at is not null
+                      and lo.chain_updated_at is not null
                       and m.last_reconciled_at is not null
                       and lo.orderbook_address = $2
                       and lo.outcome_id = $3
@@ -371,6 +373,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
                     where lo.owner_pn_address = $1
                       and lo.status = 'OPEN'
                       and lo.amount_remaining > 0
+                      and lo.chain_created_at is not null
+                      and lo.chain_updated_at is not null
                       and m.last_reconciled_at is not null
                       and ($2::bigint is null
                            or (lo.chain_created_at, lo.order_id, lo.orderbook_address)

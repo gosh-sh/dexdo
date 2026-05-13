@@ -244,10 +244,14 @@ Index: `live_orders_open_book_idx` — partial, `(orderbook_address, outcome_id,
 
 Index: `live_orders_open_owner_idx` — partial,
 `(owner_pn_address, chain_created_at, order_id)` partial on
-`owner_pn_address IS NOT NULL AND status = 'OPEN' AND amount_remaining > 0`.
+`owner_pn_address IS NOT NULL AND status = 'OPEN' AND amount_remaining > 0
+AND chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL`.
 The seek path for the cursor-based `/api/v1/openOrders` query: the index
 sort columns align with the API's `(time, orderId)` ordering, and the
 partial predicate confines the index to rows the endpoint can return.
+The chain-timestamp non-NULL clauses are belt-and-suspenders against a
+rare ingestion path where the GraphQL gateway omits `created_at` on an
+edge — such rows must not surface in account-scoped reads.
 
 ### `order_book_snapshots`
 

@@ -115,7 +115,7 @@ Cursor-decode failures collapse into `-1102` deliberately — the cursor format 
 
 ### SQL
 
-Both variants share the projection list and the index-aligned predicate `owner_pn_address = $1 AND status = 'OPEN' AND amount_remaining > 0`, which matches the partial index `live_orders_open_owner_idx`. The all-markets variant is selected when no `(orderbook_address, outcome_id)` was resolved; the filtered variant appends the per-outcome predicate.
+Both variants share the projection list and the index-aligned predicate `owner_pn_address = $1 AND status = 'OPEN' AND amount_remaining > 0 AND chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL`, which matches the partial index `live_orders_open_owner_idx`. The all-markets variant is selected when no `(orderbook_address, outcome_id)` was resolved; the filtered variant appends the per-outcome predicate. The chain-timestamp non-NULL clauses defend against a rare ingestion path where the GraphQL gateway omits `created_at` on an edge — such rows have `chain_created_at` NULL after projection and must not surface in the endpoint (the response decoder would otherwise fail to map NULL into `i64`).
 
 Common projection (pseudo-SQL — full text lives in the implementation):
 
@@ -138,12 +138,14 @@ select m.pmp_address                                                       as ma
  where lo.owner_pn_address = $1
    and lo.status = 'OPEN'
    and lo.amount_remaining > 0
+   and lo.chain_created_at is not null
+   and lo.chain_updated_at is not null
    and m.last_reconciled_at is not null
    /* filtered variant only: */
    /* and lo.orderbook_address = $2 and lo.outcome_id = $3 */
    /* if cursor present: */
-   /* and (lo.chain_created_at, lo.order_id::numeric) > ($t::timestamptz, $o::numeric) */
- order by lo.chain_created_at asc, lo.order_id asc
+   /* and (lo.chain_created_at, lo.order_id, lo.orderbook_address) > ($t::timestamptz, $o::numeric, $b::text) */
+ order by lo.chain_created_at asc, lo.order_id asc, lo.orderbook_address asc
  limit $limit + 1;
 ```
 
@@ -158,7 +160,9 @@ create index if not exists live_orders_open_owner_idx
     on live_orders (owner_pn_address, chain_created_at, order_id)
     where owner_pn_address is not null
       and status = 'OPEN'
-      and amount_remaining > 0;
+      and amount_remaining > 0
+      and chain_created_at is not null
+      and chain_updated_at is not null;
 ```
 
 The index is partial so it contains only rows the endpoint can return. Cursor lookups become a direct range scan on the index. The filtered variant adds `orderbook_address = $X AND outcome_id = $Y` as a heap filter on top of the index range; cardinalities per-owner per-pair are expected in the tens, so a heap filter is cheap relative to maintaining a wider composite index.

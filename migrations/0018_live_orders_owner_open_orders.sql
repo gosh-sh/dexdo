@@ -12,4 +12,6 @@ create index if not exists live_orders_open_owner_idx
     on live_orders (owner_pn_address, chain_created_at, order_id)
     where owner_pn_address is not null
       and status = 'OPEN'
-      and amount_remaining > 0;
+      and amount_remaining > 0
+      and chain_created_at is not null
+      and chain_updated_at is not null;

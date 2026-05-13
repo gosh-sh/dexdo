@@ -490,6 +490,62 @@ async fn limit_zero_returns_missing_parameter() {
 }
 
 #[tokio::test]
+async fn rows_with_null_chain_timestamps_are_excluded() {
+    // Regression: `live_orders.chain_created_at` / `chain_updated_at` are
+    // nullable (the projector can bind NULL if an EventNode arrives without
+    // a chain timestamp). Such a row would have caused the SELECT to decode
+    // NULL into `OpenOrderRow.chain_created_at_ms: i64` and surface as
+    // -1000/500. The query now skips them via the partial-index predicate
+    // mirrored in the WHERE clause.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // Seed one normal open order (visible) and one with NULL chain
+    // timestamps (invisible). Both belong to the same owner and book so the
+    // only differentiator is the chain-time nullability.
+    insert_order(
+        &pool, &scope.book_yes, 1, Some(&scope.owner),
+        "12345", "1000", "1000", "OPEN", 1_700_000_010,
+    ).await;
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, owner_pn_address,
+                client_order_id, status, last_chain_order,
+                chain_created_at, chain_updated_at,
+                created_at, updated_at)
+           values ($1, 2::numeric, 1, true, 12345::numeric,
+                   1000::numeric, 1000::numeric, $2,
+                   'client-null-ts', 'OPEN', '5f80000000000000000002',
+                   NULL, NULL,
+                   to_timestamp(1700000020), to_timestamp(1700000020))"#,
+    )
+    .bind(&scope.book_yes)
+    .bind(&scope.owner)
+    .execute(&pool)
+    .await
+    .expect("insert null-chain-ts row");
+
+    let page = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 100,
+            cursor: None,
+        })
+        .await
+        .expect("list page must not error on NULL chain timestamps");
+    assert_eq!(page.orders.len(), 1, "NULL-chain row must be omitted");
+    assert_eq!(page.orders[0].order_id, "1");
+    assert!(page.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+#[tokio::test]
 async fn cross_book_tie_does_not_lose_orders_across_pages() {
     // Regression: `live_orders.order_id` is only unique within an orderbook
     // (PK is `(orderbook_address, order_id)`). For the all-markets variant,
