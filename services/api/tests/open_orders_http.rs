@@ -566,6 +566,43 @@ async fn cursor_with_nonnumeric_order_id_returns_1102() {
 }
 
 #[tokio::test]
+async fn cursor_with_overlong_order_id_returns_1102() {
+    // Regression: an order_id with 79+ ASCII digits passes the digit-only
+    // check but overflows `numeric(78, 0)` at SQL bind, surfacing as
+    // -1000/500. The codec now caps the length so the documented -1102/400
+    // fires before the query runs.
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let overlong = "1".repeat(79);
+    let bad_cursor = dodex_application::OpenOrdersCursor {
+        chain_created_at_ms: 0,
+        order_id: overlong,
+        orderbook_address: "0:book".into(),
+    }
+    .encode();
+
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("cursor", &bad_cursor),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("cursor", bad_cursor.as_str())
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
 async fn limit_above_u16_max_returns_1102() {
     // Regression: `limit=65536` previously fell through u16 parsing and returned
     // -1130 instead of the spec-required -1102. Confirm both `limit=501` (above
