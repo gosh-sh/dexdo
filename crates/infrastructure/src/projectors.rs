@@ -512,8 +512,14 @@ async fn apply_order_placed(
                    status = 'OPEN',
                    last_chain_order = greatest(live_orders.last_chain_order,
                                                excluded.last_chain_order),
-                   chain_created_at = least(live_orders.chain_created_at,
-                                            excluded.chain_created_at),
+                   -- `chain_created_at` is the order's moment of birth and
+                   -- must never move once set. `least(...)` would let a
+                   -- replay carrying an earlier chain time pull the value
+                   -- backward; pagination cursors and the API contract
+                   -- both rely on the timestamp staying fixed. Use
+                   -- `coalesce` for first-write-wins.
+                   chain_created_at = coalesce(live_orders.chain_created_at,
+                                               excluded.chain_created_at),
                    chain_updated_at = greatest(live_orders.chain_updated_at,
                                                excluded.chain_updated_at),
                    updated_at = now()"#,

@@ -578,6 +578,101 @@ async fn orderplaced_preserves_fractional_chain_seconds() {
 }
 
 #[tokio::test]
+async fn orderplaced_chain_created_at_is_first_write_wins() {
+    // Regression: the ON CONFLICT clause used `least(...)` which lets a
+    // replay carrying an earlier chain time pull `chain_created_at`
+    // backward, violating the moment-of-birth invariant the cursor and
+    // API contract assume. The projector now uses `coalesce(live, new)`
+    // so the first write sticks.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_first_write_wins";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "33";
+    let msg_id_first = format!("{test}-amsg");
+    let msg_id_replay = format!("{test}-zmsg");
+    let original_seconds: i64 = 1_700_000_500;
+    let earlier_seconds: i64 = 1_700_000_100;
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_first.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_replay.as_str()),
+        ],
+    )
+    .await;
+
+    // First event: legitimate OrderPlaced establishes chain_created_at.
+    insert_raw_with_ts(
+        &pool, &msg_id_first, &orderbook_addr,
+        "OrderBook.OrderPlaced", original_seconds,
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "c",
+        }),
+    ).await;
+
+    // Replay with an EARLIER chain time. `least(...)` would have moved
+    // chain_created_at to `earlier_seconds`; `coalesce` keeps the original.
+    insert_raw_with_ts(
+        &pool, &msg_id_replay, &orderbook_addr,
+        "OrderBook.OrderPlaced", earlier_seconds,
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "c",
+        }),
+    ).await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let chain_created_ms: i64 = sqlx::query_scalar(
+        r#"select (extract(epoch from chain_created_at) * 1000)::bigint
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read chain_created_at");
+
+    assert_eq!(
+        chain_created_ms,
+        original_seconds * 1000,
+        "chain_created_at must stay pinned to the first write; replays cannot move it backward"
+    );
+}
+
+async fn insert_raw_with_ts(
+    pool: &PgPool,
+    msg_id: &str,
+    src: &str,
+    event_type: &str,
+    chain_seconds: i64,
+    decoded: &serde_json::Value,
+) {
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::bigint), $4, $4, $5, '{}'::jsonb, $6)"#,
+    )
+    .bind(msg_id)
+    .bind(format!("5f80{msg_id:0>28}"))
+    .bind(chain_seconds)
+    .bind(src)
+    .bind(event_type)
+    .bind(decoded)
+    .execute(pool)
+    .await
+    .expect("insert raw_events with chain ts");
+}
+
+#[tokio::test]
 async fn orderfilled_advances_chain_updated_at() {
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
