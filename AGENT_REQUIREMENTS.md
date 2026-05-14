@@ -20,7 +20,7 @@ Repository specifications live under [`docs/`](docs/), with implementation techn
 
 The public REST API contract is [`docs/api-spec.md`](docs/api-spec.md); do not edit it unless the task explicitly asks to change the public API.
 
-README files are entry points only: keep a short service definition, links to canonical specs, config locations/variables, and maintenance commands such as run/test/deploy. Do not put implementation details in README files. Functional requirements belong in `docs/api-spec.md`; implementation details belong in `docs/tech-specs/` (`market-data-api.md`, `market-data-indexer.md`, `auth.md`, and `trading-api/`); schema details belong in `docs/tech-specs/data-schema.md`.
+README files are entry points only: keep a short service definition, links to canonical specs, config locations/variables, and maintenance commands such as run/test/deploy. Do not put implementation details in README files. Functional requirements belong in `docs/api-spec.md`; implementation details belong in `docs/tech-specs/` (`read-api.md`, `write-api.md`, `indexer.md`, `auth.md`); schema details belong in `docs/tech-specs/data-schema.md`.
 
 ## Before every `git commit`
 

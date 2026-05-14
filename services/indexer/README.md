@@ -5,9 +5,9 @@ maintains the Postgres read-model served by `services/api`.
 
 ## Specifications
 
-- Indexer implementation: [docs/tech-specs/market-data-indexer.md](../../docs/tech-specs/market-data-indexer.md).
+- Indexer implementation: [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md).
 - Data schema: [docs/tech-specs/data-schema.md](../../docs/tech-specs/data-schema.md).
-- API consumer of the read-model: [docs/tech-specs/market-data-api.md](../../docs/tech-specs/market-data-api.md).
+- API consumer of the read-model: [docs/tech-specs/read-api.md](../../docs/tech-specs/read-api.md).
 - Public API requirements served from the read-model: [docs/api-spec.md](../../docs/api-spec.md).
 - Contract/event references: [docs/contract-specs/dex-events-routing.md](../../docs/contract-specs/dex-events-routing.md) and [docs/contract-specs/](../../docs/contract-specs/).
 

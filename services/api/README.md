@@ -7,8 +7,8 @@ Postgres and hosts authenticated private API routes.
 
 - Functional REST requirements: [docs/api-spec.md](../../docs/api-spec.md).
 - Authentication implementation: [docs/tech-specs/auth.md](../../docs/tech-specs/auth.md).
-- Market data API implementation: [docs/tech-specs/market-data-api.md](../../docs/tech-specs/market-data-api.md).
-- Trading API implementation specs: [docs/tech-specs/trading-api/read-api.md](../../docs/tech-specs/trading-api/read-api.md) and [docs/tech-specs/trading-api/write-api.md](../../docs/tech-specs/trading-api/write-api.md). These files are placeholders until the trading endpoints are implemented.
+- Read API implementation (all `GET` endpoints): [docs/tech-specs/read-api.md](../../docs/tech-specs/read-api.md).
+- Write API implementation (order placement / cancellation / batching): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md). Placeholder until the trading write endpoints are implemented.
 - Data schema: [docs/tech-specs/data-schema.md](../../docs/tech-specs/data-schema.md).
 
 Implementation details belong in the tech specs above, not in this README.

@@ -1,84 +1,108 @@
-# Dodex Backend
+# DODEX
 
-## Architecture
+Backend for DODEX — a decentralized exchange on the Acki Nacki chain. Two Rust services share a Postgres read-model:
 
-Two independent processes that share a Postgres read-model:
+- `services/api` — HTTP service serving the public REST API.
+- `services/indexer` — chain-event ingestor that builds the Postgres read-model.
 
-```text
-Acki Nacki GraphQL  →  indexer  →  Postgres (read-model)  →  api  →  REST clients
-```
-
-- **`services/api`** — HTTP server. Serves market metadata and order-book snapshots from Postgres, and gates private endpoints behind HMAC authentication.
-- **`services/indexer`** — ingests chain events, decodes them, and projects them into the read-model.
-- **Postgres** — single source of truth for the API. The indexer applies migrations on startup.
-
-Splitting `api` and `indexer` keeps user-facing latency independent of chain ingestion and lets either side scale independently.
-
-## Repository layout
-
-```text
-.
-├── services/         Service binaries (api, indexer)
-├── crates/           Shared library crates (domain, application, infrastructure)
-├── contracts/        On-chain Solidity contracts and ABIs
-├── config/           YAML config files (per-service, per-environment)
-├── migrations/       SQL migrations
-└── docs/             api-spec.md (public REST contract), tech-specs/, contract-specs/
-```
-
-Per-component internals are documented in each service's `README.md`.
-
-## Configuration
-
-YAML per service per environment, e.g. `config/api.local.yaml`. The default path is `config/<service>.local.yaml`; override with `APP_CONFIG=/path/to/file.yaml`.
-
-## Running locally
-
-Both processes need a Postgres connection. Point both at the same database; the indexer applies migrations on startup.
-
-```sh
-cargo run -p dodex-indexer
-cargo run -p dodex-api
-```
-
-## Tests and formatting
-
-### Test Postgres
-
-Integration tests need a real Postgres. A disposable test database is shipped in `docker-compose.test.yml` on port `55432`:
-
-```sh
-cp .env.example .env          # first checkout only
-docker compose -f docker-compose.test.yml up -d --wait
-cargo test
-docker compose -f docker-compose.test.yml down
-```
-
-`.env` is gitignored; `.env.example` is the committed template with the default `TEST_DATABASE_URL`. Every test binary loads `.env` via `dotenvy::dotenv()` at setup, so no manual `export` is required. Edit `.env` locally to point tests at another database; CI sets `TEST_DATABASE_URL` directly in its workflow env block.
-
-```sh
-cargo test --workspace --lib
-cargo +nightly fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-## Deployment
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.stage.yml up -d --build
-```
+On-chain DODEX contracts live under `contracts/`.
 
 ## Documentation
 
-- [docs/api-spec.md](docs/api-spec.md) — functional REST API requirements.
-- [docs/tech-specs/](docs/tech-specs/) — implementation technical specs.
-- [docs/tech-specs/data-schema.md](docs/tech-specs/data-schema.md) — Postgres schema semantics.
-- [docs/contract-specs/](docs/contract-specs/) — on-chain contracts and event routing.
-- [services/api/README.md](services/api/README.md), [services/indexer/README.md](services/indexer/README.md) — service entry points with spec links, config, and maintenance commands.
+- [docs/api-spec.md](docs/api-spec.md) — public REST API contract.
+- [docs/README.md](docs/README.md) — documentation map and file ownership.
+- [AGENT_REQUIREMENTS.md](AGENT_REQUIREMENTS.md) — rules for any agent making repository changes.
 
-## For contributors and AI agents
+## Repository layout
 
-[`AGENT_REQUIREMENTS.md`](AGENT_REQUIREMENTS.md) is the entry point for anyone (human or AI) making changes here. It defines the documentation contract, including the mandatory pre-commit sweep over `docs/`, component READMEs, and this root `README.md`.
+```
+crates/
+  domain/            # domain types
+  application/       # use cases
+  infrastructure/    # adapters (Postgres, TVM runner, GraphQL gateway)
+services/
+  api/               # REST API service
+  indexer/           # chain-event indexer
+contracts/           # on-chain DODEX contracts (TVM)
+docs/                # specs and plans (see docs/README.md)
+migrations/          # SQL migrations applied by sqlx::migrate! at startup
+config/              # service config files (api.<env>.yaml, indexer.<env>.yaml)
+scripts/             # operational scripts
+tests/               # repo-level integration fixtures (REST .rest files, e2e)
+```
+
+## Configuration
+
+Per-service config files live under `config/`:
+
+- `config/api.<env>.yaml` — consumed by `services/api`.
+- `config/indexer.<env>.yaml` — consumed by `services/indexer`.
+
+Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override at runtime with `APP_CONFIG=/path/to/file.yaml`.
+
+Secrets and environment-specific values live in `.env`:
+
+```sh
+cp .env.example .env
+```
+
+The `.env` file is gitignored; the committed `.env.example` is the template.
+
+## Build
+
+```sh
+cargo build --workspace
+```
+
+## Lint and format
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+## Test Postgres
+
+The full test suite needs a disposable Postgres. Bring it up with the test compose file:
+
+```sh
+docker compose -f docker-compose.test.yml up -d --wait
+```
+
+`TEST_DATABASE_URL` is read from `.env` (copied from `.env.example` on first checkout). The test database role must own `public` because the test suite runs migrations on connect.
+
+Tear it down with:
+
+```sh
+docker compose -f docker-compose.test.yml down
+```
+
+## Tests
+
+Unit tests (no database required):
+
+```sh
+cargo test --workspace --lib
+```
+
+DB-backed integration tests (test Postgres up first, see above):
+
+```sh
+cargo test --workspace --tests
+```
+
+Per-service narrower runs are described in [services/api/README.md](services/api/README.md) and [services/indexer/README.md](services/indexer/README.md).
+
+## Running locally
+
+After `cargo build --workspace`:
+
+```sh
+cargo run -p dodex-api
+cargo run -p dodex-indexer
+```
+
+The API needs Postgres running and the indexer feeding it; see the service READMEs for the bring-up sequence.
 
 ## License
 
