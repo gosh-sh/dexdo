@@ -166,7 +166,7 @@ One row per PMP (Prediction Market Pool) contract observed on chain. Discovered 
 | `token_code` | `text` | Quote-asset code (denormalised from `ref_tokens` for read speed). |
 | `event_id` | `numeric(78,0)` | Oracle event id this market resolves against. |
 | `oracle_list_hash` | `numeric(78,0)` (nullable per 0005) | EventList hash used in OrderBook derivation. NULL pre-reconcile. |
-| `orderbook_address` | `text` (nullable) | The deterministic OrderBook address returned by `PMP.getOrderBookAddress()`. Written by the market reconciler on the first successful pass, including pre-`PoolsFrozen` rows. Nullable only during the pre-reconcile window; migration 0014 enforces `last_reconciled_at IS NULL OR orderbook_address IS NOT NULL`, so every market visible to the API has a non-null `orderBookAddress`. |
+| `orderbook_address` | `text` (nullable, partial-UNIQUE per 0019) | The deterministic OrderBook address returned by `PMP.getOrderBookAddress()`. Written by the market reconciler on the first successful pass, including pre-`PoolsFrozen` rows. Nullable only during the pre-reconcile window; migration 0014 enforces `last_reconciled_at IS NULL OR orderbook_address IS NOT NULL`, so every market visible to the API has a non-null `orderBookAddress`. Migration 0019 adds a partial UNIQUE index on `orderbook_address WHERE orderbook_address IS NOT NULL`, pinning the contract-side per-market invariant — `/api/v1/openOrders` joins `live_orders` to `markets` on this column and relies on the at-most-one-row guarantee. |
 | `approved` | `boolean` default `false` | Approval flag from `getDetails()`; flipped to `true` by the `TimingsSet` event. |
 | `is_cancelled` | `boolean` default `false` | On-chain cancellation flag from `getDetails()`. Either this or `cancelled_at` being set is enough to flip the derived status to `CANCELLED`. |
 | `stake_start` / `stake_end` / `result_start` / `result_end` | `bigint` (nullable) | Lifecycle timings (unix seconds). Written only by the `TimingsSet` event; reconciler does **not** touch these (H2 fix). NULL on all four = PENDING. |
@@ -191,6 +191,7 @@ Indices:
 | `markets_status_idx` (`approved, is_cancelled`) | Coarse status filters. |
 | `markets_pending_reconcile_idx` (partial: `last_reconciled_at IS NULL`) | Drives the market reconciler's pending-row SELECT. |
 | `markets_terminal_idx` (partial: `resolved_at IS NOT NULL OR cancelled_at IS NOT NULL`) | Terminal-status filters. |
+| `markets_orderbook_address_unique` (added 0019, partial UNIQUE: `orderbook_address IS NOT NULL`) | Pins the per-market invariant; relied on by `/api/v1/openOrders`'s all-markets join. |
 
 ### `market_outcomes`
 
