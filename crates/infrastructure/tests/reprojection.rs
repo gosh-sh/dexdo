@@ -347,9 +347,11 @@ async fn orderfilled_deferred_replays_after_orderplaced() {
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, status, last_chain_order)
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
            values ($1, $2::numeric, 1, true, 100::numeric,
-                   100::numeric, 'OPEN', '5f800000000000000001')"#,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000001', '5f800000000000000001')"#,
     )
     .bind(&orderbook_addr)
     .bind(order_id)
@@ -419,9 +421,11 @@ async fn orderplaced_confirmed_deferred_replays_and_attaches_owner() {
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_initial, amount_remaining, status, last_chain_order)
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
            values ($1, $2::numeric, 1, true, 100::numeric,
-                   100::numeric, 100::numeric, 'OPEN', '5f800000000000000077')"#,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000077', '5f800000000000000077')"#,
     )
     .bind(&orderbook_addr)
     .bind(order_id)
@@ -940,10 +944,11 @@ async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, owner_pn_address,
-                status, last_chain_order, chain_created_at, chain_updated_at)
+                status, last_chain_order, placed_chain_order,
+                chain_created_at, chain_updated_at)
            values ($1, $2::numeric, 1, true, 100::numeric,
                    100::numeric, 100::numeric, $3,
-                   'OPEN', '5f800000000000000088',
+                   'OPEN', '5f800000000000000088', '5f800000000000000088',
                    to_timestamp(1700000000), to_timestamp(1700000000))"#,
     )
     .bind(&orderbook_addr)
