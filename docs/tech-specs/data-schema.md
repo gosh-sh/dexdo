@@ -217,12 +217,11 @@ Index: `market_outcomes_market_id_fk_idx` speeds up loading all outcome rows for
 
 ### `live_orders`
 
-Per-order read-model that backs `/api/v1/depth` and account-scoped
+Per-order read model backing `/api/v1/depth` and account-scoped
 `GET /api/v1/openOrders`. One row per chain-side order, mutated in place as
-the `OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Never
-deleted — FILLED / CANCELLED rows stay for cursor monotonicity (the depth
-handler reads `max(last_chain_order)` over **all** rows for the `(orderbook,
-outcome)` pair).
+`OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Rows are never
+deleted — `FILLED` / `CANCELLED` entries remain to preserve cursor monotonicity (the depth
+handler reads `max(last_chain_order)` across **all** rows for the `(orderbook, outcome)` pair).
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -237,22 +236,24 @@ outcome)` pair).
 | `owner_pn_address` | `text` | Trading PrivateNote address that owns the order. Initially NULL from `OrderBook.OrderPlaced`; attached by `PrivateNote.OrderPlacedConfirmed` using the event source address. NULL rows can still contribute to public depth, but cannot appear in account-scoped order responses. |
 | `status` | `text` CHECK `IN ('OPEN', 'FILLED', 'CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. |
 | `last_chain_order` | `text` NOT NULL | Chain-order key (`msg_chain_order` from the gateway) of the most recent OrderBook event that touched this order. Lex-monotonic via `greatest(existing, new)` on OrderBook writes. Feeds `lastUpdateId` in depth responses as a STRING. |
-| `chain_created_at` | `timestamptz` | On-chain block time of the originating `OrderBook.OrderPlaced`. Drives `time` in `/api/v1/openOrders` and the primary pagination sort key. NULL on pre-migration rows. |
-| `chain_updated_at` | `timestamptz` | On-chain block time of the most recent book event that touched the order — `OrderPlaced`, `OrderFilled`, `OrderCancelled`. Advanced via `greatest(...)`. Drives `updateTime` in `/api/v1/openOrders`. NULL on pre-migration rows. |
+| `chain_created_at` | `timestamptz` | On-chain block time of the originating `OrderBook.OrderPlaced`. Drives `time` in `/api/v1/openOrders`. Display-only. NULL for pre-migration rows. |
+| `chain_updated_at` | `timestamptz` | On-chain block time of the most recent order book event that affected the order — OrderPlaced, OrderFilled, OrderCancelled. Advanced via greatest(...). Drives updateTime in /api/v1/openOrders. Display-only. NULL for pre-migration rows. |
+| `placed_chain_order` | `text not null` | `msg_chain_order` of the `OrderPlaced` event that created the row. First-write-wins (`coalesce` on conflict). Sole sort key + cursor for `/api/v1/openOrders`. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
-Index: `live_orders_open_book_idx` — partial, `(orderbook_address, outcome_id, is_buy, price desc) WHERE status = 'OPEN'`. Sized for the depth query: top-N levels per side per outcome.
+Index: `live_orders_open_book_idx` — partial index on `(orderbook_address, outcome_id, is_buy, price DESC)` with predicate `status = 'OPEN'`. Sized for the depth query: top-N price levels per side and outcome.
 
-Index: `live_orders_open_owner_idx` — partial,
-`(owner_pn_address, chain_created_at, order_id)` partial on
-`owner_pn_address IS NOT NULL AND status = 'OPEN' AND amount_remaining > 0
-AND chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL`.
-The seek path for the cursor-based `/api/v1/openOrders` query: the index
-sort columns align with the API's `(time, orderId)` ordering, and the
-partial predicate confines the index to rows the endpoint can return.
-The chain-timestamp non-NULL clauses are belt-and-suspenders against a
-rare ingestion path where the GraphQL gateway omits `created_at` on an
-edge — such rows must not surface in account-scoped reads.
+Index: `live_orders_open_owner_idx` — partial index on `(owner_pn_address, placed_chain_order)`
+with predicate `owner_pn_address IS NOT NULL AND status = 'OPEN' AND amount_remaining > 0`.
+
+Serves as the seek path for the cursor-based `/api/v1/openOrders` query: a single-
+column lexicographic range scan over `placed_chain_order`. The partial predicate
+confines the index to rows the endpoint can return.
+
+The `chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` conditions
+previously attached to this index were moved into the SQL query as heap filters,
+keeping the index independent of the display-only timestamp columns. This avoids
+unnecessary index maintenance when `chain_updated_at` advances on every `OrderFilled` event.
 
 ### `order_book_snapshots`
 

@@ -867,8 +867,7 @@ GET /api/v1/openOrders
 
 Security: `USER_DATA`
 
-Fetch currently open orders for the authenticated account. The response never
-includes orders owned by another account.
+Fetch currently open orders for the authenticated account. The response never includes orders owned by another account.
 
 Parameters:
 
@@ -877,7 +876,7 @@ Parameters:
 | `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns open orders for all markets. |
 | `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
 | `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`. |
-| `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. Omit for the first page. |
+| `cursor` | STRING | NO | Opaque lex-comparable string returned by the server as `nextCursor`. Pass back verbatim to fetch the next page. An empty or whitespace-only cursor returns `-1102 / 400`. A well-formed cursor that lies past the last open order returns an empty page with `nextCursor: null` — not an error. Omit for the first page. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
 | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
@@ -888,13 +887,13 @@ Behavior:
 - If both `marketAddress` and `symbol` are sent, returns open orders for that one market symbol.
 - If only one of `marketAddress` / `symbol` is sent, returns `-1102` with HTTP `400`.
 - If `limit` is outside `[1, 500]`, returns `-1102` with HTTP `400`.
-- If `cursor` cannot be decoded, returns `-1102` with HTTP `400`. A well-formed cursor that points past the current set of open orders is not an error — the response simply has an empty `orders` array and `nextCursor: null`.
+- If `cursor` is empty or whitespace-only, returns `-1102` with HTTP `400`. A well-formed cursor that points past the current set of open orders is not an error — the response simply has an empty `orders` array and `nextCursor: null`.
 - If the `(marketAddress, symbol)` pair does not exist, returns `-1121` with HTTP `404`.
 - Open order statuses are `NEW` and `PARTIALLY_FILLED`.
 - Orders with status `FILLED`, `CANCELED`, or `REJECTED` are not returned.
 - Empty results are returned as `{ "orders": [], "nextCursor": null }`.
-- Results are sorted by `time ASC`, then `orderId ASC`. For all-market requests this ordering is global across all returned orders.
-- Pagination is cursor-based on `(time, orderId)` plus an internal tie-breaker carried inside the opaque cursor blob. The sort key is monotonic, so concurrent fills/cancels between page reads cannot duplicate or skip rows — closed orders simply drop out.
+- Results are sorted in stable chain-order. For all-market requests this ordering is global across all returned orders.
+- Pagination is cursor-based on a single server-internal chain-order key set once at order creation. The key never moves for the life of the order (subsequent fills and cancels do not touch it), so concurrent activity between page reads cannot duplicate or skip rows — closed orders simply drop out.
 - The endpoint is eventually consistent: a freshly placed order may briefly not appear, between the time the public `OrderPlaced` event is indexed and the time the private confirmation that carries owner attribution is indexed.
 
 Response:
@@ -918,7 +917,7 @@ Response:
       "updateTime": 1710000001000
     }
   ],
-  "nextCursor": "eyJ0IjoxNzEwMDAwMDAwMDAwMDAwLCJvIjoiMTIzNDU2Nzg5IiwiYiI6IjA6b3JkZXJib29rLWFkZHJlc3MifQ"
+  "nextCursor": "5f8000000000017c5a"
 }
 ```
 
@@ -926,8 +925,8 @@ Top-level response fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `orders` | ARRAY | Open orders matching the filter, sorted by `time ASC`, then `orderId ASC`. Empty when there are no matches. |
-| `nextCursor` | STRING \| null | Opaque pagination cursor. `null` when the last page has been returned. |
+| `orders` | ARRAY | Open orders matching the filter, in stable chain-order. Empty when there are no matches. |
+| `nextCursor` | STRING \| null | Opaque lex-comparable pagination cursor. Pass back verbatim to fetch the next page; do not parse or generate. `null` when the last page has been returned. |
 
 Order fields:
 

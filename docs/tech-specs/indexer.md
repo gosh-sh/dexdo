@@ -75,22 +75,24 @@ Lifecycle events drive transitions on [`markets`](data-schema.md#markets) and th
 ## Projection — order events
 
 OrderBook events drive [`live_orders`](data-schema.md#live_orders), the
-per-order read-model that backs `/api/v1/depth` and account-scoped
-`GET /api/v1/openOrders`. Three OrderBook events mutate book state; one
-PrivateNote confirmation attaches ownership for private reads; five OrderBook
+per-order read model backing `/api/v1/depth` and account-scoped
+`GET /api/v1/openOrders`.
+
+Three OrderBook events mutate order book state, one
+PrivateNote confirmation event attaches ownership for private reads, and five OrderBook
 events are observability-only.
 
 | Event | Effect |
 | --- | --- |
-| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'`, full `amount_initial`, and full `amount_remaining`. `owner_pn_address` remains NULL until the matching PrivateNote confirmation arrives. `last_chain_order` set to the event's `msg_chain_order`. A conflict on `(orderbook_address, order_id)` resets the row to OPEN. Sets `chain_created_at` (first-write-wins via `coalesce` on conflict — the moment of birth must not move once recorded) and `chain_updated_at` (`greatest` on conflict) from the event's chain timestamp. |
+| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'`, full `amount_initial`, and full `amount_remaining`. `owner_pn_address` remains NULL until the matching PrivateNote confirmation arrives. `last_chain_order` is set to the event’s `msg_chain_order`. A conflict on `(orderbook_address, order_id)` resets the row to OPEN. The handler sets: `chain_created_at` using first-write-wins semantics via `coalesce(...) on conflict` — the creation timestamp must never move once recorded; `chain_updated_at` using `greatest(...) on conflict`; `placed_chain_order` using `coalesce(live_orders.placed_chain_order, excluded.placed_chain_order)` from the event’s msg_chain_order. `placed_chain_order` is the sole sort key for `/api/v1/openOrders` and never changes once recorded, matching the first-write-wins semantics of chain_created_at. |
 | `OrderBook.OrderFilled` | Decrements `amount_remaining` by `filledAmount`. Flips `status` to `FILLED` when the remainder reaches zero. Updates `last_chain_order` via `greatest(existing, new)` (lex compare). Advances `chain_updated_at` via `greatest`. |
 | `OrderBook.OrderCancelled` | `status = 'CANCELLED'`, `amount_remaining = 0`, monotonic `last_chain_order` update. Advances `chain_updated_at` via `greatest`. |
 | `PrivateNote.OrderPlacedConfirmed` | Updates the matching `(orderBook, orderId)` row with `owner_pn_address = event.src`, where `event.src` is the authenticated account's trading PrivateNote address. If the OrderBook row has not arrived yet, the confirmation is deferred and replayed later. This ownership update does not advance `last_chain_order`, so public depth cursors continue to represent OrderBook activity only. Refuses to overwrite an already-attached `owner_pn_address`; that path is reported as `Applied` (no-op). |
 | `OrderBook.PartialFill` / `FullyFilled` / `Queued` / `Rejected` / `CallbackBounced` | Observability-only. The row is recorded in `raw_events` for audit but no read-model table is touched. |
 
-`PartialFill` / `FullyFilled` are derived aggregates the contract emits for MM-friendly UX; the underlying state is already captured by `OrderFilled`. `Queued` / `Rejected` happen at queue level, before any order id is assigned. `CallbackBounced` is a diagnostic — OrderBook state is not auto-rolled back, and the bounced credit needs operator-driven recovery.
+`PartialFill` / `FullyFilled` are derived aggregates that the contract emits for MM-friendly UX; the underlying state is already captured by `OrderFilled`. `Queued` / `Rejected` occur at the queue level, before any order ID is assigned. `CallbackBounced` is a diagnostic event — the OrderBook state is not automatically rolled back, and the bounced credit requires operator-driven recovery.
 
-Event ordering is anchored on `raw_events.chain_order` (set from the GraphQL gateway's `msg_chain_order`). The GraphQL events connection already returns edges in strict `msg_chain_order` order, and pagination preserves that order across pages; the live persist path therefore projects newly fetched edges in the received order. The reproject loop sorts deferred rows by `chain_order asc` because it reads from Postgres rather than directly from the ordered GraphQL page. Together these rules give `OrderPlaced → OrderFilled → OrderCancelled` the correct natural sequence. `greatest(existing, new)` on `last_chain_order` is a belt-and-suspenders monotonicity guard for the row's column, not the primary correctness mechanism.
+Event ordering is anchored on `raw_events.chain_order` (set from the GraphQL gateway’s `msg_chain_order`). The GraphQL events connection already returns edges in strict `msg_chain_order` order, and pagination preserves that order across pages; the live persist path therefore projects newly fetched edges in the received order. The reproject loop sorts deferred rows by `chain_order ASC` because it reads from Postgres rather than directly from the ordered GraphQL page. Together, these rules ensure that `OrderPlaced → OrderFilled → OrderCancelled` preserves the correct natural sequence. `greatest(existing, new)` on `last_chain_order` is a belt-and-suspenders monotonicity guard for the row’s column, not the primary correctness mechanism.
 
 ## Reconciliation
 
@@ -154,6 +156,7 @@ Reconciler-side failures use a separate mechanism — `last_reconcile_failed_at`
 | Lifecycle timings (`stake_*`, `result_*`) are projector-only | Reconciler does not write these columns. |
 | `oracle_events.meta_reconciled_at` set after every successful reconciler pass | OracleEventList reconciler UPDATE always stamps it. |
 | `live_orders.last_chain_order` lex-monotonic per row | `greatest(existing, new)` on every UPDATE; chain-order sorted reproject keeps natural arrival order monotonic too. |
+| `live_orders.placed_chain_order` set once and never moves | `coalesce(live, excluded)` on every `OrderPlaced` upsert; column is `text not null` so a missing `chain_order` fails the insert outright. |
 | Cancellation reason matches its source | Projector picks `PMP_CANCELLED` or `EVENT_CANCELLED` based on event type, never NULL. |
 
 The API enforces complementary read-side invariants on the assembled DTO — see [read-api.md](read-api.md#fail-closed-validation). Together they guarantee that an inconsistent indexer state (e.g. `PMP.Resolved` indexed before `PoolsFrozen`) cannot leak into a client response.
