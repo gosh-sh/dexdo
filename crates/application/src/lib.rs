@@ -21,6 +21,7 @@ use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
 use dodex_domain::TimeInForce;
+use num_bigint::BigUint;
 use uuid::Uuid;
 
 /// Per-request authorization state assembled by the HMAC middleware and
@@ -302,11 +303,15 @@ pub struct SubmittedOrder {
 }
 
 /// Dispatch a `PrivateNote.placeOrder` external message to chain.
-/// Returns once the gateway has acknowledged the dispatch; chain-side
-/// rejections that fire after acknowledgement (`ERR_NOTE_BUSY`,
-/// `ERR_LOW_VALUE`, `OrderBook.Rejected`) are not visible here and
-/// surface through indexer projection — see [write-api.md §Failure
-/// surface](../../docs/tech-specs/write-api.md#failure-surface).
+/// Returns once `bee_dex` has observed the chain's execution of
+/// `PrivateNote.placeOrder` — so PrivateNote-side `require(...)`
+/// failures (`ERR_NOTE_BUSY`, `ERR_LOW_VALUE`, `ERR_INVALID_OUTCOME_ID`,
+/// etc.) come back as typed `DomainError`s here. Only
+/// `OrderBook.Rejected` remains async (it fires from the internal
+/// message `placeOrder` enqueues, in a separate transaction this
+/// future cannot observe) and is surfaced through indexer projection
+/// — see [write-api.md §Failure surface](../../docs/tech-specs/write-api.md#failure-surface)
+/// for the canonical three-class split.
 #[async_trait]
 pub trait ChainOrderSender: Send + Sync {
     async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError>;
@@ -399,8 +404,31 @@ where
         if !is_multiple_of(&input.quantity, &outcome.step_size)? {
             return Err(DomainError::PrecisionExceeded);
         }
-        let amount_raw =
-            lift_decimal(&input.quantity, outcome.quantity_precision)?.to_str_radix(10);
+        let amount_lifted = lift_decimal(&input.quantity, outcome.quantity_precision)?;
+        // Strictly-positive invariant. `quantity == "0"` survives
+        // `precision_within` (no fractional digits) and `is_multiple_of`
+        // (zero is a multiple of every non-zero step), and the
+        // MARKET-SELL branch below skips the notional check that
+        // implicitly catches it for LIMIT and MARKET-BUY (where
+        // `0 * price < min_notional`). Without this gate the chain
+        // would reject with `ERR_LOW_VALUE` (102) — correct shape but
+        // a wasted round-trip and an avoidable contention with the
+        // per-PN `_busy` lock for the legitimate next submission.
+        if amount_lifted == BigUint::from(0u32) {
+            return Err(DomainError::OrderValidationFailed);
+        }
+        // Chain-ABI ceiling: `PrivateNote.placeOrder.amount` is
+        // `uint128`. `lift_decimal` returns an unbounded `BigUint`,
+        // and a caller can send `quantity` whose lifted value
+        // exceeds `u128::MAX` (~3.4 × 10^38) while still passing
+        // precision/step/notional. Catch it here so it surfaces as
+        // 400 / -2010 ("order cannot succeed") instead of a 500 deep
+        // in `BeeDexChainSender` when `amount_raw.parse::<u128>()`
+        // fails.
+        if amount_lifted > BigUint::from(u128::MAX) {
+            return Err(DomainError::OrderValidationFailed);
+        }
+        let amount_raw = amount_lifted.to_str_radix(10);
 
         // Notional check splits per (type, side) per spec validation
         // table. `price_input` carries the validated LIMIT price (or
@@ -879,6 +907,69 @@ mod tests {
         input.client_order_id = Some("not-a-number".into());
         let err = uc.execute(input).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
+    }
+
+    #[tokio::test]
+    async fn create_order_market_sell_rejects_zero_quantity() {
+        // Regression: MARKET SELL skips the notional check that
+        // implicitly catches qty=0 on LIMIT / MARKET BUY, so without
+        // the explicit `amount_lifted > 0` gate this would reach the
+        // chain sender and pay an `ERR_LOW_VALUE` round-trip (plus
+        // contention with the per-PN `_busy` lock).
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), sender.clone());
+        let mut input = base_input("PM-YES");
+        input.order_type = OrderType::Market;
+        input.side = OrderSide::Sell;
+        input.time_in_force = None;
+        input.price = None;
+        input.quantity = "0".into();
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        // The sender MUST NOT have been touched — gate is upstream.
+        assert!(sender.calls().is_empty(), "chain sender hit despite zero-qty reject");
+    }
+
+    #[tokio::test]
+    async fn create_order_limit_rejects_zero_quantity() {
+        // Symmetric pin: LIMIT qty=0 already failed historically via
+        // the notional check (0 * price < min_notional). With the new
+        // explicit gate, the result is the same shape but the failure
+        // happens earlier in the validation chain. Lock the outcome
+        // so a future refactor that reorders or weakens either gate
+        // can't silently let zero-qty through.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), sender.clone());
+        let mut input = base_input("PM-YES");
+        input.quantity = "0".into();
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_quantity_exceeding_u128() {
+        // Regression: `lift_decimal` returns unbounded `BigUint`, but
+        // the chain ABI is `uint128`. A 33-digit quantity with
+        // `quantity_precision = 6` lifts to ~10^39, exceeding
+        // `u128::MAX ≈ 3.4 × 10^38`. Pre-gate, `BeeDexChainSender`
+        // would surface this as `Unexpected` → 500. Post-gate, the
+        // application boundary catches it as `OrderValidationFailed`
+        // → 400 / -2010 ("order would immediately fail").
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), sender.clone());
+        let mut input = base_input("PM-YES");
+        // 33 nines × 10^6 (quantity_precision) ≈ 10^39 > u128::MAX.
+        input.quantity = "999999999999999999999999999999999".into();
+        // Strip the price to keep the test focused — LIMIT still
+        // reaches the amount gate before chain dispatch.
+        input.price = Some("0.001".into());
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.calls().is_empty(), "chain sender hit despite oversized qty");
     }
 
     #[test]

@@ -2159,6 +2159,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dodex-domain",
+ "num-bigint 0.4.6",
  "tokio",
  "uuid",
 ]

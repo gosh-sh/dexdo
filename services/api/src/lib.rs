@@ -518,9 +518,12 @@ fn require_auth(depot: &Depot, permission: Permission) -> Result<&AuthContext, A
 /// `POST /api/v1/order`. Auth hoop has already verified the request;
 /// `require_auth(Trade)` enforces the spec permission. The handler
 /// translates the parsed request + `AuthContext` into a
-/// `NewOrderInput`, hands the use case off, and shapes the response
-/// per [write-api.md §Response]. See that doc for the contract of
-/// `orderId == ""` and the optimistic-NEW status.
+/// `NewOrderInput`, hands the use case off, and shapes the
+/// three-field response (clientOrderId / transactTime / status) per
+/// [write-api.md §Response]. The chain-assigned `orderId` is not in
+/// this response by design — it arrives later through
+/// `GET /api/v1/openOrders` once the indexer projects
+/// `OrderBook.OrderPlaced`.
 #[handler]
 async fn create_order(
     req: &mut Request,
