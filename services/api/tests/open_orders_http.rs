@@ -169,11 +169,13 @@ async fn insert_open_order(pool: &PgPool, scope: &Scope, owner: &str) {
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, owner_pn_address,
                 client_order_id, status, last_chain_order,
+                placed_chain_order,
                 chain_created_at, chain_updated_at,
                 created_at, updated_at)
            values ($1, 42::numeric, 1, false, 12345::numeric,
                    1000::numeric, 750::numeric, $2,
                    'client-42', 'OPEN', '5f800000000000000042',
+                   '5f800000000000000042',
                    to_timestamp(1700000000), to_timestamp(1700000001),
                    to_timestamp(1700000000), to_timestamp(1700000001))"#,
     )
@@ -400,11 +402,13 @@ async fn pagination_returns_next_cursor_and_finishes() {
                    (orderbook_address, order_id, outcome_id, is_buy, price,
                     amount_initial, amount_remaining, owner_pn_address,
                     client_order_id, status, last_chain_order,
+                    placed_chain_order,
                     chain_created_at, chain_updated_at,
                     created_at, updated_at)
                values ($1, $2::numeric, 1, true, 12345::numeric,
                        1000::numeric, 1000::numeric, $3,
                        $4, 'OPEN', $5,
+                       $5,
                        to_timestamp($6::bigint), to_timestamp($6::bigint),
                        to_timestamp($6::bigint), to_timestamp($6::bigint))"#,
         )
@@ -500,221 +504,6 @@ async fn bad_limit_returns_1102() {
         .query("signature", sig)
         .send(&service)
         .await;
-    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
-    let body = resp.take_json::<ErrorBody>().await.expect("error body");
-    assert_eq!(body.code, -1102);
-}
-
-#[tokio::test]
-async fn bad_cursor_returns_1102() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
-    let ts = now_ms();
-    let canonical = canonical_query(&[
-        ("cursor", "not-a-valid-cursor"),
-        ("recvWindow", "5000"),
-        ("timestamp", &ts.to_string()),
-    ]);
-    let sig = sign(SEED_API_SECRET, &canonical, b"");
-
-    let mut resp = TestClient::get("http://test/api/v1/openOrders")
-        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
-        .query("cursor", "not-a-valid-cursor")
-        .query("recvWindow", "5000")
-        .query("timestamp", ts.to_string())
-        .query("signature", sig)
-        .send(&service)
-        .await;
-    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
-    let body = resp.take_json::<ErrorBody>().await.expect("error body");
-    assert_eq!(body.code, -1102);
-}
-
-#[tokio::test]
-async fn cursor_with_nonnumeric_order_id_returns_1102() {
-    // Regression: a structurally valid cursor whose `o` field is not a decimal
-    // string used to surface as -1000/500 because sqlx hit a numeric cast
-    // failure during query bind. The cursor codec now rejects it up front so
-    // the documented -1102/400 fires instead.
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
-    let bad_cursor = dodex_application::OpenOrdersCursor {
-        chain_created_at_us: 0,
-        order_id: "abc".into(),
-        orderbook_address: "0:book".into(),
-    }
-    .encode();
-
-    let ts = now_ms();
-    let canonical = canonical_query(&[
-        ("cursor", &bad_cursor),
-        ("recvWindow", "5000"),
-        ("timestamp", &ts.to_string()),
-    ]);
-    let sig = sign(SEED_API_SECRET, &canonical, b"");
-
-    let mut resp = TestClient::get("http://test/api/v1/openOrders")
-        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
-        .query("cursor", bad_cursor.as_str())
-        .query("recvWindow", "5000")
-        .query("timestamp", ts.to_string())
-        .query("signature", sig)
-        .send(&service)
-        .await;
-
-    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
-    let body = resp.take_json::<ErrorBody>().await.expect("error body");
-    assert_eq!(body.code, -1102);
-}
-
-#[tokio::test]
-async fn cursor_with_overlong_order_id_returns_1102() {
-    // Regression: an order_id with 79+ ASCII digits passes the digit-only
-    // check but overflows `numeric(78, 0)` at SQL bind, surfacing as
-    // -1000/500. The codec now caps the length so the documented -1102/400
-    // fires before the query runs.
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
-    let overlong = "1".repeat(79);
-    let bad_cursor = dodex_application::OpenOrdersCursor {
-        chain_created_at_us: 0,
-        order_id: overlong,
-        orderbook_address: "0:book".into(),
-    }
-    .encode();
-
-    let ts = now_ms();
-    let canonical = canonical_query(&[
-        ("cursor", &bad_cursor),
-        ("recvWindow", "5000"),
-        ("timestamp", &ts.to_string()),
-    ]);
-    let sig = sign(SEED_API_SECRET, &canonical, b"");
-
-    let mut resp = TestClient::get("http://test/api/v1/openOrders")
-        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
-        .query("cursor", bad_cursor.as_str())
-        .query("recvWindow", "5000")
-        .query("timestamp", ts.to_string())
-        .query("signature", sig)
-        .send(&service)
-        .await;
-
-    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
-    let body = resp.take_json::<ErrorBody>().await.expect("error body");
-    assert_eq!(body.code, -1102);
-}
-
-#[tokio::test]
-async fn cursor_with_foreign_orderbook_returns_sensible_page() {
-    // The cursor `b` field is server-issued in normal flows, but it's opaque
-    // (not signed): a client can forge any value. The repo's next-page
-    // predicate compares the full tuple `(chain_created_at, order_id,
-    // orderbook_address) > (cursor.t, cursor.o, cursor.b)` and trusts what
-    // it receives. Pin behaviour: with a cursor.t strictly between two
-    // seeded rows and a foreign cursor.b, the endpoint must return the rows
-    // that sort after cursor.t — the foreign `b` is harmless because
-    // `chain_created_at` already separates the tuples. This locks in the
-    // "forged b cannot crash, 500, or skip rows it shouldn't" property.
-    let Some((service, pool, kek)) = common::setup().await else { return };
-    let scope = Scope::new();
-    scope.cleanup(&pool).await;
-    seed_readonly_key(&pool, &kek, &scope).await;
-    insert_market(&pool, &scope).await;
-    let owner = trading_pn(&pool).await;
-
-    for (i, t) in (1..=3i64).zip([1_700_000_010i64, 1_700_000_020, 1_700_000_030]) {
-        sqlx::query(
-            r#"insert into live_orders
-                   (orderbook_address, order_id, outcome_id, is_buy, price,
-                    amount_initial, amount_remaining, owner_pn_address,
-                    client_order_id, status, last_chain_order,
-                    chain_created_at, chain_updated_at,
-                    created_at, updated_at)
-               values ($1, $2::numeric, 1, true, 12345::numeric,
-                       1000::numeric, 1000::numeric, $3,
-                       $4, 'OPEN', $5,
-                       to_timestamp($6::bigint), to_timestamp($6::bigint),
-                       to_timestamp($6::bigint), to_timestamp($6::bigint))"#,
-        )
-        .bind(&scope.book)
-        .bind(i)
-        .bind(&owner)
-        .bind(format!("client-{i}"))
-        .bind(format!("5f8000000000000{:05}", i))
-        .bind(t)
-        .execute(&pool)
-        .await
-        .expect("insert live order");
-    }
-
-    // Cursor lands strictly between row 1 (t=1_700_000_010s) and row 2
-    // (t=1_700_000_020s). The `b` field points at an unrelated orderbook,
-    // which the repo will pass through to the tuple comparison verbatim.
-    let foreign_cursor = dodex_application::OpenOrdersCursor {
-        chain_created_at_us: 1_700_000_015_000_000,
-        order_id: "1".into(),
-        orderbook_address: "0:totally_unrelated_orderbook".into(),
-    }
-    .encode();
-
-    let ts = now_ms();
-    let canonical = canonical_query(&[
-        ("cursor", &foreign_cursor),
-        ("limit", "10"),
-        ("recvWindow", "5000"),
-        ("timestamp", &ts.to_string()),
-    ]);
-    let sig = sign(SEED_API_SECRET, &canonical, b"");
-
-    let mut resp = TestClient::get("http://test/api/v1/openOrders")
-        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
-        .query("cursor", foreign_cursor.as_str())
-        .query("limit", "10")
-        .query("recvWindow", "5000")
-        .query("timestamp", ts.to_string())
-        .query("signature", sig)
-        .send(&service)
-        .await;
-    let status = resp.status_code;
-    let body = resp.take_json::<OpenOrdersPageBody>().await.expect("page body");
-    scope.cleanup(&pool).await;
-
-    assert_eq!(status, Some(StatusCode::OK));
-    assert_eq!(body.orders.len(), 2);
-    assert_eq!(body.orders[0].order_id, "2");
-    assert_eq!(body.orders[1].order_id, "3");
-    assert!(body.next_cursor.is_none());
-}
-
-#[tokio::test]
-async fn cursor_with_out_of_range_timestamp_returns_1102() {
-    // Regression: a structurally valid cursor with t = i64::MAX previously
-    // passed validation, then the repo's `to_timestamp($ / 1000.0)` pushed
-    // Postgres past its timestamp range and surfaced as -1000/500. The
-    // codec now bounds the millisecond value before returning.
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
-    let bad_cursor = dodex_application::OpenOrdersCursor {
-        chain_created_at_us: i64::MAX,
-        order_id: "1".into(),
-        orderbook_address: "0:book".into(),
-    }
-    .encode();
-
-    let ts = now_ms();
-    let canonical = canonical_query(&[
-        ("cursor", &bad_cursor),
-        ("recvWindow", "5000"),
-        ("timestamp", &ts.to_string()),
-    ]);
-    let sig = sign(SEED_API_SECRET, &canonical, b"");
-
-    let mut resp = TestClient::get("http://test/api/v1/openOrders")
-        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
-        .query("cursor", bad_cursor.as_str())
-        .query("recvWindow", "5000")
-        .query("timestamp", ts.to_string())
-        .query("signature", sig)
-        .send(&service)
-        .await;
-
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(body.code, -1102);
@@ -857,4 +646,33 @@ async fn limit_above_u16_max_returns_1102() {
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
+async fn out_of_range_cursor_returns_empty_page() {
+    // A well-formed cursor whose value lex-exceeds every placed_chain_order
+    // returns an empty page with next_cursor: null — not an error.
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    // Far-future-style cursor that no real msg_chain_order will match.
+    let cursor = "ffffffffffffffffffffffffffffffff";
+    let canonical = canonical_query(&[
+        ("cursor", cursor),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/openOrders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("cursor", cursor)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body = resp.take_json::<OpenOrdersPageBody>().await.expect("open orders body");
+    assert!(body.orders.is_empty());
+    assert!(body.next_cursor.is_none());
 }

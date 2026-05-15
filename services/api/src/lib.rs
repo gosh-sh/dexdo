@@ -22,7 +22,6 @@ use dodex_application::MarketsFilter;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
-use dodex_application::OpenOrdersCursor;
 use dodex_domain::DomainError;
 use dodex_domain::Market;
 use dodex_domain::MarketAddress;
@@ -452,9 +451,10 @@ async fn get_open_orders(
     // openOrders error contract.
     let limit = optional_typed_query::<i64>(req, "limit")
         .map_err(|_| ApiError::from(DomainError::MissingParameter))?;
-    // Cursor is opaque; an empty / whitespace-only `?cursor=` is treated
-    // as malformed rather than "no cursor". Feed the raw query value to
-    // the codec so it produces the documented MissingParameter / -1102.
+    // Cursor is the lex-comparable placed_chain_order value from a prior
+    // page response. An empty / whitespace-only `?cursor=` is treated as
+    // malformed (-1102 / 400) rather than "no cursor". The use case does
+    // the trim + non-empty check.
     let cursor = req.query::<String>("cursor");
 
     let use_case = GetOpenOrdersUseCase::new(state.repo);
@@ -471,7 +471,7 @@ async fn get_open_orders(
 
     Ok(Json(OpenOrdersPageResponse {
         orders: page.orders.into_iter().map(open_order_to_dto).collect(),
-        next_cursor: page.next_cursor.as_ref().map(OpenOrdersCursor::encode),
+        next_cursor: page.next_cursor.map(|c| c.0),
     }))
 }
 
