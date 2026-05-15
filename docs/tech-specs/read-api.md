@@ -154,14 +154,14 @@ Empty string means no OrderBook event has touched this pair yet. The value never
 
 ### Source data
 
-The endpoint reads exclusively from [`live_orders`](../data-schema.md#live_orders). A row contributes to the response iff all hold:
+The endpoint reads exclusively from [`live_orders`](data-schema.md#live_orders). A row contributes to the response iff all hold:
 
 - `owner_pn_address = ctx.trading_pn.pn_address` — caller is the owner.
 - `status = 'OPEN'` — neither `FILLED` nor `CANCELLED`.
 - `amount_remaining > 0` — defence-in-depth; an `OPEN` row with zero remainder would be a projector bug.
-- The parent market in [`markets`](../data-schema.md#markets) has `last_reconciled_at IS NOT NULL` — pre-reconcile markets are hidden symmetrically with `/api/v1/markets`.
+- The parent market in [`markets`](data-schema.md#markets) has `last_reconciled_at IS NOT NULL` — pre-reconcile markets are hidden symmetrically with `/api/v1/markets`.
 
-The query joins through `markets` and [`market_outcomes`](../data-schema.md#market_outcomes) to recover the public identifiers `pmp_address` and `symbol` for each row, plus `price_precision` / `quantity_precision` for scaling. See [§ SQL](#sql) for the two query variants.
+The query joins through `markets` and [`market_outcomes`](data-schema.md#market_outcomes) to recover the public identifiers `pmp_address` and `symbol` for each row, plus `price_precision` / `quantity_precision` for scaling. See [§ SQL](#sql) for the two query variants.
 
 ### Filter resolution
 
@@ -225,7 +225,7 @@ The format is not opaque: clients may read the cursor as a plain string, but the
 
 - `-1003` / 401 for missing or unparseable envelope (`X-DODEX-APIKEY`, `timestamp`, `signature`, `recvWindow`).
 - `-1002` / 401 for unknown / disabled key.
-- `-2015` / 403 for a key without the `USER_DATA` permission.
+- `-1002` / 401 for a key without the `USER_DATA` permission. Identical on the wire to a credential rejection — intentional `msg` opacity, see [auth.md](auth.md#authorization-permissions).
 
 The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses `ctx.trading_pn.pn_address` as the `owner_pn_address` filter. No additional permission logic.
 
@@ -238,7 +238,7 @@ The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses
 | `cursor` is empty or whitespace-only | `MissingParameter` | `-1102` | 400 |
 | Pair not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
 | Missing / invalid signature / API key / timestamp | upstream auth | `-1003` | 401 |
-| Missing `USER_DATA` permission | upstream auth | `-2015` | 403 |
+| Missing `USER_DATA` permission | upstream auth | `-1002` | 401 |
 | Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
 
 ### SQL

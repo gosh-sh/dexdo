@@ -322,12 +322,4 @@ mod tests {
         assert!(ctx.require(Permission::UserData).is_err());
         assert!(ctx.require(Permission::Trade).is_err());
     }
-
-    // OpenOrdersCursor is a plain-string newtype as of the
-    // placed_chain_order pagination migration — see
-    // docs/superpowers/specs/2026-05-14-openorders-chain-order-pagination-design.md.
-    // The only structural invariant is "non-empty after trim"; that is
-    // enforced inside GetOpenOrdersUseCase::execute. We do not unit-test
-    // execute here (it needs a mock repo); the path is covered end-to-end
-    // by services/api/tests/open_orders_http.rs.
 }

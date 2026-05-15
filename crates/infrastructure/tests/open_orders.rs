@@ -781,20 +781,44 @@ async fn sort_uses_placed_chain_order_independent_of_chain_created_at() {
     // event sequence. We assign placed_chain_order in reverse of order_id
     // to prove the sort no longer follows order_id.
     insert_order(
-        &pool, &scope.book_yes, 1,
-        Some(&scope.owner), "12345", "1000", "1000", "OPEN", 1_700_000_500,
-        "5f80000000000000_C",  // last
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_500,
+        "5f80000000000000_C", // last
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 2,
-        Some(&scope.owner), "12345", "1000", "1000", "OPEN", 1_700_000_500,
-        "5f80000000000000_A",  // first
-    ).await;
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_500,
+        "5f80000000000000_A", // first
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 3,
-        Some(&scope.owner), "12345", "1000", "1000", "OPEN", 1_700_000_500,
-        "5f80000000000000_B",  // middle
-    ).await;
+        &pool,
+        &scope.book_yes,
+        3,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_500,
+        "5f80000000000000_B", // middle
+    )
+    .await;
 
     let page = repo
         .list_open_orders(&OpenOrdersQuery {
