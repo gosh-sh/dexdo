@@ -565,10 +565,9 @@ async fn unparseable_limit_returns_1102() {
 
 #[tokio::test]
 async fn empty_cursor_returns_1102() {
-    // Regression: an empty `?cursor=` used to be silently treated as "no
-    // cursor" because the handler filtered empty / whitespace-trimmed
-    // values into None. The codec now sees the empty string and returns
-    // MissingParameter as documented.
+    // Empty cursor query value is treated as a malformed cursor — the use
+    // case trims to "" and returns MissingParameter (-1102 / 400). Distinct
+    // from "no cursor parameter at all", which means "first page".
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical =
@@ -591,12 +590,9 @@ async fn empty_cursor_returns_1102() {
 
 #[tokio::test]
 async fn whitespace_cursor_returns_1102() {
-    // Pin the handler's promise that whitespace-only `?cursor=` is also
-    // routed through the codec (not treated as "no cursor"). Server-side
-    // canonicalisation operates on the raw query string, so we embed
-    // `%20` literally — that's what reaches both the signer and the
-    // codec, and `%20` has no URL-safe-base64 representation so decode
-    // fails into MissingParameter.
+    // A whitespace-only cursor query value (e.g. URL-encoded " ") is also
+    // treated as malformed — the use case trims to "" and rejects with
+    // MissingParameter (-1102 / 400). Same rationale as empty_cursor.
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[
@@ -654,7 +650,11 @@ async fn out_of_range_cursor_returns_empty_page() {
     // returns an empty page with next_cursor: null — not an error.
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let ts = now_ms();
-    // Far-future-style cursor that no real msg_chain_order will match.
+    // Real msg_chain_order values from the gateway are zero-padded hex-shaped
+    // strings starting with 5f80... (see graphql.rs samples and migration
+    // 0016 commentary). An all-`ff` 32-char string lex-exceeds any of them
+    // by the leading nibble, so the SQL predicate `placed_chain_order > $cursor`
+    // matches zero rows.
     let cursor = "ffffffffffffffffffffffffffffffff";
     let canonical = canonical_query(&[
         ("cursor", cursor),

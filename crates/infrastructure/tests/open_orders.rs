@@ -685,11 +685,11 @@ async fn cursor_handles_sub_millisecond_chain_timestamps() {
 
 #[tokio::test]
 async fn cross_book_tie_does_not_lose_orders_across_pages() {
-    // Regression: `live_orders.order_id` is only unique within an orderbook
-    // (PK is `(orderbook_address, order_id)`). For the all-markets variant,
-    // two orders on different books that share `(chain_created_at, order_id)`
-    // used to be filtered out together by the next-page `>` predicate. The
-    // cursor now carries `orderbook_address` as the tie-breaker.
+    // Under placed_chain_order ordering, two cross-book rows are globally
+    // distinguished by their msg_chain_order (gateway-unique), so a tied
+    // (chain_time, order_id) no longer collapses two rows under a single
+    // cursor. This test pins the all-markets variant: two open orders on
+    // different orderbooks paginate without losing either row.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
     let scope = Scope::new();
