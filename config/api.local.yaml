@@ -5,7 +5,16 @@ app:
 server:
   host: 0.0.0.0
   port: 8080
-  request_timeout_ms: 5000
+  # NOTE: this value is not wired into the Salvo router yet (see the
+  # TODO on `ServerSection.request_timeout_ms` in
+  # `crates/infrastructure/src/config.rs`). When that timeout hoop
+  # is added, this value MUST exceed `chain.place_order_timeout_ms`
+  # by a safety margin — cutting off the HTTP request while the
+  # chain call is still in flight would land the order on chain
+  # while returning 504 to the client, who would then not know its
+  # `clientOrderId` (the worst failure mode for optimistic
+  # placement). 35 s = 30 s chain + ~5 s slack covers it.
+  request_timeout_ms: 35000
 
 database:
   url: postgres://postgres:postgres@localhost:5432/dodex
@@ -19,3 +28,9 @@ auth:
   default_recv_window_ms: 5000
   max_recv_window_ms: 60000
   seed_accounts: true
+
+chain:
+  # Acki Nacki gateway the trading path POSTs external messages to.
+  # Stage/prod configs ship their own endpoints.
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 30000

@@ -7,12 +7,15 @@ pub mod testkit;
 
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use dodex_application::AuthContext;
 use dodex_application::Authenticator;
+use dodex_application::ChainOrderSender;
+use dodex_application::CreateOrderUseCase;
 use dodex_application::GetDepthQuery;
 use dodex_application::GetDepthUseCase;
 use dodex_application::GetMarketsUseCase;
@@ -21,17 +24,23 @@ use dodex_application::MarketsFilter;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::NewOrderInput;
 use dodex_domain::DomainError;
 use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketEvent;
 use dodex_domain::MarketStatus;
+use dodex_domain::OrderSide;
+use dodex_domain::OrderStatus;
+use dodex_domain::OrderType;
 use dodex_domain::Permission;
 use dodex_domain::Symbol;
 use dodex_domain::Terminal;
 use dodex_domain::TerminalKind;
+use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
 use dodex_infrastructure::auth::PostgresAuthenticator;
+use dodex_infrastructure::chain_sender::BeeDexChainSender;
 use dodex_infrastructure::config::ApiConfig;
 use dodex_infrastructure::crypto::Kek;
 use dodex_infrastructure::database;
@@ -42,29 +51,37 @@ use salvo::http::StatusCode;
 use salvo::prelude::*;
 use salvo::writing::Json;
 use salvo_extra::affix_state::inject;
+use serde::Deserialize;
 use serde::Serialize;
 use tracing::error;
 use tracing::info;
-use uuid::Uuid;
+use tracing::warn;
 
 #[doc(hidden)]
 pub type SharedRepo = Arc<dyn MarketReadRepository>;
 #[doc(hidden)]
 pub type SharedAuth = Arc<dyn Authenticator>;
+#[doc(hidden)]
+pub type SharedChainSender = Arc<dyn ChainOrderSender>;
 
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) repo: SharedRepo,
     pub(crate) authenticator: SharedAuth,
+    pub(crate) chain_sender: SharedChainSender,
 }
 
 impl AppState {
     /// Wire-up constructor. Re-exported through the `testkit` module
     /// for integration tests; production code reaches it through `run`.
     #[doc(hidden)]
-    pub fn new(repo: SharedRepo, authenticator: SharedAuth) -> Self {
-        Self { repo, authenticator }
+    pub fn new(
+        repo: SharedRepo,
+        authenticator: SharedAuth,
+        chain_sender: SharedChainSender,
+    ) -> Self {
+        Self { repo, authenticator, chain_sender }
     }
 }
 
@@ -174,6 +191,11 @@ impl ApiError {
             // Transient indexer state — fail closed, client retries when
             // the indexer catches up.
             DomainError::MarketInconsistent => StatusCode::SERVICE_UNAVAILABLE,
+            // Per-PN serialisation is a chain invariant: only one
+            // `placeOrder` per trading PN can be in flight. 429 is the
+            // canonical "you sent too many to this PN; back off and
+            // retry" — distinct from a 401 (auth) or 400 (bad order).
+            DomainError::OrderPnBusy => StatusCode::TOO_MANY_REQUESTS,
             DomainError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::BAD_REQUEST,
         }
@@ -423,15 +445,38 @@ fn optional_typed_query<T: std::str::FromStr>(
     trimmed.parse::<T>().map(Some).map_err(|_| ApiError::from(DomainError::InvalidParameter))
 }
 
-/// Placeholder response for `POST /api/v1/order` until the real
-/// order-placement pipeline lands. The route is wired now to give
-/// integrators a real authenticated endpoint to smoke-test their
-/// HMAC signing against; the response shape will change to match
-/// `docs/api-spec.md §New Order` when the real handler ships.
+/// Request body for `POST /api/v1/order`. Field names match
+/// [api-spec §New Order](../../docs/api-spec.md#new-order) verbatim;
+/// `type` is the reserved keyword we rename for serde and rebind to
+/// `order_type` internally.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateOrderRequest {
+    market_address: Option<String>,
+    symbol: Option<String>,
+    new_order_client_id: Option<String>,
+    side: Option<String>,
+    quantity: Option<String>,
+    price: Option<String>,
+    #[serde(rename = "type")]
+    order_type: Option<String>,
+    time_in_force: Option<String>,
+}
+
+/// Response shape for `POST /api/v1/order`. Minimal by design — we
+/// only return facts the caller does not already have:
+/// `clientOrderId` (which the backend may have generated),
+/// `transactTime` (the moment we accepted), and `status` (always
+/// `PENDING_NEW` for a successful submission — the order is in the
+/// chain queue, not yet on the book). The full order shape with
+/// chain-assigned `orderId` becomes available through
+/// `GET /api/v1/openOrders` once `OrderBook.OrderPlaced` projects.
+/// See `docs/tech-specs/write-api.md §Response` for the rationale.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct OrderStubResponse {
-    account_id: Uuid,
+struct CreateOrderResponse {
+    client_order_id: String,
+    transact_time: i64,
     status: &'static str,
 }
 
@@ -450,15 +495,94 @@ fn require_auth(depot: &Depot, permission: Permission) -> Result<&AuthContext, A
     Ok(ctx)
 }
 
-/// Stub for `POST /api/v1/order`. The auth hoop has already verified
-/// the request and placed `AuthContext` in the depot; `require_auth`
-/// then enforces the spec-required `TRADE` permission. When the real
-/// implementation lands, only the body construction below changes —
-/// the authorization gate stays as-is.
+/// `POST /api/v1/order`. Auth hoop has already verified the request;
+/// `require_auth(Trade)` enforces the spec permission. The handler
+/// translates the parsed request + `AuthContext` into a
+/// `NewOrderInput`, hands the use case off, and shapes the response
+/// per [write-api.md §Response]. See that doc for the contract of
+/// `orderId == ""` and the optimistic-NEW status.
 #[handler]
-async fn create_order(depot: &mut Depot) -> Result<Json<OrderStubResponse>, ApiError> {
-    let ctx = require_auth(depot, Permission::Trade)?;
-    Ok(Json(OrderStubResponse { account_id: ctx.account_id, status: "STUB" }))
+async fn create_order(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<CreateOrderResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::Trade)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let body: CreateOrderRequest = req.parse_json().await.map_err(|err| {
+        // Body has been HMAC-verified upstream, so a parse failure here
+        // is a client-shape bug (malformed JSON, wrong types) — surface
+        // as -1130 InvalidParameter rather than a generic 500. `warn`
+        // not `error`: a misbehaving caller is not an ops issue, just
+        // a debugging breadcrumb (mirrors `chain_sender.rs`'s `warn`
+        // for known-mapped chain rejects).
+        warn!(?err, "POST /api/v1/order body did not parse");
+        ApiError::from(DomainError::InvalidParameter)
+    })?;
+
+    let (now_seconds, now_ms) = now_pair();
+    let input = build_new_order_input(body, ctx, now_seconds, now_ms)?;
+
+    let use_case = CreateOrderUseCase::new(state.repo, state.chain_sender);
+    let submitted = use_case.execute(input).await.map_err(ApiError::from)?;
+
+    Ok(Json(CreateOrderResponse {
+        client_order_id: submitted.client_order_id,
+        transact_time: now_ms,
+        status: OrderStatus::PendingNew.as_str(),
+    }))
+}
+
+/// Translate the raw body + auth context into a `NewOrderInput`.
+/// Returns typed `DomainError`s for missing or unknown enum values;
+/// the use case takes over for resolution and validation.
+fn build_new_order_input(
+    body: CreateOrderRequest,
+    ctx: AuthContext,
+    now_seconds: i64,
+    now_ms: i64,
+) -> Result<NewOrderInput, ApiError> {
+    let market_address =
+        non_empty(body.market_address).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let symbol = non_empty(body.symbol).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let side_str = non_empty(body.side).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let side = OrderSide::parse(&side_str).ok_or(ApiError::from(DomainError::InvalidParameter))?;
+    let quantity = non_empty(body.quantity).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let order_type = match body.order_type.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => OrderType::parse(s).ok_or(ApiError::from(DomainError::InvalidParameter))?,
+        None => OrderType::Limit,
+    };
+    let time_in_force = match body.time_in_force.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    {
+        Some(s) => {
+            Some(TimeInForce::parse(s).ok_or(ApiError::from(DomainError::InvalidParameter))?)
+        }
+        None => None,
+    };
+
+    Ok(NewOrderInput {
+        trading_pn: ctx.trading_pn,
+        market_address: MarketAddress(market_address),
+        symbol: Symbol(symbol),
+        side,
+        quantity,
+        price: non_empty(body.price),
+        order_type,
+        time_in_force,
+        client_order_id: non_empty(body.new_order_client_id),
+        now_seconds,
+        now_ms,
+    })
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Assemble the production router around `state`. Kept as a separate
@@ -516,7 +640,11 @@ pub async fn run() -> anyhow::Result<()> {
     info!("api running with postgres read-model repository");
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
     let authenticator: SharedAuth = Arc::new(PostgresAuthenticator::new(pool, kek, &config.auth));
-    let state = AppState::new(repo, authenticator);
+    let chain_sender: SharedChainSender = Arc::new(BeeDexChainSender::new(
+        vec![config.chain.gateway_endpoint.clone()],
+        Duration::from_millis(config.chain.place_order_timeout_ms),
+    )?);
+    let state = AppState::new(repo, authenticator, chain_sender);
 
     // The API is intentionally restart-to-reconfigure. None of the live
     // request paths read runtime config — pool, server bind, request_timeout
@@ -539,4 +667,13 @@ pub async fn run() -> anyhow::Result<()> {
 
 fn now_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or_default()
+}
+
+/// Capture wall-clock once and project it into both (seconds, ms) so a
+/// single request can derive market status against the same moment it
+/// reports as `transactTime`. Avoids the (rare) race where one clock
+/// read crosses a second boundary mid-request.
+fn now_pair() -> (i64, i64) {
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    (d.as_secs() as i64, d.as_millis() as i64)
 }

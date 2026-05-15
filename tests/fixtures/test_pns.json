@@ -1,0 +1,40 @@
+{
+  "notes": [
+    {
+      "address": "0:fcf6b668e551bf4de27f607b6aff196b8685c62a622b41e50663f74aac81063b",
+      "deposit_identifier_hash": "85247249531718981006865038844038018272947496725666328162751235145320912866080",
+      "owner_public_key_hex": "926d6c4c3d034f8e7cdf1d62d7ee6b49e1d920934a0d537b393a837cfe88a914",
+      "owner_secret_key_hex": "af3cb4707fc6213e25a2981d625d545de60019b22719a4c19124dc9f9f06f4f4",
+      "deployed_at_unix": 1777643556,
+      "shell_funded": true,
+      "native_funded": true
+    },
+    {
+      "address": "0:935c43fbb121fe6175d9e2144ea0dc3d1a6f38e0974fd87d195b2ab75d39d434",
+      "deposit_identifier_hash": "61366779949379726451646679105823088288020758176296518235294905991433170173455",
+      "owner_public_key_hex": "392c1018b0626dfb9a3a1dd921d004e13c8895bd977826b1b3a9be423cf14249",
+      "owner_secret_key_hex": "10e5d02c8d2c2434638ee81723842ceafa517c3bb7db111185878797a96b3b02",
+      "deployed_at_unix": 1777643890,
+      "shell_funded": true,
+      "native_funded": true
+    },
+    {
+      "address": "0:a9ea5f51ee2be7539eecac5d00f70720ad356267f83e7eb0eeac34ac01c190fc",
+      "deposit_identifier_hash": "109414283961673960961791544630645265076378974734486707711788835181314026852890",
+      "owner_public_key_hex": "46d1275386f4597a9ecd4b4ab25cbda7c504d7ce11396a65cfd0b62055419c21",
+      "owner_secret_key_hex": "b8cc5a0bd4f09df67f8e64fba3ecae243ac2ec04c593cc9c9da55081d1429a79",
+      "deployed_at_unix": 1777644232,
+      "shell_funded": true,
+      "native_funded": true
+    },
+    {
+      "address": "0:99decf29817f21299100ddf8759ffe8c237a3bc2076df28e82fb44f0376c6602",
+      "deposit_identifier_hash": "65864914985175718456256798292914278214245776811902741818184295149309536837162",
+      "owner_public_key_hex": "1c0115ef632a0a018c252aab9cab29809a873089dca4663824f4e906a1a07536",
+      "owner_secret_key_hex": "a29afb9c6e30b643474bc94b39389135966bfd135127904e8d31a6ead7738453",
+      "deployed_at_unix": 1777644568,
+      "shell_funded": true,
+      "native_funded": true
+    }
+  ]
+}

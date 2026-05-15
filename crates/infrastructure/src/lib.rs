@@ -2,6 +2,7 @@
 //
 
 pub mod auth;
+pub mod chain_sender;
 pub mod config;
 pub mod crypto;
 pub mod database;

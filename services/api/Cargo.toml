@@ -19,8 +19,12 @@ dodex-domain = { path = "../../crates/domain" }
 dodex-infrastructure = { path = "../../crates/infrastructure" }
 
 [dev-dependencies]
+ackinacki-kit.workspace = true
+async-trait.workspace = true
+bee-dex.workspace = true
 hex = "0.4"
 hmac = "0.12"
+num-bigint.workspace = true
 sha2 = "0.10"
 sqlx.workspace = true
 dotenvy.workspace = true

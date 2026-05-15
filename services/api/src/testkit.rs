@@ -12,4 +12,6 @@ pub use crate::AppState;
 #[doc(hidden)]
 pub use crate::SharedAuth;
 #[doc(hidden)]
+pub use crate::SharedChainSender;
+#[doc(hidden)]
 pub use crate::SharedRepo;

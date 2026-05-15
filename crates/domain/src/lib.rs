@@ -1,6 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
@@ -177,6 +178,12 @@ pub struct Market {
     /// HTTP 503 by `assemble_market` / depth path. Clients gate trading
     /// availability on `status`, not on this field's presence.
     pub order_book_address: String,
+    /// `0x`-prefixed hex of `PMP.getDetails().oracleListHash`, stamped
+    /// by the market reconciler. Required by `placeOrder` / `placeBatch`
+    /// chain calls; the public `/api/v1/markets` DTO does not surface
+    /// it. Empty string on a reconciled row is treated as
+    /// `MarketInconsistent` → HTTP 503 by the trading path.
+    pub oracle_list_hash: String,
     pub market_name: MarketName,
     pub status: MarketStatus,
     pub quote_asset: String,
@@ -265,6 +272,288 @@ impl Permission {
     }
 }
 
+/// Side of an order. Mirrors the public `side` enum from `api-spec.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+impl OrderSide {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Buy => "BUY",
+            Self::Sell => "SELL",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "BUY" => Some(Self::Buy),
+            "SELL" => Some(Self::Sell),
+            _ => None,
+        }
+    }
+
+    pub fn is_buy(&self) -> bool {
+        matches!(self, Self::Buy)
+    }
+}
+
+/// Order type. Mirrors the public `type` enum from `api-spec.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderType {
+    Limit,
+    Market,
+}
+
+impl OrderType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Limit => "LIMIT",
+            Self::Market => "MARKET",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "LIMIT" => Some(Self::Limit),
+            "MARKET" => Some(Self::Market),
+            _ => None,
+        }
+    }
+}
+
+/// Time-in-force. Mirrors the public `timeInForce` enum from `api-spec.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TimeInForce {
+    Gtc,
+    Ioc,
+    Fok,
+    PostOnly,
+}
+
+impl TimeInForce {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Gtc => "GTC",
+            Self::Ioc => "IOC",
+            Self::Fok => "FOK",
+            Self::PostOnly => "POST_ONLY",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "GTC" => Some(Self::Gtc),
+            "IOC" => Some(Self::Ioc),
+            "FOK" => Some(Self::Fok),
+            "POST_ONLY" => Some(Self::PostOnly),
+            _ => None,
+        }
+    }
+}
+
+/// Order status. Mirrors the public `status` enum from `api-spec.md`.
+///
+/// `PendingNew` is the transitional state between the moment
+/// `PrivateNote.placeOrder` accepts (synchronous return of
+/// `bee_dex::Dex::place_order`) and the moment `OrderBook.OrderPlaced`
+/// projects into `live_orders` with a chain-assigned `orderId`. The
+/// HTTP response to a successful `POST /api/v1/order` always carries
+/// `PendingNew`; the indexer-projected row in `live_orders` then
+/// surfaces as `NEW` through `GET /api/v1/openOrders`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderStatus {
+    PendingNew,
+    New,
+    PartiallyFilled,
+    Filled,
+    Canceled,
+    Rejected,
+}
+
+impl OrderStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PendingNew => "PENDING_NEW",
+            Self::New => "NEW",
+            Self::PartiallyFilled => "PARTIALLY_FILLED",
+            Self::Filled => "FILLED",
+            Self::Canceled => "CANCELED",
+            Self::Rejected => "REJECTED",
+        }
+    }
+}
+
+/// Chain-side flag bits packed into `placeOrder.flags` (uint8). Layout
+/// matches `contracts/modifiers/modifiers.sol`.
+pub const FLAG_IOC: u8 = 0x01;
+pub const FLAG_FOK: u8 = 0x02;
+pub const FLAG_MARKET: u8 = 0x04;
+pub const FLAG_POST_ONLY: u8 = 0x08;
+
+/// Encode `type` × `timeInForce` into the on-chain `uint8 flags` value
+/// per spec §Flags. Accepts `Option<TimeInForce>` because the public API
+/// ignores `timeInForce` on `MARKET` orders — passing `None` for `MARKET`
+/// is the canonical "no TIF was given" path. Returns
+/// `DomainError::InvalidParameter` for combinations the spec rejects.
+pub fn encode_order_flags(
+    order_type: OrderType,
+    time_in_force: Option<TimeInForce>,
+) -> Result<u8, DomainError> {
+    match order_type {
+        OrderType::Limit => match time_in_force.unwrap_or(TimeInForce::Gtc) {
+            TimeInForce::Gtc => Ok(0),
+            TimeInForce::Ioc => Ok(FLAG_IOC),
+            TimeInForce::Fok => Ok(FLAG_FOK),
+            TimeInForce::PostOnly => Ok(FLAG_POST_ONLY),
+        },
+        // MARKET has IOC semantics by construction. The api-spec documents
+        // `timeInForce` as ignored on MARKET, but rejecting explicit GTC /
+        // FOK / POST_ONLY here is intentional: silently folding them into
+        // FLAG_MARKET would hide a client-side bug.
+        OrderType::Market => match time_in_force {
+            None | Some(TimeInForce::Ioc) => Ok(FLAG_MARKET),
+            Some(_) => Err(DomainError::InvalidParameter),
+        },
+    }
+}
+
+/// Cap on the fractional digit count any decimal string is allowed to
+/// carry through validation. Far above any precision exposed by
+/// `market_outcomes.price_precision` / `quantity_precision`; the cap
+/// exists so a pathologically long input cannot blow up the scaling
+/// `pow()` step.
+///
+/// Note: this domain layer is precision-aware (BigUint) and does
+/// not impose its own u64 ceiling on the lifted value, but the
+/// downstream chain submission path eventually serializes
+/// `amount: u128` and `client_order_id: u128` through
+/// `serde_json::json!` (in `bee_dex` / `ackinacki-kit`) without the
+/// `arbitrary_precision` feature. Values above `u64::MAX` panic
+/// there. For realistic `(quantity_precision, quantity)` pairs the
+/// lifted amount stays well within u64 (NACKL: precision=9, max
+/// market ≈ 10^15 ≪ 2^64), so we do not enforce an extra check
+/// here — but an operator-misconfigured `market_outcomes` with
+/// e.g. `quantity_precision=20` and a tiny `step_size` could push
+/// the lifted amount past `u64::MAX` and trigger the same panic
+/// as the historic coid bug. See
+/// `docs/tech-specs/write-api.md §clientOrderId generation`.
+const MAX_DECIMAL_DIGITS: u8 = 38;
+
+/// Parse a non-negative decimal string into a scaled `BigUint`, rejecting
+/// inputs with more fractional digits than `max_decimals`. Returns
+/// `(scaled, actual_decimals)` such that `scaled == value * 10.pow(actual_decimals)`.
+/// Used as the building block for tick/step/notional checks at exact precision.
+pub fn parse_positive_decimal(value: &str, max_decimals: u8) -> Result<(BigUint, u8), DomainError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(DomainError::MissingParameter);
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return Err(DomainError::InvalidParameter);
+    }
+    let (int_part, frac_part) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    if int_part.is_empty() && frac_part.is_empty() {
+        return Err(DomainError::InvalidParameter);
+    }
+    let decimals = frac_part.len();
+    if decimals > max_decimals as usize {
+        return Err(DomainError::PrecisionExceeded);
+    }
+    let combined: String = format!("{int_part}{frac_part}");
+    let scaled =
+        BigUint::parse_bytes(combined.as_bytes(), 10).ok_or(DomainError::InvalidParameter)?;
+    Ok((scaled, decimals as u8))
+}
+
+/// Lift a decimal string to `BigUint` at exactly `target_decimals` fractional
+/// digits. Fails with `PrecisionExceeded` when the input carries more
+/// fractional digits than the target.
+pub fn lift_decimal(value: &str, target_decimals: u8) -> Result<BigUint, DomainError> {
+    let (scaled, actual) = parse_positive_decimal(value, target_decimals)?;
+    let pad = (target_decimals - actual) as u32;
+    Ok(scaled * BigUint::from(10u32).pow(pad))
+}
+
+fn count_decimals(value: &str) -> Result<u8, DomainError> {
+    parse_positive_decimal(value, MAX_DECIMAL_DIGITS).map(|(_, dp)| dp)
+}
+
+/// Check that the input has no more fractional digits than `max_decimals`.
+/// A convenience wrapper around `parse_positive_decimal` used by
+/// `pricePrecision` / `quantityPrecision` rules in [api-spec §Validation
+/// Rules].
+pub fn precision_within(value: &str, max_decimals: u8) -> Result<(), DomainError> {
+    parse_positive_decimal(value, max_decimals).map(|_| ())
+}
+
+/// Check that `value` is a non-negative multiple of `step` (both decimal
+/// strings). Lifts both to the common precision `max(value_dp, step_dp)`
+/// so a value with stricter precision than `step` is correctly compared
+/// rather than rejected as over-precise — the `precision_within` check
+/// is the right place to enforce digit count.
+pub fn is_multiple_of(value: &str, step: &str) -> Result<bool, DomainError> {
+    let value_dp = count_decimals(value)?;
+    let step_dp = count_decimals(step)?;
+    let scale = value_dp.max(step_dp);
+    let v = lift_decimal(value, scale)?;
+    let s = lift_decimal(step, scale)?;
+    let zero = BigUint::from(0u32);
+    if s == zero {
+        return Err(DomainError::InvalidParameter);
+    }
+    Ok((v % s) == zero)
+}
+
+/// Render a previously-validated decimal string with exactly
+/// `target_decimals` fractional digits, padding with trailing zeros.
+/// Used to format response fields (`price`, `origQty`, `executedQty`)
+/// at the outcome's `pricePrecision` / `quantityPrecision` so clients
+/// see a stable shape regardless of how the request was written.
+pub fn normalize_decimal(value: &str, target_decimals: u8) -> Result<String, DomainError> {
+    let scaled = lift_decimal(value, target_decimals)?;
+    if target_decimals == 0 {
+        return Ok(scaled.to_str_radix(10));
+    }
+    let divisor = BigUint::from(10u32).pow(target_decimals as u32);
+    let int_part = &scaled / &divisor;
+    let frac_part = &scaled % &divisor;
+    let frac_str = frac_part.to_str_radix(10);
+    let width = target_decimals as usize;
+    Ok(format!("{}.{:0>width$}", int_part.to_str_radix(10), frac_str, width = width))
+}
+
+/// Check `price * quantity >= min_notional`, all three as decimal
+/// strings. Arithmetic is exact in `BigUint` at the common scale
+/// `max(price_dp + qty_dp, min_dp)`; no float precision loss.
+pub fn notional_meets_minimum(
+    price: &str,
+    quantity: &str,
+    min_notional: &str,
+) -> Result<bool, DomainError> {
+    let price_dp = count_decimals(price)?;
+    let qty_dp = count_decimals(quantity)?;
+    let min_dp = count_decimals(min_notional)?;
+
+    let p = lift_decimal(price, price_dp)?;
+    let q = lift_decimal(quantity, qty_dp)?;
+    let product = p * q;
+    let product_dp = price_dp + qty_dp;
+
+    let common_dp = product_dp.max(min_dp);
+    let pad = (common_dp - product_dp) as u32;
+    let product_scaled = product * BigUint::from(10u32).pow(pad);
+    let min_scaled = lift_decimal(min_notional, common_dp)?;
+
+    Ok(product_scaled >= min_scaled)
+}
+
 /// Byte buffer that zeroes its contents on drop. Used for plaintext
 /// secrets (decrypted api_secret, decrypted pn_seckey) that must not
 /// linger in memory after they are no longer needed. The `Debug`
@@ -325,6 +614,13 @@ pub enum DomainError {
     PrecisionExceeded,
     #[error("order would immediately fail validation")]
     OrderValidationFailed,
+    /// The trading PN is mid-`placeOrder` (chain `ERR_NOTE_BUSY`):
+    /// only one external `placeOrder` per PN can be in flight at a
+    /// time. Distinct from `OrderValidationFailed` because the order
+    /// itself is fine — the caller just needs to retry once the
+    /// previous `onOrderPlaced` callback has cleared `_busy`.
+    #[error("trading note busy with a previous order")]
+    OrderPnBusy,
     #[error("unknown order")]
     UnknownOrder,
     /// The read-model row violates a tech-spec invariant (e.g. RESOLVED with
@@ -354,6 +650,7 @@ impl DomainError {
             Self::MarketInconsistent => -1500,
             Self::OrderValidationFailed => -2010,
             Self::UnknownOrder => -2011,
+            Self::OrderPnBusy => -2014,
         }
     }
 
@@ -372,6 +669,7 @@ impl DomainError {
             Self::MarketInconsistent => "Market data is temporarily inconsistent.",
             Self::OrderValidationFailed => "Order would immediately fail validation.",
             Self::UnknownOrder => "Unknown order.",
+            Self::OrderPnBusy => "Trading note busy with a previous order; retry shortly.",
         }
     }
 }
@@ -423,5 +721,267 @@ mod tests {
     fn sensitive_bytes_from_vec() {
         let s: SensitiveBytes = vec![0xab, 0xcd].into();
         assert_eq!(s.as_slice(), &[0xab, 0xcd]);
+    }
+
+    #[test]
+    fn order_side_round_trip() {
+        for s in [OrderSide::Buy, OrderSide::Sell] {
+            assert_eq!(OrderSide::parse(s.as_str()), Some(s));
+        }
+        assert!(OrderSide::Buy.is_buy());
+        assert!(!OrderSide::Sell.is_buy());
+    }
+
+    #[test]
+    fn order_side_parse_rejects_unknown() {
+        // Case sensitivity matters — the api-spec writes BUY/SELL in
+        // upper case and we should not silently accept lower-case input.
+        assert_eq!(OrderSide::parse(""), None);
+        assert_eq!(OrderSide::parse("buy"), None);
+        assert_eq!(OrderSide::parse("HOLD"), None);
+    }
+
+    #[test]
+    fn order_type_round_trip() {
+        for t in [OrderType::Limit, OrderType::Market] {
+            assert_eq!(OrderType::parse(t.as_str()), Some(t));
+        }
+    }
+
+    #[test]
+    fn order_type_parse_rejects_unknown() {
+        assert_eq!(OrderType::parse(""), None);
+        assert_eq!(OrderType::parse("limit"), None);
+        assert_eq!(OrderType::parse("STOP_LIMIT"), None);
+    }
+
+    #[test]
+    fn time_in_force_round_trip() {
+        for t in [TimeInForce::Gtc, TimeInForce::Ioc, TimeInForce::Fok, TimeInForce::PostOnly] {
+            assert_eq!(TimeInForce::parse(t.as_str()), Some(t));
+        }
+    }
+
+    #[test]
+    fn time_in_force_parse_rejects_unknown() {
+        assert_eq!(TimeInForce::parse(""), None);
+        assert_eq!(TimeInForce::parse("gtc"), None);
+        assert_eq!(TimeInForce::parse("DAY"), None);
+        // POST_ONLY is the canonical form — not POSTONLY, not POST-ONLY.
+        assert_eq!(TimeInForce::parse("POSTONLY"), None);
+    }
+
+    #[test]
+    fn flag_bits_are_distinct_powers_of_two() {
+        // A regression here would corrupt every order placed — two flag
+        // bits overlapping means the encoder silently emits the wrong
+        // semantics. The chain would reject (or worse, accept and act
+        // on the wrong meaning).
+        let all = [FLAG_IOC, FLAG_FOK, FLAG_MARKET, FLAG_POST_ONLY];
+        for &bit in &all {
+            assert!(bit.is_power_of_two(), "flag {bit:#x} is not a single bit");
+        }
+        for (i, &a) in all.iter().enumerate() {
+            for &b in &all[i + 1..] {
+                assert_eq!(a & b, 0, "flags {a:#x} and {b:#x} share a bit");
+            }
+        }
+    }
+
+    #[test]
+    fn encode_flags_limit_table() {
+        // The five rows in spec §Flags must encode to exactly these bits.
+        // Locking the table down with a test means a future "small
+        // tweak" cannot quietly remap LIMIT/GTC to FLAG_IOC etc.
+        assert_eq!(encode_order_flags(OrderType::Limit, Some(TimeInForce::Gtc)), Ok(0x00));
+        assert_eq!(encode_order_flags(OrderType::Limit, Some(TimeInForce::Ioc)), Ok(FLAG_IOC));
+        assert_eq!(encode_order_flags(OrderType::Limit, Some(TimeInForce::Fok)), Ok(FLAG_FOK));
+        assert_eq!(
+            encode_order_flags(OrderType::Limit, Some(TimeInForce::PostOnly)),
+            Ok(FLAG_POST_ONLY),
+        );
+    }
+
+    #[test]
+    fn encode_flags_limit_defaults_to_gtc_when_tif_absent() {
+        // The api-spec defaults `timeInForce` to GTC for LIMIT. The
+        // handler may surface this as `None` (request didn't include
+        // the field), so the encoder owns the default.
+        assert_eq!(encode_order_flags(OrderType::Limit, None), Ok(0x00));
+    }
+
+    #[test]
+    fn encode_flags_market_accepts_ioc_or_absent_tif() {
+        // The api-spec describes `timeInForce` as ignored for MARKET.
+        // Concretely that means two callers are valid: one that omits
+        // the field (None) and one that explicitly sends IOC, which
+        // matches MARKET's actual on-chain semantics.
+        assert_eq!(encode_order_flags(OrderType::Market, None), Ok(FLAG_MARKET));
+        assert_eq!(encode_order_flags(OrderType::Market, Some(TimeInForce::Ioc)), Ok(FLAG_MARKET),);
+    }
+
+    #[test]
+    fn encode_flags_rejects_market_with_resting_or_postonly_tif() {
+        // MARKET orders never rest, so GTC/FOK make no sense; POST_ONLY
+        // is the opposite of MARKET semantically. Spec rejects all three.
+        for bad in [TimeInForce::Gtc, TimeInForce::Fok, TimeInForce::PostOnly] {
+            assert_eq!(
+                encode_order_flags(OrderType::Market, Some(bad)),
+                Err(DomainError::InvalidParameter),
+                "MARKET + {} should be rejected as InvalidParameter",
+                bad.as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn parse_decimal_accepts_canonical_forms() {
+        assert_eq!(parse_positive_decimal("0", 0).unwrap(), (BigUint::from(0u32), 0));
+        assert_eq!(parse_positive_decimal("0.000", 3).unwrap(), (BigUint::from(0u32), 3));
+        assert_eq!(parse_positive_decimal("0.615", 3).unwrap(), (BigUint::from(615u32), 3));
+        assert_eq!(parse_positive_decimal("1500", 6).unwrap(), (BigUint::from(1500u32), 0));
+        assert_eq!(
+            parse_positive_decimal("123.456789", 6).unwrap(),
+            (BigUint::from(123456789u32), 6),
+        );
+    }
+
+    #[test]
+    fn parse_decimal_tolerates_partial_dot_forms() {
+        // The api-spec doesn't pin the wire grammar tightly. Accept
+        // ".5" as "0.5" and "5." as "5"; this matches how most JSON
+        // serializers emit decimals.
+        assert_eq!(parse_positive_decimal(".5", 1).unwrap(), (BigUint::from(5u32), 1));
+        assert_eq!(parse_positive_decimal("5.", 0).unwrap(), (BigUint::from(5u32), 0));
+    }
+
+    #[test]
+    fn parse_decimal_rejects_garbage() {
+        // Empty -> MissingParameter (caller should not even get here,
+        // but defence in depth).
+        assert_eq!(parse_positive_decimal("", 3), Err(DomainError::MissingParameter));
+        assert_eq!(parse_positive_decimal("   ", 3), Err(DomainError::MissingParameter));
+        // Signs, exponents, hex, locale separators — all rejected as
+        // InvalidParameter so the client gets `-1130` not `-1111`.
+        for s in ["-1", "+1", "1e3", "0xff", "1,5", "1 5", "abc"] {
+            assert_eq!(
+                parse_positive_decimal(s, 3),
+                Err(DomainError::InvalidParameter),
+                "expected InvalidParameter for {s:?}",
+            );
+        }
+        // Lone dot has no integer or fractional half.
+        assert_eq!(parse_positive_decimal(".", 3), Err(DomainError::InvalidParameter));
+    }
+
+    #[test]
+    fn parse_decimal_rejects_excess_precision() {
+        // The `max_decimals` cap is the whole point — this is the spec
+        // rule "price decimals ≤ pricePrecision".
+        assert_eq!(parse_positive_decimal("0.6150", 3), Err(DomainError::PrecisionExceeded),);
+        assert_eq!(parse_positive_decimal("1.5", 0), Err(DomainError::PrecisionExceeded),);
+    }
+
+    #[test]
+    fn precision_within_matches_parser() {
+        assert!(precision_within("0.615", 3).is_ok());
+        assert_eq!(precision_within("0.6150", 3), Err(DomainError::PrecisionExceeded));
+    }
+
+    #[test]
+    fn lift_decimal_scales_correctly() {
+        assert_eq!(lift_decimal("1", 3).unwrap(), BigUint::from(1000u32));
+        assert_eq!(lift_decimal("0.5", 3).unwrap(), BigUint::from(500u32));
+        assert_eq!(lift_decimal("0.615", 3).unwrap(), BigUint::from(615u32));
+        assert_eq!(lift_decimal("123.45", 4).unwrap(), BigUint::from(1234500u32));
+    }
+
+    #[test]
+    fn is_multiple_of_handles_step_boundaries() {
+        // Spec rule: "price is a multiple of tickSize". Cover both
+        // success and the obvious failure modes.
+        assert!(is_multiple_of("0.615", "0.001").unwrap());
+        assert!(is_multiple_of("0.6", "0.1").unwrap());
+        assert!(is_multiple_of("1", "0.1").unwrap()); // integer is multiple of fractional step
+        assert!(!is_multiple_of("0.6155", "0.001").unwrap()); // finer than step
+        assert!(!is_multiple_of("0.7", "0.3").unwrap()); // 0.7 / 0.3 has remainder
+    }
+
+    #[test]
+    fn is_multiple_of_with_value_more_precise_than_step() {
+        // 0.61 vs step 0.1: value is finer than the step, so it cannot
+        // be an exact multiple. Must return `Ok(false)`, not
+        // `PrecisionExceeded` — the precision check belongs to a
+        // separate `precision_within` call against `pricePrecision`,
+        // not against tickSize's own precision.
+        assert_eq!(is_multiple_of("0.61", "0.1"), Ok(false));
+    }
+
+    #[test]
+    fn is_multiple_of_rejects_zero_step() {
+        // A configuration bug rather than a client-input bug; the
+        // 400 reply nudges ops to look at `market_outcomes`.
+        assert_eq!(is_multiple_of("1", "0"), Err(DomainError::InvalidParameter));
+    }
+
+    #[test]
+    fn notional_meets_minimum_exact_decimal_arithmetic() {
+        // 0.615 * 1.5 = 0.9225, which is below a min_notional of 1 but
+        // above 0.9. Floating-point would mis-round on the boundary;
+        // BigUint comparison is exact.
+        assert!(!notional_meets_minimum("0.615", "1.5", "1").unwrap());
+        assert!(notional_meets_minimum("0.615", "1.5", "0.9").unwrap());
+        // Exact equality counts as meeting the minimum.
+        assert!(notional_meets_minimum("0.5", "2", "1").unwrap());
+    }
+
+    #[test]
+    fn normalize_decimal_pads_to_target_precision() {
+        assert_eq!(normalize_decimal("1.5", 6).unwrap(), "1.500000");
+        assert_eq!(normalize_decimal("0.615", 3).unwrap(), "0.615");
+        assert_eq!(normalize_decimal("0", 6).unwrap(), "0.000000");
+        assert_eq!(normalize_decimal("100", 2).unwrap(), "100.00");
+    }
+
+    #[test]
+    fn normalize_decimal_precision_zero_omits_dot() {
+        // pricePrecision = 0 markets (if any) shouldn't get a trailing
+        // dot in the response. Match Postgres NUMERIC formatting.
+        assert_eq!(normalize_decimal("42", 0).unwrap(), "42");
+        assert_eq!(normalize_decimal("0", 0).unwrap(), "0");
+    }
+
+    #[test]
+    fn normalize_decimal_rejects_excess_precision() {
+        assert_eq!(normalize_decimal("0.6155", 3), Err(DomainError::PrecisionExceeded));
+    }
+
+    #[test]
+    fn notional_meets_minimum_handles_disparate_precisions() {
+        // price has 3 dp, qty has 2 dp, min has 0 dp; the helper must
+        // align scales before comparing.
+        assert!(notional_meets_minimum("10.000", "0.50", "5").unwrap());
+        assert!(!notional_meets_minimum("10.000", "0.49", "5").unwrap());
+    }
+
+    #[test]
+    fn encode_flags_market_bit_is_set() {
+        // FLAG_MARKET (0x04) must always be set on MARKET-encoded flags,
+        // never on LIMIT-encoded ones. The chain branches on this bit
+        // for the `cost = amount` vs `cost = amount * price` decision
+        // (PrivateNote.sol:1210-1215); a leak in either direction would
+        // mis-lock collateral.
+        let market = encode_order_flags(OrderType::Market, None).unwrap();
+        assert_ne!(market & FLAG_MARKET, 0);
+
+        for tif in [TimeInForce::Gtc, TimeInForce::Ioc, TimeInForce::Fok, TimeInForce::PostOnly] {
+            let limit = encode_order_flags(OrderType::Limit, Some(tif)).unwrap();
+            assert_eq!(
+                limit & FLAG_MARKET,
+                0,
+                "LIMIT/{} must not have FLAG_MARKET set",
+                tif.as_str(),
+            );
+        }
     }
 }

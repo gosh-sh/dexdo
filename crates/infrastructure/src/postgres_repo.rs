@@ -47,6 +47,7 @@ struct MarketRow {
     id: i64,
     pmp_address: String,
     orderbook_address: Option<String>,
+    oracle_list_hash: Option<String>,
     market_name: Option<String>,
     token_type: i32,
     token_code: String,
@@ -546,6 +547,7 @@ fn market_select_sql(where_clause: &str, tail: &str) -> String {
                m.id                                          as id,
                m.pmp_address                                 as pmp_address,
                m.orderbook_address                           as orderbook_address,
+               m.oracle_list_hash::text                      as oracle_list_hash,
                m.market_id                                   as market_name,
                m.token_type                                  as token_type,
                m.token_code                                  as token_code,
@@ -682,6 +684,24 @@ fn assemble_market(
         }
     };
 
+    // `oracle_list_hash` is reconciler-only and has no CHECK constraint
+    // pinning it post-reconcile (unlike `orderbook_address`). A
+    // NULL/blank value here must NOT fail-close the read endpoints —
+    // `/api/v1/markets` and `/api/v1/depth` do not surface this field
+    // and would silently hide an otherwise-valid market. The trading
+    // path needs the value populated and enforces that itself in the
+    // application layer (`resolve_market_and_outcome`), so we render
+    // NULL as the empty string here and let the trading-side check
+    // emit `MarketInconsistent` only when an order is being placed.
+    let oracle_list_hash = row
+        .oracle_list_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(numeric_to_hex)
+        .transpose()?
+        .unwrap_or_default();
+
     let status = derive_status(&row, now);
     let timings = build_timings(&row, status);
     let terminal = build_terminal(&row, status, now);
@@ -703,6 +723,7 @@ fn assemble_market(
     Ok(Market {
         market_address: MarketAddress(row.pmp_address),
         order_book_address,
+        oracle_list_hash,
         market_name: MarketName(market_name),
         status,
         quote_asset: row.token_code,
@@ -934,6 +955,7 @@ mod tests {
             id: 1,
             pmp_address: "0:pmp".into(),
             orderbook_address: None,
+            oracle_list_hash: None,
             market_name: Some("PM".into()),
             token_type: 3,
             token_code: "USDC".into(),

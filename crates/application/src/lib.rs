@@ -4,14 +4,24 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dodex_domain::encode_order_flags;
+use dodex_domain::is_multiple_of;
+use dodex_domain::lift_decimal;
+use dodex_domain::notional_meets_minimum;
+use dodex_domain::precision_within;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
+use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
+use dodex_domain::OrderSide;
+use dodex_domain::OrderType;
+use dodex_domain::Outcome;
 use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
+use dodex_domain::TimeInForce;
 use uuid::Uuid;
 
 /// Per-request authorization state assembled by the HMAC middleware and
@@ -184,6 +194,292 @@ where
     }
 }
 
+/// Input shape for `CreateOrderUseCase`. The HTTP layer parses
+/// `POST /api/v1/order` body + `AuthContext` + clock into this struct.
+/// All decimal fields stay as strings — exact-decimal validation runs
+/// inside the use case via `dodex_domain` helpers; floats are never
+/// involved.
+#[derive(Debug, Clone)]
+pub struct NewOrderInput {
+    pub trading_pn: TradingPn,
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
+    pub side: OrderSide,
+    /// Outcome-token amount for LIMIT and for `MARKET SELL`; quote-asset
+    /// spend amount for `MARKET BUY` per
+    /// [api-spec §New Order](../../docs/api-spec.md#new-order).
+    pub quantity: String,
+    /// Required for `LIMIT`; rejected for `MARKET`.
+    pub price: Option<String>,
+    pub order_type: OrderType,
+    pub time_in_force: Option<TimeInForce>,
+    /// Optional client-supplied id; absence triggers backend generation.
+    pub client_order_id: Option<String>,
+    /// Unix seconds. Used both for status derivation and as the
+    /// `serverTime`-style anchor for the response.
+    pub now_seconds: i64,
+    /// Unix milliseconds. Returned to the client as `transactTime`.
+    pub now_ms: i64,
+}
+
+/// Chain-shaped payload handed to `ChainOrderSender`. All numeric
+/// fields are decimal strings sized for the on-chain ABI:
+/// - `price_raw`: uint256 in the contract's tick units (lifted by
+///   `pricePrecision`); `"0"` for `MARKET`.
+/// - `amount_raw`: uint128 lifted by `quantityPrecision`. The scale
+///   is the same regardless of side or type; only the unit it
+///   represents differs — outcome-token amount on LIMIT and MARKET
+///   SELL, quote-asset spend amount on MARKET BUY (per [api-spec
+///   §New Order](../../docs/api-spec.md#new-order)).
+/// - `client_order_id`: decimal string. ABI accepts uint128 but the
+///   serialization path through `serde_json::json!` rejects values
+///   above `u64::MAX` (no `arbitrary_precision` feature upstream), so
+///   the use case validates this as `u64::from_str`. See
+///   [write-api.md §clientOrderId generation] for the rationale.
+#[derive(Debug, Clone)]
+pub struct NewOrderPayload {
+    pub pn_address: String,
+    /// Decimal-encoded `uint256` public half of the trading-PN keypair.
+    /// `BeeDexChainSender` re-encodes it as hex for `KeyPair.public`.
+    pub pn_pubkey: String,
+    pub pn_seckey: SensitiveBytes,
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    pub token_type: u32,
+    pub outcome_id: u32,
+    pub is_buy: bool,
+    pub price_raw: String,
+    pub amount_raw: String,
+    pub flags: u8,
+    pub client_order_id: String,
+}
+
+/// Output of `CreateOrderUseCase`. The HTTP response shape for
+/// `POST /api/v1/order` is intentionally minimal — see
+/// `docs/tech-specs/write-api.md §Response` for the rationale; the
+/// only fact the use case contributes that the handler does not
+/// already have is the resolved `clientOrderId` (caller-supplied or
+/// backend-generated).
+#[derive(Debug, Clone)]
+pub struct SubmittedOrder {
+    pub client_order_id: String,
+}
+
+/// Dispatch a `PrivateNote.placeOrder` external message to chain.
+/// Returns once the gateway has acknowledged the dispatch; chain-side
+/// rejections that fire after acknowledgement (`ERR_NOTE_BUSY`,
+/// `ERR_LOW_VALUE`, `OrderBook.Rejected`) are not visible here and
+/// surface through indexer projection — see [write-api.md §Failure
+/// surface](../../docs/tech-specs/write-api.md#failure-surface).
+#[async_trait]
+pub trait ChainOrderSender: Send + Sync {
+    async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError>;
+}
+
+#[async_trait]
+impl<T: ?Sized + ChainOrderSender> ChainOrderSender for Arc<T> {
+    async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError> {
+        (**self).submit_order(payload).await
+    }
+}
+
+/// Orchestrates `POST /api/v1/order`: resolves market, derives status,
+/// validates input per spec §Input validation, encodes flags, builds the
+/// chain payload, dispatches through `ChainOrderSender`, and returns
+/// values the HTTP layer needs to assemble the response. The use case
+/// is generic over the repo and sender so tests can substitute fakes.
+pub struct CreateOrderUseCase<R, S> {
+    repo: R,
+    sender: S,
+}
+
+impl<R, S> CreateOrderUseCase<R, S> {
+    pub fn new(repo: R, sender: S) -> Self {
+        Self { repo, sender }
+    }
+}
+
+impl<R, S> CreateOrderUseCase<R, S>
+where
+    R: MarketReadRepository,
+    S: ChainOrderSender,
+{
+    pub async fn execute(&self, input: NewOrderInput) -> Result<SubmittedOrder, DomainError> {
+        let (market, outcome) = resolve_market_and_outcome(
+            &self.repo,
+            &input.market_address,
+            &input.symbol,
+            input.now_seconds,
+        )
+        .await?;
+
+        if market.status != MarketStatus::Trading {
+            return Err(DomainError::OrderValidationFailed);
+        }
+
+        // Read-side `assemble_market` deliberately renders a NULL
+        // `oracle_list_hash` as the empty string so that read endpoints
+        // (which do not surface the field) stay available for an
+        // otherwise-valid market. The trading path is where it actually
+        // matters — fail closed with 503 here, mirroring the
+        // `orderbook_address` invariant.
+        if market.oracle_list_hash.is_empty() {
+            return Err(DomainError::MarketInconsistent);
+        }
+
+        // Flag encoding rejects (MARKET, GTC/FOK/POST_ONLY); LIMIT path
+        // falls through with defaulted GTC when TIF is absent.
+        let flags = encode_order_flags(input.order_type, input.time_in_force)?;
+
+        // `price` is required for LIMIT and rejected for MARKET per
+        // api-spec §New Order. Resolve the field-presence + order-type
+        // matrix once, into an `Option<&str>` the rest of the function
+        // can reference without re-checking — no `.expect("checked
+        // above")` further down.
+        let price_input: Option<&str> = match (input.order_type, input.price.as_deref()) {
+            (OrderType::Limit, Some(p)) => Some(p),
+            (OrderType::Limit, None) => return Err(DomainError::MissingParameter),
+            (OrderType::Market, None) => None,
+            (OrderType::Market, Some(_)) => return Err(DomainError::InvalidParameter),
+        };
+
+        let price_raw = match price_input {
+            Some(p) => {
+                precision_within(p, outcome.price_precision)?;
+                if !is_multiple_of(p, &outcome.tick_size)? {
+                    return Err(DomainError::PrecisionExceeded);
+                }
+                lift_decimal(p, outcome.price_precision)?.to_str_radix(10)
+            }
+            None => "0".to_string(),
+        };
+
+        precision_within(&input.quantity, outcome.quantity_precision)?;
+        if !is_multiple_of(&input.quantity, &outcome.step_size)? {
+            return Err(DomainError::PrecisionExceeded);
+        }
+        let amount_raw =
+            lift_decimal(&input.quantity, outcome.quantity_precision)?.to_str_radix(10);
+
+        // Notional check splits per (type, side) per spec validation
+        // table. `price_input` carries the validated LIMIT price (or
+        // `None` for MARKET); the MARKET-SELL branch has no spec rule.
+        match (input.order_type, input.side, price_input) {
+            (OrderType::Limit, _, Some(p)) => {
+                if !notional_meets_minimum(p, &input.quantity, &outcome.min_notional)? {
+                    return Err(DomainError::OrderValidationFailed);
+                }
+            }
+            (OrderType::Market, OrderSide::Buy, _) => {
+                // MARKET BUY: `quantity` is the quote-asset spend amount,
+                // compared directly against `minNotional`.
+                if !notional_meets_minimum("1", &input.quantity, &outcome.min_notional)? {
+                    return Err(DomainError::OrderValidationFailed);
+                }
+            }
+            (OrderType::Market, OrderSide::Sell, _) => {
+                // api-spec doesn't list a notional rule for MARKET SELL;
+                // the chain enforces its own MIN_ORDER_NOTIONAL. Skip
+                // here rather than guess.
+            }
+            // The (Limit, None) and (Market, Some) cases above already
+            // returned, so this arm is structurally unreachable. We
+            // collapse it to `Unexpected` (500) rather than `panic!`
+            // so a future refactor that broke the invariant could not
+            // turn into an opaque crash in the request handler.
+            (OrderType::Limit, _, None) => return Err(DomainError::Unexpected),
+        }
+
+        let token_type =
+            u32::try_from(market.token_type).map_err(|_| DomainError::MarketInconsistent)?;
+
+        // Validate or generate the client order id. The on-chain ABI
+        // is `uint128`, but the serialization through `bee_dex` →
+        // `ackinacki-kit` → `serde_json::json!` panics on values
+        // larger than `u64::MAX` (see `generate_client_order_id` for
+        // the full chain). Until the SDK gains
+        // `serde_json/arbitrary_precision`, the public surface is
+        // bounded at `u64::MAX` — reject anything larger (or
+        // non-numeric) as 400 / -1130 here rather than letting it
+        // crash deep in the sender with a 500.
+        let client_order_id = match input.client_order_id.as_deref() {
+            Some(raw) => {
+                raw.parse::<u64>().map_err(|_| DomainError::InvalidParameter)?;
+                raw.to_string()
+            }
+            None => generate_client_order_id(),
+        };
+
+        let payload = NewOrderPayload {
+            pn_address: input.trading_pn.pn_address,
+            pn_pubkey: input.trading_pn.pn_pubkey,
+            pn_seckey: input.trading_pn.pn_seckey,
+            event_id: market.event.event_id,
+            oracle_list_hash: market.oracle_list_hash,
+            token_type,
+            outcome_id: outcome.outcome_id,
+            is_buy: input.side.is_buy(),
+            price_raw,
+            amount_raw,
+            flags,
+            client_order_id: client_order_id.clone(),
+        };
+        self.sender.submit_order(payload).await?;
+
+        Ok(SubmittedOrder { client_order_id })
+    }
+}
+
+/// Look up the market by `marketAddress` and locate the matching
+/// outcome by `symbol`. Both miss cases collapse to
+/// `InvalidMarketOrSymbol` — the client cannot distinguish "wrong
+/// market" from "wrong symbol within that market" and the spec doesn't
+/// require it to.
+async fn resolve_market_and_outcome<R>(
+    repo: &R,
+    market_address: &MarketAddress,
+    symbol: &Symbol,
+    now_seconds: i64,
+) -> Result<(Market, Outcome), DomainError>
+where
+    R: MarketReadRepository,
+{
+    let request = MarketsRequest::One { market_address: market_address.clone(), now: now_seconds };
+    let page = repo.list_markets(&request).await.map_err(|err| {
+        // The repo returns `anyhow::Error` so its inner failures can be
+        // typed (e.g. `MarketInconsistent` from `assemble_market`) or
+        // raw I/O. Downcast preserves the typed variant; everything
+        // else is an unexpected internal error.
+        err.downcast_ref::<DomainError>().copied().unwrap_or(DomainError::Unexpected)
+    })?;
+    let market = page.markets.into_iter().next().ok_or(DomainError::InvalidMarketOrSymbol)?;
+    let outcome = market
+        .outcomes
+        .iter()
+        .find(|o| o.symbol == *symbol)
+        .cloned()
+        .ok_or(DomainError::InvalidMarketOrSymbol)?;
+    Ok((market, outcome))
+}
+
+/// Generate a fresh `clientOrderId` per spec §clientOrderId generation.
+/// Format: decimal string of a `uint64` random value.
+///
+/// The on-chain ABI accepts `uint128`, but `bee_dex::Dex::place_order`
+/// reaches `ParamsOfPlaceOrder { client_order_id: u128, .. }` through
+/// `serde_json::json!` inside `ackinacki-kit`, and `serde_json`'s
+/// default serializer (no `arbitrary_precision` feature) rejects
+/// `u128 > u64::MAX` with `"number out of range"` — which `json!`
+/// then `.unwrap()`s, panicking the worker. Until the upstream SDK
+/// gains arbitrary-precision support, the API surface is therefore
+/// bounded at `u64::MAX`. Truncating `Uuid::new_v4()` to its low
+/// 64 bits keeps the variant nibble in place (2 bits fixed) and
+/// leaves 62 random bits — collision space 2^62 ≈ 4.6 × 10^18 is
+/// cosmologically safe.
+fn generate_client_order_id() -> String {
+    (Uuid::new_v4().as_u128() as u64).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +520,354 @@ mod tests {
         let ctx = context_with(vec![]);
         assert!(ctx.require(Permission::UserData).is_err());
         assert!(ctx.require(Permission::Trade).is_err());
+    }
+
+    // ---- CreateOrderUseCase ----
+
+    use std::sync::Mutex;
+
+    use dodex_domain::Market;
+    use dodex_domain::MarketEvent;
+    use dodex_domain::MarketName;
+    use dodex_domain::Outcome;
+
+    struct FakeRepo {
+        market: Option<Market>,
+    }
+
+    impl FakeRepo {
+        fn with(market: Market) -> Self {
+            Self { market: Some(market) }
+        }
+
+        fn empty() -> Self {
+            Self { market: None }
+        }
+    }
+
+    #[async_trait]
+    impl MarketReadRepository for FakeRepo {
+        async fn list_markets(&self, _: &MarketsRequest) -> Result<MarketsPage, anyhow::Error> {
+            Ok(MarketsPage {
+                markets: self.market.clone().into_iter().collect(),
+                next_cursor: None,
+                has_more: false,
+            })
+        }
+
+        async fn get_depth(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u16,
+        ) -> Result<DepthSnapshot, anyhow::Error> {
+            unimplemented!("get_depth is not exercised by the order use case")
+        }
+    }
+
+    struct FakeSender {
+        recorded: Mutex<Vec<NewOrderPayload>>,
+        fail_with: Option<DomainError>,
+    }
+
+    impl FakeSender {
+        fn ok() -> Self {
+            Self { recorded: Mutex::new(Vec::new()), fail_with: None }
+        }
+
+        fn failing(err: DomainError) -> Self {
+            Self { recorded: Mutex::new(Vec::new()), fail_with: Some(err) }
+        }
+
+        fn calls(&self) -> Vec<NewOrderPayload> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChainOrderSender for FakeSender {
+        async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError> {
+            if let Some(err) = self.fail_with {
+                return Err(err);
+            }
+            self.recorded.lock().unwrap().push(payload);
+            Ok(())
+        }
+    }
+
+    fn test_outcome(symbol: &str) -> Outcome {
+        Outcome {
+            outcome_id: 1,
+            outcome_name: "YES".into(),
+            symbol: Symbol(symbol.into()),
+            price_precision: 3,
+            quantity_precision: 6,
+            tick_size: "0.001".into(),
+            step_size: "0.000001".into(),
+            // 0.5 not 1: the base test scenario uses price=0.615,
+            // quantity=1.5 with notional 0.9225, so a 1.0 threshold
+            // would make every base case fail spuriously on notional.
+            // Tests that exercise the notional rule override this.
+            min_notional: "0.5".into(),
+            max_batch_size: 5,
+        }
+    }
+
+    fn trading_market(symbol: &str) -> Market {
+        Market {
+            market_address: MarketAddress("0:market".into()),
+            order_book_address: "0:ob".into(),
+            oracle_list_hash: "0xdead".into(),
+            market_name: MarketName("PM".into()),
+            status: MarketStatus::Trading,
+            quote_asset: "NACKL".into(),
+            token_type: 1,
+            created_at: 0,
+            timings: None,
+            event: MarketEvent {
+                event_id: "0xevent".into(),
+                event_name: None,
+                description: None,
+                oracles: vec![],
+            },
+            terminal: None,
+            outcomes: vec![test_outcome(symbol)],
+        }
+    }
+
+    fn base_input(symbol: &str) -> NewOrderInput {
+        NewOrderInput {
+            trading_pn: TradingPn {
+                pn_address: "0:pn".into(),
+                pn_pubkey: "1".into(),
+                pn_dih: "2".into(),
+                pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            },
+            market_address: MarketAddress("0:market".into()),
+            symbol: Symbol(symbol.into()),
+            side: OrderSide::Buy,
+            quantity: "1.5".into(),
+            price: Some("0.615".into()),
+            order_type: OrderType::Limit,
+            time_in_force: Some(TimeInForce::Gtc),
+            client_order_id: Some("42".into()),
+            now_seconds: 1_000,
+            now_ms: 1_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_order_happy_path_buy_limit_gtc() {
+        let market = trading_market("PM-YES");
+        let repo = FakeRepo::with(market);
+        let sender = FakeSender::ok();
+        let uc = CreateOrderUseCase::new(repo, sender);
+
+        let out = uc.execute(base_input("PM-YES")).await.expect("happy path");
+
+        // The use case contributes one thing the handler does not
+        // already have: the resolved `clientOrderId`. Sender-payload
+        // assertions live in the next test
+        // (`create_order_sender_payload_matches_request`) which owns
+        // a concrete `Arc<FakeSender>` reference for inspection.
+        assert_eq!(out.client_order_id, "42");
+    }
+
+    #[tokio::test]
+    async fn create_order_sender_payload_matches_request() {
+        // Captures the on-chain payload shape the use case constructs.
+        // A regression here would mis-bind fields between the API
+        // request and `ParamsOfPlaceOrder` — silent corruption that
+        // unit tests are the only line of defence against.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), sender.clone());
+
+        uc.execute(base_input("PM-YES")).await.unwrap();
+
+        let calls = sender.calls();
+        assert_eq!(calls.len(), 1);
+        let p = &calls[0];
+        assert_eq!(p.pn_address, "0:pn");
+        assert_eq!(p.pn_pubkey, "1");
+        assert_eq!(p.event_id, "0xevent");
+        assert_eq!(p.oracle_list_hash, "0xdead");
+        assert_eq!(p.token_type, 1);
+        assert_eq!(p.outcome_id, 1);
+        assert!(p.is_buy);
+        // 0.615 lifted by price_precision=3 -> 615
+        assert_eq!(p.price_raw, "615");
+        // 1.5 lifted by quantity_precision=6 -> 1_500_000
+        assert_eq!(p.amount_raw, "1500000");
+        // LIMIT + GTC = flags 0x00
+        assert_eq!(p.flags, 0);
+        assert_eq!(p.client_order_id, "42");
+    }
+
+    #[tokio::test]
+    async fn create_order_market_not_found() {
+        let uc = CreateOrderUseCase::new(FakeRepo::empty(), FakeSender::ok());
+        let err = uc.execute(base_input("PM-YES")).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidMarketOrSymbol);
+    }
+
+    #[tokio::test]
+    async fn create_order_symbol_not_found_in_market() {
+        let market = trading_market("PM-YES");
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let mut input = base_input("PM-YES");
+        input.symbol = Symbol("PM-NOPE".into());
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidMarketOrSymbol);
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_non_trading_status() {
+        let mut market = trading_market("PM-YES");
+        market.status = MarketStatus::Resolving;
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let err = uc.execute(base_input("PM-YES")).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+    }
+
+    #[tokio::test]
+    async fn create_order_limit_requires_price() {
+        let market = trading_market("PM-YES");
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let mut input = base_input("PM-YES");
+        input.price = None;
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::MissingParameter);
+    }
+
+    #[tokio::test]
+    async fn create_order_market_rejects_explicit_price() {
+        let market = trading_market("PM-YES");
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let mut input = base_input("PM-YES");
+        input.order_type = OrderType::Market;
+        input.time_in_force = None;
+        // price still set → invalid combination
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_excess_price_precision() {
+        let market = trading_market("PM-YES");
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let mut input = base_input("PM-YES");
+        input.price = Some("0.6155".into()); // 4 dp > pricePrecision=3
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::PrecisionExceeded);
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_non_tick_multiple() {
+        // tick_size = 0.001; price 0.6151 is finer than the lattice (would
+        // need tickSize=0.0001 to be valid). But 0.6151 has 4 dp > 3, so
+        // it'd fail precision first. Use a precision-matching but
+        // non-multiple value: tick = 0.003 and price = 0.001 — change the
+        // outcome tick to 0.003.
+        let mut market = trading_market("PM-YES");
+        market.outcomes[0].tick_size = "0.003".into();
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let mut input = base_input("PM-YES");
+        input.price = Some("0.001".into()); // 0.001 is not a multiple of 0.003
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::PrecisionExceeded);
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_below_min_notional() {
+        let mut market = trading_market("PM-YES");
+        market.outcomes[0].min_notional = "100".into(); // notional below price*qty=0.9225
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let err = uc.execute(base_input("PM-YES")).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+    }
+
+    #[tokio::test]
+    async fn create_order_generates_client_order_id_when_absent() {
+        let market = trading_market("PM-YES");
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let mut input = base_input("PM-YES");
+        input.client_order_id = None;
+        let out = uc.execute(input).await.unwrap();
+        // 128-bit value rendered in decimal — non-empty, all digits, and
+        // not the test-fixture's literal "42".
+        assert!(!out.client_order_id.is_empty());
+        assert!(out.client_order_id.chars().all(|c| c.is_ascii_digit()));
+        assert_ne!(out.client_order_id, "42");
+    }
+
+    #[tokio::test]
+    async fn create_order_propagates_sender_transport_failure() {
+        let market = trading_market("PM-YES");
+        let sender = FakeSender::failing(DomainError::Unexpected);
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), sender);
+        let err = uc.execute(base_input("PM-YES")).await.unwrap_err();
+        assert_eq!(err, DomainError::Unexpected);
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_market_with_empty_oracle_list_hash() {
+        // A reconciled market whose `oracle_list_hash` is missing
+        // breaks `placeOrder` on chain (it would send an invalid PMP
+        // key). The read endpoints stay available for that market
+        // (they don't surface the field), but the trading path must
+        // fail closed before submitting.
+        let mut market = trading_market("PM-YES");
+        market.oracle_list_hash = String::new();
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let err = uc.execute(base_input("PM-YES")).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_client_order_id_overflowing_u64() {
+        // The chain ABI is `uint128`, but the serialization path
+        // (`bee_dex` → `ackinacki-kit` → `serde_json::json!` without
+        // arbitrary_precision) rejects `u128 > u64::MAX` with a panic.
+        // Until the SDK supports arbitrary precision, the public
+        // surface is bounded at u64. A caller who supplies
+        // `u64::MAX + 1` must surface as -1130 / 400 — not as the
+        // -1000 / 500 the worker panic would otherwise produce.
+        let market = trading_market("PM-YES");
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let mut input = base_input("PM-YES");
+        // u64::MAX + 1 = 18_446_744_073_709_551_616
+        input.client_order_id = Some("18446744073709551616".into());
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_non_numeric_client_order_id() {
+        let market = trading_market("PM-YES");
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let mut input = base_input("PM-YES");
+        input.client_order_id = Some("not-a-number".into());
+        let err = uc.execute(input).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+    }
+
+    #[test]
+    fn generated_client_order_id_fits_in_u64() {
+        // Regression guard for the bug round 4 caught: an earlier
+        // implementation used the full `Uuid::new_v4().as_u128()`,
+        // which produces values exceeding `u64::MAX` ~50% of the
+        // time. Those panic deep inside `bee_dex` / `serde_json`
+        // when the worker tries to serialize them. The generator
+        // MUST stay inside u64 until the SDK supports
+        // arbitrary-precision serialization. 256 samples is more
+        // than enough to surface a regression to the full u128.
+        for _ in 0..256 {
+            let coid = generate_client_order_id();
+            assert!(
+                coid.parse::<u64>().is_ok(),
+                "generated coid {coid:?} does not fit in u64 — would panic in bee_dex::Dex::place_order",
+            );
+        }
     }
 }

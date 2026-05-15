@@ -15,10 +15,15 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use async_trait::async_trait;
 use dodex_api::testkit::build_router;
 use dodex_api::testkit::AppState;
 use dodex_api::testkit::SharedAuth;
+use dodex_api::testkit::SharedChainSender;
 use dodex_api::testkit::SharedRepo;
+use dodex_application::ChainOrderSender;
+use dodex_application::NewOrderPayload;
+use dodex_domain::DomainError;
 use dodex_infrastructure::auth::PostgresAuthenticator;
 use dodex_infrastructure::config::AuthSection;
 use dodex_infrastructure::crypto::Kek;
@@ -75,9 +80,27 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>)> {
     };
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
-    let state = AppState::new(repo, authenticator);
+    // The seeded test DB carries no markets, so the order handler stops
+    // at `InvalidMarketOrSymbol` before reaching the chain sender. A
+    // no-op fake is enough to satisfy `AppState::new`'s type bound;
+    // tests that exercise the full submission path inject their own.
+    let chain_sender: SharedChainSender = Arc::new(NoopChainSender);
+    let state = AppState::new(repo, authenticator, chain_sender);
     let service = Service::new(build_router(state));
     Some((service, pool, kek))
+}
+
+/// `ChainOrderSender` fake that succeeds on every call. The auth-layer
+/// tests under this module never reach the sender (no markets seeded,
+/// so the use case 404s first), but `AppState` needs *some* concrete
+/// implementation at construction time.
+pub struct NoopChainSender;
+
+#[async_trait]
+impl ChainOrderSender for NoopChainSender {
+    async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
+        Ok(())
+    }
 }
 
 /// Unix milliseconds, the unit `timestamp` in signed requests uses.

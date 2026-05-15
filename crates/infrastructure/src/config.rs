@@ -14,6 +14,12 @@ pub struct ApiConfig {
     pub common: CommonSection,
     pub server: ServerSection,
     pub auth: AuthSection,
+    /// Defaulting to an empty `gateway_endpoint` so YAML files written
+    /// before this field existed still parse — `validate()` then
+    /// surfaces the missing endpoint with a clear error. Live configs
+    /// (api.local.yaml, stage, prod) populate it.
+    #[serde(default)]
+    pub chain: ChainSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +92,27 @@ fn default_max_recv_window_ms() -> u64 {
     MAX_RECV_WINDOW_MS
 }
 
+/// Chain gateway settings used by `BeeDexChainSender`. `gateway_endpoint`
+/// is the Acki Nacki node URL the trading path POSTs external messages
+/// to; `place_order_timeout_ms` bounds the per-request wait so a hung
+/// gateway cannot indefinitely stall an HTTP caller. See
+/// `docs/tech-specs/write-api.md §Chain submission` for the layering.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ChainSection {
+    #[serde(default)]
+    pub gateway_endpoint: String,
+    #[serde(default = "default_place_order_timeout_ms")]
+    pub place_order_timeout_ms: u64,
+}
+
+/// 30 s — comfortable budget given typical chain round-trip is 1-3 s.
+/// Tight enough that a partitioned gateway does not pin HTTP workers
+/// indefinitely; loose enough that occasional slow ticks do not flake.
+fn default_place_order_timeout_ms() -> u64 {
+    30_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphqlSection {
     pub endpoint: String,
@@ -149,6 +176,21 @@ impl ApiConfig {
             "server.request_timeout_ms must be > 0"
         );
         self.auth.validate()?;
+        self.chain.validate()?;
+        Ok(())
+    }
+}
+
+impl ChainSection {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.gateway_endpoint.is_empty(),
+            "chain.gateway_endpoint must not be empty"
+        );
+        anyhow::ensure!(
+            self.place_order_timeout_ms > 0,
+            "chain.place_order_timeout_ms must be > 0"
+        );
         Ok(())
     }
 }
@@ -418,6 +460,8 @@ server:
   request_timeout_ms: {request_timeout_ms}
 auth:
   kek_hex: "{TEST_KEK_HEX}"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
 "#
         );
         serde_yaml::from_str(&raw).expect("parse")
@@ -494,6 +538,8 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
   default_recv_window_ms: 2000
   max_recv_window_ms: 30000
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
@@ -512,6 +558,8 @@ server:
   request_timeout_ms: 5000
 auth:
   kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
@@ -573,6 +621,88 @@ auth:
         let s = valid_auth_section(5_000, 0);
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("max_recv_window_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn api_validate_rejects_empty_chain_endpoint() {
+        // The handler hits `chain.gateway_endpoint` on every order
+        // submission. An empty value silently means "POST /api/v1/order
+        // 500s on every request" — the validator MUST catch this at
+        // boot rather than at the first trade.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: \"\"
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("chain.gateway_endpoint"), "got: {err}");
+    }
+
+    #[test]
+    fn api_validate_rejects_zero_place_order_timeout() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 0
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("place_order_timeout_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn api_config_parses_chain_section_with_explicit_timeout() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 15000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        assert_eq!(cfg.chain.gateway_endpoint, "shellnet.ackinacki.org");
+        assert_eq!(cfg.chain.place_order_timeout_ms, 15_000);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn api_config_defaults_place_order_timeout_when_omitted() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        assert_eq!(cfg.chain.place_order_timeout_ms, 30_000);
     }
 
     #[test]
