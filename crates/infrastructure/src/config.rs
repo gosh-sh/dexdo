@@ -48,9 +48,15 @@ pub struct AppSection {
 pub struct ServerSection {
     pub host: String,
     pub port: u16,
-    // TODO: not wired into the Salvo router yet — declared for forward
-    // compatibility. When wiring it up, use a hoop that runs each handler
-    // under `tokio::time::timeout` and responds 504 on elapsed.
+    /// Per-request wall-clock budget. Enforced by the
+    /// `timeout_hoop::enforce_request_timeout` hoop in `services/api`:
+    /// a handler that hangs past this returns
+    /// `-1007 / 504 RequestTimeout`. Must exceed
+    /// `chain.place_order_timeout_ms` by enough slack to cover the
+    /// path between the chain sender's own timeout firing and the
+    /// handler shaping its response — otherwise the HTTP timeout can
+    /// fire while a chain submission is still in flight (api.local.yaml
+    /// ships 30s chain + 5s slack = 35s).
     pub request_timeout_ms: u64,
 }
 

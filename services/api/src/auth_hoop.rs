@@ -24,9 +24,23 @@ use crate::AppState;
 
 const HEADER_API_KEY: &str = "x-dodex-apikey";
 
-/// Maximum body bytes the auth pipeline will read. Even a maxed-out
-/// batch order is well under this; anything larger is rejected with
-/// `-1009 / HTTP 413` before it touches the HMAC or pool.
+/// Maximum body bytes the auth pipeline will read; anything larger is
+/// rejected with `-1009 / HTTP 413` before it touches the HMAC or pool.
+///
+/// Sizing math: the largest legitimate body is a `POST /api/v1/batchOrders`
+/// at the contract-enforced ceiling — `MAX_BATCH_SIZE = 5` orders
+/// (`contracts/modifiers/modifiers.sol:170`, shared by
+/// `PrivateNote.placeBatch` and `OrderBook.executeBatch`). With a
+/// pathological per-order payload (~400 B: max-length decimal
+/// `quantity`/`price`, full enum strings, generous `newOrderClientId`)
+/// plus the wrapper (~250 B for `marketAddress` + `symbol` + JSON
+/// scaffolding), the pessimistic batch upper bound is ~2.3 KiB; the
+/// realistic MM workload sits near 1.2 KiB. 64 KiB is a deliberate
+/// ~25× over-provision so future copy-tweaks to the order shape (a
+/// longer `newOrderClientId` convention, an extra optional field)
+/// never surface as a 413 in production; the cost of the slack —
+/// HMAC over a few extra-empty KB — is microseconds and one heap
+/// alloc, well below the noise floor of the chain submission itself.
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
 /// Authenticates one inbound request. On success the resolved

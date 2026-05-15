@@ -630,6 +630,14 @@ pub enum DomainError {
     /// available yet. Surfaces as a 503 so clients know to retry.
     #[error("market read-model is temporarily inconsistent")]
     MarketInconsistent,
+    /// The request exceeded the per-handler wall-clock budget enforced
+    /// by the API's `request_timeout` hoop. Typically means a chain
+    /// submission or downstream call hung past the configured slack.
+    /// Mirrors the Binance `-1007 / 504 TIMEOUT` shape; clients should
+    /// retry with the same `clientOrderId` so a successfully-landed
+    /// chain message is not duplicated.
+    #[error("request timed out before completion")]
+    RequestTimeout,
     #[error("unexpected domain error")]
     Unexpected,
 }
@@ -640,6 +648,7 @@ impl DomainError {
             Self::Unexpected => -1000,
             Self::AuthRequired => -1002,
             Self::AuthEnvelopeIncomplete => -1003,
+            Self::RequestTimeout => -1007,
             Self::RequestTooLarge => -1009,
             Self::TimestampOutsideRecvWindow => -1021,
             Self::InvalidSignature => -1022,
@@ -659,6 +668,7 @@ impl DomainError {
             Self::Unexpected => "Unknown error.",
             Self::AuthRequired => "Authentication required.",
             Self::AuthEnvelopeIncomplete => "Required auth parameter missing.",
+            Self::RequestTimeout => "Request timed out before completion.",
             Self::RequestTooLarge => "Request body too large.",
             Self::TimestampOutsideRecvWindow => "Timestamp outside recvWindow.",
             Self::InvalidSignature => "Invalid signature.",

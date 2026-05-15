@@ -25,6 +25,7 @@ use tokio::time::timeout;
 use tracing::debug;
 use tracing::error;
 use tracing::warn;
+use zeroize::Zeroizing;
 
 pub struct BeeDexChainSender {
     dex: Dex,
@@ -58,25 +59,40 @@ impl ChainOrderSender for BeeDexChainSender {
         // decimal `numeric(78,0)` and the seckey as encrypted bytes —
         // convert both at the boundary, not deeper.
         //
-        // Defence-in-depth caveat: `KeyPair.secret` is `String` upstream
-        // without `Zeroize`, so the plaintext hex sits on the heap for
-        // the duration of the `place_order` future and is freed
-        // (but NOT zeroed) when `Signer` drops. Closing this fully
-        // requires `tvm_client::crypto::KeyPair` itself to implement
-        // `Zeroize` — out of our reach. Our own `payload.pn_seckey`
-        // (`SensitiveBytes`) still zeroes on drop per `crates/domain`,
-        // and nothing in this module logs the hex (see `debug!` below).
-        let secret = hex::encode(payload.pn_seckey.as_slice());
+        // Defence-in-depth: `KeyPair.secret` is `String` upstream with
+        // no `Zeroize` impl, so the copy we hand to `Signer::Keys`
+        // freed-unzeroed when the signer drops after `place_order`
+        // returns. We can't close that path without changes in
+        // `ackinacki-kit::tvm_client::crypto::KeyPair`. What we CAN
+        // do is keep our own pre-clone copy of the hex and `zeroize`
+        // it on the way out — so once `submit_order` returns, the
+        // only residue is the upstream clone (briefly, until Signer
+        // drops). Tracked for a kit-side fix; see the follow-up note
+        // in the PR description.
+        //
+        // `payload.pn_seckey` (`SensitiveBytes`) still zeroes on drop
+        // per `crates/domain`, and nothing in this module logs the
+        // hex (see `debug!` below).
+        let secret_hex = Zeroizing::new(hex::encode(payload.pn_seckey.as_slice()));
         let public = decimal_uint256_to_hex(&payload.pn_pubkey).map_err(|_| {
-            // Log without the decimal value — pn_pubkey is public per the
+            // `accounts.pn_pubkey` is operator-seeded data, not a runtime
+            // input — the seed/migration writes it as a decimal uint256.
+            // A failure here means the row was corrupted post-write
+            // (manual edit, partial restore, schema drift), so the right
+            // surface is `MarketInconsistent` (503 / -1500): retrying the
+            // submission won't help, but it's a service-state issue, not
+            // the generic 500 the caller can do nothing about. Log
+            // without the decimal value — pn_pubkey is public per the
             // ACK protocol, but the raw string is recoverable from the
-            // `accounts` row if ops actually needs it, and keeping the
-            // log line short avoids accidentally surfacing the seed-data
-            // generator's debug output downstream.
+            // `accounts` row if ops actually needs it.
             error!("trading PN pubkey is not a valid uint256 decimal");
-            DomainError::Unexpected
+            DomainError::MarketInconsistent
         })?;
-        let keys = KeyPair { public, secret };
+        // Pass a fresh clone to `Signer` — the upstream `KeyPair.secret`
+        // is `String` without `Zeroize`, so this clone is the one that
+        // freed-unzeroed when `Signer` drops. Our `Zeroizing<String>`
+        // local scrubs on drop regardless of how we exit `submit_order`.
+        let keys = KeyPair { public, secret: (*secret_hex).clone() };
         let signer = Signer::Keys { keys };
 
         // `amount` and `client_order_id` are uint128 on chain; the
@@ -191,6 +207,10 @@ fn map_tvm_exit_code(code: u16) -> Option<DomainError> {
         102 => Some(DomainError::OrderValidationFailed),
         // ERR_NOTE_BUSY: another `placeOrder` is in flight for this PN.
         // Distinct retry semantics — 429 / -2014 instead of -2010.
+        // TODO(api-spec): `-2014 OrderPnBusy` is not yet listed in
+        // docs/api-spec.md §Error Response; see the paired TODO block
+        // in docs/tech-specs/write-api.md §Failure surface for the
+        // exact text to add and the transitional-marker note.
         121 => Some(DomainError::OrderPnBusy),
         // ERR_INVALID_OUTCOME_ID: the `outcomeId` we pulled from
         // `market_outcomes` does not exist on the on-chain PMP. That
@@ -330,5 +350,40 @@ mod tests {
         let mut err = tvm_exit(0);
         err.error_code = Some("not-a-number".into());
         assert_eq!(map_bee_dex_error(&err), DomainError::Unexpected);
+    }
+
+    #[tokio::test]
+    async fn malformed_pn_pubkey_surfaces_as_market_inconsistent() {
+        // `accounts.pn_pubkey` is operator-seeded; a non-decimal value
+        // here means the DB row was corrupted post-write. The sender
+        // must surface that as `MarketInconsistent` (503 / -1500), not
+        // `Unexpected` (500): the cause is service-state, retrying
+        // won't help, but the operator-level diagnosis is precise.
+        // This test runs entirely synchronously — the decode step is
+        // the first thing `submit_order` does, so we never touch the
+        // gateway despite the bogus endpoint string.
+        let sender = BeeDexChainSender::new(
+            vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(10),
+        )
+        .expect("BeeDexChainSender::new");
+
+        let payload = NewOrderPayload {
+            pn_address: "0:pn".into(),
+            pn_pubkey: "not-a-decimal".into(),
+            pn_seckey: dodex_domain::SensitiveBytes::new(vec![0u8; 32]),
+            event_id: "1".into(),
+            oracle_list_hash: "1".into(),
+            token_type: 3,
+            outcome_id: 1,
+            is_buy: true,
+            price_raw: "615".into(),
+            amount_raw: "1500000".into(),
+            flags: 0,
+            client_order_id: "42".into(),
+        };
+
+        let err = sender.submit_order(payload).await.expect_err("decode must fail closed");
+        assert_eq!(err, DomainError::MarketInconsistent);
     }
 }

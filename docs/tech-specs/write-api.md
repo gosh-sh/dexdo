@@ -196,7 +196,12 @@ updates before this is mergeable as a documented public contract:
      synchronously (chain `ERR_INVALID_OUTCOME_ID` maps here, plus
      the pre-existing NULL/blank `orderbook_address` /
      `oracle_list_hash` invariants). SDK authors must know to
-     handle 503 on this endpoint. -->
+     handle 503 on this endpoint.
+  5. §Error Response: add `-1007 | Request timed out before
+     completion. | 504`. Surfaced by the `request_timeout` hoop
+     when a handler exceeds `ServerSection.request_timeout_ms`.
+     Clients retrying must re-`POST` with the same `clientOrderId`
+     so a chain message that eventually lands is not duplicated. -->
 
 
 ### Failure surface
@@ -257,9 +262,12 @@ long-term retry logic keyed on this specific code:
 | Market `status != TRADING`; local notional below `minNotional`; chain `ERR_LOW_VALUE` / `ERR_STAKE_NOT_EXISTS` / `ERR_DEBT_NON_ZERO` / `ERR_INVALID_STATE` / `ERR_ORDER_TOO_SMALL` | `OrderValidationFailed` | 400 |
 | Local precision / tick / step violation; chain `ERR_AMOUNT_NOT_LOT_MULTIPLE` / `ERR_PRICE_NOT_TICK_MULTIPLE` | `PrecisionExceeded` | 400 |
 | Chain `ERR_NOTE_BUSY` (per-PN serial enforced on-chain; another `placeOrder` still in flight) | `OrderPnBusy` | 429 |
+| Handler exceeded `ServerSection.request_timeout_ms` (`config/api.<env>.yaml`) — enforced by `services/api/src/timeout_hoop.rs` | `RequestTimeout` | 504 |
 | Unmapped chain `tvm_exit` code or gateway transport failure | `Unexpected` | 500 |
 
 `OrderPnBusy` (`-2014`) is new in this version of the API and is not yet listed in [api-spec.md §Error Response](../api-spec.md#error-response). The public spec needs a paired update; the implementation surfaces it today because synthesising it from `-2010` would lose the actionable "retry shortly" signal MM clients need.
+
+`RequestTimeout` (`-1007`) is similarly new — the public spec does not list it yet because the surrounding error table refresh is the same paired update tracked above (alongside `-2014` and `-1500`). It mirrors the Binance `-1007 / 504 TIMEOUT` shape; clients should re-`POST` with the same `clientOrderId` so a chain message that eventually lands is not duplicated.
 
 ### Layering
 

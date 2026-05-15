@@ -4,6 +4,7 @@
 mod auth_hoop;
 #[doc(hidden)]
 pub mod testkit;
+mod timeout_hoop;
 
 use std::env;
 use std::sync::Arc;
@@ -70,18 +71,33 @@ pub struct AppState {
     pub(crate) repo: SharedRepo,
     pub(crate) authenticator: SharedAuth,
     pub(crate) chain_sender: SharedChainSender,
+    /// Per-request wall-clock budget enforced by the `request_timeout`
+    /// hoop on every route. `Duration::ZERO` disables the hoop, which
+    /// is the implicit default `AppState::new` chooses so tests that
+    /// don't care about timeouts can ignore it.
+    pub(crate) request_timeout: Duration,
 }
 
 impl AppState {
     /// Wire-up constructor. Re-exported through the `testkit` module
     /// for integration tests; production code reaches it through `run`.
+    /// The request timeout defaults to `Duration::ZERO`, which keeps
+    /// the timeout hoop a no-op — tests that don't exercise it stay
+    /// terse. Production wires the configured value via
+    /// `with_request_timeout`.
     #[doc(hidden)]
     pub fn new(
         repo: SharedRepo,
         authenticator: SharedAuth,
         chain_sender: SharedChainSender,
     ) -> Self {
-        Self { repo, authenticator, chain_sender }
+        Self { repo, authenticator, chain_sender, request_timeout: Duration::ZERO }
+    }
+
+    #[doc(hidden)]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 }
 
@@ -191,6 +207,10 @@ impl ApiError {
             // Transient indexer state — fail closed, client retries when
             // the indexer catches up.
             DomainError::MarketInconsistent => StatusCode::SERVICE_UNAVAILABLE,
+            // The request_timeout hoop tripped — emit 504 so clients can
+            // distinguish "our budget elapsed" from "upstream gateway
+            // failed" (502).
+            DomainError::RequestTimeout => StatusCode::GATEWAY_TIMEOUT,
             // Per-PN serialisation is a chain invariant: only one
             // `placeOrder` per trading PN can be in flight. 429 is the
             // canonical "you sent too many to this PN; back off and
@@ -593,6 +613,11 @@ fn non_empty(value: Option<String>) -> Option<String> {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .hoop(inject(state))
+        // request_timeout runs *after* inject so the hoop can read
+        // `AppState.request_timeout` from the depot. Everything
+        // below — public routes, the auth subrouter, the handler
+        // chain — runs inside its budget.
+        .hoop(timeout_hoop::enforce_request_timeout)
         .push(Router::with_path("readiness").get(readiness))
         .push(Router::with_path("api/v1/markets").get(get_markets))
         .push(Router::with_path("api/v1/depth").get(get_depth))
@@ -644,7 +669,8 @@ pub async fn run() -> anyhow::Result<()> {
         vec![config.chain.gateway_endpoint.clone()],
         Duration::from_millis(config.chain.place_order_timeout_ms),
     )?);
-    let state = AppState::new(repo, authenticator, chain_sender);
+    let state = AppState::new(repo, authenticator, chain_sender)
+        .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms));
 
     // The API is intentionally restart-to-reconfigure. None of the live
     // request paths read runtime config — pool, server bind, request_timeout

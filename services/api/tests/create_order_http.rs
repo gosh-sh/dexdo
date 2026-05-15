@@ -22,6 +22,7 @@ use dodex_application::AuthContext;
 use dodex_application::AuthenticateRequest;
 use dodex_application::Authenticator;
 use dodex_application::ChainOrderSender;
+use dodex_application::MarketForPlacement;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsRequest;
 use dodex_application::NewOrderPayload;
@@ -107,6 +108,30 @@ impl MarketReadRepository for FakeRepo {
         _: u16,
     ) -> Result<DepthSnapshot, anyhow::Error> {
         unimplemented!("get_depth is not exercised by create_order_http tests")
+    }
+
+    async fn resolve_for_new_order(
+        &self,
+        _: &MarketAddress,
+        symbol: &Symbol,
+        _: i64,
+    ) -> Result<MarketForPlacement, anyhow::Error> {
+        let Some(market) = self.market.lock().unwrap().clone() else {
+            return Err(anyhow::anyhow!(DomainError::InvalidMarketOrSymbol));
+        };
+        let outcome = market
+            .outcomes
+            .iter()
+            .find(|o| o.symbol == *symbol)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(DomainError::InvalidMarketOrSymbol))?;
+        Ok(MarketForPlacement {
+            event_id: market.event.event_id,
+            oracle_list_hash: market.oracle_list_hash,
+            token_type: market.token_type,
+            status: market.status,
+            outcome,
+        })
     }
 }
 
@@ -654,6 +679,69 @@ async fn malformed_json_body_returns_1130() {
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1130);
+}
+
+/// `ChainOrderSender` that always hangs longer than the test's
+/// `request_timeout` budget. Used by the timeout regression test to
+/// drive the handler past the budget without an actual chain call.
+struct SlowSender;
+
+#[async_trait]
+impl ChainOrderSender for SlowSender {
+    async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
+        // 5 s is "indefinitely longer than any reasonable test
+        // budget"; the regression test caps the budget at 50 ms, so
+        // wall-clock impact stays in the tens of milliseconds.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
+    // The auth-hoop comment + api.local.yaml describe the race the
+    // timeout hoop guards against: a chain call that hangs past
+    // place_order_timeout + slack must surface as 504 instead of
+    // stalling the worker. SlowSender plays the stuck-chain role; a
+    // 50 ms budget keeps the test fast.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender: SharedChainSender = Arc::new(SlowSender);
+    let authenticator: SharedAuth =
+        Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
+    let state = AppState::new(repo, authenticator, sender)
+        .with_request_timeout(std::time::Duration::from_millis(50));
+    let service = Service::new(build_router(state));
+
+    let started = std::time::Instant::now();
+    let mut resp = post_order(&service, valid_body()).send(&service).await;
+    let elapsed = started.elapsed();
+    assert_eq!(resp.status_code, Some(StatusCode::GATEWAY_TIMEOUT));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1007);
+    // Tight bound — much less than the 5 s sender sleep — confirms the
+    // timeout hoop actually cancelled the handler rather than letting
+    // it run to completion.
+    assert!(elapsed < std::time::Duration::from_secs(1), "elapsed {elapsed:?}");
+}
+
+#[tokio::test]
+async fn handler_within_request_timeout_succeeds() {
+    // Counterpart to the 504 test: a fast handler under a non-zero
+    // budget must not be cancelled. Pins that the hoop is gated on
+    // actual elapse, not just budget-being-set.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingSender::ok());
+    let authenticator: SharedAuth =
+        Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
+    let state = AppState::new(repo, authenticator, sender.clone() as SharedChainSender)
+        .with_request_timeout(std::time::Duration::from_secs(5));
+    let service = Service::new(build_router(state));
+
+    let mut resp = post_order(&service, valid_body()).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let ok = resp.take_json::<OrderOk>().await.expect("body");
+    assert_eq!(ok.status, "PENDING_NEW");
+    assert_eq!(sender.calls().len(), 1);
 }
 
 #[tokio::test]

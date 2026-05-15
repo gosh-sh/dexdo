@@ -11,7 +11,6 @@ use dodex_domain::notional_meets_minimum;
 use dodex_domain::precision_within;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
-use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
@@ -121,6 +120,21 @@ pub enum MarketsRequest {
     Listing(MarketsListing),
 }
 
+/// Slim market+outcome projection the `POST /api/v1/order` path needs.
+/// Built by a single SELECT joining `markets ⋈ market_outcomes`; the
+/// oracle/event aggregation that `list_markets` performs is irrelevant
+/// on the trading hot path. `status` is computed against the caller's
+/// `now` so downstream validation can reject everything except
+/// `MarketStatus::Trading` without a second round-trip.
+#[derive(Debug, Clone)]
+pub struct MarketForPlacement {
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    pub token_type: i32,
+    pub status: MarketStatus,
+    pub outcome: Outcome,
+}
+
 #[async_trait]
 pub trait MarketReadRepository: Send + Sync {
     async fn list_markets(&self, request: &MarketsRequest) -> Result<MarketsPage, anyhow::Error>;
@@ -131,6 +145,19 @@ pub trait MarketReadRepository: Send + Sync {
         symbol: &Symbol,
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error>;
+
+    /// Resolve the `(marketAddress, symbol)` pair the trading path needs
+    /// in a single SELECT — no oracle/event aggregation, no second
+    /// outcome fetch. `now` lets the implementation compute the
+    /// `MarketStatus` so the use case can fail closed without a separate
+    /// `list_markets` call. Misses collapse to
+    /// `DomainError::InvalidMarketOrSymbol`.
+    async fn resolve_for_new_order(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        now: i64,
+    ) -> Result<MarketForPlacement, anyhow::Error>;
 }
 
 #[async_trait]
@@ -146,6 +173,15 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error> {
         (**self).get_depth(market_address, symbol, limit).await
+    }
+
+    async fn resolve_for_new_order(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        now: i64,
+    ) -> Result<MarketForPlacement, anyhow::Error> {
+        (**self).resolve_for_new_order(market_address, symbol, now).await
     }
 }
 
@@ -305,15 +341,20 @@ where
     S: ChainOrderSender,
 {
     pub async fn execute(&self, input: NewOrderInput) -> Result<SubmittedOrder, DomainError> {
-        let (market, outcome) = resolve_market_and_outcome(
-            &self.repo,
-            &input.market_address,
-            &input.symbol,
-            input.now_seconds,
-        )
-        .await?;
+        let MarketForPlacement { event_id, oracle_list_hash, token_type, status, outcome } = self
+            .repo
+            .resolve_for_new_order(&input.market_address, &input.symbol, input.now_seconds)
+            .await
+            .map_err(|err| {
+                // The repo returns `anyhow::Error` so its inner failures can
+                // be typed (`InvalidMarketOrSymbol` for a miss,
+                // `MarketInconsistent` for blank orderbook etc.) or raw I/O.
+                // Downcast preserves the typed variant; everything else is
+                // an unexpected internal error.
+                err.downcast_ref::<DomainError>().copied().unwrap_or(DomainError::Unexpected)
+            })?;
 
-        if market.status != MarketStatus::Trading {
+        if status != MarketStatus::Trading {
             return Err(DomainError::OrderValidationFailed);
         }
 
@@ -323,7 +364,7 @@ where
         // otherwise-valid market. The trading path is where it actually
         // matters — fail closed with 503 here, mirroring the
         // `orderbook_address` invariant.
-        if market.oracle_list_hash.is_empty() {
+        if oracle_list_hash.is_empty() {
             return Err(DomainError::MarketInconsistent);
         }
 
@@ -390,18 +431,19 @@ where
             (OrderType::Limit, _, None) => return Err(DomainError::Unexpected),
         }
 
-        let token_type =
-            u32::try_from(market.token_type).map_err(|_| DomainError::MarketInconsistent)?;
+        // `markets.token_type` is `integer` in Postgres (signed), but the
+        // on-chain `PrivateNote.placeOrder` ABI is `uint32`. The
+        // reconciler only ever writes values pulled from
+        // `PMP.getDetails()`, so a negative here would mean the DB row
+        // was corrupted post-reconcile — fail closed with 503 instead
+        // of pushing a sign-folded value to chain.
+        let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
 
-        // Validate or generate the client order id. The on-chain ABI
-        // is `uint128`, but the serialization through `bee_dex` →
-        // `ackinacki-kit` → `serde_json::json!` panics on values
-        // larger than `u64::MAX` (see `generate_client_order_id` for
-        // the full chain). Until the SDK gains
-        // `serde_json/arbitrary_precision`, the public surface is
-        // bounded at `u64::MAX` — reject anything larger (or
-        // non-numeric) as 400 / -1130 here rather than letting it
-        // crash deep in the sender with a 500.
+        // Caller-supplied `newOrderClientId` is bounded at `u64::MAX`
+        // by the upstream serialization constraint documented in
+        // `docs/tech-specs/write-api.md §clientOrderId generation`.
+        // Reject larger or non-numeric values as 400 / -1130 here
+        // rather than letting them panic deep in `ackinacki-kit`.
         let client_order_id = match input.client_order_id.as_deref() {
             Some(raw) => {
                 raw.parse::<u64>().map_err(|_| DomainError::InvalidParameter)?;
@@ -414,8 +456,8 @@ where
             pn_address: input.trading_pn.pn_address,
             pn_pubkey: input.trading_pn.pn_pubkey,
             pn_seckey: input.trading_pn.pn_seckey,
-            event_id: market.event.event_id,
-            oracle_list_hash: market.oracle_list_hash,
+            event_id,
+            oracle_list_hash,
             token_type,
             outcome_id: outcome.outcome_id,
             is_buy: input.side.is_buy(),
@@ -430,52 +472,10 @@ where
     }
 }
 
-/// Look up the market by `marketAddress` and locate the matching
-/// outcome by `symbol`. Both miss cases collapse to
-/// `InvalidMarketOrSymbol` — the client cannot distinguish "wrong
-/// market" from "wrong symbol within that market" and the spec doesn't
-/// require it to.
-async fn resolve_market_and_outcome<R>(
-    repo: &R,
-    market_address: &MarketAddress,
-    symbol: &Symbol,
-    now_seconds: i64,
-) -> Result<(Market, Outcome), DomainError>
-where
-    R: MarketReadRepository,
-{
-    let request = MarketsRequest::One { market_address: market_address.clone(), now: now_seconds };
-    let page = repo.list_markets(&request).await.map_err(|err| {
-        // The repo returns `anyhow::Error` so its inner failures can be
-        // typed (e.g. `MarketInconsistent` from `assemble_market`) or
-        // raw I/O. Downcast preserves the typed variant; everything
-        // else is an unexpected internal error.
-        err.downcast_ref::<DomainError>().copied().unwrap_or(DomainError::Unexpected)
-    })?;
-    let market = page.markets.into_iter().next().ok_or(DomainError::InvalidMarketOrSymbol)?;
-    let outcome = market
-        .outcomes
-        .iter()
-        .find(|o| o.symbol == *symbol)
-        .cloned()
-        .ok_or(DomainError::InvalidMarketOrSymbol)?;
-    Ok((market, outcome))
-}
-
-/// Generate a fresh `clientOrderId` per spec §clientOrderId generation.
-/// Format: decimal string of a `uint64` random value.
-///
-/// The on-chain ABI accepts `uint128`, but `bee_dex::Dex::place_order`
-/// reaches `ParamsOfPlaceOrder { client_order_id: u128, .. }` through
-/// `serde_json::json!` inside `ackinacki-kit`, and `serde_json`'s
-/// default serializer (no `arbitrary_precision` feature) rejects
-/// `u128 > u64::MAX` with `"number out of range"` — which `json!`
-/// then `.unwrap()`s, panicking the worker. Until the upstream SDK
-/// gains arbitrary-precision support, the API surface is therefore
-/// bounded at `u64::MAX`. Truncating `Uuid::new_v4()` to its low
-/// 64 bits keeps the variant nibble in place (2 bits fixed) and
-/// leaves 62 random bits — collision space 2^62 ≈ 4.6 × 10^18 is
-/// cosmologically safe.
+/// Generate a fresh `clientOrderId`. Decimal string of a `uint64`
+/// random value (low 64 bits of `Uuid::new_v4()`), bounded by the
+/// upstream serialization constraint documented in
+/// `docs/tech-specs/write-api.md §clientOrderId generation`.
 fn generate_client_order_id() -> String {
     (Uuid::new_v4().as_u128() as u64).to_string()
 }
@@ -562,6 +562,35 @@ mod tests {
             _: u16,
         ) -> Result<DepthSnapshot, anyhow::Error> {
             unimplemented!("get_depth is not exercised by the order use case")
+        }
+
+        async fn resolve_for_new_order(
+            &self,
+            _: &MarketAddress,
+            symbol: &Symbol,
+            _: i64,
+        ) -> Result<MarketForPlacement, anyhow::Error> {
+            // Tests construct a fully-populated `Market` and let this
+            // adapter project it down to the slim shape the use case
+            // actually consumes. Both miss paths (no market, no symbol
+            // within market) collapse to `InvalidMarketOrSymbol` the
+            // same way the Postgres impl does.
+            let Some(market) = self.market.clone() else {
+                return Err(anyhow::anyhow!(DomainError::InvalidMarketOrSymbol));
+            };
+            let outcome = market
+                .outcomes
+                .iter()
+                .find(|o| o.symbol == *symbol)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!(DomainError::InvalidMarketOrSymbol))?;
+            Ok(MarketForPlacement {
+                event_id: market.event.event_id,
+                oracle_list_hash: market.oracle_list_hash,
+                token_type: market.token_type,
+                status: market.status,
+                outcome,
+            })
         }
     }
 
