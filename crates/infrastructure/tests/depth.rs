@@ -175,18 +175,22 @@ async fn depth_returns_human_decimal_levels() {
         (false, "616", "5000"), // ask: price 6.16, qty 50.00
     ];
     for (idx, (is_buy, price, amount)) in levels.iter().enumerate() {
+        let chain_order = format!("5f8000000000{:06}", idx);
         sqlx::query(
             r#"insert into live_orders
                    (orderbook_address, order_id, outcome_id, is_buy, price,
-                    amount_remaining, status, last_chain_order)
-               values ($1, $2::numeric, 1, $3, $4::numeric, $5::numeric, 'OPEN', $6)"#,
+                    amount_initial, amount_remaining, status,
+                    last_chain_order, placed_chain_order)
+               values ($1, $2::numeric, 1, $3, $4::numeric,
+                       $5::numeric, $5::numeric, 'OPEN',
+                       $6, $6)"#,
         )
         .bind(orderbook)
         .bind(idx as i64 + 1)
         .bind(*is_buy)
         .bind(*price)
         .bind(*amount)
-        .bind(format!("5f8000000000{:06}", idx))
+        .bind(&chain_order)
         .execute(&pool)
         .await
         .expect("insert live_orders");
@@ -264,9 +268,11 @@ async fn last_update_id_is_scoped_per_outcome() {
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, status, last_chain_order)
-           values ($1, 1::numeric, 2, true, 500::numeric, 100::numeric,
-                   'OPEN', $2)"#,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, 1::numeric, 2, true, 500::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   $2, $2)"#,
     )
     .bind(orderbook)
     .bind(no_chain_order)
