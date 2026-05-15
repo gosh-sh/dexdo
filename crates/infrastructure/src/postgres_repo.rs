@@ -302,24 +302,18 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None => None,
         };
 
-        let cursor_ts_us = query.cursor.as_ref().map(|c| c.chain_created_at_us);
-        let cursor_order_id = query.cursor.as_ref().map(|c| c.order_id.clone());
-        let cursor_orderbook = query.cursor.as_ref().map(|c| c.orderbook_address.clone());
         let limit_plus_one = i64::from(query.limit) + 1;
 
         // The microsecond extraction `(extract(epoch from <timestamptz>) *
-        // 1000000)::bigint` below is exact only on Postgres >= 14, where
-        // `extract(epoch ...)` returns `numeric`. On Postgres <= 13 it
-        // returned `double precision`, and the bigint cast could round by
-        // 1 µs at 2026-era timestamps — producing a cursor `t` that doesn't
-        // match the row it came from. Deployment is pinned to PG16
-        // (docker-compose.test.yml) and Supabase (PG15+), so this is safe;
-        // do not downgrade the schema target without rewriting the extraction.
+        // 1000000)::bigint` below was once cursor-load-bearing. It now
+        // feeds response fields `time` / `updateTime` only — the cursor
+        // is placed_chain_order (text). Deployment is pinned to PG15+
+        // (Supabase) and PG16 (docker-compose.test.yml); both return
+        // numeric from extract(epoch ...), so the bigint cast is exact.
         let rows: Vec<OpenOrderRow> = match target {
             Some((orderbook_address, outcome_id)) => sqlx::query_as(
                 r#"select m.pmp_address as market_address,
                           mo.symbol as symbol,
-                          lo.orderbook_address as orderbook_address,
                           lo.order_id::text as order_id,
                           coalesce(lo.client_order_id, '') as client_order_id,
                           lo.price::text as price,
@@ -328,6 +322,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.is_buy as is_buy,
                           (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
                           (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
+                          lo.placed_chain_order as placed_chain_order,
                           mo.price_precision as price_precision,
                           mo.quantity_precision as quantity_precision
                      from live_orders lo
@@ -343,18 +338,14 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       and m.last_reconciled_at is not null
                       and lo.orderbook_address = $2
                       and lo.outcome_id = $3
-                      and ($4::bigint is null
-                           or (lo.chain_created_at, lo.order_id, lo.orderbook_address)
-                              > (to_timestamp($4::bigint / 1000000.0), $5::numeric, $6::text))
-                    order by lo.chain_created_at asc, lo.order_id asc, lo.orderbook_address asc
-                    limit $7"#,
+                      and ($4::text is null or lo.placed_chain_order > $4::text)
+                    order by lo.placed_chain_order asc
+                    limit $5"#,
             )
             .bind(query.owner_pn_address.as_str())
             .bind(orderbook_address)
             .bind(outcome_id)
-            .bind(cursor_ts_us)
-            .bind(cursor_order_id.as_deref())
-            .bind(cursor_orderbook.as_deref())
+            .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
             .bind(limit_plus_one)
             .fetch_all(&self.pool)
             .await
@@ -362,7 +353,6 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None => sqlx::query_as(
                 r#"select m.pmp_address as market_address,
                           mo.symbol as symbol,
-                          lo.orderbook_address as orderbook_address,
                           lo.order_id::text as order_id,
                           coalesce(lo.client_order_id, '') as client_order_id,
                           lo.price::text as price,
@@ -371,6 +361,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.is_buy as is_buy,
                           (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
                           (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
+                          lo.placed_chain_order as placed_chain_order,
                           mo.price_precision as price_precision,
                           mo.quantity_precision as quantity_precision
                      from live_orders lo
@@ -384,16 +375,12 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       and lo.chain_created_at is not null
                       and lo.chain_updated_at is not null
                       and m.last_reconciled_at is not null
-                      and ($2::bigint is null
-                           or (lo.chain_created_at, lo.order_id, lo.orderbook_address)
-                              > (to_timestamp($2::bigint / 1000000.0), $3::numeric, $4::text))
-                    order by lo.chain_created_at asc, lo.order_id asc, lo.orderbook_address asc
-                    limit $5"#,
+                      and ($2::text is null or lo.placed_chain_order > $2::text)
+                    order by lo.placed_chain_order asc
+                    limit $3"#,
             )
             .bind(query.owner_pn_address.as_str())
-            .bind(cursor_ts_us)
-            .bind(cursor_order_id.as_deref())
-            .bind(cursor_orderbook.as_deref())
+            .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
             .bind(limit_plus_one)
             .fetch_all(&self.pool)
             .await
@@ -408,11 +395,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         }
 
         let next_cursor = if has_more {
-            orders_raw.last().map(|row| OpenOrdersCursor {
-                chain_created_at_us: row.chain_created_at_us,
-                order_id: row.order_id.clone(),
-                orderbook_address: row.orderbook_address.clone(),
-            })
+            orders_raw.last().map(|row| OpenOrdersCursor(row.placed_chain_order.clone()))
         } else {
             None
         };
@@ -435,19 +418,19 @@ struct DepthLevelRow {
 struct OpenOrderRow {
     market_address: String,
     symbol: String,
-    orderbook_address: String,
     order_id: String,
     client_order_id: String,
     price: String,
     orig_qty: String,
     executed_qty: String,
     is_buy: bool,
-    // Microseconds since the epoch — matches the timestamptz column's
-    // native precision so the cursor predicate compares apples to apples.
-    // The API renders `time` / `updateTime` in milliseconds by dividing
-    // by 1_000 at the boundary.
+    // Microseconds since the epoch — sourced from chain_created_at /
+    // chain_updated_at (timestamptz). The API renders `time` / `updateTime`
+    // in milliseconds by dividing by 1_000 at the boundary. These columns
+    // are display-only; the cursor is built from placed_chain_order.
     chain_created_at_us: i64,
     chain_updated_at_us: i64,
+    placed_chain_order: String,
     price_precision: i32,
     quantity_precision: i32,
 }

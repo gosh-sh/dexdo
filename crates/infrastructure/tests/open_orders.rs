@@ -134,19 +134,22 @@ async fn insert_order(
     amount_remaining: &str,
     status: &str,
     created_sec: i64,
+    placed_chain_order: &str,
 ) {
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, owner_pn_address,
                 client_order_id, status, last_chain_order,
+                placed_chain_order,
                 chain_created_at, chain_updated_at,
                 created_at, updated_at)
            values ($1, $2::numeric, 1, true, $3::numeric,
                    $4::numeric, $5::numeric, $6, $7, $8,
                    $9,
-                   to_timestamp($10::bigint), to_timestamp(($10 + 1)::bigint),
-                   to_timestamp($10::bigint), to_timestamp(($10 + 1)::bigint))"#,
+                   $10,
+                   to_timestamp($11::bigint), to_timestamp(($11 + 1)::bigint),
+                   to_timestamp($11::bigint), to_timestamp(($11 + 1)::bigint))"#,
     )
     .bind(book)
     .bind(order_id)
@@ -157,6 +160,7 @@ async fn insert_order(
     .bind(format!("client-{order_id}"))
     .bind(status)
     .bind(format!("5f800000000000{:06}", order_id))
+    .bind(placed_chain_order)
     .bind(created_sec)
     .execute(pool)
     .await
@@ -182,6 +186,7 @@ async fn all_markets_open_orders_are_owner_scoped_sorted_and_scaled() {
         "1000",
         "OPEN",
         1_700_000_000,
+        &format!("5f80000000000000{:06}", 2),
     )
     .await;
     insert_order(
@@ -194,6 +199,7 @@ async fn all_markets_open_orders_are_owner_scoped_sorted_and_scaled() {
         "300",
         "OPEN",
         1_700_000_000,
+        &format!("5f80000000000000{:06}", 1),
     )
     .await;
     insert_order(
@@ -206,6 +212,7 @@ async fn all_markets_open_orders_are_owner_scoped_sorted_and_scaled() {
         "900",
         "OPEN",
         1_700_000_001,
+        &format!("5f80000000000000{:06}", 3),
     )
     .await;
     insert_order(
@@ -218,6 +225,7 @@ async fn all_markets_open_orders_are_owner_scoped_sorted_and_scaled() {
         "0",
         "FILLED",
         1_700_000_002,
+        &format!("5f80000000000000{:06}", 4),
     )
     .await;
     insert_order(
@@ -230,6 +238,7 @@ async fn all_markets_open_orders_are_owner_scoped_sorted_and_scaled() {
         "0",
         "CANCELLED",
         1_700_000_003,
+        &format!("5f80000000000000{:06}", 5),
     )
     .await;
 
@@ -280,6 +289,7 @@ async fn market_symbol_filter_and_empty_results_work() {
         "1000",
         "OPEN",
         1_700_000_010,
+        &format!("5f80000000000000{:06}", 10),
     )
     .await;
     insert_order(
@@ -292,6 +302,7 @@ async fn market_symbol_filter_and_empty_results_work() {
         "1000",
         "OPEN",
         1_700_000_011,
+        &format!("5f80000000000000{:06}", 11),
     )
     .await;
 
@@ -374,6 +385,7 @@ async fn cursor_returns_subsequent_page_in_order() {
             "1000",
             "OPEN",
             t,
+            &format!("5f80000000000000{:06}", i),
         )
         .await;
     }
@@ -431,6 +443,7 @@ async fn cursor_stable_under_concurrent_fills() {
             "1000",
             "OPEN",
             t,
+            &format!("5f80000000000000{:06}", i),
         )
         .await;
     }
@@ -505,6 +518,7 @@ async fn repo_returns_empty_page_for_limit_zero() {
         "1000",
         "OPEN",
         1_700_000_010,
+        &format!("5f80000000000000{:06}", 1),
     )
     .await;
 
@@ -554,6 +568,7 @@ async fn rows_with_null_chain_timestamps_are_excluded() {
         "1000",
         "OPEN",
         1_700_000_010,
+        &format!("5f80000000000000{:06}", 1),
     )
     .await;
     sqlx::query(
@@ -561,11 +576,13 @@ async fn rows_with_null_chain_timestamps_are_excluded() {
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, owner_pn_address,
                 client_order_id, status, last_chain_order,
+                placed_chain_order,
                 chain_created_at, chain_updated_at,
                 created_at, updated_at)
            values ($1, 2::numeric, 1, true, 12345::numeric,
                    1000::numeric, 1000::numeric, $2,
                    'client-null-ts', 'OPEN', '5f80000000000000000002',
+                   '5f80000000000000000002',
                    NULL, NULL,
                    to_timestamp(1700000020), to_timestamp(1700000020))"#,
     )
@@ -616,11 +633,13 @@ async fn cursor_handles_sub_millisecond_chain_timestamps() {
                    (orderbook_address, order_id, outcome_id, is_buy, price,
                     amount_initial, amount_remaining, owner_pn_address,
                     client_order_id, status, last_chain_order,
+                    placed_chain_order,
                     chain_created_at, chain_updated_at,
                     created_at, updated_at)
                values ($1, $2::numeric, 1, true, 12345::numeric,
                        1000::numeric, 1000::numeric, $3,
                        $4, 'OPEN', $5,
+                       $5,
                        to_timestamp($6::double precision), to_timestamp($6::double precision),
                        now(), now())"#,
         )
@@ -678,8 +697,12 @@ async fn cross_book_tie_does_not_lose_orders_across_pages() {
     insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
     insert_market(&pool, &scope.pmp_no, &scope.symbol_no, &scope.book_no).await;
 
-    // Two orders, two books, identical chain time and identical order_id —
-    // the worst case the new tie-breaker has to handle.
+    // Two orders, two books, identical chain time and identical order_id.
+    // Under the old (chain_created_at, order_id, orderbook_address) sort the
+    // tie-breaker was orderbook_address; under the new placed_chain_order
+    // sort the rows just need globally distinct chain_order values (which
+    // the gateway guarantees in production). We assign them explicitly here
+    // so the all-markets query can paginate across both rows.
     let chain_seconds = 1_700_000_050;
     insert_order(
         &pool,
@@ -691,6 +714,7 @@ async fn cross_book_tie_does_not_lose_orders_across_pages() {
         "1000",
         "OPEN",
         chain_seconds,
+        "5f80000000000000_yes_001",
     )
     .await;
     insert_order(
@@ -703,6 +727,7 @@ async fn cross_book_tie_does_not_lose_orders_across_pages() {
         "1000",
         "OPEN",
         chain_seconds,
+        "5f80000000000000_zno_001",
     )
     .await;
 
@@ -737,6 +762,57 @@ async fn cross_book_tie_does_not_lose_orders_across_pages() {
         "the two pages must surface different books"
     );
     assert!(second.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+#[tokio::test]
+async fn sort_uses_placed_chain_order_independent_of_chain_created_at() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // Three orders, all sharing the same chain second, with strictly
+    // increasing placed_chain_order values. With the old (chain_created_at,
+    // order_id) sort, ties would fall back to numeric order_id; with the
+    // new placed_chain_order sort, ordering is driven solely by the chain
+    // event sequence. We assign placed_chain_order in reverse of order_id
+    // to prove the sort no longer follows order_id.
+    insert_order(
+        &pool, &scope.book_yes, 1,
+        Some(&scope.owner), "12345", "1000", "1000", "OPEN", 1_700_000_500,
+        "5f80000000000000_C",  // last
+    ).await;
+    insert_order(
+        &pool, &scope.book_yes, 2,
+        Some(&scope.owner), "12345", "1000", "1000", "OPEN", 1_700_000_500,
+        "5f80000000000000_A",  // first
+    ).await;
+    insert_order(
+        &pool, &scope.book_yes, 3,
+        Some(&scope.owner), "12345", "1000", "1000", "OPEN", 1_700_000_500,
+        "5f80000000000000_B",  // middle
+    ).await;
+
+    let page = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("list_open_orders");
+
+    let order_ids: Vec<_> = page.orders.iter().map(|o| o.order_id.as_str()).collect();
+    assert_eq!(
+        order_ids,
+        vec!["2", "3", "1"],
+        "rows must sort by placed_chain_order ascending, not by order_id or chain_created_at"
+    );
+    assert!(page.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
 }
