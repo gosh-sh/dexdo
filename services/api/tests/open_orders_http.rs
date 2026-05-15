@@ -647,8 +647,16 @@ async fn limit_above_u16_max_returns_1102() {
 #[tokio::test]
 async fn out_of_range_cursor_returns_empty_page() {
     // A well-formed cursor whose value lex-exceeds every placed_chain_order
-    // returns an empty page with next_cursor: null — not an error.
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    // returns an empty page with next_cursor: null — not an error. Seed one
+    // smaller-cursor row so a regression from `placed_chain_order > $cursor`
+    // to `< $cursor` would return that row and fail this test.
+    let Some((service, pool, _kek)) = common::setup().await else { return };
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope).await;
+    let owner = trading_pn(&pool).await;
+    insert_open_order(&pool, &scope, &owner).await;
+
     let ts = now_ms();
     // Real msg_chain_order values from the gateway are zero-padded hex-shaped
     // strings starting with 5f80... (see graphql.rs samples and migration
@@ -675,4 +683,6 @@ async fn out_of_range_cursor_returns_empty_page() {
     let body = resp.take_json::<OpenOrdersPageBody>().await.expect("open orders body");
     assert!(body.orders.is_empty());
     assert!(body.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
 }

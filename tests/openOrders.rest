@@ -91,8 +91,8 @@ GET {{host}}/api/v1/openOrders?limit=abc&recvWindow={{recvWindow}}&timestamp={{t
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
-### malformed cursor → -1102 / 400
-GET {{host}}/api/v1/openOrders?cursor=not-a-valid-cursor&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+### opaque cursor beyond current rows → 200 / empty page
+GET {{host}}/api/v1/openOrders?cursor=ffffffffffffffffffffffffffffffff&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 

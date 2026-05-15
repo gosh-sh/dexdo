@@ -422,10 +422,10 @@ async fn cursor_returns_subsequent_page_in_order() {
 
 #[tokio::test]
 async fn cursor_stable_under_concurrent_fills() {
-    // Mid-pagination a row may move from OPEN to FILLED. Because the sort key
-    // (chain_created_at, order_id) is monotonic and the next-page predicate is
-    // strict `>`, the second page must not duplicate already-returned rows or
-    // skip rows that remain open.
+    // Mid-pagination rows may leave the OPEN set. Because the cursor is the
+    // last returned placed_chain_order and the next-page predicate is strict
+    // `>`, the second page must not duplicate already-returned rows or skip
+    // rows that remain open past the cursor.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
     let scope = Scope::new();
@@ -609,13 +609,11 @@ async fn rows_with_null_chain_timestamps_are_excluded() {
 }
 
 #[tokio::test]
-async fn cursor_handles_sub_millisecond_chain_timestamps() {
-    // Regression: `chain_created_at` carries sub-millisecond precision
-    // (the projector now binds `parse_unix_seconds` as f64). A cursor that
-    // round-tripped through milliseconds would compare against a rounded
-    // timestamp and the strict-`>` predicate would return the boundary row
-    // again on the next page. The cursor stores microseconds so the
-    // predicate matches storage precision.
+async fn sub_millisecond_chain_timestamps_are_display_only_for_cursor_pagination() {
+    // `chain_created_at` may carry sub-millisecond precision, but openOrders
+    // cursors no longer depend on it. The API renders timestamps in whole
+    // milliseconds, while pagination must continue from the last returned
+    // placed_chain_order.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
     let scope = Scope::new();
@@ -665,7 +663,9 @@ async fn cursor_handles_sub_millisecond_chain_timestamps() {
         .expect("first page");
     assert_eq!(first.orders.len(), 1);
     assert_eq!(first.orders[0].order_id, "1");
+    assert_eq!(first.orders[0].time, 1_700_000_000_500);
     let cursor = first.next_cursor.expect("next_cursor present");
+    assert_eq!(cursor.0, format!("5f8000000000000{:05}", 1));
 
     let second = repo
         .list_open_orders(&OpenOrdersQuery {
@@ -676,8 +676,9 @@ async fn cursor_handles_sub_millisecond_chain_timestamps() {
         })
         .await
         .expect("second page");
-    assert_eq!(second.orders.len(), 1, "second page must not repeat the boundary row");
+    assert_eq!(second.orders.len(), 1, "second page must advance by placed_chain_order");
     assert_eq!(second.orders[0].order_id, "2");
+    assert_eq!(second.orders[0].time, 1_700_000_000_500);
     assert!(second.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
