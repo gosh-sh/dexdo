@@ -203,8 +203,8 @@ async fn fills_only_missing_field_when_partially_set() {
         seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
 
     // Pre-set describe only; trust_addr and meta_reconciled_at remain null.
-    // This models the legacy state from before migration 0012 where a row
-    // could have describe populated without the reconciler-progress marker.
+    // This models the legacy state where a row could have describe populated
+    // without the reconciler-progress marker.
     sqlx::query(
         "update oracle_events set describe = 'Already known'
                 where eventlist_id = $1 and internal_id_in_eventlist = $2::numeric",
@@ -235,13 +235,12 @@ async fn fills_only_missing_field_when_partially_set() {
 
 #[tokio::test]
 async fn null_chain_metadata_clears_pending_predicate() {
-    // Regression: before migration 0012 the pending predicate
-    // `describe is null or trust_addr is null` matched forever when the
-    // on-chain getter legitimately returned null for `trustAddr` (or empty
-    // `describe`). The OEL reconciler then re-selected the same rows every
-    // sweep and starved later OELs out of the `LIMIT 16` batch. With the
-    // `meta_reconciled_at` marker a single pass with all-None metadata must
-    // remove the row from the pending set.
+    // Regression: the old pending predicate `describe is null or trust_addr is
+    // null` matched forever when the on-chain getter legitimately returned null
+    // for `trustAddr` (or empty `describe`). The OEL reconciler then re-selected
+    // the same rows every sweep and starved later OELs out of the `LIMIT 16`
+    // batch. With the `meta_reconciled_at` marker a single pass with all-None
+    // metadata must remove the row from the pending set.
     let Some(pool) = setup().await else { return };
 
     let test = "oel_reconcile_null_chain_meta";

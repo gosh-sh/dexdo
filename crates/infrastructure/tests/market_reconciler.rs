@@ -39,9 +39,8 @@ async fn setup() -> Option<PgPool> {
 
 /// Per-invocation fixture scope. UUID-suffixed `pmp` / `orderbook` make every
 /// test run produce row addresses that cannot collide with prior runs or with
-/// sibling tests, sidestepping `markets_orderbook_address_unique` from
-/// migration 0019. Mirrors the `Scope::new` pattern in
-/// `crates/infrastructure/tests/open_orders.rs`.
+/// sibling tests, sidestepping `markets_orderbook_address_unique`. Mirrors
+/// the `Scope::new` pattern in `crates/infrastructure/tests/open_orders.rs`.
 struct Scope {
     pmp: String,
     orderbook: String,
@@ -185,10 +184,10 @@ async fn post_freeze_reconcile_stamps_orderbook() {
 
 #[tokio::test]
 async fn reconciled_row_drops_out_of_queue_permanently() {
-    // After migration 0014 the queue predicate is just `last_reconciled_at IS
-    // NULL`: the deterministic getter returns the same address on every pass,
-    // so there is no later re-queue trigger. PoolsFrozen landing afterwards
-    // must NOT pull the row back into the queue.
+    // The queue predicate is just `last_reconciled_at IS NULL`: the deterministic
+    // getter returns the same address on every pass, so there is no later re-queue
+    // trigger. PoolsFrozen landing afterwards must NOT pull the row back into the
+    // queue.
     let Some(pool) = setup().await else { return };
     let scope = Scope::new("no_requeue");
     scope.cleanup(&pool).await;

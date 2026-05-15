@@ -263,7 +263,7 @@ async fn pending_status_when_reconciled_without_timings() {
     purge_market(&pool, &pmp).await;
     // Mirror what reconciler writes when no TimingsSet has been observed:
     // `last_reconciled_at` populated, `orderbook_address` stamped from the
-    // deterministic getter (migration 0014 CHECK requires it whenever
+    // deterministic getter (the schema CHECK requires it whenever
     // `last_reconciled_at` is set), but `stake_*`/`result_*` left NULL.
     let orderbook = format!("0:{test}_book");
     sqlx::query(

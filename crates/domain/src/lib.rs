@@ -170,10 +170,10 @@ pub struct Terminal {
 pub struct Market {
     pub market_address: MarketAddress,
     /// Deterministic OrderBook address from `PMP.getOrderBookAddress()`,
-    /// stamped on the first reconcile (migration 0014 CHECK constraint
-    /// pins `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT
-    /// NULL`). Always present on markets visible to the API — a NULL or
-    /// blank value at this point is treated as `MarketInconsistent` →
+    /// stamped on the first reconcile (the schema CHECK constraint pins
+    /// `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`).
+    /// Always present on markets visible to the API — a NULL or blank value
+    /// at this point is treated as `MarketInconsistent` →
     /// HTTP 503 by `assemble_market` / depth path. Clients gate trading
     /// availability on `status`, not on this field's presence.
     pub order_book_address: String,

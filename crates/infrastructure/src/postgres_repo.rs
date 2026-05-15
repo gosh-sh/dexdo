@@ -135,9 +135,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
         symbol: &Symbol,
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error> {
-        // markets.orderbook_address is nullable in the schema (migration 0001)
-        // because the `PMPDeployed` projector inserts a row before the
-        // reconciler runs. The migration-0014 CHECK constraint pins
+        // markets.orderbook_address is nullable in the schema because the
+        // `PMPDeployed` projector inserts a row before the reconciler runs. The
+        // schema CHECK constraint pins
         // `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`,
         // and the SQL below filters to reconciled rows — so a NULL (or blank)
         // address here is an invariant violation, not a legitimate empty-book

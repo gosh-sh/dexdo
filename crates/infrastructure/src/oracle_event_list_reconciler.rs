@@ -88,10 +88,9 @@ impl OracleEventListReconciler {
     ///
     /// We key the pending predicate on `meta_reconciled_at` rather than on
     /// `describe`/`trust_addr` being null because both fields are nullable on
-    /// chain (see migration 0012). Using the value of the field as a proxy
-    /// for "reconciliation attempted" left rows with legitimately-null
-    /// `trustAddr` matching the predicate forever and starved out the
-    /// `LIMIT 16` batch.
+    /// chain. Using the value of the field as a proxy for "reconciliation
+    /// attempted" left rows with legitimately-null `trustAddr` matching the
+    /// predicate forever and starved out the `LIMIT 16` batch.
     pub async fn run_once(&self) -> Result<OelReconcileStats> {
         let mut stats = OelReconcileStats::default();
         // Anti-starvation: same shape as `MarketReconciler::run_once`. Skip

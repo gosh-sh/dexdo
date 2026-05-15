@@ -84,8 +84,8 @@ impl IndexerRepository {
         let mut result = PagePersistResult::default();
 
         for edge in edges {
-            // `chain_order` is the projection-ordering key (migration 0016).
-            // The GraphQL gateway promises it on every message edge; an event
+            // `chain_order` is the projection-ordering key. The GraphQL gateway
+            // promises it on every message edge; an event
             // without it is unusable here — the reproject SQL orders by
             // `chain_order` and would either misplace this row or fail on the
             // NOT NULL constraint. Drop the edge with a warning rather than
