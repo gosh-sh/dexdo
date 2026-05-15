@@ -655,6 +655,83 @@ async fn orderplaced_chain_created_at_is_first_write_wins() {
     );
 }
 
+#[tokio::test]
+async fn orderplaced_placed_chain_order_is_first_write_wins() {
+    // A replayed OrderPlaced carrying a different msg_chain_order must
+    // NOT overwrite placed_chain_order. The cursor for /openOrders is
+    // built from placed_chain_order, and a moving value would let a
+    // paginated reader re-see an already-returned row.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_placed_chain_order_coalesce";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "44";
+    let msg_id_first = format!("{test}-amsg");
+    let msg_id_replay = format!("{test}-zmsg");
+    let first_seconds: i64 = 1_700_000_500;
+    let replay_seconds: i64 = 1_700_000_100;
+    // insert_raw_with_ts builds chain_order as `5f80{msg_id:0>28}`. With
+    // msg_id_first lex-smaller than msg_id_replay, the first event is
+    // applied first by reproject_pending.
+    let expected_placed_chain_order = format!("5f80{msg_id_first:0>28}");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_first.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_replay.as_str()),
+        ],
+    )
+    .await;
+
+    insert_raw_with_ts(
+        &pool,
+        &msg_id_first,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        first_seconds,
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "c",
+        }),
+    )
+    .await;
+    insert_raw_with_ts(
+        &pool,
+        &msg_id_replay,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        replay_seconds,
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "c",
+        }),
+    )
+    .await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let placed: String = sqlx::query_scalar(
+        r#"select placed_chain_order
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read placed_chain_order");
+
+    assert_eq!(
+        placed, expected_placed_chain_order,
+        "placed_chain_order must be the chain_order of the FIRST applied OrderPlaced; \
+         replays cannot overwrite it"
+    );
+}
+
 async fn insert_raw_with_ts(
     pool: &PgPool,
     msg_id: &str,

@@ -487,11 +487,12 @@ async fn apply_order_placed(
     let client_order_id = field_str(&event.value, "clientOrderId").ok().map(String::from);
     let chain_order = node_chain_order(node, "OrderPlaced")?;
 
-    // Bind the fractional-seconds form so `chain_created_at` /
-    // `chain_updated_at` survive sub-second precision through `to_timestamp`.
-    // The openOrders endpoint returns `time` / `updateTime` in milliseconds,
-    // and `node_unix_seconds` would truncate to whole seconds before the
-    // bind.
+    // chain_created_at / chain_updated_at survive sub-second precision via
+    // to_timestamp(::double precision). They are display-only — the primary
+    // sort key for /api/v1/openOrders is placed_chain_order (bound from
+    // chain_order, $8), which is globally unique and lex-monotonic by
+    // gateway design. node.created_at collides on a shared chain second
+    // and is not safe as a sort key.
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     if chain_seconds.is_none() {
         // The row will land with NULL `chain_created_at` and stay invisible
@@ -501,7 +502,9 @@ async fn apply_order_placed(
             orderbook_address,
             msg_id = %node.msg_id,
             created_at = ?node.created_at,
-            "OrderPlaced has no parseable chain time; live_orders row will be hidden from /openOrders",
+            "OrderPlaced has no parseable chain time; live_orders row will be \
+             hidden from /openOrders by the chain_created_at IS NOT NULL heap \
+             filter. placed_chain_order is unaffected (chain_order is NOT NULL).",
         );
     }
 
@@ -509,10 +512,14 @@ async fn apply_order_placed(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, client_order_id, status, last_chain_order,
-                chain_created_at, chain_updated_at, updated_at)
+                chain_created_at, chain_updated_at,
+                placed_chain_order,
+                updated_at)
            values ($1, $2::numeric, $3, $4, $5::numeric,
                    $6::numeric, $6::numeric, $7, 'OPEN', $8,
-                   to_timestamp($9::double precision), to_timestamp($9::double precision), now())
+                   to_timestamp($9::double precision), to_timestamp($9::double precision),
+                   $8,
+                   now())
            on conflict (orderbook_address, order_id) do update
                set outcome_id = excluded.outcome_id,
                    is_buy = excluded.is_buy,
@@ -533,6 +540,8 @@ async fn apply_order_placed(
                                                excluded.chain_created_at),
                    chain_updated_at = greatest(live_orders.chain_updated_at,
                                                excluded.chain_updated_at),
+                   placed_chain_order = coalesce(live_orders.placed_chain_order,
+                                                 excluded.placed_chain_order),
                    updated_at = now()"#,
     )
     .bind(orderbook_address)
