@@ -816,3 +816,157 @@ async fn sort_uses_placed_chain_order_independent_of_chain_created_at() {
 
     scope.cleanup(&pool).await;
 }
+
+#[tokio::test]
+async fn cursor_paginates_same_second_orders_without_duplicates_or_skips() {
+    // Central same-second pagination case: one user places multiple orders
+    // on one market within a single chain second. The cursor must split
+    // them across pages by placed_chain_order alone — no duplicates, no
+    // skips, no fallback to order_id (contracts/OrderBook.sol:697 only
+    // guarantees order_id uniqueness, not monotonicity). placed_chain_order
+    // is assigned in a scrambled order vs order_id so a regression to
+    // order_id-based sort would surface as a wrong-order assertion.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    let same_second = 1_700_000_500_i64;
+    let rows: [(i64, &str); 4] = [
+        (10, "5f80000000000000_D"), // 4th in placed_chain_order lex
+        (20, "5f80000000000000_A"), // 1st
+        (30, "5f80000000000000_C"), // 3rd
+        (40, "5f80000000000000_B"), // 2nd
+    ];
+    for (order_id, placed) in rows {
+        insert_order(
+            &pool,
+            &scope.book_yes,
+            order_id,
+            Some(&scope.owner),
+            "12345",
+            "1000",
+            "1000",
+            "OPEN",
+            same_second,
+            placed,
+        )
+        .await;
+    }
+
+    // Page 1, limit=2 → expected [20, 40] (lex "_A" then "_B").
+    let page1 = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 2,
+            cursor: None,
+        })
+        .await
+        .expect("page 1");
+    let page1_ids: Vec<_> = page1.orders.iter().map(|o| o.order_id.clone()).collect();
+    assert_eq!(page1_ids, vec!["20", "40"]);
+    let cursor1 = page1.next_cursor.expect("cursor present after partial page");
+
+    // Page 2, same limit → expected [30, 10] ("_C" then "_D"), no further page.
+    let page2 = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 2,
+            cursor: Some(cursor1),
+        })
+        .await
+        .expect("page 2");
+    let page2_ids: Vec<_> = page2.orders.iter().map(|o| o.order_id.clone()).collect();
+    assert_eq!(page2_ids, vec!["30", "10"]);
+    assert!(page2.next_cursor.is_none(), "no more pages");
+
+    // Every order returned exactly once, in the expected lex order.
+    let returned: Vec<_> = page1_ids.into_iter().chain(page2_ids).collect();
+    assert_eq!(returned, vec!["20", "40", "30", "10"]);
+
+    scope.cleanup(&pool).await;
+}
+
+#[tokio::test]
+async fn shared_client_order_id_across_owners_does_not_leak_rows() {
+    // client_order_id is user-supplied and per-owner. There is no DB-level
+    // uniqueness constraint on the column and the openOrders SQL filters
+    // exclusively on owner_pn_address — two users can legitimately submit
+    // orders with the same client_order_id (e.g. "my-cool-order") and each
+    // must see only their own row. Regressions to watch: client_order_id
+    // accidentally added to DISTINCT/GROUP BY, the owner predicate
+    // weakened or removed, or any logic treating client_order_id as a
+    // uniqueness key.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // Two open orders on the same orderbook, different owners, identical
+    // client_order_id. order_id differs (chain-assigned, unique per book).
+    let shared_client_order_id = "shared-cool-order";
+    for (order_id, owner, placed_chain_order) in [
+        (1_i64, &scope.owner, "5f80000000000000_alpha"),
+        (2_i64, &scope.other_owner, "5f80000000000000_bravo"),
+    ] {
+        sqlx::query(
+            r#"insert into live_orders
+                   (orderbook_address, order_id, outcome_id, is_buy, price,
+                    amount_initial, amount_remaining, owner_pn_address,
+                    client_order_id, status, last_chain_order,
+                    placed_chain_order,
+                    chain_created_at, chain_updated_at,
+                    created_at, updated_at)
+               values ($1, $2::numeric, 1, true, 12345::numeric,
+                       1000::numeric, 1000::numeric, $3,
+                       $4, 'OPEN', $5,
+                       $5,
+                       to_timestamp(1700000500::bigint), to_timestamp(1700000501::bigint),
+                       to_timestamp(1700000500::bigint), to_timestamp(1700000501::bigint))"#,
+        )
+        .bind(&scope.book_yes)
+        .bind(order_id)
+        .bind(owner)
+        .bind(shared_client_order_id)
+        .bind(placed_chain_order)
+        .execute(&pool)
+        .await
+        .expect("insert shared-client_order_id row");
+    }
+
+    // Owner sees exactly one row, with the shared clientOrderId.
+    let owner_page = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("owner page");
+    assert_eq!(owner_page.orders.len(), 1, "owner must see exactly their own row");
+    assert_eq!(owner_page.orders[0].order_id, "1");
+    assert_eq!(owner_page.orders[0].client_order_id, shared_client_order_id);
+    assert!(owner_page.next_cursor.is_none());
+
+    // Other owner sees exactly their row, with the same clientOrderId.
+    let other_page = repo
+        .list_open_orders(&OpenOrdersQuery {
+            owner_pn_address: scope.other_owner.clone(),
+            market: None,
+            limit: 10,
+            cursor: None,
+        })
+        .await
+        .expect("other owner page");
+    assert_eq!(other_page.orders.len(), 1, "other owner must see exactly their own row");
+    assert_eq!(other_page.orders[0].order_id, "2");
+    assert_eq!(other_page.orders[0].client_order_id, shared_client_order_id);
+    assert!(other_page.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
