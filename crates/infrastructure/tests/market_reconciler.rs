@@ -37,12 +37,33 @@ async fn setup() -> Option<PgPool> {
     Some(pool)
 }
 
-async fn purge(pool: &PgPool, pmp_address: &str) {
-    sqlx::query("delete from markets where pmp_address = $1")
-        .bind(pmp_address)
-        .execute(pool)
-        .await
-        .expect("purge market");
+/// Per-invocation fixture scope. UUID-suffixed `pmp` / `orderbook` make every
+/// test run produce row addresses that cannot collide with prior runs or with
+/// sibling tests, sidestepping `markets_orderbook_address_unique` from
+/// migration 0019. Mirrors the `Scope::new` pattern in
+/// `crates/infrastructure/tests/open_orders.rs`.
+struct Scope {
+    pmp: String,
+    orderbook: String,
+}
+
+impl Scope {
+    fn new(label: &str) -> Self {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        Self {
+            pmp: format!("0:reconciler_{label}_{id}"),
+            orderbook: format!("0:reconciler_{label}_book_{id}"),
+        }
+    }
+
+    async fn cleanup(&self, pool: &PgPool) {
+        sqlx::query("delete from markets where pmp_address = $1 or orderbook_address = $2")
+            .bind(&self.pmp)
+            .bind(&self.orderbook)
+            .execute(pool)
+            .await
+            .expect("scope cleanup");
+    }
 }
 
 async fn seed_market(
@@ -127,35 +148,39 @@ async fn pre_freeze_reconcile_stamps_orderbook() {
     // contract requires `orderBookAddress` to be present for any reconciled
     // market. Migration 0014's CHECK constraint pins this invariant.
     let Some(pool) = setup().await else { return };
+    let scope = Scope::new("pre_freeze");
+    scope.cleanup(&pool).await;
 
-    let pmp = "0:reconciler_pre_freeze";
-    purge(&pool, pmp).await;
-    let id = seed_market(&pool, pmp, false, None, None).await;
+    let id = seed_market(&pool, &scope.pmp, false, None, None).await;
 
-    reconcile_update(&pool, id, "0:deterministic_precomputed").await;
+    reconcile_update(&pool, id, &scope.orderbook).await;
 
     assert_eq!(
         read_orderbook_address(&pool, id).await.as_deref(),
-        Some("0:deterministic_precomputed"),
+        Some(scope.orderbook.as_str()),
         "reconciler must stamp the deterministic orderbook_address even pre-freeze"
     );
+
+    scope.cleanup(&pool).await;
 }
 
 #[tokio::test]
 async fn post_freeze_reconcile_stamps_orderbook() {
     let Some(pool) = setup().await else { return };
+    let scope = Scope::new("post_freeze");
+    scope.cleanup(&pool).await;
 
-    let pmp = "0:reconciler_post_freeze";
-    purge(&pool, pmp).await;
-    let id = seed_market(&pool, pmp, false, Some(1_700_000_250), None).await;
+    let id = seed_market(&pool, &scope.pmp, false, Some(1_700_000_250), None).await;
 
-    reconcile_update(&pool, id, "0:deployed_orderbook").await;
+    reconcile_update(&pool, id, &scope.orderbook).await;
 
     assert_eq!(
         read_orderbook_address(&pool, id).await.as_deref(),
-        Some("0:deployed_orderbook"),
+        Some(scope.orderbook.as_str()),
         "post-freeze reconcile stamps orderbook_address (same path as pre-freeze)"
     );
+
+    scope.cleanup(&pool).await;
 }
 
 #[tokio::test]
@@ -165,16 +190,15 @@ async fn reconciled_row_drops_out_of_queue_permanently() {
     // so there is no later re-queue trigger. PoolsFrozen landing afterwards
     // must NOT pull the row back into the queue.
     let Some(pool) = setup().await else { return };
-
-    let pmp = "0:reconciler_no_requeue";
-    purge(&pool, pmp).await;
+    let scope = Scope::new("no_requeue");
+    scope.cleanup(&pool).await;
 
     // Never-reconciled row sits in the queue.
-    let id = seed_market(&pool, pmp, false, None, None).await;
+    let id = seed_market(&pool, &scope.pmp, false, None, None).await;
     assert!(pending_ids(&pool).await.contains(&id), "fresh row must be queued");
 
     // First reconcile pass stamps the address and last_reconciled_at.
-    reconcile_update(&pool, id, "0:deterministic_precomputed").await;
+    reconcile_update(&pool, id, &scope.orderbook).await;
     assert!(
         !pending_ids(&pool).await.contains(&id),
         "first reconcile must drop the row from the queue"
@@ -191,6 +215,8 @@ async fn reconciled_row_drops_out_of_queue_permanently() {
         !pending_ids(&pool).await.contains(&id),
         "PoolsFrozen does not re-queue a row whose address is already stamped"
     );
+
+    scope.cleanup(&pool).await;
 }
 
 #[tokio::test]
@@ -201,10 +227,10 @@ async fn check_constraint_blocks_reconciled_row_without_orderbook() {
     // with a CHECK violation, so the depth fail-closed path can rely on the
     // invariant rather than re-validating it on every read.
     let Some(pool) = setup().await else { return };
+    let scope = Scope::new("check_constraint");
+    scope.cleanup(&pool).await;
 
-    let pmp = "0:reconciler_check_constraint";
-    purge(&pool, pmp).await;
-    let id = seed_market(&pool, pmp, false, None, None).await;
+    let id = seed_market(&pool, &scope.pmp, false, None, None).await;
 
     let err = sqlx::query("update markets set last_reconciled_at = now() where id = $1")
         .bind(id)
@@ -216,4 +242,6 @@ async fn check_constraint_blocks_reconciled_row_without_orderbook() {
         message.contains("markets_orderbook_address_set_after_reconcile"),
         "expected CHECK constraint violation, got: {message}"
     );
+
+    scope.cleanup(&pool).await;
 }

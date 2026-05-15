@@ -102,8 +102,20 @@ async fn blank_orderbook_address_fails_closed() {
 
     let pmp = "0:depth_blank_orderbook_pmp";
     let symbol = "DEPTH_BLANK_ORDERBOOK_YES";
+    let blank_orderbook = "   ";
     purge_market(&pool, pmp, symbol).await;
-    insert_market_with_outcome(&pool, pmp, symbol, Some("   ")).await;
+    // The blank-orderbook value is shared with
+    // `markets_status.rs::blank_orderbook_address_fails_closed_in_markets`
+    // (both tests pin the same CHECK-allows-whitespace gap). The
+    // `markets_orderbook_address_unique` partial index
+    // collides whichever test's row was left in the DB by the prior run.
+    // Purging by orderbook_address here scrubs any sibling residue.
+    sqlx::query("delete from markets where orderbook_address = $1")
+        .bind(blank_orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge blank-orderbook residue");
+    insert_market_with_outcome(&pool, pmp, symbol, Some(blank_orderbook)).await;
 
     let err = repo
         .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
