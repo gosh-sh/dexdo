@@ -446,10 +446,9 @@ pub fn encode_order_flags(
             TimeInForce::Fok => Ok(FLAG_FOK),
             TimeInForce::PostOnly => Ok(FLAG_POST_ONLY),
         },
-        // MARKET has IOC semantics by construction. The api-spec documents
-        // `timeInForce` as ignored on MARKET, but rejecting explicit GTC /
-        // FOK / POST_ONLY here is intentional: silently folding them into
-        // FLAG_MARKET would hide a client-side bug.
+        // MARKET has IOC semantics by construction. Explicit GTC / FOK /
+        // POST_ONLY is rejected per the api-spec — `timeInForce` is
+        // LIMIT-only.
         OrderType::Market => match time_in_force {
             None | Some(TimeInForce::Ioc) => Ok(FLAG_MARKET),
             Some(_) => Err(DomainError::InvalidParameter),

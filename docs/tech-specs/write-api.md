@@ -175,9 +175,9 @@ A successful submission returns a deliberately minimal three-field body:
 
 Why minimal: every other field a fully-populated order would carry (`marketAddress`, `symbol`, `side`, `type`, `timeInForce`, `price`, `origQty`) is **already in the request the client just sent** — echoing them adds bytes without adding information. Two specific fields the legacy Binance-style shape carries (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission: `orderId` is assigned by `OrderBook` after our return, and `executedQty` is always zero for a freshly-placed order. Surfacing them as `""` / `"0"` is worse than not surfacing them — it implies the order is further along the lifecycle than it actually is.
 
-The client correlates the response with future `live_orders` rows via `clientOrderId`: poll `GET /api/v1/openOrders?clientOrderId=...` (the polling key is the canonical one until the chain `orderId` arrives, after which `orderId` is also valid). The `PENDING_NEW` status flips to `NEW` in `/api/v1/openOrders` once the indexer projects `OrderPlaced`.
+The client correlates the response with future `live_orders` rows by polling `GET /api/v1/openOrders` and matching by `clientOrderId` in the returned `orders[]`. The `PENDING_NEW` status flips to `NEW` once the indexer projects `OrderPlaced`.
 
-`PENDING_NEW` is listed in [api-spec §Order Status](../api-spec.md#order-status); it's the only status `POST /api/v1/order` and `POST /api/v1/batchOrders` return on success. Strictly additive — code that only switches on `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` continues to work because those values still arrive through `/api/v1/openOrders`.
+`PENDING_NEW` is listed in [api-spec §Order Status](../api-spec.md#order-status); it's the only status `POST /api/v1/order` returns on success. Strictly additive — code that only switches on `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` continues to work because those values still arrive through `/api/v1/openOrders`.
 
 
 ### Failure surface
@@ -191,7 +191,7 @@ Three failure classes — two synchronous, one async:
    | chain `exit_code` | source | `DomainError` |
    | --- | --- | --- |
    | `102` `ERR_LOW_VALUE` | insufficient `_balance[tokenType]` (BUY) or `stake.amount[outcomeId]` (SELL) | `OrderValidationFailed` → 400 / -2010 |
-   | `121` `ERR_NOTE_BUSY` | another `placeOrder` from this PN is still in flight (`_busy` not cleared) | `OrderPnBusy` → 429 / -2014 (TODO: remove when multi-PN-per-account trading lands — see note below) |
+   | `121` `ERR_NOTE_BUSY` | another `placeOrder` from this PN is still in flight (`_busy` not cleared) | `OrderPnBusy` → 429 / -2014 |
    | `130` `ERR_INVALID_OUTCOME_ID` | `outcome_id` from the read-model does not exist on the PMP | `MarketInconsistent` → 503 / -1500 |
    | `142` `ERR_STAKE_NOT_EXISTS` | SELL but no `splitFullSet` has run for this PN on this market | `OrderValidationFailed` → 400 / -2010 |
    | `150` `ERR_DEBT_NON_ZERO` / `151` `ERR_INVALID_STATE` | PN has outstanding debt or has been withdrawn | `OrderValidationFailed` → 400 / -2010 |

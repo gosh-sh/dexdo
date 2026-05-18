@@ -163,6 +163,7 @@ Recommended common error codes:
 | `-1102` | Mandatory parameter was not sent. | 400 |
 | `-1111` | Precision is over the maximum defined for this asset. | 400 |
 | `-1121` | Invalid market or symbol. | 404 |
+| `-1130` | Invalid value for a query or body parameter. | 400 |
 | `-1500` | Market data is temporarily inconsistent. | 503 |
 | `-2010` | Order would immediately fail validation. | 400 |
 | `-2011` | Unknown order. | 404 |
