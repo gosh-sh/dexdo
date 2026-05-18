@@ -168,16 +168,9 @@ Recommended common error codes:
 | `-2011` | Unknown order. | 404 |
 | `-2014` | Trading note busy with a previous order; retry shortly. | 429 |
 
-`-1007` is the spec'd retry signal: a request that times out at the
-HTTP layer may have landed on chain. Clients retrying a `POST /api/v1/order`
-MUST re-send with the same `newOrderClientId` so the chain rejects a
-duplicate via the per-PN `clientOrderId` invariant rather than placing
-the order twice.
+`-1007` means the request did not complete in time. The order may still have been accepted by the exchange. Retry `POST /api/v1/order` with the same `newOrderClientId` — the server will deduplicate so the same order is not placed twice.
 
-`-2014` is the per-PN serialization signal: a `placeOrder` is already
-in flight for this account's trading note. Retry after a short backoff;
-the in-flight order will surface in `/api/v1/openOrders` once
-projected.
+`-2014` means another order from the same account is still being processed. Retry after a short delay; the in-flight order will appear in `/api/v1/openOrders` shortly.
 
 Authentication errors are split intentionally: `-1003` signals a malformed
 request envelope (missing or unparseable `X-DODEX-APIKEY`, `timestamp`,
@@ -613,11 +606,11 @@ Response fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `clientOrderId` | STRING | Caller-supplied `newOrderClientId`, or a backend-generated `uint64` value if absent on the request. The correlation handle until the chain-assigned `orderId` is projected through `/api/v1/openOrders`. |
-| `transactTime` | LONG | Server time (unix ms) at which the chain submission was accepted. |
-| `status` | ENUM | Always [`PENDING_NEW`](#order-status) on success — the order is in the chain queue, not yet on the book. |
+| `clientOrderId` | STRING | Either the `newOrderClientId` sent in the request, or a server-generated identifier when none was provided. Use it to look up the order in `/api/v1/openOrders` until the server-assigned `orderId` is available. |
+| `transactTime` | LONG | Server timestamp (Unix ms) when the order was accepted. |
+| `status` | ENUM | Always [`PENDING_NEW`](#order-status) on success. |
 
-Note: the response is intentionally minimal. Optimistic placement returns once the chain sender has dispatched the external message; the chain-assigned `orderId`, fill state, and effective `timeInForce` become available through `GET /api/v1/openOrders` once `OrderBook.OrderPlaced` projects. Clients poll on `clientOrderId` until the chain `orderId` appears.
+The response confirms acceptance only. The full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/openOrders`](#current-open-orders) shortly after; look up by `clientOrderId`.
 
 ### Cancel Order
 
@@ -992,7 +985,7 @@ Response:
 
 | Value | Description |
 | --- | --- |
-| `PENDING_NEW` | Order accepted by the chain queue but not yet projected into the order book; chain-assigned `orderId` will surface through `/api/v1/openOrders`. |
+| `PENDING_NEW` | Order accepted by the exchange and not yet on the book. Will transition to `NEW` (or `PARTIALLY_FILLED` if it immediately matches) once visible in `/api/v1/openOrders`. |
 | `NEW` | Order is open and has no fills. |
 | `PARTIALLY_FILLED` | Order is open and partially filled. |
 | `FILLED` | Order is completely filled. |
