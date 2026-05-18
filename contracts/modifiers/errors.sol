@@ -175,6 +175,19 @@ abstract contract Errors {
     /// @notice Order book: price is not a multiple of tick size
     uint16 constant ERR_PRICE_NOT_TICK_MULTIPLE = 164;
 
+    /// @notice OrderBook shutdown not yet complete — claim blocked
+    uint16 constant ERR_ORDERBOOK_NOT_SHUTDOWN = 165;
+
+    /// @notice PMP outflow would exceed `_totalUnclaimedBalance` —
+    ///         payout / refund / fee math is inconsistent with deposits.
+    uint16 constant ERR_INSOLVENT = 166;
+
+    /// @notice Open OrderBook orders prevent the requested action (e.g. coupon
+    ///         issuance must wait for all orders to settle / cancel).
+    uint16 constant ERR_OPEN_ORDERS_EXIST = 167;
+
+    uint16 constant ERR_NOTIONAL_OVERFLOW = 168;
+
     // ===== Replay protection =====
 
     /// @notice External message hash already processed within its expireAt window.
@@ -193,4 +206,10 @@ abstract contract Errors {
     ///         Either the layer number is wrong or the hash has aged out of
     ///         the historical window.
     uint16 constant ERR_INVALID_HISTORY_PROOF = 403;
+
+    /// @notice PMP._ensureFrozen sent a normalization refund to the deployer
+    ///         but the deployer PN has not yet acknowledged via
+    ///         `confirmRefundReceived`. Split/merge are gated until then to
+    ///         prevent stale-stake races.
+    uint16 constant ERR_NORM_REFUND_PENDING = 404;
 }

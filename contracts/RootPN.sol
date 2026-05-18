@@ -444,8 +444,12 @@ contract RootPN is Modifiers {
         uint256 initialDataHash
     ) public senderIs(DexLib.computePrivateNoteAddress(_privateNoteCode, initialDataHash)) accept {
         ensureBalance();
-        // Verify sufficient balance
-        if (address(this).currencies[tokenType] < withdrawedValue) {
+        // Verify sufficient balance — both real currency reserves and the
+        // bookkeeping pool must cover the withdrawal. Either gap → revert
+        // the PN-side debit via `revertWithdraw` instead of throwing here
+        // (a plain require would leave PN's `_balance` permanently low).
+        if (address(this).currencies[tokenType] < withdrawedValue
+            || _deployedValues[tokenType] < withdrawedValue) {
             PrivateNote(msg.sender).revertWithdraw{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
                 tokenType,
                 withdrawedValue

@@ -71,8 +71,8 @@ abstract contract Modifiers is Errors {
     uint128 constant PMP_ALL_ORACLES_CONFIRMED = 128;
     /// @notice Reserved external event id for PMP initialization.
     uint128 constant PMP_INITIALIZED = 129;
-    /// @notice External event id for `PMP.PMPCancelled`.
-    uint128 constant PMP_CANCELLED_BY_ORACLE = 132;
+    /// @notice External event id for `PMP.PMPRejected`.
+    uint128 constant PMP_REJECTED_BY_ORACLE = 132;
 
     // OracleList events
     /// @notice External event id for `OracleEventList.EventAdded`.
@@ -209,19 +209,25 @@ abstract contract Modifiers is Errors {
     /// @notice Grace period for oracle resolve (24 hours in seconds)
     uint64 constant GRACE_PERIOD = 86400;
 
+    /// @notice Minimum lead time from now to resultStart on first setTimings call (10 hours).
+    uint64 constant MIN_RESULT_GAP = 60;
+
     /// @notice Fee percentage for staking operations
     uint128 constant FEE_PERCENT = 1; // 0.01% = 1
 
     /// @notice Trading fee denominator (0.001% precision)
     uint128 constant FEE_DENOMINATOR = 100000;
 
-    /// @notice Maker fee rate (limit orders that add liquidity)
-    /// @dev 15 / 100000 = 0.015% — Hyperliquid Tier 0 maker rate
-    uint128 constant MAKER_FEE_RATE = 15;
-
-    /// @notice Taker fee rate (IOC/FOK/MARKET orders that remove liquidity)
-    /// @dev 45 / 100000 = 0.045% — Hyperliquid Tier 0 taker rate
+    /// @notice Taker fee rate. Maker pays no fee — instead receives a rebate
+    ///         funded from the taker fee (see MAKER_REBATE_NUM / _DEN).
+    /// @dev 45 / 100000 = 0.045%
     uint128 constant TAKER_FEE_RATE = 45;
+
+    /// @notice Maker rebate as a fraction of the taker fee on each fill.
+    /// @dev 3 / 4 = 75% → maker gets 0.03375% of notional, the contract
+    ///      retains 0.01125% (= takerFee - makerRebate) as protocol revenue.
+    uint128 constant MAKER_REBATE_NUM = 3;
+    uint128 constant MAKER_REBATE_DEN = 4;
 
     /// @notice Bet type identifiers
     uint8 constant BET_TYPE_CLEAN = 0;    // Stake without debt

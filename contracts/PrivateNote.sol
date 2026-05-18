@@ -62,8 +62,18 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///         every offerTransfer bounce also mutated _lockedInOrders,
     ///         corrupting open-orders accounting and opening a double-spend
     ///         path for users with resting orders.
-    uint128 _pendingPlaceBuyLock;
-    uint32  _pendingPlaceBuyTokenType;
+    uint128 public _pendingPlaceBuyLock;
+    uint32  public _pendingPlaceBuyTokenType;
+
+    /// @notice clientOrderId reserved by the in-flight single-order
+    ///         placeOrder. On bounce we use this to release the sentinel
+    ///         from `_clientOrderIds` (otherwise the cid leaks). Cleared in
+    ///         onOrderPlaced / onOrderRejected on the happy path.
+    uint128 _pendingPlaceClientOrderId;
+
+    /// @notice clientOrderIds reserved by the in-flight placeBatch.
+    ///         Same role as `_pendingPlaceClientOrderId` but for batches.
+    uint128[] _pendingBatchClientOrderIds;
 
     /// @notice Per-OB-per-order fee reserves
     ///         (obAddress => orderId => remaining fee reserve).
@@ -89,6 +99,52 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @notice Collateral locked in open OrderBook orders, per token type.
     ///         Incremented on order placement, decremented on fill/cancel.
     mapping(uint32 => uint128) _lockedInOrders;
+
+    /// @notice Number of open orders this PN has resting in any OrderBook.
+    ///         Incremented on `onOrderPlaced` (per accepted order), decremented
+    ///         on `onOrderCancelled` and on `onOrderFilled` with `isFinal=true`.
+    ///         Rejected placements never increment (no `onOrderPlaced` fires for
+    ///         them), so this counter mirrors the OB-side resting set.
+    ///         Used to gate operations that must not proceed while orders are
+    ///         in flight (e.g. `generateCoupon`).
+    uint32 _openOrderCount;
+
+    /// @notice Per-PMP-event open-order counter.
+    ///         Key = tvm.hash(abi.encode(eventId, oracleListHash, tokenType))
+    ///         — same key shape as `_stakes`. Gates `claim` so that a holder
+    ///         of a resting SELL at PMP shutdown cannot claim before all
+    ///         `onOrderCancelled` callbacks for that event have folded the
+    ///         outcome tokens back into `_stakes[hash].amount[...]`. Without
+    ///         this gate, OB→PMP `onOrderBookShutdownComplete` (which flips
+    ///         `_orderBookDone`) can land before OB→PN `onOrderCancelled`,
+    ///         the user claims, `_stakes[hash]` is deleted, and the late
+    ///         cancel-callback silently drops the outcome tokens (see
+    ///         `onOrderCancelled` sell-branch comment).
+    mapping(uint256 => uint32) _openOrdersByEvent;
+
+    /// @notice Active `clientOrderId → orderId` index (per-PN, not per-OB).
+    ///         Sentinel `type(uint128).max` means "place sent, OB-assigned
+    ///         orderId not yet received". On `onOrderPlaced` it becomes the
+    ///         real orderId. Cleared in onOrderCancelled / onOrderFilled
+    ///         (isFinal) / onOrderRejected. cid==0 means "not set" and is
+    ///         never put in this map. Owns the uniqueness invariant:
+    ///         placeOrder rejects a cid that already exists here.
+    mapping(uint128 => uint128) _clientOrderIds;
+
+    /// @notice Monotonic counter of user-initiated ops sent to any OB.
+    ///         Each placeOrder / placeBatch / cancelOrder / cancelBatch /
+    ///         cancelOrderByClient increments it. Echoed by OB in every
+    ///         callback so PN can tell "this is ack of MY current op"
+    ///         from "this is a late callback from a previous/incidental
+    ///         event" (shutdown drain, maker-side fill, etc.).
+    uint64 _opNonce;
+
+    /// @notice Nonce of the op currently holding `_busy`. 0 = no op in
+    ///         flight. Set on each user op together with `_busy`. Callbacks
+    ///         clear `_busy`/pending state only when their echoed nonce
+    ///         matches this value — stale callbacks become no-ops on the
+    ///         `_busy` slot.
+    uint64 _busyOpNonce;
 
     /// @notice True while a batch order-book operation is in flight between the
     ///         outbound executePlaceBatch/executeCancelBatch/executeCancelAll call
@@ -187,10 +243,19 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @notice Emitted when an order is confirmed placed on OrderBook
     /// @param orderBook OrderBook address
     /// @param orderId Assigned order ID
-    event OrderPlacedConfirmed(address orderBook, uint128 orderId);
+    event OrderPlacedConfirmed(
+        address orderBook,
+        uint128 orderId,
+        uint128 clientOrderId,
+        uint32  outcomeId,
+        bool    isBuy,
+        uint8   flags,
+        uint256 price,
+        uint128 amount
+    );
 
     /// @notice Emitted when an order fill callback is received from OrderBook
-    event OrderFilledConfirmed(address orderBook, uint128 orderId, uint32 outcomeId, uint128 filledAmount, uint256 clearingPrice, bool isBuy, uint128 feeAmount, bool isFinal);
+    event OrderFilledConfirmed(address orderBook, uint128 orderId, uint32 outcomeId, uint128 filledAmount, uint256 clearingPrice, bool isBuy, uint128 feeAmount, bool isRebate, bool isFinal);
 
     /// @notice Emitted when an order cancel callback is received from OrderBook
     event OrderCancelledConfirmed(address orderBook, uint128 orderId, uint32 outcomeId, bool isBuy, uint128 returnAmount);
@@ -285,6 +350,12 @@ contract PrivateNote is Modifiers, ReplayProtection {
     function deployPMP(uint256 eventId, uint128[] oracleFee, uint32 tokenType, string[] names, uint128[] index, uint128[] initialStakes) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         uint256 length = names.length;
         require(!_hasWithdrawn, ERR_INVALID_STATE);
+        // Empty `names` means no OracleEventList is asked to confirm the PMP.
+        // PMP.constructor would set `_numberOfOracleEvents = 0`, no confirmEvent
+        // dispatches, no approveEvent / onInitialStakesAccepted / onInitialStakesFailed
+        // ever fires — leaving PN locked in `_busy` and the initial stakes
+        // stranded in candidateAmount forever.
+        require(length > 0, ERR_INVALID_PARAMS);
         require(length == oracleFee.length, ERR_INVALID_PARAMS);
         require(length == index.length, ERR_INVALID_PARAMS);
         require(initialStakes.length > 0, ERR_INVALID_PARAMS);
@@ -315,7 +386,12 @@ contract PrivateNote is Modifiers, ReplayProtection {
                 DexLib.computeOracleAddressFromHash(_oracleCodeHash, _oracleCodeDepth, names[i]),
                 index[i]
             ));
-            forOracleHash[tvm.hash(names[i])] = true;
+            // Names must be unique: `oracleListHash` is a hash of the name-set,
+            // so duplicates collapse there and desync `_numberOfOracleEvents`
+            // from the distinct-oracle count the contract actually tracks.
+            uint256 nameHash = tvm.hash(names[i]);
+            require(!forOracleHash.exists(nameHash), ERR_INVALID_PARAMS);
+            forOracleHash[nameHash] = true;
         }
         mapping(uint32 => varuint32) dataCur;
         dataCur[CURRENCIES_ID_SHELL] = sumFee + NETWORK_FEE_AMOUNT;
@@ -380,14 +456,27 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @param tokenType Token type
     /// @param refundTotal Total amount to refund to balance
     function onInitialStakesFailed(uint256 eventId, uint256 oracleListHash, uint32 tokenType, uint128 refundTotal)
-        public senderIs(_busy.get()) accept
+        public senderIs(DexLib.computePMPAddress(_privateNoteCode, _pmpCode, eventId, oracleListHash, tokenType)) accept
     {
+        // Auth via deterministic PMP address (not `_busy`): after the first
+        // oracle approval `_busy` is cleared by `onInitialStakesAccepted`,
+        // so a later refund originating from `rejectEvent` / `onBounce`
+        // can still authenticate. Only clear `_busy` if it actually points
+        // to the sender — the user may have moved on to another PMP.
         ensureBalance();
-        _balance[tokenType] += refundTotal;
         TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
         uint256 hash = tvm.hash(data);
-        delete _stakes[hash];
-        delete _busy;
+        // If the user pre-emptively deleteStake'd the record, the refund is
+        // forfeited. Otherwise deleteStake → generateCoupon → rejectEvent
+        // would let them pocket both a coupon (issued under empty `_stakes`)
+        // and the returned principal. Burn balance here = pay for misuse.
+        if (_stakes.exists(hash)) {
+            _balance[tokenType] += refundTotal;
+            delete _stakes[hash];
+        }
+        if (_busy.hasValue() && _busy.get() == msg.sender) {
+            delete _busy;
+        }
     }
 
     /// @notice PMP normalization-refund callback (creator-only).
@@ -421,6 +510,13 @@ contract PrivateNote is Modifiers, ReplayProtection {
         }
         _stakes[hash] = stake;
         _balance[tokenType] += refundTotal;
+        // Tell PMP we processed the refund so it can clear `_normRefundPending`
+        // and re-enable split/merge. Sent as a follow-up internal so this
+        // callback's storage mutations commit before PMP's check.
+        PMP(msg.sender).confirmRefundReceived{
+            value: 0.05 vmshell,
+            flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+        }(_depositIdentifierHash);
     }
 
     /// @notice Deletes a stake record
@@ -446,6 +542,13 @@ contract PrivateNote is Modifiers, ReplayProtection {
         TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
         uint256 hash = tvm.hash(data);
         require(_stakes.exists(hash), ERR_STAKE_NOT_EXISTS);
+        // Race fix (mirrors claim): PMP gates cancelStake on `_orderBookDone`
+        // (OB finished SENDING cancel callbacks), but a late OB→PN
+        // `onOrderCancelled` from a resting SELL can still be in flight when
+        // PMP.onStakeCancelled lands and deletes _stakes[hash] (see line 560).
+        // Without this counter, the late cancel-callback would silently drop
+        // the returned outcome tokens.
+        require(_openOrdersByEvent[hash] == 0, ERR_OPEN_ORDERS_EXIST);
         address pmpAddress = DexLib.computePMPAddress(_privateNoteCode, _pmpCode, eventId, _stakes[hash].oracleListHash, tokenType);
         _busy = pmpAddress;
         _lastHash = hash;
@@ -499,7 +602,11 @@ contract PrivateNote is Modifiers, ReplayProtection {
         ensureBalance();
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         require(collateral > 0, ERR_LOW_VALUE);
-        require(collateral % lotSize(tokenType) == 0, ERR_AMOUNT_NOT_LOT_MULTIPLE);
+        // No lotSize check here: the minimal mintable basket (derived from
+        // per-outcome unit sizes `u_k`) can be a large prime that exceeds
+        // lotSize. Gating split by lotSize would make such baskets undivisible
+        // and block the downstream OrderBook flow. lotSize stays enforced on
+        // stake placement and order placement paths.
         require(_balance[tokenType] >= collateral, ERR_LOW_VALUE);
         require(_debt == 0, ERR_DEBT_NON_ZERO);
 
@@ -599,12 +706,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         StakeInfo stake = _stakes[hash];
         require(amount.length == stake.amount.length, ERR_INVALID_PARAMS);
 
-        // Verify PN has enough outcome tokens to merge
-        uint128 mergeLot = lotSize(tokenType);
+        // Verify PN has enough outcome tokens to merge.
+        // No lotSize check on per-outcome amounts: the basket unit sizes `u_k`
+        // can be large primes that aren't lot-multiples. Gating merge by
+        // lotSize would block users from returning partial baskets minted via
+        // split. lotSize stays enforced on stake / order placement paths.
         uint128 total = 0;
         for (uint32 i = 0; i < amount.length; i++) {
             require(stake.amount[i] >= amount[i], ERR_LOW_VALUE);
-            require(amount[i] % mergeLot == 0, ERR_AMOUNT_NOT_LOT_MULTIPLE);
             total += amount[i];
         }
 
@@ -658,7 +767,17 @@ contract PrivateNote is Modifiers, ReplayProtection {
         stake.candidateAmount = 0;
 
         if (isEmpty) {
-            delete _stakes[hash];
+            // Race fix: if any orders for this event are still resting on OB,
+            // keep a zero-stake record so a late onOrderCancelled callback for
+            // a resting SELL can add the returned outcome tokens back to
+            // stake.amount[outcomeId]. User can re-merge or place new orders.
+            // MM-friendly: partial merges never delete; only a true full-exit
+            // with no open orders trims the storage entry.
+            if (_openOrdersByEvent[hash] > 0) {
+                _stakes[hash] = stake;
+            } else {
+                delete _stakes[hash];
+            }
         } else {
             _stakes[hash] = stake;
         }
@@ -791,11 +910,20 @@ contract PrivateNote is Modifiers, ReplayProtection {
     function claim(uint256 eventId, uint256 oracleListHash, uint32 tokenType) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
         uint256 hash = tvm.hash(data);
+        require(_stakes.exists(hash), ERR_STAKE_NOT_EXISTS);
         StakeInfo stake = _stakes[hash];
 
         require(!_hasWithdrawn, ERR_INVALID_STATE);
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         require(stake.candidateAmount == 0, ERR_STAKE_NOT_APPROVED);
+        // Race fix: OB→PMP `onOrderBookShutdownComplete` (sets _orderBookDone)
+        // may land before OB→PN `onOrderCancelled` callbacks from the same
+        // shutdown round. Without this gate the user could claim early and
+        // `delete _stakes[hash]`; the late cancel-callback for any resting
+        // SELL would then silently drop the returned outcome tokens (see
+        // `onOrderCancelled` sell-branch). Per-event counter so claim on
+        // PMP_A is not blocked by unrelated open orders on PMP_B.
+        require(_openOrdersByEvent[hash] == 0, ERR_OPEN_ORDERS_EXIST);
 
         ensureBalance();
         
@@ -892,7 +1020,23 @@ contract PrivateNote is Modifiers, ReplayProtection {
         require(_stakes.empty(), ERR_NOTE_BUSY);
         for ((uint32 tt, uint128 bal) : _balance) {
             require(bal < minStakeValue(tt), ERR_NON_ZERO_BALANCE);
-        }        
+        }
+        // Reject if collateral is parked in the OrderBook layer — otherwise a
+        // user with a resting buy could pass the `bal < minStakeValue` gate
+        // (lock pulled balance below the threshold), mint a coupon, then
+        // cancel the order to recover the original balance ⇒ free coupon.
+        for ((uint32 tt, uint128 locked) : _lockedInOrders) {
+            tt;
+            require(locked == 0, ERR_NON_ZERO_BALANCE);
+        }
+        require(_pendingPlaceBuyLock == 0, ERR_NON_ZERO_BALANCE);
+        require(_pendingBatchBuyLock == 0, ERR_NON_ZERO_BALANCE);
+        // Belt-and-braces: even if the locked-balance gates above pass,
+        // sell-side resting orders don't show up in `_lockedInOrders` (they
+        // lock outcome tokens, not collateral) and a stake with all-zero
+        // amounts could in principle remain after orders drained it. The
+        // explicit counter is the canonical "no orders open" check.
+        require(_openOrderCount == 0, ERR_OPEN_ORDERS_EXIST);
         require(_couponsValue == 0, ERR_COUPON_ALREADY_EXISTS);
         _couponsValue = getCouponValue(tokenType);
         _couponsTokenType = tokenType;
@@ -939,12 +1083,18 @@ contract PrivateNote is Modifiers, ReplayProtection {
                 }
                 _stakes[_pendingBatchStakeHash] = s;
             }
+            // Release cid sentinels reserved by the bounced batch so they can be reused.
+            for (uint32 i = 0; i < uint32(_pendingBatchClientOrderIds.length); i++) {
+                delete _clientOrderIds[_pendingBatchClientOrderIds[i]];
+            }
             _pendingBatchActive = false;
             _pendingBatchBuyLock = 0;
             _pendingBatchTokenType = 0;
             _pendingBatchStakeHash = 0;
             delete _pendingBatchSells;
+            delete _pendingBatchClientOrderIds;
             delete _busy;
+            _busyOpNonce = 0;
             return;
         }
 
@@ -962,9 +1112,15 @@ contract PrivateNote is Modifiers, ReplayProtection {
             } else {
                 _lockedInOrders[_pendingPlaceBuyTokenType] = 0;
             }
+            // Release cid sentinel reserved by the bounced single-order place.
+            if (_pendingPlaceClientOrderId != 0) {
+                delete _clientOrderIds[_pendingPlaceClientOrderId];
+                _pendingPlaceClientOrderId = 0;
+            }
             _pendingPlaceBuyLock = 0;
             _pendingPlaceBuyTokenType = 0;
             delete _busy;
+            _busyOpNonce = 0;
             return;
         }
 
@@ -979,8 +1135,9 @@ contract PrivateNote is Modifiers, ReplayProtection {
             return;
         }
 
-        // --- PMP bounce: acceptStake / acceptFullSetStake / cancelStake etc. ---
+        // --- PMP / OB-sell bounce: acceptStake / acceptFullSetStake / cancelStake / placeOrder(sell) ---
         delete _busy;
+        _busyOpNonce = 0;
         StakeInfo stake = _stakes[_lastHash];
 
         // Return funds to proper balance based on bet type
@@ -989,6 +1146,11 @@ contract PrivateNote is Modifiers, ReplayProtection {
         } else if (stake.candidateBetType == BET_TYPE_OB_SELL) {
             // Sell order bounce: return outcome tokens to stake
             stake.amount[stake.candidateOutcome] += stake.candidateAmount;
+            // Release cid sentinel reserved by the bounced single-order sell.
+            if (_pendingPlaceClientOrderId != 0) {
+                delete _clientOrderIds[_pendingPlaceClientOrderId];
+                _pendingPlaceClientOrderId = 0;
+            }
         } else if (stake.candidateBetType == BET_TYPE_MERGE) {
             // Merge bounce: nothing was deducted from _balance, outcome tokens
             // are still in stake.amount — just clear candidate, no restoration needed.
@@ -1120,6 +1282,17 @@ contract PrivateNote is Modifiers, ReplayProtection {
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         require(_stakes.empty(), ERR_NOTE_BUSY);
         require(_debt == 0, ERR_DEBT_NON_ZERO);
+        // Mirror generateCoupon's OB gate: in-flight order-book activity must
+        // be fully drained before withdrawing. Otherwise a buy order placed
+        // pre-withdraw could fill afterwards and credit outcome tokens to a
+        // stake the user can no longer claim (`_hasWithdrawn` blocks claim).
+        for ((uint32 tt, uint128 locked) : _lockedInOrders) {
+            tt;
+            require(locked == 0, ERR_NON_ZERO_BALANCE);
+        }
+        require(_pendingPlaceBuyLock == 0, ERR_NON_ZERO_BALANCE);
+        require(_pendingBatchBuyLock == 0, ERR_NON_ZERO_BALANCE);
+        require(_openOrderCount == 0, ERR_OPEN_ORDERS_EXIST);
         RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_balance[tokenType], tokenType, destWalletAddr, _depositIdentifierHash);
         _balance[tokenType] = 0;
         _hasWithdrawn = true;
@@ -1179,21 +1352,32 @@ contract PrivateNote is Modifiers, ReplayProtection {
         require(amount > 0, ERR_LOW_VALUE);
         require(_debt == 0, ERR_DEBT_NON_ZERO);
 
-        // Amount quantisation in base currency (outcome-tokens).
-        require(amount % lotSize(tokenType) == 0, ERR_AMOUNT_NOT_LOT_MULTIPLE);
+        // clientOrderId uniqueness (cid==0 = "not set", bypasses both gate and map).
+        // Reserve the slot now with a sentinel; replaced with real orderId in
+        // onOrderPlaced or cleared in onOrderRejected / bounce.
+        if (clientOrderId != 0) {
+            require(!_clientOrderIds.exists(clientOrderId), ERR_INVALID_PARAMS);
+            _clientOrderIds[clientOrderId] = type(uint128).max;
+            _pendingPlaceClientOrderId = clientOrderId;
+        }
 
         // Minimum order notional (value in quote currency) + tick size on price.
         uint128 minNotional = minOrderNotional(tokenType);
         if (flags & 0x04 != 0) {
+            // Market buy: amount is quote/collateral, not base. Base-lot
+            // quantisation and minAmount do not apply.
+            require(minAmount == 0, ERR_INVALID_PARAMS);
             if (isBuy) {
                 require(amount >= minNotional, ERR_ORDER_TOO_SMALL);
             }
         } else {
+            // Limit order: amount is in base (outcome-tokens) → lot quantisation.
+            require(amount % lotSize(tokenType) == 0, ERR_AMOUNT_NOT_LOT_MULTIPLE);
             require(price % TICK_SIZE == 0, ERR_PRICE_NOT_TICK_MULTIPLE);
-            uint128 notional = uint128(
-                (uint256(amount) * uint256(price)) / uint256(FULL_PERCENT)
-            );
-            require(notional >= minNotional, ERR_ORDER_TOO_SMALL);
+            require(price == 0 || uint256(amount) <= type(uint256).max / uint256(price), ERR_NOTIONAL_OVERFLOW);
+            uint256 notionalFull = (uint256(amount) * uint256(price)) / uint256(FULL_PERCENT);
+            require(notionalFull <= uint256(type(uint128).max), ERR_NOTIONAL_OVERFLOW);
+            require(notionalFull >= uint256(minNotional), ERR_ORDER_TOO_SMALL);
         }
 
         {
@@ -1249,6 +1433,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
 
         _busy = obAddress;
         _lastHash = hash;
+        _opNonce++;
+        _busyOpNonce = _opNonce;
 
         OrderBook.PlaceParams[] orderArr;
         orderArr.push(OrderBook.PlaceParams(outcomeId, isBuy, flags, price, amount, minAmount, epochId, clientOrderId));
@@ -1256,7 +1442,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         OrderBook(obAddress).executeBatch{
             value: 1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_depositIdentifierHash, orderArr, noCancels);
+        }(_depositIdentifierHash, orderArr, noCancels, _opNonce);
     }
 
     /// @notice Called by OrderBook after order is placed.
@@ -1276,7 +1462,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         uint32 tokenType,
         uint128 orderId,
         uint128 feeReserve,
-        uint128 lock
+        uint128 lock,
+        uint128 clientOrderId,
+        uint32  outcomeId,
+        bool    isBuy,
+        uint8   flags,
+        uint256 price,
+        uint128 amount,
+        uint64  opNonce
     ) public accept {
         // Sender check: allow either active single-op OB (_busy) or any OB from this event
         // (because in batch mode _busy is cleared in onBatchComplete, not on first callback).
@@ -1291,17 +1484,48 @@ contract PrivateNote is Modifiers, ReplayProtection {
         tvm.accept();
         ensureBalance();
 
-        // Store fee reserve + total lock per (OB, orderId) (buys only;
-        // sells have feeReserve == 0 and lock == 0). msg.sender == expectedOb
-        // is verified above, so we can use it directly as the outer key.
+        // Promote sentinel to real orderId for the caller's cid lookup.
+        // Clear the bounce-cleanup slot — terminal callback arrived, no
+        // bounce can land for this place anymore (single-place path only;
+        // batch path resets _pendingBatchClientOrderIds in onBatchComplete).
+        if (clientOrderId != 0) {
+            _clientOrderIds[clientOrderId] = orderId;
+            if (!_pendingBatchActive && _pendingPlaceClientOrderId == clientOrderId) {
+                _pendingPlaceClientOrderId = 0;
+            }
+        }
+
+        // Store fee reserve + total lock per (OB, orderId). The two records
+        // are independent and gated on their own non-zero condition:
+        //   _orderFeeReserves — only when there's actually a reserve to draw
+        //     fees from (current TAKER_FEE_RATE makes every valid buy hit
+        //     this; sells always skip).
+        //   _orderLocks — whenever the order has any locked collateral.
+        //     A buy with cost > 0 must always get a lock record so that
+        //     subsequent fill/cancel can decrement `_lockedInOrders[tt]`.
+        //     Gating this on `feeReserve > 0` would leak locked collateral
+        //     if fees ever round / drop to zero (e.g. zero-fee mode or a
+        //     lowered MIN_ORDER_NOTIONAL); gate on `lock > 0` instead.
+        // msg.sender == expectedOb is verified above, so we use it directly
+        // as the outer key.
         if (feeReserve > 0) {
             _orderFeeReserves[msg.sender][orderId] = feeReserve;
+        }
+        if (lock > 0) {
             _orderLocks[msg.sender][orderId] = lock;
         }
 
+        // Order successfully accepted by OB and resting on the book.
+        _openOrderCount += 1;
+        uint256 _eventHash = tvm.hash(abi.encode(eventId, oracleListHash, tokenType));
+        _openOrdersByEvent[_eventHash] += 1;
+
         // For single-place path only: clear pending place-buy lock, sell candidate, _busy.
         // Batch-place path leaves these alone; onBatchComplete performs final cleanup.
-        if (!_pendingBatchActive) {
+        // Nonce gate: only clear state if this callback acks MY current op. A
+        // stale callback (opNonce != _busyOpNonce) from a previous op must NOT
+        // wipe slots that now belong to a subsequent op.
+        if (!_pendingBatchActive && opNonce == _busyOpNonce) {
             _pendingPlaceBuyLock = 0;
             _pendingPlaceBuyTokenType = 0;
             TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
@@ -1315,11 +1539,12 @@ contract PrivateNote is Modifiers, ReplayProtection {
             }
             if (_busy.hasValue() && _busy.get() == msg.sender) {
                 delete _busy;
+                _busyOpNonce = 0;
             }
         }
 
         address addrExtern = address.makeAddrExtern(PRIVATENOTE_ORDER_PLACED, bitCntAddress);
-        emit OrderPlacedConfirmed{dest: addrExtern}(msg.sender, orderId);
+        emit OrderPlacedConfirmed{dest: addrExtern}(msg.sender, orderId, clientOrderId, outcomeId, isBuy, flags, price, amount);
     }
 
     /// @notice Called by OrderBook when a place submission was rejected (queue full or
@@ -1335,7 +1560,10 @@ contract PrivateNote is Modifiers, ReplayProtection {
         bool isBuy,
         uint8 flags,
         uint256 price,
-        uint128 amount
+        uint128 amount,
+        uint32 numOutcomes,
+        uint128 clientOrderId,
+        uint64  opNonce
     ) public accept {
         ensureBalance();
         address expectedOb = DexLib.computeOrderBookAddress(
@@ -1347,6 +1575,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         );
         require(msg.sender == expectedOb, ERR_INVALID_SENDER);
         tvm.accept();
+
+        // Release the cid sentinel so the caller can reuse the cid.
+        if (clientOrderId != 0) {
+            delete _clientOrderIds[clientOrderId];
+            if (!_pendingBatchActive && _pendingPlaceClientOrderId == clientOrderId) {
+                _pendingPlaceClientOrderId = 0;
+            }
+        }
 
         if (isBuy) {
             // Reconstruct original lock (cost + maxFee)
@@ -1366,17 +1602,40 @@ contract PrivateNote is Modifiers, ReplayProtection {
             } else {
                 _lockedInOrders[tokenType] = 0;
             }
+            // Clear the single-place sentinel: the lock has just been refunded,
+            // any later message bounce that hits `onBounce` would otherwise
+            // re-credit the same amount via the stale `_pendingPlaceBuyLock`
+            // slot (double-refund). Batch-place path keeps `_pendingBatchActive`
+            // true and lets `onBatchComplete` perform final cleanup.
+            // Nonce gate: only clear slots owned by MY current op.
+            if (!_pendingBatchActive && opNonce == _busyOpNonce) {
+                _pendingPlaceBuyLock = 0;
+                _pendingPlaceBuyTokenType = 0;
+            }
         } else {
-            // Sell: restore outcome-token lock in stake
+            // Sell: restore outcome-token lock in stake. Auto-create / grow
+            // the record on demand so we never silently drop tokens — the
+            // user already had them debited via `placeOrder` and is owed
+            // them back on rejection.
             TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
             uint256 hash = tvm.hash(data);
+            StakeInfo stake;
             if (_stakes.exists(hash)) {
-                StakeInfo stake = _stakes[hash];
-                if (outcomeId < uint32(stake.amount.length)) {
-                    stake.amount[outcomeId] += amount;
-                    _stakes[hash] = stake;
-                }
+                stake = _stakes[hash];
+            } else {
+                stake.oracleListHash = oracleListHash;
+                stake.tokenType = tokenType;
             }
+            while (uint32(stake.amount.length) < numOutcomes) {
+                stake.amount.push(0);
+                stake.debtAmount.push(0);
+                stake.couponsAmount.push(0);
+            }
+            stake.amount[outcomeId] += amount;
+            if (stake.candidateAmount > 0 && stake.candidateBetType == BET_TYPE_OB_SELL) {
+                stake.candidateAmount = 0;
+            }
+            _stakes[hash] = stake;
         }
     }
 
@@ -1406,6 +1665,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
         TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
         _lastHash = tvm.hash(data);
         _busy = obAddress;
+        _opNonce++;
+        _busyOpNonce = _opNonce;
 
         OrderBook.PlaceParams[] noOrders;
         uint128[] cancelArr;
@@ -1413,7 +1674,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         OrderBook(obAddress).executeBatch{
             value: 1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_depositIdentifierHash, noOrders, cancelArr);
+        }(_depositIdentifierHash, noOrders, cancelArr, _opNonce);
     }
 
     function cancelOrderByClient(
@@ -1424,6 +1685,12 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
+        require(clientOrderId != 0, ERR_INVALID_PARAMS);
+        require(_clientOrderIds.exists(clientOrderId), ERR_ORDER_NOT_FOUND);
+        uint128 orderId = _clientOrderIds[clientOrderId];
+        // Sentinel `type(uint128).max` means the place is in flight — cannot
+        // cancel until OB has confirmed via onOrderPlaced.
+        require(orderId != type(uint128).max, ERR_NOTE_BUSY);
 
         address obAddress = DexLib.computeOrderBookAddress(
             _privateNoteCode,
@@ -1436,11 +1703,16 @@ contract PrivateNote is Modifiers, ReplayProtection {
         TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
         _lastHash = tvm.hash(data);
         _busy = obAddress;
+        _opNonce++;
+        _busyOpNonce = _opNonce;
 
-        OrderBook(obAddress).cancelByClientId{
+        OrderBook.PlaceParams[] noOrders;
+        uint128[] cancelArr;
+        cancelArr.push(orderId);
+        OrderBook(obAddress).executeBatch{
             value: 1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_depositIdentifierHash, clientOrderId);
+        }(_depositIdentifierHash, noOrders, cancelArr, _opNonce);
     }
 
     /// @notice Called by OrderBook after order is cancelled. Returns locked tokens.
@@ -1458,7 +1730,9 @@ contract PrivateNote is Modifiers, ReplayProtection {
         uint128 orderId,
         uint32 outcomeId,
         bool isBuy,
-        uint128 amount
+        uint128 amount,
+        uint128 clientOrderId,
+        uint64  opNonce
     ) public accept {
         // Verify sender is the correct OrderBook (same pattern as onOrderFilled)
         address expectedOb = DexLib.computeOrderBookAddress(
@@ -1472,6 +1746,22 @@ contract PrivateNote is Modifiers, ReplayProtection {
         tvm.accept();
         ensureBalance();
         orderId; // suppress unused warning
+
+        // Free the cid slot — order is gone (user-cancel, FOK reject, shutdown).
+        if (clientOrderId != 0) {
+            delete _clientOrderIds[clientOrderId];
+        }
+
+        // Order left the book — counter must match OB-side resting set. Guarded
+        // against underflow in case the cancellation arrives for an order PN
+        // never saw confirmed (defensive — should not happen in normal flow).
+        if (_openOrderCount > 0) {
+            _openOrderCount -= 1;
+        }
+        uint256 _eventHash = tvm.hash(abi.encode(eventId, oracleListHash, tokenType));
+        if (_openOrdersByEvent[_eventHash] > 0) {
+            _openOrdersByEvent[_eventHash] -= 1;
+        }
 
         if (isBuy) {
             // Return the authoritative remaining lock for this order.
@@ -1520,8 +1810,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // Clear _busy only if it still points to this OrderBook (explicit cancelOrder flow).
         // For IOC/FOK auto-cancels, _busy was already cleared by onOrderPlaced.
         // For batch operations, _busy is cleared in onBatchComplete.
-        if (!_pendingBatchActive && _busy.hasValue() && _busy.get() == msg.sender) {
+        // Nonce gate (Race 2): late onOrderCancelled from a prior op must NOT
+        // clear _busy of a subsequent op that has already started — even when
+        // both target the same OB (same event), `_busy.get() == msg.sender`
+        // alone is not enough to identify "my current op".
+        if (!_pendingBatchActive && opNonce == _busyOpNonce
+            && _busy.hasValue() && _busy.get() == msg.sender) {
             delete _busy;
+            _busyOpNonce = 0;
         }
 
         address addrExtern = address.makeAddrExtern(PRIVATENOTE_ORDER_CANCELLED, bitCntAddress);
@@ -1537,7 +1833,13 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @param clearingPrice Clearing price in basis points
     /// @param isBuy Whether this was a buy fill
     /// @param refundAmount Collateral refund for buy orders (overpaid above clearing price)
-    /// @param feeAmount Trading fee (maker or taker) calculated by OrderBook
+    /// @param feeAmount Per-fill fee component computed by OrderBook. Semantics
+    ///        depend on `isRebate`:
+    ///          isRebate=false → taker fee (debit from reserve / proceeds);
+    ///          isRebate=true  → maker rebate (credit to balance).
+    /// @param isRebate True for the maker side of a fill, false for the taker
+    ///        side. Maker pays no fee — the rebate is funded out of the
+    ///        taker's fee on the same fill (see OrderBook._processFillTo).
     function onOrderFilled(
         uint256 eventId,
         uint256 oracleListHash,
@@ -1548,8 +1850,11 @@ contract PrivateNote is Modifiers, ReplayProtection {
         bool isBuy,
         uint128 refundAmount,
         uint128 feeAmount,
+        bool isRebate,
         uint128 orderId,
-        bool isFinal
+        bool isFinal,
+        uint32 numOutcomes,
+        uint128 clientOrderId
     ) public accept {
         ensureBalance();
         // Verify sender is the OrderBook for this event
@@ -1562,33 +1867,55 @@ contract PrivateNote is Modifiers, ReplayProtection {
         );
         require(msg.sender == expectedOb, ERR_INVALID_SENDER);
 
+        // Free cid slot when the order has fully consumed.
+        if (isFinal && clientOrderId != 0) {
+            delete _clientOrderIds[clientOrderId];
+        }
+
         TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
         uint256 hash = tvm.hash(data);
 
         if (isBuy) {
-            // Bought outcome tokens: add to stakes.
-            // If stake record was deleted (user called deleteStake while order was resting),
-            // the fill is accepted but outcome tokens are burned — the user explicitly
-            // abandoned this event, so tokens remain in the PMP pool.
+            // Bought outcome tokens: add to stakes. The stake record may not
+            // exist yet (PN-only buyer who never staked / split) or its
+            // `amount[]` array may be shorter than `outcomeId` (lazy
+            // initialisation pattern from setStake). Either case must NOT
+            // burn the bought tokens — collateral was already paid, the user
+            // is entitled to the outcome tokens.
+            StakeInfo stake;
             if (_stakes.exists(hash)) {
-                StakeInfo stake = _stakes[hash];
-                stake.amount[outcomeId] += filledAmount;
-                _stakes[hash] = stake;
+                stake = _stakes[hash];
+            } else {
+                stake.oracleListHash = oracleListHash;
+                stake.tokenType = tokenType;
             }
-            // Fee is covered by per-order fee reserve (populated by OB in onOrderPlaced).
-            // Each fill consumes its exact fee from the reserve. On the final
-            // fill (isFinal=true) any unused reserve is refunded and the entry
-            // deleted. Otherwise the reserve carries over for subsequent fills;
-            // if the order is later cancelled, onOrderCancelled refunds what's
-            // left. This keeps multi-fill orders charged exactly once per
-            // actual fill (pre-fix: delete-on-first-fill let fills 2..N skip
-            // payment).
-            // All per-order state is keyed by (obAddress, orderId) to
-            // avoid collisions with other PMP events' OBs (each OB has its
-            // own `_nextOrderId` starting at 1). msg.sender is the verified
-            // OB address.
+            while (uint32(stake.amount.length) < numOutcomes) {
+                stake.amount.push(0);
+                stake.debtAmount.push(0);
+                stake.couponsAmount.push(0);
+            }
+            stake.amount[outcomeId] += filledAmount;
+            _stakes[hash] = stake;
+            // Fee accounting. The per-order fee reserve (populated by OB in
+            // onOrderPlaced at TAKER_FEE_RATE) covers the worst case where the
+            // whole order is taken as a taker. Per fill:
+            //
+            //   isRebate=false (taker fill): debit feeAmount from reserve;
+            //     unused reserve is refunded on isFinal.
+            //   isRebate=true  (maker fill): nothing is debited from reserve;
+            //     feeAmount is the rebate, credited to the maker's balance.
+            //     Reserve drains on isFinal as unused.
+            //
+            // All per-order state is keyed by (obAddress, orderId) to avoid
+            // collisions with other PMP events' OBs (each OB has its own
+            // `_nextOrderId` starting at 1). msg.sender is the verified OB.
             uint128 reserve = _orderFeeReserves[msg.sender][orderId];
-            uint128 newReserve = reserve >= feeAmount ? reserve - feeAmount : 0;
+            uint128 newReserve;
+            if (isRebate) {
+                newReserve = reserve;            // maker side: no fee debited
+            } else {
+                newReserve = reserve >= feeAmount ? reserve - feeAmount : 0;
+            }
             uint128 feeRefund = 0;
             if (isFinal) {
                 // Order done: refund the unused reserve and clean up.
@@ -1603,13 +1930,17 @@ contract PrivateNote is Modifiers, ReplayProtection {
                 _orderFeeReserves[msg.sender][orderId] = newReserve;
             }
             // Credit the price-diff refund (for limit buys filled below cap
-            // price) plus any final-fill fee refund.
-            _balance[tokenType] += refundAmount + feeRefund;
-            // Unlock: price-diff refund + final-fill fee refund + actual cost + this fill's fee.
+            // price), any final-fill fee-reserve refund, and — on maker fills
+            // — the rebate.
+            _balance[tokenType] += refundAmount + feeRefund + (isRebate ? feeAmount : uint128(0));
+            // Unlock from the order's lock: price-diff refund + final-fill
+            // reserve refund + actualCost + (taker fills only) the per-fill
+            // taker fee. Maker rebate is credited from outside the lock and is
+            // NOT part of `consumed`.
             uint128 actualCost = uint128(
                 (uint256(filledAmount) * uint256(clearingPrice)) / uint256(FULL_PERCENT)
             );
-            uint128 consumed = refundAmount + feeRefund + actualCost + feeAmount;
+            uint128 consumed = refundAmount + feeRefund + actualCost + (isRebate ? uint128(0) : feeAmount);
 
             // Per-order lock tracker: `_orderLocks[ob][orderId]` is the
             // authoritative remaining lock for this order (set at
@@ -1620,38 +1951,46 @@ contract PrivateNote is Modifiers, ReplayProtection {
             uint128 orderLock = _orderLocks[msg.sender][orderId];
             uint128 applyDec = orderLock >= consumed ? consumed : orderLock;
 
+            // Invariant: applyDec <= orderLock <= _lockedInOrders[tt]
+            // (orderLock is set by OB at placement, _lockedInOrders is the
+            // sum of all live orderLocks for this tokenType). So plain
+            // subtraction is safe — no defensive clamps needed.
             if (isFinal) {
-                uint128 residual = orderLock > applyDec ? orderLock - applyDec : 0;
+                uint128 residual = orderLock - applyDec;
                 _balance[tokenType] += residual;
-                uint128 totalUnlock = applyDec + residual; // == orderLock
-                if (_lockedInOrders[tokenType] >= totalUnlock) {
-                    _lockedInOrders[tokenType] -= totalUnlock;
-                } else {
-                    _lockedInOrders[tokenType] = 0;
-                }
-                if (_orderLocks[msg.sender].exists(orderId)) {
-                    delete _orderLocks[msg.sender][orderId];
-                }
+                _lockedInOrders[tokenType] -= orderLock; // == applyDec + residual
+                delete _orderLocks[msg.sender][orderId];
             } else {
                 _orderLocks[msg.sender][orderId] = orderLock - applyDec;
-                if (_lockedInOrders[tokenType] >= applyDec) {
-                    _lockedInOrders[tokenType] -= applyDec;
-                } else {
-                    _lockedInOrders[tokenType] = 0;
-                }
+                _lockedInOrders[tokenType] -= applyDec;
             }
         } else {
-            // Sold outcome tokens: receive collateral minus fee
+            // Sold outcome tokens: receive collateral. Maker side gets a rebate
+            // on top of proceeds; taker side has the fee deducted.
             uint128 proceeds = uint128(
                 (uint256(filledAmount) * uint256(clearingPrice)) / uint256(FULL_PERCENT)
             );
-            if (proceeds > feeAmount) {
+            if (isRebate) {
+                _balance[tokenType] += proceeds + feeAmount;
+            } else if (proceeds > feeAmount) {
                 _balance[tokenType] += (proceeds - feeAmount);
             }
         }
 
+        // Order fully consumed — leaves the book. Partial fills (isFinal=false)
+        // keep the residue resting, so the counter stays unchanged for those.
+        if (isFinal) {
+            if (_openOrderCount > 0) {
+                _openOrderCount -= 1;
+            }
+            uint256 _eventHash = tvm.hash(abi.encode(eventId, oracleListHash, tokenType));
+            if (_openOrdersByEvent[_eventHash] > 0) {
+                _openOrdersByEvent[_eventHash] -= 1;
+            }
+        }
+
         address addrExtern = address.makeAddrExtern(PRIVATENOTE_ORDER_FILLED, bitCntAddress);
-        emit OrderFilledConfirmed{dest: addrExtern}(msg.sender, orderId, outcomeId, filledAmount, clearingPrice, isBuy, feeAmount, isFinal);
+        emit OrderFilledConfirmed{dest: addrExtern}(msg.sender, orderId, outcomeId, filledAmount, clearingPrice, isBuy, feeAmount, isRebate, isFinal);
     }
 
     // ===== Batch order-book operations =====
@@ -1691,17 +2030,27 @@ contract PrivateNote is Modifiers, ReplayProtection {
         for (uint32 i = 0; i < uint32(orders.length); i++) {
             OrderBook.PlaceParams p = orders[i];
             require(p.amount > 0, ERR_LOW_VALUE);
-            require(p.amount % lot == 0, ERR_AMOUNT_NOT_LOT_MULTIPLE);
+
+            // clientOrderId uniqueness — both vs existing and intra-batch.
+            // Sentinel set here; intra-batch dupes hit it on the second seen.
+            if (p.clientOrderId != 0) {
+                require(!_clientOrderIds.exists(p.clientOrderId), ERR_INVALID_PARAMS);
+                _clientOrderIds[p.clientOrderId] = type(uint128).max;
+                _pendingBatchClientOrderIds.push(p.clientOrderId);
+            }
             if (p.flags & 0x04 != 0) {
+                // Market buy: amount = quote/collateral, not base.
+                require(p.minAmount == 0, ERR_INVALID_PARAMS);
                 if (p.isBuy) {
                     require(p.amount >= minNotional, ERR_ORDER_TOO_SMALL);
                 }
             } else {
+                require(p.amount % lot == 0, ERR_AMOUNT_NOT_LOT_MULTIPLE);
                 require(p.price % TICK_SIZE == 0, ERR_PRICE_NOT_TICK_MULTIPLE);
-                uint128 notional = uint128(
-                    (uint256(p.amount) * uint256(p.price)) / uint256(FULL_PERCENT)
-                );
-                require(notional >= minNotional, ERR_ORDER_TOO_SMALL);
+                require(p.price == 0 || uint256(p.amount) <= type(uint256).max / uint256(p.price), ERR_NOTIONAL_OVERFLOW);
+                uint256 notionalFull = (uint256(p.amount) * uint256(p.price)) / uint256(FULL_PERCENT);
+                require(notionalFull <= uint256(type(uint128).max), ERR_NOTIONAL_OVERFLOW);
+                require(notionalFull >= uint256(minNotional), ERR_ORDER_TOO_SMALL);
             }
 
             if (p.isBuy) {
@@ -1749,12 +2098,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         );
         _busy = obAddress;
         _lastHash = hash;
+        _opNonce++;
+        _busyOpNonce = _opNonce;
 
         uint128[] emptyIds;
         OrderBook(obAddress).executeBatch{
             value: 1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_depositIdentifierHash, orders, emptyIds);
+        }(_depositIdentifierHash, orders, emptyIds, _opNonce);
     }
 
     /// @notice Cancels a batch of orders by ID atomically. All-or-nothing.
@@ -1782,12 +2133,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         _lastHash = tvm.hash(data);
         _pendingBatchActive = true;
         _busy = obAddress;
+        _opNonce++;
+        _busyOpNonce = _opNonce;
 
         OrderBook.PlaceParams[] emptyOrders;
         OrderBook(obAddress).executeBatch{
             value: 1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_depositIdentifierHash, emptyOrders, orderIds);
+        }(_depositIdentifierHash, emptyOrders, orderIds, _opNonce);
     }
 
     /// @notice Enqueues a CANCEL_ALL request on the given OrderBook. The OB will
@@ -1815,11 +2168,13 @@ contract PrivateNote is Modifiers, ReplayProtection {
         _pendingBatchActive = true;
         _pendingBatchTokenType = tokenType;
         _busy = obAddress;
+        _opNonce++;
+        _busyOpNonce = _opNonce;
 
         OrderBook(obAddress).cancelAllOrders{
             value: 1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_depositIdentifierHash);
+        }(_depositIdentifierHash, _opNonce);
     }
 
     /// @notice Sentinel callback sent by OrderBook after all effects of a batch
@@ -1828,7 +2183,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
     function onBatchComplete(
         uint256 eventId,
         uint256 oracleListHash,
-        uint32 tokenType
+        uint32 tokenType,
+        uint64  opNonce
     ) public accept {
         address expectedOb = DexLib.computeOrderBookAddress(
             _privateNoteCode,
@@ -1841,15 +2197,34 @@ contract PrivateNote is Modifiers, ReplayProtection {
         tvm.accept();
         ensureBalance();
 
-        // All effects dispatched — tx committed, bounce protection no longer needed.
+        // Nonce gate (Race 1): a late onBatchComplete from a previous op
+        // (e.g. a single placeOrder that internally uses executeBatch and so
+        // also fires this sentinel) must NOT wipe `_pendingBatch*` state that
+        // now belongs to a subsequent placeBatch the user has already started.
+        // Only the current op's ack is authoritative.
+        if (opNonce != _busyOpNonce) {
+            return;
+        }
+
+        // Single-mode pendingBatch slots are all zero — these writes are no-ops.
+        // Batch-mode owns these slots and clears them here.
         _pendingBatchActive = false;
         _pendingBatchBuyLock = 0;
         _pendingBatchTokenType = 0;
         _pendingBatchStakeHash = 0;
         delete _pendingBatchSells;
+        delete _pendingBatchClientOrderIds;
 
+        // _busy release: nonce match alone makes this safe. The previous
+        // `wasBatch` gate was a stand-in for "is this my current op?" —
+        // superseded by the nonce gate above. Without this, a rejected
+        // single placeOrder/cancelOrder (which leaves `_pendingBatchActive`
+        // false and has no per-order callback clearing `_busy`) would leave
+        // PN busy forever. In the success path `_busy` is already cleared
+        // by `onOrderPlaced` / `onOrderCancelled`, so this is a no-op.
         if (_busy.hasValue() && _busy.get() == msg.sender) {
             delete _busy;
+            _busyOpNonce = 0;
         }
     }
 

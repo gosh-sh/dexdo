@@ -38,6 +38,13 @@ contract OrderBook is Modifiers {
     ///         outcome is observable off-chain.
     uint64 _resultStart;
 
+    /// @notice Number of outcomes for the underlying PMP event. Propagated to
+    ///         PrivateNote in stake-mutating callbacks (`onOrderFilled` buy,
+    ///         `onOrderRejected` sell) so PN can size stake arrays to the
+    ///         full width PMP::claim() expects, regardless of which outcomes
+    ///         the user actually trades.
+    uint32 _numOutcomes;
+
     // ===== Order storage =====
 
     /// @notice Resting order record. Doubly linked into the per-price-level FIFO
@@ -51,6 +58,7 @@ contract OrderBook is Modifiers {
         uint128 filledAccum;    // cumulative filled size (survives continuations)
         uint128 clientOrderId;  // optional user-supplied id (0 = not set)
         uint64  epochId;
+        uint64  opNonce;        // nonce of the place op that created this order
         uint32  outcomeId;
         uint8   flags;
         bool    isBuy;
@@ -63,13 +71,6 @@ contract OrderBook is Modifiers {
     }
 
     mapping(uint128 => Order) _orders;
-
-    /// @notice Per-owner active `clientOrderId → internalOrderId` index.
-    ///         Scope: per `depositHash` (PN). Zero means unused. Freed on
-    ///         full fill or cancellation. `clientOrderId == 0` is reserved
-    ///         as "not set" and bypasses both the uniqueness check and the
-    ///         mapping entirely.
-    mapping(uint256 => mapping(uint128 => uint128)) _clientOrderIds;
 
     /// @notice Per-price-level metadata. Keyed by (outcomeId, isBuy, epochId, price).
     ///         epochId is part of the key so orders from different epochs live
@@ -98,6 +99,15 @@ contract OrderBook is Modifiers {
     ///         place/cancel operations are accepted; the contract is draining.
     bool _shuttingDown;
 
+    /// @notice Deferred-shutdown latch. `shutdown()` sets this (instead of
+    ///         `_shuttingDown`) when the queue is still draining an in-flight
+    ///         order match — the drain must not preempt an order that has
+    ///         already started executing. Once `_queueSize` reaches zero the
+    ///         next `_processHeadCore` pass promotes this into a real
+    ///         shutdown via a self-call.
+    bool _shutdownPending;
+
+
     /// @notice Resume cursor for shutdown's batch scan across self-calls.
     ///         Persisted across tx boundaries so each self-call picks up
     ///         where the previous one left off instead of re-scanning
@@ -108,9 +118,14 @@ contract OrderBook is Modifiers {
     ///         orders can be placed), so the cursor always terminates.
     uint128 _shutdownCursor;
 
-    /// @notice Accumulated maker/taker fees (in collateral units).
-    uint128 _totalMakerFees;
-    uint128 _totalTakerFees;
+    /// @notice Accumulated rebates paid out to makers (in collateral units).
+    ///         Each fill pays takerFee × MAKER_REBATE_NUM/MAKER_REBATE_DEN
+    ///         (= 0.03375% of notional) to the matched maker.
+    uint128 _totalMakerRebatesPaid;
+
+    /// @notice Accumulated protocol fees retained by the contract
+    ///         (= takerFee - makerRebate per fill, i.e. 0.01125% of notional).
+    uint128 _totalProtocolFees;
 
     // ===== Matching constants =====
 
@@ -172,7 +187,6 @@ contract OrderBook is Modifiers {
 
     struct QueueEntry {
         uint8   entryType;
-        bool    cancelled;
         uint32  queueId;
         uint256 depositHash;
         // Place fields:
@@ -196,6 +210,15 @@ contract OrderBook is Modifiers {
         bool    precheckDone;
         uint128 precheckAccum;
         uint256 precheckLastPrice;
+        // Marks the last entry of an `executeBatch` / `cancelAllOrders` call.
+        // When this entry leaves the head, OB fires `onBatchComplete` to PN.
+        bool    isBatchEnd;
+        // Echo of the caller's `_opNonce` for this op. Threaded through every
+        // PN callback (onOrderPlaced/Rejected/Cancelled/BatchComplete) so PN
+        // can tell "this is ack of MY current op" from "this is a stale late
+        // callback of a previous op" — the latter must NOT clear `_busy` or
+        // wipe `_pendingBatch*` state.
+        uint64  opNonce;
     }
 
     mapping(uint8 => QueueEntry) _queue;
@@ -231,7 +254,8 @@ contract OrderBook is Modifiers {
     constructor(
         uint256 pmpSaltedCodeHash,
         uint16 pmpSaltedCodeDepth,
-        uint64 resultStart
+        uint64 resultStart,
+        uint32 numOutcomes
     ) {
         tvm.accept();
         ensureBalance();
@@ -247,6 +271,7 @@ contract OrderBook is Modifiers {
         ), ERR_INVALID_SENDER);
 
         _resultStart = resultStart;
+        _numOutcomes = numOutcomes;
         _nextOrderId = 1;
         _orderCount = 0;
 
@@ -274,13 +299,14 @@ contract OrderBook is Modifiers {
 
     function _notifyRejectedPlace(
         uint256 depositHash,
-        PlaceParams op
+        PlaceParams op,
+        uint64  opNonce
     ) private view {
         address pn = DexLib.computePrivateNoteAddress(_privateNoteCode, depositHash);
         PrivateNote(pn).onOrderRejected{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
         }(_eventId, _oracleListHash, _tokenType,
-          op.outcomeId, op.isBuy, op.flags, op.price, op.amount);
+          op.outcomeId, op.isBuy, op.flags, op.price, op.amount, _numOutcomes, op.clientOrderId, opNonce);
     }
 
     // ===== Unified entry point: enqueue + processHead =====
@@ -288,7 +314,8 @@ contract OrderBook is Modifiers {
     function executeBatch(
         uint256 depositIdentifierHash,
         PlaceParams[] orders,
-        uint128[] cancelIds
+        uint128[] cancelIds,
+        uint64  opNonce
     ) public {
         require(!_shuttingDown, ERR_ALREADY_CANCELLED);
         // Book is closed at the result deadline.
@@ -306,6 +333,8 @@ contract OrderBook is Modifiers {
 
         uint128 minNotional = minOrderNotional(_tokenType);
         uint128 lot = lotSize(_tokenType);
+        bool anyQueued = false;
+        uint8 lastSlot = 0;
         for (uint32 i = 0; i < nPlace; i++) {
             PlaceParams op = orders[i];
             bool valid = true;
@@ -320,59 +349,73 @@ contract OrderBook is Modifiers {
             bool opIsFok      = (op.flags & FLAG_FOK)       != 0;
 
             if (op.amount == 0) valid = false;
-            else if (op.amount % lot != 0) valid = false;
-            else if (op.minAmount > op.amount) valid = false;
             else if (opIsPostOnly && (opIsMarket || opIsIoc || opIsFok)) valid = false;
             else if (opIsIoc && opIsFok) valid = false;
             else if (opIsMarket && (opIsIoc || opIsFok)) valid = false;
             else if (opIsMarket) {
-                if (op.isBuy && op.amount < minNotional) valid = false;
+                // Market buy: amount is quote/collateral, not base. Base-lot
+                // quantisation and minAmount (a base-unit threshold) do not
+                // apply here — forbid them outright to avoid cross-unit
+                // comparisons in the FOK/minAmount precheck loop.
+                if (op.minAmount != 0) valid = false;
+                else if (op.isBuy && op.amount < minNotional) valid = false;
             } else {
-                if (op.price == 0) valid = false;
+                if (op.amount % lot != 0) valid = false;
+                else if (op.minAmount > op.amount) valid = false;
+                else if (op.price == 0) valid = false;
                 else if (op.price % TICK_SIZE != 0) valid = false;
+                else if (op.price != 0 && uint256(op.amount) > type(uint256).max / uint256(op.price)) {
+                    valid = false;
+                }
                 else {
-                    uint128 notional = uint128(
-                        (uint256(op.amount) * uint256(op.price)) / uint256(FULL_PERCENT)
-                    );
-                    if (notional < minNotional) valid = false;
+                    uint256 notionalFull = (uint256(op.amount) * uint256(op.price)) / uint256(FULL_PERCENT);
+                    if (notionalFull > uint256(type(uint128).max)) {
+                        valid = false;
+                    } else if (notionalFull < uint256(minNotional)) {
+                        valid = false;
+                    }
                 }
             }
-            // clientOrderId uniqueness gate (per-PN, opt-out via cid=0).
-            if (valid && op.clientOrderId != 0
-                && _clientOrderIds[depositIdentifierHash][op.clientOrderId] != 0) {
-                valid = false;
-            }
+            // clientOrderId uniqueness is enforced on the PN side now —
+            // OB just carries the cid for event emission.
 
             if (valid) {
                 bool ok = _enqueuePlace(
                     depositIdentifierHash, op.outcomeId, op.isBuy,
-                    op.flags, op.price, op.amount, op.minAmount, op.epochId, op.clientOrderId
+                    op.flags, op.price, op.amount, op.minAmount, op.epochId, op.clientOrderId,
+                    opNonce
                 );
-                if (!ok) {
-                    _notifyRejectedPlace(depositIdentifierHash, op);
-                } else if (op.clientOrderId != 0) {
-                    // Reserve the cid slot now (sentinel = max uint128, replaced
-                    // with real orderId once _doPlace assigns one). Prevents a
-                    // second batch entry from claiming the same cid before
-                    // _doPlace runs from the queue.
-                    _clientOrderIds[depositIdentifierHash][op.clientOrderId] = type(uint128).max;
+                if (ok) {
+                    lastSlot = _queueTail == 0 ? uint8(QUEUE_CAPACITY - 1) : _queueTail - 1;
+                    anyQueued = true;
+                } else {
+                    _notifyRejectedPlace(depositIdentifierHash, op, opNonce);
                 }
             } else {
                 address addrExtern = address.makeAddrExtern(0, bitCntAddress);
                 emit Rejected{dest: addrExtern}(QENTRY_PLACE, depositIdentifierHash);
-                _notifyRejectedPlace(depositIdentifierHash, op);
+                _notifyRejectedPlace(depositIdentifierHash, op, opNonce);
             }
         }
 
         for (uint32 j = 0; j < nCancel; j++) {
-            _enqueueCancel(depositIdentifierHash, cancelIds[j]);
+            if (_enqueueCancel(depositIdentifierHash, cancelIds[j], opNonce)) {
+                lastSlot = _queueTail == 0 ? uint8(QUEUE_CAPACITY - 1) : _queueTail - 1;
+                anyQueued = true;
+            }
         }
 
+        if (anyQueued) {
+            _queue[lastSlot].isBatchEnd = true;
+        }
         _processHeadCore();
-        _notifyBatchAccepted(depositIdentifierHash);
+        // All-rejected case — no queue entry will fire the ack.
+        if (!anyQueued) {
+            _notifyBatchAccepted(depositIdentifierHash, opNonce);
+        }
     }
 
-    function cancelAllOrders(uint256 depositIdentifierHash) public {
+    function cancelAllOrders(uint256 depositIdentifierHash, uint64 opNonce) public {
         require(!_shuttingDown, ERR_ALREADY_CANCELLED);
         require(block.timestamp < _resultStart, ERR_RESULT_NOT_STARTED);
         address wallet = DexLib.computePrivateNoteAddress(
@@ -383,34 +426,24 @@ contract OrderBook is Modifiers {
         tvm.accept();
         ensureBalance();
 
-        _enqueueCancelAll(depositIdentifierHash);
+        bool ok = _enqueueCancelAll(depositIdentifierHash, opNonce);
+        if (ok) {
+            uint8 slot = _queueTail == 0 ? uint8(QUEUE_CAPACITY - 1) : _queueTail - 1;
+            _queue[slot].isBatchEnd = true;
+        }
         _processHeadCore();
-        _notifyBatchAccepted(depositIdentifierHash);
+        if (!ok) {
+            _notifyBatchAccepted(depositIdentifierHash, opNonce);
+        }
     }
 
-    function cancelQueued(uint8 slot, uint32 queueId, uint256 depositIdentifierHash) public {
-        require(!_shuttingDown, ERR_ALREADY_CANCELLED);
-        require(block.timestamp < _resultStart, ERR_RESULT_NOT_STARTED);
-        address wallet = DexLib.computePrivateNoteAddress(
-            _privateNoteCode,
-            depositIdentifierHash
-        );
-        require(msg.sender == wallet, ERR_INVALID_SENDER);
-        tvm.accept();
-        ensureBalance();
-
-        _markQueueCancelled(slot, queueId, depositIdentifierHash);
-        _processHeadCore();
-        _notifyBatchAccepted(depositIdentifierHash);
-    }
-
-    function _notifyBatchAccepted(uint256 depositIdentifierHash) private view {
+    function _notifyBatchAccepted(uint256 depositIdentifierHash, uint64 opNonce) private view {
         address pn = DexLib.computePrivateNoteAddress(
             _privateNoteCode, depositIdentifierHash
         );
         PrivateNote(pn).onBatchComplete{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_eventId, _oracleListHash, _tokenType);
+        }(_eventId, _oracleListHash, _tokenType, opNonce);
     }
 
     // ===== Queue helpers =====
@@ -449,7 +482,8 @@ contract OrderBook is Modifiers {
         uint128 amount,
         uint128 minAmount,
         uint64  epochId,
-        uint128 clientOrderId
+        uint128 clientOrderId,
+        uint64  opNonce
     ) private returns (bool ok) {
         if (!_canQueuePlace()) {
             address addrExtern = address.makeAddrExtern(0, bitCntAddress);
@@ -459,7 +493,6 @@ contract OrderBook is Modifiers {
         (uint8 slot, uint32 queueId) = _allocSlot();
         _queue[slot] = QueueEntry({
             entryType: QENTRY_PLACE,
-            cancelled: false,
             queueId: queueId,
             depositHash: depositHash,
             outcomeId: outcomeId,
@@ -474,7 +507,9 @@ contract OrderBook is Modifiers {
             filledAccum: 0,
             precheckDone: false,
             precheckAccum: 0,
-            precheckLastPrice: 0
+            precheckLastPrice: 0,
+            isBatchEnd: false,
+            opNonce: opNonce
         });
         // (placeholder anchor — _enqueueCancel/_enqueueCancelAll use clientOrderId: 0)
         address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
@@ -484,7 +519,8 @@ contract OrderBook is Modifiers {
 
     function _enqueueCancel(
         uint256 depositHash,
-        uint128 targetOrderId
+        uint128 targetOrderId,
+        uint64  opNonce
     ) private returns (bool ok) {
         if (!_canQueueCancel()) {
             address addrExtern = address.makeAddrExtern(0, bitCntAddress);
@@ -494,7 +530,6 @@ contract OrderBook is Modifiers {
         (uint8 slot, uint32 queueId) = _allocSlot();
         _queue[slot] = QueueEntry({
             entryType: QENTRY_CANCEL,
-            cancelled: false,
             queueId: queueId,
             depositHash: depositHash,
             outcomeId: 0,
@@ -509,14 +544,16 @@ contract OrderBook is Modifiers {
             filledAccum: 0,
             precheckDone: false,
             precheckAccum: 0,
-            precheckLastPrice: 0
+            precheckLastPrice: 0,
+            isBatchEnd: false,
+            opNonce: opNonce
         });
         address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
         emit Queued{dest: addrExtern2}(slot, queueId, QENTRY_CANCEL);
         return true;
     }
 
-    function _enqueueCancelAll(uint256 depositHash) private returns (bool ok) {
+    function _enqueueCancelAll(uint256 depositHash, uint64 opNonce) private returns (bool ok) {
         if (!_canQueueCancel()) {
             address addrExtern = address.makeAddrExtern(0, bitCntAddress);
             emit Rejected{dest: addrExtern}(QENTRY_CANCEL_ALL, depositHash);
@@ -525,7 +562,6 @@ contract OrderBook is Modifiers {
         (uint8 slot, uint32 queueId) = _allocSlot();
         _queue[slot] = QueueEntry({
             entryType: QENTRY_CANCEL_ALL,
-            cancelled: false,
             queueId: queueId,
             depositHash: depositHash,
             outcomeId: 0,
@@ -540,18 +576,12 @@ contract OrderBook is Modifiers {
             filledAccum: 0,
             precheckDone: false,
             precheckAccum: 0,
-            precheckLastPrice: 0
+            precheckLastPrice: 0,
+            isBatchEnd: false,
+            opNonce: opNonce
         });
         address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
         emit Queued{dest: addrExtern2}(slot, queueId, QENTRY_CANCEL_ALL);
-        return true;
-    }
-
-    function _markQueueCancelled(uint8 slot, uint32 queueId, uint256 depositHash) private returns (bool ok) {
-        if (_queue[slot].queueId != queueId) return false;
-        if (_queue[slot].depositHash != depositHash) return false;
-        if (_queue[slot].cancelled) return true;
-        _queue[slot].cancelled = true;
         return true;
     }
 
@@ -563,7 +593,7 @@ contract OrderBook is Modifiers {
 
     /// @notice Public entry: accepts the call (anyone can poke the queue) and
     ///         delegates to the internal core. Same-tx invocations from
-    ///         executeBatch/cancelAll/cancelQueued should call _processHeadCore
+    ///         executeBatch/cancelAllOrders should call _processHeadCore
     ///         directly to avoid a redundant tvm.accept().
     function processHead() public {
         tvm.accept();
@@ -572,43 +602,81 @@ contract OrderBook is Modifiers {
     }
 
     function _processHeadCore() private {
-        // Once shutdown is latched, do NOT process queued PLACE entries — they
-        // could re-insert orders into the book while shutdown is draining it.
-        // CANCEL/CANCEL_ALL are also skipped: shutdown will clear the book
-        // wholesale anyway. PNs whose ops were in flight will not get callbacks
-        // here; the event is being torn down so this is acceptable.
+        // Once the drain itself is latched we do not process queue entries —
+        // their side effects (book insertions / cancels) would race with the
+        // drain cancelling the same orders. The queue was expected to be empty
+        // by the time `_shuttingDown` becomes true (see `shutdown()` below,
+        // which defers via `_shutdownPending` until `_queueSize == 0`).
         if (_shuttingDown) return;
-        if (_queueSize == 0) return;
-
-        // Skip up to 5 cancelled queue entries in the same tx; advancing the
-        // head is cheap (storage delete + counter), no need to defer.
-        uint8 skipped = 0;
-        while (_queueSize > 0 && _queue[_queueHead].cancelled && skipped < 5) {
-            _advanceHead();
-            skipped++;
-        }
-
-        if (_queueSize == 0) return;
-
-        // If we hit the skip-limit with the head still cancelled, defer the
-        // next pass to a fresh tx via self-call instead of executing a
-        // cancelled entry here. Without this, a 6th consecutive cancelled
-        // entry would fall through to the entryType dispatch below and be
-        // processed — for a PLACE that means the order gets inserted into
-        // the book despite the cancelQueued marker, leaving the caller's
-        // lock stuck in `_lockedInOrders` until they manually cancelOrder.
-        if (_queue[_queueHead].cancelled) {
-            _selfCallProcessHead();
+        if (_queueSize == 0) {
+            // Queue drained — if a shutdown has been queued behind in-flight
+            // order processing, promote it now via a self-call to run in its
+            // own tx (gas headroom, clean stack).
+            if (_shutdownPending) {
+                OrderBook(address(this)).shutdown{
+                    value: 1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+                }();
+            }
             return;
         }
 
         QueueEntry head = _queue[_queueHead];
+
+        // ── Shutdown-pending fast-path ─────────────────────────────────────
+        // If `shutdown()` was deferred behind in-flight queue entries, only
+        // entries that have ALREADY started executing (head with
+        // `precheckDone == true`) get to finish their match-chain.
+        // Untouched entries are refused immediately — letting the drain
+        // proceed without firing fills that the user no longer expects.
+        // CANCEL/CANCEL_ALL just advance: the upcoming book drain will
+        // clear those orders anyway.
+        if (_shutdownPending && !head.precheckDone) {
+            uint256 doneHash = head.depositHash;
+            uint64  doneNonce = head.opNonce;
+            if (head.entryType == QENTRY_PLACE) {
+                if (head.targetOrderId == 0) {
+                    // _doPlace never ran → onOrderPlaced never fired → reject path.
+                    PlaceParams op = PlaceParams(
+                        head.outcomeId, head.isBuy, head.flags, head.price,
+                        head.amount, head.minAmount, head.epochId,
+                        head.clientOrderId
+                    );
+                    _notifyRejectedPlace(doneHash, op, doneNonce);
+                } else {
+                    // onOrderPlaced fired (precheck started, didn't finish) →
+                    // must cancel symmetrically so _openOrderCount decrements.
+                    address callerPn = DexLib.computePrivateNoteAddress(
+                        _privateNoteCode, doneHash
+                    );
+                    uint128 returnAmt = _collateralFor(
+                        head.isBuy, head.price, head.amount
+                    );
+                    _cancelNoBookEntryTo(
+                        callerPn, doneHash, head.targetOrderId,
+                        head.outcomeId, head.isBuy, returnAmt, head.clientOrderId,
+                        doneNonce
+                    );
+                }
+            }
+            bool wasBatchEnd = head.isBatchEnd;
+            _advanceHead();
+            if (wasBatchEnd) _notifyBatchAccepted(doneHash, doneNonce);
+            if (_queueSize > 0) {
+                _selfCallProcessHead();
+            } else {
+                OrderBook(address(this)).shutdown{
+                    value: 1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+                }();
+            }
+            return;
+        }
+
         bool keepHead = false;
 
         if (head.entryType == QENTRY_CANCEL) {
-            _doCancel(head.depositHash, head.targetOrderId);
+            _doCancel(head.depositHash, head.targetOrderId, head.opNonce);
         } else if (head.entryType == QENTRY_CANCEL_ALL) {
-            uint32 cancelled = _doCancelAll(head.depositHash);
+            uint32 cancelled = _doCancelAll(head.depositHash, head.opNonce);
             keepHead = (cancelled >= MAX_CANCEL_ALL_PER_CALL);
         } else {
             PlaceParams p = PlaceParams(
@@ -621,7 +689,7 @@ contract OrderBook is Modifiers {
                 _doPlace(
                     head.depositHash, p, head.targetOrderId,
                     head.precheckDone, head.precheckAccum, head.precheckLastPrice,
-                    head.filledAccum
+                    head.filledAccum, head.opNonce
                 );
             if (cont) {
                 _queue[_queueHead].amount = contRemaining;
@@ -634,8 +702,21 @@ contract OrderBook is Modifiers {
             }
         }
 
-        if (!keepHead) _advanceHead();
-        if (_queueSize > 0) _selfCallProcessHead();
+        if (!keepHead) {
+            uint256 advancedHash = head.depositHash;
+            uint64  advancedNonce = head.opNonce;
+            bool wasBatchEnd = head.isBatchEnd;
+            _advanceHead();
+            if (wasBatchEnd) _notifyBatchAccepted(advancedHash, advancedNonce);
+        }
+        if (_queueSize > 0) {
+            _selfCallProcessHead();
+        } else if (_shutdownPending) {
+            // Queue drained, deferred shutdown promotes now (claim() gate).
+            OrderBook(address(this)).shutdown{
+                value: 1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+            }();
+        }
     }
 
     // ===== Native matching engine =====
@@ -665,7 +746,8 @@ contract OrderBook is Modifiers {
         bool    inPrecheckDone,
         uint128 inPrecheckAccum,
         uint256 inPrecheckLastPrice,
-        uint128 inFilledAccum
+        uint128 inFilledAccum,
+        uint64  opNonce
     ) private returns (
         bool cont,
         uint128 contOrderId,
@@ -699,7 +781,7 @@ contract OrderBook is Modifiers {
         // Compute caller PN address once and reuse across all callbacks.
         address callerPn = DexLib.computePrivateNoteAddress(_privateNoteCode, callerHash);
 
-        if (!isContinuation) _emitOrderPlacedTo(callerPn, orderId, p);
+        if (!isContinuation) _emitOrderPlacedTo(callerPn, orderId, p, opNonce);
 
         // ── POST_ONLY check: only on first call. (Cheap — single _bestOpposite.)
         if (!isContinuation && isPostOnly) {
@@ -708,7 +790,7 @@ contract OrderBook is Modifiers {
                 (uint256 bp, ) = bestLevel.get();
                 if (_pricesCross(p.isBuy, storedPrice, false, bp)) {
                     uint128 returnAmt = _collateralFor(p.isBuy, storedPrice, p.amount);
-                    _cancelNoBookEntryTo(callerPn, callerHash, orderId, p.outcomeId, p.isBuy, returnAmt, p.clientOrderId);
+                    _cancelNoBookEntryTo(callerPn, callerHash, orderId, p.outcomeId, p.isBuy, returnAmt, p.clientOrderId, opNonce);
                     return (false, 0, 0, false, 0, 0, 0);
                 }
             }
@@ -754,7 +836,7 @@ contract OrderBook is Modifiers {
             if (!reached) {
                 // Walked the full crossing region but didn't reach minFill → reject.
                 uint128 returnAmt = _collateralFor(p.isBuy, storedPrice, p.amount);
-                _cancelNoBookEntryTo(callerPn, callerHash, orderId, p.outcomeId, p.isBuy, returnAmt, p.clientOrderId);
+                _cancelNoBookEntryTo(callerPn, callerHash, orderId, p.outcomeId, p.isBuy, returnAmt, p.clientOrderId, opNonce);
                 return (false, 0, 0, false, 0, 0, 0);
             }
             // Pre-check passed: fall through into the match loop.
@@ -764,6 +846,10 @@ contract OrderBook is Modifiers {
         uint128 remaining = p.amount;
         uint8 matchesDone = 0;
         bool hitCapWithMore = false;
+        // Set when MARKET BUY remaining quote can't afford one base unit at
+        // the current clearingPrice. Subsequent levels are strictly worse
+        // (outer walks best-first), so we stop the outer walk too.
+        bool marketBuyDust = false;
 
         optional(uint256, PriceLevel) iter = _bestOpposite(p.outcomeId, p.isBuy, p.epochId);
         while (iter.hasValue() && remaining > 0) {
@@ -805,7 +891,11 @@ contract OrderBook is Modifiers {
                     if (trade == 0) {
                         // Remaining quote can't cover one base unit at this
                         // clearingPrice. Subsequent levels are worse (outer
-                        // loop walks best-first) — stop matching entirely.
+                        // loop walks best-first) — flag to stop the outer
+                        // walk too. (Previously this `break` only exited the
+                        // inner loop and the outer kept scanning worse
+                        // levels for nothing.)
+                        marketBuyDust = true;
                         break;
                     }
                 } else {
@@ -847,9 +937,9 @@ contract OrderBook is Modifiers {
                 bool makerFinal = (cp.amount == trade);
                 bool takerFinal = (p.isBuy && isMarket) ? (spentQuote == remaining) : (remaining == trade);
                 // Maker callback: maker's address differs per fill, must compute.
-                _processFill(cp.depositHash, cur, p.outcomeId, trade, clearingPrice, cp.isBuy, cpBuyerRefund, false, makerFinal);
+                _processFill(cp.depositHash, cur, p.outcomeId, trade, clearingPrice, cp.isBuy, cpBuyerRefund, false, makerFinal, cp.clientOrderId);
                 // Taker callback: reuse cached caller address.
-                _processFillTo(callerPn, orderId, p.outcomeId, trade, clearingPrice, p.isBuy, newBuyerRefund, true, takerFinal);
+                _processFillTo(callerPn, orderId, p.outcomeId, trade, clearingPrice, p.isBuy, newBuyerRefund, true, takerFinal, p.clientOrderId);
 
                 // Maker-side aggregated MM event — emitted right at the fill
                 // (maker is touched at most once per overall taker placement).
@@ -884,6 +974,7 @@ contract OrderBook is Modifiers {
                 cur = nextOrd;
             }
             if (hitCapWithMore) break;
+            if (marketBuyDust) break;
 
             // Move to next level in our epoch (worse price). Re-fetch since storage may have changed.
             iter = _nextOpposite(p.outcomeId, p.isBuy, p.epochId, levelPrice);
@@ -905,9 +996,9 @@ contract OrderBook is Modifiers {
         if (remaining > 0) {
             if (isIoc || isFok || isMarket) {
                 uint128 returnAmt = (isMarket && p.isBuy) ? remaining : _collateralFor(p.isBuy, storedPrice, remaining);
-                _cancelNoBookEntryTo(callerPn, callerHash, orderId, p.outcomeId, p.isBuy, returnAmt, p.clientOrderId);
+                _cancelNoBookEntryTo(callerPn, callerHash, orderId, p.outcomeId, p.isBuy, returnAmt, p.clientOrderId, opNonce);
             } else {
-                _insertIntoBook(orderId, callerHash, p, storedPrice, remaining, takerFilledAccum);
+                _insertIntoBook(orderId, callerHash, p, storedPrice, remaining, takerFilledAccum, opNonce);
             }
         }
 
@@ -921,16 +1012,11 @@ contract OrderBook is Modifiers {
                 _emitPartialFill(orderId, p.clientOrderId, takerFilledAccum, remaining);
             }
         }
-        // Taker fully consumed without resting → release any cid reservation
-        // we made in executeBatch (no _insertIntoBook / _cancelNoBookEntryTo
-        // path took care of it).
-        if (remaining == 0 && p.clientOrderId != 0) {
-            delete _clientOrderIds[callerHash][p.clientOrderId];
-        }
+        // cid lifecycle is owned by PN — nothing to clean up here.
         return (false, 0, 0, false, 0, 0, 0);
     }
 
-    function _doCancel(uint256 callerHash, uint128 orderId) private {
+    function _doCancel(uint256 callerHash, uint128 orderId, uint64 opNonce) private {
         Order o = _orders[orderId];
         if (o.amount == 0 && o.depositHash == 0) return;
         if (o.depositHash != callerHash) return;
@@ -938,12 +1024,12 @@ contract OrderBook is Modifiers {
         uint32 outcomeId = o.outcomeId;
         bool isBuy = o.isBuy;
         uint128 cid = o.clientOrderId;
-        _removeFromBook(orderId);  // also frees _clientOrderIds[depositHash][cid]
+        _removeFromBook(orderId);
         _emitOrderCancelled(orderId, cid);
-        _notifyOrderCancelled(callerHash, orderId, outcomeId, isBuy, returnAmt);
+        _notifyOrderCancelled(callerHash, orderId, outcomeId, isBuy, returnAmt, cid, opNonce);
     }
 
-    function _doCancelAll(uint256 callerHash) private returns (uint32 cancelled) {
+    function _doCancelAll(uint256 callerHash, uint64 opNonce) private returns (uint32 cancelled) {
         cancelled = 0;
         uint128 cur = _ownerHead[callerHash];
         while (cur != 0 && cancelled < MAX_CANCEL_ALL_PER_CALL) {
@@ -953,9 +1039,9 @@ contract OrderBook is Modifiers {
             uint32 outcomeId = o.outcomeId;
             bool isBuy = o.isBuy;
             uint128 cid = o.clientOrderId;
-            _removeFromBook(cur);  // frees cid mapping
+            _removeFromBook(cur);
             _emitOrderCancelled(cur, cid);
-            _notifyOrderCancelled(callerHash, cur, outcomeId, isBuy, returnAmt);
+            _notifyOrderCancelled(callerHash, cur, outcomeId, isBuy, returnAmt, cid, opNonce);
             cancelled++;
             cur = next;
         }
@@ -1005,7 +1091,8 @@ contract OrderBook is Modifiers {
         PlaceParams p,
         uint256 storedPrice,
         uint128 amount,
-        uint128 priorFilledAccum
+        uint128 priorFilledAccum,
+        uint64  opNonce
     ) private {
         uint128 oTail = _ownerTail[callerHash];
         PriceLevel level = _levels[p.outcomeId][p.isBuy][p.epochId][storedPrice];
@@ -1020,6 +1107,7 @@ contract OrderBook is Modifiers {
             filledAccum: priorFilledAccum,
             clientOrderId: p.clientOrderId,
             epochId: p.epochId,
+            opNonce: opNonce,
             outcomeId: p.outcomeId,
             flags: p.flags,
             isBuy: p.isBuy,
@@ -1029,11 +1117,9 @@ contract OrderBook is Modifiers {
             prevInOwner: oTail
         });
 
-        // Bind the cid to the real orderId now that we have one (replaces the
-        // sentinel set at executeBatch validation time).
-        if (p.clientOrderId != 0) {
-            _clientOrderIds[callerHash][p.clientOrderId] = orderId;
-        }
+        // cid lifecycle is owned by PN; OB just stores it on the Order for
+        // event emission.
+        callerHash;
 
         if (priceTail == 0) {
             // First order at this (epoch, price) level
@@ -1062,11 +1148,9 @@ contract OrderBook is Modifiers {
     function _removeFromBook(uint128 orderId) private {
         Order o = _orders[orderId];
 
-        // Free the per-PN clientOrderId slot now that the order is leaving
-        // the book (fully filled / cancelled / shutdown).
-        if (o.clientOrderId != 0) {
-            delete _clientOrderIds[o.depositHash][o.clientOrderId];
-        }
+        // cid lifecycle is owned by PN — OB does not track cid → orderId
+        // anymore, the corresponding cleanup happens on PN side via
+        // onOrderCancelled / onOrderFilled (isFinal) callbacks.
 
         // Price-level FIFO (within order's epoch)
         uint128 prevP = o.prevAtPrice;
@@ -1117,7 +1201,7 @@ contract OrderBook is Modifiers {
 
     /// @notice Variant that takes the resolved PN address directly. Used by
     ///         _doPlace to avoid recomputing the caller's PN address per fill.
-    function _emitOrderPlacedTo(address pn, uint128 orderId, PlaceParams p) private view {
+    function _emitOrderPlacedTo(address pn, uint128 orderId, PlaceParams p, uint64 opNonce) private view {
         uint128 feeReserve = 0;
         uint128 lock = 0;
         if (p.isBuy) {
@@ -1134,7 +1218,7 @@ contract OrderBook is Modifiers {
         emit OrderPlaced{dest: addrExtern}(orderId, p.outcomeId, p.isBuy, p.flags, p.price, p.amount, p.clientOrderId);
         PrivateNote(pn).onOrderPlaced{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_eventId, _oracleListHash, _tokenType, orderId, feeReserve, lock);
+        }(_eventId, _oracleListHash, _tokenType, orderId, feeReserve, lock, p.clientOrderId, p.outcomeId, p.isBuy, p.flags, p.price, p.amount, opNonce);
     }
 
     function _emitOrderCancelled(uint128 orderId, uint128 clientOrderId) private pure {
@@ -1143,29 +1227,27 @@ contract OrderBook is Modifiers {
     }
 
     function _notifyOrderCancelled(
-        uint256 callerHash, uint128 orderId, uint32 outcomeId, bool isBuy, uint128 returnAmt
+        uint256 callerHash, uint128 orderId, uint32 outcomeId, bool isBuy, uint128 returnAmt, uint128 clientOrderId, uint64 opNonce
     ) private view {
         address pn = DexLib.computePrivateNoteAddress(_privateNoteCode, callerHash);
-        _notifyOrderCancelledTo(pn, orderId, outcomeId, isBuy, returnAmt);
+        _notifyOrderCancelledTo(pn, orderId, outcomeId, isBuy, returnAmt, clientOrderId, opNonce);
     }
 
     function _notifyOrderCancelledTo(
-        address pn, uint128 orderId, uint32 outcomeId, bool isBuy, uint128 returnAmt
+        address pn, uint128 orderId, uint32 outcomeId, bool isBuy, uint128 returnAmt, uint128 clientOrderId, uint64 opNonce
     ) private view {
         PrivateNote(pn).onOrderCancelled{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_eventId, _oracleListHash, _tokenType, orderId, outcomeId, isBuy, returnAmt);
+        }(_eventId, _oracleListHash, _tokenType, orderId, outcomeId, isBuy, returnAmt, clientOrderId, opNonce);
     }
 
     function _cancelNoBookEntryTo(
         address pn, uint256 callerHash, uint128 orderId, uint32 outcomeId, bool isBuy,
-        uint128 returnAmt, uint128 clientOrderId
-    ) private {
-        if (clientOrderId != 0) {
-            delete _clientOrderIds[callerHash][clientOrderId];
-        }
+        uint128 returnAmt, uint128 clientOrderId, uint64 opNonce
+    ) private view {
+        callerHash;
         _emitOrderCancelled(orderId, clientOrderId);
-        _notifyOrderCancelledTo(pn, orderId, outcomeId, isBuy, returnAmt);
+        _notifyOrderCancelledTo(pn, orderId, outcomeId, isBuy, returnAmt, clientOrderId, opNonce);
     }
 
     /// @notice Aggregated fill events for MM-friendly subscribers. Emitted
@@ -1191,10 +1273,11 @@ contract OrderBook is Modifiers {
         bool    isBuy,
         uint128 buyerRefund,
         bool    isTaker,
-        bool    isFinal
+        bool    isFinal,
+        uint128 clientOrderId
     ) private {
         address pn = DexLib.computePrivateNoteAddress(_privateNoteCode, pnHash);
-        _processFillTo(pn, orderId, outcomeId, filledAmount, clearingPrice, isBuy, buyerRefund, isTaker, isFinal);
+        _processFillTo(pn, orderId, outcomeId, filledAmount, clearingPrice, isBuy, buyerRefund, isTaker, isFinal, clientOrderId);
     }
 
     function _processFillTo(
@@ -1206,19 +1289,34 @@ contract OrderBook is Modifiers {
         bool    isBuy,
         uint128 buyerRefund,
         bool    isTaker,
-        bool    isFinal
+        bool    isFinal,
+        uint128 clientOrderId
     ) private {
-        uint128 feeRate = isTaker ? TAKER_FEE_RATE : MAKER_FEE_RATE;
         uint128 notional = uint128(
             (uint256(filledAmount) * clearingPrice) / uint256(FULL_PERCENT)
         );
-        uint128 feeAmount = uint128(
-            (uint256(notional) * uint256(feeRate)) / uint256(FEE_DENOMINATOR)
+        // Taker pays the full fee on each fill. Of that fee, MAKER_REBATE_NUM /
+        // MAKER_REBATE_DEN (75%) is rebated to the matched maker; the rest
+        // (25%) is retained as protocol revenue. Maker pays nothing.
+        uint128 takerFee = uint128(
+            (uint256(notional) * uint256(TAKER_FEE_RATE)) / uint256(FEE_DENOMINATOR)
         );
+        uint128 makerRebate = uint128(
+            (uint256(takerFee) * uint256(MAKER_REBATE_NUM)) / uint256(MAKER_REBATE_DEN)
+        );
+
+        // `feeAmount` semantics depend on `isTaker`:
+        //   isTaker=true  → fee debited from taker's reserve / proceeds.
+        //   isTaker=false → rebate credited to the maker's balance.
+        uint128 feeAmount;
         if (isTaker) {
-            _totalTakerFees += feeAmount;
+            feeAmount = takerFee;
+            // Only the protocol share stays in the contract; the rebate share
+            // leaves with the maker on the paired _processFill call.
+            _totalProtocolFees += takerFee - makerRebate;
         } else {
-            _totalMakerFees += feeAmount;
+            feeAmount = makerRebate;
+            _totalMakerRebatesPaid += makerRebate;
         }
 
         address addrExtern = address.makeAddrExtern(OB_ORDER_FILLED, bitCntAddress);
@@ -1226,7 +1324,7 @@ contract OrderBook is Modifiers {
 
         PrivateNote(pn).onOrderFilled{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_eventId, _oracleListHash, _tokenType, outcomeId, filledAmount, clearingPrice, isBuy, buyerRefund, feeAmount, orderId, isFinal);
+        }(_eventId, _oracleListHash, _tokenType, outcomeId, filledAmount, clearingPrice, isBuy, buyerRefund, feeAmount, !isTaker, orderId, isFinal, _numOutcomes, clientOrderId);
     }
 
     // ===== Getters =====
@@ -1237,8 +1335,8 @@ contract OrderBook is Modifiers {
         uint32  tokenType,
         uint128 nextOrderId,
         uint128 orderCount,
-        uint128 totalMakerFees,
-        uint128 totalTakerFees
+        uint128 totalMakerRebatesPaid,
+        uint128 totalProtocolFees
     ) {
         return (
             _eventId,
@@ -1246,13 +1344,21 @@ contract OrderBook is Modifiers {
             _tokenType,
             _nextOrderId,
             uint128(_orderCount),
-            _totalMakerFees,
-            _totalTakerFees
+            _totalMakerRebatesPaid,
+            _totalProtocolFees
         );
     }
 
     function getQueueSize() external view returns (uint8 size) {
         return _queueSize;
+    }
+
+    /// @notice Shutdown-state getter for tests/monitoring.
+    /// @return shuttingDown True once the drain has started.
+    /// @return shutdownPending True once shutdown was queued behind the
+    ///         active-order queue but has not yet been promoted.
+    function getShutdownState() external view returns (bool shuttingDown, bool shutdownPending) {
+        return (_shuttingDown, _shutdownPending);
     }
 
     function getOrder(uint128 orderId) external view returns (
@@ -1296,21 +1402,6 @@ contract OrderBook is Modifiers {
         }
     }
 
-    function getOrderIdByClient(uint256 depositHash, uint128 clientOrderId) external view returns (uint128 orderId) {
-        orderId = _clientOrderIds[depositHash][clientOrderId];
-    }
-
-    function cancelByClientId(uint256 depositIdentifierHash, uint128 clientOrderId) public {
-        require(!_shuttingDown, ERR_ALREADY_CANCELLED);
-        address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
-        require(msg.sender == wallet, ERR_INVALID_SENDER);
-        tvm.accept();
-        ensureBalance();
-        uint128 orderId = _clientOrderIds[depositIdentifierHash][clientOrderId];
-        if (orderId == 0) return;
-        _doCancel(depositIdentifierHash, orderId);
-    }
-
     // ===== Shutdown =====
 
     function shutdown() public {
@@ -1318,17 +1409,28 @@ contract OrderBook is Modifiers {
         tvm.accept();
         ensureBalance();
 
+        // If an order is mid-execution (queue still has entries being matched
+        // across self-calls) defer the drain — the in-flight order must be
+        // allowed to finish before we start cancelling. The next
+        // `_processHeadCore` pass that empties the queue promotes this latch
+        // into a real shutdown self-call. Self-calls during drain bypass this
+        // guard via `_shuttingDown` which is already set.
+        if (_queueSize > 0 && !_shuttingDown) {
+            _shutdownPending = true;
+            return;
+        }
+
         // Latch shutdown on the first call so no new place/cancel may slip in
         // while the contract is draining its order map across self-call passes.
         _shuttingDown = true;
+        _shutdownPending = false;
 
-        uint8 cancelled = 0;
         uint128[] toCancel;
         uint128 i = _shutdownCursor == 0 ? 1 : _shutdownCursor;
-        while (i < _nextOrderId && cancelled < MAX_SHUTDOWN_BATCH) {
+        uint128 start = i;
+        while (i < _nextOrderId && (i - start) < MAX_SHUTDOWN_BATCH) {
             if (_orders[i].amount > 0) {
                 toCancel.push(i);
-                cancelled++;
             }
             i++;
         }
@@ -1342,9 +1444,11 @@ contract OrderBook is Modifiers {
             uint32 outcomeId = o.outcomeId;
             bool isBuy = o.isBuy;
             uint128 cid = o.clientOrderId;
-            _removeFromBook(oid);  // frees cid mapping
+            _removeFromBook(oid);
             _emitOrderCancelled(oid, cid);
-            _notifyOrderCancelled(pnHash, oid, outcomeId, isBuy, returnAmt);
+            // opNonce=0: recipient maker isn't currently busy on THIS event from
+            // their POV — guard their PN `_busy` from accidental clearing.
+            _notifyOrderCancelled(pnHash, oid, outcomeId, isBuy, returnAmt, cid, 0);
         }
 
         if (_orderCount > 0) {
@@ -1352,7 +1456,13 @@ contract OrderBook is Modifiers {
                 value: 1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
             }();
         } else {
-            selfdestruct(ROOT_PN_ADDRESS);
+            // flag 161 = 128 (carry all remaining balance) + 32 (destroy source
+            // once balance hits zero) + 1 (pay msg forward fees separately).
+            // Notifies the PMP that the drain is complete and tears down this
+            // OrderBook in a single action; any residual balance lands in PMP.
+            PMP(_pmpAddress).onOrderBookShutdownComplete{
+                value: 0, flag: 161, dest_dapp_id: ROOT_PN_DAPP_ID
+            }();
         }
     }
 

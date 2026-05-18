@@ -151,6 +151,14 @@ contract PMP is Modifiers {
     /// @notice Whether base pools have been frozen (snapshot taken at stakeEnd)
     bool _frozen;
 
+    /// @notice True between `_ensureFrozen` emitting `onPmpCleanRefund` to the
+    ///         deployer and the deployer PN acknowledging via
+    ///         `confirmRefundReceived`. Gates `splitFullSet` and `mergeFullSet`
+    ///         so that no PN (especially the deployer) can use stale stake
+    ///         data before the refund has been applied. Cleared when the
+    ///         refund callback has been processed by the deployer PN.
+    bool _normRefundPending;
+
     /// @notice Snapshot of _totalPool at freeze time (clean + debt only)
     uint128 _baseTotalPool;
 
@@ -162,6 +170,20 @@ contract PMP is Modifiers {
     ///         denominator for proportional clean payouts.
     uint128 _resolvedWinClean;
 
+    /// @notice Set at resolve when no outcome attracted any stake
+    ///         (`totalWinMass == 0`) but debt bettors exist. While true,
+    ///         `claim()` takes the alternate refund path: debt principals are
+    ///         returned to their owners, while clean / coupon stakes stay
+    ///         forfeit and the residual flows to the creator only after every
+    ///         debt position has been claimed.
+    bool _debtRefundMode;
+
+    /// @notice Outstanding debt principal owed to bettors under
+    ///         `_debtRefundMode`. Initialised to `_totalDebtPool` at resolve;
+    ///         each refund claim decrements it. The PMP self-destructs once
+    ///         this reaches zero (or no debt-claimer is left).
+    uint128 _debtRefundRemaining;
+
     /// @notice Market-level collateral quantum Q used by split/merge.
     uint128 _splitMergeQ;
 
@@ -170,6 +192,48 @@ contract PMP is Modifiers {
 
     /// @notice OrderBook contract code for deployment
     TvmCell _orderBookCode;
+
+    /// @notice True once the OrderBook has finished its shutdown drain and
+    ///         reported back via `onOrderBookShutdownComplete`. Required by
+    ///         `claim()` — blocks payouts until all open orders have been
+    ///         cancelled and their collateral refunded to the owning PNs.
+    bool _orderBookDone;
+
+    /// @notice Cached deterministic OrderBook address — set once in the
+    ///         constructor. Avoids re-hashing the OB stateInit on every
+    ///         PMP↔OB interaction.
+    address _orderBookAddress;
+
+    /// @notice Latches after the very first `OrderBook.shutdown` message has
+    ///         been sent so that subsequent calls to `ensureBalance` (which
+    ///         fires on every entry point) don't spam redundant shutdown
+    ///         messages. Cleared implicitly by `_orderBookDone` taking over.
+    bool _shutdownTriggered;
+
+    /// @notice Defense-in-depth invariant: total collateral currently held by
+    ///         the PMP that is owed back to participants.
+    ///
+    ///         Increments on every collateral inflow:
+    ///           - initial stakes (deployer)             ─ approveEvent
+    ///           - clean / debt stakes                   ─ acceptStake
+    ///           - splitFullSet                          ─ F_use
+    ///         Decrements on every collateral outflow:
+    ///           - cancelStake refunds (clean + debt)    ─ stakeAmount + debtAmount
+    ///           - splitFullSet normalization refund     ─ refundTotal
+    ///           - mergeFullSet                          ─ collateral
+    ///           - resolve creator fee                   ─ _creatorFee
+    ///           - claim winner payout                   ─ payoutClean+Debt+Coupon
+    ///           - claim residual to creator             ─ residual
+    ///
+    ///         Coupon stakes don't move real collateral and are excluded.
+    ///
+    ///         Every outflow is **clamped** to whatever balance is left rather
+    ///         than reverting — the tx always succeeds, but a buggy reward
+    ///         calculation can never withdraw more than was actually deposited.
+    ///         The user gets a smaller (possibly zero) payout instead of the
+    ///         pool over-paying. This keeps the system live even after
+    ///         math drift.
+    uint128 _totalUnclaimedBalance;
 
     /// Events
 
@@ -218,8 +282,9 @@ contract PMP is Modifiers {
     /// @notice Emitted when the event is cancelled by oracle governance.
     event EventCancelled();
 
-    /// @notice Emitted when a PMP is cancelled by oracle.
-    event PMPCancelled();
+    /// @notice Emitted when an oracle event list rejects the PMP before
+    ///         oracle approval is complete (pre-approval termination path).
+    event PMPRejected();
 
     /// @notice Emitted when creator fee is collected at resolution.
     /// @param fee Fee amount credited to deployer.
@@ -253,6 +318,10 @@ contract PMP is Modifiers {
         (TvmCell PrivateNoteCode) = abi.decode(salt, (TvmCell));
         _privateNoteCode = PrivateNoteCode;
         _orderBookCode = orderBookCode;
+        _orderBookAddress = DexLib.computeOrderBookAddress(
+            _privateNoteCode, _orderBookCode,
+            _eventId, _oracleListHash, _tokenType
+        );
         _approved = false;
         _deployer = msg.sender;
         _numOutcomes = 0; // Initialize with 0 outcomes
@@ -279,8 +348,8 @@ contract PMP is Modifiers {
         require(_oracleEventsConfirmed.exists(msg.sender.value), ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
-        address addrExtern = address.makeAddrExtern(PMP_CANCELLED_BY_ORACLE, bitCntAddress);
-        emit PMPCancelled{dest: addrExtern}();
+        address addrExtern = address.makeAddrExtern(PMP_REJECTED_BY_ORACLE, bitCntAddress);
+        emit PMPRejected{dest: addrExtern}();
         
         for ((uint256 key, bool value) : _oracleEventsConfirmed) {
             if (value == true) {
@@ -292,9 +361,14 @@ contract PMP is Modifiers {
             }
         }
 
-        // If no approveEvent was called yet, initial stakes are still locked in PN (_busy set).
-        // Refund the deployer to unblock the note before self-destructing.
-        if (_approvedOracleEvents == 0 && _initialStakes.length > 0) {
+        // Refund the deployer's initial stakes regardless of approval state:
+        //   - Pre-approval (`_approvedOracleEvents == 0`): stakes still in PN's
+        //     `candidateAmount` slot, blocking `_busy`.
+        //   - Post-partial-approval: stakes were committed into `stake.amount[k]`
+        //     by `onInitialStakesAccepted` and `_balance` was reduced; without a
+        //     refund here they'd stay locked in PN forever once the PMP self-
+        //     destructs and the only mutation path disappears.
+        if (_initialStakes.length > 0) {
             uint128 refundTotal = 0;
             for (uint32 i = 0; i < _initialStakes.length; i++) {
                 refundTotal += _initialStakes[i];
@@ -371,6 +445,7 @@ contract PMP is Modifiers {
             }
             _totalPool += initialTotal;
             _totalCleanPool += initialTotal;
+            _totalUnclaimedBalance += initialTotal;
             PrivateNote(_deployer).onInitialStakesAccepted{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
                 _eventId, _oracleListHash, _tokenType, _initialStakes
             );
@@ -378,6 +453,7 @@ contract PMP is Modifiers {
         _oracleEventsConfirmed[msg.sender.value] = true;
         _oracleEventsPubkeys[oraclePubkey] = true;
         if (trustAddr.hasValue()) {
+            require(!_oracleEventsAddress.exists(trustAddr.get()), ERR_ALREADY_INITIALIZED);
             _oracleEventsAddress[trustAddr.get()] = oraclePubkey;
         }
 
@@ -390,10 +466,44 @@ contract PMP is Modifiers {
         }
     }
 
-    /// @notice Ensures minimal native balance for operations
-    function ensureBalance() private pure {
-        if (address(this).balance > MIN_BALANCE) return;
-        gosh.mintshellq(MIN_BALANCE);
+    /// @notice Ensures minimal native balance for operations. Also piggybacks
+    ///         the OrderBook shutdown trigger: once `_resultStart` has elapsed
+    ///         any interaction with the PMP will kick off the drain (idempotent,
+    ///         latched by `_shutdownTriggered`). This avoids a dedicated
+    ///         external trigger method — the book always gets shut down as soon
+    ///         as someone touches the PMP past the result deadline.
+    function ensureBalance() private {
+        if (address(this).balance <= MIN_BALANCE) {
+            gosh.mintshellq(MIN_BALANCE);
+        }
+        triggerOrderBookShutdown();
+    }
+
+    /// @notice Idempotent OrderBook shutdown trigger. Gated by `if` (not
+    ///         `require`) so routine calls don't revert — the drain simply
+    ///         won't start until `_resultStart` is reached, and won't be
+    ///         re-sent once latched or once the OB has reported back.
+    function triggerOrderBookShutdown() private {
+        if (_shutdownTriggered) return;
+        if (_orderBookDone) return;
+        // Before setTimings, `_resultStart == 0` — any block.timestamp is >=0,
+        // so we must explicitly guard against the uninitialised case. Also,
+        // no OrderBook exists until auto-freeze (`_frozen`), so shutting-down
+        // early would send the message to an empty address.
+        if (_resultStart == 0) return;
+        if (!_frozen) return;
+        // Trigger when EITHER the result window has opened, OR the event has
+        // been cancelled by oracle/grace-period — otherwise a cancelled event
+        // would leave the book live and let users keep trading on what is
+        // effectively a refund-only market.
+        if (block.timestamp < _resultStart && !_isCancelled) return;
+
+        _shutdownTriggered = true;
+
+        OrderBook(_orderBookAddress).shutdown{
+            value: 10 vmshell,
+            flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+        }();
     }
 
     /// @notice Computes stakeEnd as 10% of (stakeStart..resultStart).
@@ -415,6 +525,7 @@ contract PMP is Modifiers {
 
         // stakeStart = now on first call (PMP approval)
         if (_stakeStart == 0) {
+            require(resultStart >= uint64(block.timestamp) + MIN_RESULT_GAP, ERR_INVALID_PARAMS);
             _stakeStart = uint64(block.timestamp);
         }
 
@@ -428,11 +539,7 @@ contract PMP is Modifiers {
 
         // OB already alive — propagate the new resultStart so its time-gate stays consistent.
         if (_frozen) {
-            address obAddress = DexLib.computeOrderBookAddress(
-                _privateNoteCode, _orderBookCode,
-                _eventId, _oracleListHash, _tokenType
-            );
-            OrderBook(obAddress).setResultStart{
+            OrderBook(_orderBookAddress).setResultStart{
                 value: 0.1 vmshell,
                 flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
             }(_resultStart);
@@ -447,14 +554,17 @@ contract PMP is Modifiers {
 
     /// @notice Cancels the event
     function cancelEvent() private {
-        require(_approved, ERR_NOT_APPROVED);
+        require(_approvedOracleEvents == _numberOfOracleEvents, ERR_NOT_APPROVED);
         require(!_isCancelled, ERR_ALREADY_CANCELLED);
         // Once an outcome is resolved, claims are open and a cancel must be impossible
         // — otherwise users could double-dip via cancelStake and claim.
         require(!_resolvedOutcome.hasValue(), ERR_ALREADY_RESOLVED);
         tvm.accept();
-        ensureBalance();
         _isCancelled = true;
+        // ensureBalance fires triggerOrderBookShutdown, which now also fires
+        // on `_isCancelled` — so flipping the flag first is required for the
+        // OB drain to start in the same tx as the cancel.
+        ensureBalance();
 
         address addrExtern = address.makeAddrExtern(PMP_EVENT_CANCELLED, bitCntAddress);
         emit EventCancelled{dest: addrExtern}();
@@ -501,10 +611,12 @@ contract PMP is Modifiers {
             _totalCouponPool += stakeAmount;
         } else if (betType == BET_TYPE_CLEAN) {
             _totalCleanPool += stakeAmount;
-            _totalPool += stakeAmount;    
+            _totalPool += stakeAmount;
+            _totalUnclaimedBalance += stakeAmount;
         } else if (betType == BET_TYPE_DEBT) {
             _totalDebtPool += stakeAmount;
-            _totalPool += stakeAmount;    
+            _totalPool += stakeAmount;
+            _totalUnclaimedBalance += stakeAmount;
         }
     
         _typedOutcomePools[outcomeId][betType] += stakeAmount;
@@ -550,6 +662,12 @@ contract PMP is Modifiers {
             cancelEvent();
         }
         require(_isCancelled, ERR_NOT_CANCELLED);
+        // If an OrderBook was deployed (_frozen == true), wait until it has
+        // finished draining all resting orders. Otherwise PN.onStakeCancelled
+        // would delete the stake record while a sell-side resting order is
+        // still on the book, and a later onOrderCancelled callback would have
+        // no stake to credit the released outcome tokens to (silent loss).
+        require(!_frozen || _orderBookDone, ERR_ORDERBOOK_NOT_SHUTDOWN);
 
         address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
@@ -588,6 +706,15 @@ contract PMP is Modifiers {
             }
         }
 
+        // Defense-in-depth: real (clean+debt) refund is clamped to whatever
+        // unclaimed balance the PMP actually has. Coupon refunds are virtual
+        // and excluded. If math drift left us under-reserved, the user gets
+        // back less rather than the pool over-paying.
+        if (totalStake > _totalUnclaimedBalance) {
+            totalStake = _totalUnclaimedBalance;
+        }
+        _totalUnclaimedBalance -= totalStake;
+
         PrivateNote(wallet).onStakeCancelled{
             value: 0.1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
@@ -611,6 +738,22 @@ contract PMP is Modifiers {
     ///      No payout coefficients (creatorFee, couponCoef, debtCoef,
     ///      profitToClean) are frozen here — they are computed at resolve
     ///      from live pools.
+    /// @notice Public entry (incl. external messages) to freeze the pools and
+    ///         deploy the OrderBook once the stake window has ended. Lets
+    ///         traders bootstrap the OB without having to first call
+    ///         split/merge themselves.
+    /// @dev Checks run before tvm.accept() so spam on already-frozen /
+    ///      cancelled / pre-stakeEnd state doesn't burn contract gas.
+    function freezeNow() public {
+        require(!_frozen, ERR_ALREADY_FROZEN);
+        require(_approved, ERR_NOT_APPROVED);
+        require(!_isCancelled, ERR_ALREADY_CANCELLED);
+        require(block.timestamp >= _computeStakeEnd(), ERR_NOT_STAKEEND);
+        tvm.accept();
+        ensureBalance();
+        _ensureFrozen();
+    }
+
     function _ensureFrozen() private {
         if (_frozen) return;
         require(_approved, ERR_NOT_APPROVED);
@@ -649,6 +792,18 @@ contract PMP is Modifiers {
         if (refundTotal > 0) {
             _totalCleanPool -= refundTotal;
             _totalPool      -= refundTotal;
+            // Clamp the normalization refund to whatever unclaimed balance is
+            // left. In normal operation this is always equal — the require
+            // is here purely as a math-drift safety net.
+            if (refundTotal > _totalUnclaimedBalance) {
+                refundTotal = _totalUnclaimedBalance;
+            }
+            _totalUnclaimedBalance -= refundTotal;
+            // Race fix: block split/merge until deployer PN acks the refund
+            // (via `confirmRefundReceived`). Without this, deployer could use
+            // stale stake.amount before refund is applied (e.g. sell or split
+            // tokens that are about to be normalized out of stake).
+            _normRefundPending = true;
             // Update creator's PN: decrement stake.amount[k] and credit balance.
             PrivateNote(_deployer).onPmpCleanRefund{
                 value: 0.1 vmshell,
@@ -693,7 +848,8 @@ contract PMP is Modifiers {
             _splitMergeQ = basketSize;
         }
 
-        // Deploy OrderBook
+        // Deploy OrderBook (address pre-computed in constructor and cached
+        // in `_orderBookAddress`).
         TvmCell stateInit = DexLib.buildOrderBookStateInit(
             _privateNoteCode,
             _orderBookCode,
@@ -706,7 +862,7 @@ contract PMP is Modifiers {
             stateInit: stateInit,
             value: 10 vmshell,
             flag: 1
-        }(tvm.hash(tvm.code()), tvm.code().depth(), _resultStart);
+        }(tvm.hash(tvm.code()), tvm.code().depth(), _resultStart, _numOutcomes);
 
         address addrExtern = address.makeAddrExtern(PMP_POOLS_FROZEN, bitCntAddress);
         emit PoolsFrozen{dest: addrExtern}(_baseTotalPool);
@@ -731,6 +887,10 @@ contract PMP is Modifiers {
         // claim accounting — no further split/merge is permitted.
         require(block.timestamp < _resultStart, ERR_RESULT_NOT_STARTED);
         require(collateral > 0, ERR_LOW_VALUE);
+        // Race fix: deployer must process the normalization refund before any
+        // further pool mutation, else stake.amount may be out of sync with
+        // pools (deployer could use stale amounts).
+        require(!_normRefundPending, ERR_NORM_REFUND_PENDING);
         require(_baseTotalPool > 0, ERR_INVALID_PARAMS);
 
         address wallet = DexLib.computePrivateNoteAddress(
@@ -767,6 +927,7 @@ contract PMP is Modifiers {
         }
         _totalPool += F_use;
         _totalCleanPool += mintedTotal;
+        _totalUnclaimedBalance += F_use;
 
         PrivateNote(wallet).onSplitAccepted{
             value: 0.1 vmshell,
@@ -798,6 +959,9 @@ contract PMP is Modifiers {
         require(block.timestamp < _resultStart, ERR_RESULT_NOT_STARTED);
         require(amount.length == _numOutcomes, ERR_INVALID_OUTCOME_ID);
         require(_baseTotalPool > 0, ERR_INVALID_PARAMS);
+        // Race fix: see splitFullSet — block until normalization refund is
+        // applied by deployer PN.
+        require(!_normRefundPending, ERR_NORM_REFUND_PENDING);
 
         address wallet = DexLib.computePrivateNoteAddress(
             _privateNoteCode,
@@ -852,6 +1016,12 @@ contract PMP is Modifiers {
         // Per spec: _totalPool -= F (full collateral)
         _totalPool -= collateral;
         _totalCleanPool -= burnedTotal;
+        // Clamp the merge collateral refund — pool math is supposed to keep
+        // them equal, but if drift happens, hand back what we can.
+        if (collateral > _totalUnclaimedBalance) {
+            collateral = _totalUnclaimedBalance;
+        }
+        _totalUnclaimedBalance -= collateral;
 
         PrivateNote(wallet).onMergeAccepted{
             value: 0.1 vmshell,
@@ -891,8 +1061,8 @@ contract PMP is Modifiers {
         _totalWinPool     = totalWinMass;
 
         if (totalWinMass == 0) {
-            // No winning stakes — zero out everything; residual collateral
-            // flows to the creator via the claim tail-out path.
+            // No winning stakes — zero out coefficients and reward buckets so
+            // the standard claim path produces nothing.
             _creatorFee         = 0;
             _couponWinCoef      = 0;
             _debtWinCoef        = 0;
@@ -900,6 +1070,16 @@ contract PMP is Modifiers {
             _totalRewardsClean  = 0;
             _totalRewardsDebt   = 0;
             _totalRewardsCoupon = 0;
+            _totalWinPool       = 0;
+
+            // If there are debt-funded losing stakes, refund them — burning a
+            // bettor's principal *and* leaving them with on-PN debt would be
+            // unfair when no winning side ever existed. Clean / coupon stakes
+            // are still forfeit (creator gets the residual after refunds).
+            if (_totalDebtPool > 0) {
+                _debtRefundMode = true;
+                _debtRefundRemaining = _totalDebtPool;
+            }
         } else {
             // Live profit budget: total pool minus principal owed to clean+debt winners.
             uint128 profitBudget = _totalPool > (winClean + winDebt)
@@ -938,10 +1118,19 @@ contract PMP is Modifiers {
                 uint128 baseRealPPU = uint128(
                     (uint256(profitBudget) * FULL_PERCENT) / realWinMass
                 );
-                debtCoef = uint128(
-                    (uint256(baseRealPPU) *
-                     uint256(FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT)) / uint256(FULL_PERCENT)
-                );
+                if (winClean > 0) {
+                    // Standard split: debt winners give up `R%` of their PPU
+                    // so clean winners can absorb it via `_profitToClean`.
+                    debtCoef = uint128(
+                        (uint256(baseRealPPU) *
+                         uint256(FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT)) / uint256(FULL_PERCENT)
+                    );
+                } else {
+                    // No clean winners → no one to receive the redistribution
+                    // share, so debt winners keep the full PPU and `debtPaid`
+                    // (formula 17) stays zero in claim().
+                    debtCoef = baseRealPPU;
+                }
                 debtProfit = uint128(
                     (uint256(winDebt) * uint256(debtCoef)) / FULL_PERCENT
                 );
@@ -956,8 +1145,12 @@ contract PMP is Modifiers {
             _totalRewardsCoupon = couponPaid;
         }
 
-        // Send creator fee to deployer's PrivateNote.
+        // Send creator fee to deployer's PrivateNote — clamped.
+        if (_creatorFee > _totalUnclaimedBalance) {
+            _creatorFee = _totalUnclaimedBalance;
+        }
         if (_creatorFee > 0) {
+            _totalUnclaimedBalance -= _creatorFee;
             PrivateNote(_deployer).acceptFee{
                 value: 0.1 vmshell,
                 flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
@@ -1007,6 +1200,7 @@ contract PMP is Modifiers {
     uint256 depositIdentifierHash
     ) public {
         require(_approved, ERR_NOT_APPROVED);
+        require(_orderBookDone, ERR_ORDERBOOK_NOT_SHUTDOWN);
         require(stakeAmount.length == _numOutcomes, ERR_INVALID_OUTCOME_ID);
         address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
@@ -1019,6 +1213,48 @@ contract PMP is Modifiers {
             }(_eventId, _oracleListHash, _tokenType, _resolvedOutcome, 0, 0, 0, 0);
             return;
         }
+
+        // Alternate path: no winning side at resolve, but debt-funded losers
+        // exist. Refund their principal across all outcomes; clean / coupon
+        // stakes are forfeit and the residual is swept to the deployer once
+        // the last debt position has been claimed.
+        if (_debtRefundMode) {
+            uint128 debtSum = 0;
+            for (uint32 i = 0; i < debtAmount.length; i++) {
+                debtSum += debtAmount[i];
+            }
+            if (debtSum > _debtRefundRemaining) {
+                debtSum = _debtRefundRemaining;
+            }
+            if (debtSum > _totalUnclaimedBalance) {
+                debtSum = _totalUnclaimedBalance;
+            }
+            _debtRefundRemaining -= debtSum;
+            _totalUnclaimedBalance -= debtSum;
+
+            PrivateNote(wallet).onClaimAccepted{
+                value: 0.1 vmshell,
+                flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+            }(_eventId, _oracleListHash, _tokenType, _resolvedOutcome,
+              0, debtSum, 0, 0);
+
+            address addrExternRefund = address.makeAddrExtern(PMP_CLAIM_PROCESSED, bitCntAddress);
+            emit ClaimProcessed{dest: addrExternRefund}(wallet, debtSum, debtSum > 0);
+
+            if (_debtRefundRemaining == 0) {
+                if (_totalUnclaimedBalance > 0) {
+                    uint128 residual = _totalUnclaimedBalance;
+                    _totalUnclaimedBalance = 0;
+                    PrivateNote(_deployer).acceptFee{
+                        value: 0.1 vmshell,
+                        flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+                    }(residual, _tokenType, _eventId, _oracleListHash);
+                }
+                selfdestruct(_deployer);
+            }
+            return;
+        }
+
         uint32 W = _resolvedOutcome.get();
         uint128 payoutClean  = 0;
         uint128 payoutDebt   = 0;
@@ -1042,10 +1278,16 @@ contract PMP is Modifiers {
             payoutDebt = debtAmount[W] + profit;
 
             // Formula 17: debtPaid_i = ⌊(profit · R) / (P - R)⌋
-            debtPaid = uint128(
-                (uint256(profit) * uint256(DEBT_REDISTRIBUTION_PERCENT)) /
-                uint256(FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT)
-            );
+            // Skipped when there are no clean winners — without a redistribution
+            // recipient the debt-share carve-out doesn't apply (resolve() also
+            // gave debt winners the full PPU in that case), so no implicit
+            // debt repayment happens here.
+            if (_resolvedWinClean > 0) {
+                debtPaid = uint128(
+                    (uint256(profit) * uint256(DEBT_REDISTRIBUTION_PERCENT)) /
+                    uint256(FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT)
+                );
+            }
             win = true;
         }
 
@@ -1064,10 +1306,14 @@ contract PMP is Modifiers {
             payoutDebt = _totalRewardsDebt;
             uint128 debtPrincipal = debtAmount.length > W ? debtAmount[W] : 0;
             uint128 newDebtProfit = payoutDebt > debtPrincipal ? payoutDebt - debtPrincipal : 0;
-            debtPaid = uint128(
-                (uint256(newDebtProfit) * uint256(DEBT_REDISTRIBUTION_PERCENT)) /
-                uint256(FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT)
-            );
+            if (_resolvedWinClean > 0) {
+                debtPaid = uint128(
+                    (uint256(newDebtProfit) * uint256(DEBT_REDISTRIBUTION_PERCENT)) /
+                    uint256(FULL_PERCENT - DEBT_REDISTRIBUTION_PERCENT)
+                );
+            } else {
+                debtPaid = 0;
+            }
         }
         _totalRewardsDebt -= payoutDebt;
 
@@ -1077,6 +1323,30 @@ contract PMP is Modifiers {
         _totalRewardsCoupon -= payoutCoupon;
 
         uint128 totalPayout = payoutClean + payoutDebt + payoutCoupon;
+
+        // Defense-in-depth: clamp the payout to the tracked unclaimed
+        // balance. If math drift would have caused an over-pay, the user
+        // gets less (down to 0) instead of the pool leaking funds. We trim
+        // components in order of "speculation" — coupon (free bet), then
+        // debt (redistributed profit), then clean (principal-backed).
+        if (totalPayout > _totalUnclaimedBalance) {
+            uint128 deficit = totalPayout - _totalUnclaimedBalance;
+            uint128 cut;
+            if (deficit > 0 && payoutCoupon > 0) {
+                cut = deficit > payoutCoupon ? payoutCoupon : deficit;
+                payoutCoupon -= cut; deficit -= cut;
+            }
+            if (deficit > 0 && payoutDebt > 0) {
+                cut = deficit > payoutDebt ? payoutDebt : deficit;
+                payoutDebt -= cut; deficit -= cut;
+            }
+            if (deficit > 0 && payoutClean > 0) {
+                cut = deficit > payoutClean ? payoutClean : deficit;
+                payoutClean -= cut; deficit -= cut;
+            }
+            totalPayout = payoutClean + payoutDebt + payoutCoupon;
+        }
+        _totalUnclaimedBalance -= totalPayout;
 
         PrivateNote(wallet).onClaimAccepted{
             value: 0.1 vmshell,
@@ -1106,31 +1376,27 @@ contract PMP is Modifiers {
         }
         if (_totalWinPool == 0) {
             uint128 residual = _totalRewardsClean + _totalRewardsDebt + _totalRewardsCoupon;
+            _totalRewardsClean = 0;
+            _totalRewardsDebt = 0;
+            _totalRewardsCoupon = 0;
+            // Clamp residual sweep to whatever's left in the unclaimed
+            // balance — math-drift safety net (normally `residual` matches
+            // `_totalUnclaimedBalance` at this point).
+            if (residual > _totalUnclaimedBalance) {
+                residual = _totalUnclaimedBalance;
+            }
             if (residual > 0) {
-                _totalRewardsClean = 0;
-                _totalRewardsDebt = 0;
-                _totalRewardsCoupon = 0;
+                _totalUnclaimedBalance -= residual;
                 PrivateNote(_deployer).acceptFee{
                     value: 0.1 vmshell,
                     flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
                 }(residual, _tokenType, _eventId, _oracleListHash);
             }
-            // Shutdown OrderBook: cancel all remaining orders, then OB selfdestructs.
-            address obAddress = DexLib.computeOrderBookAddress(
-                _privateNoteCode,
-                _orderBookCode,
-                _eventId,
-                _oracleListHash,
-                _tokenType
-            );
-            OrderBook(obAddress).shutdown{
-                value: 10 vmshell,
-                flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-            }();
+            // OrderBook was shut down earlier via `triggerOrderBookShutdown` (gate
+            // for `claim` entry). Here we just finalize the PMP itself.
             selfdestruct(_deployer);
         }
     }
-
 
     /// @notice Returns the oracle pubkey from the current message sender.
     ///         Accepts both internal (address-based) and external (pubkey-based) messages.
@@ -1253,10 +1519,11 @@ contract PMP is Modifiers {
                 }
             }
 
-            // If approval never happened, deployer's initial stakes are still
-            // locked in PN (_busy set). Refund before self-destructing — symmetric
-            // with rejectEvent.
-            if (_approvedOracleEvents == 0 && _initialStakes.length > 0) {
+            // Refund the deployer's initial stakes — symmetric with rejectEvent.
+            // Must fire regardless of `_approvedOracleEvents`: post-partial-approval
+            // the stakes are already committed in PN as `stake.amount[k]`, and
+            // without this callback they'd stay locked once the PMP is gone.
+            if (_initialStakes.length > 0) {
                 uint128 refundTotal = 0;
                 for (uint32 i = 0; i < _initialStakes.length; i++) {
                     refundTotal += _initialStakes[i];
@@ -1355,16 +1622,47 @@ contract PMP is Modifiers {
         );
     }
 
+    /// @notice Shutdown-state getter for tests/monitoring.
+    /// @return orderBookDone True once OrderBook has reported completion.
+    /// @return shutdownTriggered True once PMP has fired the first shutdown.
+    function getShutdownState() external view returns (bool orderBookDone, bool shutdownTriggered) {
+        return (_orderBookDone, _shutdownTriggered);
+    }
+
+    /// @notice Returns the safety counter tracking total collateral the PMP
+    ///         currently owes to participants. Useful for tests and external
+    ///         monitors that want to detect math drift before a payout fails.
+    function getUnclaimedBalance() external view returns (uint128) {
+        return _totalUnclaimedBalance;
+    }
+
     /// @notice Returns the OrderBook address for this PMP
     /// @return orderBookAddress Deterministic OrderBook address for this market.
     function getOrderBookAddress() external view returns (address orderBookAddress) {
-        return DexLib.computeOrderBookAddress(
-            _privateNoteCode,
-            _orderBookCode,
-            _eventId,
-            _oracleListHash,
-            _tokenType
-        );
+        return _orderBookAddress;
+    }
+
+    /// @notice Callback from the OrderBook emitted as part of its final
+    ///         self-destruct message (flag 161 — carries balance, deletes
+    ///         source). Flips the gate that `claim()` checks.
+    /// @notice Deployer PN acknowledges receipt and application of the
+    ///         normalization refund. Clears `_normRefundPending`, re-enabling
+    ///         `splitFullSet` / `mergeFullSet`. Auto-called at the tail of
+    ///         `PrivateNote.onPmpCleanRefund`.
+    function confirmRefundReceived(uint256 depositIdentifierHash) public {
+        require(msg.sender == DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash),
+                ERR_INVALID_SENDER);
+        require(msg.sender == _deployer, ERR_INVALID_SENDER);
+        tvm.accept();
+        ensureBalance();
+        _normRefundPending = false;
+    }
+
+    function onOrderBookShutdownComplete() public {
+        require(msg.sender == _orderBookAddress, ERR_INVALID_SENDER);
+        tvm.accept();
+        ensureBalance();
+        _orderBookDone = true;
     }
 
     /// @notice Returns contract name

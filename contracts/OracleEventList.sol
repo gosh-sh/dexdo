@@ -148,7 +148,7 @@ contract OracleEventList is Modifiers {
     function deleteEvent(uint256 eventId) public onlyOwnerPubkey(_oraclePubkey) accept {
         ensureBalance();
         EventInfo eventInfo = _events[eventId];
-        if ((eventInfo.count == 0) || (eventInfo.deadline < block.timestamp)) {
+        if ((eventInfo.count == 0) && (eventInfo.deadline < block.timestamp)) {
             delete _events[eventId];
         }
     } 
