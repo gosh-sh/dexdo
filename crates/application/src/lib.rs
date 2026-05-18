@@ -22,6 +22,7 @@ use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
 use dodex_domain::TimeInForce;
 use num_bigint::BigUint;
+use tracing::error;
 use uuid::Uuid;
 
 /// Per-request authorization state assembled by the HMAC middleware and
@@ -355,8 +356,15 @@ where
                 // be typed (`InvalidMarketOrSymbol` for a miss,
                 // `MarketInconsistent` for blank orderbook etc.) or raw I/O.
                 // Downcast preserves the typed variant; everything else is
-                // an unexpected internal error.
-                err.downcast_ref::<DomainError>().copied().unwrap_or(DomainError::Unexpected)
+                // an unexpected internal error — log the underlying cause
+                // so a 500 on the trading path leaves a breadcrumb for ops
+                // (matches the logging discipline of `get_markets` /
+                // `get_depth` in `services/api`).
+                if let Some(domain) = err.downcast_ref::<DomainError>() {
+                    return *domain;
+                }
+                error!(?err, market_address = %input.market_address.0, "resolve_for_new_order failed (non-domain)");
+                DomainError::Unexpected
             })?;
 
         if status != MarketStatus::Trading {

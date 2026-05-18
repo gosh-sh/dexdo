@@ -31,6 +31,7 @@ use dodex_domain::TerminalKind;
 use dodex_domain::Timings;
 use num_bigint::BigUint;
 use sqlx::PgPool;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct PostgresReadModelRepository {
@@ -327,15 +328,31 @@ impl MarketReadRepository for PostgresReadModelRepository {
             now,
         );
 
+        // `oracle_list_hash` has no CHECK constraint, so a reconciled
+        // row can technically carry NULL or whitespace if the
+        // reconciler hit a partial-write bug. The use case's
+        // `is_empty` check fails closed either way, but logging the
+        // distinction here gives ops a breadcrumb to triage which
+        // reconciler pass dropped the value — without this line a
+        // 503 from the trading path is indistinguishable from a
+        // legitimately blank field. Trim before checking so a
+        // whitespace-only value doesn't slip past `is_empty()` in
+        // the use case.
+        let oracle_list_hash = match row.oracle_list_hash {
+            Some(raw) if !raw.trim().is_empty() => raw,
+            other => {
+                warn!(
+                    pmp_address = %market_address.0,
+                    null = other.is_none(),
+                    "resolve_for_new_order: oracle_list_hash NULL/blank on reconciled row",
+                );
+                String::new()
+            }
+        };
+
         Ok(MarketForPlacement {
             event_id: row.event_id,
-            // `oracle_list_hash` is NULL on pre-reconcile rows; the
-            // WHERE clause already filtered to `last_reconciled_at is
-            // not null` so a NULL here means a reconciler bug. Map to
-            // empty string and let the use case fail closed with
-            // `MarketInconsistent` (same shape `assemble_market` uses
-            // on the read-side path).
-            oracle_list_hash: row.oracle_list_hash.unwrap_or_default(),
+            oracle_list_hash,
             token_type: row.token_type,
             status,
             outcome: Outcome {
@@ -802,9 +819,11 @@ fn assemble_market(
     // `/api/v1/markets` and `/api/v1/depth` do not surface this field
     // and would silently hide an otherwise-valid market. The trading
     // path needs the value populated and enforces that itself in the
-    // application layer (`resolve_market_and_outcome`), so we render
-    // NULL as the empty string here and let the trading-side check
-    // emit `MarketInconsistent` only when an order is being placed.
+    // application layer (`CreateOrderUseCase::execute`'s `is_empty`
+    // check on the `MarketForPlacement` projection produced by
+    // `resolve_for_new_order`), so we render NULL as the empty string
+    // here and let the trading-side check emit `MarketInconsistent`
+    // only when an order is being placed.
     let oracle_list_hash = row
         .oracle_list_hash
         .as_deref()

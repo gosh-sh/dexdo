@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 num-bigint.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 dodex-domain = { path = "../domain" }
 

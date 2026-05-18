@@ -41,8 +41,9 @@ impl BeeDexChainSender {
     /// `place_order_timeout` bounds the per-call wait — `bee_dex::Dex`
     /// itself has no per-request deadline, so a partitioned or hung
     /// gateway would otherwise stall the HTTP worker indefinitely.
-    /// Elapsed surfaces as `DomainError::Unexpected` → 500 with a
-    /// distinctive log line (see `submit_order`).
+    /// Elapsed surfaces as `DomainError::RequestTimeout` → 504 /
+    /// -1007 via `classify_chain_outcome`, matching the retry-with-
+    /// same-coid contract of the HTTP request_timeout hoop.
     pub fn new(endpoints: Vec<String>, place_order_timeout: Duration) -> anyhow::Result<Self> {
         let dex = Dex::new(endpoints)
             .map_err(|err| anyhow::anyhow!("bee_dex::Dex::new failed: {err:?}"))?;
@@ -141,20 +142,34 @@ impl ChainOrderSender for BeeDexChainSender {
         );
 
         let call = self.dex.place_order(&payload.pn_address, params, signer);
-        match timeout(self.place_order_timeout, call).await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(app_err)) => Err(map_bee_dex_error(&app_err)),
-            Err(_elapsed) => {
-                // Gateway did not respond within the configured budget
-                // (`chain.place_order_timeout_ms`). Most often a network
-                // partition or a gateway-side deadlock — log loudly so
-                // ops can correlate with infra metrics, surface as 500.
-                error!(
-                    timeout_ms = self.place_order_timeout.as_millis() as u64,
-                    "bee_dex::Dex::place_order timed out before gateway responded",
-                );
-                Err(DomainError::Unexpected)
-            }
+        let outcome = timeout(self.place_order_timeout, call).await;
+        classify_chain_outcome(outcome, self.place_order_timeout.as_millis() as u64)
+    }
+}
+
+/// Translate the `(timeout, place_order)` result chain into the typed
+/// `DomainError` surface. Lifted out of `submit_order` so the three
+/// arms can be exercised by unit tests against real `bee_dex::AppError`
+/// values — the HTTP integration tests fake `ChainOrderSender`
+/// entirely and would not catch a future refactor that breaks the
+/// wiring between `map_bee_dex_error` and the `submit_order` dispatch.
+fn classify_chain_outcome<T>(
+    outcome: Result<Result<T, AppError>, tokio::time::error::Elapsed>,
+    timeout_ms: u64,
+) -> Result<(), DomainError> {
+    match outcome {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(app_err)) => Err(map_bee_dex_error(&app_err)),
+        Err(_elapsed) => {
+            // Gateway did not respond within the configured budget
+            // (`chain.place_order_timeout_ms`). Most often a network
+            // partition or a gateway-side deadlock. Surface as
+            // `RequestTimeout` (504 / -1007) so the client receives
+            // the same "retry with the same `clientOrderId`" contract
+            // as the HTTP request-timeout hoop — see
+            // `docs/tech-specs/write-api.md §Failure surface`.
+            error!(timeout_ms, "bee_dex::Dex::place_order timed out before gateway responded",);
+            Err(DomainError::RequestTimeout)
         }
     }
 }
@@ -350,6 +365,50 @@ mod tests {
         let mut err = tvm_exit(0);
         err.error_code = Some("not-a-number".into());
         assert_eq!(map_bee_dex_error(&err), DomainError::Unexpected);
+    }
+
+    #[test]
+    fn classify_chain_outcome_ok_passes_through() {
+        let outcome: Result<Result<(), AppError>, tokio::time::error::Elapsed> = Ok(Ok(()));
+        assert!(classify_chain_outcome(outcome, 1_000).is_ok());
+    }
+
+    #[test]
+    fn classify_chain_outcome_pipes_app_error_through_map_bee_dex_error() {
+        // Regression: HTTP-level tests fake `ChainOrderSender` whole,
+        // which means a future refactor that drops the
+        // `map_bee_dex_error` call inside `submit_order` would not
+        // fail any HTTP test. This pin exercises the wiring end-to-end
+        // for the headline chain-side rejects.
+        let cases = [
+            (102u16, DomainError::OrderValidationFailed), // ERR_LOW_VALUE
+            (121, DomainError::OrderPnBusy),              // ERR_NOTE_BUSY
+            (130, DomainError::MarketInconsistent),       // ERR_INVALID_OUTCOME_ID
+            (163, DomainError::PrecisionExceeded),        // ERR_AMOUNT_NOT_LOT_MULTIPLE
+        ];
+        for (code, expected) in cases {
+            let outcome: Result<Result<(), AppError>, tokio::time::error::Elapsed> =
+                Ok(Err(tvm_exit(code)));
+            let result = classify_chain_outcome(outcome, 1_000);
+            assert_eq!(result, Err(expected), "tvm_exit({code}) mismapped");
+        }
+    }
+
+    #[tokio::test]
+    async fn classify_chain_outcome_elapsed_maps_to_request_timeout() {
+        // `tokio::time::error::Elapsed` is non-constructible from
+        // user code, so we obtain a real one by running a 0-duration
+        // timeout against a future that never completes. Pins the
+        // contract: gateway-side hang surfaces as `RequestTimeout`
+        // (504 / -1007), same retry-with-same-coid semantics as the
+        // HTTP-layer request_timeout hoop. Pre-fix this returned
+        // `Unexpected` (500), which tells the client "do not retry".
+        let elapsed = tokio::time::timeout(
+            std::time::Duration::from_millis(0),
+            std::future::pending::<Result<(), AppError>>(),
+        )
+        .await;
+        assert_eq!(classify_chain_outcome(elapsed, 30_000), Err(DomainError::RequestTimeout),);
     }
 
     #[tokio::test]

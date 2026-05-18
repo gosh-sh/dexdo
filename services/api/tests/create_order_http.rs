@@ -75,19 +75,29 @@ impl Authenticator for FakeAuthenticator {
     }
 }
 
-/// `MarketReadRepository` that returns a single configurable market.
+/// `MarketReadRepository` that either returns a single configurable
+/// market or short-circuits `resolve_for_new_order` with a fixed
+/// typed error. The fail-with mode lets tests exercise resolver-side
+/// failure paths (e.g. blank `orderbook_address` → `MarketInconsistent`)
+/// that the `with(market)` path can't synthesise because it builds
+/// `MarketForPlacement` straight from the `Market` struct.
 /// `get_depth` panics — tests that exercise depth must not use this.
 struct FakeRepo {
     market: Mutex<Option<Market>>,
+    resolver_error: Option<DomainError>,
 }
 
 impl FakeRepo {
     fn with(market: Market) -> Self {
-        Self { market: Mutex::new(Some(market)) }
+        Self { market: Mutex::new(Some(market)), resolver_error: None }
     }
 
     fn empty() -> Self {
-        Self { market: Mutex::new(None) }
+        Self { market: Mutex::new(None), resolver_error: None }
+    }
+
+    fn failing_resolver(err: DomainError) -> Self {
+        Self { market: Mutex::new(None), resolver_error: Some(err) }
     }
 }
 
@@ -116,6 +126,9 @@ impl MarketReadRepository for FakeRepo {
         symbol: &Symbol,
         _: i64,
     ) -> Result<MarketForPlacement, anyhow::Error> {
+        if let Some(err) = self.resolver_error {
+            return Err(anyhow::anyhow!(err));
+        }
         let Some(market) = self.market.lock().unwrap().clone() else {
             return Err(anyhow::anyhow!(DomainError::InvalidMarketOrSymbol));
         };
@@ -328,6 +341,64 @@ async fn happy_path_echoes_explicit_client_order_id() {
     assert_eq!(sender.calls()[0].client_order_id, "777");
 }
 
+// ---- LIMIT × TIF happy paths --------------------------------------------
+//
+// The flag-encoding table is unit-tested row-by-row in
+// `dodex_domain::tests::encode_flags_limit_table`. These three pins
+// exercise the same matrix from the HTTP boundary: a request-parsing
+// regression that silently defaulted `timeInForce: "IOC"` to `Gtc`
+// before reaching `encode_order_flags` would still pass the unit
+// test (which calls the encoder directly with the right enum) but
+// would flip the `flags` byte these assertions read off the chain
+// payload.
+
+#[tokio::test]
+async fn limit_ioc_dispatches_with_flag_ioc() {
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingSender::ok());
+    let service = setup_with(repo, sender.clone());
+
+    let mut body = valid_body();
+    body["timeInForce"] = json!("IOC");
+    let mut resp = post_order(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let _: OrderOk = resp.take_json().await.expect("body");
+
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].flags, dodex_domain::FLAG_IOC);
+}
+
+#[tokio::test]
+async fn limit_fok_dispatches_with_flag_fok() {
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingSender::ok());
+    let service = setup_with(repo, sender.clone());
+
+    let mut body = valid_body();
+    body["timeInForce"] = json!("FOK");
+    let mut resp = post_order(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let _: OrderOk = resp.take_json().await.expect("body");
+
+    assert_eq!(sender.calls()[0].flags, dodex_domain::FLAG_FOK);
+}
+
+#[tokio::test]
+async fn limit_post_only_dispatches_with_flag_post_only() {
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingSender::ok());
+    let service = setup_with(repo, sender.clone());
+
+    let mut body = valid_body();
+    body["timeInForce"] = json!("POST_ONLY");
+    let mut resp = post_order(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let _: OrderOk = resp.take_json().await.expect("body");
+
+    assert_eq!(sender.calls()[0].flags, dodex_domain::FLAG_POST_ONLY);
+}
+
 // ---- Error mapping rows --------------------------------------------------
 
 async fn expect_error(service: &Service, body: serde_json::Value, http: StatusCode, code: i32) {
@@ -422,8 +493,35 @@ async fn limit_without_price_returns_1102() {
 
 #[tokio::test]
 async fn unknown_market_returns_1121() {
+    // Covers two indistinguishable-at-HTTP cases the Postgres
+    // resolver bundles into the same `InvalidMarketOrSymbol`
+    // response: (a) no `markets` row exists for `pmp_address`, and
+    // (b) the row exists but `last_reconciled_at IS NULL` (the
+    // `WHERE m.last_reconciled_at is not null` filter in
+    // `resolve_for_new_order` filters those out). The application
+    // contract is identical — 404 / -1121 — and the resolver does
+    // not leak which one happened.
     let service = setup_with(Arc::new(FakeRepo::empty()), Arc::new(RecordingSender::ok()));
     expect_error(&service, valid_body(), StatusCode::NOT_FOUND, -1121).await;
+}
+
+#[tokio::test]
+async fn resolver_inconsistent_returns_1500() {
+    // Covers the resolver-side `MarketInconsistent` paths the
+    // application layer can't synthesise from a populated `Market`
+    // — most notably a reconciled market with a NULL/blank
+    // `orderbook_address` (CHECK constraint says
+    // `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`,
+    // but a whitespace-only string slips past). The companion
+    // `empty_oracle_list_hash_returns_1500` test below covers the
+    // post-resolve `oracle_list_hash` check; this one pins that the
+    // resolver layer's own `MarketInconsistent` also surfaces as
+    // 503 / -1500 at HTTP.
+    let service = setup_with(
+        Arc::new(FakeRepo::failing_resolver(DomainError::MarketInconsistent)),
+        Arc::new(RecordingSender::ok()),
+    );
+    expect_error(&service, valid_body(), StatusCode::SERVICE_UNAVAILABLE, -1500).await;
 }
 
 #[tokio::test]

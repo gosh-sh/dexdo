@@ -562,9 +562,35 @@ pub fn notional_meets_minimum(
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct SensitiveBytes(Vec<u8>);
 
+/// Required byte length of an ed25519 secret key — fixed by the
+/// chain ABI (`tvm_client::crypto::KeyPair.secret` is a 32-byte hex
+/// string upstream). Pinning the length at the construction boundary
+/// (`SensitiveBytes::seckey`) means a corrupted `accounts.pn_seckey_enc`
+/// row or a future migration that drifts the encoding cannot smuggle
+/// a wrong-sized buffer into the chain sender.
+pub const PN_SECKEY_BYTE_LEN: usize = 32;
+
 impl SensitiveBytes {
+    /// General-purpose constructor. Used for variable-length plaintext
+    /// (`api_secret` is HMAC key material with no fixed length under
+    /// the spec). Use [`SensitiveBytes::seckey`] for trading-PN secret
+    /// keys so the 32-byte invariant is checked at the construction
+    /// boundary, not at the chain ABI.
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+
+    /// Wrap a freshly-decrypted ed25519 PN secret key. Enforces
+    /// exactly `PN_SECKEY_BYTE_LEN` bytes; a wrong-sized buffer
+    /// surfaces as `DomainError::Unexpected` so the auth pipeline
+    /// fails closed before the bytes reach `BeeDexChainSender`,
+    /// where a `hex::encode` of a short key would silently produce
+    /// a key that the chain rejects with an unmappable error.
+    pub fn seckey(bytes: Vec<u8>) -> Result<Self, DomainError> {
+        if bytes.len() != PN_SECKEY_BYTE_LEN {
+            return Err(DomainError::Unexpected);
+        }
+        Ok(Self(bytes))
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -624,10 +650,11 @@ pub enum DomainError {
     #[error("unknown order")]
     UnknownOrder,
     /// The read-model row violates a tech-spec invariant (e.g. RESOLVED with
-    /// `frozenAt = null`, CANCELLED with `cancelReason = null`). Per
-    /// docs/tech-spec.md:113 these rows MUST be rejected rather than
-    /// serialized — the indexer is mid-replay and a consistent view is not
-    /// available yet. Surfaces as a 503 so clients know to retry.
+    /// `frozenAt = null`, CANCELLED with `cancelReason = null`). Per the
+    /// invariant-checking contract in `docs/tech-specs/read-api.md`
+    /// these rows MUST be rejected rather than serialized — the
+    /// indexer is mid-replay and a consistent view is not available
+    /// yet. Surfaces as a 503 so clients know to retry.
     #[error("market read-model is temporarily inconsistent")]
     MarketInconsistent,
     /// The request exceeded the per-handler wall-clock budget enforced
@@ -731,6 +758,29 @@ mod tests {
     fn sensitive_bytes_from_vec() {
         let s: SensitiveBytes = vec![0xab, 0xcd].into();
         assert_eq!(s.as_slice(), &[0xab, 0xcd]);
+    }
+
+    #[test]
+    fn sensitive_bytes_seckey_accepts_32_bytes() {
+        let bytes = vec![0u8; PN_SECKEY_BYTE_LEN];
+        let s = SensitiveBytes::seckey(bytes.clone()).expect("32-byte seckey accepted");
+        assert_eq!(s.len(), PN_SECKEY_BYTE_LEN);
+        assert_eq!(s.as_slice(), bytes.as_slice());
+    }
+
+    #[test]
+    fn sensitive_bytes_seckey_rejects_wrong_length() {
+        // ed25519 seckey is exactly 32 bytes; auth.rs decrypts from
+        // `accounts.pn_seckey_enc`, and a row whose plaintext length
+        // drifted from 32 is a service-state bug, not a user error.
+        // Any deviation must surface as `Unexpected` (-1000/500) so
+        // the auth pipeline fails closed before the bytes reach
+        // `BeeDexChainSender::submit_order`.
+        for bad_len in [0usize, 1, 16, 31, 33, 64] {
+            let err = SensitiveBytes::seckey(vec![0u8; bad_len])
+                .expect_err("wrong-length seckey must be rejected at construction");
+            assert_eq!(err, DomainError::Unexpected, "len {bad_len}: wrong variant");
+        }
     }
 
     #[test]

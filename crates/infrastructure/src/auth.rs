@@ -169,18 +169,27 @@ impl Authenticator for PostgresAuthenticator {
 
         // 6. Only decrypt the trading PN key after the signature has
         //    proven the request is from the legitimate api_secret holder.
-        //    Same -1000 semantics as #4 on decrypt failure. Wrapped in
-        //    `SensitiveBytes` at the call site so the plaintext is never
-        //    held bare on the stack.
-        let pn_seckey =
-            SensitiveBytes::new(crypto::open(&self.kek, &row.pn_seckey_enc).map_err(|e| {
-                tracing::error!(
-                    error = ?e,
-                    account_id = %row.account_id,
-                    "auth failed: cannot decrypt pn_seckey_enc",
-                );
-                DomainError::Unexpected
-            })?);
+        //    Same -1000 semantics as #4 on decrypt failure. `SensitiveBytes::seckey`
+        //    enforces the 32-byte ed25519 invariant at the construction
+        //    boundary — a wrong-sized plaintext (corrupted row or schema
+        //    drift) fails closed here rather than smuggling a short key
+        //    into `BeeDexChainSender` where it would surface as an
+        //    unmappable chain reject.
+        let pn_seckey_plain = crypto::open(&self.kek, &row.pn_seckey_enc).map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                account_id = %row.account_id,
+                "auth failed: cannot decrypt pn_seckey_enc",
+            );
+            DomainError::Unexpected
+        })?;
+        let pn_seckey = SensitiveBytes::seckey(pn_seckey_plain).map_err(|err| {
+            tracing::error!(
+                account_id = %row.account_id,
+                "auth failed: pn_seckey plaintext has wrong length",
+            );
+            err
+        })?;
 
         // 7. Parse permissions. Unknown enum labels are skipped with a
         //    warn so a stale binary still serves USER_DATA / TRADE

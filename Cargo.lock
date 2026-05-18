@@ -2161,6 +2161,7 @@ dependencies = [
  "dodex-domain",
  "num-bigint 0.4.6",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
