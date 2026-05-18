@@ -6,6 +6,12 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Read-model** — Postgres tables prepared for API reads. The indexer builds these tables from chain events and contract state; the API reads them instead of querying contracts directly.
 
+**Owner attribution** — the binding between a chain-side order (`orderbook_address`, `order_id`) and the trading PrivateNote address that placed it. `OrderBook.OrderPlaced` does not carry the owner; attribution arrives separately via `PrivateNote.OrderPlacedConfirmed` and is stored in `live_orders.owner_pn_address`.
+
+**Trading PN** — the trading PrivateNote address of an authenticated account. Resolved from the API key by the existing auth hoop and exposed as `ctx.trading_pn.pn_address`.
+
+**Chain time** — `raw_events.created_at_chain` of the event that produced a state transition. Used for response `time` and `updateTime` so they are stable under indexer backlog.
+
 **Market row** — one row in the `markets` table. It represents one PMP contract and is the main source for `/api/v1/markets`.
 
 **Reconciled market** — a market row with `last_reconciled_at IS NOT NULL`. This means the market reconciler has already read the PMP state and filled the fields required for public responses. `/api/v1/markets` hides markets until this is true.
@@ -20,7 +26,7 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 ## Market identity
 
-The backend treats `marketAddress` as the PMP address. `orderBookAddress` is the deterministic address returned by `PMP.getOrderBookAddress()` and is stamped on the first successful reconciler pass — pre-`PoolsFrozen` rows already carry it (migration 0014 enforces the invariant `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL` via a CHECK constraint). The pre-reconcile window between `PMPDeployed` and the first reconciler pass is the only state where the column is legitimately null, and such rows are hidden from the API by the `last_reconciled_at IS NOT NULL` visibility filter. The write-side flow is described in [indexer.md](indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
+The backend treats `marketAddress` as the PMP address. `orderBookAddress` is the deterministic address returned by `PMP.getOrderBookAddress()` and is stamped on the first successful reconciler pass — pre-`PoolsFrozen` rows already carry it. The pre-reconcile window between `PMPDeployed` and the first reconciler pass is the only state where the column is legitimately null, and such rows are hidden from the API by the `last_reconciled_at IS NOT NULL` visibility filter. The write-side flow is described in [indexer.md](indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
 
 ## `/api/v1/markets`
 
@@ -82,7 +88,7 @@ After building the DTO, the API checks the assembled shape against spec invarian
 | EXPIRED requires kind=EXPIRED | spec consistency |
 | TRADING / RESOLVING require `frozen_at` | spec consistency with `frozenAt != null` for post-freeze statuses |
 | `event.eventName` / `event.description` agree across every confirming oracle for one market | Hash invariant `eventId = hash(eventName, description, deadline, outcomeNames)` on chain. Enforced by `aggregate_oracle_events` in `postgres_repo.rs`. |
-| `orderbook_address` is non-blank on every reconciled market | Migration-0014 CHECK pins NOT NULL; `assemble_market` rejects whitespace-only strings that slip past the CHECK so listing/single-market match the depth contract. |
+| `orderbook_address` is non-blank on every reconciled market | DB schema CHECK pins NOT NULL; `assemble_market` rejects whitespace-only strings that slip past the CHECK so listing/single-market match the depth contract. |
 
 The validation works on the *built* DTO rather than the raw row so that downstream silent-elision bugs are caught — for example, an unknown `cancel_reason` string would be parsed to `None` and serialized as `cancelReason: null`; the validator rejects the assembled DTO instead of the raw column being non-null.
 
@@ -144,20 +150,137 @@ Empty string means no OrderBook event has touched this pair yet. The value never
 | Missing `marketAddress` or `symbol` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
 
-## `/api/v1/account`
+## `/api/v1/openOrders`
 
-See [api-spec §Account Balance](../api-spec.md#account-balance) for the public contract. Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
+### Source data
 
-_Implementation tech spec to be filled in._
+The endpoint reads exclusively from [`live_orders`](data-schema.md#live_orders). A row contributes to the response iff all hold:
 
-## `/api/v1/openOrders` (GET)
+- `owner_pn_address = ctx.trading_pn.pn_address` — caller is the owner.
+- `status = 'OPEN'` — neither `FILLED` nor `CANCELLED`.
+- `amount_remaining > 0` — defence-in-depth; an `OPEN` row with zero remainder would be a projector bug.
+- The parent market in [`markets`](data-schema.md#markets) has `last_reconciled_at IS NOT NULL` — pre-reconcile markets are hidden symmetrically with `/api/v1/markets`.
 
-See [api-spec §Current Open Orders](../api-spec.md#current-open-orders) for the public contract.
+The query joins through `markets` and [`market_outcomes`](data-schema.md#market_outcomes) to recover the public identifiers `pmp_address` and `symbol` for each row, plus `price_precision` / `quantity_precision` for scaling. See [§ SQL](#sql) for the two query variants.
 
-_Implementation tech spec to be filled in._
+### Filter resolution
+
+The endpoint accepts three filter shapes (see the public spec for client-facing wording):
+
+| Inputs | Behaviour |
+| --- | --- |
+| neither `marketAddress` nor `symbol` | all-markets query, owner-scoped. |
+| both present | resolve `(marketAddress, symbol)` to `(orderbook_address, outcome_id)` via `markets ⨝ market_outcomes`. If the pair is missing or its market is not reconciled → `DomainError::InvalidMarketOrSymbol` → `-1121` / 404. |
+| exactly one present | `DomainError::MissingParameter` → `-1102` / 400. |
+
+The pair-resolution lookup is a separate SQL round-trip that runs before the main query so the unknown-pair case can be distinguished cleanly from "owner has no orders here". Resolution is bound by `last_reconciled_at IS NOT NULL` so a pair that exists in `markets` but has never reconciled is reported the same way as a pair that does not exist.
+
+### Open-order status mapping
+
+The public `status` enum is derived from row state, not stored:
+
+| Row state | Public `status` |
+| --- | --- |
+| `executed_qty == 0` (i.e., `amount_remaining == amount_initial`) | `NEW` |
+| `executed_qty > 0` | `PARTIALLY_FILLED` |
+
+`FILLED`, `CANCELED`, `REJECTED` rows never reach this code path because they fail the `status = 'OPEN' AND amount_remaining > 0` predicate.
+
+`origQty = scale(amount_initial)`, `executedQty = scale(amount_initial - amount_remaining)`, `price = scale(price)`. Scaling uses `market_outcomes.price_precision` / `quantity_precision`. `timeInForce` is always `GTC`, `type` is always `LIMIT` in v1 (no other combinations are produced by the order-placement path).
+
+### Time fields
+
+`time` and `updateTime` come from `live_orders.chain_created_at` / `chain_updated_at`, not from DB bookkeeping columns. Rationale: DB `created_at` / `updated_at` drift from real chain time during indexer backlog, which is observable to clients and would make pagination cursors non-monotonic across replays.
+
+### Pagination
+
+Cursor-based on `live_orders.placed_chain_order` with a strict `>` comparison.
+`msg_chain_order` is globally unique and lexicographically monotonic by GraphQL gateway
+design, so no tie-breakers are needed. The column is set once by the
+`OrderPlaced` projector via `coalesce` (first-write-wins) and never changes
+on replay or subsequent events, which preserves cursor stability across
+reprojects and fills.
+
+Consequence: between two paginated reads, an order that closes simply
+disappears from later pages; no duplication or skipping is possible.
+`OrderFilled` advances `last_chain_order` and `chain_updated_at` but does
+not modify `placed_chain_order`, so the row’s position in the sort order remains
+fixed.
+
+#### Cursor format
+
+The cursor is the `placed_chain_order` value of the last retained row and is returned verbatim. The server validates only that the value is a non-empty UTF-8 string after trimming whitespace; a corrupted or empty cursor surfaces as `DomainError::MissingParameter` → `-1102` / `400`. A well-formed cursor whose value lexicographically exceeds every open order returns an empty page with `nextCursor: null` and is not treated as an error.
+
+The format is not opaque: clients may read the cursor as a plain string, but they must not parse its internal structure or generate cursors of their own. It should be treated as a token to pass back verbatim.
+
+#### Page-size protocol
+
+- `limit` defaults to `100` when omitted.
+- Valid range is `[1, 500]`. Out-of-range → `-1102` / 400.
+- The SQL query fetches `LIMIT $limit + 1` rows. If `$limit + 1` rows are returned, the last row is omitted from the response and `next_cursor` is built from the row that remains at position `$limit` (the last retained row); otherwise, `next_cursor` is `null`. The `+1` lookahead is the only mechanism by which the server distinguishes between “exactly `$limit` rows remaining” and “more rows available”. Building the cursor from the last retained row ensures that the sentinel row reappears as the first row of the next page (via a strict `>` predicate against a fully included row, never against a hidden one).
+
+### Auth & permissions
+
+`USER_DATA`. Handled by the existing auth hoop:
+
+- `-1003` / 401 for missing or unparseable envelope (`X-DODEX-APIKEY`, `timestamp`, `signature`, `recvWindow`).
+- `-1002` / 401 for unknown / disabled key.
+- `-1002` / 401 for a key without the `USER_DATA` permission. Identical on the wire to a credential rejection — intentional `msg` opacity, see [auth.md](auth.md#authorization-permissions).
+
+The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses `ctx.trading_pn.pn_address` as the `owner_pn_address` filter. No additional permission logic.
+
+### Error mapping
+
+| Condition | `DomainError` | API code | HTTP |
+| --- | --- | --- | --- |
+| Exactly one of `marketAddress` / `symbol` present | `MissingParameter` | `-1102` | 400 |
+| `limit` out of `[1, 500]` | `MissingParameter` | `-1102` | 400 |
+| `cursor` is empty or whitespace-only | `MissingParameter` | `-1102` | 400 |
+| Pair not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
+| Missing / invalid signature / API key / timestamp | upstream auth | `-1003` | 401 |
+| Missing `USER_DATA` permission | upstream auth | `-1002` | 401 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+### SQL
+
+Both variants share the same projection list and the index-aligned predicate `owner_pn_address = $1 AND status = 'OPEN' AND amount_remaining > 0`, which matches the partial index `live_orders_open_owner_idx`. The all-markets variant is selected when no `(orderbook_address, outcome_id)` pair has been resolved; the filtered variant appends the per-outcome predicate.
+
+`chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` are SQL-side heap filters (and are no longer index predicates). They guard against a rare ingestion path in which the GraphQL gateway omits `created_at` on an edge — such rows must not surface through the endpoint (otherwise, the response decoder would fail when mapping `NULL` into `i64`) — while keeping the index independent of the display-only timestamp columns.
+
+The cursor predicate uses a single text comparison against `placed_chain_order`. No tie-breaker columns are required — `msg_chain_order` from the gateway is globally unique. `chain_created_at` / `chain_updated_at` appear in the projection solely to populate the response fields `time` / `updateTime`; the `IS NOT NULL` clauses in the `WHERE` condition are heap filters that suppress rows for which the gateway omitted `created_at` (a rare path that is warn-logged by the projector).
+
+The filtered variant pre-resolves `(orderbook_address, outcome_id)` via a separate query against `markets ⨝ market_outcomes`. That query is likewise gated by `last_reconciled_at IS NOT NULL`.
+
+### Index reliance
+
+The index is partial so it contains only rows the endpoint can return. Cursor lookups become a direct range scan on `placed_chain_order`. The filtered variant adds `orderbook_address = $X AND outcome_id = $Y` as a heap filter on top of the index range; cardinalities per-owner per-pair are expected in the tens, so a heap filter is cheap relative to maintaining a wider composite index.
+
+`chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` is enforced as a SQL-side heap filter rather than an index predicate. The index intentionally tracks only the chain-order key so that advancing `chain_updated_at` on every `OrderFilled` does not cause unnecessary index maintenance.
+
+### Visibility / eventual consistency
+
+Between `OrderBook.OrderPlaced` and `PrivateNote.OrderPlacedConfirmed`, the row exists in `live_orders` with `owner_pn_address = NULL`. The partial index excludes `NULL` owners, so the row contributes to public depth but cannot appear in `/api/v1/openOrders`.
+
+The confirmation event projector attaches the owner; if the confirmation event arrives first, it is deferred and replayed once the OrderBook row exists (via the existing `Deferred → Applied` reprojection mechanism). This window is exposed to clients as an eventual-consistency note in `api-spec.md`; no additional mitigation is provided in v1.
+
+### Test coverage
+
+Three integration suites, all gated on `TEST_DATABASE_URL`:
+
+- `crates/infrastructure/tests/open_orders.rs` — owner scoping, sorting, scaling, the three filter shapes, cursor advance, cursor stability under concurrent fills, `limit` defaults and bounds, invalid cursor.
+- `crates/infrastructure/tests/reprojection.rs` — deferred replay of `OrderPlacedConfirmed`, idempotency when already attributed, chain timestamps written by `OrderPlaced`.
+- `services/api/tests/open_orders_http.rs` — happy path through the production router with the wrapped response, the three error codes (`-1102`, `-1121`, auth), and the pagination round-trip.
 
 ## `/api/v1/allOrders`
 
 See [api-spec §Closed And Canceled Orders](../api-spec.md#closed-and-canceled-orders) for the public contract.
+
+When added it will reuse `live_orders` plus the closed/filled rows the same table already retains (`status IN ('FILLED', 'CANCELLED')`) and a separate index. Time and status filters from the public spec will translate to additional predicates on `chain_updated_at` and `status`.
+
+_Implementation tech spec to be filled in._
+
+## `/api/v1/account`
+
+See [api-spec §Account Balance](../api-spec.md#account-balance) for the public contract. Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
 
 _Implementation tech spec to be filled in._

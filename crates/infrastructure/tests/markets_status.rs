@@ -263,7 +263,7 @@ async fn pending_status_when_reconciled_without_timings() {
     purge_market(&pool, &pmp).await;
     // Mirror what reconciler writes when no TimingsSet has been observed:
     // `last_reconciled_at` populated, `orderbook_address` stamped from the
-    // deterministic getter (migration 0014 CHECK requires it whenever
+    // deterministic getter (the schema CHECK requires it whenever
     // `last_reconciled_at` is set), but `stake_*`/`result_*` left NULL.
     let orderbook = format!("0:{test}_book");
     sqlx::query(
@@ -473,6 +473,16 @@ async fn blank_orderbook_address_fails_closed_in_markets() {
     let orderbook = "   "; // blank — CHECK allows, business contract does not.
 
     purge_market(&pool, &pmp).await;
+    // The blank-orderbook value is shared with
+    // `depth.rs::blank_orderbook_address_fails_closed` (both tests pin the
+    // same CHECK-allows-whitespace gap). The `markets_orderbook_address_unique`
+    // partial index collides whichever test's row was left in the DB by the prior
+    // run. Purging by orderbook_address here scrubs any sibling residue.
+    sqlx::query("delete from markets where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge blank-orderbook residue");
     insert_market(&pool, &pmp, &market_name, orderbook, false, None).await;
 
     let request =

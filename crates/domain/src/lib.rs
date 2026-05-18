@@ -171,10 +171,10 @@ pub struct Terminal {
 pub struct Market {
     pub market_address: MarketAddress,
     /// Deterministic OrderBook address from `PMP.getOrderBookAddress()`,
-    /// stamped on the first reconcile (migration 0014 CHECK constraint
-    /// pins `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT
-    /// NULL`). Always present on markets visible to the API — a NULL or
-    /// blank value at this point is treated as `MarketInconsistent` →
+    /// stamped on the first reconcile (the schema CHECK constraint pins
+    /// `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`).
+    /// Always present on markets visible to the API — a NULL or blank value
+    /// at this point is treated as `MarketInconsistent` →
     /// HTTP 503 by `assemble_market` / depth path. Clients gate trading
     /// availability on `status`, not on this field's presence.
     pub order_book_address: String,
@@ -221,6 +221,39 @@ pub struct DepthSnapshot {
     pub last_update_id: String,
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenOrder {
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
+    pub order_id: String,
+    pub client_order_id: String,
+    pub price: String,
+    pub orig_qty: String,
+    pub executed_qty: String,
+    pub status: OpenOrderStatus,
+    pub time_in_force: TimeInForce,
+    pub order_type: OrderType,
+    pub side: OrderSide,
+    pub time: i64,
+    pub update_time: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OpenOrderStatus {
+    New,
+    PartiallyFilled,
+}
+
+impl OpenOrderStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::New => "NEW",
+            Self::PartiallyFilled => "PARTIALLY_FILLED",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

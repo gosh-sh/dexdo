@@ -13,6 +13,9 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::OpenOrdersCursor;
+use dodex_application::OpenOrdersPage;
+use dodex_application::OpenOrdersQuery;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -22,12 +25,17 @@ use dodex_domain::MarketEvent;
 use dodex_domain::MarketName;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
+use dodex_domain::OpenOrder;
+use dodex_domain::OpenOrderStatus;
 use dodex_domain::OracleEntry;
+use dodex_domain::OrderSide;
+use dodex_domain::OrderType;
 use dodex_domain::Outcome;
 use dodex_domain::PriceLevel;
 use dodex_domain::Symbol;
 use dodex_domain::Terminal;
 use dodex_domain::TerminalKind;
+use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
 use num_bigint::BigUint;
 use sqlx::PgPool;
@@ -130,9 +138,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
         symbol: &Symbol,
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error> {
-        // markets.orderbook_address is nullable in the schema (migration 0001)
-        // because the `PMPDeployed` projector inserts a row before the
-        // reconciler runs. The migration-0014 CHECK constraint pins
+        // markets.orderbook_address is nullable in the schema because the
+        // `PMPDeployed` projector inserts a row before the reconciler runs. The
+        // schema CHECK constraint pins
         // `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`,
         // and the SQL below filters to reconciled rows — so a NULL (or blank)
         // address here is an invariant violation, not a legitimate empty-book
@@ -360,6 +368,142 @@ impl MarketReadRepository for PostgresReadModelRepository {
             },
         })
     }
+
+    async fn list_open_orders(
+        &self,
+        query: &OpenOrdersQuery,
+    ) -> Result<OpenOrdersPage, anyhow::Error> {
+        let target = match &query.market {
+            Some(filter) => {
+                let target: Option<(Option<String>, i32)> = sqlx::query_as(
+                    r#"select m.orderbook_address,
+                              mo.outcome_id
+                         from markets m
+                         join market_outcomes mo on mo.market_id_fk = m.id
+                        where m.pmp_address = $1
+                          and mo.symbol = $2
+                          and m.last_reconciled_at is not null"#,
+                )
+                .bind(filter.market_address.0.as_str())
+                .bind(filter.symbol.0.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .context("resolve openOrders market filter")?;
+
+                let Some((orderbook_address, outcome_id)) = target else {
+                    return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
+                };
+                let Some(orderbook_address) = orderbook_address.and_then(filter_orderbook) else {
+                    return Err(anyhow!(DomainError::MarketInconsistent));
+                };
+                Some((orderbook_address, outcome_id))
+            }
+            None => None,
+        };
+
+        let limit_plus_one = i64::from(query.limit) + 1;
+
+        // The microsecond extraction `(extract(epoch from <timestamptz>) *
+        // 1000000)::bigint` below was once cursor-load-bearing. It now
+        // feeds response fields `time` / `updateTime` only — the cursor
+        // is placed_chain_order (text). Deployment is pinned to PG15+
+        // (Supabase) and PG16 (docker-compose.test.yml); both return
+        // numeric from extract(epoch ...), so the bigint cast is exact.
+        let rows: Vec<OpenOrderRow> = match target {
+            Some((orderbook_address, outcome_id)) => sqlx::query_as(
+                r#"select m.pmp_address as market_address,
+                          mo.symbol as symbol,
+                          lo.order_id::text as order_id,
+                          coalesce(lo.client_order_id, '') as client_order_id,
+                          lo.price::text as price,
+                          lo.amount_initial::text as orig_qty,
+                          greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
+                          lo.is_buy as is_buy,
+                          (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
+                          (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
+                          lo.placed_chain_order as placed_chain_order,
+                          mo.price_precision as price_precision,
+                          mo.quantity_precision as quantity_precision
+                     from live_orders lo
+                     join markets m on m.orderbook_address = lo.orderbook_address
+                     join market_outcomes mo
+                       on mo.market_id_fk = m.id
+                      and mo.outcome_id = lo.outcome_id
+                    where lo.owner_pn_address = $1
+                      and lo.status = 'OPEN'
+                      and lo.amount_remaining > 0
+                      and lo.chain_created_at is not null
+                      and lo.chain_updated_at is not null
+                      and m.last_reconciled_at is not null
+                      and lo.orderbook_address = $2
+                      and lo.outcome_id = $3
+                      and ($4::text is null or lo.placed_chain_order > $4::text)
+                    order by lo.placed_chain_order asc
+                    limit $5"#,
+            )
+            .bind(query.owner_pn_address.as_str())
+            .bind(orderbook_address)
+            .bind(outcome_id)
+            .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
+            .bind(limit_plus_one)
+            .fetch_all(&self.pool)
+            .await
+            .context("select filtered open orders")?,
+            None => sqlx::query_as(
+                r#"select m.pmp_address as market_address,
+                          mo.symbol as symbol,
+                          lo.order_id::text as order_id,
+                          coalesce(lo.client_order_id, '') as client_order_id,
+                          lo.price::text as price,
+                          lo.amount_initial::text as orig_qty,
+                          greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
+                          lo.is_buy as is_buy,
+                          (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
+                          (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
+                          lo.placed_chain_order as placed_chain_order,
+                          mo.price_precision as price_precision,
+                          mo.quantity_precision as quantity_precision
+                     from live_orders lo
+                     join markets m on m.orderbook_address = lo.orderbook_address
+                     join market_outcomes mo
+                       on mo.market_id_fk = m.id
+                      and mo.outcome_id = lo.outcome_id
+                    where lo.owner_pn_address = $1
+                      and lo.status = 'OPEN'
+                      and lo.amount_remaining > 0
+                      and lo.chain_created_at is not null
+                      and lo.chain_updated_at is not null
+                      and m.last_reconciled_at is not null
+                      and ($2::text is null or lo.placed_chain_order > $2::text)
+                    order by lo.placed_chain_order asc
+                    limit $3"#,
+            )
+            .bind(query.owner_pn_address.as_str())
+            .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
+            .bind(limit_plus_one)
+            .fetch_all(&self.pool)
+            .await
+            .context("select all open orders")?,
+        };
+
+        let limit = usize::from(query.limit);
+        let has_more = rows.len() > limit;
+        let mut orders_raw = rows;
+        if has_more {
+            orders_raw.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            orders_raw.last().map(|row| OpenOrdersCursor(row.placed_chain_order.clone()))
+        } else {
+            None
+        };
+
+        let orders =
+            orders_raw.into_iter().map(open_order_from_row).collect::<Result<Vec<_>, _>>()?;
+
+        Ok(OpenOrdersPage { orders, next_cursor })
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -392,6 +536,27 @@ struct DepthLevelRow {
     quantity: String,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct OpenOrderRow {
+    market_address: String,
+    symbol: String,
+    order_id: String,
+    client_order_id: String,
+    price: String,
+    orig_qty: String,
+    executed_qty: String,
+    is_buy: bool,
+    // Microseconds since the epoch — sourced from chain_created_at /
+    // chain_updated_at (timestamptz). The API renders `time` / `updateTime`
+    // in milliseconds by dividing by 1_000 at the boundary. These columns
+    // are display-only; the cursor is built from placed_chain_order.
+    chain_created_at_us: i64,
+    chain_updated_at_us: i64,
+    placed_chain_order: String,
+    price_precision: i32,
+    quantity_precision: i32,
+}
+
 fn filter_orderbook(s: String) -> Option<String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -416,6 +581,44 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
     } else {
         let split = raw.len() - p;
         format!("{}.{}", &raw[..split], &raw[split..])
+    }
+}
+
+fn open_order_from_row(row: OpenOrderRow) -> Result<OpenOrder, anyhow::Error> {
+    let quantity_scale = u32::try_from(row.quantity_precision.max(0)).unwrap_or(0);
+    let status = if decimal_string_is_zero(&row.executed_qty) {
+        OpenOrderStatus::New
+    } else {
+        OpenOrderStatus::PartiallyFilled
+    };
+
+    Ok(OpenOrder {
+        market_address: MarketAddress(row.market_address),
+        symbol: Symbol(row.symbol),
+        order_id: row.order_id,
+        client_order_id: row.client_order_id,
+        price: scale_uint_to_decimal(
+            &row.price,
+            u32::try_from(row.price_precision.max(0)).unwrap_or(0),
+        ),
+        orig_qty: scale_uint_to_decimal(&row.orig_qty, quantity_scale),
+        executed_qty: scale_uint_to_decimal(&row.executed_qty, quantity_scale),
+        status,
+        time_in_force: TimeInForce::Gtc,
+        order_type: OrderType::Limit,
+        side: if row.is_buy { OrderSide::Buy } else { OrderSide::Sell },
+        // The API contract is unix milliseconds; storage and cursor are at
+        // microsecond precision. Truncating div is fine — sub-ms detail is
+        // not exposed externally.
+        time: row.chain_created_at_us / 1_000,
+        update_time: row.chain_updated_at_us / 1_000,
+    })
+}
+
+fn decimal_string_is_zero(s: &str) -> bool {
+    match BigUint::parse_bytes(s.as_bytes(), 10) {
+        Some(v) => v == BigUint::from(0_u8),
+        None => true,
     }
 }
 

@@ -39,7 +39,7 @@ Static collateral-token catalogue. The indexer joins against it when a `PMPDeplo
 | `enabled` | `boolean` | Reserved — not read on the hot path today. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
-Seeded values: `(1, NACKL, 9, ...)`, `(2, SHELL, 9, ...)`, `(3, USDC, 6, ...)` (`migrations/0001:144-146`). Adding a new collateral token is a migration-time change.
+Seeded values: `(1, NACKL, 9, ...)`, `(2, SHELL, 9, ...)`, `(3, USDC, 6, ...)`. Adding a new collateral token is a migration-time change.
 
 ## Indexer infrastructure
 
@@ -51,13 +51,13 @@ The append-only event log. Every message edge the indexer pulls from the GraphQL
 | --- | --- | --- |
 | `id` | `bigserial` PK | Insertion order. Not used for ordering — that's `chain_order` below. |
 | `msg_id` | `text` UNIQUE | Chain-side message id. Prevents duplicate ingestion across overlapping page fetches. |
-| `chain_order` | `text` NOT NULL (added in 0016) | Global lex-sortable chain order from the GraphQL gateway's `msg_chain_order`. The strict-monotonic projection key — `created_at_chain` collides within one second and drifts across shards, so any reproject sweep that ordered on time could apply `OrderFilled` before its parent `OrderPlaced`. Required on every row; edges arriving without it are dropped at ingest. |
+| `chain_order` | `text` NOT NULL | Global lex-sortable chain order from the GraphQL gateway's `msg_chain_order`. The strict-monotonic projection key — `created_at_chain` collides within one second and drifts across shards, so any reproject sweep that ordered on time could apply `OrderFilled` before its parent `OrderPlaced`. Required on every row; edges arriving without it are dropped at ingest. |
 | `created_at_chain` | `timestamptz` | Chain block timestamp from the GraphQL `created_at` field. Kept for diagnostics/analytics only — not load-bearing for ordering. Nullable, preserved as-is. |
-| `src_address` | `text` (nullable per 0002) | Source contract address (the contract that emitted the event). |
-| `dst_address` | `text` (nullable per 0002) | Destination address from the message header. |
-| `event_type` | `text` (nullable per 0002) | `"<ContractKind>.<EventName>"`, e.g. `OrderBook.OrderPlaced`. NULL when decoding failed or the body was not an event message. |
+| `src_address` | `text` | Source contract address (the contract that emitted the event). |
+| `dst_address` | `text` | Destination address from the message header. |
+| `event_type` | `text` | `"<ContractKind>.<EventName>"`, e.g. `OrderBook.OrderPlaced`. NULL when decoding failed or the body was not an event message. |
 | `body_json` | `jsonb` | Raw message body JSON as ingested. |
-| `decoded` | `jsonb` (added in 0003) | ABI-decoded event payload. Filled at ingest time if decoding succeeds; reprojection reuses this — bodies are not re-decoded. |
+| `decoded` | `jsonb` | ABI-decoded event payload. Filled at ingest time if decoding succeeds; reprojection reuses this — bodies are not re-decoded. |
 | `processed_at` | `timestamptz` | Stamped by the projector when the row is `Applied` or `Unknown`. NULL = pending; covered by the reprojection sweep. |
 | `created_at` | `timestamptz` | Indexer ingestion time (wall-clock). |
 
@@ -68,7 +68,7 @@ Indices:
 | `raw_events_event_type_idx` | General `event_type` scans (debug, analytics). |
 | `raw_events_event_type_decoded_idx` (partial, `event_type IS NOT NULL`) | Same scope but optimised for decoded rows. |
 | `raw_events_created_at_chain_idx` (desc) | Time-window queries (analytics only). |
-| `raw_events_chain_order_idx` (added in 0016) | Backs the reproject `ORDER BY chain_order asc`. |
+| `raw_events_chain_order_idx` | Backs the reproject `ORDER BY chain_order asc`. |
 | `raw_events_pending_projection_idx` (partial: `processed_at IS NULL AND event_type IS NOT NULL AND decoded IS NOT NULL`) | Drives reprojection (`crates/infrastructure/src/indexer_repo.rs::reproject_pending`). |
 
 ### `indexer_cursors`
@@ -110,8 +110,8 @@ Each oracle owns a sequence of EventList contracts created by the `Oracle.Oracle
 | `address` | `text` UNIQUE | EventList contract address. |
 | `list_index` | `bigint` | Oracle-local index of the event list. |
 | `created_at` | `timestamptz` | Bookkeeping. |
-| `last_reconcile_failed_at` (added 0011) | `timestamptz` | Stamped when a reconcile attempt fails. Used for backoff and queue ordering. |
-| `reconcile_attempts` (added 0011) | `integer` default `0` | Diagnostic counter for permanently broken EventLists. |
+| `last_reconcile_failed_at` | `timestamptz` | Stamped when a reconcile attempt fails. Used for backoff and queue ordering. |
+| `reconcile_attempts` | `integer` default `0` | Diagnostic counter for permanently broken EventLists. |
 
 Index: `oracle_event_lists_oracle_id_idx` speeds up loading all EventList rows for one oracle.
 
@@ -132,13 +132,13 @@ The actual events inside each EventList. Two writers:
 | `deadline` | `bigint` | Event deadline (unix seconds). |
 | `describe` | `text` | Event description — reconciler-only field. NULL until OracleEventList reconciler runs. |
 | `count` | `numeric(78,0)` | Reserved metadata field from `_events`. |
-| `trust_addr` | `text` | Reconciler-only field. Optional on chain — may stay NULL even after reconciliation (see migration 0012). |
+| `trust_addr` | `text` | Reconciler-only field. Optional on chain — may stay NULL even after reconciliation. |
 | `outcome_names_jsonb` | `jsonb` default `'{}'::jsonb` | Outcome label map (`outcomeId → name`). |
 | `is_deleted` | `boolean` default `false` | Soft-delete flag for events that disappear from the EventList. |
 | `last_seen_at` | `timestamptz` | Updated on every projector pass that touches the row. |
-| `confirmed_pmp_address` (added 0004) | `text` | Set by the `EventConfirmed` event. Links an event to the PMP that markets it. |
-| `confirmed_at` (added 0004) | `timestamptz` | Stamp time (currently wall-clock; see review note in `docs/review-fixes-2026-05-11.md`). |
-| `meta_reconciled_at` (added 0012) | `timestamptz` | Per-row marker — set unconditionally by the OracleEventList reconciler after a successful getter pass, even when `describe`/`trust_addr` come back NULL on chain. Drives the pending-row predicate so legitimately-null fields don't cause infinite re-fetch. |
+| `confirmed_pmp_address` | `text` | Set by the `EventConfirmed` event. Links an event to the PMP that markets it. |
+| `confirmed_at` | `timestamptz` | Stamp time (currently wall-clock; see review note in `docs/review-fixes-2026-05-11.md`). |
+| `meta_reconciled_at` | `timestamptz` | Per-row marker — set unconditionally by the OracleEventList reconciler after a successful getter pass, even when `describe`/`trust_addr` come back NULL on chain. Drives the pending-row predicate so legitimately-null fields don't cause infinite re-fetch. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Indices:
@@ -148,7 +148,7 @@ Indices:
 | `oracle_events_eventlist_id_idx` | Speeds up loading all event rows for one EventList. |
 | `oracle_events_deadline_idx` | Time-window queries. |
 | `oracle_events_confirmed_pmp_idx` (partial: `confirmed_pmp_address IS NOT NULL`) | Reverse-lookup from PMP back to event. |
-| `oracle_events_pending_meta_idx` (partial: `meta_reconciled_at IS NULL`) | Drives the OracleEventList reconciler's pending-row SELECT. Replaced the original `describe IS NULL`-only index in migration 0012. |
+| `oracle_events_pending_meta_idx` (partial: `meta_reconciled_at IS NULL`) | Drives the OracleEventList reconciler's pending-row SELECT. |
 
 ## Read-model — markets
 
@@ -160,27 +160,27 @@ One row per PMP (Prediction Market Pool) contract observed on chain. Discovered 
 | --- | --- | --- |
 | `id` | `bigserial` PK | Internal FK target. |
 | `pmp_address` | `text` UNIQUE | The PMP contract address. Exposed as `marketAddress`. |
-| `market_id` | `text` (nullable per 0005) | Market identifier from `getDetails()`. NULL pre-reconcile. |
-| `name` | `text` (nullable per 0005) | Market display name from `getDetails()`. Surfaces as `marketName`. |
+| `market_id` | `text` | Market identifier from `getDetails()`. NULL pre-reconcile. |
+| `name` | `text` | Market display name from `getDetails()`. Surfaces as `marketName`. |
 | `token_type` | `integer` FK → `ref_tokens(token_type)` | Quote-asset token type. |
 | `token_code` | `text` | Quote-asset code (denormalised from `ref_tokens` for read speed). |
 | `event_id` | `numeric(78,0)` | Oracle event id this market resolves against. |
-| `oracle_list_hash` | `numeric(78,0)` (nullable per 0005) | EventList hash used in OrderBook derivation. NULL pre-reconcile. |
-| `orderbook_address` | `text` (nullable) | The deterministic OrderBook address returned by `PMP.getOrderBookAddress()`. Written by the market reconciler on the first successful pass, including pre-`PoolsFrozen` rows. Nullable only during the pre-reconcile window; migration 0014 enforces `last_reconciled_at IS NULL OR orderbook_address IS NOT NULL`, so every market visible to the API has a non-null `orderBookAddress`. |
+| `oracle_list_hash` | `numeric(78,0)` | EventList hash used in OrderBook derivation. NULL pre-reconcile. |
+| `orderbook_address` | `text` | The deterministic OrderBook address returned by `PMP.getOrderBookAddress()`. Written by the market reconciler on the first successful pass, including pre-`PoolsFrozen` rows. Nullable only during the pre-reconcile window; Predicat  `last_reconciled_at IS NULL OR orderbook_address IS NOT NULL` enforces that every market visible to the API has a non-null `orderBookAddress`. A partial UNIQUE index on `orderbook_address WHERE orderbook_address IS NOT NULL`, pinning the contract-side per-market invariant — `/api/v1/openOrders` joins `live_orders` to `markets` on this column and relies on the at-most-one-row guarantee. |
 | `approved` | `boolean` default `false` | Approval flag from `getDetails()`; flipped to `true` by the `TimingsSet` event. |
 | `is_cancelled` | `boolean` default `false` | On-chain cancellation flag from `getDetails()`. Either this or `cancelled_at` being set is enough to flip the derived status to `CANCELLED`. |
 | `stake_start` / `stake_end` / `result_start` / `result_end` | `bigint` (nullable) | Lifecycle timings (unix seconds). Written only by the `TimingsSet` event; reconciler does **not** touch these (H2 fix). NULL on all four = PENDING. |
 | `num_outcomes` | `integer` default `0` | Outcome count from `getDetails()`. |
-| `oracle_event_lists_json` (added 0005) | `jsonb` | Auxiliary data from the `PMPDeployed` event for outcome-resolution. |
-| `oracle_fee_json` (added 0005) | `jsonb` | Same. |
-| `last_reconciled_at` (added 0005) | `timestamptz` | Stamped by the market reconciler after a successful pass. The public API filters on `last_reconciled_at IS NOT NULL` — markets without this are invisible to clients. |
-| `frozen_at` (added 0006) | `bigint` | Block timestamp of the `PoolsFrozen` event. Required for any post-freeze status (TRADING / RESOLVING / EXPIRED / RESOLVED). |
-| `resolved_at` (added 0006) | `bigint` | Block timestamp of the `PMP.Resolved` event. |
-| `resolved_outcome_id` (added 0006) | `integer` | Winning outcome id. |
-| `cancelled_at` (added 0006) | `bigint` | Block timestamp of the `PMP.PMPCancelled` or `PMP.EventCancelled` event. May also be back-filled to `now()` by the reconciler if the chain flag flipped before the event was replayed. |
-| `cancel_reason` (added 0006) | `text` | `'PMP_CANCELLED'` or `'EVENT_CANCELLED'`. Required when `cancelled_at` is set; the API fails closed (HTTP 503) when CANCELLED is derived without a valid reason. |
-| `last_reconcile_failed_at` (added 0011) | `timestamptz` | Backoff bookkeeping for the market reconciler. |
-| `reconcile_attempts` (added 0011) | `integer` default `0` | Diagnostic counter. |
+| `oracle_event_lists_json` | `jsonb` | Auxiliary data from the `PMPDeployed` event for outcome-resolution. |
+| `oracle_fee_json` | `jsonb` | Same. |
+| `last_reconciled_at` | `timestamptz` | Stamped by the market reconciler after a successful pass. The public API filters on `last_reconciled_at IS NOT NULL` — markets without this are invisible to clients. |
+| `frozen_at` | `bigint` | Block timestamp of the `PoolsFrozen` event. Required for any post-freeze status (TRADING / RESOLVING / EXPIRED / RESOLVED). |
+| `resolved_at` | `bigint` | Block timestamp of the `PMP.Resolved` event. |
+| `resolved_outcome_id` | `integer` | Winning outcome id. |
+| `cancelled_at` | `bigint` | Block timestamp of the `PMP.PMPCancelled` or `PMP.EventCancelled` event. May also be back-filled to `now()` by the reconciler if the chain flag flipped before the event was replayed. |
+| `cancel_reason` | `text` | `'PMP_CANCELLED'` or `'EVENT_CANCELLED'`. Required when `cancelled_at` is set; the API fails closed (HTTP 503) when CANCELLED is derived without a valid reason. |
+| `last_reconcile_failed_at` | `timestamptz` | Backoff bookkeeping for the market reconciler. |
+| `reconcile_attempts` | `integer` default `0` | Diagnostic counter. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Indices:
@@ -191,6 +191,7 @@ Indices:
 | `markets_status_idx` (`approved, is_cancelled`) | Coarse status filters. |
 | `markets_pending_reconcile_idx` (partial: `last_reconciled_at IS NULL`) | Drives the market reconciler's pending-row SELECT. |
 | `markets_terminal_idx` (partial: `resolved_at IS NOT NULL OR cancelled_at IS NOT NULL`) | Terminal-status filters. |
+| `markets_orderbook_address_unique` (partial UNIQUE: `orderbook_address IS NOT NULL`) | Pins the per-market invariant; relied on by `/api/v1/openOrders`'s all-markets join. |
 
 ### `market_outcomes`
 
@@ -216,7 +217,11 @@ Index: `market_outcomes_market_id_fk_idx` speeds up loading all outcome rows for
 
 ### `live_orders`
 
-Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, mutated in place as the `OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Never deleted — FILLED / CANCELLED rows stay for cursor monotonicity (the depth handler reads `max(last_chain_order)` over **all** rows for the `(orderbook, outcome)` pair).
+Per-order read model backing `/api/v1/depth` and account-scoped
+`GET /api/v1/openOrders`. One row per chain-side order, mutated in place as
+`OrderPlaced`, `OrderFilled`, and `OrderCancelled` events arrive. Rows are never
+deleted — `FILLED` / `CANCELLED` entries remain to preserve cursor monotonicity (the depth
+handler reads `max(last_chain_order)` across **all** rows for the `(orderbook, outcome)` pair).
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -225,13 +230,30 @@ Per-order read-model that backs `/api/v1/depth`. One row per chain-side order, m
 | `outcome_id` | `integer` | Which outcome this order is on. |
 | `is_buy` | `boolean` | Side. `true` = bid, `false` = ask. |
 | `price` | `numeric(78,0)` | Order price as the contract emitted it (raw uint256). Scaled to a decimal at API render time. |
+| `amount_initial` | `numeric(78,0)` | Original order quantity from `OrderBook.OrderPlaced`. Used with `amount_remaining` to render `origQty` and `executedQty` in account order endpoints. |
 | `amount_remaining` | `numeric(78,0)` | Quantity still open. Set by the `OrderPlaced` event, decremented by the `OrderFilled` event, zeroed by the `OrderCancelled` event. |
 | `client_order_id` | `text` | Optional client-supplied id. |
+| `owner_pn_address` | `text` | Trading PrivateNote address that owns the order. Initially NULL from `OrderBook.OrderPlaced`; attached by `PrivateNote.OrderPlacedConfirmed` using the event source address. NULL rows can still contribute to public depth, but cannot appear in account-scoped order responses. |
 | `status` | `text` CHECK `IN ('OPEN', 'FILLED', 'CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. |
-| `last_chain_order` | `text` NOT NULL | Chain-order key (`msg_chain_order` from the gateway) of the most recent event that touched this order. Lex-monotonic via `greatest(existing, new)` on every write. Feeds `lastUpdateId` in depth responses as a STRING. |
+| `last_chain_order` | `text` NOT NULL | Chain-order key (`msg_chain_order` from the gateway) of the most recent OrderBook event that touched this order. Lex-monotonic via `greatest(existing, new)` on OrderBook writes. Feeds `lastUpdateId` in depth responses as a STRING. |
+| `chain_created_at` | `timestamptz` | On-chain block time of the originating `OrderBook.OrderPlaced`. Drives `time` in `/api/v1/openOrders`. Display-only. NULL for pre-migration rows. |
+| `chain_updated_at` | `timestamptz` | On-chain block time of the most recent order book event that affected the order — OrderPlaced, OrderFilled, OrderCancelled. Advanced via greatest(...). Drives updateTime in /api/v1/openOrders. Display-only. NULL for pre-migration rows. |
+| `placed_chain_order` | `text not null` | `msg_chain_order` of the `OrderPlaced` event that created the row. First-write-wins (`coalesce` on conflict). Sole sort key + cursor for `/api/v1/openOrders`. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
-Index: `live_orders_open_book_idx` — partial, `(orderbook_address, outcome_id, is_buy, price desc) WHERE status = 'OPEN'`. Sized for the depth query: top-N levels per side per outcome.
+Index: `live_orders_open_book_idx` — partial index on `(orderbook_address, outcome_id, is_buy, price DESC)` with predicate `status = 'OPEN'`. Sized for the depth query: top-N price levels per side and outcome.
+
+Index: `live_orders_open_owner_idx` — partial index on `(owner_pn_address, placed_chain_order)`
+with predicate `owner_pn_address IS NOT NULL AND status = 'OPEN' AND amount_remaining > 0`.
+
+Serves as the seek path for the cursor-based `/api/v1/openOrders` query: a single-
+column lexicographic range scan over `placed_chain_order`. The partial predicate
+confines the index to rows the endpoint can return.
+
+The `chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` conditions
+previously attached to this index were moved into the SQL query as heap filters,
+keeping the index independent of the display-only timestamp columns. This avoids
+unnecessary index maintenance when `chain_updated_at` advances on every `OrderFilled` event.
 
 ### `order_book_snapshots`
 
@@ -248,7 +270,7 @@ Reserved table for cached depth snapshots. Not used by the current depth handler
 
 ## Authentication and credentials
 
-Identity and credential storage for the auth middleware. See [auth.md](./auth.md) for the user model, request-verification pipeline, and error mapping. Introduced by migration `0017_accounts_and_api_keys.sql`.
+Identity and credential storage for the auth middleware. See [auth.md](./auth.md) for the user model, request-verification pipeline, and error mapping.
 
 ### `accounts`
 
@@ -298,4 +320,4 @@ Every schema change ships as a new numbered migration file. Conventions:
 - Partial indices are preferred over full ones for "pending row" predicates; they shrink with reconciliation progress.
 - Add a header comment on every migration explaining *why* the change is needed and which code path requires it. Migrations are read by reviewers and operators as much as the code is.
 
-The full migration set (`migrations/0001_*.sql` … `migrations/0017_*.sql`) is the canonical reference; this document summarises intent but does not replace it.
+The full migration set (`migrations/*.sql`) is the canonical reference; this document summarises intent but does not replace it.

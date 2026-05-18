@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn scale_uint_to_decimal_matches_ref_tokens_seed() {
-        // ref_tokens seed values from migrations/0001_init_read_model.sql:144.
+        // ref_tokens seed values from the initial schema migration.
         // These pin the API-facing min_notional contract: clients use it to
         // validate orders, so a regression here is a public-API regression.
         assert_eq!(scale_uint_to_decimal("1000000", 6), "1.000000"); // USDC

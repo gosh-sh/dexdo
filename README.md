@@ -57,7 +57,7 @@ cargo build --workspace
 ## Lint and format
 
 ```sh
-cargo fmt --check
+cargo +nightly fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
@@ -74,7 +74,7 @@ docker compose -f docker-compose.test.yml up -d --wait
 Tear it down with:
 
 ```sh
-docker compose -f docker-compose.test.yml down
+docker compose -f docker-compose.test.yml down -v
 ```
 
 ## Tests

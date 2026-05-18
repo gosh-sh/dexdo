@@ -6,7 +6,8 @@
 # quoteAsset, tokenType, createdAt, timings|null, event, terminal|null, outcomes[].
 
 @host = http://localhost:8080
-@marketAddress = 0:b286c2c1996fe90fe5ed06679115f8b9be4b3184accfb84ac22308cad5d81a48
+# @host = http://94.156.178.89:8080
+@marketAddress = 0:b0c40ca1723b461a10db39863ab7ee3c9c1a2e73eaefabb456f226d2f4b08779
 
 ### list with defaults: sort=resultStart asc, limit=50
 GET {{host}}/api/v1/markets

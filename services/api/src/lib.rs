@@ -20,6 +20,7 @@ use dodex_application::CreateOrderUseCase;
 use dodex_application::GetDepthQuery;
 use dodex_application::GetDepthUseCase;
 use dodex_application::GetMarketsUseCase;
+use dodex_application::GetOpenOrdersUseCase;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsFilter;
 use dodex_application::MarketsListing;
@@ -31,6 +32,7 @@ use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketEvent;
 use dodex_domain::MarketStatus;
+use dodex_domain::OpenOrder;
 use dodex_domain::OrderSide;
 use dodex_domain::OrderStatus;
 use dodex_domain::OrderType;
@@ -184,6 +186,32 @@ struct DepthResponse {
     last_update_id: String,
     bids: Vec<[String; 2]>,
     asks: Vec<[String; 2]>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenOrderResponse {
+    market_address: String,
+    symbol: String,
+    order_id: String,
+    client_order_id: String,
+    price: String,
+    orig_qty: String,
+    executed_qty: String,
+    status: &'static str,
+    time_in_force: &'static str,
+    #[serde(rename = "type")]
+    order_type: &'static str,
+    side: &'static str,
+    time: i64,
+    update_time: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenOrdersPageResponse {
+    orders: Vec<OpenOrderResponse>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -442,6 +470,71 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
     }))
 }
 
+#[handler]
+async fn get_open_orders(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<OpenOrdersPageResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::UserData)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let market_address = non_empty_query(req, "marketAddress").map(MarketAddress);
+    let symbol = non_empty_query(req, "symbol").map(Symbol);
+    // Map any limit-parse failure to MissingParameter so the documented
+    // -1102 fires for both out-of-range (e.g., 501) and unparseable
+    // (e.g., "abc") inputs. `optional_typed_query` distinguishes them
+    // structurally as InvalidParameter (-1130), which conflicts with the
+    // openOrders error contract.
+    let limit = optional_typed_query::<i64>(req, "limit")
+        .map_err(|_| ApiError::from(DomainError::MissingParameter))?;
+    // Cursor is the lex-comparable placed_chain_order value from a prior
+    // page response. An empty / whitespace-only `?cursor=` is treated as
+    // malformed (-1102 / 400) rather than "no cursor". The use case does
+    // the trim + non-empty check.
+    let cursor = req.query::<String>("cursor");
+
+    let use_case = GetOpenOrdersUseCase::new(state.repo);
+    let page = use_case
+        .execute(&ctx, market_address, symbol, limit, cursor.as_deref())
+        .await
+        .map_err(|err| {
+            if let Some(domain) = err.downcast_ref::<DomainError>() {
+                return ApiError::from(*domain);
+            }
+            error!(?err, "get_open_orders failed");
+            ApiError::from(DomainError::Unexpected)
+        })?;
+
+    Ok(Json(OpenOrdersPageResponse {
+        orders: page.orders.into_iter().map(open_order_to_dto).collect(),
+        next_cursor: page.next_cursor.map(|c| c.0),
+    }))
+}
+
+fn open_order_to_dto(order: OpenOrder) -> OpenOrderResponse {
+    OpenOrderResponse {
+        market_address: order.market_address.0,
+        symbol: order.symbol.0,
+        order_id: order.order_id,
+        client_order_id: order.client_order_id,
+        price: order.price,
+        orig_qty: order.orig_qty,
+        executed_qty: order.executed_qty,
+        status: order.status.as_str(),
+        time_in_force: order.time_in_force.as_str(),
+        order_type: order.order_type.as_str(),
+        side: order.side.as_str(),
+        time: order.time,
+        update_time: order.update_time,
+    }
+}
+
 fn non_empty_query(req: &mut Request, key: &str) -> Option<String> {
     req.query::<String>(key).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -631,7 +724,8 @@ pub fn build_router(state: AppState) -> Router {
             // `NONE`-security per docs/api-spec.md §Endpoint Summary.
             Router::new()
                 .hoop(auth_hoop::authenticate)
-                .push(Router::with_path("api/v1/order").post(create_order)),
+                .push(Router::with_path("api/v1/order").post(create_order))
+                .push(Router::with_path("api/v1/openOrders").get(get_open_orders)),
         )
 }
 

@@ -102,8 +102,20 @@ async fn blank_orderbook_address_fails_closed() {
 
     let pmp = "0:depth_blank_orderbook_pmp";
     let symbol = "DEPTH_BLANK_ORDERBOOK_YES";
+    let blank_orderbook = "   ";
     purge_market(&pool, pmp, symbol).await;
-    insert_market_with_outcome(&pool, pmp, symbol, Some("   ")).await;
+    // The blank-orderbook value is shared with
+    // `markets_status.rs::blank_orderbook_address_fails_closed_in_markets`
+    // (both tests pin the same CHECK-allows-whitespace gap). The
+    // `markets_orderbook_address_unique` partial index
+    // collides whichever test's row was left in the DB by the prior run.
+    // Purging by orderbook_address here scrubs any sibling residue.
+    sqlx::query("delete from markets where orderbook_address = $1")
+        .bind(blank_orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge blank-orderbook residue");
+    insert_market_with_outcome(&pool, pmp, symbol, Some(blank_orderbook)).await;
 
     let err = repo
         .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
@@ -115,12 +127,11 @@ async fn blank_orderbook_address_fails_closed() {
 
 #[tokio::test]
 async fn fresh_orderbook_without_orders_returns_empty_book() {
-    // Legitimate empty-book case after migration 0014: a reconciled market
-    // has its deterministic `orderbook_address` stamped on the first pass,
-    // but no `OrderBook.OrderPlaced` events have landed yet. The depth
-    // response shape (empty bids/asks, `lastUpdateId = ""`) must still work —
-    // it just now stems from "no rows in live_orders" rather than "no
-    // address resolved".
+    // Legitimate empty-book case: a reconciled market has its deterministic
+    // `orderbook_address` stamped on the first pass, but no
+    // `OrderBook.OrderPlaced` events have landed yet. The depth response shape
+    // (empty bids/asks, `lastUpdateId = ""`) must still work — it stems from
+    // "no rows in live_orders" rather than "no address resolved".
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -175,18 +186,22 @@ async fn depth_returns_human_decimal_levels() {
         (false, "616", "5000"), // ask: price 6.16, qty 50.00
     ];
     for (idx, (is_buy, price, amount)) in levels.iter().enumerate() {
+        let chain_order = format!("5f8000000000{:06}", idx);
         sqlx::query(
             r#"insert into live_orders
                    (orderbook_address, order_id, outcome_id, is_buy, price,
-                    amount_remaining, status, last_chain_order)
-               values ($1, $2::numeric, 1, $3, $4::numeric, $5::numeric, 'OPEN', $6)"#,
+                    amount_initial, amount_remaining, status,
+                    last_chain_order, placed_chain_order)
+               values ($1, $2::numeric, 1, $3, $4::numeric,
+                       $5::numeric, $5::numeric, 'OPEN',
+                       $6, $6)"#,
         )
         .bind(orderbook)
         .bind(idx as i64 + 1)
         .bind(*is_buy)
         .bind(*price)
         .bind(*amount)
-        .bind(format!("5f8000000000{:06}", idx))
+        .bind(&chain_order)
         .execute(&pool)
         .await
         .expect("insert live_orders");
@@ -264,9 +279,11 @@ async fn last_update_id_is_scoped_per_outcome() {
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, status, last_chain_order)
-           values ($1, 1::numeric, 2, true, 500::numeric, 100::numeric,
-                   'OPEN', $2)"#,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, 1::numeric, 2, true, 500::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   $2, $2)"#,
     )
     .bind(orderbook)
     .bind(no_chain_order)
@@ -290,4 +307,83 @@ async fn last_update_id_is_scoped_per_outcome() {
         .await
         .expect("get_depth NO");
     assert_eq!(no_depth.last_update_id, no_chain_order);
+}
+
+#[tokio::test]
+async fn depth_aggregates_across_owners_into_single_level() {
+    // Depth is global (all open orders) and per-price aggregated. Two
+    // regressions could deanonymize it:
+    //   (1) adding `owner_pn_address` to GROUP BY would split same-price
+    //       orders by owner, letting a client count distinct owners at a
+    //       price level by counting same-price entries;
+    //   (2) adding `owner_pn_address IS NOT NULL` to WHERE would hide rows
+    //       in the eventual-consistency window between OrderBook.OrderPlaced
+    //       and PrivateNote.OrderPlacedConfirmed (read-api.md §
+    //       "Visibility / eventual consistency").
+    // This test pins both invariants: three bid orders at the same price —
+    // one with owner A, one with owner B, one with NULL owner — must
+    // collapse into a single PriceLevel whose quantity is the sum.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_cross_owner_aggregation_pmp";
+    let symbol = "DEPTH_CROSS_OWNER_AGG_YES";
+    let orderbook = "0:depth_cross_owner_aggregation_book";
+    purge_market(&pool, pmp, symbol).await;
+    sqlx::query("delete from live_orders where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge live_orders");
+    insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
+
+    // Three bids at the SAME raw price (500 → "5.00"), three owner states:
+    //   owner A:    raw amount 100 → "1.00"
+    //   owner B:    raw amount 200 → "2.00"
+    //   NULL owner: raw amount 300 → "3.00"
+    // Aggregated quantity = 600 → "6.00".
+    let rows: [(i64, Option<&str>, &str); 3] = [
+        (1, Some("0:depth_cross_owner_a"), "100"),
+        (2, Some("0:depth_cross_owner_b"), "200"),
+        (3, None, "300"),
+    ];
+    for (order_id, owner, amount) in rows {
+        let chain_order = format!("5f8000000000{:06}", order_id);
+        sqlx::query(
+            r#"insert into live_orders
+                   (orderbook_address, order_id, outcome_id, is_buy, price,
+                    amount_initial, amount_remaining, owner_pn_address, status,
+                    last_chain_order, placed_chain_order)
+               values ($1, $2::numeric, 1, true, 500::numeric,
+                       $3::numeric, $3::numeric, $4, 'OPEN',
+                       $5, $5)"#,
+        )
+        .bind(orderbook)
+        .bind(order_id)
+        .bind(amount)
+        .bind(owner)
+        .bind(&chain_order)
+        .execute(&pool)
+        .await
+        .expect("insert live_orders");
+    }
+
+    let depth = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect("get_depth");
+
+    assert_eq!(
+        depth.bids.len(),
+        1,
+        "same-price orders from different owners must aggregate into one level"
+    );
+    assert_eq!(depth.bids[0].price, "5.00");
+    assert_eq!(
+        depth.bids[0].quantity, "6.00",
+        "level quantity must include ALL same-price open orders \
+         (owner A 1.00 + owner B 2.00 + NULL-owner 3.00 = 6.00); a regression \
+         that filters by owner or groups by owner would change this sum"
+    );
+    assert!(depth.asks.is_empty());
 }

@@ -57,6 +57,9 @@ pub async fn project_event(
         "OrderBook.OrderCancelled" => {
             apply_order_cancelled(tx, event, node).await.with_context(context)
         }
+        "PrivateNote.OrderPlacedConfirmed" => {
+            apply_order_placed_confirmed(tx, event, node).await.with_context(context)
+        }
         // Observability-only OrderBook events; state of the book does not change.
         "OrderBook.PartialFill"
         | "OrderBook.FullyFilled"
@@ -484,22 +487,61 @@ async fn apply_order_placed(
     let client_order_id = field_str(&event.value, "clientOrderId").ok().map(String::from);
     let chain_order = node_chain_order(node, "OrderPlaced")?;
 
+    // chain_created_at / chain_updated_at survive sub-second precision via
+    // to_timestamp(::double precision). They are display-only — the primary
+    // sort key for /api/v1/openOrders is placed_chain_order (bound from
+    // chain_order, $8), which is globally unique and lex-monotonic by
+    // gateway design. node.created_at collides on a shared chain second
+    // and is not safe as a sort key.
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    if chain_seconds.is_none() {
+        // The row will land with NULL `chain_created_at` and stay invisible
+        // to `/openOrders` because of the partial-index predicate. The path
+        // is documented as rare; surface it so we notice if it stops being.
+        warn!(
+            orderbook_address,
+            msg_id = %node.msg_id,
+            created_at = ?node.created_at,
+            "OrderPlaced has no parseable chain time; live_orders row will be \
+             hidden from /openOrders by the chain_created_at IS NOT NULL heap \
+             filter. placed_chain_order is unaffected (chain_order is NOT NULL).",
+        );
+    }
+
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, client_order_id, status, last_chain_order,
+                amount_initial, amount_remaining, client_order_id, status, last_chain_order,
+                chain_created_at, chain_updated_at,
+                placed_chain_order,
                 updated_at)
            values ($1, $2::numeric, $3, $4, $5::numeric,
-                   $6::numeric, $7, 'OPEN', $8, now())
+                   $6::numeric, $6::numeric, $7, 'OPEN', $8,
+                   to_timestamp($9::double precision), to_timestamp($9::double precision),
+                   $8,
+                   now())
            on conflict (orderbook_address, order_id) do update
                set outcome_id = excluded.outcome_id,
                    is_buy = excluded.is_buy,
                    price = excluded.price,
+                   amount_initial = excluded.amount_initial,
                    amount_remaining = excluded.amount_remaining,
                    client_order_id = excluded.client_order_id,
                    status = 'OPEN',
                    last_chain_order = greatest(live_orders.last_chain_order,
                                                excluded.last_chain_order),
+                   -- `chain_created_at` is the order's moment of birth and
+                   -- must never move once set. `least(...)` would let a
+                   -- replay carrying an earlier chain time pull the value
+                   -- backward; pagination cursors and the API contract
+                   -- both rely on the timestamp staying fixed. Use
+                   -- `coalesce` for first-write-wins.
+                   chain_created_at = coalesce(live_orders.chain_created_at,
+                                               excluded.chain_created_at),
+                   chain_updated_at = greatest(live_orders.chain_updated_at,
+                                               excluded.chain_updated_at),
+                   placed_chain_order = coalesce(live_orders.placed_chain_order,
+                                                 excluded.placed_chain_order),
                    updated_at = now()"#,
     )
     .bind(orderbook_address)
@@ -510,11 +552,70 @@ async fn apply_order_placed(
     .bind(&amount)
     .bind(client_order_id)
     .bind(chain_order)
+    .bind(chain_seconds)
     .execute(&mut **tx)
     .await
-    .context("upsert live_orders on OrderPlaced")?;
+    .context("upsert live_orders for OrderBook.OrderPlaced")?;
 
     Ok(ProjectionOutcome::Applied)
+}
+
+async fn apply_order_placed_confirmed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let owner_pn_address =
+        node.src.as_deref().context("OrderPlacedConfirmed: src missing on event message")?;
+    let orderbook_address = field_str(&event.value, "orderBook")?;
+    let order_id = uint_field_to_decimal(&event.value, "orderId")?;
+
+    let updated = sqlx::query(
+        r#"update live_orders
+              set owner_pn_address = $3,
+                  updated_at = now()
+            where orderbook_address = $1
+              and order_id = $2::numeric
+              and owner_pn_address is null"#,
+    )
+    .bind(orderbook_address)
+    .bind(&order_id)
+    .bind(owner_pn_address)
+    .execute(&mut **tx)
+    .await
+    .context("attach owner_pn_address on OrderPlacedConfirmed")?
+    .rows_affected();
+
+    if updated > 0 {
+        return Ok(ProjectionOutcome::Applied);
+    }
+
+    // Either the row doesn't exist yet (defer and retry once OrderPlaced lands)
+    // or it already has an owner attached (idempotent no-op).
+    let row_exists: bool = sqlx::query_scalar(
+        r#"select exists(
+               select 1 from live_orders
+                where orderbook_address = $1 and order_id = $2::numeric
+           )"#,
+    )
+    .bind(orderbook_address)
+    .bind(&order_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("check live_orders row existence for OrderPlacedConfirmed")?;
+
+    if row_exists {
+        Ok(ProjectionOutcome::Applied)
+    } else {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            owner_pn_address,
+            msg_id = %node.msg_id,
+            "OrderPlacedConfirmed observed before OrderPlaced; deferring"
+        );
+        Ok(ProjectionOutcome::Deferred)
+    }
 }
 
 async fn apply_order_filled(
@@ -527,15 +628,15 @@ async fn apply_order_filled(
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let filled_amount = uint_field_to_decimal(&event.value, "filledAmount")?;
     let chain_order = node_chain_order(node, "OrderFilled")?;
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
 
     let updated = sqlx::query(
         r#"update live_orders
-              set amount_remaining = greatest(amount_remaining - $3::numeric, 0),
-                  status = case
-                      when amount_remaining - $3::numeric <= 0 then 'FILLED'
-                      else status
-                  end,
+              set amount_remaining = greatest(amount_remaining - $3::numeric, 0::numeric),
+                  status = case when amount_remaining - $3::numeric <= 0
+                                then 'FILLED' else status end,
                   last_chain_order = greatest(last_chain_order, $4),
+                  chain_updated_at = greatest(chain_updated_at, to_timestamp($5::double precision)),
                   updated_at = now()
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
@@ -543,9 +644,10 @@ async fn apply_order_filled(
     .bind(&order_id)
     .bind(&filled_amount)
     .bind(chain_order)
+    .bind(chain_seconds)
     .execute(&mut **tx)
     .await
-    .context("update live_orders on OrderFilled")?
+    .context("apply OrderFilled")?
     .rows_affected();
 
     if updated == 0 {
@@ -569,21 +671,24 @@ async fn apply_order_cancelled(
         node.src.as_deref().context("OrderCancelled: src missing on event message")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let chain_order = node_chain_order(node, "OrderCancelled")?;
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
 
     let updated = sqlx::query(
         r#"update live_orders
               set status = 'CANCELLED',
                   amount_remaining = 0,
                   last_chain_order = greatest(last_chain_order, $3),
+                  chain_updated_at = greatest(chain_updated_at, to_timestamp($4::double precision)),
                   updated_at = now()
             where orderbook_address = $1 and order_id = $2::numeric"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
     .bind(chain_order)
+    .bind(chain_seconds)
     .execute(&mut **tx)
     .await
-    .context("update live_orders on OrderCancelled")?
+    .context("apply OrderCancelled")?
     .rows_affected();
 
     if updated == 0 {

@@ -160,6 +160,13 @@ impl MarketReadRepository for FakeRepo {
             outcome,
         })
     }
+
+    async fn list_open_orders(
+        &self,
+        _: &dodex_application::OpenOrdersQuery,
+    ) -> Result<dodex_application::OpenOrdersPage, anyhow::Error> {
+        unimplemented!("list_open_orders is not exercised by create_order_http tests")
+    }
 }
 
 /// `ChainOrderSender` that records every payload it sees, or fails

@@ -347,9 +347,11 @@ async fn orderfilled_deferred_replays_after_orderplaced() {
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
-                amount_remaining, status, last_chain_order)
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
            values ($1, $2::numeric, 1, true, 100::numeric,
-                   100::numeric, 'OPEN', '5f800000000000000001')"#,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000001', '5f800000000000000001')"#,
     )
     .bind(&orderbook_addr)
     .bind(order_id)
@@ -378,4 +380,609 @@ async fn orderfilled_deferred_replays_after_orderplaced() {
         "deferred OrderFilled must subtract filledAmount from amount_remaining once replayed"
     );
     assert_eq!(row.1, "OPEN", "partial fill must keep the order OPEN");
+}
+
+#[tokio::test]
+async fn orderplaced_confirmed_deferred_replays_and_attaches_owner() {
+    // Private account reads depend on the PN confirmation event to attach
+    // ownership to the public OrderBook row. If the confirmation arrives first
+    // it must defer, then replay once OrderPlaced creates the live_orders row.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_deferred_orderplaced_confirmed";
+    let owner_pn = format!("0:{test}_owner");
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "77";
+    let msg_id = format!("{test}-confirm-msg");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    let decoded = json!({
+        "orderBook": orderbook_addr,
+        "orderId": order_id,
+    });
+    insert_raw(&pool, &msg_id, &owner_pn, "PrivateNote.OrderPlacedConfirmed", &decoded).await;
+
+    repo.reproject_pending(1000).await.expect("reproject pass 1");
+    assert!(
+        !processed_at_is_set(&pool, &msg_id).await,
+        "deferred OrderPlacedConfirmed must keep processed_at null until the order exists"
+    );
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 100::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000077', '5f800000000000000077')"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    repo.reproject_pending(1000).await.expect("reproject pass 2");
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "processed_at must be stamped once the owner attachment applies"
+    );
+
+    let owner: Option<String> = sqlx::query_scalar(
+        "select owner_pn_address from live_orders
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read owner");
+    assert_eq!(owner.as_deref(), Some(owner_pn.as_str()));
+}
+
+#[tokio::test]
+async fn orderplaced_sets_chain_timestamps_from_event_time() {
+    // Locks in the contract that apply_order_placed reads chain time off the
+    // EventNode rather than using `now()`. The API's openOrders.time / .updateTime
+    // depend on these columns being set at projection time.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_chain_ts";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "11";
+    let msg_id = format!("{test}-msg");
+    let chain_seconds: i64 = 1_700_555_000;
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::bigint), $4, $4,
+                   'OrderBook.OrderPlaced', '{}'::jsonb, $5)"#,
+    )
+    .bind(&msg_id)
+    .bind(format!("5f80{msg_id:0>28}"))
+    .bind(chain_seconds)
+    .bind(&orderbook_addr)
+    .bind(json!({
+        "orderId": order_id,
+        "outcomeId": "1",
+        "isBuy": true,
+        "price": "100",
+        "amount": "50",
+        "clientOrderId": "client-chain-ts",
+    }))
+    .execute(&pool)
+    .await
+    .expect("insert raw_events");
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let (chain_created_ms, chain_updated_ms): (i64, i64) = sqlx::query_as(
+        r#"select (extract(epoch from chain_created_at) * 1000)::bigint,
+                  (extract(epoch from chain_updated_at) * 1000)::bigint
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read chain ts");
+
+    assert_eq!(chain_created_ms, chain_seconds * 1000);
+    assert_eq!(chain_updated_ms, chain_seconds * 1000);
+}
+
+#[tokio::test]
+async fn orderplaced_preserves_fractional_chain_seconds() {
+    // Regression: `chain_seconds` used to be truncated to `i64` before the
+    // bind, losing the millisecond component of fractional chain times the
+    // gateway already round-trips. The projector now binds the full f64.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_chain_ts_fractional";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "12";
+    let msg_id = format!("{test}-msg");
+    let chain_seconds: f64 = 1_700_555_000.5;
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::double precision), $4, $4,
+                   'OrderBook.OrderPlaced', '{}'::jsonb, $5)"#,
+    )
+    .bind(&msg_id)
+    .bind(format!("5f80{msg_id:0>28}"))
+    .bind(chain_seconds)
+    .bind(&orderbook_addr)
+    .bind(json!({
+        "orderId": order_id,
+        "outcomeId": "1",
+        "isBuy": true,
+        "price": "100",
+        "amount": "50",
+        "clientOrderId": "client-frac",
+    }))
+    .execute(&pool)
+    .await
+    .expect("insert raw_events");
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let (chain_created_ms, chain_updated_ms): (i64, i64) = sqlx::query_as(
+        r#"select (extract(epoch from chain_created_at) * 1000)::bigint,
+                  (extract(epoch from chain_updated_at) * 1000)::bigint
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read chain ts");
+
+    assert_eq!(chain_created_ms, 1_700_555_000_500);
+    assert_eq!(chain_updated_ms, 1_700_555_000_500);
+}
+
+#[tokio::test]
+async fn orderplaced_chain_created_at_is_first_write_wins() {
+    // Regression: the ON CONFLICT clause used `least(...)` which lets a
+    // replay carrying an earlier chain time pull `chain_created_at`
+    // backward, violating the moment-of-birth invariant the cursor and
+    // API contract assume. The projector now uses `coalesce(live, new)`
+    // so the first write sticks.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_first_write_wins";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "33";
+    let msg_id_first = format!("{test}-amsg");
+    let msg_id_replay = format!("{test}-zmsg");
+    let original_seconds: i64 = 1_700_000_500;
+    let earlier_seconds: i64 = 1_700_000_100;
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_first.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_replay.as_str()),
+        ],
+    )
+    .await;
+
+    // First event: legitimate OrderPlaced establishes chain_created_at.
+    insert_raw_with_ts(
+        &pool,
+        &msg_id_first,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        original_seconds,
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "c",
+        }),
+    )
+    .await;
+
+    // Replay with an EARLIER chain time. `least(...)` would have moved
+    // chain_created_at to `earlier_seconds`; `coalesce` keeps the original.
+    insert_raw_with_ts(
+        &pool,
+        &msg_id_replay,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        earlier_seconds,
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "c",
+        }),
+    )
+    .await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let chain_created_ms: i64 = sqlx::query_scalar(
+        r#"select (extract(epoch from chain_created_at) * 1000)::bigint
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read chain_created_at");
+
+    assert_eq!(
+        chain_created_ms,
+        original_seconds * 1000,
+        "chain_created_at must stay pinned to the first write; replays cannot move it backward"
+    );
+}
+
+#[tokio::test]
+async fn orderplaced_placed_chain_order_is_first_write_wins() {
+    // A replayed OrderPlaced carrying a different msg_chain_order must
+    // NOT overwrite placed_chain_order. The cursor for /openOrders is
+    // built from placed_chain_order, and a moving value would let a
+    // paginated reader re-see an already-returned row.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_placed_chain_order_coalesce";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "44";
+    let msg_id_first = format!("{test}-amsg");
+    let msg_id_replay = format!("{test}-zmsg");
+    let first_seconds: i64 = 1_700_000_500;
+    let replay_seconds: i64 = 1_700_000_100;
+    // insert_raw_with_ts builds chain_order as `5f80{msg_id:0>28}`. With
+    // msg_id_first lex-smaller than msg_id_replay, the first event is
+    // applied first by reproject_pending.
+    let expected_placed_chain_order = format!("5f80{msg_id_first:0>28}");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_first.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_replay.as_str()),
+        ],
+    )
+    .await;
+
+    insert_raw_with_ts(
+        &pool,
+        &msg_id_first,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        first_seconds,
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "c",
+        }),
+    )
+    .await;
+    insert_raw_with_ts(
+        &pool,
+        &msg_id_replay,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        replay_seconds,
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "c",
+        }),
+    )
+    .await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let placed: String = sqlx::query_scalar(
+        r#"select placed_chain_order
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read placed_chain_order");
+
+    assert_eq!(
+        placed, expected_placed_chain_order,
+        "placed_chain_order must be the chain_order of the FIRST applied OrderPlaced; \
+         replays cannot overwrite it"
+    );
+}
+
+async fn insert_raw_with_ts(
+    pool: &PgPool,
+    msg_id: &str,
+    src: &str,
+    event_type: &str,
+    chain_seconds: i64,
+    decoded: &serde_json::Value,
+) {
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::bigint), $4, $4, $5, '{}'::jsonb, $6)"#,
+    )
+    .bind(msg_id)
+    .bind(format!("5f80{msg_id:0>28}"))
+    .bind(chain_seconds)
+    .bind(src)
+    .bind(event_type)
+    .bind(decoded)
+    .execute(pool)
+    .await
+    .expect("insert raw_events with chain ts");
+}
+
+#[tokio::test]
+async fn orderfilled_advances_chain_updated_at() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderfilled_chain_updated";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "21";
+    let msg_id_place = format!("{test}-aplace-msg");
+    let msg_id_fill = format!("{test}-bfill-msg");
+    let place_seconds: i64 = 1_700_000_500;
+    let fill_seconds: i64 = 1_700_000_900;
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_place.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_fill.as_str()),
+        ],
+    )
+    .await;
+
+    // Seed an OrderPlaced raw_event so apply_order_placed creates the row.
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::bigint), $4, $4,
+                   'OrderBook.OrderPlaced', '{}'::jsonb, $5)"#,
+    )
+    .bind(&msg_id_place)
+    .bind(format!("5f80{msg_id_place:0>28}"))
+    .bind(place_seconds)
+    .bind(&orderbook_addr)
+    .bind(json!({
+        "orderId": order_id, "outcomeId": "1", "isBuy": true,
+        "price": "100", "amount": "100", "clientOrderId": "c",
+    }))
+    .execute(&pool)
+    .await
+    .expect("insert place");
+
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::bigint), $4, $4,
+                   'OrderBook.OrderFilled', '{}'::jsonb, $5)"#,
+    )
+    .bind(&msg_id_fill)
+    .bind(format!("5f80{msg_id_fill:0>28}"))
+    .bind(fill_seconds)
+    .bind(&orderbook_addr)
+    .bind(json!({ "orderId": order_id, "filledAmount": "10" }))
+    .execute(&pool)
+    .await
+    .expect("insert fill");
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let (chain_created_ms, chain_updated_ms): (i64, i64) = sqlx::query_as(
+        r#"select (extract(epoch from chain_created_at) * 1000)::bigint,
+                  (extract(epoch from chain_updated_at) * 1000)::bigint
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read ts");
+
+    assert_eq!(chain_created_ms, place_seconds * 1000);
+    assert_eq!(chain_updated_ms, fill_seconds * 1000);
+}
+
+#[tokio::test]
+async fn ordercancelled_advances_chain_updated_at() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_ordercancelled_chain_updated";
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "22";
+    let msg_id_place = format!("{test}-aplace-msg");
+    let msg_id_cancel = format!("{test}-bcancel-msg");
+    let place_seconds: i64 = 1_700_000_500;
+    let cancel_seconds: i64 = 1_700_000_800;
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_place.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_cancel.as_str()),
+        ],
+    )
+    .await;
+
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::bigint), $4, $4,
+                   'OrderBook.OrderPlaced', '{}'::jsonb, $5)"#,
+    )
+    .bind(&msg_id_place)
+    .bind(format!("5f80{msg_id_place:0>28}"))
+    .bind(place_seconds)
+    .bind(&orderbook_addr)
+    .bind(json!({
+        "orderId": order_id, "outcomeId": "1", "isBuy": true,
+        "price": "100", "amount": "100", "clientOrderId": "c",
+    }))
+    .execute(&pool)
+    .await
+    .expect("insert place");
+
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp($3::bigint), $4, $4,
+                   'OrderBook.OrderCancelled', '{}'::jsonb, $5)"#,
+    )
+    .bind(&msg_id_cancel)
+    .bind(format!("5f80{msg_id_cancel:0>28}"))
+    .bind(cancel_seconds)
+    .bind(&orderbook_addr)
+    .bind(json!({ "orderId": order_id }))
+    .execute(&pool)
+    .await
+    .expect("insert cancel");
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let chain_updated_ms: i64 = sqlx::query_scalar(
+        r#"select (extract(epoch from chain_updated_at) * 1000)::bigint
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read ts");
+
+    assert_eq!(chain_updated_ms, cancel_seconds * 1000);
+}
+
+#[tokio::test]
+async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
+    // The PN-confirm projector must not overwrite an existing owner_pn_address
+    // (defence against a second confirmation event with a different src landing
+    // on the same orderbook+orderId after a reprojection sweep).
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_confirmed_idempotent";
+    let original_owner = format!("0:{test}_owner");
+    let other_owner = format!("0:{test}_other");
+    let orderbook_addr = format!("0:{test}_book");
+    let order_id = "88";
+    let msg_id = format!("{test}-confirm-msg");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    // Pre-create the row with the original owner already attached.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, owner_pn_address,
+                status, last_chain_order, placed_chain_order,
+                chain_created_at, chain_updated_at)
+           values ($1, $2::numeric, 1, true, 100::numeric,
+                   100::numeric, 100::numeric, $3,
+                   'OPEN', '5f800000000000000088', '5f800000000000000088',
+                   to_timestamp(1700000000), to_timestamp(1700000000))"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .bind(&original_owner)
+    .execute(&pool)
+    .await
+    .expect("insert pre-attributed row");
+
+    // The PN confirmation event claims a different owner.
+    insert_raw(
+        &pool,
+        &msg_id,
+        &other_owner,
+        "PrivateNote.OrderPlacedConfirmed",
+        &json!({ "orderBook": orderbook_addr, "orderId": order_id }),
+    )
+    .await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "Applied (no-op) outcome must stamp processed_at"
+    );
+
+    let owner: String = sqlx::query_scalar(
+        "select owner_pn_address from live_orders
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read owner");
+    assert_eq!(owner, original_owner, "owner must not change once attributed");
 }
