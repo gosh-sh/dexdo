@@ -328,16 +328,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
             now,
         );
 
-        // `oracle_list_hash` has no CHECK constraint, so a reconciled
-        // row can technically carry NULL or whitespace if the
-        // reconciler hit a partial-write bug. The use case's
-        // `is_empty` check fails closed either way, but logging the
-        // distinction here gives ops a breadcrumb to triage which
-        // reconciler pass dropped the value — without this line a
-        // 503 from the trading path is indistinguishable from a
-        // legitimately blank field. Trim before checking so a
-        // whitespace-only value doesn't slip past `is_empty()` in
-        // the use case.
+        // Log so ops can triage reconciler partial-writes; the empty
+        // string then feeds the use case's `is_empty` invariant check.
         let oracle_list_hash = match row.oracle_list_hash {
             Some(raw) if !raw.trim().is_empty() => raw,
             other => {

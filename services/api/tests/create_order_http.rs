@@ -85,19 +85,30 @@ impl Authenticator for FakeAuthenticator {
 struct FakeRepo {
     market: Mutex<Option<Market>>,
     resolver_error: Option<DomainError>,
+    /// Raw anyhow that doesn't wrap a DomainError — exercises the
+    /// non-domain fallback branch in `CreateOrderUseCase::execute`.
+    resolver_raw_error: Option<String>,
 }
 
 impl FakeRepo {
     fn with(market: Market) -> Self {
-        Self { market: Mutex::new(Some(market)), resolver_error: None }
+        Self { market: Mutex::new(Some(market)), resolver_error: None, resolver_raw_error: None }
     }
 
     fn empty() -> Self {
-        Self { market: Mutex::new(None), resolver_error: None }
+        Self { market: Mutex::new(None), resolver_error: None, resolver_raw_error: None }
     }
 
     fn failing_resolver(err: DomainError) -> Self {
-        Self { market: Mutex::new(None), resolver_error: Some(err) }
+        Self { market: Mutex::new(None), resolver_error: Some(err), resolver_raw_error: None }
+    }
+
+    fn failing_resolver_raw(msg: &str) -> Self {
+        Self {
+            market: Mutex::new(None),
+            resolver_error: None,
+            resolver_raw_error: Some(msg.to_string()),
+        }
     }
 }
 
@@ -126,6 +137,9 @@ impl MarketReadRepository for FakeRepo {
         symbol: &Symbol,
         _: i64,
     ) -> Result<MarketForPlacement, anyhow::Error> {
+        if let Some(msg) = &self.resolver_raw_error {
+            return Err(anyhow::anyhow!("{msg}"));
+        }
         if let Some(err) = self.resolver_error {
             return Err(anyhow::anyhow!(err));
         }
@@ -506,6 +520,20 @@ async fn unknown_market_returns_1121() {
 }
 
 #[tokio::test]
+async fn resolver_raw_anyhow_returns_1000() {
+    // Pin the non-domain fallback in `CreateOrderUseCase::execute`:
+    // an anyhow without a `DomainError` cause must surface as
+    // 500/-1000, not be swallowed as a no-op. The `error!` log on
+    // that branch is not asserted here — it's observable in CI logs
+    // and the branch is structurally exercised by this test.
+    let service = setup_with(
+        Arc::new(FakeRepo::failing_resolver_raw("simulated sqlx pool drop")),
+        Arc::new(RecordingSender::ok()),
+    );
+    expect_error(&service, valid_body(), StatusCode::INTERNAL_SERVER_ERROR, -1000).await;
+}
+
+#[tokio::test]
 async fn resolver_inconsistent_returns_1500() {
     // Covers the resolver-side `MarketInconsistent` paths the
     // application layer can't synthesise from a populated `Market`
@@ -736,14 +764,9 @@ async fn client_order_id_overflowing_u64_returns_1130() {
 
 #[tokio::test]
 async fn empty_oracle_list_hash_returns_1500() {
-    // Pre-submit `MarketInconsistent` path — a reconciled market whose
-    // `oracle_list_hash` is missing/blank cannot be submitted to chain
-    // (placeOrder.oracleListHash would be empty). The use case rejects
-    // before reaching the chain sender (see
-    // `resolve_market_and_outcome` in `crates/application/src/lib.rs`),
-    // which means the failure surfaces at HTTP without spending a
-    // chain round-trip. Application-level coverage exists; this test
-    // locks the wire mapping (503 / -1500).
+    // Pin the wire mapping: a reconciled market with blank
+    // `oracle_list_hash` must fail at the application boundary, not
+    // round-trip the chain.
     let mut market = trading_market();
     market.oracle_list_hash = String::new();
     let service = setup_with(Arc::new(FakeRepo::with(market)), Arc::new(RecordingSender::ok()));

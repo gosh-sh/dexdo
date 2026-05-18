@@ -96,11 +96,9 @@ impl ChainOrderSender for BeeDexChainSender {
         let keys = KeyPair { public, secret: (*secret_hex).clone() };
         let signer = Signer::Keys { keys };
 
-        // `amount` and `client_order_id` are uint128 on chain; the
-        // application layer already validated decimal precision against
-        // `quantityPrecision`, so an overflow here implies a market
-        // configured with absurd precision values — surface as
-        // `Unexpected` rather than masking with a misleading 400.
+        // Defence-in-depth: the application layer caps both at
+        // `u64::MAX`, so reaching the error arm means the gate was
+        // bypassed. Log loudly and fail closed.
         let amount = payload.amount_raw.parse::<u128>().map_err(|err| {
             error!(?err, raw = %payload.amount_raw, "amount_raw exceeds uint128");
             DomainError::Unexpected
@@ -413,17 +411,14 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_pn_pubkey_surfaces_as_market_inconsistent() {
-        // `accounts.pn_pubkey` is operator-seeded; a non-decimal value
-        // here means the DB row was corrupted post-write. The sender
-        // must surface that as `MarketInconsistent` (503 / -1500), not
-        // `Unexpected` (500): the cause is service-state, retrying
-        // won't help, but the operator-level diagnosis is precise.
-        // This test runs entirely synchronously — the decode step is
-        // the first thing `submit_order` does, so we never touch the
-        // gateway despite the bogus endpoint string.
+        // Pin: `pn_pubkey` decode runs before any network I/O, so a
+        // bogus endpoint is fine. Timeout is generous (100ms) to keep
+        // the test stable on loaded CI — a future refactor that moves
+        // the gateway call before decode would surface here as
+        // `RequestTimeout`, flagging the regression.
         let sender = BeeDexChainSender::new(
             vec!["http://invalid.example.test".to_string()],
-            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(100),
         )
         .expect("BeeDexChainSender::new");
 

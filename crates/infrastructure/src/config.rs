@@ -183,6 +183,17 @@ impl ApiConfig {
         );
         self.auth.validate()?;
         self.chain.validate()?;
+        // The HTTP request_timeout hoop must outlast the chain
+        // sender's own timeout; otherwise an in-flight `placeOrder`
+        // would be dropped while still running on chain — the client
+        // would see a 504 and lose the `clientOrderId` for an order
+        // that eventually lands.
+        anyhow::ensure!(
+            self.server.request_timeout_ms > self.chain.place_order_timeout_ms,
+            "server.request_timeout_ms ({}) must exceed chain.place_order_timeout_ms ({})",
+            self.server.request_timeout_ms,
+            self.chain.place_order_timeout_ms,
+        );
         Ok(())
     }
 }
@@ -488,6 +499,28 @@ chain:
     }
 
     #[test]
+    fn api_validate_rejects_request_timeout_not_exceeding_chain_timeout() {
+        // `chain.place_order_timeout_ms` defaults to 30 000. Without
+        // a strict ordering, the HTTP timeout could fire while the
+        // chain submission is still in flight — the client would see
+        // 504 and lose the `clientOrderId` for an order that eventually
+        // lands.
+        let cfg = api_config_with("postgres://x", 30_000);
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_ms"), "got: {msg}");
+        assert!(msg.contains("place_order_timeout_ms"), "got: {msg}");
+    }
+
+    #[test]
+    fn api_validate_accepts_request_timeout_just_above_chain_timeout() {
+        // Boundary: 1 ms of slack is the minimum the strict check
+        // requires; production yaml ships ~5 s of slack.
+        let cfg = api_config_with("postgres://x", 30_001);
+        cfg.validate().expect("1 ms above chain timeout must validate");
+    }
+
+    #[test]
     fn indexer_validate_rejects_zero_intervals() {
         let raw = format!(
             "{COMMON}
@@ -534,12 +567,14 @@ server:
 
     #[test]
     fn api_config_parses_explicit_auth_section() {
+        // request_timeout_ms must exceed chain.place_order_timeout_ms
+        // (default 30_000) per the ApiConfig invariant.
         let raw = format!(
             "{COMMON}
 server:
   host: 0.0.0.0
   port: 8080
-  request_timeout_ms: 5000
+  request_timeout_ms: 35000
 auth:
   kek_hex: \"{TEST_KEK_HEX}\"
   default_recv_window_ms: 2000
@@ -561,7 +596,7 @@ chain:
 server:
   host: 0.0.0.0
   port: 8080
-  request_timeout_ms: 5000
+  request_timeout_ms: 35000
 auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 chain:
@@ -674,12 +709,13 @@ chain:
 
     #[test]
     fn api_config_parses_chain_section_with_explicit_timeout() {
+        // request_timeout_ms must exceed chain.place_order_timeout_ms.
         let raw = format!(
             "{COMMON}
 server:
   host: 0.0.0.0
   port: 8080
-  request_timeout_ms: 5000
+  request_timeout_ms: 20000
 auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 chain:

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use dodex_domain::DomainError;
 use salvo::prelude::*;
+use tracing::error;
 use tracing::warn;
 
 use crate::ApiError;
@@ -34,9 +35,17 @@ pub async fn enforce_request_timeout(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
+    // Fail closed if state is missing — silent fallback would tie
+    // behaviour to router mount order. Matches the same pattern in
+    // `auth_hoop::authenticate`.
     let budget = match depot.obtain::<AppState>() {
         Ok(state) => state.request_timeout,
-        Err(_) => Duration::ZERO,
+        Err(err) => {
+            error!(?err, "request_timeout hoop: AppState missing from depot");
+            ApiError::from(DomainError::Unexpected).render(res);
+            ctrl.skip_rest();
+            return;
+        }
     };
 
     if budget.is_zero() {
@@ -44,18 +53,13 @@ pub async fn enforce_request_timeout(
         return;
     }
 
+    // The "chain landed after we 504" race is bounded by
+    // `chain.place_order_timeout_ms` < `request_timeout_ms`: when this
+    // branch fires the chain sender's own timeout has already returned.
     tokio::select! {
         biased;
         _ = ctrl.call_next(req, depot, res) => {}
         _ = tokio::time::sleep(budget) => {
-            // Cancelling `call_next` drops the in-flight handler future.
-            // For `POST /api/v1/order` the practical race ("chain
-            // submission still in flight after we 504") is bounded by
-            // `chain.place_order_timeout_ms` being strictly less than
-            // the request budget (api.local.yaml ships 30s vs 35s); the
-            // chain-sender's own timeout has already fired by the time
-            // this branch runs, so dropping its future does not leave
-            // an unanswered `placeOrder` outstanding on the gateway.
             warn!(
                 budget_ms = budget.as_millis() as u64,
                 method = %req.method(),
