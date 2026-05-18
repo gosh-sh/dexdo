@@ -13,8 +13,6 @@
 // slack over the chain timeout that protects against the "chain
 // landed, client got 504, lost clientOrderId" race.
 
-use std::time::Duration;
-
 use dodex_domain::DomainError;
 use salvo::prelude::*;
 use tracing::error;
@@ -69,5 +67,36 @@ pub async fn enforce_request_timeout(
             ApiError::from(DomainError::RequestTimeout).render(res);
             ctrl.skip_rest();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use salvo::http::StatusCode;
+    use salvo::prelude::*;
+    use salvo::test::ResponseExt;
+    use salvo::test::TestClient;
+    use salvo::Service;
+
+    use super::enforce_request_timeout;
+
+    #[handler]
+    async fn ok_handler() -> &'static str {
+        "ok"
+    }
+
+    #[tokio::test]
+    async fn depot_miss_renders_500() {
+        // Pin the fail-closed behaviour: mounting the hoop without
+        // `inject(state)` upstream must surface as 500 / -1000, not
+        // the old silent `Duration::ZERO` passthrough that ties
+        // request handling to router mount order.
+        let router = Router::new().hoop(enforce_request_timeout).goal(ok_handler);
+        let service = Service::new(router);
+
+        let mut resp = TestClient::get("http://test/").send(&service).await;
+        assert_eq!(resp.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+        let body: serde_json::Value = resp.take_json().await.expect("error body");
+        assert_eq!(body["code"], -1000);
     }
 }

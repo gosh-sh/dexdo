@@ -148,3 +148,33 @@ fn reject(res: &mut Response, ctrl: &mut FlowCtrl, err: DomainError) {
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use salvo::http::StatusCode;
+    use salvo::prelude::*;
+    use salvo::test::ResponseExt;
+    use salvo::test::TestClient;
+    use salvo::Service;
+
+    use super::authenticate;
+
+    #[handler]
+    async fn ok_handler() -> &'static str {
+        "ok"
+    }
+
+    #[tokio::test]
+    async fn depot_miss_renders_500() {
+        // Pin the fail-closed behaviour: mounting the hoop without
+        // `inject(state)` upstream must surface as 500 / -1000.
+        // Symmetric pin to `timeout_hoop::tests::depot_miss_renders_500`.
+        let router = Router::new().hoop(authenticate).goal(ok_handler);
+        let service = Service::new(router);
+
+        let mut resp = TestClient::get("http://test/").send(&service).await;
+        assert_eq!(resp.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+        let body: serde_json::Value = resp.take_json().await.expect("error body");
+        assert_eq!(body["code"], -1000);
+    }
+}

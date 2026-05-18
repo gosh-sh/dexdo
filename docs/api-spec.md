@@ -156,14 +156,29 @@ Recommended common error codes:
 | `-1000` | Unknown error. | 500 |
 | `-1002` | Authentication required. | 401 |
 | `-1003` | Required auth parameter missing. | 401 |
+| `-1007` | Request timed out before completion. | 504 |
 | `-1009` | Request body too large. | 413 |
 | `-1021` | Timestamp outside recvWindow. | 401 |
 | `-1022` | Invalid signature. | 401 |
 | `-1102` | Mandatory parameter was not sent. | 400 |
 | `-1111` | Precision is over the maximum defined for this asset. | 400 |
 | `-1121` | Invalid market or symbol. | 404 |
+| `-1130` | Invalid value for a query parameter. | 400 |
+| `-1500` | Market data is temporarily inconsistent. | 503 |
 | `-2010` | Order would immediately fail validation. | 400 |
 | `-2011` | Unknown order. | 404 |
+| `-2014` | Trading note busy with a previous order; retry shortly. | 429 |
+
+`-1007` is the spec'd retry signal: a request that times out at the
+HTTP layer may have landed on chain. Clients retrying a `POST /api/v1/order`
+or `POST /api/v1/batchOrders` MUST re-send with the same
+`newOrderClientId` so the chain rejects a duplicate via the per-PN
+`clientOrderId` invariant rather than placing the order twice.
+
+`-2014` is the per-PN serialization signal: a `placeOrder` is already
+in flight for this account's trading note. Retry after a short backoff;
+the in-flight order will surface in `/api/v1/openOrders` once
+projected.
 
 Authentication errors are split intentionally: `-1003` signals a malformed
 request envelope (missing or unparseable `X-DODEX-APIKEY`, `timestamp`,
@@ -589,20 +604,21 @@ Response:
 
 ```json
 {
-  "marketAddress": "0:market-address",
-  "symbol": "PM-2026-ELECTION-YES",
-  "orderId": "123456789",
   "clientOrderId": "mm-order-0001",
   "transactTime": 1710000000000,
-  "price": "0.615",
-  "origQty": "1.500000",
-  "executedQty": "0.000000",
-  "status": "NEW",
-  "timeInForce": "GTC",
-  "type": "LIMIT",
-  "side": "BUY"
+  "status": "PENDING_NEW"
 }
 ```
+
+Response fields:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `clientOrderId` | STRING | Caller-supplied `newOrderClientId`, or a backend-generated `uint64` value if absent on the request. The correlation handle until the chain-assigned `orderId` is projected through `/api/v1/openOrders`. |
+| `transactTime` | LONG | Server time (unix ms) at which the chain submission was accepted. |
+| `status` | ENUM | Always [`PENDING_NEW`](#order-status) on success — the order is in the chain queue, not yet on the book. |
+
+Note: the response is intentionally minimal. Optimistic placement returns once the chain sender has dispatched the external message; the chain-assigned `orderId`, fill state, and effective `timeInForce` become available through `GET /api/v1/openOrders` once `OrderBook.OrderPlaced` projects. Clients poll on `clientOrderId` until the chain `orderId` appears.
 
 ### Cancel Order
 
@@ -714,38 +730,19 @@ Response:
 ```json
 [
   {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
-    "orderId": "123456789",
     "clientOrderId": "mm-order-0001",
     "transactTime": 1710000000000,
-    "price": "0.615",
-    "origQty": "1.500000",
-    "executedQty": "0.000000",
-    "status": "NEW",
-    "timeInForce": "GTC",
-    "type": "LIMIT",
-    "side": "BUY"
+    "status": "PENDING_NEW"
   },
   {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
-    "orderId": "123456790",
     "clientOrderId": "mm-order-0002",
     "transactTime": 1710000000000,
-    "price": "0.620",
-    "origQty": "0.750000",
-    "executedQty": "0.000000",
-    "status": "NEW",
-    "timeInForce": "POST_ONLY",
-    "type": "LIMIT",
-    "side": "SELL"
+    "status": "PENDING_NEW"
   }
 ]
 ```
 
-Batch creation is atomic at the API validation level: if any order is invalid, the whole request
-is rejected and no orders are created.
+Per-item fields match the single-order [response shape](#new-order); the chain-assigned `orderId` and fill state arrive later through `/api/v1/openOrders`. Batch creation is atomic at the API validation level: if any order is invalid, the whole request is rejected and no orders are created.
 
 ### Cancel Batch Orders
 
@@ -977,11 +974,14 @@ Response:
 
 | Value | Description |
 | --- | --- |
+| `PENDING_NEW` | Order accepted by the chain queue but not yet projected into the order book; chain-assigned `orderId` will surface through `/api/v1/openOrders`. |
 | `NEW` | Order is open and has no fills. |
 | `PARTIALLY_FILLED` | Order is open and partially filled. |
 | `FILLED` | Order is completely filled. |
 | `CANCELED` | Order was canceled by the user or system. |
 | `REJECTED` | Order was rejected and was not opened. |
+
+`PENDING_NEW` is the only status `POST /api/v1/order` and `POST /api/v1/batchOrders` return on success. The status transitions to `NEW` (or `PARTIALLY_FILLED` if a market submission immediately matches) once the indexer projects the chain's `OrderPlaced` event into `/api/v1/openOrders`. Clients correlate on `clientOrderId` until the chain-assigned `orderId` becomes visible.
 
 ## Validation Rules
 

@@ -220,10 +220,6 @@ fn map_tvm_exit_code(code: u16) -> Option<DomainError> {
         102 => Some(DomainError::OrderValidationFailed),
         // ERR_NOTE_BUSY: another `placeOrder` is in flight for this PN.
         // Distinct retry semantics — 429 / -2014 instead of -2010.
-        // TODO(api-spec): `-2014 OrderPnBusy` is not yet listed in
-        // docs/api-spec.md §Error Response; see the paired TODO block
-        // in docs/tech-specs/write-api.md §Failure surface for the
-        // exact text to add and the transitional-marker note.
         121 => Some(DomainError::OrderPnBusy),
         // ERR_INVALID_OUTCOME_ID: the `outcomeId` we pulled from
         // `market_outcomes` does not exist on the on-chain PMP. That

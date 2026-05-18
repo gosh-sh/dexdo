@@ -177,31 +177,7 @@ Why minimal: every other field a fully-populated order would carry (`marketAddre
 
 The client correlates the response with future `live_orders` rows via `clientOrderId`: poll `GET /api/v1/openOrders?clientOrderId=...` (the polling key is the canonical one until the chain `orderId` arrives, after which `orderId` is also valid). The `PENDING_NEW` status flips to `NEW` in `/api/v1/openOrders` once the indexer projects `OrderPlaced`.
 
-**`PENDING_NEW` is a new value in the `OrderStatus` enum** — not previously listed in [api-spec §Order Status](../api-spec.md#order-status). Strictly additive (no existing client code that switches on `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` breaks), but the public spec needs the row.
-
-<!-- TODO(reviewer): the public `docs/api-spec.md` needs four paired
-updates before this is mergeable as a documented public contract:
-  1. §Order Status: add the row exactly as
-     `PENDING_NEW | Order accepted by the chain but not yet on the
-     book; chain-assigned orderId will surface in /openOrders.`
-  2. §New Order response: replace the existing 12-field example with
-     the three-field minimal shape above; document the rationale
-     ("optimistic placement; orderId arrives via /openOrders").
-  3. §Error Response: add `-2014 | Trading note busy; retry shortly. | 429`
-     to the error code table. Add the transitional marker text from
-     §Failure surface's TODO block (below) — this code disappears
-     when multi-PN-per-account trading lands.
-  4. §Error Response: add `-1500 | Market data is temporarily
-     inconsistent. | 503`. The trading path now returns this
-     synchronously (chain `ERR_INVALID_OUTCOME_ID` maps here, plus
-     the pre-existing NULL/blank `orderbook_address` /
-     `oracle_list_hash` invariants). SDK authors must know to
-     handle 503 on this endpoint.
-  5. §Error Response: add `-1007 | Request timed out before
-     completion. | 504`. Surfaced by the `request_timeout` hoop
-     when a handler exceeds `ServerSection.request_timeout_ms`.
-     Clients retrying must re-`POST` with the same `clientOrderId`
-     so a chain message that eventually lands is not duplicated. -->
+`PENDING_NEW` is listed in [api-spec §Order Status](../api-spec.md#order-status); it's the only status `POST /api/v1/order` and `POST /api/v1/batchOrders` return on success. Strictly additive — code that only switches on `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` continues to work because those values still arrive through `/api/v1/openOrders`.
 
 
 ### Failure surface
@@ -229,23 +205,7 @@ Three failure classes — two synchronous, one async:
 
 Transport-level failures (gateway connection drop, malformed reply, decode error) sit outside this classification and always collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error` level. Accepted orders that later get filled or cancelled by normal market activity are not failures and are surfaced through `/api/v1/openOrders` / `/api/v1/allOrders` per [read-api.md](read-api.md).
 
-<!-- TODO: `-2014 OrderPnBusy` is **transitional** and exists only because
-the current account model has exactly one trading PN per account
-([auth.md §Trading Private Note](auth.md#trading-private-note)). When
-multi-PN trading lands (one account routing orders across several PNs in
-parallel), `_busy` ceases to be a per-account bottleneck and a client
-hitting `ERR_NOTE_BUSY` would mean an internal PN-selection bug — at that
-point this row collapses back into `OrderValidationFailed` / 400 and the
-`-2014` code is removed from the public surface.
-
-When the api-spec.md row for `-2014` is added, append exactly this
-marker text after the message column so SDK authors do not bake
-long-term retry logic keyed on this specific code:
-
-  "Transitional: this code will be removed when multi-PN-per-account
-   trading lands. SDKs should treat -2014 the same as -2010 plus a
-   short retry hint; do not key persistent retry logic on this
-   specific code." -->
+**`-2014 OrderPnBusy` is transitional.** The current account model has exactly one trading PN per account ([auth.md §Trading Private Note](auth.md#trading-private-note)). When multi-PN trading lands (one account routing orders across several PNs in parallel), `_busy` ceases to be a per-account bottleneck and a client hitting `ERR_NOTE_BUSY` would mean an internal PN-selection bug — at that point this row collapses back into `OrderValidationFailed` / 400 and the `-2014` code is removed from the public surface. SDK authors should treat `-2014` the same as `-2010` plus a short retry hint; do not bake persistent retry logic keyed on this specific code.
 
 
 ### Error mapping
@@ -265,9 +225,7 @@ long-term retry logic keyed on this specific code:
 | Handler exceeded `ServerSection.request_timeout_ms` (`config/api.<env>.yaml`) — enforced by `services/api/src/timeout_hoop.rs` | `RequestTimeout` | 504 |
 | Unmapped chain `tvm_exit` code or gateway transport failure | `Unexpected` | 500 |
 
-`OrderPnBusy` (`-2014`) is new in this version of the API and is not yet listed in [api-spec.md §Error Response](../api-spec.md#error-response). The public spec needs a paired update; the implementation surfaces it today because synthesising it from `-2010` would lose the actionable "retry shortly" signal MM clients need.
-
-`RequestTimeout` (`-1007`) is similarly new — the public spec does not list it yet because the surrounding error table refresh is the same paired update tracked above (alongside `-2014` and `-1500`). It mirrors the Binance `-1007 / 504 TIMEOUT` shape; clients should re-`POST` with the same `clientOrderId` so a chain message that eventually lands is not duplicated.
+`RequestTimeout` (`-1007`) is enforced at two layers: the HTTP request_timeout hoop (`services/api/src/timeout_hoop.rs`) for handler-wide budgets, and the chain sender (`crates/infrastructure/src/chain_sender.rs::classify_chain_outcome`) for gateway-side hangs. `ApiConfig::validate` pins `server.request_timeout_ms > chain.place_order_timeout_ms` at boot so the HTTP timeout cannot fire while a chain submission is still in flight.
 
 ### Layering
 
