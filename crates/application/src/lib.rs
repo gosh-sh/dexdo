@@ -417,15 +417,17 @@ where
         if amount_lifted == BigUint::from(0u32) {
             return Err(DomainError::OrderValidationFailed);
         }
-        // Chain-ABI ceiling: `PrivateNote.placeOrder.amount` is
-        // `uint128`. `lift_decimal` returns an unbounded `BigUint`,
-        // and a caller can send `quantity` whose lifted value
-        // exceeds `u128::MAX` (~3.4 × 10^38) while still passing
-        // precision/step/notional. Catch it here so it surfaces as
-        // 400 / -2010 ("order cannot succeed") instead of a 500 deep
-        // in `BeeDexChainSender` when `amount_raw.parse::<u128>()`
-        // fails.
-        if amount_lifted > BigUint::from(u128::MAX) {
+        // SDK serialization ceiling. `PrivateNote.placeOrder.amount`
+        // is `uint128` at the chain ABI, but the upstream
+        // `bee_dex` → `ackinacki-kit` → `serde_json::json!` path
+        // panics on `u128 > u64::MAX` for the same reason
+        // `clientOrderId` is capped — see
+        // `docs/tech-specs/write-api.md §clientOrderId generation`.
+        // Until the SDK gains `serde_json/arbitrary_precision` the
+        // amount surface is also u64. Catch over-ceiling values here
+        // so they surface as 400 / -2010 ("order cannot succeed")
+        // instead of a 500 from the worker panic.
+        if amount_lifted > BigUint::from(u64::MAX) {
             return Err(DomainError::OrderValidationFailed);
         }
         let amount_raw = amount_lifted.to_str_radix(10);
@@ -950,26 +952,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_order_rejects_quantity_exceeding_u128() {
-        // Regression: `lift_decimal` returns unbounded `BigUint`, but
-        // the chain ABI is `uint128`. A 33-digit quantity with
-        // `quantity_precision = 6` lifts to ~10^39, exceeding
-        // `u128::MAX ≈ 3.4 × 10^38`. Pre-gate, `BeeDexChainSender`
-        // would surface this as `Unexpected` → 500. Post-gate, the
-        // application boundary catches it as `OrderValidationFailed`
-        // → 400 / -2010 ("order would immediately fail").
+    async fn create_order_rejects_quantity_exceeding_u64() {
+        // Regression: the *effective* ceiling on `amount` is
+        // `u64::MAX`, not `u128::MAX`, because the upstream
+        // `serde_json::json!` path in `ackinacki-kit` panics above
+        // u64 (same SDK constraint that bounds `clientOrderId` —
+        // see write-api.md §clientOrderId generation). Pin a value
+        // strictly inside the (u64::MAX, u128::MAX) gap so a future
+        // relaxation of the gate to u128 would re-open the 500 path
+        // and trip this test.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateOrderUseCase::new(FakeRepo::with(market), sender.clone());
         let mut input = base_input("PM-YES");
-        // 33 nines × 10^6 (quantity_precision) ≈ 10^39 > u128::MAX.
-        input.quantity = "999999999999999999999999999999999".into();
-        // Strip the price to keep the test focused — LIMIT still
-        // reaches the amount gate before chain dispatch.
+        // u64::MAX = 18_446_744_073_709_551_615. After lift by
+        // quantity_precision=6, an input quantity of
+        // "18446744073709.551616" lifts to u64::MAX + 1 — fits in
+        // u128 (sender would not 500), but the SDK ceiling rejects.
+        input.quantity = "18446744073709.551616".into();
+        // Strip price to a small value so the LIMIT notional check
+        // does not short-circuit the amount gate first.
         input.price = Some("0.001".into());
         let err = uc.execute(input).await.unwrap_err();
         assert_eq!(err, DomainError::OrderValidationFailed);
-        assert!(sender.calls().is_empty(), "chain sender hit despite oversized qty");
+        assert!(sender.calls().is_empty(), "chain sender hit despite over-ceiling qty");
+    }
+
+    #[tokio::test]
+    async fn create_order_accepts_quantity_at_u64_max() {
+        // Boundary pin counterpart: a quantity whose lifted value is
+        // exactly `u64::MAX` must still pass the gate. Catches a
+        // future off-by-one (e.g. `>=` instead of `>` on the
+        // comparison) that would reject the boundary value.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateOrderUseCase::new(FakeRepo::with(market), sender.clone());
+        let mut input = base_input("PM-YES");
+        // u64::MAX = 18_446_744_073_709_551_615.
+        input.quantity = "18446744073709.551615".into();
+        input.price = Some("0.001".into());
+        uc.execute(input).await.expect("boundary qty must pass");
+        assert_eq!(sender.calls().len(), 1);
+        assert_eq!(sender.calls()[0].amount_raw, u64::MAX.to_string());
     }
 
     #[test]
