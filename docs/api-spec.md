@@ -999,8 +999,6 @@ Response:
 | `CANCELED` | Order was canceled by the user or system. |
 | `REJECTED` | Order was rejected and was not opened. |
 
-`PENDING_NEW` is the only status `POST /api/v1/order` returns on success. The status transitions to `NEW` (or `PARTIALLY_FILLED` if a market submission immediately matches) once the indexer projects the chain's `OrderPlaced` event into `/api/v1/openOrders`. Clients correlate on `clientOrderId` until the chain-assigned `orderId` becomes visible.
-
 ## Validation Rules
 
 Order creation MUST validate:
