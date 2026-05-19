@@ -24,8 +24,7 @@
     - [New Batch Orders](#new-batch-orders)
     - [Cancel Batch Orders](#cancel-batch-orders)
     - [Cancel All Open Orders On Symbol](#cancel-all-open-orders-on-symbol)
-    - [Current Open Orders](#current-open-orders)
-    - [Closed And Canceled Orders](#closed-and-canceled-orders)
+    - [Orders](#orders)
     - [Common Enums](#common-enums-1)
       - [Order Side](#order-side)
       - [Order Type](#order-type)
@@ -171,7 +170,7 @@ Recommended common error codes:
 
 `-1007` means the request did not complete in time. The order may still have been accepted by the exchange. Retry `POST /api/v1/order` with the same `newOrderClientId` — the server will deduplicate so the same order is not placed twice.
 
-`-2014` means another order from the same account is still being processed. Retry after a short delay; the in-flight order will appear in `/api/v1/openOrders` shortly.
+`-2014` means another order from the same account is still being processed. Retry after a short delay; the in-flight order will appear in `/api/v1/orders` shortly.
 
 Authentication errors are split intentionally: `-1003` signals a malformed
 request envelope (missing or unparseable `X-DODEX-APIKEY`, `timestamp`,
@@ -193,8 +192,7 @@ envelope field failed or why a credential was rejected.
 | Create batch orders | `POST` | `/api/v1/batchOrders` | `TRADE` |
 | Cancel batch orders by IDs | `DELETE` | `/api/v1/batchOrders` | `TRADE` |
 | Cancel all open orders on one symbol | `DELETE` | `/api/v1/openOrders` | `TRADE` |
-| Fetch open orders | `GET` | `/api/v1/openOrders` | `USER_DATA` |
-| Fetch closed and canceled orders | `GET` | `/api/v1/allOrders` | `USER_DATA` |
+| Fetch orders | `GET` | `/api/v1/orders` | `USER_DATA` |
 
 ## Market Data Endpoints
 
@@ -607,11 +605,11 @@ Response fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `clientOrderId` | STRING | Either the `newOrderClientId` sent in the request, or a server-generated identifier when none was provided. Use it to look up the order in `/api/v1/openOrders` until the server-assigned `orderId` is available. |
+| `clientOrderId` | STRING | Either the `newOrderClientId` sent in the request, or a server-generated identifier when none was provided. Use it to look up the order in `/api/v1/orders` until the server-assigned `orderId` is available. |
 | `transactTime` | LONG | Server timestamp (Unix ms) when the order was accepted. |
 | `status` | ENUM | Always [`PENDING_NEW`](#order-status) on success. |
 
-The response confirms acceptance only. The full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/openOrders`](#current-open-orders) shortly after; look up by `clientOrderId`.
+The response confirms acceptance only. The full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/orders`](#orders) shortly after; look up by `clientOrderId`.
 
 ### Cancel Order
 
@@ -868,41 +866,41 @@ Response:
 ]
 ```
 
-### Current Open Orders
+### Orders
 
 ```http
-GET /api/v1/openOrders
+GET /api/v1/orders
 ```
 
 Security: `USER_DATA`
 
-Fetch currently open orders for the authenticated account. The response never includes orders owned by another account.
+Fetch orders for the authenticated account across all lifecycle states — currently open, filled, canceled, and (once produced by the indexer) rejected. The response never includes orders owned by another account.
 
 Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns open orders for all markets. |
+| `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns orders across all markets. |
 | `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
+| `status` | STRING | NO | Comma-separated list of [Order Status](#order-status) values to include. Allowed: `NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`. Tokens are trimmed and de-duplicated. Default: include all statuses. |
 | `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`. |
-| `cursor` | STRING | NO | Opaque lex-comparable string returned by the server as `nextCursor`. Pass back verbatim to fetch the next page. An empty or whitespace-only cursor returns `-1102 / 400`. A well-formed cursor that lies past the last open order returns an empty page with `nextCursor: null` — not an error. Omit for the first page. |
+| `cursor` | STRING | NO | Opaque lex-comparable string returned by the server as `nextCursor`. Pass back verbatim to fetch the next page. An empty or whitespace-only cursor returns `-1102 / 400`. A well-formed cursor that lies past the last order returns an empty page with `nextCursor: null` — not an error. Omit for the first page. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
 | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
 
 Behavior:
 
-- If both `marketAddress` and `symbol` are omitted, returns all open orders for the authenticated account across all markets.
-- If both `marketAddress` and `symbol` are sent, returns open orders for that one market symbol.
+- If both `marketAddress` and `symbol` are omitted, returns orders for the authenticated account across all markets.
+- If both `marketAddress` and `symbol` are sent, returns orders for that one market symbol.
 - If only one of `marketAddress` / `symbol` is sent, returns `-1102` with HTTP `400`.
 - If `limit` is outside `[1, 500]`, returns `-1102` with HTTP `400`.
-- If `cursor` is empty or whitespace-only, returns `-1102` with HTTP `400`. A well-formed cursor that points past the current set of open orders is not an error — the response simply has an empty `orders` array and `nextCursor: null`.
+- If `cursor` is empty or whitespace-only, returns `-1102` with HTTP `400`. A well-formed cursor that points past the current set of orders is not an error — the response is `{ "orders": [], "nextCursor": null }`.
+- If `status` contains an unknown token, returns `-1130` with HTTP `400`.
 - If the `(marketAddress, symbol)` pair does not exist, returns `-1121` with HTTP `404`.
-- Open order statuses are `NEW` and `PARTIALLY_FILLED`.
-- Orders with status `FILLED`, `CANCELED`, or `REJECTED` are not returned.
 - Empty results are returned as `{ "orders": [], "nextCursor": null }`.
-- Results are sorted in stable chain-order. For all-market requests this ordering is global across all returned orders.
-- Pagination is cursor-based on a single server-internal chain-order key set once at order creation. The key never moves for the life of the order (subsequent fills and cancels do not touch it), so concurrent activity between page reads cannot duplicate or skip rows — closed orders simply drop out.
+- Results are sorted by a single server-internal chain-order key, **descending** (most recently placed first). For all-market requests this ordering is global across all returned orders.
+- Pagination is cursor-based on the same chain-order key. The key is set once when the order is placed and never moves for the life of the order — subsequent fills, cancels, and status transitions do not touch it — so concurrent activity between page reads cannot duplicate or skip rows.
 - The endpoint is eventually consistent: a freshly placed order may briefly not appear, between the time the public `OrderPlaced` event is indexed and the time the private confirmation that carries owner attribution is indexed.
 
 Response:
@@ -934,7 +932,7 @@ Top-level response fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `orders` | ARRAY | Open orders matching the filter, in stable chain-order. Empty when there are no matches. |
+| `orders` | ARRAY | Orders matching the filter, in stable chain-order descending. Empty when there are no matches. |
 | `nextCursor` | STRING \| null | Opaque lex-comparable pagination cursor. Pass back verbatim to fetch the next page; do not parse or generate. `null` when the last page has been returned. |
 
 Order fields:
@@ -943,62 +941,17 @@ Order fields:
 | --- | --- | --- |
 | `marketAddress` | STRING | Market address. |
 | `symbol` | STRING | Outcome-token symbol. |
-| `orderId` | STRING | Chain-side order id. |
+| `orderId` | STRING | Chain-side order id. Empty string for `REJECTED` orders (the chain never assigns an id to a rejected placement). |
 | `clientOrderId` | STRING | Client-supplied id, or an empty string if absent. |
 | `price` | DECIMAL | Limit price, scaled by the outcome price precision. |
 | `origQty` | DECIMAL | Original order quantity, scaled by the outcome quantity precision. |
-| `executedQty` | DECIMAL | Filled quantity, scaled by the outcome quantity precision. |
-| `status` | ENUM | `NEW` or `PARTIALLY_FILLED`. |
+| `executedQty` | DECIMAL | Filled quantity, scaled by the outcome quantity precision. Can be `> 0` for `CANCELED` orders that filled partially before cancellation. Always `0` for `NEW`, `REJECTED`. |
+| `status` | ENUM | One of `NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`. |
 | `timeInForce` | ENUM | `GTC`. |
 | `type` | ENUM | `LIMIT`. |
 | `side` | ENUM | `BUY` or `SELL`. |
 | `time` | LONG | On-chain order creation time in Unix milliseconds. Stable under indexer backlog. |
 | `updateTime` | LONG | On-chain time of the most recent book event that touched the order (place / fill / cancel), in Unix milliseconds. |
-
-### Closed And Canceled Orders
-
-```http
-GET /api/v1/allOrders
-```
-
-Security: `USER_DATA`
-
-Fetch filled and canceled order history.
-
-Parameters:
-
-| Name | Type | Mandatory | Description |
-| --- | --- | --- | --- |
-| `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns history for all markets. |
-| `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
-| `status` | ENUM | NO | Filter by order status. See [Order Status](#order-status). Supported filters: `FILLED`, `CANCELED`, `REJECTED`. |
-| `startTime` | LONG | NO | Start time in milliseconds. |
-| `endTime` | LONG | NO | End time in milliseconds. |
-| `limit` | INT | NO | Number of orders. Default: `100`. Max: `1000`. |
-| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
-| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
-| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
-
-Response:
-
-```json
-[
-  {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
-    "orderId": "123456789",
-    "price": "0.615",
-    "origQty": "1.500000",
-    "executedQty": "1.500000",
-    "status": "FILLED",
-    "timeInForce": "GTC",
-    "type": "LIMIT",
-    "side": "BUY",
-    "time": 1710000000000,
-    "updateTime": 1710000100000
-  }
-]
-```
 
 ### Common Enums
 
@@ -1031,7 +984,7 @@ Response:
 
 | Value | Description |
 | --- | --- |
-| `PENDING_NEW` | Order accepted by the exchange and not yet on the book. Will transition to `NEW` (or `PARTIALLY_FILLED` if it immediately matches) once visible in `/api/v1/openOrders`. |
+| `PENDING_NEW` | Order accepted by the exchange and not yet on the book. Will transition to `NEW` (or `PARTIALLY_FILLED` if it immediately matches) once visible in `/api/v1/orders`. |
 | `NEW` | Order is open and has no fills. |
 | `PARTIALLY_FILLED` | Order is open and partially filled. |
 | `FILLED` | Order is completely filled. |
