@@ -46,4 +46,20 @@ impl TestPnPool {
     pub fn first(&self) -> &TestPn {
         self.notes.first().expect("test_pns.json: at least one PN")
     }
+
+    /// Return PN at slot `idx` (zero-based). Each e2e test that needs
+    /// its own deployer-PN takes a different slot so a parallel
+    /// `cargo test -- --ignored` run does not contend on the same
+    /// PN's `_busy` lock — every chain op (`deployPMP`, `setStake`,
+    /// `splitFullSet`, …) serialises through it, so two tests sharing
+    /// the same PN would either race each other to `ERR_NOTE_BUSY` or
+    /// trip the much longer cross-deploy ordering on the chain side.
+    pub fn slot(&self, idx: usize) -> &TestPn {
+        self.notes.get(idx).unwrap_or_else(|| {
+            panic!(
+                "test_pns.json: PN slot {idx} requested, only {} PN(s) available — top up via mint_pn_pool",
+                self.notes.len()
+            )
+        })
+    }
 }

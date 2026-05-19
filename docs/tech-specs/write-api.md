@@ -270,12 +270,13 @@ Mandatory-field absence returns `MissingParameter` → 400.
 
 ### Order resolution
 
-One SELECT joins [`live_orders`](data-schema.md#live_orders) ⨝ [`markets`](data-schema.md#markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes) and applies four predicates at once:
+One SELECT joins [`live_orders`](data-schema.md#live_orders) ⨝ [`markets`](data-schema.md#markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes) and applies five predicates at once:
 
 - `markets.last_reconciled_at IS NOT NULL` — same visibility gate as POST.
-- `markets.market_address = :marketAddress` AND `market_outcomes.symbol = :symbol`.
+- `markets.pmp_address = :marketAddress` AND `market_outcomes.symbol = :symbol`. The `pmp_address` column is the SQL spelling of the public `marketAddress` field; the alias dates from the contract-level naming.
 - `live_orders.order_id = :orderId` AND `live_orders.status = 'OPEN'`.
 - `live_orders.owner_pn_address = :pn_address` — pins the caller as the owner of the row.
+- `live_orders.amount_remaining > 0` — same belt-and-suspenders predicate `/api/v1/openOrders` uses. A row could in principle linger as `status = 'OPEN'` with `amount_remaining = 0` in the brief window before `apply_order_filled` flips it to `FILLED`; the gate keeps that transient slice invisible to cancel.
 
 A miss surfaces as `UnknownOrder` → 404 / -2011 with **no distinction** between "order does not exist", "order exists but belongs to another account", "order is not OPEN anymore", or "marketAddress/symbol does not match the order's actual market". This is deliberate: differentiating those cases would leak the existence (and account binding) of orders the caller does not own.
 
@@ -285,7 +286,7 @@ The same row supplies every value the chain submission and the response need:
 | --- | --- |
 | `markets.event_id` | `cancelOrder.eventId` (uint256). |
 | `markets.oracle_list_hash` | `cancelOrder.oracleListHash` (uint256). NULL on a reconciled row → `MarketInconsistent` → 503. |
-| `markets.token_type` | `cancelOrder.tokenType` (uint32). |
+| `markets.token_type` | `cancelOrder.tokenType` (uint32). The column is `integer` in Postgres (signed); the use case applies `u32::try_from` and a negative value (read-model corruption) surfaces as `MarketInconsistent` → 503. Same guard as POST. |
 | `markets.orderbook_address` | Joined against `live_orders.orderbook_address` to scope ownership to one book. |
 | `live_orders.client_order_id` | Echoed back as `clientOrderId` in the response. |
 
@@ -368,7 +369,7 @@ The same `request_timeout_ms > chain.cancel_order_timeout_ms` invariant POST rel
 | --- | --- |
 | `crates/domain` | Adds `OrderStatus::PendingCancel` (rendered as `"PENDING_CANCEL"` via `as_str`). No other changes — `OrderSide`, error variants, decimal helpers are unchanged. |
 | `crates/application` | `CancelOrderInput` (HTTP-shaped), `CancelOrderPayload` (chain-shaped), `CancelledOrder` (response-shaped); `CancelOrderUseCase`. Extends `ChainOrderSender` with `cancel_order`. Extends `MarketReadRepository` with `resolve_for_cancel(market_address, symbol, order_id, owner_pn_address, now)` — the one-shot join described in [Order resolution](#order-resolution). |
-| `crates/infrastructure` | `BeeDexChainSender::cancel_order` wraps `bee_dex::Dex::cancel_order` (pubkey/seckey re-encode reused). `PostgresReadModelRepository::resolve_for_cancel` runs the join, mapping NULL `oracle_list_hash` to `MarketInconsistent` and any other miss to `UnknownOrder`. |
+| `crates/infrastructure` | `BeeDexChainSender::cancel_order` wraps `bee_dex::Dex::cancel_order` (pubkey/seckey re-encode reused). `PostgresReadModelRepository::resolve_for_cancel` runs the join. A miss in the predicate set surfaces as `UnknownOrder`; a NULL/blank `oracle_list_hash` on a reconciled row is logged as a `warn` and surfaced as an empty string, which the use case then translates to `MarketInconsistent`. The same split lives on the POST side — keeping it symmetric means a future tightening (e.g. moving the translation into the SELECT) touches both paths together. |
 | `services/api` | `delete_order` handler attached as `Router::with_path("api/v1/order").delete(delete_order)` on the existing auth subrouter (alongside `.post(create_order)`). HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` reuses the `BeeDexChainSender` instance already constructed for POST. |
 
 Use case constructors take trait objects; `services/api/tests/cancel_order_http.rs` injects `FakeRepo` + `FakeAuthenticator` + a `RecordingSender` variant that records cancel payloads, matching the triad established by `create_order_http.rs`.

@@ -70,8 +70,11 @@ async fn cancel_order_against_shellnet() {
     // ---- have something concrete to cancel. The placement step
     // ---- is intentionally minimal here — exhaustive POST coverage
     // ---- lives in `e2e_order.rs`; this test owns the DELETE path.
+    // Slot 1 belongs to this test (`e2e_order.rs` owns slot 0) so
+    // parallel `cargo test -- --ignored` runs do not contend on the
+    // same PN's chain-side `_busy` lock.
     let pn_pool = TestPnPool::load();
-    let trader = pn_pool.first().clone();
+    let trader = pn_pool.slot(1).clone();
     let market = deploy_ephemeral_market(
         vec![SHELLNET_ENDPOINT.to_string()],
         &trader,

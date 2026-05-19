@@ -286,6 +286,40 @@ async fn resolve_for_cancel_wrong_market_for_order_id_is_unknown_order() {
 }
 
 #[tokio::test]
+async fn resolve_for_cancel_zero_remaining_open_row_is_invisible() {
+    // Pin: a row with `status='OPEN'` but `amount_remaining=0` is the
+    // transient slice between `OrderFilled` zeroing remaining and
+    // flipping status to 'FILLED'. The SELECT carries an
+    // `amount_remaining > 0` predicate precisely to keep that slice
+    // out of cancel; without this test a regression that drops the
+    // predicate would not fail any of the other 8 cases (they all
+    // seed with non-zero remaining).
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_zero_remaining_pmp";
+    let symbol = "RESOLVE_CANCEL_ZERO_REMAINING_YES";
+    let pn = "0:resolve_cancel_zero_remaining_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    // `status='OPEN'` but `amount_remaining=0` — the transient slice.
+    seed_live_order(&pool, pmp, 700, 7, pn, "OPEN", "0", Some("z")).await;
+
+    let err = repo
+        .resolve_for_cancel(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            700,
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect_err("OPEN row with amount_remaining=0 must surface as UnknownOrder");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::UnknownOrder);
+}
+
+#[tokio::test]
 async fn resolve_for_cancel_closed_order_is_unknown_order() {
     // A CANCELLED or FILLED row must not be cancellable again — the
     // ownership SELECT filters by status='OPEN'.

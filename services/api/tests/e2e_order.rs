@@ -78,8 +78,11 @@ async fn buy_limit_gtc_against_shellnet() {
     // Deploy a fresh PMP + OrderBook on shellnet. The deployer-PN is
     // the same PN we then trade against — `splitFullSet` primed its
     // outcome-token balance during deploy.
+    // Slot 0 belongs to this test. `e2e_cancel_order.rs` takes slot 1
+    // so a parallel `cargo test -- --ignored` run does not contend on
+    // the same PN's chain-side `_busy` lock.
     let pn_pool = TestPnPool::load();
-    let trader = pn_pool.first().clone();
+    let trader = pn_pool.slot(0).clone();
     let market = deploy_ephemeral_market(
         vec![SHELLNET_ENDPOINT.to_string()],
         &trader,
