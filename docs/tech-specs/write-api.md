@@ -250,9 +250,140 @@ Clients that need higher per-account throughput batch multiple orders into one c
 
 ## `DELETE /api/v1/order`
 
-See [api-spec §Cancel Order](../api-spec.md#cancel-order) for the public contract.
+The handler runs three phases: request parsing → order resolution (which folds market lookup, status derivation, and ownership into one SELECT) → chain submission. Each phase fails closed with its own error code (see [DELETE error mapping](#error-mapping-1)). The on-chain cancel itself is optimistic in the same sense as POST: `PrivateNote.cancelOrder` returns once PN has forwarded the cancel to `OrderBook.executeBatch` as an internal message — the actual removal from the book and the projection into [`live_orders`](data-schema.md#live_orders) happen asynchronously through the indexer.
 
-_Implementation tech spec to be filled in._
+### Authorization
+
+Same hoop as POST. The handler calls `require_auth(depot, Permission::Trade)` and reads the resolved [`TradingPn`](auth.md#trading-private-note) (`pn_address`, `pn_pubkey`, `pn_dih`, decrypted `pn_seckey`) out of `AuthContext`.
+
+### Request parsing
+
+DELETE has no body; all named parameters arrive in the query string (the HMAC layer has already verified the canonical query string for those exact bytes).
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `marketAddress` | `MarketAddress` | Mandatory. |
+| `symbol` | `Symbol` | Mandatory. |
+| `orderId` | `String` | Mandatory; parsed as `u64::from_str` in the use case. The on-chain ABI is `uint128`, but the `bee_dex` → `ackinacki-kit` → `serde_json::json!` path rejects values above `u64::MAX` (same `arbitrary_precision` constraint documented in [§clientOrderId generation](#clientorderid-generation)). Out-of-range or non-numeric → `InvalidParameter` → 400 / -1130. |
+
+Mandatory-field absence returns `MissingParameter` → 400.
+
+### Order resolution
+
+One SELECT joins [`live_orders`](data-schema.md#live_orders) ⨝ [`markets`](data-schema.md#markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes) and applies four predicates at once:
+
+- `markets.last_reconciled_at IS NOT NULL` — same visibility gate as POST.
+- `markets.market_address = :marketAddress` AND `market_outcomes.symbol = :symbol`.
+- `live_orders.order_id = :orderId` AND `live_orders.status = 'OPEN'`.
+- `live_orders.owner_pn_address = :pn_address` — pins the caller as the owner of the row.
+
+A miss surfaces as `UnknownOrder` → 404 / -2011 with **no distinction** between "order does not exist", "order exists but belongs to another account", "order is not OPEN anymore", or "marketAddress/symbol does not match the order's actual market". This is deliberate: differentiating those cases would leak the existence (and account binding) of orders the caller does not own.
+
+The same row supplies every value the chain submission and the response need:
+
+| Source column | Bound to |
+| --- | --- |
+| `markets.event_id` | `cancelOrder.eventId` (uint256). |
+| `markets.oracle_list_hash` | `cancelOrder.oracleListHash` (uint256). NULL on a reconciled row → `MarketInconsistent` → 503. |
+| `markets.token_type` | `cancelOrder.tokenType` (uint32). |
+| `markets.orderbook_address` | Joined against `live_orders.orderbook_address` to scope ownership to one book. |
+| `live_orders.client_order_id` | Echoed back as `clientOrderId` in the response. |
+
+Status derivation reuses the SQL from [read-api.md §Status derivation](read-api.md#status-derivation) over the same `markets` row and the request `now`. Cancellation is permitted only when `status == TRADING`; any other phase rejects with `OrderValidationFailed` → 400 / -2010. The chain itself does not gate cancels by market status, but the read-model gate keeps the public surface symmetric with POST and prevents user-driven cancels against a draining book once the market has left TRADING.
+
+### Chain submission
+
+Encode and dispatch a `PrivateNote.cancelOrder` external message against `trading_pn.pn_address`. ABI from `contracts/PrivateNote.sol::cancelOrder`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfCancelOrder`:
+
+```text
+cancelOrder(
+  eventId,         // uint256, markets.event_id
+  oracleListHash,  // uint256, markets.oracle_list_hash
+  tokenType,       // uint32,  markets.token_type
+  orderId,         // uint128 ABI; capped at u64 today (see Request parsing)
+)
+```
+
+`PrivateNote.cancelOrder` performs no ownership or existence check on `orderId` — only the per-PN busy guard (`require(!_busy.hasValue(), ERR_NOTE_BUSY)`) and the internal forward `OrderBook.executeBatch(noOrders, [orderId])`. The OrderBook side runs in a separate transaction the synchronous return cannot observe; any reject there (queue overflow, owner mismatch, order already gone) is invisible to the HTTP caller. See [DELETE failure surface](#failure-surface-1).
+
+Sender boundary: extend the existing `ChainOrderSender` trait in `crates/application/src/lib.rs` with `async fn cancel_order(&self, payload: CancelOrderPayload) -> Result<(), DomainError>`. The production `BeeDexChainSender` impl wraps `bee_dex::Dex::cancel_order` and reuses `classify_chain_outcome` and `map_tvm_exit_code` from `crates/infrastructure/src/chain_sender.rs` — the only TVM exit code the cancel path produces is `121 ERR_NOTE_BUSY`, already mapped.
+
+### Response
+
+A successful submission returns the four-field body from [api-spec §Cancel Order](../api-spec.md#cancel-order):
+
+| Field | Source |
+| --- | --- |
+| `orderId` | Echoed from the request. |
+| `clientOrderId` | `live_orders.client_order_id` from the resolved row. Empty string when the column is NULL (order was placed without a `newOrderClientId`). |
+| `transactTime` | `now_millis()` captured once at the start of the handler. |
+| `status` | Always `"PENDING_CANCEL"` — `PrivateNote.cancelOrder` has accepted the request and forwarded to OrderBook, but the order has **not been removed from the book yet**. `OrderBook` will emit `OrderCancelled` once it dequeues the entry, and the indexer will flip [`live_orders.status`](data-schema.md#live_orders) to `CANCELLED` then. |
+
+The client correlates by `orderId` against `/api/v1/openOrders` (the order disappears) and `/api/v1/allOrders` (it surfaces as `CANCELED`, or `FILLED` if matching raced the cancel).
+
+`PENDING_CANCEL` is listed in [api-spec §Order Status](../api-spec.md#order-status); it is the only status `DELETE /api/v1/order` returns on success. Strictly additive — `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` still arrive through `/api/v1/openOrders` and `/api/v1/allOrders` and existing client switches keep working.
+
+### Failure surface
+
+Three failure classes — two synchronous, one async — same shape as POST.
+
+1. **Pre-submit, surfaced synchronously** — request shape, order resolution, status derivation. Mapped per [DELETE error mapping](#error-mapping-1).
+
+2. **PrivateNote chain-side, surfaced synchronously** — `bee_dex::Dex::cancel_order` awaits the chain's execution of `PrivateNote.cancelOrder`. The only PN-side `require(...)` is the busy guard:
+
+   | chain `exit_code` | source | `DomainError` |
+   | --- | --- | --- |
+   | `121` `ERR_NOTE_BUSY` | another op from this PN is still in flight (`_busy` not cleared) | `OrderPnBusy` → 429 / -2014 |
+   | any other `tvm_exit` code | unmapped chain code | `Unexpected` → 500 / -1000, logged at `error` for ops triage |
+
+3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancel from its internal queue in a later transaction. Three outcomes are silent at HTTP-response time:
+   - **Race with fill or earlier cancel** — the order is no longer on the book when the cancel dequeues; `_doCancel` returns without emitting `OrderCancelled`. `live_orders` may already be `FILLED` or `CANCELLED` from another path.
+   - **Owner mismatch** — `_doCancel` silently no-ops if `o.depositHash` does not match the caller's. The pre-submit ownership lookup makes this case unreachable under normal operation; it remains possible only under read-model corruption.
+   - **Queue overflow** — `OrderBook.Rejected` fires; the indexer records the raw event but does not touch `live_orders`. The order stays `OPEN`.
+
+   An HTTP 200 `PENDING_CANCEL` is therefore not a guarantee that the cancel will land — it confirms only that `PrivateNote.cancelOrder` accepted the request. Clients detect class-3 outcomes by polling `/api/v1/openOrders` and `/api/v1/allOrders` and reasoning over the disappearance (or non-disappearance) of the `orderId`.
+
+Transport-level failures (gateway drop, decode error) collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error`, same as POST.
+
+### Error mapping
+
+| Condition | DomainError | HTTP |
+| --- | --- | --- |
+| Auth envelope / unknown api_key / bad signature / timestamp | handled upstream by [auth_hoop](auth.md#authentication) | 401 |
+| Caller lacks `TRADE` permission | `AuthRequired` | 401 |
+| Mandatory query field missing | `MissingParameter` | 400 |
+| `orderId` not numeric or overflows u64 | `InvalidParameter` | 400 |
+| Reconciled market with NULL `oracle_list_hash` | `MarketInconsistent` | 503 |
+| `(marketAddress, symbol, orderId)` does not resolve to an OPEN order owned by the caller (covers unknown order, wrong owner, wrong market, already closed) | `UnknownOrder` | 404 |
+| Resolved market `status != TRADING` | `OrderValidationFailed` | 400 |
+| Chain `ERR_NOTE_BUSY` (per-PN serial; another op still in flight) | `OrderPnBusy` | 429 |
+| Handler exceeded `ServerSection.request_timeout_ms` | `RequestTimeout` | 504 |
+| Unmapped chain `tvm_exit` code or gateway transport failure | `Unexpected` | 500 |
+
+The same `request_timeout_ms > chain.cancel_order_timeout_ms` invariant POST relies on extends to cancel — the chain config gets a `cancel_order_timeout_ms` alongside `place_order_timeout_ms`, pinned at boot by `ApiConfig::validate` so the HTTP timeout cannot fire while a chain submission is still in flight.
+
+### Layering
+
+| Layer | Responsibility |
+| --- | --- |
+| `crates/domain` | Adds `OrderStatus::PendingCancel` (rendered as `"PENDING_CANCEL"` via `as_str`). No other changes — `OrderSide`, error variants, decimal helpers are unchanged. |
+| `crates/application` | `CancelOrderInput` (HTTP-shaped), `CancelOrderPayload` (chain-shaped), `CancelledOrder` (response-shaped); `CancelOrderUseCase`. Extends `ChainOrderSender` with `cancel_order`. Extends `MarketReadRepository` with `resolve_for_cancel(market_address, symbol, order_id, owner_pn_address, now)` — the one-shot join described in [Order resolution](#order-resolution). |
+| `crates/infrastructure` | `BeeDexChainSender::cancel_order` wraps `bee_dex::Dex::cancel_order` (pubkey/seckey re-encode reused). `PostgresReadModelRepository::resolve_for_cancel` runs the join, mapping NULL `oracle_list_hash` to `MarketInconsistent` and any other miss to `UnknownOrder`. |
+| `services/api` | `delete_order` handler attached as `Router::with_path("api/v1/order").delete(delete_order)` on the existing auth subrouter (alongside `.post(create_order)`). HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` reuses the `BeeDexChainSender` instance already constructed for POST. |
+
+Use case constructors take trait objects; `services/api/tests/cancel_order_http.rs` injects `FakeRepo` + `FakeAuthenticator` + a `RecordingSender` variant that records cancel payloads, matching the triad established by `create_order_http.rs`.
+
+### Idempotency and retries
+
+The backend stores no inflight cancel state and does not retry on its own. Duplicate DELETEs on the same `orderId` are safe at the chain level:
+
+- If the first cancel is still in flight at PN, the second hits `ERR_NOTE_BUSY` → 429 (retry).
+- If the first cancel already cleared PN but the indexer has not flipped `live_orders` yet, the second passes pre-submit, PN forwards a second `executeBatch`, OrderBook's `_doCancel` silently no-ops (the order is gone), and the indexer state remains consistent.
+- Once `live_orders.status` is `CANCELLED`, the pre-submit lookup returns `UnknownOrder` and further DELETEs surface as 404 / -2011. Clients should treat `-2011` as terminal and not retry.
+
+### Concurrency
+
+Cancellation contends for the same per-PN `_busy` lock as placement — see [§Concurrency for POST /order](#concurrency). A DELETE that races a POST (or another DELETE) from the same account surfaces as `OrderPnBusy` → 429 / -2014 with the same retry semantics. Clients that need to cancel multiple orders without back-pressure should use `DELETE /api/v1/batchOrders` once that endpoint lands — one chain message under a single `_busy` lock.
 
 ## `POST /api/v1/batchOrders`
 

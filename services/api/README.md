@@ -8,7 +8,7 @@ Postgres and hosts authenticated private API routes.
 - Functional REST requirements: [docs/api-spec.md](../../docs/api-spec.md).
 - Authentication implementation: [docs/tech-specs/auth.md](../../docs/tech-specs/auth.md).
 - Read API implementation (all `GET` endpoints): [docs/tech-specs/read-api.md](../../docs/tech-specs/read-api.md).
-- Write API implementation (order placement / cancellation / batching): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md). Covers `POST /api/v1/order` today; the remaining write endpoints are stub sections inside that doc.
+- Write API implementation (order placement / cancellation / batching): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md). Covers `POST /api/v1/order` and `DELETE /api/v1/order` today; the remaining write endpoints (batch + cancel-all) are stub sections inside that doc.
 - Data schema: [docs/tech-specs/data-schema.md](../../docs/tech-specs/data-schema.md).
 
 Implementation details belong in the tech specs above, not in this README.
@@ -25,9 +25,10 @@ Config sections:
 - `database`: Postgres URL and pool settings.
 - `auth`: HMAC recvWindow limits and local seed-account toggle.
 - `chain`: Acki Nacki gateway endpoint (`gateway_endpoint`) the trading
-  path POSTs `placeOrder` external messages to, plus
-  `place_order_timeout_ms` bounding the per-call wait. Local config
-  defaults to `shellnet.ackinacki.org`; stage/prod ship their own.
+  path POSTs external messages to, plus `place_order_timeout_ms` and
+  `cancel_order_timeout_ms` bounding the per-call wait for each chain
+  entry point. Local config defaults to `shellnet.ackinacki.org`;
+  stage/prod ship their own.
 
 The `auth.kek_hex` field is the 32-byte master key used to encrypt
 `api_secret` and `pn_seckey` at rest. `config/api.local.yaml` ships a

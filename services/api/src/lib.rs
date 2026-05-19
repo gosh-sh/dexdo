@@ -15,6 +15,8 @@ use std::time::UNIX_EPOCH;
 use anyhow::Context;
 use dodex_application::AuthContext;
 use dodex_application::Authenticator;
+use dodex_application::CancelOrderInput;
+use dodex_application::CancelOrderUseCase;
 use dodex_application::ChainOrderSender;
 use dodex_application::CreateOrderUseCase;
 use dodex_application::GetDepthQuery;
@@ -593,6 +595,24 @@ struct CreateOrderResponse {
     status: &'static str,
 }
 
+/// Response shape for `DELETE /api/v1/order`. Minimal by design,
+/// parallel to [`CreateOrderResponse`]: we only return facts the
+/// caller does not already have. `clientOrderId` is the value
+/// recorded on placement (`live_orders.client_order_id`) — useful
+/// for correlation with the prior POST. The final state arrives
+/// later through `/api/v1/openOrders` (the order disappears) and
+/// `/api/v1/allOrders` (CANCELED, or FILLED if matching raced the
+/// cancel). See `docs/tech-specs/write-api.md §Response` for
+/// `DELETE /api/v1/order`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelOrderResponse {
+    order_id: String,
+    client_order_id: String,
+    transact_time: i64,
+    status: &'static str,
+}
+
 /// Read the authenticated identity from the depot and enforce the
 /// endpoint's required permission in one call. Protected handlers
 /// must call this rather than `depot.obtain::<AuthContext>()`
@@ -701,6 +721,59 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// `DELETE /api/v1/order`. Auth hoop verified the request; this
+/// handler enforces `TRADE`, parses query params, hands off to the use
+/// case, and shapes the four-field `PENDING_CANCEL` response per
+/// `docs/tech-specs/write-api.md §Response` (DELETE).
+#[handler]
+async fn delete_order(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<CancelOrderResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::Trade)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let market_address = non_empty_query(req, "marketAddress")
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let symbol =
+        non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let order_id_raw =
+        non_empty_query(req, "orderId").ok_or(ApiError::from(DomainError::MissingParameter))?;
+    // u64 ceiling at the public boundary — same `serde_json` /
+    // `arbitrary_precision` constraint as `clientOrderId` for POST.
+    // Overflow or non-numeric → 400 / -1130.
+    let order_id =
+        order_id_raw.parse::<u64>().map_err(|_| ApiError::from(DomainError::InvalidParameter))?;
+
+    let (now_seconds, now_ms) = now_pair();
+    let input = CancelOrderInput {
+        trading_pn: ctx.trading_pn,
+        market_address: MarketAddress(market_address),
+        symbol: Symbol(symbol),
+        order_id,
+        now_seconds,
+        now_ms,
+    };
+
+    let use_case = CancelOrderUseCase::new(state.repo, state.chain_sender);
+    let cancelled = use_case.execute(input).await.map_err(ApiError::from)?;
+
+    Ok(Json(CancelOrderResponse {
+        order_id: order_id.to_string(),
+        // api-spec §Cancel Order: empty string when the order was
+        // placed without a `newOrderClientId`.
+        client_order_id: cancelled.client_order_id.unwrap_or_default(),
+        transact_time: now_ms,
+        status: OrderStatus::PendingCancel.as_str(),
+    }))
+}
+
 /// Assemble the production router around `state`. Kept as a separate
 /// function so integration tests can drive the same router with a
 /// test-DB pool through Salvo's in-process `TestClient`; production
@@ -724,7 +797,11 @@ pub fn build_router(state: AppState) -> Router {
             // `NONE`-security per docs/api-spec.md §Endpoint Summary.
             Router::new()
                 .hoop(auth_hoop::authenticate)
-                .push(Router::with_path("api/v1/order").post(create_order))
+                .push(
+                    Router::with_path("api/v1/order")
+                        .post(create_order)
+                        .delete(delete_order),
+                )
                 .push(Router::with_path("api/v1/openOrders").get(get_open_orders)),
         )
 }
@@ -765,6 +842,7 @@ pub async fn run() -> anyhow::Result<()> {
     let chain_sender: SharedChainSender = Arc::new(BeeDexChainSender::new(
         vec![config.chain.gateway_endpoint.clone()],
         Duration::from_millis(config.chain.place_order_timeout_ms),
+        Duration::from_millis(config.chain.cancel_order_timeout_ms),
     )?);
     let state = AppState::new(repo, authenticator, chain_sender)
         .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms));

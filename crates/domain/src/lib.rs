@@ -399,12 +399,21 @@ impl TimeInForce {
 /// HTTP response to a successful `POST /api/v1/order` always carries
 /// `PendingNew`; the indexer-projected row in `live_orders` then
 /// surfaces as `NEW` through `GET /api/v1/openOrders`.
+///
+/// `PendingCancel` is the analogous state for cancellation: the moment
+/// `PrivateNote.cancelOrder` accepts and forwards to `OrderBook`, the
+/// HTTP response carries `PendingCancel`; the book-side removal lands
+/// asynchronously via `OrderBook.OrderCancelled`, after which the order
+/// disappears from `/api/v1/openOrders` and surfaces in
+/// `/api/v1/allOrders` as `Canceled` (or `Filled` if matching raced the
+/// cancel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OrderStatus {
     PendingNew,
     New,
     PartiallyFilled,
+    PendingCancel,
     Filled,
     Canceled,
     Rejected,
@@ -416,6 +425,7 @@ impl OrderStatus {
             Self::PendingNew => "PENDING_NEW",
             Self::New => "NEW",
             Self::PartiallyFilled => "PARTIALLY_FILLED",
+            Self::PendingCancel => "PENDING_CANCEL",
             Self::Filled => "FILLED",
             Self::Canceled => "CANCELED",
             Self::Rejected => "REJECTED",

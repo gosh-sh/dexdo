@@ -638,20 +638,23 @@ Response:
 
 ```json
 {
-  "marketAddress": "0:market-address",
-  "symbol": "PM-2026-ELECTION-YES",
   "orderId": "123456789",
-  "price": "0.615",
-  "origQty": "1.500000",
-  "executedQty": "0.000000",
-  "status": "CANCELED",
-  "timeInForce": "GTC",
-  "type": "LIMIT",
-  "side": "BUY",
-  "time": 1710000000000,
-  "updateTime": 1710000010000
+  "clientOrderId": "mm-order-0001",
+  "transactTime": 1710000000000,
+  "status": "PENDING_CANCEL"
 }
 ```
+
+Response fields:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `orderId` | STRING | The `orderId` from the request, echoed for correlation. |
+| `clientOrderId` | STRING | The order's `clientOrderId` as recorded on placement. Empty string if the order was placed without one. |
+| `transactTime` | LONG | Server timestamp (Unix ms) when the cancel request was accepted. |
+| `status` | ENUM | Always [`PENDING_CANCEL`](#order-status) on success. |
+
+The response confirms acceptance only. The final outcome — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/openOrders`](#current-open-orders) (the order disappears) and [`GET /api/v1/allOrders`](#closed-and-canceled-orders) shortly after.
 
 ### New Batch Orders
 
@@ -1034,6 +1037,7 @@ Response:
 | `PENDING_NEW` | Order accepted by the exchange and not yet on the book. Will transition to `NEW` (or `PARTIALLY_FILLED` if it immediately matches) once visible in `/api/v1/openOrders`. |
 | `NEW` | Order is open and has no fills. |
 | `PARTIALLY_FILLED` | Order is open and partially filled. |
+| `PENDING_CANCEL` | Cancel request accepted by the exchange but not yet applied to the book. Will transition to `CANCELED` (or `FILLED` if matching raced the cancel) once the order disappears from `/api/v1/openOrders` and surfaces in `/api/v1/allOrders`. |
 | `FILLED` | Order is completely filled. |
 | `CANCELED` | Order was canceled by the user or system. |
 | `REJECTED` | Order was rejected and was not opened. |

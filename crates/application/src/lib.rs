@@ -123,6 +123,27 @@ pub enum MarketsRequest {
     Listing(MarketsListing),
 }
 
+/// Slim projection the `DELETE /api/v1/order` path needs. Built by a
+/// single SELECT joining `live_orders ⋈ markets ⋈ market_outcomes` with
+/// the ownership predicate `live_orders.owner_pn_address = :pn_address`
+/// baked into the where-clause — a miss collapses to
+/// `DomainError::UnknownOrder` regardless of whether the orderId does
+/// not exist, belongs to another account, is no longer OPEN, or the
+/// `(marketAddress, symbol)` does not match the order's actual market.
+/// That ambiguity is intentional: differentiating those cases would
+/// leak the existence of orders the caller does not own.
+#[derive(Debug, Clone)]
+pub struct OrderForCancel {
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    pub token_type: i32,
+    pub status: MarketStatus,
+    /// `live_orders.client_order_id`. NULL in the DB surfaces as `None`
+    /// here; the handler renders it as the empty string per
+    /// api-spec §Cancel Order.
+    pub client_order_id: Option<String>,
+}
+
 /// Slim market+outcome projection the `POST /api/v1/order` path needs.
 /// Built by a single SELECT joining `markets ⋈ market_outcomes`; the
 /// oracle/event aggregation that `list_markets` performs is irrelevant
@@ -162,6 +183,21 @@ pub trait MarketReadRepository: Send + Sync {
         now: i64,
     ) -> Result<MarketForPlacement, anyhow::Error>;
 
+    /// Resolve one open order owned by `owner_pn_address` together with
+    /// the chain-side market fields needed for `PrivateNote.cancelOrder`,
+    /// in a single SELECT. The ownership predicate is part of the
+    /// where-clause: any miss (unknown id, wrong owner, wrong market,
+    /// already closed) collapses to `DomainError::UnknownOrder` so error
+    /// codes do not leak ownership.
+    async fn resolve_for_cancel(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        order_id: u64,
+        owner_pn_address: &str,
+        now: i64,
+    ) -> Result<OrderForCancel, anyhow::Error>;
+
     async fn list_open_orders(
         &self,
         query: &OpenOrdersQuery,
@@ -190,6 +226,17 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         now: i64,
     ) -> Result<MarketForPlacement, anyhow::Error> {
         (**self).resolve_for_new_order(market_address, symbol, now).await
+    }
+
+    async fn resolve_for_cancel(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        order_id: u64,
+        owner_pn_address: &str,
+        now: i64,
+    ) -> Result<OrderForCancel, anyhow::Error> {
+        (**self).resolve_for_cancel(market_address, symbol, order_id, owner_pn_address, now).await
     }
 
     async fn list_open_orders(
@@ -342,6 +389,51 @@ pub struct SubmittedOrder {
     pub client_order_id: String,
 }
 
+/// Input shape for `CancelOrderUseCase`. The HTTP layer parses
+/// `DELETE /api/v1/order` query string + `AuthContext` + clock into
+/// this struct. `order_id` is already parsed as `u64` — overflow is
+/// rejected at the HTTP boundary so the use case never sees out-of-range
+/// values (see `docs/tech-specs/write-api.md §Request parsing`).
+#[derive(Debug, Clone)]
+pub struct CancelOrderInput {
+    pub trading_pn: TradingPn,
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
+    pub order_id: u64,
+    /// Unix seconds. Used for status derivation in
+    /// `resolve_for_cancel` and as the `serverTime`-style anchor.
+    pub now_seconds: i64,
+    /// Unix milliseconds. Returned to the client as `transactTime`.
+    pub now_ms: i64,
+}
+
+/// Chain-shaped payload handed to `ChainOrderSender::cancel_order`.
+/// Parallel in shape to `NewOrderPayload`, but the ABI is narrower —
+/// `PrivateNote.cancelOrder` takes only event/oracle/token coordinates
+/// plus the chain-assigned `orderId`. No price, amount, or flags are
+/// involved on cancel.
+#[derive(Debug, Clone)]
+pub struct CancelOrderPayload {
+    pub pn_address: String,
+    /// Decimal-encoded `uint256` public half of the trading-PN keypair.
+    pub pn_pubkey: String,
+    pub pn_seckey: SensitiveBytes,
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    pub token_type: u32,
+    pub order_id: u64,
+}
+
+/// Output of `CancelOrderUseCase`. Carries the `clientOrderId` resolved
+/// from `live_orders` (or `None` if the order was placed without one)
+/// so the handler can echo it in the response per api-spec §Cancel
+/// Order. `orderId` is not duplicated here — the handler already has it
+/// from the request.
+#[derive(Debug, Clone)]
+pub struct CancelledOrder {
+    pub client_order_id: Option<String>,
+}
+
 /// Dispatch a `PrivateNote.placeOrder` external message to chain.
 /// Returns once `bee_dex` has observed the chain's execution of
 /// `PrivateNote.placeOrder` — so PrivateNote-side `require(...)`
@@ -355,12 +447,25 @@ pub struct SubmittedOrder {
 #[async_trait]
 pub trait ChainOrderSender: Send + Sync {
     async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError>;
+
+    /// Dispatch a `PrivateNote.cancelOrder` external message to chain.
+    /// Returns once `bee_dex` has observed PN's execution of
+    /// `cancelOrder` — the only PN-side reject mapped here is
+    /// `ERR_NOTE_BUSY` → `OrderPnBusy`. OrderBook-side outcomes (silent
+    /// no-op on owner mismatch / already-closed, queue overflow
+    /// `Rejected`) are asynchronous and surface through the indexer; see
+    /// `docs/tech-specs/write-api.md §DELETE failure surface`.
+    async fn cancel_order(&self, payload: CancelOrderPayload) -> Result<(), DomainError>;
 }
 
 #[async_trait]
 impl<T: ?Sized + ChainOrderSender> ChainOrderSender for Arc<T> {
     async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError> {
         (**self).submit_order(payload).await
+    }
+
+    async fn cancel_order(&self, payload: CancelOrderPayload) -> Result<(), DomainError> {
+        (**self).cancel_order(payload).await
     }
 }
 
@@ -557,6 +662,77 @@ fn generate_client_order_id() -> String {
     (Uuid::new_v4().as_u128() as u64).to_string()
 }
 
+/// Orchestrates `DELETE /api/v1/order`: resolves the caller-owned open
+/// order through one SELECT, validates market `status == TRADING`,
+/// builds the chain payload, dispatches `PrivateNote.cancelOrder`, and
+/// returns the `clientOrderId` to echo. The chain-side effects on
+/// `OrderBook` are asynchronous; only the PN-side accept/reject is
+/// surfaced synchronously.
+pub struct CancelOrderUseCase<R, S> {
+    repo: R,
+    sender: S,
+}
+
+impl<R, S> CancelOrderUseCase<R, S> {
+    pub fn new(repo: R, sender: S) -> Self {
+        Self { repo, sender }
+    }
+}
+
+impl<R, S> CancelOrderUseCase<R, S>
+where
+    R: MarketReadRepository,
+    S: ChainOrderSender,
+{
+    pub async fn execute(&self, input: CancelOrderInput) -> Result<CancelledOrder, DomainError> {
+        let OrderForCancel { event_id, oracle_list_hash, token_type, status, client_order_id } =
+            self.repo
+                .resolve_for_cancel(
+                    &input.market_address,
+                    &input.symbol,
+                    input.order_id,
+                    &input.trading_pn.pn_address,
+                    input.now_seconds,
+                )
+                .await
+                .map_err(|err| {
+                    if let Some(domain) = err.downcast_ref::<DomainError>() {
+                        return *domain;
+                    }
+                    error!(?err, market_address = %input.market_address.0, "resolve_for_cancel failed (non-domain)");
+                    DomainError::Unexpected
+                })?;
+
+        if status != MarketStatus::Trading {
+            return Err(DomainError::OrderValidationFailed);
+        }
+
+        // Same fail-closed invariant as POST: a reconciled market is
+        // expected to carry `oracle_list_hash`; the chain ABI requires
+        // it. Blank means the read-model is internally inconsistent —
+        // 503 lets the indexer catch up rather than pushing a
+        // zero-hash submission.
+        if oracle_list_hash.is_empty() {
+            return Err(DomainError::MarketInconsistent);
+        }
+
+        let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
+
+        let payload = CancelOrderPayload {
+            pn_address: input.trading_pn.pn_address,
+            pn_pubkey: input.trading_pn.pn_pubkey,
+            pn_seckey: input.trading_pn.pn_seckey,
+            event_id,
+            oracle_list_hash,
+            token_type,
+            order_id: input.order_id,
+        };
+        self.sender.cancel_order(payload).await?;
+
+        Ok(CancelledOrder { client_order_id })
+    }
+}
+
 pub struct GetOpenOrdersUseCase<R> {
     repo: R,
 }
@@ -666,17 +842,29 @@ mod tests {
     use dodex_domain::MarketName;
     use dodex_domain::Outcome;
 
+    #[derive(Clone)]
+    struct FakeOpenOrder {
+        order_id: u64,
+        owner_pn_address: String,
+        client_order_id: Option<String>,
+    }
+
     struct FakeRepo {
         market: Option<Market>,
+        open_order: Option<FakeOpenOrder>,
     }
 
     impl FakeRepo {
         fn with(market: Market) -> Self {
-            Self { market: Some(market) }
+            Self { market: Some(market), open_order: None }
         }
 
         fn empty() -> Self {
-            Self { market: None }
+            Self { market: None, open_order: None }
+        }
+
+        fn with_open_order(market: Market, order: FakeOpenOrder) -> Self {
+            Self { market: Some(market), open_order: Some(order) }
         }
     }
 
@@ -728,6 +916,36 @@ mod tests {
             })
         }
 
+        async fn resolve_for_cancel(
+            &self,
+            _: &MarketAddress,
+            symbol: &Symbol,
+            order_id: u64,
+            owner_pn_address: &str,
+            _: i64,
+        ) -> Result<OrderForCancel, anyhow::Error> {
+            // Same shape as the Postgres impl: any predicate miss
+            // (market/symbol/order/owner) collapses to `UnknownOrder`
+            // so callers cannot distinguish "wrong owner" from
+            // "no such order" through error codes.
+            let unknown = || anyhow::anyhow!(DomainError::UnknownOrder);
+            let market = self.market.clone().ok_or_else(unknown)?;
+            if !market.outcomes.iter().any(|o| o.symbol == *symbol) {
+                return Err(unknown());
+            }
+            let order = self.open_order.clone().ok_or_else(unknown)?;
+            if order.order_id != order_id || order.owner_pn_address != owner_pn_address {
+                return Err(unknown());
+            }
+            Ok(OrderForCancel {
+                event_id: market.event.event_id,
+                oracle_list_hash: market.oracle_list_hash,
+                token_type: market.token_type,
+                status: market.status,
+                client_order_id: order.client_order_id,
+            })
+        }
+
         async fn list_open_orders(
             &self,
             _: &OpenOrdersQuery,
@@ -738,20 +956,33 @@ mod tests {
 
     struct FakeSender {
         recorded: Mutex<Vec<NewOrderPayload>>,
+        recorded_cancels: Mutex<Vec<CancelOrderPayload>>,
         fail_with: Option<DomainError>,
     }
 
     impl FakeSender {
         fn ok() -> Self {
-            Self { recorded: Mutex::new(Vec::new()), fail_with: None }
+            Self {
+                recorded: Mutex::new(Vec::new()),
+                recorded_cancels: Mutex::new(Vec::new()),
+                fail_with: None,
+            }
         }
 
         fn failing(err: DomainError) -> Self {
-            Self { recorded: Mutex::new(Vec::new()), fail_with: Some(err) }
+            Self {
+                recorded: Mutex::new(Vec::new()),
+                recorded_cancels: Mutex::new(Vec::new()),
+                fail_with: Some(err),
+            }
         }
 
         fn calls(&self) -> Vec<NewOrderPayload> {
             self.recorded.lock().unwrap().clone()
+        }
+
+        fn cancel_calls(&self) -> Vec<CancelOrderPayload> {
+            self.recorded_cancels.lock().unwrap().clone()
         }
     }
 
@@ -762,6 +993,14 @@ mod tests {
                 return Err(err);
             }
             self.recorded.lock().unwrap().push(payload);
+            Ok(())
+        }
+
+        async fn cancel_order(&self, payload: CancelOrderPayload) -> Result<(), DomainError> {
+            if let Some(err) = self.fail_with {
+                return Err(err);
+            }
+            self.recorded_cancels.lock().unwrap().push(payload);
             Ok(())
         }
     }
@@ -1125,5 +1364,147 @@ mod tests {
                 "generated coid {coid:?} does not fit in u64 — would panic in bee_dex::Dex::place_order",
             );
         }
+    }
+
+    // ---- CancelOrderUseCase ----
+
+    fn base_cancel_input(symbol: &str, order_id: u64) -> CancelOrderInput {
+        CancelOrderInput {
+            trading_pn: TradingPn {
+                pn_address: "0:pn".into(),
+                pn_pubkey: "1".into(),
+                pn_dih: "2".into(),
+                pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            },
+            market_address: MarketAddress("0:market".into()),
+            symbol: Symbol(symbol.into()),
+            order_id,
+            now_seconds: 1_000,
+            now_ms: 1_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_order_happy_path() {
+        let market = trading_market("PM-YES");
+        let order = FakeOpenOrder {
+            order_id: 123,
+            owner_pn_address: "0:pn".into(),
+            client_order_id: Some("42".into()),
+        };
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), sender.clone());
+
+        let out = uc.execute(base_cancel_input("PM-YES", 123)).await.expect("happy path");
+        assert_eq!(out.client_order_id, Some("42".into()));
+
+        let calls = sender.cancel_calls();
+        assert_eq!(calls.len(), 1);
+        let p = &calls[0];
+        assert_eq!(p.pn_address, "0:pn");
+        assert_eq!(p.event_id, "0xevent");
+        assert_eq!(p.oracle_list_hash, "0xdead");
+        assert_eq!(p.token_type, 1);
+        assert_eq!(p.order_id, 123);
+    }
+
+    #[tokio::test]
+    async fn cancel_order_echoes_empty_client_order_id_when_absent() {
+        // Orders placed without `newOrderClientId` come back as
+        // `client_order_id: None`; the use case must propagate the
+        // absence rather than fabricating a value, so the HTTP layer
+        // can render the spec-mandated empty string.
+        let market = trading_market("PM-YES");
+        let order =
+            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
+        let uc = CancelOrderUseCase::new(
+            FakeRepo::with_open_order(market, order),
+            Arc::new(FakeSender::ok()),
+        );
+
+        let out = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap();
+        assert_eq!(out.client_order_id, None);
+    }
+
+    #[tokio::test]
+    async fn cancel_order_unknown_when_market_missing() {
+        let uc = CancelOrderUseCase::new(FakeRepo::empty(), FakeSender::ok());
+        let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
+        assert_eq!(err, DomainError::UnknownOrder);
+    }
+
+    #[tokio::test]
+    async fn cancel_order_unknown_when_symbol_mismatch() {
+        let market = trading_market("PM-YES");
+        let order =
+            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
+        let uc =
+            CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), FakeSender::ok());
+        let err = uc.execute(base_cancel_input("PM-NOPE", 123)).await.unwrap_err();
+        assert_eq!(err, DomainError::UnknownOrder);
+    }
+
+    #[tokio::test]
+    async fn cancel_order_unknown_when_order_missing() {
+        // Market resolves, but no live_orders row for the caller —
+        // surfaces as UnknownOrder, never as MissingParameter.
+        let market = trading_market("PM-YES");
+        let uc = CancelOrderUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
+        assert_eq!(err, DomainError::UnknownOrder);
+    }
+
+    #[tokio::test]
+    async fn cancel_order_unknown_when_owner_mismatch() {
+        // Wrong-owner case MUST NOT differ from "no such order" — the
+        // existence of another account's order would otherwise leak
+        // through the error code.
+        let market = trading_market("PM-YES");
+        let order = FakeOpenOrder {
+            order_id: 123,
+            owner_pn_address: "0:someone-else".into(),
+            client_order_id: None,
+        };
+        let uc =
+            CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), FakeSender::ok());
+        let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
+        assert_eq!(err, DomainError::UnknownOrder);
+    }
+
+    #[tokio::test]
+    async fn cancel_order_rejects_non_trading_status() {
+        let mut market = trading_market("PM-YES");
+        market.status = MarketStatus::Resolving;
+        let order =
+            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
+        let uc =
+            CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), FakeSender::ok());
+        let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+    }
+
+    #[tokio::test]
+    async fn cancel_order_rejects_blank_oracle_list_hash() {
+        let mut market = trading_market("PM-YES");
+        market.oracle_list_hash = String::new();
+        let order =
+            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
+        let uc =
+            CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), FakeSender::ok());
+        let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[tokio::test]
+    async fn cancel_order_propagates_sender_pn_busy() {
+        let market = trading_market("PM-YES");
+        let order =
+            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
+        let uc = CancelOrderUseCase::new(
+            FakeRepo::with_open_order(market, order),
+            FakeSender::failing(DomainError::OrderPnBusy),
+        );
+        let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderPnBusy);
     }
 }
