@@ -673,9 +673,19 @@ async fn apply_order_cancelled(
     let chain_order = node_chain_order(node, "OrderCancelled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
 
+    // `status` uses a CASE expression so an OrderCancelled that races a
+    // full fill cannot demote a `FILLED` row to `CANCELLED`. The chain
+    // contract is supposed to prevent this race (see
+    // docs/tech-specs/write-api.md §Response — "FILLED if matching
+    // raced the cancel"), but defensive parity with `apply_order_filled`
+    // — which already gates the FILLED transition on
+    // `amount_remaining - $3 <= 0` — costs one CASE and keeps the
+    // projector internally consistent regardless of contract drift.
+    // `last_chain_order` / `chain_updated_at` still advance because the
+    // cancel event itself did land on chain.
     let updated = sqlx::query(
         r#"update live_orders
-              set status = 'CANCELLED',
+              set status = case when status = 'FILLED' then 'FILLED' else 'CANCELLED' end,
                   last_chain_order = greatest(last_chain_order, $3),
                   chain_updated_at = greatest(chain_updated_at, to_timestamp($4::double precision)),
                   updated_at = now()
