@@ -386,7 +386,7 @@ impl TimeInForce {
 /// HTTP response to a successful `POST /api/v1/order` always carries
 /// `PendingNew`; the indexer-projected row in `live_orders` then
 /// surfaces as `NEW` through `GET /api/v1/openOrders`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OrderStatus {
     PendingNew,

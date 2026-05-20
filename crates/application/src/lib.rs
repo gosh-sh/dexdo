@@ -14,8 +14,9 @@ use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
-use dodex_domain::OpenOrder;
+use dodex_domain::Order;
 use dodex_domain::OrderSide;
+use dodex_domain::OrderStatus;
 use dodex_domain::OrderType;
 use dodex_domain::Outcome;
 use dodex_domain::Permission;
@@ -162,10 +163,10 @@ pub trait MarketReadRepository: Send + Sync {
         now: i64,
     ) -> Result<MarketForPlacement, anyhow::Error>;
 
-    async fn list_open_orders(
+    async fn list_orders(
         &self,
-        query: &OpenOrdersQuery,
-    ) -> Result<OpenOrdersPage, anyhow::Error>;
+        query: &OrdersQuery,
+    ) -> Result<OrdersPage, anyhow::Error>;
 }
 
 #[async_trait]
@@ -192,11 +193,11 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         (**self).resolve_for_new_order(market_address, symbol, now).await
     }
 
-    async fn list_open_orders(
+    async fn list_orders(
         &self,
-        query: &OpenOrdersQuery,
-    ) -> Result<OpenOrdersPage, anyhow::Error> {
-        (**self).list_open_orders(query).await
+        query: &OrdersQuery,
+    ) -> Result<OrdersPage, anyhow::Error> {
+        (**self).list_orders(query).await
     }
 }
 
@@ -207,30 +208,90 @@ pub struct GetDepthQuery {
     pub limit: u16,
 }
 
-pub const OPEN_ORDERS_DEFAULT_LIMIT: u16 = 100;
-pub const OPEN_ORDERS_MAX_LIMIT: u16 = 500;
+pub const ORDERS_DEFAULT_LIMIT: u16 = 100;
+pub const ORDERS_MAX_LIMIT: u16 = 500;
+
+/// Caller-supplied filter on order status. `is_all()` means "no filter,
+/// every row passes"; otherwise the inner set is the canonical subset
+/// of [`OrderStatus`] tokens the caller listed in the request `status`
+/// CSV. `PendingNew` is rejected at parse time — it is a write-side
+/// synthetic status and never appears on a `live_orders` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderStatusSet(std::collections::BTreeSet<OrderStatus>);
+
+impl OrderStatusSet {
+    /// Parse the request `status` parameter. `None` or all-whitespace
+    /// means "all statuses"; anything else is split on `,`, trimmed,
+    /// de-duplicated, and matched against the allow-list. An unknown
+    /// token (or `PENDING_NEW`, which is write-side only) returns
+    /// [`DomainError::InvalidParameter`].
+    pub fn from_csv(raw: Option<&str>) -> Result<Self, DomainError> {
+        let Some(value) = raw else {
+            return Ok(Self::all());
+        };
+        let mut set = std::collections::BTreeSet::new();
+        let mut had_token = false;
+        for token in value.split(',') {
+            let trimmed = token.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            had_token = true;
+            let status = match trimmed {
+                "NEW" => OrderStatus::New,
+                "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
+                "FILLED" => OrderStatus::Filled,
+                "CANCELED" => OrderStatus::Canceled,
+                "REJECTED" => OrderStatus::Rejected,
+                _ => return Err(DomainError::InvalidParameter),
+            };
+            set.insert(status);
+        }
+        if !had_token {
+            return Ok(Self::all());
+        }
+        Ok(Self(set))
+    }
+
+    pub fn all() -> Self {
+        Self(std::collections::BTreeSet::new())
+    }
+
+    pub fn is_all(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn canonical_vec(&self) -> Vec<OrderStatus> {
+        // BTreeSet iteration order is the enum's `Ord`. The enum is
+        // declared as `PendingNew, New, PartiallyFilled, Filled,
+        // Canceled, Rejected` and PendingNew is never inserted here,
+        // so the result order is stable and PendingNew-free.
+        self.0.iter().copied().collect()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenOrdersCursor(pub String);
+pub struct OrdersCursor(pub String);
 
 #[derive(Debug, Clone)]
-pub struct OpenOrdersQuery {
+pub struct OrdersQuery {
     pub owner_pn_address: String,
-    pub market: Option<OpenOrdersMarketFilter>,
+    pub market: Option<OrdersMarketFilter>,
+    pub status: OrderStatusSet,
     pub limit: u16,
-    pub cursor: Option<OpenOrdersCursor>,
+    pub cursor: Option<OrdersCursor>,
 }
 
 #[derive(Debug, Clone)]
-pub struct OpenOrdersMarketFilter {
+pub struct OrdersMarketFilter {
     pub market_address: MarketAddress,
     pub symbol: Symbol,
 }
 
 #[derive(Debug, Clone)]
-pub struct OpenOrdersPage {
-    pub orders: Vec<OpenOrder>,
-    pub next_cursor: Option<OpenOrdersCursor>,
+pub struct OrdersPage {
+    pub orders: Vec<Order>,
+    pub next_cursor: Option<OrdersCursor>,
 }
 
 pub struct GetMarketsUseCase<R> {
@@ -557,17 +618,17 @@ fn generate_client_order_id() -> String {
     (Uuid::new_v4().as_u128() as u64).to_string()
 }
 
-pub struct GetOpenOrdersUseCase<R> {
+pub struct GetOrdersUseCase<R> {
     repo: R,
 }
 
-impl<R> GetOpenOrdersUseCase<R> {
+impl<R> GetOrdersUseCase<R> {
     pub fn new(repo: R) -> Self {
         Self { repo }
     }
 }
 
-impl<R> GetOpenOrdersUseCase<R>
+impl<R> GetOrdersUseCase<R>
 where
     R: MarketReadRepository,
 {
@@ -576,20 +637,24 @@ where
         ctx: &AuthContext,
         market_address: Option<MarketAddress>,
         symbol: Option<Symbol>,
+        status: Option<&str>,
         limit: Option<i64>,
         cursor: Option<&str>,
-    ) -> Result<OpenOrdersPage, anyhow::Error> {
+    ) -> Result<OrdersPage, anyhow::Error> {
         let market = match (market_address, symbol) {
             (None, None) => None,
             (Some(market_address), Some(symbol)) => {
-                Some(OpenOrdersMarketFilter { market_address, symbol })
+                Some(OrdersMarketFilter { market_address, symbol })
             }
             _ => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
         };
 
+        let status = OrderStatusSet::from_csv(status)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
         let limit = match limit {
-            None => OPEN_ORDERS_DEFAULT_LIMIT,
-            Some(v) if (1..=i64::from(OPEN_ORDERS_MAX_LIMIT)).contains(&v) => v as u16,
+            None => ORDERS_DEFAULT_LIMIT,
+            Some(v) if (1..=i64::from(ORDERS_MAX_LIMIT)).contains(&v) => v as u16,
             Some(_) => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
         };
 
@@ -600,14 +665,15 @@ where
                 if trimmed.is_empty() {
                     return Err(anyhow::anyhow!(DomainError::MissingParameter));
                 }
-                Some(OpenOrdersCursor(trimmed.to_string()))
+                Some(OrdersCursor(trimmed.to_string()))
             }
         };
 
         self.repo
-            .list_open_orders(&OpenOrdersQuery {
+            .list_orders(&OrdersQuery {
                 owner_pn_address: ctx.trading_pn.pn_address.clone(),
                 market,
+                status,
                 limit,
                 cursor,
             })
@@ -728,11 +794,11 @@ mod tests {
             })
         }
 
-        async fn list_open_orders(
+        async fn list_orders(
             &self,
-            _: &OpenOrdersQuery,
-        ) -> Result<OpenOrdersPage, anyhow::Error> {
-            unimplemented!("list_open_orders is not exercised by CreateOrderUseCase tests")
+            _: &OrdersQuery,
+        ) -> Result<OrdersPage, anyhow::Error> {
+            unimplemented!("list_orders is not exercised by CreateOrderUseCase tests")
         }
     }
 
@@ -1106,6 +1172,36 @@ mod tests {
         uc.execute(input).await.expect("boundary qty must pass");
         assert_eq!(sender.calls().len(), 1);
         assert_eq!(sender.calls()[0].amount_raw, u64::MAX.to_string());
+    }
+
+    #[test]
+    fn status_set_parses_csv_and_dedups() {
+        let set = OrderStatusSet::from_csv(Some("NEW, FILLED ,NEW, CANCELED"))
+            .expect("valid CSV");
+        let canonical = set.canonical_vec();
+        assert_eq!(canonical, vec![OrderStatus::New, OrderStatus::Filled, OrderStatus::Canceled]);
+    }
+
+    #[test]
+    fn status_set_treats_absent_and_empty_as_all() {
+        assert!(OrderStatusSet::from_csv(None).expect("absent").is_all());
+        assert!(OrderStatusSet::from_csv(Some("   ")).expect("blank").is_all());
+    }
+
+    #[test]
+    fn status_set_rejects_unknown_token() {
+        let err = OrderStatusSet::from_csv(Some("NEW,SUPER_FILLED"))
+            .expect_err("unknown token");
+        assert_eq!(err, DomainError::InvalidParameter);
+    }
+
+    #[test]
+    fn status_set_rejects_pending_new() {
+        // PendingNew is a write-side synthetic status and must not be
+        // accepted as a /orders filter — it never appears on a live_orders row.
+        let err = OrderStatusSet::from_csv(Some("PENDING_NEW"))
+            .expect_err("pending_new rejected");
+        assert_eq!(err, DomainError::InvalidParameter);
     }
 
     #[test]
