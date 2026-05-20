@@ -224,36 +224,23 @@ pub struct DepthSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenOrder {
+pub struct Order {
     pub market_address: MarketAddress,
     pub symbol: Symbol,
+    /// Chain-side order id as a decimal string. Empty when the row's
+    /// `status` is `Rejected` — the chain never assigns an id to a
+    /// rejected placement.
     pub order_id: String,
     pub client_order_id: String,
     pub price: String,
     pub orig_qty: String,
     pub executed_qty: String,
-    pub status: OpenOrderStatus,
+    pub status: OrderStatus,
     pub time_in_force: TimeInForce,
     pub order_type: OrderType,
     pub side: OrderSide,
     pub time: i64,
     pub update_time: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum OpenOrderStatus {
-    New,
-    PartiallyFilled,
-}
-
-impl OpenOrderStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::New => "NEW",
-            Self::PartiallyFilled => "PARTIALLY_FILLED",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
