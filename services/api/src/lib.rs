@@ -20,7 +20,7 @@ use dodex_application::CreateOrderUseCase;
 use dodex_application::GetDepthQuery;
 use dodex_application::GetDepthUseCase;
 use dodex_application::GetMarketsUseCase;
-use dodex_application::GetOpenOrdersUseCase;
+use dodex_application::GetOrdersUseCase;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsFilter;
 use dodex_application::MarketsListing;
@@ -32,7 +32,7 @@ use dodex_domain::Market;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketEvent;
 use dodex_domain::MarketStatus;
-use dodex_domain::OpenOrder;
+use dodex_domain::Order;
 use dodex_domain::OrderSide;
 use dodex_domain::OrderStatus;
 use dodex_domain::OrderType;
@@ -190,7 +190,7 @@ struct DepthResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct OpenOrderResponse {
+struct OrderResponse {
     market_address: String,
     symbol: String,
     order_id: String,
@@ -209,8 +209,8 @@ struct OpenOrderResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct OpenOrdersPageResponse {
-    orders: Vec<OpenOrderResponse>,
+struct OrdersPageResponse {
+    orders: Vec<OrderResponse>,
     next_cursor: Option<String>,
 }
 
@@ -471,10 +471,10 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
 }
 
 #[handler]
-async fn get_open_orders(
+async fn get_orders(
     req: &mut Request,
     depot: &mut Depot,
-) -> Result<Json<OpenOrdersPageResponse>, ApiError> {
+) -> Result<Json<OrdersPageResponse>, ApiError> {
     let ctx = require_auth(depot, Permission::UserData)?.clone();
     let state = depot
         .obtain::<AppState>()
@@ -486,39 +486,42 @@ async fn get_open_orders(
 
     let market_address = non_empty_query(req, "marketAddress").map(MarketAddress);
     let symbol = non_empty_query(req, "symbol").map(Symbol);
+    // status: raw CSV, validated by OrderStatusSet::from_csv inside the
+    // use case. Absent / blank → "all statuses".
+    let status = req.query::<String>("status");
     // Map any limit-parse failure to MissingParameter so the documented
-    // -1102 fires for both out-of-range (e.g., 501) and unparseable
-    // (e.g., "abc") inputs. `optional_typed_query` distinguishes them
-    // structurally as InvalidParameter (-1130), which conflicts with the
-    // openOrders error contract.
+    // -1102 fires for both out-of-range and unparseable inputs.
     let limit = optional_typed_query::<i64>(req, "limit")
         .map_err(|_| ApiError::from(DomainError::MissingParameter))?;
-    // Cursor is the lex-comparable placed_chain_order value from a prior
-    // page response. An empty / whitespace-only `?cursor=` is treated as
-    // malformed (-1102 / 400) rather than "no cursor". The use case does
-    // the trim + non-empty check.
     let cursor = req.query::<String>("cursor");
 
-    let use_case = GetOpenOrdersUseCase::new(state.repo);
+    let use_case = GetOrdersUseCase::new(state.repo);
     let page = use_case
-        .execute(&ctx, market_address, symbol, limit, cursor.as_deref())
+        .execute(
+            &ctx,
+            market_address,
+            symbol,
+            status.as_deref(),
+            limit,
+            cursor.as_deref(),
+        )
         .await
         .map_err(|err| {
             if let Some(domain) = err.downcast_ref::<DomainError>() {
                 return ApiError::from(*domain);
             }
-            error!(?err, "get_open_orders failed");
+            error!(?err, "get_orders failed");
             ApiError::from(DomainError::Unexpected)
         })?;
 
-    Ok(Json(OpenOrdersPageResponse {
-        orders: page.orders.into_iter().map(open_order_to_dto).collect(),
+    Ok(Json(OrdersPageResponse {
+        orders: page.orders.into_iter().map(order_to_dto).collect(),
         next_cursor: page.next_cursor.map(|c| c.0),
     }))
 }
 
-fn open_order_to_dto(order: OpenOrder) -> OpenOrderResponse {
-    OpenOrderResponse {
+fn order_to_dto(order: Order) -> OrderResponse {
+    OrderResponse {
         market_address: order.market_address.0,
         symbol: order.symbol.0,
         order_id: order.order_id,
@@ -725,7 +728,7 @@ pub fn build_router(state: AppState) -> Router {
             Router::new()
                 .hoop(auth_hoop::authenticate)
                 .push(Router::with_path("api/v1/order").post(create_order))
-                .push(Router::with_path("api/v1/openOrders").get(get_open_orders)),
+                .push(Router::with_path("api/v1/orders").get(get_orders)),
         )
 }
 
