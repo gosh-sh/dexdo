@@ -586,7 +586,7 @@ struct CreateOrderRequest {
 /// `PENDING_NEW` for a successful submission — the order is in the
 /// chain queue, not yet on the book). The full order shape with
 /// chain-assigned `orderId` becomes available through
-/// `GET /api/v1/openOrders` once `OrderBook.OrderPlaced` projects.
+/// `GET /api/v1/orders` once `OrderBook.OrderPlaced` projects.
 /// See `docs/tech-specs/write-api.md §Response` for the rationale.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -618,7 +618,7 @@ fn require_auth(depot: &Depot, permission: Permission) -> Result<&AuthContext, A
 /// three-field response (clientOrderId / transactTime / status) per
 /// [write-api.md §Response]. The chain-assigned `orderId` is not in
 /// this response by design — it arrives later through
-/// `GET /api/v1/openOrders` once the indexer projects
+/// `GET /api/v1/orders` once the indexer projects
 /// `OrderBook.OrderPlaced`.
 #[handler]
 async fn create_order(
