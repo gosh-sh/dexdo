@@ -32,3 +32,4 @@ chain:
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 30000
   cancel_order_timeout_ms: 30000
+  place_batch_timeout_ms: 30000

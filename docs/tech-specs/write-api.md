@@ -388,9 +388,147 @@ Cancellation contends for the same per-PN `_busy` lock as placement — see [§C
 
 ## `POST /api/v1/batchOrders`
 
-See [api-spec §New Batch Orders](../api-spec.md#new-batch-orders) for the public contract.
+The handler runs three phases: request parsing → market/outcome resolution and per-item input validation → chain submission. Layout mirrors `POST /api/v1/order`: the per-item validation chain is the same and lives in one shared helper. Each phase fails closed with its own error code (see [Batch error mapping](#error-mapping-2)).
 
-_Implementation tech spec to be filled in._
+### Authorization
+
+Same hoop as `POST /api/v1/order`. The handler calls `require_auth(depot, Permission::Trade)` and reads the resolved [`TradingPn`](auth.md#trading-private-note) out of `AuthContext`. All items in the batch are signed by the same trading-PN keypair — the chain ABI accepts only one external message and the busy lock is per-PN regardless of batch size.
+
+### Request parsing
+
+Body fields are taken byte-exact from the request as transmitted; the HMAC layer has already verified the signature over those exact bytes. Mandatory-field absence (top-level or per-item) returns `MissingParameter` → 400.
+
+Top-level body fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `marketAddress` | `MarketAddress` | Mandatory. |
+| `symbol` | `Symbol` | Mandatory. |
+| `orders` | `Vec<BatchOrderInputItem>` | Mandatory and non-empty. Maximum length equals the resolved outcome's `max_batch_size`. |
+
+Each `BatchOrderInputItem` is shaped the same as the body of `POST /api/v1/order` minus `marketAddress` / `symbol` (the chain ABI takes those once per batch, not per item). An unknown enum value (`side`, `type`, `timeInForce`) on any item returns `InvalidParameter` → 400.
+
+### Market and outcome resolution
+
+`(marketAddress, symbol)` is resolved once via the same `resolve_for_new_order` join `POST /api/v1/order` uses, including the visibility gate (`m.last_reconciled_at IS NOT NULL`) and the [Status derivation](read-api.md#status-derivation) clause. A miss surfaces as `InvalidMarketOrSymbol` → 404. Placement is permitted only when `status == TRADING`; any other phase rejects with `OrderValidationFailed` → 400. A reconciled market with NULL/blank `oracle_list_hash` surfaces as `MarketInconsistent` → 503 — same fail-closed invariant as POST.
+
+The resolved row supplies the chain-level fields once for the whole batch:
+
+| Source column | Bound to |
+| --- | --- |
+| `markets.event_id` | `placeBatch.eventId` (uint256). |
+| `markets.oracle_list_hash` | `placeBatch.oracleListHash` (uint256). |
+| `markets.token_type` | `placeBatch.tokenType` (uint32). |
+| `market_outcomes.outcome_id` | Each `OrderBookOrder.outcomeId` in the batch. |
+| `market_outcomes.price_precision` / `tick_size` | Per-item price scaling and tick-size validation. |
+| `market_outcomes.quantity_precision` / `step_size` | Per-item quantity scaling and step-size validation. |
+| `market_outcomes.min_notional` | Per-item notional validation. |
+| `market_outcomes.max_batch_size` | Length cap for `orders[]`. |
+
+### Batch size cap
+
+The cap is sourced from `market_outcomes.max_batch_size` on the resolved outcome — the same value `/api/v1/markets` returns. The chain enforces its own `MAX_BATCH_SIZE` (5 today); the read-model value is the public contract clients can act on, so the local check uses it rather than a hard-coded constant. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
+
+### Per-item input validation
+
+Per-item validation is identical to `POST /api/v1/order` — same precision / tick / step / notional / coid rules from [api-spec §Validation Rules](../api-spec.md#validation-rules). The shared helper `validate_and_encode_order_item` in `crates/application/src/lib.rs` runs the chain for both endpoints, so a future tightening (e.g. tighter step-size handling) touches one place. The helper also encodes the chain-shaped fields (`outcome_id`, `is_buy`, `price_raw`, `amount_raw`, `flags`, `client_order_id`) the dispatch needs.
+
+The loop short-circuits on the first item-level failure: the entire request rejects with the failing item's error code; no chain message is sent. This matches the chain's atomic `placeBatch` semantics — partial submission is not a possible outcome — and avoids spending the per-PN busy window on a doomed batch. The response carries one error object regardless of how many items would have failed; the client correlates by re-reading its own request payload.
+
+### Flags
+
+Same encoding table as `POST /api/v1/order` — see [Flags](#flags). The chain's `OrderBookOrder.flags` field is per-item, so a single batch can mix LIMIT and MARKET orders freely as long as each item's combination is valid.
+
+### `clientOrderId` generation
+
+Identical to the single-order path; see [§clientOrderId generation](#clientorderid-generation). One subtlety: the chain enforces uniqueness across the PN's still-live coids **and within the batch itself** — `PrivateNote.placeBatch` walks each item's `clientOrderId` and rejects intra-batch duplicates with `ERR_INVALID_PARAMS` (129). Caller-supplied duplicates the backend cannot disambiguate (they parse fine as u64) surface as `InvalidParameter` → 400 / -1130 via that chain code. Backend-generated coids are drawn independently for each item; the 2^62-bit collision space documented for the single-order path means intra-batch collisions are cosmologically negligible.
+
+### Chain submission
+
+Encode and dispatch a `PrivateNote.placeBatch` external message against `trading_pn.pn_address`. ABI from `contracts/PrivateNote.sol::placeBatch`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceBatch`:
+
+```text
+placeBatch(
+  eventId,         // uint256, markets.event_id
+  oracleListHash,  // uint256, markets.oracle_list_hash
+  tokenType,       // uint32,  markets.token_type
+  orders,          // OrderBookOrder[]; each item carries
+                   //   outcomeId, isBuy, flags, price, amount,
+                   //   minAmount, epochId, clientOrderId
+)
+```
+
+Per-item `minAmount` and `epochId` stay at 0 — same constants as `placeOrder` (neither is exposed by api-spec and neither has a per-order meaning in this version of the public API).
+
+Sender boundary: the existing `ChainOrderSender` trait grows a third method `async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError>`. The production `BeeDexChainSender` impl wraps `bee_dex::Dex::place_batch`, reuses `build_signer` for pubkey/seckey re-encoding and `classify_chain_outcome` for the timeout / exit-code translation. A dedicated `chain.place_batch_timeout_ms` config knob bounds the per-call wait; `ApiConfig::validate` pins `server.request_timeout_ms > chain.place_batch_timeout_ms` at boot so the HTTP timeout cannot fire while a batch submission is still in flight.
+
+`bee_dex::Dex::place_batch` **waits for the chain to execute `PrivateNote.placeBatch` on the trading PN** and returns the TVM exit code on `require(...)` failure. `placeBatch` is atomic in WASM: every item is re-validated and any failed `require(...)` reverts the whole batch — none of the items land. The `OrderBook` side runs as an internal message after `placeBatch` returns; the `_pendingBatchActive` flag on the PN stays set until `onBatchComplete` arrives back from `OrderBook`, so the busy window is longer for a batch than for a single placement and a fast follow-up `placeOrder` / `placeBatch` from the same PN is more likely to hit `ERR_NOTE_BUSY` (121). Clients should rely on the same `OrderPnBusy` → 429 retry contract as the single-order path.
+
+### Response
+
+One `PENDING_NEW` envelope per accepted item, returned as a flat array in request order (see [api-spec §New Batch Orders](../api-spec.md#new-batch-orders)). The shape is symmetric with `POST /api/v1/order`:
+
+| Field | Source |
+| --- | --- |
+| `clientOrderId` | Per-item: caller-supplied `newOrderClientId`, or the backend-generated value. |
+| `transactTime` | `now_millis()` captured once at the start of the handler, repeated for every item — one chain submission, one moment of acceptance. |
+| `status` | Always `"PENDING_NEW"` — same rationale as the single-order path; the chain-assigned `orderId` arrives later through `/api/v1/openOrders`. |
+
+Why minimal: the same argument as POST /order applies item by item — every other field a fully-populated order would carry is already in the request the client just sent, and the only fields the legacy Binance-style shape adds (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission.
+
+### Failure surface
+
+Same three-class split as `POST /api/v1/order`:
+
+1. **Pre-submit, surfaced synchronously** — request shape (top-level and per-item), market/outcome resolution, batch size cap, per-item validation. First failure rejects the whole request; mapped per [Batch error mapping](#error-mapping-2).
+
+2. **PrivateNote chain-side, surfaced synchronously** — `bee_dex::Dex::place_batch` awaits PN's execution. The single-order exit codes (102 / 121 / 130 / 142 / 150 / 151 / 160 / 163 / 164) carry over verbatim; the batch path adds four:
+
+   | chain `exit_code` | source | `DomainError` |
+   | --- | --- | --- |
+   | `129` `ERR_INVALID_PARAMS` | intra-batch `clientOrderId` collision (the only way batches can trigger this — `placeBatch` enforces no other client-supplied invariant) | `InvalidParameter` → 400 / -1130 |
+   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — the use case already enforces the same range locally | `InvalidParameter` → 400 / -1130 |
+   | `168` `ERR_NOTIONAL_OVERFLOW` | `price * amount` overflowed uint256 inside `placeBatch` (only the chain checks for this; the read-model has no equivalent ceiling) | `OrderValidationFailed` → 400 / -2010 |
+
+3. **OrderBook chain-side, surfaced asynchronously** — same shape as the single-order path: the internal `executeBatch` message runs in a later transaction and `OrderBook.Rejected` events (e.g. queue overflow) are visible only through the indexer.
+
+Transport-level failures collapse to `Unexpected` → 500 / -1000, same as the single-order path.
+
+### Error mapping
+
+| Condition | DomainError | HTTP |
+| --- | --- | --- |
+| Auth envelope / unknown api_key / bad signature / timestamp | handled upstream by [auth_hoop](auth.md#authentication) | 401 |
+| Body exceeds the auth-hoop body cap | `RequestTooLarge` | 413 |
+| Caller lacks `TRADE` permission | `AuthRequired` | 401 |
+| Mandatory body field missing (top-level or per-item) | `MissingParameter` | 400 |
+| Unknown enum value, unsupported `type` × `timeInForce` combination, empty `orders[]`, length above `max_batch_size`, non-numeric or over-u64 `newOrderClientId`; chain `ERR_INVALID_PARAMS` / `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` | `InvalidParameter` | 400 |
+| Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
+| Reconciled market with NULL `oracle_list_hash`, or chain `ERR_INVALID_OUTCOME_ID` | `MarketInconsistent` | 503 |
+| Market `status != TRADING`; per-item notional below `minNotional`; chain `ERR_LOW_VALUE` / `ERR_STAKE_NOT_EXISTS` / `ERR_DEBT_NON_ZERO` / `ERR_INVALID_STATE` / `ERR_ORDER_TOO_SMALL` / `ERR_NOTIONAL_OVERFLOW` | `OrderValidationFailed` | 400 |
+| Per-item precision / tick / step violation; chain `ERR_AMOUNT_NOT_LOT_MULTIPLE` / `ERR_PRICE_NOT_TICK_MULTIPLE` | `PrecisionExceeded` | 400 |
+| Chain `ERR_NOTE_BUSY` (per-PN serial; another op still in flight on this PN) | `OrderPnBusy` | 429 |
+| Handler exceeded `ServerSection.request_timeout_ms` | `RequestTimeout` | 504 |
+| Unmapped chain `tvm_exit` code or gateway transport failure | `Unexpected` | 500 |
+
+### Layering
+
+| Layer | Responsibility |
+| --- | --- |
+| `crates/domain` | No new types — `OrderStatus::PendingNew`, `encode_order_flags`, and the decimal helpers are all reused. |
+| `crates/application` | `BatchOrderInputItem` (HTTP-shaped), `BatchOrderPayloadItem` (chain-shaped, one per item), `NewBatchOrderPayload` (chain-shaped, one per batch), `SubmittedBatchOrders`; `CreateBatchOrdersUseCase`. Extends `ChainOrderSender` with `submit_batch_order`. The shared `validate_and_encode_order_item` helper lives here. |
+| `crates/infrastructure` | `BeeDexChainSender::submit_batch_order` wraps `bee_dex::Dex::place_batch` and packs each `BatchOrderPayloadItem` into an `OrderBookOrder`. `map_tvm_exit_code` learns the four batch-specific codes (129/161/162/168). `ChainSection` grows `place_batch_timeout_ms` with the same validation invariant as the existing timeouts. |
+| `services/api` | `create_batch_orders` handler attached as `Router::with_path("api/v1/batchOrders").post(create_batch_orders)` on the existing auth subrouter. HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` extends the `BeeDexChainSender` constructor with `Duration::from_millis(config.chain.place_batch_timeout_ms)`. |
+
+Use case constructors take trait objects; `services/api/tests/create_batch_orders_http.rs` injects `FakeRepo` + `FakeAuthenticator` + a `RecordingBatchSender` variant that records batch payloads, matching the triad established by `create_order_http.rs` and `cancel_order_http.rs`.
+
+### Idempotency and retries
+
+The backend stores no inflight batch state and does not retry on its own. Clients that need at-least-once delivery supply explicit `newOrderClientId` values for each item and re-`POST` on transient errors: the chain rejects any item whose coid is still live as `ERR_INVALID_PARAMS`, reverting the whole batch; once the original batch is no longer in flight, `/api/v1/openOrders` keyed on `clientOrderId` surfaces the eventually-confirmed state.
+
+### Concurrency
+
+Same per-PN serial constraint as the single-order path — `placeBatch` takes the same `_busy` lock and holds it until `onBatchComplete` arrives. A POST `/batchOrders` racing any other placement or cancellation from the same account surfaces as `OrderPnBusy` → 429 / -2014, with the same retry semantics. Submitting a 5-item batch instead of five sequential POSTs is the canonical way to get higher per-account placement throughput today — one chain message, one `_busy` lock, one `onBatchComplete` callback.
 
 ## `DELETE /api/v1/batchOrders`
 

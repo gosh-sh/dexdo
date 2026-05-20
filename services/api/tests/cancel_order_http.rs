@@ -168,6 +168,13 @@ impl ChainOrderSender for RecordingCancelSender {
         self.recorded.lock().unwrap().push(payload);
         Ok(())
     }
+
+    async fn submit_batch_order(
+        &self,
+        _: dodex_application::NewBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("RecordingCancelSender::submit_batch_order called from DELETE /order test")
+    }
 }
 
 // ---- Fixtures ------------------------------------------------------------

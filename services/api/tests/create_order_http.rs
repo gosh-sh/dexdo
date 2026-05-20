@@ -221,6 +221,14 @@ impl ChainOrderSender for RecordingSender {
         // means the suite mixed concerns.
         unreachable!("RecordingSender::cancel_order called from POST test")
     }
+
+    async fn submit_batch_order(
+        &self,
+        _: dodex_application::NewBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        // POST /order tests never reach the batch path.
+        unreachable!("RecordingSender::submit_batch_order called from POST /order test")
+    }
 }
 
 // ---- Fixtures ------------------------------------------------------------
@@ -850,6 +858,13 @@ impl ChainOrderSender for SlowSender {
         _: dodex_application::CancelOrderPayload,
     ) -> Result<(), DomainError> {
         unreachable!("SlowSender::cancel_order called from POST test")
+    }
+
+    async fn submit_batch_order(
+        &self,
+        _: dodex_application::NewBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("SlowSender::submit_batch_order called from POST /order test")
     }
 }
 

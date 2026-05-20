@@ -662,8 +662,7 @@ POST /api/v1/batchOrders
 
 Security: `TRADE`
 
-Create multiple orders in one request.
-All orders in the batch are submitted to the single market symbol identified by the top-level `marketAddress` and `symbol`.
+Create multiple orders in one request. All orders in the batch are submitted to the single market symbol identified by the top-level `marketAddress` and `symbol`.
 
 Body parameters:
 
@@ -671,13 +670,13 @@ Body parameters:
 | --- | --- | --- | --- |
 | `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Max: `5`. |
+| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/markets`. |
 
 Each order item:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
+| `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. Each item is generated or accepted independently; intra-batch duplicates are rejected. |
 | `side` | ENUM | YES | Order side. See [Order Side](#order-side). |
 | `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
@@ -700,7 +699,7 @@ Request body:
   "symbol": "PM-2026-ELECTION-YES",
   "orders": [
     {
-      "newOrderClientId": "mm-order-0001",
+      "newOrderClientId": "1001",
       "side": "BUY",
       "quantity": "1.500000",
       "price": "0.615",
@@ -708,7 +707,7 @@ Request body:
       "timeInForce": "GTC"
     },
     {
-      "newOrderClientId": "mm-order-0002",
+      "newOrderClientId": "1002",
       "side": "SELL",
       "quantity": "0.750000",
       "price": "0.620",
@@ -724,38 +723,29 @@ Response:
 ```json
 [
   {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
-    "orderId": "123456789",
-    "clientOrderId": "mm-order-0001",
+    "clientOrderId": "1001",
     "transactTime": 1710000000000,
-    "price": "0.615",
-    "origQty": "1.500000",
-    "executedQty": "0.000000",
-    "status": "NEW",
-    "timeInForce": "GTC",
-    "type": "LIMIT",
-    "side": "BUY"
+    "status": "PENDING_NEW"
   },
   {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
-    "orderId": "123456790",
-    "clientOrderId": "mm-order-0002",
+    "clientOrderId": "1002",
     "transactTime": 1710000000000,
-    "price": "0.620",
-    "origQty": "0.750000",
-    "executedQty": "0.000000",
-    "status": "NEW",
-    "timeInForce": "POST_ONLY",
-    "type": "LIMIT",
-    "side": "SELL"
+    "status": "PENDING_NEW"
   }
 ]
 ```
 
-Batch creation is atomic at the API validation level: if any order is invalid, the whole request
-is rejected and no orders are created.
+Response items, in request order:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `clientOrderId` | STRING | Either the `newOrderClientId` sent in the corresponding request item, or a server-generated identifier when none was provided. Use it to look up the order in `/api/v1/openOrders` until the server-assigned `orderId` is available. |
+| `transactTime` | LONG | Server timestamp (Unix ms) when the batch was accepted. The same value is repeated for every item in the response. |
+| `status` | ENUM | Always [`PENDING_NEW`](#order-status) on success. |
+
+The response confirms acceptance only. For each item, the full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/openOrders`](#current-open-orders) shortly after; look up by `clientOrderId`.
+
+Batch creation is atomic: if any order in the batch fails validation, the whole request is rejected and no orders are created. Validation runs item by item in request order and the first failure returns its error code; the response carries one error object, not an array. Atomicity holds on the exchange side too — even after the request is accepted, if the exchange rejects any item during placement the whole batch is reverted.
 
 ### Cancel Batch Orders
 
