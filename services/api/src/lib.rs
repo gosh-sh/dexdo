@@ -489,10 +489,16 @@ async fn get_orders(
     // status: raw CSV, validated by OrderStatusSet::from_csv inside the
     // use case. Absent / blank → "all statuses".
     let status = req.query::<String>("status");
-    // Map any limit-parse failure to MissingParameter so the documented
-    // -1102 fires for both out-of-range and unparseable inputs.
-    let limit = optional_typed_query::<i64>(req, "limit")
-        .map_err(|_| ApiError::from(DomainError::MissingParameter))?;
+    // `optional_typed_query` returns `Err(InvalidParameter)` when the
+    // raw value is present but unparseable (e.g. `limit=abc`). That maps
+    // to -1130 ("Invalid value for a query or body parameter") per the
+    // api-spec.md error table, which is the precise diagnosis for a
+    // non-numeric `limit`. Out-of-range numeric inputs (e.g. `limit=501`
+    // or `limit=0`) still come back as -1102 ("Mandatory parameter was
+    // not sent" — the api-spec.md §Orders §Behaviour bullet treats
+    // limit-out-of-range as a -1102 case) because the use case applies
+    // the `[1, 500]` bound check after parsing succeeds.
+    let limit = optional_typed_query::<i64>(req, "limit")?;
     let cursor = req.query::<String>("cursor");
 
     let use_case = GetOrdersUseCase::new(state.repo);

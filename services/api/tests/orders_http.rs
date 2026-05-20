@@ -576,6 +576,33 @@ async fn limit_out_of_range_returns_minus_1102() {
     }
 }
 
+// ---- test 7b: non-numeric limit → -1130 / 400 (distinct from -1102 above) -
+
+#[tokio::test]
+async fn non_numeric_limit_returns_minus_1130() {
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("limit", "abc"),
+        ("recvWindow", "5000"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/orders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("limit", "abc")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1130);
+}
+
 // ---- test 8: pagination round-trip in DESC order -------------------------
 
 #[tokio::test]
