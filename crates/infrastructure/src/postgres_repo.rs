@@ -13,9 +13,10 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
-use dodex_application::OpenOrdersCursor;
-use dodex_application::OpenOrdersPage;
-use dodex_application::OpenOrdersQuery;
+use dodex_application::OrdersCursor;
+use dodex_application::OrdersPage;
+use dodex_application::OrdersQuery;
+use dodex_application::OrderStatusSet;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -25,8 +26,8 @@ use dodex_domain::MarketEvent;
 use dodex_domain::MarketName;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
-use dodex_domain::OpenOrder;
-use dodex_domain::OpenOrderStatus;
+use dodex_domain::Order;
+use dodex_domain::OrderStatus;
 use dodex_domain::OracleEntry;
 use dodex_domain::OrderSide;
 use dodex_domain::OrderType;
@@ -369,10 +370,10 @@ impl MarketReadRepository for PostgresReadModelRepository {
         })
     }
 
-    async fn list_open_orders(
+    async fn list_orders(
         &self,
-        query: &OpenOrdersQuery,
-    ) -> Result<OpenOrdersPage, anyhow::Error> {
+        query: &OrdersQuery,
+    ) -> Result<OrdersPage, anyhow::Error> {
         let target = match &query.market {
             Some(filter) => {
                 let target: Option<(Option<String>, i32)> = sqlx::query_as(
@@ -388,7 +389,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 .bind(filter.symbol.0.as_str())
                 .fetch_optional(&self.pool)
                 .await
-                .context("resolve openOrders market filter")?;
+                .context("resolve orders market filter")?;
 
                 let Some((orderbook_address, outcome_id)) = target else {
                     return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
@@ -402,6 +403,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         };
 
         let limit_plus_one = i64::from(query.limit) + 1;
+        let status_sql = build_status_predicate(&query.status);
 
         // The microsecond extraction `(extract(epoch from <timestamptz>) *
         // 1000000)::bigint` below was once cursor-load-bearing. It now
@@ -409,9 +411,10 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // is placed_chain_order (text). Deployment is pinned to PG15+
         // (Supabase) and PG16 (docker-compose.test.yml); both return
         // numeric from extract(epoch ...), so the bigint cast is exact.
-        let rows: Vec<OpenOrderRow> = match target {
-            Some((orderbook_address, outcome_id)) => sqlx::query_as(
-                r#"select m.pmp_address as market_address,
+        let rows: Vec<OrderRow> = match target {
+            Some((orderbook_address, outcome_id)) => {
+                let sql = format!(
+                    r#"select m.pmp_address as market_address,
                           mo.symbol as symbol,
                           lo.order_id::text as order_id,
                           coalesce(lo.client_order_id, '') as client_order_id,
@@ -423,34 +426,37 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
                           lo.placed_chain_order as placed_chain_order,
                           mo.price_precision as price_precision,
-                          mo.quantity_precision as quantity_precision
+                          mo.quantity_precision as quantity_precision,
+                          lo.status as raw_status
                      from live_orders lo
                      join markets m on m.orderbook_address = lo.orderbook_address
                      join market_outcomes mo
                        on mo.market_id_fk = m.id
                       and mo.outcome_id = lo.outcome_id
                     where lo.owner_pn_address = $1
-                      and lo.status = 'OPEN'
-                      and lo.amount_remaining > 0
                       and lo.chain_created_at is not null
                       and lo.chain_updated_at is not null
                       and m.last_reconciled_at is not null
                       and lo.orderbook_address = $2
                       and lo.outcome_id = $3
-                      and ($4::text is null or lo.placed_chain_order > $4::text)
-                    order by lo.placed_chain_order asc
-                    limit $5"#,
-            )
-            .bind(query.owner_pn_address.as_str())
-            .bind(orderbook_address)
-            .bind(outcome_id)
-            .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
-            .bind(limit_plus_one)
-            .fetch_all(&self.pool)
-            .await
-            .context("select filtered open orders")?,
-            None => sqlx::query_as(
-                r#"select m.pmp_address as market_address,
+                      and ($4::text is null or lo.placed_chain_order < $4::text)
+                      {status_sql}
+                    order by lo.placed_chain_order desc
+                    limit $5"#
+                );
+                sqlx::query_as::<_, OrderRow>(&sql)
+                    .bind(query.owner_pn_address.as_str())
+                    .bind(orderbook_address)
+                    .bind(outcome_id)
+                    .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
+                    .bind(limit_plus_one)
+                    .fetch_all(&self.pool)
+                    .await
+                    .context("select filtered orders")?
+            }
+            None => {
+                let sql = format!(
+                    r#"select m.pmp_address as market_address,
                           mo.symbol as symbol,
                           lo.order_id::text as order_id,
                           coalesce(lo.client_order_id, '') as client_order_id,
@@ -462,28 +468,30 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
                           lo.placed_chain_order as placed_chain_order,
                           mo.price_precision as price_precision,
-                          mo.quantity_precision as quantity_precision
+                          mo.quantity_precision as quantity_precision,
+                          lo.status as raw_status
                      from live_orders lo
                      join markets m on m.orderbook_address = lo.orderbook_address
                      join market_outcomes mo
                        on mo.market_id_fk = m.id
                       and mo.outcome_id = lo.outcome_id
                     where lo.owner_pn_address = $1
-                      and lo.status = 'OPEN'
-                      and lo.amount_remaining > 0
                       and lo.chain_created_at is not null
                       and lo.chain_updated_at is not null
                       and m.last_reconciled_at is not null
-                      and ($2::text is null or lo.placed_chain_order > $2::text)
-                    order by lo.placed_chain_order asc
-                    limit $3"#,
-            )
-            .bind(query.owner_pn_address.as_str())
-            .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
-            .bind(limit_plus_one)
-            .fetch_all(&self.pool)
-            .await
-            .context("select all open orders")?,
+                      and ($2::text is null or lo.placed_chain_order < $2::text)
+                      {status_sql}
+                    order by lo.placed_chain_order desc
+                    limit $3"#
+                );
+                sqlx::query_as::<_, OrderRow>(&sql)
+                    .bind(query.owner_pn_address.as_str())
+                    .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
+                    .bind(limit_plus_one)
+                    .fetch_all(&self.pool)
+                    .await
+                    .context("select all orders")?
+            }
         };
 
         let limit = usize::from(query.limit);
@@ -494,15 +502,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
         }
 
         let next_cursor = if has_more {
-            orders_raw.last().map(|row| OpenOrdersCursor(row.placed_chain_order.clone()))
+            orders_raw.last().map(|row| OrdersCursor(row.placed_chain_order.clone()))
         } else {
             None
         };
 
         let orders =
-            orders_raw.into_iter().map(open_order_from_row).collect::<Result<Vec<_>, _>>()?;
+            orders_raw.into_iter().filter_map(|row| order_from_row(row).ok()).collect::<Vec<_>>();
 
-        Ok(OpenOrdersPage { orders, next_cursor })
+        Ok(OrdersPage { orders, next_cursor })
     }
 }
 
@@ -537,7 +545,7 @@ struct DepthLevelRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-struct OpenOrderRow {
+struct OrderRow {
     market_address: String,
     symbol: String,
     order_id: String,
@@ -555,6 +563,90 @@ struct OpenOrderRow {
     placed_chain_order: String,
     price_precision: i32,
     quantity_precision: i32,
+    /// Raw status string from the live_orders table (e.g. "OPEN", "FILLED",
+    /// "CANCELLED", "REJECTED"). The public `OrderStatus` is derived from
+    /// this in combination with `executed_qty` / `orig_qty` for OPEN rows.
+    raw_status: String,
+}
+
+/// Build a SQL status predicate fragment for the given [`OrderStatusSet`].
+///
+/// Returns `""` when the set is "all" (no filter needed). Otherwise returns
+/// `"AND (<disjuncts>)"` where each disjunct is a compile-time literal
+/// mapping from public `OrderStatus` to the storage representation in
+/// `live_orders.status` + amount columns.
+///
+/// # SQL-injection safety
+/// Every disjunct is a compile-time string literal selected by an exhaustive
+/// match arm. No user-supplied bytes ever flow into the returned string.
+fn build_status_predicate(set: &OrderStatusSet) -> &'static str {
+    // Fast path: no filter.
+    if set.is_all() {
+        return "";
+    }
+
+    // Static lookup table covering all non-empty subsets of the 5 public
+    // status tokens (PendingNew is rejected at parse time and never appears
+    // here). There are exactly 2^5 - 1 = 31 such subsets. We use a
+    // OnceLock<HashMap<...>> so the strings are allocated once and returned
+    // as `'static` references on every subsequent call — no Box::leak needed
+    // and no per-call allocation.
+    use std::collections::BTreeSet;
+    use std::sync::OnceLock;
+
+    static TABLE: OnceLock<std::collections::HashMap<BTreeSet<OrderStatus>, &'static str>> =
+        OnceLock::new();
+
+    let table = TABLE.get_or_init(|| {
+        // Each individual-status literal.
+        const NEW: &str =
+            "(lo.status = 'OPEN' AND lo.amount_remaining = lo.amount_initial)";
+        const PARTIALLY_FILLED: &str =
+            "(lo.status = 'OPEN' AND lo.amount_remaining < lo.amount_initial AND lo.amount_remaining > 0)";
+        const FILLED: &str = "lo.status = 'FILLED'";
+        const CANCELED: &str = "lo.status = 'CANCELLED'";
+        const REJECTED: &str = "lo.status = 'REJECTED'";
+
+        // Helper: allocate a `'static str` from a runtime-built String.
+        // Called at most 31 times (once per non-empty subset), so the
+        // total allocation is tiny and bounded.
+        fn leak(s: String) -> &'static str {
+            Box::leak(s.into_boxed_str())
+        }
+
+        fn predicate_from_parts(parts: &[&str]) -> &'static str {
+            leak(format!("AND ({})", parts.join(" OR ")))
+        }
+
+        let mut m: std::collections::HashMap<BTreeSet<OrderStatus>, &'static str> =
+            std::collections::HashMap::new();
+
+        // Enumerate every non-empty subset of the 5 status variants.
+        // Using bits 0..4 mapped to [New, PartiallyFilled, Filled, Canceled, Rejected].
+        let variants = [
+            (OrderStatus::New, NEW),
+            (OrderStatus::PartiallyFilled, PARTIALLY_FILLED),
+            (OrderStatus::Filled, FILLED),
+            (OrderStatus::Canceled, CANCELED),
+            (OrderStatus::Rejected, REJECTED),
+        ];
+        for mask in 1u8..32u8 {
+            let mut key: BTreeSet<OrderStatus> = BTreeSet::new();
+            let mut parts: Vec<&str> = Vec::new();
+            for (bit, (status, literal)) in variants.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    key.insert(*status);
+                    parts.push(literal);
+                }
+            }
+            m.insert(key, predicate_from_parts(&parts));
+        }
+        m
+    });
+
+    let key: std::collections::BTreeSet<OrderStatus> =
+        set.canonical_vec().into_iter().collect();
+    table.get(&key).copied().unwrap_or("")
 }
 
 fn filter_orderbook(s: String) -> Option<String> {
@@ -584,18 +676,54 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
     }
 }
 
-fn open_order_from_row(row: OpenOrderRow) -> Result<OpenOrder, anyhow::Error> {
+fn order_from_row(row: OrderRow) -> Result<Order, anyhow::Error> {
     let quantity_scale = u32::try_from(row.quantity_precision.max(0)).unwrap_or(0);
-    let status = if decimal_string_is_zero(&row.executed_qty) {
-        OpenOrderStatus::New
-    } else {
-        OpenOrderStatus::PartiallyFilled
+
+    // Derive the public OrderStatus from the stored raw_status and the
+    // executed/remaining amounts.
+    let status = match row.raw_status.as_str() {
+        "OPEN" => {
+            let executed_is_zero = decimal_string_is_zero(&row.executed_qty);
+            let orig_is_zero = decimal_string_is_zero(&row.orig_qty);
+            if executed_is_zero {
+                OrderStatus::New
+            } else if !orig_is_zero && row.executed_qty == row.orig_qty {
+                // amount_remaining == 0 but status is still OPEN: projector bug.
+                // Fail closed — do NOT surface as New or silently skip.
+                warn!(
+                    order_id = %row.order_id,
+                    market = %row.market_address,
+                    "live_orders row has status=OPEN with amount_remaining=0 (projector bug); skipping"
+                );
+                return Err(anyhow!(DomainError::Unexpected));
+            } else {
+                OrderStatus::PartiallyFilled
+            }
+        }
+        "FILLED" => OrderStatus::Filled,
+        "CANCELLED" => OrderStatus::Canceled,
+        "REJECTED" => OrderStatus::Rejected,
+        other => {
+            warn!(
+                order_id = %row.order_id,
+                raw_status = %other,
+                "live_orders row has unrecognised status; skipping"
+            );
+            return Err(anyhow!(DomainError::Unexpected));
+        }
     };
 
-    Ok(OpenOrder {
+    // REJECTED orders never receive a chain-assigned order_id.
+    let order_id = if status == OrderStatus::Rejected {
+        String::new()
+    } else {
+        row.order_id
+    };
+
+    Ok(Order {
         market_address: MarketAddress(row.market_address),
         symbol: Symbol(row.symbol),
-        order_id: row.order_id,
+        order_id,
         client_order_id: row.client_order_id,
         price: scale_uint_to_decimal(
             &row.price,
