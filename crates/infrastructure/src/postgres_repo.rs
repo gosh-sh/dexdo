@@ -403,7 +403,10 @@ impl MarketReadRepository for PostgresReadModelRepository {
         };
 
         let limit_plus_one = i64::from(query.limit) + 1;
-        let status_sql = build_status_predicate(&query.status);
+        let status_sql = match build_status_predicate(&query.status) {
+            Some(clause) => format!(" AND ({clause}) "),
+            None => String::new(),
+        };
 
         // The microsecond extraction `(extract(epoch from <timestamptz>) *
         // 1000000)::bigint` below was once cursor-load-bearing. It now
@@ -569,84 +572,42 @@ struct OrderRow {
     raw_status: String,
 }
 
-/// Build a SQL status predicate fragment for the given [`OrderStatusSet`].
+/// Build the SQL fragment that filters `live_orders` rows by the requested
+/// status set. Returns `None` when every status is allowed — the caller
+/// then emits no status predicate at all.
 ///
-/// Returns `""` when the set is "all" (no filter needed). Otherwise returns
-/// `"AND (<disjuncts>)"` where each disjunct is a compile-time literal
-/// mapping from public `OrderStatus` to the storage representation in
-/// `live_orders.status` + amount columns.
-///
-/// # SQL-injection safety
-/// Every disjunct is a compile-time string literal selected by an exhaustive
-/// match arm. No user-supplied bytes ever flow into the returned string.
-fn build_status_predicate(set: &OrderStatusSet) -> &'static str {
-    // Fast path: no filter.
+/// The fragment is composed from compile-time `const &str` literals chosen
+/// by an exhaustive `match`; no user-supplied bytes ever reach the SQL.
+fn build_status_predicate(set: &OrderStatusSet) -> Option<String> {
     if set.is_all() {
-        return "";
+        return None;
     }
+    // Mirrors docs/tech-specs/read-api.md §Status mapping. Iteration order
+    // is the BTreeSet's Ord-derived enum-declaration order, which is
+    // load-bearing for deterministic SQL composition; see the docstring
+    // on dodex_domain::OrderStatus.
+    const NEW: &str = "(lo.status = 'OPEN' AND lo.amount_remaining = lo.amount_initial)";
+    const PARTIALLY_FILLED: &str = "(lo.status = 'OPEN' AND lo.amount_remaining < lo.amount_initial AND lo.amount_remaining > 0)";
+    const FILLED: &str = "lo.status = 'FILLED'";
+    const CANCELED: &str = "lo.status = 'CANCELLED'";
+    const REJECTED: &str = "lo.status = 'REJECTED'";
 
-    // Static lookup table covering all non-empty subsets of the 5 public
-    // status tokens (PendingNew is rejected at parse time and never appears
-    // here). There are exactly 2^5 - 1 = 31 such subsets. We use a
-    // OnceLock<HashMap<...>> so the strings are allocated once and returned
-    // as `'static` references on every subsequent call — no Box::leak needed
-    // and no per-call allocation.
-    use std::collections::BTreeSet;
-    use std::sync::OnceLock;
+    let disjuncts: Vec<&'static str> = set
+        .canonical_vec()
+        .into_iter()
+        .map(|status| match status {
+            OrderStatus::New => NEW,
+            OrderStatus::PartiallyFilled => PARTIALLY_FILLED,
+            OrderStatus::Filled => FILLED,
+            OrderStatus::Canceled => CANCELED,
+            OrderStatus::Rejected => REJECTED,
+            OrderStatus::PendingNew => unreachable!(
+                "OrderStatusSet::from_csv rejects PENDING_NEW; reaching this arm means the application layer was bypassed"
+            ),
+        })
+        .collect();
 
-    static TABLE: OnceLock<std::collections::HashMap<BTreeSet<OrderStatus>, &'static str>> =
-        OnceLock::new();
-
-    let table = TABLE.get_or_init(|| {
-        // Each individual-status literal.
-        const NEW: &str =
-            "(lo.status = 'OPEN' AND lo.amount_remaining = lo.amount_initial)";
-        const PARTIALLY_FILLED: &str =
-            "(lo.status = 'OPEN' AND lo.amount_remaining < lo.amount_initial AND lo.amount_remaining > 0)";
-        const FILLED: &str = "lo.status = 'FILLED'";
-        const CANCELED: &str = "lo.status = 'CANCELLED'";
-        const REJECTED: &str = "lo.status = 'REJECTED'";
-
-        // Helper: allocate a `'static str` from a runtime-built String.
-        // Called at most 31 times (once per non-empty subset), so the
-        // total allocation is tiny and bounded.
-        fn leak(s: String) -> &'static str {
-            Box::leak(s.into_boxed_str())
-        }
-
-        fn predicate_from_parts(parts: &[&str]) -> &'static str {
-            leak(format!("AND ({})", parts.join(" OR ")))
-        }
-
-        let mut m: std::collections::HashMap<BTreeSet<OrderStatus>, &'static str> =
-            std::collections::HashMap::new();
-
-        // Enumerate every non-empty subset of the 5 status variants.
-        // Using bits 0..4 mapped to [New, PartiallyFilled, Filled, Canceled, Rejected].
-        let variants = [
-            (OrderStatus::New, NEW),
-            (OrderStatus::PartiallyFilled, PARTIALLY_FILLED),
-            (OrderStatus::Filled, FILLED),
-            (OrderStatus::Canceled, CANCELED),
-            (OrderStatus::Rejected, REJECTED),
-        ];
-        for mask in 1u8..32u8 {
-            let mut key: BTreeSet<OrderStatus> = BTreeSet::new();
-            let mut parts: Vec<&str> = Vec::new();
-            for (bit, (status, literal)) in variants.iter().enumerate() {
-                if mask & (1 << bit) != 0 {
-                    key.insert(*status);
-                    parts.push(literal);
-                }
-            }
-            m.insert(key, predicate_from_parts(&parts));
-        }
-        m
-    });
-
-    let key: std::collections::BTreeSet<OrderStatus> =
-        set.canonical_vec().into_iter().collect();
-    table.get(&key).copied().unwrap_or("")
+    Some(disjuncts.join(" OR "))
 }
 
 fn filter_orderbook(s: String) -> Option<String> {
