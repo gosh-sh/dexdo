@@ -76,7 +76,7 @@ Lifecycle events drive transitions on [`markets`](data-schema.md#markets) and th
 
 OrderBook events drive [`live_orders`](data-schema.md#live_orders), the
 per-order read model backing `/api/v1/depth` and account-scoped
-`GET /api/v1/openOrders`.
+`GET /api/v1/orders`.
 
 Three OrderBook events mutate order book state, one
 PrivateNote confirmation event attaches ownership for private reads, and five OrderBook
@@ -84,7 +84,7 @@ events are observability-only.
 
 | Event | Effect |
 | --- | --- |
-| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'`, full `amount_initial`, and full `amount_remaining`. `owner_pn_address` remains NULL until the matching PrivateNote confirmation arrives. `last_chain_order` is set to the event’s `msg_chain_order`. A conflict on `(orderbook_address, order_id)` resets the row to OPEN. The handler sets: `chain_created_at` using first-write-wins semantics via `coalesce(...) on conflict` — the creation timestamp must never move once recorded; `chain_updated_at` using `greatest(...) on conflict`; `placed_chain_order` using `coalesce(live_orders.placed_chain_order, excluded.placed_chain_order)` from the event’s msg_chain_order. `placed_chain_order` is the sole sort key for `/api/v1/openOrders` and never changes once recorded, matching the first-write-wins semantics of chain_created_at. |
+| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'`, full `amount_initial`, and full `amount_remaining`. `owner_pn_address` remains NULL until the matching PrivateNote confirmation arrives. `last_chain_order` is set to the event’s `msg_chain_order`. A conflict on `(orderbook_address, order_id)` resets the row to OPEN. The handler sets: `chain_created_at` using first-write-wins semantics via `coalesce(...) on conflict` — the creation timestamp must never move once recorded; `chain_updated_at` using `greatest(...) on conflict`; `placed_chain_order` using `coalesce(live_orders.placed_chain_order, excluded.placed_chain_order)` from the event’s msg_chain_order. `placed_chain_order` is the sole sort key for `/api/v1/orders` and never changes once recorded, matching the first-write-wins semantics of chain_created_at. |
 | `OrderBook.OrderFilled` | Decrements `amount_remaining` by `filledAmount`. Flips `status` to `FILLED` when the remainder reaches zero. Updates `last_chain_order` via `greatest(existing, new)` (lex compare). Advances `chain_updated_at` via `greatest`. |
 | `OrderBook.OrderCancelled` | `status = 'CANCELLED'`, `amount_remaining = 0`, monotonic `last_chain_order` update. Advances `chain_updated_at` via `greatest`. |
 | `PrivateNote.OrderPlacedConfirmed` | Updates the matching `(orderBook, orderId)` row with `owner_pn_address = event.src`, where `event.src` is the authenticated account's trading PrivateNote address. If the OrderBook row has not arrived yet, the confirmation is deferred and replayed later. This ownership update does not advance `last_chain_order`, so public depth cursors continue to represent OrderBook activity only. Refuses to overwrite an already-attached `owner_pn_address`; that path is reported as `Applied` (no-op). |
