@@ -514,6 +514,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // is placed_chain_order (text). Deployment is pinned to PG15+
         // (Supabase) and PG16 (docker-compose.test.yml); both return
         // numeric from extract(epoch ...), so the bigint cast is exact.
+        // The filtered/unfiltered SQL blocks are intentionally duplicated:
+        // their bind arity differs, while the projection/predicate contract
+        // must stay obvious because it backs the public /orders shape.
         let rows: Vec<OrderRow> = match target {
             Some((orderbook_address, outcome_id)) => {
                 let sql = format!(
@@ -717,6 +720,8 @@ fn build_status_predicate(set: &OrderStatusSet) -> Option<String> {
     const PARTIALLY_FILLED: &str = "(lo.status = 'OPEN' AND lo.amount_remaining < lo.amount_initial AND lo.amount_remaining > 0)";
     const FILLED: &str = "lo.status = 'FILLED'";
     const CANCELED: &str = "lo.status = 'CANCELLED'";
+    // Public status token, but structurally empty until the contracts-side
+    // follow-up extends the live_orders.status CHECK to admit REJECTED rows.
     const REJECTED: &str = "lo.status = 'REJECTED'";
 
     let disjuncts: Vec<&'static str> = set
@@ -800,6 +805,8 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
         }
         "FILLED" => OrderStatus::Filled,
         "CANCELLED" => OrderStatus::Canceled,
+        // Awaiting the contracts-side follow-up that extends the CHECK
+        // constraint; current migrated rows cannot legally reach this arm.
         "REJECTED" => OrderStatus::Rejected,
         other => {
             // Unknown raw_status: either schema drift the read path

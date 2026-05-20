@@ -242,7 +242,7 @@ The format is not opaque: clients may read the cursor as a plain string, but the
 
 - `limit` defaults to `100` when omitted.
 - Valid range is `[1, 500]`. Out-of-range → `-1102` / 400.
-- The SQL query fetches `LIMIT $limit + 1` rows. If `$limit + 1` rows are returned, the last row is omitted from the response and `next_cursor` is built from the row that remains at position `$limit` (the last retained row); otherwise, `next_cursor` is `null`. The `+1` lookahead is the only mechanism by which the server distinguishes between "exactly `$limit` rows remaining" and "more rows available". Building the cursor from the last retained row ensures that the sentinel row reappears as the first row of the next page (via a strict `<` predicate against a fully included row, never against a hidden one).
+- The SQL query fetches `LIMIT $limit + 1` rows. If `$limit + 1` rows are returned, the last row is omitted from the response and `next_cursor` is built from the row that remains at position `$limit` (the last retained row); otherwise, `next_cursor` is `null`. The `+1` lookahead is the only mechanism by which the server distinguishes between "exactly `$limit` rows remaining" and "more rows available". Building the cursor from the last retained row ensures that the next page's strict `<` predicate advances past that boundary row, including any retained row the response mapper later drops as invalid, instead of re-reading it.
 
 ### Auth & permissions
 

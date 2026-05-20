@@ -1453,6 +1453,43 @@ mod tests {
     }
 
     #[test]
+    fn status_set_canonical_vec_orders_all_public_read_statuses_exhaustively() {
+        fn permutations(values: Vec<&'static str>) -> Vec<Vec<&'static str>> {
+            if values.is_empty() {
+                return vec![Vec::new()];
+            }
+            let mut out = Vec::new();
+            for (idx, value) in values.iter().enumerate() {
+                let mut rest = values.clone();
+                rest.remove(idx);
+                for mut tail in permutations(rest) {
+                    let mut next = vec![*value];
+                    next.append(&mut tail);
+                    out.push(next);
+                }
+            }
+            out
+        }
+
+        let statuses = ["REJECTED", "CANCELED", "FILLED", "PARTIALLY_FILLED", "NEW"];
+        for permutation in permutations(statuses.to_vec()) {
+            let csv = permutation.join(",");
+            let set = OrderStatusSet::from_csv(Some(&csv)).expect("valid exhaustive CSV");
+            assert_eq!(
+                set.canonical_vec(),
+                vec![
+                    OrderStatus::New,
+                    OrderStatus::PartiallyFilled,
+                    OrderStatus::Filled,
+                    OrderStatus::Canceled,
+                    OrderStatus::Rejected,
+                ],
+                "canonical order changed for input {csv}"
+            );
+        }
+    }
+
+    #[test]
     fn status_set_treats_absent_and_empty_as_all() {
         assert!(OrderStatusSet::from_csv(None).expect("absent").is_all());
         assert!(OrderStatusSet::from_csv(Some("   ")).expect("blank").is_all());

@@ -439,6 +439,74 @@ async fn default_status_returns_all_non_rejected_buckets() {
     scope.cleanup(&pool).await;
 }
 
+/// Rows missing either chain timestamp must be filtered in SQL before the
+/// mapper decodes them into non-null `time` / `updateTime` fields. This
+/// covers both duplicated `list_orders` SQL blocks.
+#[tokio::test]
+async fn filters_rows_missing_chain_timestamps_before_decoding() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    for i in 1_i64..=3 {
+        insert_order(
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "1000",
+            "1000",
+            "1000",
+            "OPEN",
+            1_700_000_000 + i,
+            &format!("{:03}", i),
+        )
+        .await;
+    }
+
+    sqlx::query(
+        "update live_orders set chain_created_at = null
+              where orderbook_address = $1 and order_id = 2::numeric",
+    )
+    .bind(&scope.book_yes)
+    .execute(&pool)
+    .await
+    .expect("clear chain_created_at");
+
+    sqlx::query(
+        "update live_orders set chain_updated_at = null
+              where orderbook_address = $1 and order_id = 3::numeric",
+    )
+    .bind(&scope.book_yes)
+    .execute(&pool)
+    .await
+    .expect("clear chain_updated_at");
+
+    let page_all = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders all");
+    let ids_all: Vec<&str> = page_all.orders.iter().map(|o| o.order_id.as_str()).collect();
+    assert_eq!(ids_all, vec!["1"], "unfiltered query drops both NULL timestamp rows");
+
+    let page_market = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: Some(OrdersMarketFilter {
+                market_address: MarketAddress(scope.pmp_yes.clone()),
+                symbol: Symbol(scope.symbol_yes.clone()),
+            }),
+            status: OrderStatusSet::all(),
+            limit: 100,
+            cursor: None,
+        })
+        .await
+        .expect("list_orders market-filtered");
+    let ids_market: Vec<&str> = page_market.orders.iter().map(|o| o.order_id.as_str()).collect();
+    assert_eq!(ids_market, vec!["1"], "market-filtered query drops both NULL timestamp rows");
+
+    scope.cleanup(&pool).await;
+}
+
 /// Status CSV filter narrows results, one bucket at a time.
 /// Seed NEW + PARTIALLY_FILLED + FILLED + CANCELLED, then query each
 /// non-default status in isolation. Pins every disjunct in
