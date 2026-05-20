@@ -583,6 +583,25 @@ async fn blank_oracle_list_hash_returns_503_minus_1500() {
 // ---- Chain sender outcomes -----------------------------------------------
 
 #[tokio::test]
+async fn intra_batch_client_order_id_collision_returns_400_minus_1130() {
+    // Spec: duplicate `newOrderClientId` within a single batch is not
+    // pre-validated locally — the chain raises ERR_INVALID_PARAMS (129)
+    // on its own coid check, which maps to `DomainError::InvalidParameter`
+    // and surfaces as `-1130 / 400`. Simulate the chain leg with a
+    // failing sender; this pins the HTTP shape contract for the path.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender: SharedChainSender =
+        Arc::new(RecordingBatchSender::failing(DomainError::InvalidParameter));
+    let service = setup_with(repo, sender);
+
+    let body = valid_body_with(vec![valid_item("11"), valid_item("11")]);
+    let mut resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1130);
+}
+
+#[tokio::test]
 async fn pn_busy_returns_429_minus_2014() {
     // Sender raising `OrderPnBusy` simulates a real `ERR_NOTE_BUSY`
     // (121) coming back from `bee_dex::Dex::place_batch` while another
