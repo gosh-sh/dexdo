@@ -100,7 +100,7 @@ fn default_max_recv_window_ms() -> u64 {
 
 /// Chain gateway settings used by `BeeDexChainSender`. `gateway_endpoint`
 /// is the Acki Nacki node URL the trading path POSTs external messages
-/// to; `place_order_timeout_ms` bounds the per-request wait so a hung
+/// to; the `*_timeout_ms` fields bound the per-request wait so a hung
 /// gateway cannot indefinitely stall an HTTP caller. See
 /// `docs/tech-specs/write-api.md §Chain submission` for the layering.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -110,12 +110,22 @@ pub struct ChainSection {
     pub gateway_endpoint: String,
     #[serde(default = "default_place_order_timeout_ms")]
     pub place_order_timeout_ms: u64,
+    #[serde(default = "default_cancel_order_timeout_ms")]
+    pub cancel_order_timeout_ms: u64,
 }
 
 /// 30 s — comfortable budget given typical chain round-trip is 1-3 s.
 /// Tight enough that a partitioned gateway does not pin HTTP workers
 /// indefinitely; loose enough that occasional slow ticks do not flake.
 fn default_place_order_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Same 30 s budget as placement. `PrivateNote.cancelOrder` follows
+/// the same chain-round-trip profile (busy-check + forward to
+/// `OrderBook.executeBatch` internal message) so the chain-side wait
+/// is comparable.
+fn default_cancel_order_timeout_ms() -> u64 {
     30_000
 }
 
@@ -183,16 +193,22 @@ impl ApiConfig {
         );
         self.auth.validate()?;
         self.chain.validate()?;
-        // The HTTP request_timeout hoop must outlast the chain
-        // sender's own timeout; otherwise an in-flight `placeOrder`
-        // would be dropped while still running on chain — the client
-        // would see a 504 and lose the `clientOrderId` for an order
-        // that eventually lands.
+        // The HTTP request_timeout hoop must outlast each chain
+        // sender timeout; otherwise an in-flight chain call would be
+        // dropped while still running on chain — the client would see
+        // a 504 and lose the request id for an op that eventually
+        // lands.
         anyhow::ensure!(
             self.server.request_timeout_ms > self.chain.place_order_timeout_ms,
             "server.request_timeout_ms ({}) must exceed chain.place_order_timeout_ms ({})",
             self.server.request_timeout_ms,
             self.chain.place_order_timeout_ms,
+        );
+        anyhow::ensure!(
+            self.server.request_timeout_ms > self.chain.cancel_order_timeout_ms,
+            "server.request_timeout_ms ({}) must exceed chain.cancel_order_timeout_ms ({})",
+            self.server.request_timeout_ms,
+            self.chain.cancel_order_timeout_ms,
         );
         Ok(())
     }
@@ -207,6 +223,10 @@ impl ChainSection {
         anyhow::ensure!(
             self.place_order_timeout_ms > 0,
             "chain.place_order_timeout_ms must be > 0"
+        );
+        anyhow::ensure!(
+            self.cancel_order_timeout_ms > 0,
+            "chain.cancel_order_timeout_ms must be > 0"
         );
         Ok(())
     }
@@ -709,7 +729,7 @@ chain:
 
     #[test]
     fn api_config_parses_chain_section_with_explicit_timeout() {
-        // request_timeout_ms must exceed chain.place_order_timeout_ms.
+        // request_timeout_ms must exceed every chain timeout.
         let raw = format!(
             "{COMMON}
 server:
@@ -721,11 +741,13 @@ auth:
 chain:
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 15000
+  cancel_order_timeout_ms: 15000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
         assert_eq!(cfg.chain.gateway_endpoint, "shellnet.ackinacki.org");
         assert_eq!(cfg.chain.place_order_timeout_ms, 15_000);
+        assert_eq!(cfg.chain.cancel_order_timeout_ms, 15_000);
         cfg.validate().unwrap();
     }
 
@@ -745,6 +767,58 @@ chain:
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
         assert_eq!(cfg.chain.place_order_timeout_ms, 30_000);
+        assert_eq!(cfg.chain.cancel_order_timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn api_validate_rejects_zero_cancel_order_timeout() {
+        // Same invariant as place_order_timeout — a zero budget would
+        // collapse every DELETE /order to an immediate RequestTimeout.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 4000
+  cancel_order_timeout_ms: 0
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("cancel_order_timeout_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn api_validate_rejects_request_timeout_not_exceeding_cancel_timeout() {
+        // The HTTP request_timeout must outlast cancel_order_timeout
+        // for the same reason it must outlast place_order_timeout:
+        // otherwise an in-flight cancelOrder gets dropped while still
+        // running on chain — the client would see 504 and lose the
+        // orderId of an op that eventually lands.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 1000
+  cancel_order_timeout_ms: 5000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_ms"), "got: {msg}");
+        assert!(msg.contains("cancel_order_timeout_ms"), "got: {msg}");
     }
 
     #[test]

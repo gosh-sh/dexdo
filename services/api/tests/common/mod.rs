@@ -9,6 +9,10 @@
 
 #![allow(dead_code)]
 
+pub mod deploy_market;
+pub mod e2e_setup;
+pub mod test_pns;
+
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +25,7 @@ use dodex_api::testkit::AppState;
 use dodex_api::testkit::SharedAuth;
 use dodex_api::testkit::SharedChainSender;
 use dodex_api::testkit::SharedRepo;
+use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::NewOrderPayload;
 use dodex_domain::DomainError;
@@ -99,6 +104,10 @@ pub struct NoopChainSender;
 #[async_trait]
 impl ChainOrderSender for NoopChainSender {
     async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn cancel_order(&self, _: CancelOrderPayload) -> Result<(), DomainError> {
         Ok(())
     }
 }

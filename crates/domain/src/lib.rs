@@ -392,12 +392,20 @@ impl TimeInForce {
 /// (plus the read-API SQL fragment built from it) relies on that
 /// deterministic iteration. Do not reorder variants without auditing
 /// the depending sites.
+///
+/// `PendingCancel` is the analogous state for cancellation: the moment
+/// `PrivateNote.cancelOrder` accepts and forwards to `OrderBook`, the
+/// HTTP response carries `PendingCancel`; the book-side removal lands
+/// asynchronously via `OrderBook.OrderCancelled`, after which the order
+/// surfaces in `/api/v1/orders` as `Canceled` (or `Filled` if matching
+/// raced the cancel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OrderStatus {
     PendingNew,
     New,
     PartiallyFilled,
+    PendingCancel,
     Filled,
     Canceled,
     Rejected,
@@ -409,6 +417,7 @@ impl OrderStatus {
             Self::PendingNew => "PENDING_NEW",
             Self::New => "NEW",
             Self::PartiallyFilled => "PARTIALLY_FILLED",
+            Self::PendingCancel => "PENDING_CANCEL",
             Self::Filled => "FILLED",
             Self::Canceled => "CANCELED",
             Self::Rejected => "REJECTED",

@@ -6,11 +6,11 @@ server:
   host: 0.0.0.0
   port: 8080
   # Enforced by the request_timeout hoop in services/api. Must exceed
-  # chain.place_order_timeout_ms by a safety margin — cutting off the
-  # HTTP request while the chain call is still in flight would land the
-  # order on chain while returning 504 to the client, who would then
-  # not know its clientOrderId (the worst failure mode for optimistic
-  # placement). 35 s = 30 s chain + ~5 s slack covers it.
+  # every chain timeout (place_order, cancel_order) by a safety margin —
+  # cutting off the HTTP request while the chain call is still in flight
+  # would land the operation on chain while returning 504 to the client,
+  # who would then not know its id (the worst failure mode for
+  # optimistic submission). 35 s = 30 s chain + ~5 s slack covers it.
   request_timeout_ms: 35000
 
 database:
@@ -31,3 +31,4 @@ chain:
   # Stage/prod configs ship their own endpoints.
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 30000
+  cancel_order_timeout_ms: 30000

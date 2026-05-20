@@ -17,6 +17,7 @@ use dodex_application::OrderStatusSet;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
+use dodex_application::OrderForCancel;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -370,6 +371,107 @@ impl MarketReadRepository for PostgresReadModelRepository {
         })
     }
 
+    async fn resolve_for_cancel(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        order_id: u64,
+        owner_pn_address: &str,
+        now: i64,
+    ) -> Result<OrderForCancel, anyhow::Error> {
+        // Single round-trip. Join `live_orders` to `markets` on
+        // `orderbook_address` (CHECK-enforced on every reconciled
+        // market, see migration 0014), then to `market_outcomes` on
+        // `outcome_id` so the `(marketAddress, symbol)` filter from
+        // the caller actually constrains the row. Every miss collapses
+        // to `UnknownOrder` — the use case docs why.
+        //
+        // `lo.order_id` is `numeric(78,0)`; bind as decimal string and
+        // cast (same pattern the indexer uses in `apply_order_*`).
+        let order_id_decimal = order_id.to_string();
+        let row: Option<CancelRow> = sqlx::query_as(
+            r#"select m.event_id::text         as event_id,
+                      m.oracle_list_hash::text as oracle_list_hash,
+                      m.token_type             as token_type,
+                      m.stake_start            as stake_start,
+                      m.stake_end              as stake_end,
+                      m.result_start           as result_start,
+                      m.result_end             as result_end,
+                      m.frozen_at              as frozen_at,
+                      m.resolved_at            as resolved_at,
+                      m.cancelled_at           as cancelled_at,
+                      m.is_cancelled           as is_cancelled,
+                      lo.client_order_id       as client_order_id
+                 from live_orders lo
+                 join markets m on m.orderbook_address = lo.orderbook_address
+                 join market_outcomes mo
+                   on mo.market_id_fk = m.id
+                  and mo.outcome_id = lo.outcome_id
+                where m.pmp_address       = $1
+                  and mo.symbol           = $2
+                  and lo.order_id         = $3::numeric
+                  and lo.owner_pn_address = $4
+                  and lo.status           = 'OPEN'
+                  and lo.amount_remaining > 0
+                  and m.last_reconciled_at is not null"#,
+        )
+        .bind(market_address.0.as_str())
+        .bind(symbol.0.as_str())
+        .bind(order_id_decimal.as_str())
+        .bind(owner_pn_address)
+        .fetch_optional(&self.pool)
+        .await
+        .context("resolve_for_cancel: select live_orders + market")?;
+
+        let Some(row) = row else {
+            // Single ambiguous miss code: unknown id, wrong owner,
+            // wrong market for this id, market hidden from API,
+            // or order already closed.
+            return Err(anyhow!(DomainError::UnknownOrder));
+        };
+
+        let status = compute_status(
+            row.cancelled_at,
+            row.is_cancelled,
+            row.resolved_at,
+            row.stake_start,
+            row.stake_end,
+            row.result_start,
+            row.result_end,
+            row.frozen_at,
+            now,
+        );
+
+        let oracle_list_hash = match row.oracle_list_hash {
+            Some(raw) if !raw.trim().is_empty() => raw,
+            other => {
+                warn!(
+                    pmp_address = %market_address.0,
+                    null = other.is_none(),
+                    "resolve_for_cancel: oracle_list_hash NULL/blank on reconciled row",
+                );
+                String::new()
+            }
+        };
+
+        let client_order_id = row.client_order_id.and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+        Ok(OrderForCancel {
+            event_id: row.event_id,
+            oracle_list_hash,
+            token_type: row.token_type,
+            status,
+            client_order_id,
+        })
+    }
+
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         let target = match &query.market {
             Some(filter) => {
@@ -538,6 +640,22 @@ struct PlacementRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct CancelRow {
+    event_id: String,
+    oracle_list_hash: Option<String>,
+    token_type: i32,
+    stake_start: Option<i64>,
+    stake_end: Option<i64>,
+    result_start: Option<i64>,
+    result_end: Option<i64>,
+    frozen_at: Option<i64>,
+    resolved_at: Option<i64>,
+    cancelled_at: Option<i64>,
+    is_cancelled: bool,
+    client_order_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 struct DepthLevelRow {
     is_buy: bool,
     price: String,
@@ -598,8 +716,8 @@ fn build_status_predicate(set: &OrderStatusSet) -> Option<String> {
             OrderStatus::Filled => FILLED,
             OrderStatus::Canceled => CANCELED,
             OrderStatus::Rejected => REJECTED,
-            OrderStatus::PendingNew => unreachable!(
-                "OrderStatusSet::from_csv rejects PENDING_NEW; reaching this arm means the application layer was bypassed"
+            OrderStatus::PendingNew | OrderStatus::PendingCancel => unreachable!(
+                "OrderStatusSet::from_csv rejects PENDING_NEW and PENDING_CANCEL; reaching this arm means the application layer was bypassed"
             ),
         })
         .collect();

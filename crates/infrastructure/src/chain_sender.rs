@@ -1,25 +1,29 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Production implementation of `ChainOrderSender` that dispatches
-// `PrivateNote.placeOrder` through `bee_dex::Dex`. The wrapper does
-// nothing except translate the application-layer `NewOrderPayload`
-// into the chain ABI's `ParamsOfPlaceOrder` and forward the call —
-// ABI encoding, signing, and gateway transport all live in `bee_dex`.
+// `PrivateNote.placeOrder` and `PrivateNote.cancelOrder` through
+// `bee_dex::Dex`. The wrapper does nothing except translate the
+// application-layer payloads into the chain ABI's `ParamsOfPlaceOrder`
+// / `ParamsOfCancelOrder` and forward the call — ABI encoding, signing,
+// and gateway transport all live in `bee_dex`.
 //
 // See `docs/tech-specs/write-api.md §Chain submission` for the layering
 // contract this implements.
 
 use std::time::Duration;
 
+use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use async_trait::async_trait;
 use bee_dex::errors::AppError;
 use bee_dex::Dex;
+use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::NewOrderPayload;
 use dodex_domain::DomainError;
+use dodex_domain::SensitiveBytes;
 use num_bigint::BigUint;
 use tokio::time::timeout;
 use tracing::debug;
@@ -30,6 +34,7 @@ use zeroize::Zeroizing;
 pub struct BeeDexChainSender {
     dex: Dex,
     place_order_timeout: Duration,
+    cancel_order_timeout: Duration,
 }
 
 impl BeeDexChainSender {
@@ -38,63 +43,28 @@ impl BeeDexChainSender {
     /// `Arc<dyn ChainOrderSender>` at the `AppState` boundary, so the
     /// inner `Dex` does not need its own `Arc`.
     ///
-    /// `place_order_timeout` bounds the per-call wait — `bee_dex::Dex`
-    /// itself has no per-request deadline, so a partitioned or hung
-    /// gateway would otherwise stall the HTTP worker indefinitely.
-    /// Elapsed surfaces as `DomainError::RequestTimeout` → 504 /
-    /// -1007 via `classify_chain_outcome`, matching the retry-with-
-    /// same-coid contract of the HTTP request_timeout hoop.
-    pub fn new(endpoints: Vec<String>, place_order_timeout: Duration) -> anyhow::Result<Self> {
+    /// The two timeouts bound the per-call wait for each chain entry
+    /// point — `bee_dex::Dex` itself has no per-request deadline, so a
+    /// partitioned or hung gateway would otherwise stall the HTTP
+    /// worker indefinitely. Elapsed surfaces as
+    /// `DomainError::RequestTimeout` → 504 / -1007 via
+    /// `classify_chain_outcome`, matching the retry-with-same-id
+    /// contract of the HTTP request_timeout hoop.
+    pub fn new(
+        endpoints: Vec<String>,
+        place_order_timeout: Duration,
+        cancel_order_timeout: Duration,
+    ) -> anyhow::Result<Self> {
         let dex = Dex::new(endpoints)
             .map_err(|err| anyhow::anyhow!("bee_dex::Dex::new failed: {err:?}"))?;
-        Ok(Self { dex, place_order_timeout })
+        Ok(Self { dex, place_order_timeout, cancel_order_timeout })
     }
 }
 
 #[async_trait]
 impl ChainOrderSender for BeeDexChainSender {
     async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError> {
-        // `tvm_client::crypto::KeyPair` takes hex strings (matches the
-        // `owner_public_key_hex` / `owner_secret_key_hex` shape that
-        // bee_dex integration tests use). Our DB stores the pubkey as
-        // decimal `numeric(78,0)` and the seckey as encrypted bytes —
-        // convert both at the boundary, not deeper.
-        //
-        // Defence-in-depth: `KeyPair.secret` is `String` upstream with
-        // no `Zeroize` impl, so the copy we hand to `Signer::Keys`
-        // freed-unzeroed when the signer drops after `place_order`
-        // returns. We can't close that path without changes in
-        // `ackinacki-kit::tvm_client::crypto::KeyPair`. What we CAN
-        // do is keep our own pre-clone copy of the hex and `zeroize`
-        // it on the way out — so once `submit_order` returns, the
-        // only residue is the upstream clone (briefly, until Signer
-        // drops). Tracked for a kit-side fix; see the follow-up note
-        // in the PR description.
-        //
-        // `payload.pn_seckey` (`SensitiveBytes`) still zeroes on drop
-        // per `crates/domain`, and nothing in this module logs the
-        // hex (see `debug!` below).
-        let secret_hex = Zeroizing::new(hex::encode(payload.pn_seckey.as_slice()));
-        let public = decimal_uint256_to_hex(&payload.pn_pubkey).map_err(|_| {
-            // `accounts.pn_pubkey` is operator-seeded data, not a runtime
-            // input — the seed/migration writes it as a decimal uint256.
-            // A failure here means the row was corrupted post-write
-            // (manual edit, partial restore, schema drift), so the right
-            // surface is `MarketInconsistent` (503 / -1500): retrying the
-            // submission won't help, but it's a service-state issue, not
-            // the generic 500 the caller can do nothing about. Log
-            // without the decimal value — pn_pubkey is public per the
-            // ACK protocol, but the raw string is recoverable from the
-            // `accounts` row if ops actually needs it.
-            error!("trading PN pubkey is not a valid uint256 decimal");
-            DomainError::MarketInconsistent
-        })?;
-        // Pass a fresh clone to `Signer` — the upstream `KeyPair.secret`
-        // is `String` without `Zeroize`, so this clone is the one that
-        // freed-unzeroed when `Signer` drops. Our `Zeroizing<String>`
-        // local scrubs on drop regardless of how we exit `submit_order`.
-        let keys = KeyPair { public, secret: (*secret_hex).clone() };
-        let signer = Signer::Keys { keys };
+        let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
 
         // Defence-in-depth: the application layer caps both at
         // `u64::MAX`, so reaching the error arm means the gate was
@@ -141,68 +111,149 @@ impl ChainOrderSender for BeeDexChainSender {
 
         let call = self.dex.place_order(&payload.pn_address, params, signer);
         let outcome = timeout(self.place_order_timeout, call).await;
-        classify_chain_outcome(outcome, self.place_order_timeout.as_millis() as u64)
+        classify_chain_outcome(outcome, self.place_order_timeout.as_millis() as u64, "place_order")
+    }
+
+    async fn cancel_order(&self, payload: CancelOrderPayload) -> Result<(), DomainError> {
+        let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
+
+        let params = ParamsOfCancelOrder {
+            event_id: payload.event_id,
+            oracle_list_hash: payload.oracle_list_hash,
+            token_type: payload.token_type,
+            // The application layer caps `order_id` at u64::MAX; the
+            // chain ABI is uint128 but the `serde_json::json!` path
+            // panics on values above u64::MAX (same constraint as
+            // `clientOrderId`). Upcast is loss-less.
+            order_id: payload.order_id as u128,
+        };
+
+        debug!(
+            pn = %payload.pn_address,
+            event_id = %params.event_id,
+            oracle_list_hash = %params.oracle_list_hash,
+            token_type = params.token_type,
+            order_id = params.order_id,
+            "cancel_order params",
+        );
+
+        let call = self.dex.cancel_order(&payload.pn_address, params, signer);
+        let outcome = timeout(self.cancel_order_timeout, call).await;
+        classify_chain_outcome(
+            outcome,
+            self.cancel_order_timeout.as_millis() as u64,
+            "cancel_order",
+        )
     }
 }
 
-/// Translate the `(timeout, place_order)` result chain into the typed
-/// `DomainError` surface. Lifted out of `submit_order` so the three
-/// arms can be exercised by unit tests against real `bee_dex::AppError`
-/// values — the HTTP integration tests fake `ChainOrderSender`
-/// entirely and would not catch a future refactor that breaks the
-/// wiring between `map_bee_dex_error` and the `submit_order` dispatch.
+/// Build a `Signer::Keys` from the application-layer (`pn_pubkey`,
+/// `pn_seckey`) pair. Shared by `submit_order` and `cancel_order`.
+///
+/// `tvm_client::crypto::KeyPair` takes hex strings (matches the
+/// `owner_public_key_hex` / `owner_secret_key_hex` shape that bee_dex
+/// integration tests use). Our DB stores the pubkey as decimal
+/// `numeric(78,0)` and the seckey as encrypted bytes — both get
+/// converted at the boundary, not deeper.
+///
+/// Defence-in-depth: `KeyPair.secret` is `String` upstream with no
+/// `Zeroize` impl, so the copy handed to `Signer::Keys` freed-unzeroed
+/// when the signer drops after the chain call returns. We can't close
+/// that path without changes in `ackinacki-kit::tvm_client::crypto`.
+/// What we DO control is keeping the pre-clone copy under
+/// `Zeroizing<String>` here — once this helper returns, the only
+/// residue is the upstream clone (briefly, until Signer drops). The
+/// caller's `SensitiveBytes` still zeroes on drop per `crates/domain`,
+/// and nothing in this module logs the hex.
+fn build_signer(pn_pubkey: &str, pn_seckey: &SensitiveBytes) -> Result<Signer, DomainError> {
+    let secret_hex = Zeroizing::new(hex::encode(pn_seckey.as_slice()));
+    let public = decimal_uint256_to_hex(pn_pubkey).map_err(|_| {
+        // `accounts.pn_pubkey` is operator-seeded data, not a runtime
+        // input — the seed/migration writes it as a decimal uint256.
+        // A failure here means the row was corrupted post-write
+        // (manual edit, partial restore, schema drift), so the right
+        // surface is `MarketInconsistent` (503 / -1500): retrying
+        // won't help, but it's a service-state issue, not the generic
+        // 500 the caller can do nothing about. Log without the
+        // decimal value — pn_pubkey is public per the ACK protocol,
+        // but the raw string is recoverable from the `accounts` row
+        // if ops actually needs it.
+        error!("trading PN pubkey is not a valid uint256 decimal");
+        DomainError::MarketInconsistent
+    })?;
+    // Pass a fresh clone to `Signer` — the upstream `KeyPair.secret`
+    // is `String` without `Zeroize`. Our `Zeroizing<String>` local
+    // scrubs on drop regardless of how we exit.
+    let keys = KeyPair { public, secret: (*secret_hex).clone() };
+    Ok(Signer::Keys { keys })
+}
+
+/// Translate the `(timeout, chain-call)` result chain into the typed
+/// `DomainError` surface. Lifted out of the per-method dispatchers so
+/// the three arms can be exercised by unit tests against real
+/// `bee_dex::AppError` values — the HTTP integration tests fake
+/// `ChainOrderSender` entirely and would not catch a future refactor
+/// that breaks the wiring between `map_bee_dex_error` and the chain
+/// dispatch. `entry_point` is included in the timeout / unmapped-error
+/// logs so ops can tell place from cancel without correlation.
 fn classify_chain_outcome<T>(
     outcome: Result<Result<T, AppError>, tokio::time::error::Elapsed>,
     timeout_ms: u64,
+    entry_point: &'static str,
 ) -> Result<(), DomainError> {
     match outcome {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(app_err)) => Err(map_bee_dex_error(&app_err)),
+        Ok(Err(app_err)) => Err(map_bee_dex_error(&app_err, entry_point)),
         Err(_elapsed) => {
             // Gateway did not respond within the configured budget
-            // (`chain.place_order_timeout_ms`). Most often a network
-            // partition or a gateway-side deadlock. Surface as
-            // `RequestTimeout` (504 / -1007) so the client receives
-            // the same "retry with the same `clientOrderId`" contract
-            // as the HTTP request-timeout hoop — see
+            // (`chain.{place,cancel}_order_timeout_ms`). Most often a
+            // network partition or a gateway-side deadlock. Surface as
+            // `RequestTimeout` (504 / -1007) so the client receives the
+            // same "retry with the same id" contract as the HTTP
+            // request-timeout hoop — see
             // `docs/tech-specs/write-api.md §Failure surface`.
-            error!(timeout_ms, "bee_dex::Dex::place_order timed out before gateway responded",);
+            error!(
+                entry_point,
+                timeout_ms, "bee_dex chain call timed out before gateway responded",
+            );
             Err(DomainError::RequestTimeout)
         }
     }
 }
 
 /// Translate a `bee_dex` `AppError` into a typed `DomainError`. The
-/// `bee_dex::Dex::place_order` call already waits for the chain to
-/// finish executing `PrivateNote.placeOrder`, so a `tvm_exit` error
-/// here carries the exact `require(...)` exit code the chain raised.
-/// Mapping it to a specific `DomainError` lets the HTTP caller
-/// distinguish "balance insufficient" from "PN busy" from "transport
-/// blew up" without having to poll `/api/v1/orders` for absence.
+/// underlying `bee_dex::Dex::{place_order, cancel_order}` calls already
+/// wait for the chain to finish executing the corresponding PN method,
+/// so a `tvm_exit` error here carries the exact `require(...)` exit
+/// code the chain raised. Mapping it to a specific `DomainError` lets
+/// the HTTP caller distinguish "balance insufficient" from "PN busy"
+/// from "transport blew up" without polling `/api/v1/orders` for
+/// absence.
 ///
 /// Unrecognized chain codes and non-`tvm_exit` failures (gateway
 /// disconnect, malformed reply, etc.) collapse to `Unexpected` so a
 /// new chain error variant cannot silently surface as a misleading
 /// 400. See [`docs/tech-specs/write-api.md` §Failure surface] for the
 /// per-code contract this enforces.
-fn map_bee_dex_error(err: &AppError) -> DomainError {
+fn map_bee_dex_error(err: &AppError, entry_point: &'static str) -> DomainError {
     if err.kind.as_deref() == Some("tvm_exit")
         && let Some(code_str) = err.error_code.as_deref()
         && let Ok(code) = code_str.parse::<u16>()
         && let Some(mapped) = map_tvm_exit_code(code)
     {
         warn!(
+            entry_point,
             exit_code = code,
             ?err,
             domain_error = ?mapped,
-            "chain rejected place_order",
+            "chain rejected request",
         );
         return mapped;
     }
     // Unmapped path: full diagnostic at error level since this is
     // either a transport failure or a chain code we have not learned
     // to handle yet.
-    error!(?err, "bee_dex::Dex::place_order failed (unmapped)");
+    error!(entry_point, ?err, "bee_dex chain call failed (unmapped)");
     DomainError::Unexpected
 }
 
@@ -320,15 +371,39 @@ mod tests {
         // down so a future "small refactor" cannot silently remap a
         // known reject onto the wrong HTTP class. Codes come from
         // `contracts/modifiers/errors.sol`.
-        assert_eq!(map_bee_dex_error(&tvm_exit(102)), DomainError::OrderValidationFailed);
-        assert_eq!(map_bee_dex_error(&tvm_exit(121)), DomainError::OrderPnBusy);
-        assert_eq!(map_bee_dex_error(&tvm_exit(130)), DomainError::MarketInconsistent);
-        assert_eq!(map_bee_dex_error(&tvm_exit(142)), DomainError::OrderValidationFailed);
-        assert_eq!(map_bee_dex_error(&tvm_exit(150)), DomainError::OrderValidationFailed);
-        assert_eq!(map_bee_dex_error(&tvm_exit(151)), DomainError::OrderValidationFailed);
-        assert_eq!(map_bee_dex_error(&tvm_exit(160)), DomainError::OrderValidationFailed);
-        assert_eq!(map_bee_dex_error(&tvm_exit(163)), DomainError::PrecisionExceeded);
-        assert_eq!(map_bee_dex_error(&tvm_exit(164)), DomainError::PrecisionExceeded);
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(102), "place_order"),
+            DomainError::OrderValidationFailed
+        );
+        assert_eq!(map_bee_dex_error(&tvm_exit(121), "place_order"), DomainError::OrderPnBusy);
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(130), "place_order"),
+            DomainError::MarketInconsistent
+        );
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(142), "place_order"),
+            DomainError::OrderValidationFailed
+        );
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(150), "place_order"),
+            DomainError::OrderValidationFailed
+        );
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(151), "place_order"),
+            DomainError::OrderValidationFailed
+        );
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(160), "place_order"),
+            DomainError::OrderValidationFailed
+        );
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(163), "place_order"),
+            DomainError::PrecisionExceeded
+        );
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(164), "place_order"),
+            DomainError::PrecisionExceeded
+        );
     }
 
     #[test]
@@ -336,7 +411,7 @@ mod tests {
         // A chain code we haven't learned to handle MUST NOT degrade
         // to a misleading 400 — the operator needs to see it in logs
         // and decide whether to extend the mapping.
-        assert_eq!(map_bee_dex_error(&tvm_exit(9999)), DomainError::Unexpected);
+        assert_eq!(map_bee_dex_error(&tvm_exit(9999), "place_order"), DomainError::Unexpected);
     }
 
     #[test]
@@ -346,10 +421,10 @@ mod tests {
         // "404" outside the `tvm_exit` context as a TVM exit code.
         let mut err = tvm_exit(102);
         err.kind = Some("transport".into());
-        assert_eq!(map_bee_dex_error(&err), DomainError::Unexpected);
+        assert_eq!(map_bee_dex_error(&err, "place_order"), DomainError::Unexpected);
 
         err.kind = None;
-        assert_eq!(map_bee_dex_error(&err), DomainError::Unexpected);
+        assert_eq!(map_bee_dex_error(&err, "place_order"), DomainError::Unexpected);
     }
 
     #[test]
@@ -358,22 +433,22 @@ mod tests {
         // possible. Make sure we don't panic and fall through cleanly.
         let mut err = tvm_exit(0);
         err.error_code = Some("not-a-number".into());
-        assert_eq!(map_bee_dex_error(&err), DomainError::Unexpected);
+        assert_eq!(map_bee_dex_error(&err, "place_order"), DomainError::Unexpected);
     }
 
     #[test]
     fn classify_chain_outcome_ok_passes_through() {
         let outcome: Result<Result<(), AppError>, tokio::time::error::Elapsed> = Ok(Ok(()));
-        assert!(classify_chain_outcome(outcome, 1_000).is_ok());
+        assert!(classify_chain_outcome(outcome, 1_000, "place_order").is_ok());
     }
 
     #[test]
     fn classify_chain_outcome_pipes_app_error_through_map_bee_dex_error() {
         // Regression: HTTP-level tests fake `ChainOrderSender` whole,
         // which means a future refactor that drops the
-        // `map_bee_dex_error` call inside `submit_order` would not
-        // fail any HTTP test. This pin exercises the wiring end-to-end
-        // for the headline chain-side rejects.
+        // `map_bee_dex_error` call inside the chain dispatchers would
+        // not fail any HTTP test. This pin exercises the wiring
+        // end-to-end for the headline chain-side rejects.
         let cases = [
             (102u16, DomainError::OrderValidationFailed), // ERR_LOW_VALUE
             (121, DomainError::OrderPnBusy),              // ERR_NOTE_BUSY
@@ -383,7 +458,7 @@ mod tests {
         for (code, expected) in cases {
             let outcome: Result<Result<(), AppError>, tokio::time::error::Elapsed> =
                 Ok(Err(tvm_exit(code)));
-            let result = classify_chain_outcome(outcome, 1_000);
+            let result = classify_chain_outcome(outcome, 1_000, "place_order");
             assert_eq!(result, Err(expected), "tvm_exit({code}) mismapped");
         }
     }
@@ -394,15 +469,17 @@ mod tests {
         // user code, so we obtain a real one by running a 0-duration
         // timeout against a future that never completes. Pins the
         // contract: gateway-side hang surfaces as `RequestTimeout`
-        // (504 / -1007), same retry-with-same-coid semantics as the
-        // HTTP-layer request_timeout hoop. Pre-fix this returned
-        // `Unexpected` (500), which tells the client "do not retry".
+        // (504 / -1007), same retry-with-same-id semantics as the
+        // HTTP-layer request_timeout hoop.
         let elapsed = tokio::time::timeout(
             std::time::Duration::from_millis(0),
             std::future::pending::<Result<(), AppError>>(),
         )
         .await;
-        assert_eq!(classify_chain_outcome(elapsed, 30_000), Err(DomainError::RequestTimeout),);
+        assert_eq!(
+            classify_chain_outcome(elapsed, 30_000, "place_order"),
+            Err(DomainError::RequestTimeout),
+        );
     }
 
     #[tokio::test]
@@ -414,6 +491,7 @@ mod tests {
         // `RequestTimeout`, flagging the regression.
         let sender = BeeDexChainSender::new(
             vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
         )
         .expect("BeeDexChainSender::new");

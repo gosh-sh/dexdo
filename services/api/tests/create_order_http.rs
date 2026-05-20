@@ -161,6 +161,17 @@ impl MarketReadRepository for FakeRepo {
         })
     }
 
+    async fn resolve_for_cancel(
+        &self,
+        _: &MarketAddress,
+        _: &Symbol,
+        _: u64,
+        _: &str,
+        _: i64,
+    ) -> Result<dodex_application::OrderForCancel, anyhow::Error> {
+        unimplemented!("resolve_for_cancel is not exercised by create_order_http tests")
+    }
+
     async fn list_orders(
         &self,
         _: &dodex_application::OrdersQuery,
@@ -199,6 +210,16 @@ impl ChainOrderSender for RecordingSender {
         }
         self.recorded.lock().unwrap().push(payload);
         Ok(())
+    }
+
+    async fn cancel_order(
+        &self,
+        _: dodex_application::CancelOrderPayload,
+    ) -> Result<(), DomainError> {
+        // `create_order_http.rs` covers POST only; the cancel path has
+        // its own test file with its own recorder. Reaching this arm
+        // means the suite mixed concerns.
+        unreachable!("RecordingSender::cancel_order called from POST test")
     }
 }
 
@@ -822,6 +843,13 @@ impl ChainOrderSender for SlowSender {
         // wall-clock impact stays in the tens of milliseconds.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         Ok(())
+    }
+
+    async fn cancel_order(
+        &self,
+        _: dodex_application::CancelOrderPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("SlowSender::cancel_order called from POST test")
     }
 }
 
