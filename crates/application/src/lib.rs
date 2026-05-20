@@ -674,6 +674,75 @@ pub struct CancelledOrder {
     pub client_order_id: Option<String>,
 }
 
+/// One body item of `POST /api/v1/batchOrders`. The HTTP layer parses
+/// each request `orders[]` entry into this shape; the use case applies
+/// the same per-item validation rules as `POST /api/v1/order` and
+/// assembles a single `NewBatchOrderPayload` that goes to the chain in
+/// one `PrivateNote.placeBatch` call.
+#[derive(Debug, Clone)]
+pub struct BatchOrderInputItem {
+    pub side: OrderSide,
+    pub quantity: String,
+    pub price: Option<String>,
+    pub order_type: OrderType,
+    pub time_in_force: Option<TimeInForce>,
+    pub client_order_id: Option<String>,
+}
+
+/// Input shape for `CreateBatchOrdersUseCase`. Mirrors the body of
+/// `POST /api/v1/batchOrders` — one trading PN, one `(marketAddress,
+/// symbol)`, plus the per-item list. The chain ABI accepts only one
+/// `(eventId, oracleListHash, tokenType)` per batch, so all items share
+/// the same market/outcome resolution.
+#[derive(Debug, Clone)]
+pub struct CreateBatchOrdersInput {
+    pub trading_pn: TradingPn,
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
+    pub orders: Vec<BatchOrderInputItem>,
+    pub now_seconds: i64,
+    pub now_ms: i64,
+}
+
+/// Per-order chain-shaped fields the batch sender packs into
+/// `OrderBookOrder`. Identical in meaning to the corresponding fields
+/// in `NewOrderPayload`; carried separately because the chain ABI puts
+/// `(eventId, oracleListHash, tokenType)` at the batch level and only
+/// these fields per order.
+#[derive(Debug, Clone)]
+pub struct BatchOrderPayloadItem {
+    pub outcome_id: u32,
+    pub is_buy: bool,
+    pub price_raw: String,
+    pub amount_raw: String,
+    pub flags: u8,
+    pub client_order_id: String,
+}
+
+/// Chain-shaped payload handed to `ChainOrderSender::submit_batch_order`.
+/// Single market/outcome coordinates, multiple orders — matches
+/// `ackinacki-kit::PrivateNote::place_batch` (`ParamsOfPlaceBatch`)
+/// directly.
+#[derive(Debug, Clone)]
+pub struct NewBatchOrderPayload {
+    pub pn_address: String,
+    pub pn_pubkey: String,
+    pub pn_seckey: SensitiveBytes,
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    pub token_type: u32,
+    pub orders: Vec<BatchOrderPayloadItem>,
+}
+
+/// Output of `CreateBatchOrdersUseCase`. One `SubmittedOrder` per
+/// accepted item, in request order — the HTTP layer maps these into
+/// the `PENDING_NEW` array response per
+/// [api-spec §New Batch Orders](../../docs/api-spec.md#new-batch-orders).
+#[derive(Debug, Clone)]
+pub struct SubmittedBatchOrders {
+    pub items: Vec<SubmittedOrder>,
+}
+
 /// Dispatch a `PrivateNote.placeOrder` external message to chain.
 /// Returns once `bee_dex` has observed the chain's execution of
 /// `PrivateNote.placeOrder` — so PrivateNote-side `require(...)`
@@ -696,6 +765,18 @@ pub trait ChainOrderSender: Send + Sync {
     /// `Rejected`) are asynchronous and surface through the indexer; see
     /// `docs/tech-specs/write-api.md §DELETE failure surface`.
     async fn cancel_order(&self, payload: CancelOrderPayload) -> Result<(), DomainError>;
+
+    /// Dispatch a `PrivateNote.placeBatch` external message to chain.
+    /// `placeBatch` is atomic on chain: every item is re-validated and
+    /// any failed `require(...)` reverts the whole batch — none of the
+    /// items land. The same chain `_busy` lock applies as for
+    /// `placeOrder`, so a busy PN surfaces here as `OrderPnBusy` too.
+    /// New chain exit codes batches can raise:
+    /// `129 ERR_INVALID_PARAMS` (intra-batch clientOrderId collision),
+    /// `161 ERR_BATCH_TOO_LARGE`, `162 ERR_EMPTY_BATCH` (both as
+    /// defence-in-depth — the use case pre-checks these), and
+    /// `168 ERR_NOTIONAL_OVERFLOW`.
+    async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError>;
 }
 
 #[async_trait]
@@ -706,6 +787,10 @@ impl<T: ?Sized + ChainOrderSender> ChainOrderSender for Arc<T> {
 
     async fn cancel_order(&self, payload: CancelOrderPayload) -> Result<(), DomainError> {
         (**self).cancel_order(payload).await
+    }
+
+    async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError> {
+        (**self).submit_batch_order(payload).await
     }
 }
 
@@ -765,93 +850,15 @@ where
             return Err(DomainError::MarketInconsistent);
         }
 
-        // Flag encoding rejects (MARKET, GTC/FOK/POST_ONLY); LIMIT path
-        // falls through with defaulted GTC when TIF is absent.
-        let flags = encode_order_flags(input.order_type, input.time_in_force)?;
-
-        // `price` is required for LIMIT and rejected for MARKET per
-        // api-spec §New Order. Resolve the field-presence + order-type
-        // matrix once, into an `Option<&str>` the rest of the function
-        // can reference without re-checking — no `.expect("checked
-        // above")` further down.
-        let price_input: Option<&str> = match (input.order_type, input.price.as_deref()) {
-            (OrderType::Limit, Some(p)) => Some(p),
-            (OrderType::Limit, None) => return Err(DomainError::MissingParameter),
-            (OrderType::Market, None) => None,
-            (OrderType::Market, Some(_)) => return Err(DomainError::InvalidParameter),
-        };
-
-        let price_raw = match price_input {
-            Some(p) => {
-                precision_within(p, outcome.price_precision)?;
-                if !is_multiple_of(p, &outcome.tick_size)? {
-                    return Err(DomainError::PrecisionExceeded);
-                }
-                lift_decimal(p, outcome.price_precision)?.to_str_radix(10)
-            }
-            None => "0".to_string(),
-        };
-
-        precision_within(&input.quantity, outcome.quantity_precision)?;
-        if !is_multiple_of(&input.quantity, &outcome.step_size)? {
-            return Err(DomainError::PrecisionExceeded);
-        }
-        let amount_lifted = lift_decimal(&input.quantity, outcome.quantity_precision)?;
-        // Strictly-positive invariant. `quantity == "0"` survives
-        // `precision_within` (no fractional digits) and `is_multiple_of`
-        // (zero is a multiple of every non-zero step), and the
-        // MARKET-SELL branch below skips the notional check that
-        // implicitly catches it for LIMIT and MARKET-BUY (where
-        // `0 * price < min_notional`). Without this gate the chain
-        // would reject with `ERR_LOW_VALUE` (102) — correct shape but
-        // a wasted round-trip and an avoidable contention with the
-        // per-PN `_busy` lock for the legitimate next submission.
-        if amount_lifted == BigUint::from(0u32) {
-            return Err(DomainError::OrderValidationFailed);
-        }
-        // SDK serialization ceiling. `PrivateNote.placeOrder.amount`
-        // is `uint128` at the chain ABI, but the upstream
-        // `bee_dex` → `ackinacki-kit` → `serde_json::json!` path
-        // panics on `u128 > u64::MAX` for the same reason
-        // `clientOrderId` is capped — see
-        // `docs/tech-specs/write-api.md §clientOrderId generation`.
-        // Until the SDK gains `serde_json/arbitrary_precision` the
-        // amount surface is also u64. Catch over-ceiling values here
-        // so they surface as 400 / -2010 ("order cannot succeed")
-        // instead of a 500 from the worker panic.
-        if amount_lifted > BigUint::from(u64::MAX) {
-            return Err(DomainError::OrderValidationFailed);
-        }
-        let amount_raw = amount_lifted.to_str_radix(10);
-
-        // Notional check splits per (type, side) per spec validation
-        // table. `price_input` carries the validated LIMIT price (or
-        // `None` for MARKET); the MARKET-SELL branch has no spec rule.
-        match (input.order_type, input.side, price_input) {
-            (OrderType::Limit, _, Some(p)) => {
-                if !notional_meets_minimum(p, &input.quantity, &outcome.min_notional)? {
-                    return Err(DomainError::OrderValidationFailed);
-                }
-            }
-            (OrderType::Market, OrderSide::Buy, _) => {
-                // MARKET BUY: `quantity` is the quote-asset spend amount,
-                // compared directly against `minNotional`.
-                if !notional_meets_minimum("1", &input.quantity, &outcome.min_notional)? {
-                    return Err(DomainError::OrderValidationFailed);
-                }
-            }
-            (OrderType::Market, OrderSide::Sell, _) => {
-                // api-spec doesn't list a notional rule for MARKET SELL;
-                // the chain enforces its own MIN_ORDER_NOTIONAL. Skip
-                // here rather than guess.
-            }
-            // The (Limit, None) and (Market, Some) cases above already
-            // returned, so this arm is structurally unreachable. We
-            // collapse it to `Unexpected` (500) rather than `panic!`
-            // so a future refactor that broke the invariant could not
-            // turn into an opaque crash in the request handler.
-            (OrderType::Limit, _, None) => return Err(DomainError::Unexpected),
-        }
+        let encoded = validate_and_encode_order_item(
+            input.side,
+            &input.quantity,
+            input.price.as_deref(),
+            input.order_type,
+            input.time_in_force,
+            input.client_order_id.as_deref(),
+            &outcome,
+        )?;
 
         // `markets.token_type` is `integer` in Postgres (signed), but the
         // on-chain `PrivateNote.placeOrder` ABI is `uint32`. The
@@ -861,19 +868,6 @@ where
         // of pushing a sign-folded value to chain.
         let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
 
-        // Caller-supplied `newOrderClientId` is bounded at `u64::MAX`
-        // by the upstream serialization constraint documented in
-        // `docs/tech-specs/write-api.md §clientOrderId generation`.
-        // Reject larger or non-numeric values as 400 / -1130 here
-        // rather than letting them panic deep in `ackinacki-kit`.
-        let client_order_id = match input.client_order_id.as_deref() {
-            Some(raw) => {
-                raw.parse::<u64>().map_err(|_| DomainError::InvalidParameter)?;
-                raw.to_string()
-            }
-            None => generate_client_order_id(),
-        };
-
         let payload = NewOrderPayload {
             pn_address: input.trading_pn.pn_address,
             pn_pubkey: input.trading_pn.pn_pubkey,
@@ -881,16 +875,16 @@ where
             event_id,
             oracle_list_hash,
             token_type,
-            outcome_id: outcome.outcome_id,
-            is_buy: input.side.is_buy(),
-            price_raw,
-            amount_raw,
-            flags,
-            client_order_id: client_order_id.clone(),
+            outcome_id: encoded.outcome_id,
+            is_buy: encoded.is_buy,
+            price_raw: encoded.price_raw,
+            amount_raw: encoded.amount_raw,
+            flags: encoded.flags,
+            client_order_id: encoded.client_order_id.clone(),
         };
         self.sender.submit_order(payload).await?;
 
-        Ok(SubmittedOrder { client_order_id })
+        Ok(SubmittedOrder { client_order_id: encoded.client_order_id })
     }
 }
 
@@ -900,6 +894,121 @@ where
 /// `docs/tech-specs/write-api.md §clientOrderId generation`.
 fn generate_client_order_id() -> String {
     (Uuid::new_v4().as_u128() as u64).to_string()
+}
+
+/// Run the per-order validation and chain encoding that both
+/// `POST /api/v1/order` and `POST /api/v1/batchOrders` apply identically
+/// per [api-spec §Validation Rules]. Single-order callers wrap the
+/// result with chain-level fields into a `NewOrderPayload`; batch
+/// callers collect a `Vec<BatchOrderPayloadItem>` into
+/// `NewBatchOrderPayload`.
+fn validate_and_encode_order_item(
+    side: OrderSide,
+    quantity: &str,
+    price: Option<&str>,
+    order_type: OrderType,
+    time_in_force: Option<TimeInForce>,
+    client_order_id: Option<&str>,
+    outcome: &Outcome,
+) -> Result<BatchOrderPayloadItem, DomainError> {
+    let flags = encode_order_flags(order_type, time_in_force)?;
+
+    // `price` is required for LIMIT and rejected for MARKET per
+    // api-spec §New Order. Resolve the field-presence + order-type
+    // matrix once, into an `Option<&str>` the rest of the function
+    // can reference without re-checking.
+    let price_input: Option<&str> = match (order_type, price) {
+        (OrderType::Limit, Some(p)) => Some(p),
+        (OrderType::Limit, None) => return Err(DomainError::MissingParameter),
+        (OrderType::Market, None) => None,
+        (OrderType::Market, Some(_)) => return Err(DomainError::InvalidParameter),
+    };
+
+    let price_raw = match price_input {
+        Some(p) => {
+            precision_within(p, outcome.price_precision)?;
+            if !is_multiple_of(p, &outcome.tick_size)? {
+                return Err(DomainError::PrecisionExceeded);
+            }
+            lift_decimal(p, outcome.price_precision)?.to_str_radix(10)
+        }
+        None => "0".to_string(),
+    };
+
+    precision_within(quantity, outcome.quantity_precision)?;
+    if !is_multiple_of(quantity, &outcome.step_size)? {
+        return Err(DomainError::PrecisionExceeded);
+    }
+    let amount_lifted = lift_decimal(quantity, outcome.quantity_precision)?;
+    // Strictly-positive invariant. `quantity == "0"` survives
+    // `precision_within` (no fractional digits) and `is_multiple_of`
+    // (zero is a multiple of every non-zero step), and the
+    // MARKET-SELL branch below skips the notional check that
+    // implicitly catches it for LIMIT and MARKET-BUY. Without this
+    // gate the chain would reject with `ERR_LOW_VALUE` (102) — a
+    // wasted round-trip and avoidable contention with the per-PN
+    // `_busy` lock for the legitimate next submission.
+    if amount_lifted == BigUint::from(0u32) {
+        return Err(DomainError::OrderValidationFailed);
+    }
+    // SDK serialization ceiling. `PrivateNote.placeOrder.amount` and
+    // `placeBatch.orders[i].amount` are `uint128` at the chain ABI,
+    // but the upstream `bee_dex` → `ackinacki-kit` → `serde_json::json!`
+    // path panics on `u128 > u64::MAX` for the same reason
+    // `clientOrderId` is capped — see
+    // `docs/tech-specs/write-api.md §clientOrderId generation`.
+    if amount_lifted > BigUint::from(u64::MAX) {
+        return Err(DomainError::OrderValidationFailed);
+    }
+    let amount_raw = amount_lifted.to_str_radix(10);
+
+    // Notional check splits per (type, side) per spec validation
+    // table. `price_input` carries the validated LIMIT price (or
+    // `None` for MARKET); the MARKET-SELL branch has no spec rule.
+    match (order_type, side, price_input) {
+        (OrderType::Limit, _, Some(p)) => {
+            if !notional_meets_minimum(p, quantity, &outcome.min_notional)? {
+                return Err(DomainError::OrderValidationFailed);
+            }
+        }
+        (OrderType::Market, OrderSide::Buy, _) => {
+            // MARKET BUY: `quantity` is the quote-asset spend amount,
+            // compared directly against `minNotional`.
+            if !notional_meets_minimum("1", quantity, &outcome.min_notional)? {
+                return Err(DomainError::OrderValidationFailed);
+            }
+        }
+        (OrderType::Market, OrderSide::Sell, _) => {
+            // api-spec doesn't list a notional rule for MARKET SELL;
+            // the chain enforces its own MIN_ORDER_NOTIONAL.
+        }
+        // The (Limit, None) and (Market, Some) cases above already
+        // returned, so this arm is structurally unreachable. Collapse
+        // to `Unexpected` (500) rather than `panic!` so a future
+        // refactor that broke the invariant could not turn into an
+        // opaque crash in the request handler.
+        (OrderType::Limit, _, None) => return Err(DomainError::Unexpected),
+    }
+
+    // Caller-supplied `newOrderClientId` is bounded at `u64::MAX`
+    // by the upstream serialization constraint documented in
+    // `docs/tech-specs/write-api.md §clientOrderId generation`.
+    let client_order_id = match client_order_id {
+        Some(raw) => {
+            raw.parse::<u64>().map_err(|_| DomainError::InvalidParameter)?;
+            raw.to_string()
+        }
+        None => generate_client_order_id(),
+    };
+
+    Ok(BatchOrderPayloadItem {
+        outcome_id: outcome.outcome_id,
+        is_buy: side.is_buy(),
+        price_raw,
+        amount_raw,
+        flags,
+        client_order_id,
+    })
 }
 
 /// Orchestrates `DELETE /api/v1/order`: resolves the caller-owned open
@@ -970,6 +1079,109 @@ where
         self.sender.cancel_order(payload).await?;
 
         Ok(CancelledOrder { client_order_id })
+    }
+}
+
+/// Orchestrates `POST /api/v1/batchOrders`: resolves market+outcome
+/// once, validates the request shape (non-empty,
+/// `len ≤ outcome.max_batch_size`), runs the same per-item validation
+/// chain `POST /api/v1/order` uses (any failure rejects the whole
+/// batch), and dispatches a single `PrivateNote.placeBatch` call. The
+/// chain itself enforces all-or-nothing — if any item fails on-chain
+/// the entire `placeBatch` reverts.
+pub struct CreateBatchOrdersUseCase<R, S> {
+    repo: R,
+    sender: S,
+}
+
+impl<R, S> CreateBatchOrdersUseCase<R, S> {
+    pub fn new(repo: R, sender: S) -> Self {
+        Self { repo, sender }
+    }
+}
+
+impl<R, S> CreateBatchOrdersUseCase<R, S>
+where
+    R: MarketReadRepository,
+    S: ChainOrderSender,
+{
+    pub async fn execute(
+        &self,
+        input: CreateBatchOrdersInput,
+    ) -> Result<SubmittedBatchOrders, DomainError> {
+        // Empty batch is a client-shape error. The chain enforces the
+        // same (`ERR_EMPTY_BATCH`) but failing fast saves a round-trip
+        // and avoids needlessly contending for the per-PN `_busy` lock.
+        if input.orders.is_empty() {
+            return Err(DomainError::InvalidParameter);
+        }
+
+        let MarketForPlacement { event_id, oracle_list_hash, token_type, status, outcome } = self
+            .repo
+            .resolve_for_new_order(&input.market_address, &input.symbol, input.now_seconds)
+            .await
+            .map_err(|err| {
+                if let Some(domain) = err.downcast_ref::<DomainError>() {
+                    return *domain;
+                }
+                error!(
+                    ?err,
+                    market_address = %input.market_address.0,
+                    "resolve_for_new_order failed (non-domain)",
+                );
+                DomainError::Unexpected
+            })?;
+
+        if status != MarketStatus::Trading {
+            return Err(DomainError::OrderValidationFailed);
+        }
+        if oracle_list_hash.is_empty() {
+            return Err(DomainError::MarketInconsistent);
+        }
+        // Per-outcome cap. Authoritative source is `/api/v1/markets`
+        // (`outcome.max_batch_size`); the chain enforces the same
+        // (`ERR_BATCH_TOO_LARGE`). Reject locally so a misbehaving
+        // client gets `-1130 / 400` instead of paying a chain
+        // round-trip on a doomed batch.
+        if input.orders.len() > outcome.max_batch_size as usize {
+            return Err(DomainError::InvalidParameter);
+        }
+
+        let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
+
+        let mut encoded_orders = Vec::with_capacity(input.orders.len());
+        let mut submitted_items = Vec::with_capacity(input.orders.len());
+        for item in input.orders {
+            // First per-item failure short-circuits the whole batch —
+            // matches the chain's atomic placeBatch semantics. The
+            // caller can re-submit with the offending entry removed or
+            // corrected.
+            let encoded = validate_and_encode_order_item(
+                item.side,
+                &item.quantity,
+                item.price.as_deref(),
+                item.order_type,
+                item.time_in_force,
+                item.client_order_id.as_deref(),
+                &outcome,
+            )?;
+            submitted_items
+                .push(SubmittedOrder { client_order_id: encoded.client_order_id.clone() });
+            encoded_orders.push(encoded);
+        }
+
+        let payload = NewBatchOrderPayload {
+            pn_address: input.trading_pn.pn_address,
+            pn_pubkey: input.trading_pn.pn_pubkey,
+            pn_seckey: input.trading_pn.pn_seckey,
+            event_id,
+            oracle_list_hash,
+            token_type,
+            orders: encoded_orders,
+        };
+        self.sender.submit_batch_order(payload).await?;
+
+        Ok(SubmittedBatchOrders { items: submitted_items })
     }
 }
 
@@ -1224,6 +1436,7 @@ mod tests {
     struct FakeSender {
         recorded: Mutex<Vec<NewOrderPayload>>,
         recorded_cancels: Mutex<Vec<CancelOrderPayload>>,
+        recorded_batches: Mutex<Vec<NewBatchOrderPayload>>,
         fail_with: Option<DomainError>,
     }
 
@@ -1232,6 +1445,7 @@ mod tests {
             Self {
                 recorded: Mutex::new(Vec::new()),
                 recorded_cancels: Mutex::new(Vec::new()),
+                recorded_batches: Mutex::new(Vec::new()),
                 fail_with: None,
             }
         }
@@ -1240,6 +1454,7 @@ mod tests {
             Self {
                 recorded: Mutex::new(Vec::new()),
                 recorded_cancels: Mutex::new(Vec::new()),
+                recorded_batches: Mutex::new(Vec::new()),
                 fail_with: Some(err),
             }
         }
@@ -1250,6 +1465,10 @@ mod tests {
 
         fn cancel_calls(&self) -> Vec<CancelOrderPayload> {
             self.recorded_cancels.lock().unwrap().clone()
+        }
+
+        fn batch_calls(&self) -> Vec<NewBatchOrderPayload> {
+            self.recorded_batches.lock().unwrap().clone()
         }
     }
 
@@ -1268,6 +1487,17 @@ mod tests {
                 return Err(err);
             }
             self.recorded_cancels.lock().unwrap().push(payload);
+            Ok(())
+        }
+
+        async fn submit_batch_order(
+            &self,
+            payload: NewBatchOrderPayload,
+        ) -> Result<(), DomainError> {
+            if let Some(err) = self.fail_with {
+                return Err(err);
+            }
+            self.recorded_batches.lock().unwrap().push(payload);
             Ok(())
         }
     }
@@ -2102,5 +2332,221 @@ mod tests {
                 "repo must not be touched for blank cursor={blank:?}",
             );
         }
+    }
+
+    // ---- CreateBatchOrdersUseCase ----
+
+    fn batch_item(coid: Option<&str>) -> BatchOrderInputItem {
+        BatchOrderInputItem {
+            side: OrderSide::Buy,
+            quantity: "1.5".into(),
+            price: Some("0.615".into()),
+            order_type: OrderType::Limit,
+            time_in_force: Some(TimeInForce::Gtc),
+            client_order_id: coid.map(|s| s.to_string()),
+        }
+    }
+
+    fn base_batch_input(symbol: &str, orders: Vec<BatchOrderInputItem>) -> CreateBatchOrdersInput {
+        CreateBatchOrdersInput {
+            trading_pn: TradingPn {
+                pn_address: "0:pn".into(),
+                pn_pubkey: "1".into(),
+                pn_dih: "2".into(),
+                pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            },
+            market_address: MarketAddress("0:market".into()),
+            symbol: Symbol(symbol.into()),
+            orders,
+            now_seconds: 1_000,
+            now_ms: 1_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_happy_path_two_items() {
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let input =
+            base_batch_input("PM-YES", vec![batch_item(Some("11")), batch_item(Some("22"))]);
+        let out = uc.execute(input).await.expect("happy path");
+
+        assert_eq!(out.items.len(), 2);
+        assert_eq!(out.items[0].client_order_id, "11");
+        assert_eq!(out.items[1].client_order_id, "22");
+
+        let batches = sender.batch_calls();
+        assert_eq!(batches.len(), 1);
+        let payload = &batches[0];
+        assert_eq!(payload.pn_address, "0:pn");
+        assert_eq!(payload.event_id, "0xevent");
+        assert_eq!(payload.oracle_list_hash, "0xdead");
+        assert_eq!(payload.token_type, 1);
+        assert_eq!(payload.orders.len(), 2);
+        // Order preserved; per-item encoding matches single-order helper.
+        assert_eq!(payload.orders[0].client_order_id, "11");
+        assert_eq!(payload.orders[1].client_order_id, "22");
+        assert_eq!(payload.orders[0].outcome_id, 1);
+        assert_eq!(payload.orders[0].price_raw, "615");
+        assert_eq!(payload.orders[0].amount_raw, "1500000");
+        assert_eq!(payload.orders[0].flags, 0);
+        assert!(payload.orders[0].is_buy);
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_rejects_empty_batch() {
+        // Pre-flight: an empty `orders[]` reaches the chain as
+        // ERR_EMPTY_BATCH (162); failing here saves the round-trip
+        // and avoids contending for the per-PN _busy lock.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let err = uc.execute(base_batch_input("PM-YES", vec![])).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        // Empty batch must short-circuit BEFORE market resolution and
+        // the sender — otherwise we'd waste a chain call.
+        assert!(sender.batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_rejects_above_max_batch_size() {
+        // test_outcome().max_batch_size == 5; 6 items must fail
+        // locally with -1130 instead of paying a chain ERR_BATCH_TOO_LARGE.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let orders = (0..6).map(|i| batch_item(Some(&i.to_string()))).collect();
+        let err = uc.execute(base_batch_input("PM-YES", orders)).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        assert!(sender.batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_accepts_exactly_max_batch_size() {
+        // Boundary pin: `outcome.max_batch_size` items must succeed.
+        // Catches a future off-by-one (e.g. `>=` instead of `>`) that
+        // would reject the boundary value.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let orders: Vec<_> = (0..5).map(|i| batch_item(Some(&i.to_string()))).collect();
+        let out = uc.execute(base_batch_input("PM-YES", orders)).await.expect("max size accepted");
+        assert_eq!(out.items.len(), 5);
+        assert_eq!(sender.batch_calls()[0].orders.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_market_not_found() {
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::empty(), FakeSender::ok());
+        let err =
+            uc.execute(base_batch_input("PM-YES", vec![batch_item(Some("1"))])).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidMarketOrSymbol);
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_rejects_non_trading_status() {
+        let mut market = trading_market("PM-YES");
+        market.status = MarketStatus::Resolving;
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let err =
+            uc.execute(base_batch_input("PM-YES", vec![batch_item(Some("1"))])).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_rejects_blank_oracle_list_hash() {
+        let mut market = trading_market("PM-YES");
+        market.oracle_list_hash = String::new();
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let err =
+            uc.execute(base_batch_input("PM-YES", vec![batch_item(Some("1"))])).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_per_item_failure_aborts_whole_batch() {
+        // First item is fine; second has 4-dp price against
+        // pricePrecision=3. The whole batch must fail with the first
+        // observed validation error and the sender MUST NOT be hit —
+        // chain placeBatch is atomic, so half-submitting locally
+        // would diverge from the chain contract.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut bad = batch_item(Some("2"));
+        bad.price = Some("0.6155".into()); // 4 dp > pricePrecision=3
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), bad]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::PrecisionExceeded);
+        assert!(sender.batch_calls().is_empty(), "chain sender hit despite per-item reject");
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_per_item_zero_quantity_aborts_whole_batch() {
+        // Regression mirror of `create_order_limit_rejects_zero_quantity`
+        // — the per-item zero-qty gate must fire inside the batch
+        // loop too and short-circuit before the chain call.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut bad = batch_item(Some("2"));
+        bad.quantity = "0".into();
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), bad]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_propagates_sender_pn_busy() {
+        let market = trading_market("PM-YES");
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            FakeSender::failing(DomainError::OrderPnBusy),
+        );
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), batch_item(Some("2"))]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::OrderPnBusy);
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_generates_client_order_id_when_absent() {
+        // Mirror of the single-order coid-generation path: each item
+        // without `newOrderClientId` must get a fresh u64-bounded
+        // decimal id, and IDs MUST be unique across the batch
+        // (otherwise chain ERR_INVALID_PARAMS (129) on
+        // intra-batch coid collision would always fire).
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let input = base_batch_input("PM-YES", vec![batch_item(None), batch_item(None)]);
+        let out = uc.execute(input).await.unwrap();
+
+        let coid_a = &out.items[0].client_order_id;
+        let coid_b = &out.items[1].client_order_id;
+        for coid in [coid_a, coid_b] {
+            assert!(!coid.is_empty());
+            assert!(coid.chars().all(|c| c.is_ascii_digit()));
+            assert!(coid.parse::<u64>().is_ok());
+        }
+        assert_ne!(coid_a, coid_b, "generated coids must not collide intra-batch");
+        // Same ids must appear in the chain payload.
+        let payload = &sender.batch_calls()[0];
+        assert_eq!(payload.orders[0].client_order_id, *coid_a);
+        assert_eq!(payload.orders[1].client_order_id, *coid_b);
     }
 }
