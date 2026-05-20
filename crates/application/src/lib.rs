@@ -225,6 +225,17 @@ impl OrderStatusSet {
     /// de-duplicated, and matched against the allow-list. An unknown
     /// token (or `PENDING_NEW`, which is write-side only) returns
     /// [`DomainError::InvalidParameter`].
+    ///
+    /// Whitespace-only input is treated as "all statuses" by design.
+    /// This is asymmetric with the `cursor` parameter — a
+    /// whitespace-only `cursor` is rejected as `MissingParameter` —
+    /// because the two parameters express different intents: `status`
+    /// is an optional narrowing filter whose absence (any falsy form)
+    /// trivially means "no filter applied", while `cursor` is an
+    /// opaque server-issued token whose syntactic emptiness is always
+    /// a client-side bug. See api-spec.md §Orders behaviour bullets
+    /// for the public contract. Do not collapse the two parsers into
+    /// a shared "blank-is-empty" helper.
     pub fn from_csv(raw: Option<&str>) -> Result<Self, DomainError> {
         let Some(value) = raw else {
             return Ok(Self::all());

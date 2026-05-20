@@ -190,7 +190,11 @@ fn status_set_parses_csv_and_dedups() {
     let set = OrderStatusSet::from_csv(Some("NEW, FILLED ,NEW, CANCELED"))
         .expect("valid CSV");
     let canonical = set.canonical_vec();
-    assert_eq!(canonical, vec![OrderStatus::New, OrderStatus::Canceled, OrderStatus::Filled]);
+    // BTreeSet iterates by the derived Ord on OrderStatus, which is
+    // declaration order: PendingNew, New, PartiallyFilled, Filled,
+    // Canceled, Rejected. So the input "NEW, FILLED, NEW, CANCELED"
+    // dedups to {New, Filled, Canceled} and surfaces in that order.
+    assert_eq!(canonical, vec![OrderStatus::New, OrderStatus::Filled, OrderStatus::Canceled]);
 }
 
 #[test]
