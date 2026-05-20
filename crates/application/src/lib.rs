@@ -163,10 +163,7 @@ pub trait MarketReadRepository: Send + Sync {
         now: i64,
     ) -> Result<MarketForPlacement, anyhow::Error>;
 
-    async fn list_orders(
-        &self,
-        query: &OrdersQuery,
-    ) -> Result<OrdersPage, anyhow::Error>;
+    async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error>;
 }
 
 #[async_trait]
@@ -193,10 +190,7 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         (**self).resolve_for_new_order(market_address, symbol, now).await
     }
 
-    async fn list_orders(
-        &self,
-        query: &OrdersQuery,
-    ) -> Result<OrdersPage, anyhow::Error> {
+    async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         (**self).list_orders(query).await
     }
 }
@@ -660,8 +654,7 @@ where
             _ => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
         };
 
-        let status = OrderStatusSet::from_csv(status)
-            .map_err(|err| anyhow::anyhow!(err))?;
+        let status = OrderStatusSet::from_csv(status).map_err(|err| anyhow::anyhow!(err))?;
 
         let limit = match limit {
             None => ORDERS_DEFAULT_LIMIT,
@@ -805,10 +798,7 @@ mod tests {
             })
         }
 
-        async fn list_orders(
-            &self,
-            _: &OrdersQuery,
-        ) -> Result<OrdersPage, anyhow::Error> {
+        async fn list_orders(&self, _: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
             unimplemented!("list_orders is not exercised by CreateOrderUseCase tests")
         }
     }
@@ -1187,8 +1177,7 @@ mod tests {
 
     #[test]
     fn status_set_parses_csv_and_dedups() {
-        let set = OrderStatusSet::from_csv(Some("NEW, FILLED ,NEW, CANCELED"))
-            .expect("valid CSV");
+        let set = OrderStatusSet::from_csv(Some("NEW, FILLED ,NEW, CANCELED")).expect("valid CSV");
         let canonical = set.canonical_vec();
         assert_eq!(canonical, vec![OrderStatus::New, OrderStatus::Filled, OrderStatus::Canceled]);
     }
@@ -1201,8 +1190,7 @@ mod tests {
 
     #[test]
     fn status_set_rejects_unknown_token() {
-        let err = OrderStatusSet::from_csv(Some("NEW,SUPER_FILLED"))
-            .expect_err("unknown token");
+        let err = OrderStatusSet::from_csv(Some("NEW,SUPER_FILLED")).expect_err("unknown token");
         assert_eq!(err, DomainError::InvalidParameter);
     }
 
@@ -1210,8 +1198,7 @@ mod tests {
     fn status_set_rejects_pending_new() {
         // PendingNew is a write-side synthetic status and must not be
         // accepted as a /orders filter — it never appears on a live_orders row.
-        let err = OrderStatusSet::from_csv(Some("PENDING_NEW"))
-            .expect_err("pending_new rejected");
+        let err = OrderStatusSet::from_csv(Some("PENDING_NEW")).expect_err("pending_new rejected");
         assert_eq!(err, DomainError::InvalidParameter);
     }
 

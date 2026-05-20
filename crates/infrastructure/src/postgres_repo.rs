@@ -13,10 +13,10 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::OrderStatusSet;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
-use dodex_application::OrderStatusSet;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -26,10 +26,10 @@ use dodex_domain::MarketEvent;
 use dodex_domain::MarketName;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
-use dodex_domain::Order;
-use dodex_domain::OrderStatus;
 use dodex_domain::OracleEntry;
+use dodex_domain::Order;
 use dodex_domain::OrderSide;
+use dodex_domain::OrderStatus;
 use dodex_domain::OrderType;
 use dodex_domain::Outcome;
 use dodex_domain::PriceLevel;
@@ -370,10 +370,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         })
     }
 
-    async fn list_orders(
-        &self,
-        query: &OrdersQuery,
-    ) -> Result<OrdersPage, anyhow::Error> {
+    async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         let target = match &query.market {
             Some(filter) => {
                 let target: Option<(Option<String>, i32)> = sqlx::query_as(
@@ -675,11 +672,7 @@ fn order_from_row(row: OrderRow) -> Result<Order, anyhow::Error> {
     };
 
     // REJECTED orders never receive a chain-assigned order_id.
-    let order_id = if status == OrderStatus::Rejected {
-        String::new()
-    } else {
-        row.order_id
-    };
+    let order_id = if status == OrderStatus::Rejected { String::new() } else { row.order_id };
 
     Ok(Order {
         market_address: MarketAddress(row.market_address),

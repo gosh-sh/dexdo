@@ -503,14 +503,7 @@ async fn get_orders(
 
     let use_case = GetOrdersUseCase::new(state.repo);
     let page = use_case
-        .execute(
-            &ctx,
-            market_address,
-            symbol,
-            status.as_deref(),
-            limit,
-            cursor.as_deref(),
-        )
+        .execute(&ctx, market_address, symbol, status.as_deref(), limit, cursor.as_deref())
         .await
         .map_err(|err| {
             if let Some(domain) = err.downcast_ref::<DomainError>() {

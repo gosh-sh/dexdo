@@ -8,10 +8,10 @@ use std::env;
 use std::time::Duration;
 
 use dodex_application::MarketReadRepository;
+use dodex_application::OrderStatusSet;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersMarketFilter;
 use dodex_application::OrdersQuery;
-use dodex_application::OrderStatusSet;
 use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
 use dodex_domain::Symbol;
@@ -237,34 +237,76 @@ async fn returns_only_owner_rows_across_all_statuses() {
 
     // owner-1: NEW (OPEN, amount_remaining == amount_initial)
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "1000", "1000", "1000", "OPEN", 1_700_000_001, "001",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "001",
+    )
+    .await;
     // owner-1: PARTIALLY_FILLED (OPEN, 0 < amount_remaining < amount_initial)
     insert_order(
-        &pool, &scope.book_yes, 2, Some(&scope.owner),
-        "1000", "1000", "500", "OPEN", 1_700_000_002, "002",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "500",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
     // owner-1: FILLED
     insert_order(
-        &pool, &scope.book_yes, 3, Some(&scope.owner),
-        "1000", "1000", "0", "FILLED", 1_700_000_003, "003",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        3,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "FILLED",
+        1_700_000_003,
+        "003",
+    )
+    .await;
     // owner-1: CANCELLED
     insert_order(
-        &pool, &scope.book_yes, 4, Some(&scope.owner),
-        "1000", "1000", "0", "CANCELLED", 1_700_000_004, "004",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        4,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "CANCELLED",
+        1_700_000_004,
+        "004",
+    )
+    .await;
     // owner-2: NEW — must NOT appear in owner-1 results
     insert_order(
-        &pool, &scope.book_yes, 5, Some(&scope.other_owner),
-        "1000", "1000", "1000", "OPEN", 1_700_000_005, "005",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        5,
+        Some(&scope.other_owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_005,
+        "005",
+    )
+    .await;
 
-    let page = repo
-        .list_orders(&query_all(&scope.owner))
-        .await
-        .expect("list_orders");
+    let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
 
     assert_eq!(page.orders.len(), 4, "exactly four owner-1 rows");
     // DESC placed_chain_order: "004" > "003" > "002" > "001"
@@ -287,26 +329,59 @@ async fn default_status_returns_all_non_rejected_buckets() {
     insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
 
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "1000", "1000", "1000", "OPEN", 1_700_000_001, "001",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "001",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 2, Some(&scope.owner),
-        "1000", "1000", "500", "OPEN", 1_700_000_002, "002",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "500",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 3, Some(&scope.owner),
-        "1000", "1000", "0", "FILLED", 1_700_000_003, "003",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        3,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "FILLED",
+        1_700_000_003,
+        "003",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 4, Some(&scope.owner),
-        "1000", "1000", "0", "CANCELLED", 1_700_000_004, "004",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        4,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "CANCELLED",
+        1_700_000_004,
+        "004",
+    )
+    .await;
 
-    let page = repo
-        .list_orders(&query_all(&scope.owner))
-        .await
-        .expect("list_orders");
+    let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
 
     assert_eq!(page.orders.len(), 4, "all four rows returned by default filter");
     assert!(page.next_cursor.is_none());
@@ -326,21 +401,57 @@ async fn status_csv_filter_narrows_results() {
     insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
 
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "1000", "1000", "1000", "OPEN", 1_700_000_001, "001",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "001",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 2, Some(&scope.owner),
-        "1000", "1000", "500", "OPEN", 1_700_000_002, "002",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "500",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 3, Some(&scope.owner),
-        "1000", "1000", "0", "FILLED", 1_700_000_003, "003",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        3,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "FILLED",
+        1_700_000_003,
+        "003",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 4, Some(&scope.owner),
-        "1000", "1000", "0", "CANCELLED", 1_700_000_004, "004",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        4,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "CANCELLED",
+        1_700_000_004,
+        "004",
+    )
+    .await;
 
     let status = OrderStatusSet::from_csv(Some("FILLED,CANCELED")).expect("valid CSV");
     let page = repo
@@ -359,10 +470,7 @@ async fn status_csv_filter_narrows_results() {
     // DESC: CANCELLED row (004) then FILLED row (003)
     assert!(statuses.contains(&"FILLED"), "FILLED present");
     assert!(statuses.contains(&"CANCELED"), "CANCELED present");
-    assert!(
-        !statuses.iter().any(|s| *s == "NEW" || *s == "PARTIALLY_FILLED"),
-        "no OPEN rows"
-    );
+    assert!(!statuses.iter().any(|s| *s == "NEW" || *s == "PARTIALLY_FILLED"), "no OPEN rows");
     assert!(page.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
@@ -381,21 +489,57 @@ async fn rejected_filter_today_returns_empty_set() {
 
     // Seed the usual four non-rejected rows — none should surface under REJECTED filter.
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "1000", "1000", "1000", "OPEN", 1_700_000_001, "001",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "001",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 2, Some(&scope.owner),
-        "1000", "1000", "500", "OPEN", 1_700_000_002, "002",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "500",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 3, Some(&scope.owner),
-        "1000", "1000", "0", "FILLED", 1_700_000_003, "003",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        3,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "FILLED",
+        1_700_000_003,
+        "003",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 4, Some(&scope.owner),
-        "1000", "1000", "0", "CANCELLED", 1_700_000_004, "004",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        4,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "CANCELLED",
+        1_700_000_004,
+        "004",
+    )
+    .await;
 
     let status = OrderStatusSet::from_csv(Some("REJECTED")).expect("valid CSV");
     let page = repo
@@ -429,14 +573,20 @@ async fn canceled_partial_fill_reports_nonzero_executed_qty() {
     // amount_initial=1000, amount_remaining=300: executed = 1000 - 300 = 700.
     // quantity_precision=2 → scale by /100: origQty="10.00", executedQty="7.00".
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "1000", "1000", "300", "CANCELLED", 1_700_000_001, "001",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "300",
+        "CANCELLED",
+        1_700_000_001,
+        "001",
+    )
+    .await;
 
-    let page = repo
-        .list_orders(&query_all(&scope.owner))
-        .await
-        .expect("list_orders");
+    let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
 
     assert_eq!(page.orders.len(), 1);
     let order = &page.orders[0];
@@ -461,17 +611,21 @@ async fn descending_placed_chain_order_sort() {
 
     for i in 1_i64..=3 {
         insert_order(
-            &pool, &scope.book_yes, i, Some(&scope.owner),
-            "1000", "1000", "1000", "OPEN",
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "1000",
+            "1000",
+            "1000",
+            "OPEN",
             1_700_000_000 + i,
             &format!("{:03}", i),
-        ).await;
+        )
+        .await;
     }
 
-    let page = repo
-        .list_orders(&query_all(&scope.owner))
-        .await
-        .expect("list_orders");
+    let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
 
     assert_eq!(page.orders.len(), 3);
     let placed: Vec<&str> = page.orders.iter().map(|o| o.order_id.as_str()).collect();
@@ -495,11 +649,18 @@ async fn cursor_advances_strictly_below_last_returned() {
 
     for i in 1_i64..=6 {
         insert_order(
-            &pool, &scope.book_yes, i, Some(&scope.owner),
-            "1000", "1000", "1000", "OPEN",
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "1000",
+            "1000",
+            "1000",
+            "OPEN",
             1_700_000_000 + i,
             &format!("{:03}", i),
-        ).await;
+        )
+        .await;
     }
 
     let page1 = repo
@@ -552,11 +713,18 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
     // Rows with placed_chain_order "001".."004".
     for i in 1_i64..=4 {
         insert_order(
-            &pool, &scope.book_yes, i, Some(&scope.owner),
-            "1000", "1000", "1000", "OPEN",
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "1000",
+            "1000",
+            "1000",
+            "OPEN",
             1_700_000_000 + i,
             &format!("{:03}", i),
-        ).await;
+        )
+        .await;
     }
 
     // Page 1 (limit=2): gets rows "004" and "003" (DESC).
@@ -649,9 +817,7 @@ async fn unreconciled_market_pair_returns_invalid_market_or_symbol() {
     let repo = PostgresReadModelRepository::new(pool.clone());
     let scope = Scope::new();
     scope.cleanup(&pool).await;
-    insert_market_unreconciled(
-        &pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes,
-    ).await;
+    insert_market_unreconciled(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
 
     let err = repo
         .list_orders(&OrdersQuery {
@@ -700,27 +866,59 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
     // Four rows in ascending placed_chain_order; row 002 is the corrupt one.
     // DESC sort puts the tail of page 1 (limit=3) at row 002.
     insert_order(
-        &pool, &scope.book_yes, 1, Some(&scope.owner),
-        "12345", "1000", "1000", "OPEN",
-        1_700_000_000, "001",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_000,
+        "001",
+    )
+    .await;
     // Row 002: OPEN + amount_remaining=0 — projector bug; the mapper
     // logs warn and returns Err, the row is filtered out of the response.
     insert_order(
-        &pool, &scope.book_yes, 2, Some(&scope.owner),
-        "12345", "1000", "0", "OPEN",
-        1_700_000_001, "002",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "0",
+        "OPEN",
+        1_700_000_001,
+        "002",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 3, Some(&scope.owner),
-        "12345", "1000", "1000", "OPEN",
-        1_700_000_002, "003",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        3,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_002,
+        "003",
+    )
+    .await;
     insert_order(
-        &pool, &scope.book_yes, 4, Some(&scope.owner),
-        "12345", "1000", "1000", "OPEN",
-        1_700_000_003, "004",
-    ).await;
+        &pool,
+        &scope.book_yes,
+        4,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_003,
+        "004",
+    )
+    .await;
 
     // Page 1: limit=3. DESC raw fetch order: 004, 003, 002, 001.
     // limit+1 lookahead returns all 4; has_more=true; truncate to
