@@ -18,8 +18,12 @@
 use std::env;
 use std::time::Duration;
 
+use dodex_application::MarketReadRepository;
+use dodex_application::OrderStatusSet;
+use dodex_application::OrdersQuery;
 use dodex_infrastructure::database;
 use dodex_infrastructure::indexer_repo::IndexerRepository;
+use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -85,6 +89,42 @@ async fn processed_at_is_set(pool: &PgPool, msg_id: &str) -> bool {
         .fetch_one(pool)
         .await
         .expect("read processed_at")
+}
+
+async fn insert_reconciled_market(pool: &PgPool, pmp: &str, symbol: &str, book: &str) {
+    let market_id: i64 = sqlx::query_scalar(
+        r#"insert into markets
+               (pmp_address, market_id, name, token_type, token_code,
+                event_id, oracle_list_hash, orderbook_address,
+                stake_start, stake_end, result_start, result_end,
+                last_reconciled_at)
+           values ($1, $1, $1, 3, 'USDC',
+                   1::numeric, 0::numeric, $2,
+                   1700000100, 1700000200, 1700000300, 1700000400,
+                   now())
+           returning id"#,
+    )
+    .bind(pmp)
+    .bind(book)
+    .fetch_one(pool)
+    .await
+    .expect("insert market");
+
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 1, 'YES', $3,
+                   3, 2, '0.001', '0.01',
+                   '1.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(symbol)
+    .execute(pool)
+    .await
+    .expect("insert market_outcomes");
 }
 
 #[tokio::test]
@@ -912,6 +952,103 @@ async fn ordercancelled_advances_chain_updated_at() {
     .expect("read ts");
 
     assert_eq!(chain_updated_ms, cancel_seconds * 1000);
+}
+
+#[tokio::test]
+async fn orderplaced_fill_cancel_pipeline_reports_partial_executed_qty() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let indexer = IndexerRepository::new(pool.clone());
+    let read_model = PostgresReadModelRepository::new(pool.clone());
+
+    let test = "reproj_partial_cancel_orders";
+    let orderbook_addr = format!("0:{test}_book");
+    let pmp = format!("0:{test}_pmp");
+    let symbol = format!("{test}_YES");
+    let owner_pn = format!("0:{test}_owner");
+    let order_id = "23";
+    let msg_id_place = format!("{test}-a-place-msg");
+    let msg_id_fill = format!("{test}-b-fill-msg");
+    let msg_id_cancel = format!("{test}-c-cancel-msg");
+    let msg_id_confirm = format!("{test}-d-confirm-msg");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_place.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_fill.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_cancel.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_confirm.as_str()),
+            ("delete from market_outcomes where symbol = $1", symbol.as_str()),
+            ("delete from markets where pmp_address = $1", pmp.as_str()),
+        ],
+    )
+    .await;
+
+    insert_reconciled_market(&pool, &pmp, &symbol, &orderbook_addr).await;
+    insert_raw(
+        &pool,
+        &msg_id_place,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        &json!({
+            "orderId": order_id,
+            "outcomeId": "1",
+            "isBuy": true,
+            "price": "100",
+            "amount": "1000",
+            "clientOrderId": "partial-cancel",
+        }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &msg_id_fill,
+        &orderbook_addr,
+        "OrderBook.OrderFilled",
+        &json!({ "orderId": order_id, "filledAmount": "300" }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &msg_id_cancel,
+        &orderbook_addr,
+        "OrderBook.OrderCancelled",
+        &json!({ "orderId": order_id }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &msg_id_confirm,
+        &owner_pn,
+        "PrivateNote.OrderPlacedConfirmed",
+        &json!({ "orderBook": orderbook_addr, "orderId": order_id }),
+    )
+    .await;
+
+    indexer.reproject_pending(1000).await.expect("reproject");
+
+    let page = read_model
+        .list_orders(&OrdersQuery {
+            owner_pn_address: owner_pn,
+            market: None,
+            status: OrderStatusSet::all(),
+            limit: 100,
+            cursor: None,
+        })
+        .await
+        .expect("list_orders");
+
+    assert_eq!(page.orders.len(), 1);
+    let order = &page.orders[0];
+    assert_eq!(order.status.as_str(), "CANCELED");
+    assert_eq!(order.orig_qty, "10.00");
+    assert_eq!(
+        order.executed_qty, "3.00",
+        "executedQty must reflect the fill before cancellation, not the canceled remainder"
+    );
+    assert!(page.next_cursor.is_none());
 }
 
 #[tokio::test]

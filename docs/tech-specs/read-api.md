@@ -313,7 +313,7 @@ This endpoint is downstream of the indexer; it consumes only what the projectors
 | --- | --- | --- |
 | `OrderBook.OrderPlaced` | OrderBook | Creates `live_orders` row, `status='OPEN'`. |
 | `OrderBook.OrderFilled` | OrderBook | Decrements `amount_remaining`; flips `status` to `FILLED` on full fill. |
-| `OrderBook.OrderCancelled` | OrderBook | Zeroes `amount_remaining`; flips `status` to `CANCELLED`. |
+| `OrderBook.OrderCancelled` | OrderBook | Preserves the current `amount_remaining` as the cancelled remainder; flips `status` to `CANCELLED`. |
 | `PrivateNote.OrderPlacedConfirmed` | PrivateNote | Attaches `owner_pn_address`. |
 
 Commit `9aab586` adds internal threading (`opNonce`, deferred shutdown latch, batch-end ack via `PrivateNote.onBatchComplete`), splits fees into maker rebate vs protocol, and adds `isRebate` / `isFinal` flags to `PrivateNote.OrderFilledConfirmed`. The new flags are routed to the `/api/v1/account` fee / balance code path, not to `/orders`. The outward shape of the three OrderBook events above and of `OrderPlacedConfirmed` is unchanged; the existing projectors continue to work without modification.

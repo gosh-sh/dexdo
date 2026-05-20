@@ -676,7 +676,6 @@ async fn apply_order_cancelled(
     let updated = sqlx::query(
         r#"update live_orders
               set status = 'CANCELLED',
-                  amount_remaining = 0,
                   last_chain_order = greatest(last_chain_order, $3),
                   chain_updated_at = greatest(chain_updated_at, to_timestamp($4::double precision)),
                   updated_at = now()

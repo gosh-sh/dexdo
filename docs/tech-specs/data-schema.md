@@ -232,7 +232,7 @@ both see them.
 | `is_buy` | `boolean` | Side. `true` = bid, `false` = ask. |
 | `price` | `numeric(78,0)` | Order price as the contract emitted it (raw uint256). Scaled to a decimal at API render time. |
 | `amount_initial` | `numeric(78,0)` | Original order quantity from `OrderBook.OrderPlaced`. Used with `amount_remaining` to render `origQty` and `executedQty` in account order endpoints. |
-| `amount_remaining` | `numeric(78,0)` | Quantity still open. Set by the `OrderPlaced` event, decremented by the `OrderFilled` event, zeroed by the `OrderCancelled` event. |
+| `amount_remaining` | `numeric(78,0)` | Quantity not yet filled. Set by the `OrderPlaced` event and decremented by the `OrderFilled` event. `OrderCancelled` preserves the current value as the cancelled remainder so `/api/v1/orders.executedQty` can be derived as `amount_initial - amount_remaining`; depth ignores the row because `status != 'OPEN'`. |
 | `client_order_id` | `text` | Optional client-supplied id. |
 | `owner_pn_address` | `text` | Trading PrivateNote address that owns the order. Initially NULL from `OrderBook.OrderPlaced`; attached by `PrivateNote.OrderPlacedConfirmed` using the event source address. NULL rows can still contribute to public depth, but cannot appear in account-scoped order responses. |
 | `status` | `text` CHECK `IN ('OPEN', 'FILLED', 'CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. The CHECK is extended to include `'REJECTED'` by the contracts-side follow-up documented in [read-api.md §REJECTED — future work](read-api.md#rejected--future-work); until then no row carries that value. |
