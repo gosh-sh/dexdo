@@ -451,7 +451,7 @@ async fn buy_limit_gtc_against_shellnet() {
     let ok: Ok = serde_json::from_str(&body).expect("happy path body");
     // Minimal-response contract: three fields, status PENDING_NEW
     // until `OrderBook.OrderPlaced` projects through the indexer
-    // (which surfaces the row as NEW via /api/v1/openOrders).
+    // (which surfaces the row as NEW via /api/v1/orders).
     assert_eq!(ok.status, "PENDING_NEW");
     assert_eq!(ok.client_order_id, coid);
     assert!(ok.transact_time > 0);

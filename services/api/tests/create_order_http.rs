@@ -619,7 +619,7 @@ async fn pn_busy_chain_reject_returns_2014_429() {
     // in-flight call from the same PN raises `ERR_NOTE_BUSY` (chain
     // exit 121) which `BeeDexChainSender` maps to `OrderPnBusy`.
     // Surfaces synchronously as 429 with -2014 so MM clients can
-    // back off and retry instead of polling `/openOrders` for absence.
+    // back off and retry instead of polling `/orders` for absence.
     let service = setup_with(
         Arc::new(FakeRepo::with(trading_market())),
         Arc::new(RecordingSender::failing(DomainError::OrderPnBusy)),
