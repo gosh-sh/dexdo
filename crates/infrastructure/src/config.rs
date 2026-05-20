@@ -114,6 +114,8 @@ pub struct ChainSection {
     pub cancel_order_timeout_ms: u64,
     #[serde(default = "default_place_batch_timeout_ms")]
     pub place_batch_timeout_ms: u64,
+    #[serde(default = "default_cancel_batch_timeout_ms")]
+    pub cancel_batch_timeout_ms: u64,
 }
 
 /// 30 s — comfortable budget given typical chain round-trip is 1-3 s.
@@ -139,6 +141,14 @@ fn default_cancel_order_timeout_ms() -> u64 {
 /// latency measurements for batches at `max_batch_size`, this default
 /// should be revisited rather than carrying the assumption forward.
 fn default_place_batch_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Same 30 s budget as the other chain entry points.
+/// `PrivateNote.cancelBatch` shares the placeBatch busy-window profile
+/// (one external message, `_pendingBatchActive` held until
+/// `onBatchComplete` returns), so the synchronous wait is comparable.
+fn default_cancel_batch_timeout_ms() -> u64 {
     30_000
 }
 
@@ -229,6 +239,12 @@ impl ApiConfig {
             self.server.request_timeout_ms,
             self.chain.place_batch_timeout_ms,
         );
+        anyhow::ensure!(
+            self.server.request_timeout_ms > self.chain.cancel_batch_timeout_ms,
+            "server.request_timeout_ms ({}) must exceed chain.cancel_batch_timeout_ms ({})",
+            self.server.request_timeout_ms,
+            self.chain.cancel_batch_timeout_ms,
+        );
         Ok(())
     }
 }
@@ -250,6 +266,10 @@ impl ChainSection {
         anyhow::ensure!(
             self.place_batch_timeout_ms > 0,
             "chain.place_batch_timeout_ms must be > 0"
+        );
+        anyhow::ensure!(
+            self.cancel_batch_timeout_ms > 0,
+            "chain.cancel_batch_timeout_ms must be > 0"
         );
         Ok(())
     }
@@ -766,6 +786,7 @@ chain:
   place_order_timeout_ms: 15000
   cancel_order_timeout_ms: 15000
   place_batch_timeout_ms: 15000
+  cancel_batch_timeout_ms: 15000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -773,6 +794,7 @@ chain:
         assert_eq!(cfg.chain.place_order_timeout_ms, 15_000);
         assert_eq!(cfg.chain.cancel_order_timeout_ms, 15_000);
         assert_eq!(cfg.chain.place_batch_timeout_ms, 15_000);
+        assert_eq!(cfg.chain.cancel_batch_timeout_ms, 15_000);
         cfg.validate().unwrap();
     }
 
@@ -794,6 +816,7 @@ chain:
         assert_eq!(cfg.chain.place_order_timeout_ms, 30_000);
         assert_eq!(cfg.chain.cancel_order_timeout_ms, 30_000);
         assert_eq!(cfg.chain.place_batch_timeout_ms, 30_000);
+        assert_eq!(cfg.chain.cancel_batch_timeout_ms, 30_000);
     }
 
     #[test]
@@ -896,6 +919,58 @@ chain:
         let msg = err.to_string();
         assert!(msg.contains("request_timeout_ms"), "got: {msg}");
         assert!(msg.contains("cancel_order_timeout_ms"), "got: {msg}");
+    }
+
+    #[test]
+    fn api_validate_rejects_zero_cancel_batch_timeout() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 4000
+  cancel_order_timeout_ms: 4000
+  place_batch_timeout_ms: 4000
+  cancel_batch_timeout_ms: 0
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("cancel_batch_timeout_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn api_validate_rejects_request_timeout_not_exceeding_cancel_batch_timeout() {
+        // Same invariant as the other chain timeouts — request_timeout
+        // must outlast cancel_batch_timeout, else an in-flight
+        // cancelBatch gets dropped while still running on chain and the
+        // client loses the orderIds of an op that eventually lands.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 1000
+  cancel_order_timeout_ms: 1000
+  place_batch_timeout_ms: 1000
+  cancel_batch_timeout_ms: 5000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_ms"), "got: {msg}");
+        assert!(msg.contains("cancel_batch_timeout_ms"), "got: {msg}");
     }
 
     #[test]

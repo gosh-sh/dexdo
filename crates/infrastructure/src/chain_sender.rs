@@ -14,6 +14,7 @@
 use std::time::Duration;
 
 use ackinacki_kit::contracts::dex::order_book::OrderBookOrder;
+use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
@@ -23,6 +24,7 @@ use async_trait::async_trait;
 use bee_dex::errors::AppError;
 use bee_dex::Dex;
 use dodex_application::BatchOrderPayloadItem;
+use dodex_application::CancelBatchOrderPayload;
 use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::NewBatchOrderPayload;
@@ -42,6 +44,7 @@ pub struct BeeDexChainSender {
     place_order_timeout: Duration,
     cancel_order_timeout: Duration,
     place_batch_timeout: Duration,
+    cancel_batch_timeout: Duration,
 }
 
 impl BeeDexChainSender {
@@ -50,8 +53,8 @@ impl BeeDexChainSender {
     /// `Arc<dyn ChainOrderSender>` at the `AppState` boundary, so the
     /// inner `Dex` does not need its own `Arc`.
     ///
-    /// The three timeouts bound the per-call wait for each chain entry
-    /// point — `bee_dex::Dex` itself has no per-request deadline, so a
+    /// Each timeout bounds the per-call wait for one chain entry point —
+    /// `bee_dex::Dex` itself has no per-request deadline, so a
     /// partitioned or hung gateway would otherwise stall the HTTP
     /// worker indefinitely. Elapsed surfaces as
     /// `DomainError::RequestTimeout` → 504 / -1007 via
@@ -62,10 +65,17 @@ impl BeeDexChainSender {
         place_order_timeout: Duration,
         cancel_order_timeout: Duration,
         place_batch_timeout: Duration,
+        cancel_batch_timeout: Duration,
     ) -> anyhow::Result<Self> {
         let dex = Dex::new(endpoints)
             .map_err(|err| anyhow::anyhow!("bee_dex::Dex::new failed: {err:?}"))?;
-        Ok(Self { dex, place_order_timeout, cancel_order_timeout, place_batch_timeout })
+        Ok(Self {
+            dex,
+            place_order_timeout,
+            cancel_order_timeout,
+            place_batch_timeout,
+            cancel_batch_timeout,
+        })
     }
 }
 
@@ -198,6 +208,42 @@ impl ChainOrderSender for BeeDexChainSender {
         let call = self.dex.place_batch(&pn_address, params, signer);
         let outcome = timeout(self.place_batch_timeout, call).await;
         classify_chain_outcome(outcome, self.place_batch_timeout.as_millis() as u64, "place_batch")
+    }
+
+    async fn cancel_batch_order(
+        &self,
+        payload: CancelBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
+
+        // The application layer caps each `order_id` at u64::MAX; the
+        // chain ABI is uint128[]. Upcast is loss-less. Same constraint
+        // as the single-order cancel path.
+        let order_ids: Vec<u128> = payload.order_ids.iter().map(|&id| id as u128).collect();
+
+        let params = ParamsOfCancelBatch {
+            event_id: payload.event_id,
+            oracle_list_hash: payload.oracle_list_hash,
+            token_type: payload.token_type,
+            order_ids,
+        };
+
+        debug!(
+            pn = %payload.pn_address,
+            event_id = %params.event_id,
+            oracle_list_hash = %params.oracle_list_hash,
+            token_type = params.token_type,
+            order_count = params.order_ids.len(),
+            "cancel_batch params",
+        );
+
+        let call = self.dex.cancel_batch(&payload.pn_address, params, signer);
+        let outcome = timeout(self.cancel_batch_timeout, call).await;
+        classify_chain_outcome(
+            outcome,
+            self.cancel_batch_timeout.as_millis() as u64,
+            "cancel_batch",
+        )
     }
 }
 
@@ -629,6 +675,7 @@ mod tests {
         // `RequestTimeout`, flagging the regression.
         let sender = BeeDexChainSender::new(
             vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),

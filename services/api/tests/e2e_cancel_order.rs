@@ -97,6 +97,7 @@ async fn cancel_order_against_shellnet() {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
+            Duration::from_secs(30),
         )
         .expect("BeeDexChainSender::new"),
     );

@@ -16,6 +16,8 @@ use anyhow::Context;
 use dodex_application::AuthContext;
 use dodex_application::Authenticator;
 use dodex_application::BatchOrderInputItem;
+use dodex_application::CancelBatchOrdersInput;
+use dodex_application::CancelBatchOrdersUseCase;
 use dodex_application::CancelOrderInput;
 use dodex_application::CancelOrderUseCase;
 use dodex_application::ChainOrderSender;
@@ -706,6 +708,31 @@ struct BatchOrderResponseItem {
     status: &'static str,
 }
 
+/// Request body for `DELETE /api/v1/batchOrders`. One market+symbol per
+/// request, every id is cancelled on that single book — matches the
+/// chain ABI's `PrivateNote.cancelBatch(eventId, oracleListHash,
+/// tokenType, uint128[])`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelBatchOrdersRequest {
+    market_address: Option<String>,
+    symbol: Option<String>,
+    order_ids: Option<Vec<String>>,
+}
+
+/// Response item for `DELETE /api/v1/batchOrders`. Same `PENDING_CANCEL`
+/// envelope as the single-order DELETE — see [`CancelOrderResponse`]
+/// for the rationale. Returned in request order; the array has one
+/// element per accepted id.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelBatchOrderResponseItem {
+    order_id: String,
+    client_order_id: String,
+    transact_time: i64,
+    status: &'static str,
+}
+
 /// Read the authenticated identity from the depot and enforce the
 /// endpoint's required permission in one call. Protected handlers
 /// must call this rather than `depot.obtain::<AuthContext>()`
@@ -1006,6 +1033,94 @@ fn build_batch_orders_input(
     })
 }
 
+/// `DELETE /api/v1/batchOrders`. Parses one `(marketAddress, symbol)`
+/// plus `orderIds[]`, hands off to `CancelBatchOrdersUseCase`, and
+/// shapes a flat array of `PENDING_CANCEL` envelopes per
+/// [api-spec §Cancel Batch Orders](../../docs/api-spec.md#cancel-batch-orders).
+/// The use case enforces non-empty `orderIds[]`, intra-batch dedup, the
+/// `outcome.max_batch_size` cap, and bulk order resolution. The chain
+/// (`PrivateNote.cancelBatch`) accepts the list atomically under one
+/// `_busy` window.
+#[handler]
+async fn delete_batch_orders(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<Vec<CancelBatchOrderResponseItem>>, ApiError> {
+    let ctx = require_auth(depot, Permission::Trade)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let body: CancelBatchOrdersRequest = req.parse_json().await.map_err(|err| {
+        warn!(?err, "DELETE /api/v1/batchOrders body did not parse");
+        ApiError::from(DomainError::InvalidParameter)
+    })?;
+
+    let (now_seconds, now_ms) = now_pair();
+    let input = build_cancel_batch_orders_input(body, ctx, now_seconds, now_ms)?;
+    let request_order_ids: Vec<u64> = input.order_ids.clone();
+
+    let use_case = CancelBatchOrdersUseCase::new(state.repo, state.chain_sender);
+    let cancelled = use_case.execute(input).await.map_err(ApiError::from)?;
+
+    // The use case guarantees response order matches input order; the
+    // explicit length check below is defence-in-depth in case that
+    // invariant is ever relaxed.
+    debug_assert_eq!(cancelled.len(), request_order_ids.len());
+
+    let response = cancelled
+        .into_iter()
+        .map(|item| CancelBatchOrderResponseItem {
+            order_id: item.order_id.to_string(),
+            client_order_id: item.client_order_id.unwrap_or_default(),
+            transact_time: now_ms,
+            status: OrderStatus::PendingCancel.as_str(),
+        })
+        .collect();
+    Ok(Json(response))
+}
+
+/// Translate the parsed body + auth context into a
+/// `CancelBatchOrdersInput`. Mirrors `build_batch_orders_input` for the
+/// cancel path: each `orderIds[]` element is parsed as `u64` at the
+/// public boundary — same `serde_json` / `arbitrary_precision`
+/// constraint as `clientOrderId` and single-order DELETE.
+fn build_cancel_batch_orders_input(
+    body: CancelBatchOrdersRequest,
+    ctx: AuthContext,
+    now_seconds: i64,
+    now_ms: i64,
+) -> Result<CancelBatchOrdersInput, ApiError> {
+    let market_address =
+        non_empty(body.market_address).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let symbol = non_empty(body.symbol).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let raw_ids = body.order_ids.ok_or(ApiError::from(DomainError::MissingParameter))?;
+
+    let mut order_ids = Vec::with_capacity(raw_ids.len());
+    for raw in raw_ids {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::from(DomainError::MissingParameter));
+        }
+        let id =
+            trimmed.parse::<u64>().map_err(|_| ApiError::from(DomainError::InvalidParameter))?;
+        order_ids.push(id);
+    }
+
+    Ok(CancelBatchOrdersInput {
+        trading_pn: ctx.trading_pn,
+        market_address: MarketAddress(market_address),
+        symbol: Symbol(symbol),
+        order_ids,
+        now_seconds,
+        now_ms,
+    })
+}
+
 /// Assemble the production router around `state`. Kept as a separate
 /// function so integration tests can drive the same router with a
 /// test-DB pool through Salvo's in-process `TestClient`; production
@@ -1035,7 +1150,11 @@ pub fn build_router(state: AppState) -> Router {
                         .delete(delete_order),
                 )
                 .push(Router::with_path("api/v1/orders").get(get_orders))
-                .push(Router::with_path("api/v1/batchOrders").post(create_batch_orders)),
+                .push(
+                    Router::with_path("api/v1/batchOrders")
+                        .post(create_batch_orders)
+                        .delete(delete_batch_orders),
+                ),
         )
 }
 
@@ -1077,6 +1196,7 @@ pub async fn run() -> anyhow::Result<()> {
         Duration::from_millis(config.chain.place_order_timeout_ms),
         Duration::from_millis(config.chain.cancel_order_timeout_ms),
         Duration::from_millis(config.chain.place_batch_timeout_ms),
+        Duration::from_millis(config.chain.cancel_batch_timeout_ms),
     )?);
     let state = AppState::new(repo, authenticator, chain_sender)
         .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms));

@@ -8,6 +8,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use dodex_application::CancelBatchOrderRow;
 use dodex_application::MarketForPlacement;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
@@ -476,6 +477,68 @@ impl MarketReadRepository for PostgresReadModelRepository {
         })
     }
 
+    async fn resolve_for_cancel_batch(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        order_ids: &[u64],
+        owner_pn_address: &str,
+    ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
+        // Mirror `resolve_for_cancel`'s join shape (live_orders ⨝
+        // markets ⨝ market_outcomes) but with `lo.order_id = ANY(...)`.
+        // `lo.order_id` is numeric(78,0); bind the array as text[] and
+        // cast to numeric[] inside the query — same pattern the single
+        // path uses for the scalar bind.
+        let order_ids_decimal: Vec<String> = order_ids.iter().map(|id| id.to_string()).collect();
+        let rows: Vec<CancelBatchRow> = sqlx::query_as(
+            r#"select lo.order_id::text       as order_id,
+                      lo.client_order_id      as client_order_id
+                 from live_orders lo
+                 join markets m on m.orderbook_address = lo.orderbook_address
+                 join market_outcomes mo
+                   on mo.market_id_fk = m.id
+                  and mo.outcome_id = lo.outcome_id
+                where m.pmp_address       = $1
+                  and mo.symbol           = $2
+                  and lo.order_id         = ANY($3::text[]::numeric[])
+                  and lo.owner_pn_address = $4
+                  and lo.status           = 'OPEN'
+                  and lo.amount_remaining > 0
+                  and m.last_reconciled_at is not null"#,
+        )
+        .bind(market_address.0.as_str())
+        .bind(symbol.0.as_str())
+        .bind(&order_ids_decimal)
+        .bind(owner_pn_address)
+        .fetch_all(&self.pool)
+        .await
+        .context("resolve_for_cancel_batch: select live_orders + market")?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            // numeric(78,0) text → u64 with the same hard cap as the
+            // single-order path. Any value above u64::MAX would mean
+            // an indexer wrote a chain-side id we cannot represent;
+            // surface as MarketInconsistent so retries don't help.
+            let order_id = row.order_id.parse::<u64>().map_err(|err| {
+                anyhow!(
+                    "resolve_for_cancel_batch: live_orders.order_id={} overflows u64: {err}",
+                    row.order_id,
+                )
+            })?;
+            let client_order_id = row.client_order_id.and_then(|raw| {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+            out.push(CancelBatchOrderRow { order_id, client_order_id });
+        }
+        Ok(out)
+    }
+
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         let target = match &query.market {
             Some(filter) => {
@@ -700,6 +763,12 @@ struct CancelRow {
     resolved_at: Option<i64>,
     cancelled_at: Option<i64>,
     is_cancelled: bool,
+    client_order_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct CancelBatchRow {
+    order_id: String,
     client_order_id: Option<String>,
 }
 

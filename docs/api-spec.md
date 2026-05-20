@@ -790,32 +790,16 @@ Response:
 ```json
 [
   {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
     "orderId": "123456789",
-    "price": "0.615",
-    "origQty": "1.500000",
-    "executedQty": "0.000000",
-    "status": "CANCELED",
-    "timeInForce": "GTC",
-    "type": "LIMIT",
-    "side": "BUY",
-    "time": 1710000000000,
-    "updateTime": 1710000010000
+    "clientOrderId": "mm-order-0001",
+    "transactTime": 1710000000000,
+    "status": "PENDING_CANCEL"
   },
   {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
     "orderId": "123456790",
-    "price": "0.620",
-    "origQty": "0.750000",
-    "executedQty": "0.000000",
-    "status": "CANCELED",
-    "timeInForce": "POST_ONLY",
-    "type": "LIMIT",
-    "side": "SELL",
-    "time": 1710000000000,
-    "updateTime": 1710000010000
+    "clientOrderId": "mm-order-0002",
+    "transactTime": 1710000000000,
+    "status": "PENDING_CANCEL"
   }
 ]
 ```
