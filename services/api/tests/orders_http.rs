@@ -468,6 +468,33 @@ async fn pending_new_status_token_returns_minus_1130() {
     assert_eq!(body.code, -1130);
 }
 
+// status=PENDING_CANCEL → -1130 / 400 (write-side synthetic)
+
+#[tokio::test]
+async fn pending_cancel_status_token_returns_minus_1130() {
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("recvWindow", "5000"),
+        ("status", "PENDING_CANCEL"),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/orders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("status", "PENDING_CANCEL")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1130);
+}
+
 // whitespace-only cursor → -1102 / 400
 
 #[tokio::test]
@@ -541,6 +568,30 @@ async fn limit_out_of_range_returns_minus_1102() {
         let mut resp = TestClient::get("http://test/api/v1/orders")
             .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
             .query("limit", "0")
+            .query("recvWindow", "5000")
+            .query("timestamp", ts.to_string())
+            .query("signature", sig)
+            .send(&service)
+            .await;
+        assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+        let body = resp.take_json::<ErrorBody>().await.expect("error body");
+        assert_eq!(body.code, -1102);
+    }
+
+    // limit=65536 parses as i64 but exceeds both u16 and ORDERS_MAX_LIMIT;
+    // it must remain an out-of-range numeric (-1102), not parse-invalid (-1130).
+    {
+        let ts = now_ms();
+        let canonical = canonical_query(&[
+            ("limit", "65536"),
+            ("recvWindow", "5000"),
+            ("timestamp", &ts.to_string()),
+        ]);
+        let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+        let mut resp = TestClient::get("http://test/api/v1/orders")
+            .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+            .query("limit", "65536")
             .query("recvWindow", "5000")
             .query("timestamp", ts.to_string())
             .query("signature", sig)

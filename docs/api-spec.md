@@ -898,6 +898,7 @@ Behavior:
 - If both `marketAddress` and `symbol` are sent, returns orders for that one market symbol.
 - If only one of `marketAddress` / `symbol` is sent, returns `-1102` with HTTP `400`.
 - If `limit` is outside `[1, 500]`, returns `-1102` with HTTP `400`.
+- If `limit` is present but not an integer, returns `-1130` with HTTP `400`.
 - If `cursor` is empty or whitespace-only, returns `-1102` with HTTP `400`. A well-formed cursor that points past the current set of orders is not an error — the response is `{ "orders": [], "nextCursor": null }`.
 - If `status` contains an unknown token, returns `-1130` with HTTP `400`.
 - If the `(marketAddress, symbol)` pair does not exist, returns `-1121` with HTTP `404`.
@@ -953,8 +954,8 @@ Order fields:
 | `timeInForce` | ENUM | `GTC`. |
 | `type` | ENUM | `LIMIT`. |
 | `side` | ENUM | `BUY` or `SELL`. |
-| `time` | LONG | On-chain order creation time in Unix milliseconds. Stable under indexer backlog. |
-| `updateTime` | LONG | On-chain time of the most recent book event that touched the order (place / fill / cancel), in Unix milliseconds. |
+| `time` | LONG | On-chain order creation time in Unix milliseconds, truncated from the indexed microsecond timestamp. Stable under indexer backlog. |
+| `updateTime` | LONG | On-chain time of the most recent book event that touched the order (place / fill / cancel), in Unix milliseconds, truncated from the indexed microsecond timestamp. |
 
 ### Common Enums
 

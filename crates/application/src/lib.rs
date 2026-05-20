@@ -331,14 +331,12 @@ impl OrderStatusSet {
 /// page; the server reads it as a lexicographic token via the strict
 /// `<` predicate in [`PostgresReadModelRepository::list_orders`].
 ///
-/// The pub-field shape matches sibling newtypes (`MarketAddress`,
-/// `Symbol`) so existing call-site idioms still work, but
-/// construction goes through [`OrdersCursor::new`] which enforces the
-/// non-blank invariant. Callers that already hold a known-good value
-/// (e.g. the projector loading a row's `placed_chain_order`) may
-/// construct the tuple form directly.
+/// Construction goes through [`OrdersCursor::new`] which enforces the
+/// non-blank invariant. Values sourced from persisted `placed_chain_order`
+/// columns use [`OrdersCursor::from_db_token`], which applies the same
+/// invariant before the token is exposed as `nextCursor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrdersCursor(pub String);
+pub struct OrdersCursor(String);
 
 impl OrdersCursor {
     /// Validating constructor: trims whitespace, rejects blank input
@@ -351,6 +349,18 @@ impl OrdersCursor {
             return Err(DomainError::MissingParameter);
         }
         Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn from_db_token(raw: String) -> Result<Self, DomainError> {
+        Self::new(raw)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
     }
 }
 
@@ -944,7 +954,7 @@ mod tests {
     use dodex_domain::Outcome;
 
     #[derive(Clone)]
-    struct FakeOpenOrder {
+    struct FakeCancelableOrder {
         order_id: u64,
         owner_pn_address: String,
         client_order_id: Option<String>,
@@ -952,20 +962,20 @@ mod tests {
 
     struct FakeRepo {
         market: Option<Market>,
-        open_order: Option<FakeOpenOrder>,
+        cancelable_order: Option<FakeCancelableOrder>,
     }
 
     impl FakeRepo {
         fn with(market: Market) -> Self {
-            Self { market: Some(market), open_order: None }
+            Self { market: Some(market), cancelable_order: None }
         }
 
         fn empty() -> Self {
-            Self { market: None, open_order: None }
+            Self { market: None, cancelable_order: None }
         }
 
-        fn with_open_order(market: Market, order: FakeOpenOrder) -> Self {
-            Self { market: Some(market), open_order: Some(order) }
+        fn with_cancelable_order(market: Market, order: FakeCancelableOrder) -> Self {
+            Self { market: Some(market), cancelable_order: Some(order) }
         }
     }
 
@@ -1034,7 +1044,7 @@ mod tests {
             if !market.outcomes.iter().any(|o| o.symbol == *symbol) {
                 return Err(unknown());
             }
-            let order = self.open_order.clone().ok_or_else(unknown)?;
+            let order = self.cancelable_order.clone().ok_or_else(unknown)?;
             if order.order_id != order_id || order.owner_pn_address != owner_pn_address {
                 return Err(unknown());
             }
@@ -1511,7 +1521,7 @@ mod tests {
         // strict `<` predicate in `list_orders` advances the cursor to
         // the wrong row and pagination silently breaks.
         let cursor = OrdersCursor::new("  003  ".into()).expect("trims and accepts");
-        assert_eq!(cursor.0, "003");
+        assert_eq!(cursor.as_str(), "003");
     }
 
     #[test]
@@ -1540,14 +1550,10 @@ mod tests {
 
     #[test]
     fn generated_client_order_id_fits_in_u64() {
-        // Regression guard for the bug round 4 caught: an earlier
-        // implementation used the full `Uuid::new_v4().as_u128()`,
-        // which produces values exceeding `u64::MAX` ~50% of the
-        // time. Those panic deep inside `bee_dex` / `serde_json`
-        // when the worker tries to serialize them. The generator
-        // MUST stay inside u64 until the SDK supports
-        // arbitrary-precision serialization. 256 samples is more
-        // than enough to surface a regression to the full u128.
+        // Regression guard: the generated decimal must fit in u64
+        // because bee_dex / serde_json cannot serialize larger client
+        // order ids on this path. 256 samples are enough to surface
+        // accidental use of a full UUID-sized integer.
         for _ in 0..256 {
             let coid = generate_client_order_id();
             assert!(
@@ -1578,13 +1584,14 @@ mod tests {
     #[tokio::test]
     async fn cancel_order_happy_path() {
         let market = trading_market("PM-YES");
-        let order = FakeOpenOrder {
+        let order = FakeCancelableOrder {
             order_id: 123,
             owner_pn_address: "0:pn".into(),
             client_order_id: Some("42".into()),
         };
         let sender = Arc::new(FakeSender::ok());
-        let uc = CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), sender.clone());
+        let uc =
+            CancelOrderUseCase::new(FakeRepo::with_cancelable_order(market, order), sender.clone());
 
         let out = uc.execute(base_cancel_input("PM-YES", 123)).await.expect("happy path");
         assert_eq!(out.client_order_id, Some("42".into()));
@@ -1606,10 +1613,13 @@ mod tests {
         // absence rather than fabricating a value, so the HTTP layer
         // can render the spec-mandated empty string.
         let market = trading_market("PM-YES");
-        let order =
-            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
+        let order = FakeCancelableOrder {
+            order_id: 123,
+            owner_pn_address: "0:pn".into(),
+            client_order_id: None,
+        };
         let uc = CancelOrderUseCase::new(
-            FakeRepo::with_open_order(market, order),
+            FakeRepo::with_cancelable_order(market, order),
             Arc::new(FakeSender::ok()),
         );
 
@@ -1627,10 +1637,15 @@ mod tests {
     #[tokio::test]
     async fn cancel_order_unknown_when_symbol_mismatch() {
         let market = trading_market("PM-YES");
-        let order =
-            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
-        let uc =
-            CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), FakeSender::ok());
+        let order = FakeCancelableOrder {
+            order_id: 123,
+            owner_pn_address: "0:pn".into(),
+            client_order_id: None,
+        };
+        let uc = CancelOrderUseCase::new(
+            FakeRepo::with_cancelable_order(market, order),
+            FakeSender::ok(),
+        );
         let err = uc.execute(base_cancel_input("PM-NOPE", 123)).await.unwrap_err();
         assert_eq!(err, DomainError::UnknownOrder);
     }
@@ -1651,13 +1666,15 @@ mod tests {
         // existence of another account's order would otherwise leak
         // through the error code.
         let market = trading_market("PM-YES");
-        let order = FakeOpenOrder {
+        let order = FakeCancelableOrder {
             order_id: 123,
             owner_pn_address: "0:someone-else".into(),
             client_order_id: None,
         };
-        let uc =
-            CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), FakeSender::ok());
+        let uc = CancelOrderUseCase::new(
+            FakeRepo::with_cancelable_order(market, order),
+            FakeSender::ok(),
+        );
         let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
         assert_eq!(err, DomainError::UnknownOrder);
     }
@@ -1666,10 +1683,15 @@ mod tests {
     async fn cancel_order_rejects_non_trading_status() {
         let mut market = trading_market("PM-YES");
         market.status = MarketStatus::Resolving;
-        let order =
-            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
-        let uc =
-            CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), FakeSender::ok());
+        let order = FakeCancelableOrder {
+            order_id: 123,
+            owner_pn_address: "0:pn".into(),
+            client_order_id: None,
+        };
+        let uc = CancelOrderUseCase::new(
+            FakeRepo::with_cancelable_order(market, order),
+            FakeSender::ok(),
+        );
         let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
         assert_eq!(err, DomainError::OrderValidationFailed);
     }
@@ -1678,10 +1700,15 @@ mod tests {
     async fn cancel_order_rejects_blank_oracle_list_hash() {
         let mut market = trading_market("PM-YES");
         market.oracle_list_hash = String::new();
-        let order =
-            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
-        let uc =
-            CancelOrderUseCase::new(FakeRepo::with_open_order(market, order), FakeSender::ok());
+        let order = FakeCancelableOrder {
+            order_id: 123,
+            owner_pn_address: "0:pn".into(),
+            client_order_id: None,
+        };
+        let uc = CancelOrderUseCase::new(
+            FakeRepo::with_cancelable_order(market, order),
+            FakeSender::ok(),
+        );
         let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
     }
@@ -1689,10 +1716,13 @@ mod tests {
     #[tokio::test]
     async fn cancel_order_propagates_sender_pn_busy() {
         let market = trading_market("PM-YES");
-        let order =
-            FakeOpenOrder { order_id: 123, owner_pn_address: "0:pn".into(), client_order_id: None };
+        let order = FakeCancelableOrder {
+            order_id: 123,
+            owner_pn_address: "0:pn".into(),
+            client_order_id: None,
+        };
         let uc = CancelOrderUseCase::new(
-            FakeRepo::with_open_order(market, order),
+            FakeRepo::with_cancelable_order(market, order),
             FakeSender::failing(DomainError::OrderPnBusy),
         );
         let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();

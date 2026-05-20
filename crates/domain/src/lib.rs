@@ -654,6 +654,9 @@ impl From<Vec<u8>> for SensitiveBytes {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DomainError {
+    /// Binance-compatible `-1102`. Some handlers also use this for a
+    /// syntactically present parameter whose numeric value is outside the
+    /// accepted range; the wire message intentionally stays Binance-shaped.
     #[error("mandatory parameter was not sent")]
     MissingParameter,
     #[error("invalid value for a query parameter")]
@@ -833,6 +836,32 @@ mod tests {
         assert_eq!(OrderSide::parse(""), None);
         assert_eq!(OrderSide::parse("buy"), None);
         assert_eq!(OrderSide::parse("HOLD"), None);
+    }
+
+    #[test]
+    fn order_status_declaration_order_pins_read_api_canonical_order() {
+        let mut statuses = vec![
+            OrderStatus::Rejected,
+            OrderStatus::Canceled,
+            OrderStatus::Filled,
+            OrderStatus::PendingCancel,
+            OrderStatus::PartiallyFilled,
+            OrderStatus::New,
+            OrderStatus::PendingNew,
+        ];
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            vec![
+                OrderStatus::PendingNew,
+                OrderStatus::New,
+                OrderStatus::PartiallyFilled,
+                OrderStatus::PendingCancel,
+                OrderStatus::Filled,
+                OrderStatus::Canceled,
+                OrderStatus::Rejected,
+            ]
+        );
     }
 
     #[test]

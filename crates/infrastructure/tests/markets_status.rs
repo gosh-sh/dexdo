@@ -405,7 +405,7 @@ async fn resolved_without_outcome_id_fails_closed() {
 
 #[tokio::test]
 async fn cancelled_with_garbage_reason_fails_closed() {
-    // The reviewer's catch: `build_terminal` runs
+    // `build_terminal` runs
     // `row.cancel_reason.as_deref().and_then(CancelReason::parse)`. If the
     // column holds a string outside {PMP_CANCELLED, EVENT_CANCELLED} —
     // historical data, projector bug, manual SQL — parse returns None and

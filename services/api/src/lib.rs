@@ -30,6 +30,7 @@ use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
 use dodex_application::NewOrderInput;
+use dodex_application::OrdersCursor;
 use dodex_domain::DomainError;
 use dodex_domain::Market;
 use dodex_domain::MarketAddress;
@@ -525,7 +526,7 @@ async fn get_orders(
 
     Ok(Json(OrdersPageResponse {
         orders: page.orders.into_iter().map(order_to_dto).collect(),
-        next_cursor: page.next_cursor.map(|c| c.0),
+        next_cursor: page.next_cursor.map(OrdersCursor::into_string),
     }))
 }
 

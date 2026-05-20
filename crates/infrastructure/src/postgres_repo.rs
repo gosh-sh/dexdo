@@ -509,11 +509,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
         };
 
         // The microsecond extraction `(extract(epoch from <timestamptz>) *
-        // 1000000)::bigint` below was once cursor-load-bearing. It now
-        // feeds response fields `time` / `updateTime` only — the cursor
-        // is placed_chain_order (text). Deployment is pinned to PG15+
-        // (Supabase) and PG16 (docker-compose.test.yml); both return
-        // numeric from extract(epoch ...), so the bigint cast is exact.
+        // 1000000)::bigint` feeds response fields `time` / `updateTime`
+        // only; the cursor is placed_chain_order (text). Deployment is
+        // pinned to PG15+ (Supabase) and PG16 (docker-compose.test.yml);
+        // both return numeric from extract(epoch ...), so the bigint cast
+        // is exact.
         // The filtered/unfiltered SQL blocks are intentionally duplicated:
         // their bind arity differs, while the projection/predicate contract
         // must stay obvious because it backs the public /orders shape.
@@ -555,7 +555,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                     .bind(query.owner_pn_address.as_str())
                     .bind(orderbook_address)
                     .bind(outcome_id)
-                    .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
+                    .bind(query.cursor.as_ref().map(OrdersCursor::as_str))
                     .bind(limit_plus_one)
                     .fetch_all(&self.pool)
                     .await
@@ -594,7 +594,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 );
                 sqlx::query_as::<_, OrderRow>(&sql)
                     .bind(query.owner_pn_address.as_str())
-                    .bind(query.cursor.as_ref().map(|c| c.0.as_str()))
+                    .bind(query.cursor.as_ref().map(OrdersCursor::as_str))
                     .bind(limit_plus_one)
                     .fetch_all(&self.pool)
                     .await
@@ -610,7 +610,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
         }
 
         let next_cursor = if has_more {
-            orders_raw.last().map(|row| OrdersCursor(row.placed_chain_order.clone()))
+            orders_raw
+                .last()
+                .map(|row| OrdersCursor::from_db_token(row.placed_chain_order.clone()))
+                .transpose()
+                .map_err(|err| anyhow!(err))?
         } else {
             None
         };
@@ -1606,9 +1610,9 @@ mod tests {
 
     #[test]
     fn expired_at_result_end_boundary() {
-        // Spec: EXPIRED applies once the market reaches `resultEnd`. `now == result_end`
-        // must flip to EXPIRED; the previous `>` boundary kept it RESOLVING by one
-        // tick. This pins the inclusive boundary against future regressions.
+        // Spec: EXPIRED applies once the market reaches `resultEnd`.
+        // `now == result_end` must flip to EXPIRED. This pins the
+        // inclusive boundary against future regressions.
         let mut r = row(Some(200), Some(300), Some(400), Some(500));
         r.frozen_at = Some(310);
         assert_eq!(derive_status(&r, 500), MarketStatus::Expired);
@@ -1712,8 +1716,8 @@ mod tests {
     #[test]
     fn validate_non_pending_with_null_timings_fails() {
         // Catches the `build_timings -> None` path when a non-PENDING status
-        // is paired with one NULL timing column. The reviewer's reported
-        // shape: terminal/non-pending status surfacing with `timings: null`.
+        // is paired with one NULL timing column, which would otherwise
+        // surface a terminal/non-pending status with `timings: null`.
         let err = validate_invariants(MarketStatus::AwaitingFreeze, &None, &None).unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
     }
@@ -1721,9 +1725,9 @@ mod tests {
     #[test]
     fn validate_resolved_without_outcome_id_fails() {
         // api-spec.md:391: `resolvedOutcomeId` MUST be set when kind=RESOLVED.
-        // `build_terminal` just maps `Option<i32> -> Option<u32>`, so a NULL
-        // `resolved_outcome_id` row used to surface as a Resolved terminal
-        // with `resolvedOutcomeId: null` — the client cannot tell who won.
+        // `build_terminal` just maps `Option<i32> -> Option<u32>`, so this
+        // validator must fail closed before a Resolved terminal can carry
+        // `resolvedOutcomeId: null`.
         let err = validate_invariants(
             MarketStatus::Resolved,
             &Some(timings_full(Some(250))),
@@ -1749,12 +1753,10 @@ mod tests {
 
     #[test]
     fn validate_cancelled_without_reason_fails() {
-        // The reviewer's new case: a CANCELLED row whose `cancel_reason`
-        // column is a string outside `{PMP_CANCELLED, EVENT_CANCELLED}` is
-        // parsed to `None` by `build_terminal::CancelReason::parse`. Looking
-        // at `row.cancel_reason.is_none()` alone (the previous check) would
-        // miss this — the row has a value, just an invalid one. Validating
-        // the *built* DTO catches it.
+        // A CANCELLED row whose `cancel_reason` column is a string outside
+        // `{PMP_CANCELLED, EVENT_CANCELLED}` is parsed to `None` by
+        // `build_terminal::CancelReason::parse`. Validating the built DTO
+        // catches the invalid terminal shape.
         let err = validate_invariants(
             MarketStatus::Cancelled,
             &Some(timings_full(Some(250))),
@@ -1933,8 +1935,8 @@ mod tests {
 
     #[test]
     fn listing_query_default_has_no_params() {
-        // Regression: previously bound `now` as $1 even when STATUS_CASE was absent,
-        // producing 08P01 "bind message supplies 1 parameters, but prepared statement requires 0".
+        // The default listing query has no dynamic filters, so it must not
+        // carry any bind parameters.
         let l = listing(MarketsFilter::default(), None);
         let (sql, params) = build_listing_query(&l).unwrap();
         assert!(params.is_empty(), "no filters → no binds; got {params:?}");

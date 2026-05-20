@@ -137,7 +137,7 @@ The actual events inside each EventList. Two writers:
 | `is_deleted` | `boolean` default `false` | Soft-delete flag for events that disappear from the EventList. |
 | `last_seen_at` | `timestamptz` | Updated on every projector pass that touches the row. |
 | `confirmed_pmp_address` | `text` | Set by the `EventConfirmed` event. Links an event to the PMP that markets it. |
-| `confirmed_at` | `timestamptz` | Stamp time (currently wall-clock; see review note in `docs/review-fixes-2026-05-11.md`). |
+| `confirmed_at` | `timestamptz` | Stamp time recorded when the projector observes the confirmation event. |
 | `meta_reconciled_at` | `timestamptz` | Per-row marker — set unconditionally by the OracleEventList reconciler after a successful getter pass, even when `describe`/`trust_addr` come back NULL on chain. Drives the pending-row predicate so legitimately-null fields don't cause infinite re-fetch. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
@@ -166,7 +166,7 @@ One row per PMP (Prediction Market Pool) contract observed on chain. Discovered 
 | `token_code` | `text` | Quote-asset code (denormalised from `ref_tokens` for read speed). |
 | `event_id` | `numeric(78,0)` | Oracle event id this market resolves against. |
 | `oracle_list_hash` | `numeric(78,0)` | EventList hash used in OrderBook derivation. NULL pre-reconcile. |
-| `orderbook_address` | `text` | The deterministic OrderBook address returned by `PMP.getOrderBookAddress()`. Written by the market reconciler on the first successful pass, including pre-`PoolsFrozen` rows. Nullable only during the pre-reconcile window; Predicat  `last_reconciled_at IS NULL OR orderbook_address IS NOT NULL` enforces that every market visible to the API has a non-null `orderBookAddress`. A partial UNIQUE index on `orderbook_address WHERE orderbook_address IS NOT NULL`, pinning the contract-side per-market invariant — `/api/v1/orders` joins `live_orders` to `markets` on this column and relies on the at-most-one-row guarantee. |
+| `orderbook_address` | `text` | The deterministic OrderBook address returned by `PMP.getOrderBookAddress()`. Written by the market reconciler on the first successful pass, including pre-`PoolsFrozen` rows. Nullable only during the pre-reconcile window; the CHECK predicate `last_reconciled_at IS NULL OR orderbook_address IS NOT NULL` enforces that every market visible to the API has a non-null `orderBookAddress`. A partial UNIQUE index on `orderbook_address WHERE orderbook_address IS NOT NULL` pins the contract-side per-market invariant — `/api/v1/orders` joins `live_orders` to `markets` on this column and relies on the at-most-one-row guarantee. |
 | `approved` | `boolean` default `false` | Approval flag from `getDetails()`; flipped to `true` by the `TimingsSet` event. |
 | `is_cancelled` | `boolean` default `false` | On-chain cancellation flag from `getDetails()`. Either this or `cancelled_at` being set is enough to flip the derived status to `CANCELLED`. |
 | `stake_start` / `stake_end` / `result_start` / `result_end` | `bigint` (nullable) | Lifecycle timings (unix seconds). Written only by the `TimingsSet` event; reconciler does **not** touch these (H2 fix). NULL on all four = PENDING. |
@@ -260,7 +260,8 @@ independent of the display-only timestamp columns. This avoids unnecessary index
 `chain_updated_at` advances on every `OrderFilled` event.
 
 This index supersedes the OPEN-only `live_orders_open_owner_idx`, which is dropped in the same
-migration that introduces `/api/v1/orders` (see [read-api.md §Index reliance](read-api.md#index-reliance)).
+migration that introduces `/api/v1/orders` (see [read-api.md §Index reliance](read-api.md#index-reliance)
+and [`0002_orders_owner_index.sql`](../../migrations/0002_orders_owner_index.sql)).
 
 #### Migration requirement: cancel-preserves-remainder semantics
 

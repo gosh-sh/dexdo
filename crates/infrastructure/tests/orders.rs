@@ -624,6 +624,34 @@ async fn status_csv_filter_narrows_results() {
     assert_eq!(statuses, vec!["CANCELED", "FILLED"]);
     assert!(page_closed.next_cursor.is_none());
 
+    let page_filled = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::from_csv(Some("FILLED")).expect("valid FILLED filter"),
+            limit: 100,
+            cursor: None,
+        })
+        .await
+        .expect("list_orders with FILLED filter");
+    assert_eq!(page_filled.orders.len(), 1, "only the FILLED row");
+    assert_eq!(page_filled.orders[0].order_id, "3");
+    assert_eq!(page_filled.orders[0].status.as_str(), "FILLED");
+
+    let page_canceled = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::from_csv(Some("CANCELED")).expect("valid CANCELED filter"),
+            limit: 100,
+            cursor: None,
+        })
+        .await
+        .expect("list_orders with CANCELED filter");
+    assert_eq!(page_canceled.orders.len(), 1, "only the CANCELED row");
+    assert_eq!(page_canceled.orders[0].order_id, "4");
+    assert_eq!(page_canceled.orders[0].status.as_str(), "CANCELED");
+
     scope.cleanup(&pool).await;
 }
 
@@ -895,7 +923,7 @@ async fn cursor_advances_strictly_below_last_returned() {
     let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id.as_str()).collect();
     assert_eq!(ids1, vec!["6", "5", "4", "3"], "page 1 DESC");
     let cursor = page1.next_cursor.expect("next_cursor set after partial page");
-    assert_eq!(cursor.0, "003", "cursor is the placed_chain_order of the last returned row");
+    assert_eq!(cursor.as_str(), "003", "cursor is the placed_chain_order of the last returned row");
 
     let page2 = repo
         .list_orders(&OrdersQuery {
@@ -903,7 +931,7 @@ async fn cursor_advances_strictly_below_last_returned() {
             market: None,
             status: OrderStatusSet::all(),
             limit: 4,
-            cursor: Some(OrdersCursor(cursor.0.clone())),
+            cursor: Some(cursor.clone()),
         })
         .await
         .expect("page 2");
@@ -911,6 +939,145 @@ async fn cursor_advances_strictly_below_last_returned() {
     let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id.as_str()).collect();
     assert_eq!(ids2, vec!["2", "1"], "page 2 completes the set");
     assert!(page2.next_cursor.is_none(), "no further pages");
+
+    scope.cleanup(&pool).await;
+}
+
+/// A page whose size exactly equals the remaining row count is terminal:
+/// the `LIMIT + 1` lookahead must use `rows.len() > limit`, not `>=`.
+#[tokio::test]
+async fn limit_equal_to_row_count_has_no_next_cursor() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    for i in 1_i64..=3 {
+        insert_order(
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "1000",
+            "1000",
+            "1000",
+            "OPEN",
+            1_700_000_000 + i,
+            &format!("{:03}", i),
+        )
+        .await;
+    }
+
+    let page = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::all(),
+            limit: 3,
+            cursor: None,
+        })
+        .await
+        .expect("exact-size page");
+
+    let ids: Vec<&str> = page.orders.iter().map(|o| o.order_id.as_str()).collect();
+    assert_eq!(ids, vec!["3", "2", "1"]);
+    assert!(page.next_cursor.is_none(), "exact-size page is terminal");
+
+    scope.cleanup(&pool).await;
+}
+
+/// A cursor below every row in scope returns an empty terminal page, not an
+/// error. This lets clients tolerate stale cursors after history compaction
+/// or owner-scoped data changes.
+#[tokio::test]
+async fn out_of_range_cursor_returns_empty_page() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "010",
+    )
+    .await;
+
+    let page = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::all(),
+            limit: 100,
+            cursor: Some(OrdersCursor::new("001".into()).expect("valid cursor")),
+        })
+        .await
+        .expect("out-of-range cursor");
+
+    assert!(page.orders.is_empty());
+    assert!(page.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+/// Client order ids are owner-scoped. Two accounts can reuse the same coid;
+/// account order reads must still apply owner_pn_address first.
+#[tokio::test]
+async fn shared_client_order_id_across_owners_does_not_leak_rows() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "001",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.other_owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
+    sqlx::query(
+        "update live_orders set client_order_id = 'shared-coid'
+              where orderbook_address = $1 and order_id in (1::numeric, 2::numeric)",
+    )
+    .bind(&scope.book_yes)
+    .execute(&pool)
+    .await
+    .expect("share client_order_id");
+
+    let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
+    assert_eq!(page.orders.len(), 1);
+    assert_eq!(page.orders[0].order_id, "1");
+    assert_eq!(page.orders[0].client_order_id, "shared-coid");
 
     scope.cleanup(&pool).await;
 }
@@ -1027,7 +1194,7 @@ async fn status_filter_combines_with_cursor_pagination() {
     let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id.as_str()).collect();
     assert_eq!(ids1, vec!["6", "4"], "filtered page 1 skips OPEN row 005");
     let cursor = page1.next_cursor.expect("cursor after partial filtered page");
-    assert_eq!(cursor.0, "004");
+    assert_eq!(cursor.as_str(), "004");
 
     // Page 2: same filter + cursor → must skip OPEN row 002, return "003" then "001".
     let page2 = repo
@@ -1036,7 +1203,7 @@ async fn status_filter_combines_with_cursor_pagination() {
             market: None,
             status,
             limit: 2,
-            cursor: Some(OrdersCursor(cursor.0)),
+            cursor: Some(cursor),
         })
         .await
         .expect("page 2 filtered");
@@ -1097,7 +1264,7 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
     let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id.as_str()).collect();
     assert_eq!(ids1, vec!["4", "3"], "page 1 has rows 4 and 3");
     let cursor = page1.next_cursor.expect("cursor present");
-    assert_eq!(cursor.0, "003");
+    assert_eq!(cursor.as_str(), "003");
 
     // Mutate row 2 (logical position 3 in DESC order) to FILLED.
     // placed_chain_order is NOT changed — cursor stability depends on this.
@@ -1117,7 +1284,7 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
             market: None,
             status: OrderStatusSet::all(),
             limit: 2,
-            cursor: Some(OrdersCursor(cursor.0)),
+            cursor: Some(cursor),
         })
         .await
         .expect("page 2");
@@ -1293,7 +1460,7 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
     assert_eq!(page1.orders[0].order_id, "4");
     assert_eq!(page1.orders[1].order_id, "3");
     let cursor = page1.next_cursor.expect("next_cursor set");
-    assert_eq!(cursor.0, "002");
+    assert_eq!(cursor.as_str(), "002");
 
     // Page 2: strict-< against "002" → returns only "001".
     let page2 = repo

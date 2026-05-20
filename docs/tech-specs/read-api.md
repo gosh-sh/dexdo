@@ -260,6 +260,7 @@ The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses
 | --- | --- | --- | --- |
 | Exactly one of `marketAddress` / `symbol` present | `MissingParameter` | `-1102` | 400 |
 | `limit` out of `[1, 500]` | `MissingParameter` | `-1102` | 400 |
+| `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
 | `cursor` is empty or whitespace-only | `MissingParameter` | `-1102` | 400 |
 | Unknown token in `status` CSV | `InvalidParameter` | `-1130` | 400 |
 | Pair not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
@@ -307,7 +308,7 @@ REJECTED rows, once the future projector ships, are created with `owner_pn_addre
 
 ### Contract event consumption
 
-This endpoint is downstream of the indexer; it consumes only what the projectors write to `live_orders`. The chain-side surface used today, none of which is altered by commit `9aab586`:
+This endpoint is downstream of the indexer; it consumes only what the projectors write to `live_orders`. The chain-side surface consumed by `/orders` is:
 
 | Event | Producer | Read-model effect |
 | --- | --- | --- |
@@ -316,7 +317,7 @@ This endpoint is downstream of the indexer; it consumes only what the projectors
 | `OrderBook.OrderCancelled` | OrderBook | Preserves the current `amount_remaining` as the cancelled remainder; flips `status` to `CANCELLED`. |
 | `PrivateNote.OrderPlacedConfirmed` | PrivateNote | Attaches `owner_pn_address`. |
 
-Commit `9aab586` adds internal threading (`opNonce`, deferred shutdown latch, batch-end ack via `PrivateNote.onBatchComplete`), splits fees into maker rebate vs protocol, and adds `isRebate` / `isFinal` flags to `PrivateNote.OrderFilledConfirmed`. The new flags are routed to the `/api/v1/account` fee / balance code path, not to `/orders`. The outward shape of the three OrderBook events above and of `OrderPlacedConfirmed` is unchanged; the existing projectors continue to work without modification.
+PrivateNote may emit additional confirmation events for account accounting (for example fee or balance updates), but those are routed to the `/api/v1/account` code path, not to `/orders`. The outward shape of the three OrderBook events above and of `OrderPlacedConfirmed` is the only chain-side surface this endpoint depends on.
 
 ### REJECTED — future work
 
@@ -368,11 +369,9 @@ Decided when the follow-up PR is written; the choice should not perturb the `/or
 
 Three integration suites, all gated on `TEST_DATABASE_URL`:
 
-- `crates/infrastructure/tests/orders.rs` (new) — owner scoping, DESC sort, scaling, the three market-filter shapes, `status` CSV across all five tokens (REJECTED returns empty pre-follow-up), cursor advance, cursor stability under concurrent fills and cancellations (closed rows retain their position), `limit` defaults and bounds, invalid `status` tokens, invalid cursor, `executedQty > 0` for `CANCELED` partial-then-cancel rows.
+- `crates/infrastructure/tests/orders.rs` — owner scoping, DESC sort, scaling, the three market-filter shapes, `status` CSV across all five tokens (REJECTED returns empty pre-follow-up), cursor advance, cursor stability under concurrent fills and cancellations (closed rows retain their position), `limit` defaults and bounds, invalid `status` tokens, invalid cursor, `executedQty > 0` for `CANCELED` partial-then-cancel rows.
 - `crates/infrastructure/tests/reprojection.rs` — extend the existing deferred-replay tests to cover `OrderPlacedConfirmed` arriving after the row has already transitioned to `FILLED` / `CANCELLED`; assert the owner attaches and the row appears under those public statuses in `/orders`.
-- `services/api/tests/orders_http.rs` (new) — happy path through the production router with the wrapped response, the four error codes (`-1102`, `-1121`, `-1130`, auth), and the pagination round-trip across mixed-status pages.
-
-The legacy `crates/infrastructure/tests/open_orders.rs` and `services/api/tests/open_orders_http.rs` are deleted alongside the endpoint removal.
+- `services/api/tests/orders_http.rs` — happy path through the production router with the wrapped response, the four error codes (`-1102`, `-1121`, `-1130`, auth), and the pagination round-trip across mixed-status pages.
 
 ## `/api/v1/account`
 

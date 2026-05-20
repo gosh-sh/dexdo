@@ -574,8 +574,7 @@ mod tests {
     #[test]
     fn mask_still_redacts_middle_of_minimum_length_key() {
         // 12-char keys must still have at least 4 chars redacted in
-        // the middle; the earlier implementation showed the entire
-        // input verbatim.
+        // the middle; short keys must never be shown verbatim.
         let m = mask("dk_live_1234");
         assert_eq!(m, "dk_liv...34");
     }

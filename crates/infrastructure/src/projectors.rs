@@ -677,10 +677,8 @@ async fn apply_order_cancelled(
     // full fill cannot demote a `FILLED` row to `CANCELLED`. The chain
     // contract is supposed to prevent this race (see
     // docs/tech-specs/write-api.md §Response — "FILLED if matching
-    // raced the cancel"), but defensive parity with `apply_order_filled`
-    // — which already gates the FILLED transition on
-    // `amount_remaining - $3 <= 0` — costs one CASE and keeps the
-    // projector internally consistent regardless of contract drift.
+    // raced the cancel"), but the guard is cheap and keeps this close
+    // path fail-closed if contract ordering ever drifts.
     // `last_chain_order` / `chain_updated_at` still advance because the
     // cancel event itself did land on chain.
     let updated = sqlx::query(

@@ -93,7 +93,7 @@ GET {{host}}/api/v1/orders?limit=0&recvWindow={{recvWindow}}&timestamp={{timesta
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
-### unparseable limit → -1102 / 400
+### unparseable limit → -1130 / 400
 GET {{host}}/api/v1/orders?limit=abc&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
