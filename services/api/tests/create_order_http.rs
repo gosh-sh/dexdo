@@ -161,11 +161,11 @@ impl MarketReadRepository for FakeRepo {
         })
     }
 
-    async fn list_open_orders(
+    async fn list_orders(
         &self,
-        _: &dodex_application::OpenOrdersQuery,
-    ) -> Result<dodex_application::OpenOrdersPage, anyhow::Error> {
-        unimplemented!("list_open_orders is not exercised by create_order_http tests")
+        _: &dodex_application::OrdersQuery,
+    ) -> Result<dodex_application::OrdersPage, anyhow::Error> {
+        unimplemented!("list_orders is not exercised by create_order_http tests")
     }
 }
 
