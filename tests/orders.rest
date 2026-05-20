@@ -1,10 +1,11 @@
-# GET /api/v1/openOrders — manual smoke checks for the account-scoped open-orders read
+# GET /api/v1/orders — manual smoke checks for the account-scoped orders read
 # Compatibility: VS Code REST Client, JetBrains HTTP Client
 #
 # Response shape: { orders: [...], nextCursor: string | null }.
 # Each order: marketAddress, symbol, orderId, clientOrderId, price, origQty,
-# executedQty, status (NEW | PARTIALLY_FILLED), timeInForce (GTC), type (LIMIT),
-# side (BUY | SELL), time (unix ms), updateTime (unix ms).
+# executedQty, status (NEW | PARTIALLY_FILLED | FILLED | CANCELED | REJECTED),
+# timeInForce (GTC), type (LIMIT), side (BUY | SELL), time (unix ms),
+# updateTime (unix ms).
 #
 # Auth: USER_DATA scope. Each request needs `X-DODEX-APIKEY`, `timestamp`,
 # `recvWindow` (optional), and `signature`. Signing rules live in
@@ -31,86 +32,97 @@
 @apiSecret = 1de6fc5cf8899e7f1dacf449fe46c3c88854478b7fcd9dd26c664535ee589966
 @marketAddress = 0:b286c2c1996fe90fe5ed06679115f8b9be4b3184accfb84ac22308cad5d81a48
 @symbol = PM-2026-ELECTION-YES
+@status = NEW,FILLED
 @recvWindow = 5000
 # Fill these per-request — see the openssl one-liner above.
 @timestamp = 1710000000000
 @signature = <hex-hmac-of-canonicalQueryString>
 
-### no filter — all open orders for the authenticated account
-GET {{host}}/api/v1/openOrders?recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+### no filter — all orders for the authenticated account
+GET {{host}}/api/v1/orders?recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### explicit limit (default 100, max 500)
-GET {{host}}/api/v1/openOrders?limit=10&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?limit=10&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+X-DODEX-APIKEY: {{apiKey}}
+Accept: application/json
+
+### filtered by lifecycle status (CSV; allowed: NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED)
+GET {{host}}/api/v1/orders?recvWindow={{recvWindow}}&status={{status}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### filtered by (marketAddress, symbol) → one-market view
-GET {{host}}/api/v1/openOrders?marketAddress={{marketAddress}}&recvWindow={{recvWindow}}&symbol={{symbol}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?marketAddress={{marketAddress}}&recvWindow={{recvWindow}}&symbol={{symbol}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### pagination — first page (copy `nextCursor` from the response into the next request)
-GET {{host}}/api/v1/openOrders?limit=2&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?limit=2&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### pagination — second page (replace `<cursor>` with `nextCursor` from above and re-sign)
-GET {{host}}/api/v1/openOrders?cursor=<cursor>&limit=2&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?cursor=<cursor>&limit=2&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### one-sided filter (marketAddress without symbol) → -1102 / 400
-GET {{host}}/api/v1/openOrders?marketAddress={{marketAddress}}&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?marketAddress={{marketAddress}}&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### one-sided filter (symbol without marketAddress) → -1102 / 400
-GET {{host}}/api/v1/openOrders?recvWindow={{recvWindow}}&symbol={{symbol}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?recvWindow={{recvWindow}}&symbol={{symbol}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### unknown (marketAddress, symbol) pair → -1121 / 404
-GET {{host}}/api/v1/openOrders?marketAddress=0:does-not-exist&recvWindow={{recvWindow}}&symbol=PM-DOES-NOT-EXIST&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?marketAddress=0:does-not-exist&recvWindow={{recvWindow}}&symbol=PM-DOES-NOT-EXIST&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### limit out of range (above 500) → -1102 / 400
-GET {{host}}/api/v1/openOrders?limit=501&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?limit=501&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### limit zero → -1102 / 400
-GET {{host}}/api/v1/openOrders?limit=0&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?limit=0&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### unparseable limit → -1102 / 400
-GET {{host}}/api/v1/openOrders?limit=abc&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?limit=abc&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+X-DODEX-APIKEY: {{apiKey}}
+Accept: application/json
+
+### unknown status token → -1130 / 400
+GET {{host}}/api/v1/orders?recvWindow={{recvWindow}}&status=NEW,WRONG_TOKEN&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### opaque cursor beyond current rows → 200 / empty page
-GET {{host}}/api/v1/openOrders?cursor=ffffffffffffffffffffffffffffffff&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?cursor=ffffffffffffffffffffffffffffffff&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### empty cursor → -1102 / 400 (not silently treated as "no cursor")
-GET {{host}}/api/v1/openOrders?cursor=&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?cursor=&recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### missing X-DODEX-APIKEY header → -1003 / 401
-GET {{host}}/api/v1/openOrders?recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 Accept: application/json
 
 ### missing signature → -1003 / 401
-GET {{host}}/api/v1/openOrders?recvWindow={{recvWindow}}&timestamp={{timestamp}}
+GET {{host}}/api/v1/orders?recvWindow={{recvWindow}}&timestamp={{timestamp}}
 X-DODEX-APIKEY: {{apiKey}}
 Accept: application/json
 
 ### unknown API key → -1002 / 401
-GET {{host}}/api/v1/openOrders?recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
+GET {{host}}/api/v1/orders?recvWindow={{recvWindow}}&timestamp={{timestamp}}&signature={{signature}}
 X-DODEX-APIKEY: dk_not_a_real_key
 Accept: application/json
