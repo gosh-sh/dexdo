@@ -385,7 +385,13 @@ impl TimeInForce {
 /// projects into `live_orders` with a chain-assigned `orderId`. The
 /// HTTP response to a successful `POST /api/v1/order` always carries
 /// `PendingNew`; the indexer-projected row in `live_orders` then
-/// surfaces as `NEW` through `GET /api/v1/openOrders`.
+/// surfaces as `NEW` through `GET /api/v1/orders`.
+///
+/// Variant declaration order is load-bearing: the derived `Ord` is the
+/// declared discriminant order, and `OrderStatusSet::canonical_vec`
+/// (plus the read-API SQL fragment built from it) relies on that
+/// deterministic iteration. Do not reorder variants without auditing
+/// the depending sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OrderStatus {
