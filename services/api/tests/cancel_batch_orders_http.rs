@@ -651,6 +651,26 @@ async fn partial_shortfall_rejects_whole_batch_with_minus_2011() {
 // ---- Chain-side failures -------------------------------------------------
 
 #[tokio::test]
+async fn chain_invalid_parameter_returns_400_minus_1130() {
+    // Defence-in-depth: the use case pre-rejects oversize/empty batches
+    // locally, but the chain still raises ERR_BATCH_TOO_LARGE (161) /
+    // ERR_EMPTY_BATCH (162) if the local guard is bypassed. Both map to
+    // `DomainError::InvalidParameter` in `chain_sender::map_tvm_exit_code`
+    // and must surface as `-1130 / 400`. Simulate the chain leg with a
+    // failing sender; this pins the HTTP shape contract for the path.
+    let repo: SharedRepo =
+        Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
+    let sender: SharedChainSender =
+        Arc::new(RecordingCancelBatchSender::failing(DomainError::InvalidParameter));
+    let service = setup_with(repo, sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1130);
+}
+
+#[tokio::test]
 async fn pn_busy_returns_429_minus_2014() {
     // Sender raising `OrderPnBusy` simulates a real `ERR_NOTE_BUSY`
     // (121) coming back from `bee_dex::Dex::cancel_batch` while another

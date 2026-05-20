@@ -88,7 +88,7 @@ impl ChainOrderSender for BeeDexChainSender {
         // `u64::MAX`, so reaching the error arm means the gate was
         // bypassed. Log loudly and fail closed.
         let amount = payload.amount_raw.parse::<u128>().map_err(|err| {
-            error!(?err, raw = %payload.amount_raw, "amount_raw exceeds uint128");
+            error!(?err, raw = %payload.amount_raw, "amount_raw is not uint128");
             DomainError::Unexpected
         })?;
         let client_order_id = payload.client_order_id.parse::<u128>().map_err(|err| {
