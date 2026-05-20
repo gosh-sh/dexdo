@@ -542,6 +542,7 @@ mod tests {
             (121, DomainError::OrderPnBusy),              // ERR_NOTE_BUSY
             (129, DomainError::InvalidParameter),         // ERR_INVALID_PARAMS (batch-coid dupe)
             (130, DomainError::MarketInconsistent),       // ERR_INVALID_OUTCOME_ID
+            (161, DomainError::InvalidParameter),         // ERR_BATCH_TOO_LARGE
             (162, DomainError::InvalidParameter),         // ERR_EMPTY_BATCH
             (163, DomainError::PrecisionExceeded),        // ERR_AMOUNT_NOT_LOT_MULTIPLE
             (168, DomainError::OrderValidationFailed),    // ERR_NOTIONAL_OVERFLOW
