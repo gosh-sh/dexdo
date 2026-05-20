@@ -489,21 +489,21 @@ async fn apply_order_placed(
 
     // chain_created_at / chain_updated_at survive sub-second precision via
     // to_timestamp(::double precision). They are display-only — the primary
-    // sort key for /api/v1/openOrders is placed_chain_order (bound from
+    // sort key for /api/v1/orders is placed_chain_order (bound from
     // chain_order, $8), which is globally unique and lex-monotonic by
     // gateway design. node.created_at collides on a shared chain second
     // and is not safe as a sort key.
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     if chain_seconds.is_none() {
         // The row will land with NULL `chain_created_at` and stay invisible
-        // to `/openOrders` because of the partial-index predicate. The path
+        // to `/orders` because of the partial-index predicate. The path
         // is documented as rare; surface it so we notice if it stops being.
         warn!(
             orderbook_address,
             msg_id = %node.msg_id,
             created_at = ?node.created_at,
             "OrderPlaced has no parseable chain time; live_orders row will be \
-             hidden from /openOrders by the chain_created_at IS NOT NULL heap \
+             hidden from /orders by the chain_created_at IS NOT NULL heap \
              filter. placed_chain_order is unaffected (chain_order is NOT NULL).",
         );
     }

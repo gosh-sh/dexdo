@@ -454,7 +454,7 @@ async fn orderplaced_confirmed_deferred_replays_and_attaches_owner() {
 #[tokio::test]
 async fn orderplaced_sets_chain_timestamps_from_event_time() {
     // Locks in the contract that apply_order_placed reads chain time off the
-    // EventNode rather than using `now()`. The API's openOrders.time / .updateTime
+    // EventNode rather than using `now()`. The API's orders.time / .updateTime
     // depend on these columns being set at projection time.
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
@@ -662,7 +662,7 @@ async fn orderplaced_chain_created_at_is_first_write_wins() {
 #[tokio::test]
 async fn orderplaced_placed_chain_order_is_first_write_wins() {
     // A replayed OrderPlaced carrying a different msg_chain_order must
-    // NOT overwrite placed_chain_order. The cursor for /openOrders is
+    // NOT overwrite placed_chain_order. The cursor for /orders is
     // built from placed_chain_order, and a moving value would let a
     // paginated reader re-see an already-returned row.
     let _guard = REPROJECTION_LOCK.lock().await;
