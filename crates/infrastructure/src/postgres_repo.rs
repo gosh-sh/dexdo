@@ -523,6 +523,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.price::text as price,
                           lo.amount_initial::text as orig_qty,
                           greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
+                          (lo.amount_remaining = 0) as fully_filled,
                           lo.is_buy as is_buy,
                           (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
                           (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
@@ -565,6 +566,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.price::text as price,
                           lo.amount_initial::text as orig_qty,
                           greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
+                          (lo.amount_remaining = 0) as fully_filled,
                           lo.is_buy as is_buy,
                           (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
                           (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
@@ -609,8 +611,13 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None
         };
 
-        let orders =
-            orders_raw.into_iter().filter_map(|row| order_from_row(row).ok()).collect::<Vec<_>>();
+        // `order_from_row` returns `None` for projector-bug rows (logs a
+        // warn! inside). `next_cursor` was captured above from the
+        // pre-filter tail, so a corrupt boundary row advances the cursor
+        // past itself instead of freezing pagination — pinned by
+        // `cursor_advances_past_corrupt_row_at_page_tail` in
+        // crates/infrastructure/tests/orders.rs.
+        let orders = orders_raw.into_iter().filter_map(order_from_row).collect::<Vec<_>>();
 
         Ok(OrdersPage { orders, next_cursor })
     }
@@ -671,6 +678,10 @@ struct OrderRow {
     price: String,
     orig_qty: String,
     executed_qty: String,
+    /// `amount_remaining = 0` evaluated in SQL. Drives the OPEN-row
+    /// status derivation without relying on `numeric::text` canonical
+    /// formatting matching across `orig_qty` and `executed_qty`.
+    fully_filled: bool,
     is_buy: bool,
     // Microseconds since the epoch — sourced from chain_created_at /
     // chain_updated_at (timestamptz). The API renders `time` / `updateTime`
@@ -683,7 +694,7 @@ struct OrderRow {
     quantity_precision: i32,
     /// Raw status string from the live_orders table (e.g. "OPEN", "FILLED",
     /// "CANCELLED", "REJECTED"). The public `OrderStatus` is derived from
-    /// this in combination with `executed_qty` / `orig_qty` for OPEN rows.
+    /// this in combination with `fully_filled` (for OPEN rows).
     raw_status: String,
 }
 
@@ -752,26 +763,34 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
     }
 }
 
-fn order_from_row(row: OrderRow) -> Result<Order, anyhow::Error> {
+/// Project a `live_orders` row into the public [`Order`] DTO.
+///
+/// Returns `None` for rows that fail invariants the projector should
+/// guarantee (OPEN with `amount_remaining = 0`, or an unrecognised
+/// `raw_status`). The skip is logged inside this function; callers
+/// just `filter_map(order_from_row)` to drop bad rows from the page.
+/// Encoding "skip" as `None` rather than a synthetic `Err(Unexpected)`
+/// keeps the semantics in the type — the caller no longer has to
+/// `.ok()` away a fake error to express the same intent.
+fn order_from_row(row: OrderRow) -> Option<Order> {
     let quantity_scale = u32::try_from(row.quantity_precision.max(0)).unwrap_or(0);
 
-    // Derive the public OrderStatus from the stored raw_status and the
-    // executed/remaining amounts.
+    // Derive the public OrderStatus from the stored raw_status and
+    // (for OPEN rows) the SQL-side `fully_filled` boolean.
     let status = match row.raw_status.as_str() {
         "OPEN" => {
             let executed_is_zero = decimal_string_is_zero(&row.executed_qty);
-            let orig_is_zero = decimal_string_is_zero(&row.orig_qty);
             if executed_is_zero {
                 OrderStatus::New
-            } else if !orig_is_zero && row.executed_qty == row.orig_qty {
+            } else if row.fully_filled {
                 // amount_remaining == 0 but status is still OPEN: projector bug.
-                // Fail closed — do NOT surface as New or silently skip.
+                // Fail closed — do NOT surface as New or silently mis-bucket.
                 warn!(
                     order_id = %row.order_id,
                     market = %row.market_address,
                     "live_orders row has status=OPEN with amount_remaining=0 (projector bug); skipping"
                 );
-                return Err(anyhow!(DomainError::Unexpected));
+                return None;
             } else {
                 OrderStatus::PartiallyFilled
             }
@@ -785,14 +804,14 @@ fn order_from_row(row: OrderRow) -> Result<Order, anyhow::Error> {
                 raw_status = %other,
                 "live_orders row has unrecognised status; skipping"
             );
-            return Err(anyhow!(DomainError::Unexpected));
+            return None;
         }
     };
 
     // REJECTED orders never receive a chain-assigned order_id.
     let order_id = if status == OrderStatus::Rejected { String::new() } else { row.order_id };
 
-    Ok(Order {
+    Some(Order {
         market_address: MarketAddress(row.market_address),
         symbol: Symbol(row.symbol),
         order_id,

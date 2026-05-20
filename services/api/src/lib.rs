@@ -22,6 +22,7 @@ use dodex_application::CreateOrderUseCase;
 use dodex_application::GetDepthQuery;
 use dodex_application::GetDepthUseCase;
 use dodex_application::GetMarketsUseCase;
+use dodex_application::GetOrdersInput;
 use dodex_application::GetOrdersUseCase;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsFilter;
@@ -505,7 +506,14 @@ async fn get_orders(
 
     let use_case = GetOrdersUseCase::new(state.repo);
     let page = use_case
-        .execute(&ctx, market_address, symbol, status.as_deref(), limit, cursor.as_deref())
+        .execute(GetOrdersInput {
+            owner_pn_address: ctx.trading_pn.pn_address.clone(),
+            market_address,
+            symbol,
+            status,
+            limit,
+            cursor,
+        })
         .await
         .map_err(|err| {
             if let Some(domain) = err.downcast_ref::<DomainError>() {

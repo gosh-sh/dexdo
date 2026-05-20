@@ -325,8 +325,33 @@ impl OrderStatusSet {
     }
 }
 
+/// Opaque pagination cursor for `/api/v1/orders`. The inner string is
+/// the `placed_chain_order` of the last row returned by a previous
+/// page; the server reads it as a lexicographic token via the strict
+/// `<` predicate in [`PostgresReadModelRepository::list_orders`].
+///
+/// The pub-field shape matches sibling newtypes (`MarketAddress`,
+/// `Symbol`) so existing call-site idioms still work, but
+/// construction goes through [`OrdersCursor::new`] which enforces the
+/// non-blank invariant. Callers that already hold a known-good value
+/// (e.g. the projector loading a row's `placed_chain_order`) may
+/// construct the tuple form directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrdersCursor(pub String);
+
+impl OrdersCursor {
+    /// Validating constructor: trims whitespace, rejects blank input
+    /// as [`DomainError::MissingParameter`] (mirrors the public
+    /// `/api/v1/orders` contract — a whitespace-only `?cursor=` is
+    /// always a client-side bug, not "no cursor").
+    pub fn new(raw: String) -> Result<Self, DomainError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(DomainError::MissingParameter);
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OrdersQuery {
@@ -802,6 +827,21 @@ where
     }
 }
 
+/// Inputs to `GetOrdersUseCase::execute`, mirroring the shape of
+/// [`NewOrderInput`] for symmetry across read/write use cases. The
+/// HTTP handler is the only intended constructor: it owns the
+/// `AuthContext` and passes a clone of `ctx.trading_pn.pn_address`
+/// here. The CSV `status` / `cursor` strings are raw request values;
+/// validation happens inside `execute`.
+pub struct GetOrdersInput {
+    pub owner_pn_address: String,
+    pub market_address: Option<MarketAddress>,
+    pub symbol: Option<Symbol>,
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
 pub struct GetOrdersUseCase<R> {
     repo: R,
 }
@@ -816,16 +856,8 @@ impl<R> GetOrdersUseCase<R>
 where
     R: MarketReadRepository,
 {
-    pub async fn execute(
-        &self,
-        ctx: &AuthContext,
-        market_address: Option<MarketAddress>,
-        symbol: Option<Symbol>,
-        status: Option<&str>,
-        limit: Option<i64>,
-        cursor: Option<&str>,
-    ) -> Result<OrdersPage, anyhow::Error> {
-        let market = match (market_address, symbol) {
+    pub async fn execute(&self, input: GetOrdersInput) -> Result<OrdersPage, anyhow::Error> {
+        let market = match (input.market_address, input.symbol) {
             (None, None) => None,
             (Some(market_address), Some(symbol)) => {
                 Some(OrdersMarketFilter { market_address, symbol })
@@ -833,28 +865,23 @@ where
             _ => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
         };
 
-        let status = OrderStatusSet::from_csv(status).map_err(|err| anyhow::anyhow!(err))?;
+        let status =
+            OrderStatusSet::from_csv(input.status.as_deref()).map_err(|err| anyhow::anyhow!(err))?;
 
-        let limit = match limit {
+        let limit = match input.limit {
             None => ORDERS_DEFAULT_LIMIT,
             Some(v) if (1..=i64::from(ORDERS_MAX_LIMIT)).contains(&v) => v as u16,
             Some(_) => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
         };
 
-        let cursor = match cursor {
+        let cursor = match input.cursor {
             None => None,
-            Some(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    return Err(anyhow::anyhow!(DomainError::MissingParameter));
-                }
-                Some(OrdersCursor(trimmed.to_string()))
-            }
+            Some(raw) => Some(OrdersCursor::new(raw).map_err(|err| anyhow::anyhow!(err))?),
         };
 
         self.repo
             .list_orders(&OrdersQuery {
-                owner_pn_address: ctx.trading_pn.pn_address.clone(),
+                owner_pn_address: input.owner_pn_address,
                 market,
                 status,
                 limit,
