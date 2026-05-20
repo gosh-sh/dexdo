@@ -672,3 +672,90 @@ async fn unreconciled_market_pair_returns_invalid_market_or_symbol() {
 
     scope.cleanup(&pool).await;
 }
+
+/// Test 11: cursor stays unstuck when the row at the page tail fails
+/// the mapper (projector-bug scenario: OPEN row with `amount_remaining = 0`).
+///
+/// `list_orders` builds `next_cursor` from the last truncated raw row
+/// BEFORE `filter_map(order_from_row.ok())` drops corrupt rows. Without
+/// this ordering, a corrupt row at the page boundary would freeze
+/// pagination: if `next_cursor` were taken from the last
+/// successfully-rendered row instead, the next page would re-query the
+/// corrupt row, drop it again, advance the cursor to the same place,
+/// and loop indefinitely. This test pins the live behaviour by seeding
+/// a corrupt row at the boundary and verifying:
+///   - page 1 returns the two healthy rows above the corrupt boundary;
+///   - `next_cursor` equals the corrupt row's `placed_chain_order`
+///     (so the strict-`<` predicate on page 2 skips past it);
+///   - page 2 returns the one row strictly below the corrupt boundary
+///     with `next_cursor = None`.
+#[tokio::test]
+async fn cursor_advances_past_corrupt_row_at_page_tail() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // Four rows in ascending placed_chain_order; row 002 is the corrupt one.
+    // DESC sort puts the tail of page 1 (limit=3) at row 002.
+    insert_order(
+        &pool, &scope.book_yes, 1, Some(&scope.owner),
+        "12345", "1000", "1000", "OPEN",
+        1_700_000_000, "001",
+    ).await;
+    // Row 002: OPEN + amount_remaining=0 — projector bug; the mapper
+    // logs warn and returns Err, the row is filtered out of the response.
+    insert_order(
+        &pool, &scope.book_yes, 2, Some(&scope.owner),
+        "12345", "1000", "0", "OPEN",
+        1_700_000_001, "002",
+    ).await;
+    insert_order(
+        &pool, &scope.book_yes, 3, Some(&scope.owner),
+        "12345", "1000", "1000", "OPEN",
+        1_700_000_002, "003",
+    ).await;
+    insert_order(
+        &pool, &scope.book_yes, 4, Some(&scope.owner),
+        "12345", "1000", "1000", "OPEN",
+        1_700_000_003, "004",
+    ).await;
+
+    // Page 1: limit=3. DESC raw fetch order: 004, 003, 002, 001.
+    // limit+1 lookahead returns all 4; has_more=true; truncate to
+    // [004, 003, 002]; next_cursor = "002" (last of truncated).
+    // filter_map drops 002 → response orders = [004, 003].
+    let page1 = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::all(),
+            limit: 3,
+            cursor: None,
+        })
+        .await
+        .expect("page 1");
+    assert_eq!(page1.orders.len(), 2);
+    assert_eq!(page1.orders[0].order_id, "4");
+    assert_eq!(page1.orders[1].order_id, "3");
+    let cursor = page1.next_cursor.expect("next_cursor set");
+    assert_eq!(cursor.0, "002");
+
+    // Page 2: strict-< against "002" → returns only "001".
+    let page2 = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::all(),
+            limit: 3,
+            cursor: Some(cursor),
+        })
+        .await
+        .expect("page 2");
+    assert_eq!(page2.orders.len(), 1);
+    assert_eq!(page2.orders[0].order_id, "1");
+    assert!(page2.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
