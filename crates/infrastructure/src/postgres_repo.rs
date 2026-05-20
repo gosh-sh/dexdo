@@ -41,6 +41,7 @@ use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
 use num_bigint::BigUint;
 use sqlx::PgPool;
+use tracing::error;
 use tracing::warn;
 
 #[derive(Debug, Clone)]
@@ -611,8 +612,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None
         };
 
-        // `order_from_row` returns `None` for projector-bug rows (logs a
-        // warn! inside). `next_cursor` was captured above from the
+        // `order_from_row` returns `None` for projector-bug rows (logs an
+        // error! inside). `next_cursor` was captured above from the
         // pre-filter tail, so a corrupt boundary row advances the cursor
         // past itself instead of freezing pagination — pinned by
         // `cursor_advances_past_corrupt_row_at_page_tail` in
@@ -785,7 +786,9 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
             } else if row.fully_filled {
                 // amount_remaining == 0 but status is still OPEN: projector bug.
                 // Fail closed — do NOT surface as New or silently mis-bucket.
-                warn!(
+                // error! (not warn!) because this is a storage-invariant violation
+                // operators must triage; per-occurrence is the right granularity.
+                error!(
                     order_id = %row.order_id,
                     market = %row.market_address,
                     "live_orders row has status=OPEN with amount_remaining=0 (projector bug); skipping"
@@ -799,8 +802,12 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
         "CANCELLED" => OrderStatus::Canceled,
         "REJECTED" => OrderStatus::Rejected,
         other => {
-            warn!(
+            // Unknown raw_status: either schema drift the read path
+            // hasn't caught up with, or read-model corruption. Either
+            // way it's an invariant violation — error!, not warn!.
+            error!(
                 order_id = %row.order_id,
+                market = %row.market_address,
                 raw_status = %other,
                 "live_orders row has unrecognised status; skipping"
             );

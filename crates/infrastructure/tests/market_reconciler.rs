@@ -39,8 +39,7 @@ async fn setup() -> Option<PgPool> {
 
 /// Per-invocation fixture scope. UUID-suffixed `pmp` / `orderbook` make every
 /// test run produce row addresses that cannot collide with prior runs or with
-/// sibling tests, sidestepping `markets_orderbook_address_unique`. Mirrors
-/// the `Scope::new` pattern in `crates/infrastructure/tests/open_orders.rs`.
+/// sibling tests, sidestepping `markets_orderbook_address_unique`.
 struct Scope {
     pmp: String,
     orderbook: String,

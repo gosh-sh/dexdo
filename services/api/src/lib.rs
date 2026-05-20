@@ -609,10 +609,10 @@ struct CreateOrderResponse {
 /// parallel to [`CreateOrderResponse`]: we only return facts the
 /// caller does not already have. `clientOrderId` is the value
 /// recorded on placement (`live_orders.client_order_id`) — useful
-/// for correlation with the prior POST. The final state arrives
-/// later through `/api/v1/openOrders` (the order disappears) and
-/// `/api/v1/allOrders` (CANCELED, or FILLED if matching raced the
-/// cancel). See `docs/tech-specs/write-api.md §Response` for
+/// for correlation with the prior POST. The final state —
+/// `CANCELED`, or `FILLED` if matching raced the cancel — becomes
+/// visible through `GET /api/v1/orders` once `OrderBook.OrderCancelled`
+/// projects. See `docs/tech-specs/write-api.md §Response` for
 /// `DELETE /api/v1/order`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

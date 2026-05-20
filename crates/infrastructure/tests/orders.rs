@@ -223,7 +223,7 @@ fn query_all(owner: &str) -> OrdersQuery {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-/// Test 1: owner scoping across all statuses.
+/// Owner scoping across all statuses.
 /// Seed owner-1 with one row per status (NEW=OPEN full, PARTIALLY_FILLED=OPEN
 /// partial, FILLED, CANCELLED). Seed owner-2 NEW row that must NOT appear.
 /// Assert: page returns exactly 4 owner-1 rows, in DESC placed_chain_order.
@@ -317,7 +317,7 @@ async fn returns_only_owner_rows_across_all_statuses() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 2: default status (is_all) returns all non-rejected buckets.
+/// Default status (is_all) returns all non-rejected buckets.
 /// Seed owner-1 with NEW + PARTIALLY_FILLED + FILLED + CANCELLED.
 /// No status filter. Assert: all four rows returned.
 #[tokio::test]
@@ -389,7 +389,7 @@ async fn default_status_returns_all_non_rejected_buckets() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 3: status CSV filter narrows results.
+/// Status CSV filter narrows results.
 /// Seed NEW + PARTIALLY_FILLED + FILLED + CANCELLED.
 /// Query with status=FILLED,CANCELED. Assert: only FILLED + CANCELLED rows.
 #[tokio::test]
@@ -476,11 +476,14 @@ async fn status_csv_filter_narrows_results() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 4: REJECTED filter returns empty set (no REJECTED rows seeded; the
-/// projector that writes 'REJECTED' rows ships separately).
+/// REJECTED filter narrows the result to rows whose stored status is
+/// REJECTED. The `live_orders.status` CHECK constraint (see
+/// `migrations/0001_initial.sql`) currently excludes `REJECTED`, so
+/// against this fixture the filter returns an empty page; the test
+/// pins the no-leakage-of-non-REJECTED-rows property.
 /// Do NOT attempt to insert a 'REJECTED' row — it would violate the CHECK.
 #[tokio::test]
-async fn rejected_filter_today_returns_empty_set() {
+async fn rejected_filter_returns_only_rejected_rows() {
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
     let scope = Scope::new();
@@ -559,7 +562,7 @@ async fn rejected_filter_today_returns_empty_set() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 5: canceled partial fill reports non-zero executed_qty.
+/// Canceled partial fill reports non-zero executed_qty.
 /// Seed: amount_initial=1000, amount_remaining=300, status='CANCELLED'.
 /// quantity_precision=2 → origQty="10.00", executedQty="7.00".
 #[tokio::test]
@@ -598,7 +601,7 @@ async fn canceled_partial_fill_reports_nonzero_executed_qty() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 6: descending placed_chain_order sort.
+/// Descending placed_chain_order sort.
 /// Seed 3 rows with placed_chain_order "001", "002", "003".
 /// Assert: response order is "003", "002", "001".
 #[tokio::test]
@@ -635,7 +638,7 @@ async fn descending_placed_chain_order_sort() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 7: cursor advances strictly below last returned.
+/// Cursor advances strictly below last returned.
 /// Seed 6 rows with placed_chain_order "001".."006".
 /// Page 1 limit=4 → "006","005","004","003", next_cursor="003".
 /// Page 2 with cursor → "002","001", next_cursor=None.
@@ -697,7 +700,7 @@ async fn cursor_advances_strictly_below_last_returned() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 8: cursor stable when open row transitions to FILLED between pages.
+/// Cursor stable when open row transitions to FILLED between pages.
 /// Seed 4 OPEN rows; fetch page 1 with limit=2 (gets the two highest
 /// placed_chain_order). Mutate row at logical position 3 to FILLED.
 /// Fetch page 2 with the cursor — default status filter must still surface
@@ -778,7 +781,7 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 9: unknown (marketAddress, symbol) pair returns InvalidMarketOrSymbol.
+/// Unknown (marketAddress, symbol) pair returns InvalidMarketOrSymbol.
 #[tokio::test]
 async fn pair_unknown_returns_invalid_market_or_symbol() {
     let Some(pool) = setup().await else { return };
@@ -808,7 +811,7 @@ async fn pair_unknown_returns_invalid_market_or_symbol() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 10: unreconciled market pair returns InvalidMarketOrSymbol.
+/// Unreconciled market pair returns InvalidMarketOrSymbol.
 /// Insert a market row WITHOUT `last_reconciled_at` (NULL).
 /// Query with that pair. Assert: DomainError::InvalidMarketOrSymbol.
 #[tokio::test]
@@ -839,11 +842,11 @@ async fn unreconciled_market_pair_returns_invalid_market_or_symbol() {
     scope.cleanup(&pool).await;
 }
 
-/// Test 11: cursor stays unstuck when the row at the page tail fails
+/// Cursor stays unstuck when the row at the page tail fails
 /// the mapper (projector-bug scenario: OPEN row with `amount_remaining = 0`).
 ///
 /// `list_orders` builds `next_cursor` from the last truncated raw row
-/// BEFORE `filter_map(order_from_row.ok())` drops corrupt rows. Without
+/// BEFORE `filter_map(order_from_row)` drops corrupt rows. Without
 /// this ordering, a corrupt row at the page boundary would freeze
 /// pagination: if `next_cursor` were taken from the last
 /// successfully-rendered row instead, the next page would re-query the
@@ -879,7 +882,7 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
     )
     .await;
     // Row 002: OPEN + amount_remaining=0 — projector bug; the mapper
-    // logs warn and returns Err, the row is filtered out of the response.
+    // logs and returns None, the row is filtered out of the response.
     insert_order(
         &pool,
         &scope.book_yes,

@@ -510,7 +510,7 @@ async fn limit_out_of_range_returns_minus_1102() {
     }
 }
 
-// non-numeric limit → -1130 / 400 (distinct from -1102 above)
+// non-numeric limit → -1130 / 400 (out-of-range numerics get -1102; this is the parse-failure path)
 
 #[tokio::test]
 async fn non_numeric_limit_returns_minus_1130() {
@@ -568,8 +568,11 @@ async fn get_orders_page(
     let canonical = canonical_query(&params);
     let sig = sign(&scope.api_secret_hex, &canonical, b"");
 
-    let mut req = TestClient::get("http://test/api/v1/orders")
-        .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true);
+    let mut req = TestClient::get("http://test/api/v1/orders").add_header(
+        "X-DODEX-APIKEY",
+        scope.api_key.as_str(),
+        true,
+    );
     if let Some(c) = cursor {
         req = req.query("cursor", c);
     }

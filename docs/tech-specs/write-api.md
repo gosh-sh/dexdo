@@ -276,7 +276,7 @@ One SELECT joins [`live_orders`](data-schema.md#live_orders) ⨝ [`markets`](dat
 - `markets.pmp_address = :marketAddress` AND `market_outcomes.symbol = :symbol`. The `pmp_address` column is the SQL spelling of the public `marketAddress` field; the alias dates from the contract-level naming.
 - `live_orders.order_id = :orderId` AND `live_orders.status = 'OPEN'`.
 - `live_orders.owner_pn_address = :pn_address` — pins the caller as the owner of the row.
-- `live_orders.amount_remaining > 0` — same belt-and-suspenders predicate `/api/v1/openOrders` uses. A row could in principle linger as `status = 'OPEN'` with `amount_remaining = 0` in the brief window before `apply_order_filled` flips it to `FILLED`; the gate keeps that transient slice invisible to cancel.
+- `live_orders.amount_remaining > 0` — same belt-and-suspenders predicate the `/api/v1/orders` read path applies to OPEN rows. A row could in principle linger as `status = 'OPEN'` with `amount_remaining = 0` in the brief window before `apply_order_filled` flips it to `FILLED`; the gate keeps that transient slice invisible to cancel.
 
 A miss surfaces as `UnknownOrder` → 404 / -2011 with **no distinction** between "order does not exist", "order exists but belongs to another account", "order is not OPEN anymore", or "marketAddress/symbol does not match the order's actual market". This is deliberate: differentiating those cases would leak the existence (and account binding) of orders the caller does not own.
 
@@ -320,9 +320,9 @@ A successful submission returns the four-field body from [api-spec §Cancel Orde
 | `transactTime` | `now_millis()` captured once at the start of the handler. |
 | `status` | Always `"PENDING_CANCEL"` — `PrivateNote.cancelOrder` has accepted the request and forwarded to OrderBook, but the order has **not been removed from the book yet**. `OrderBook` will emit `OrderCancelled` once it dequeues the entry, and the indexer will flip [`live_orders.status`](data-schema.md#live_orders) to `CANCELLED` then. |
 
-The client correlates by `orderId` against `/api/v1/openOrders` (the order disappears) and `/api/v1/allOrders` (it surfaces as `CANCELED`, or `FILLED` if matching raced the cancel).
+The client correlates by `orderId` against `/api/v1/orders` (the stored status flips to `CANCELED`, or to `FILLED` if matching raced the cancel).
 
-`PENDING_CANCEL` is listed in [api-spec §Order Status](../api-spec.md#order-status); it is the only status `DELETE /api/v1/order` returns on success. Strictly additive — `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` still arrive through `/api/v1/openOrders` and `/api/v1/allOrders` and existing client switches keep working.
+`PENDING_CANCEL` is listed in [api-spec §Order Status](../api-spec.md#order-status); it is the only status `DELETE /api/v1/order` returns on success. Strictly additive — `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` still arrive through `/api/v1/orders` and existing client switches keep working.
 
 ### Failure surface
 
@@ -342,7 +342,7 @@ Three failure classes — two synchronous, one async — same shape as POST.
    - **Owner mismatch** — `_doCancel` silently no-ops if `o.depositHash` does not match the caller's. The pre-submit ownership lookup makes this case unreachable under normal operation; it remains possible only under read-model corruption.
    - **Queue overflow** — `OrderBook.Rejected` fires; the indexer records the raw event but does not touch `live_orders`. The order stays `OPEN`.
 
-   An HTTP 200 `PENDING_CANCEL` is therefore not a guarantee that the cancel will land — it confirms only that `PrivateNote.cancelOrder` accepted the request. Clients detect class-3 outcomes by polling `/api/v1/openOrders` and `/api/v1/allOrders` and reasoning over the disappearance (or non-disappearance) of the `orderId`.
+   An HTTP 200 `PENDING_CANCEL` is therefore not a guarantee that the cancel will land — it confirms only that `PrivateNote.cancelOrder` accepted the request. Clients detect class-3 outcomes by polling `/api/v1/orders` and observing whether the `orderId`'s stored status flips off `PENDING_CANCEL` within a reasonable window.
 
 Transport-level failures (gateway drop, decode error) collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error`, same as POST.
 

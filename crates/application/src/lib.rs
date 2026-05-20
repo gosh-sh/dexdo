@@ -255,8 +255,9 @@ pub const ORDERS_MAX_LIMIT: u16 = 500;
 /// Caller-supplied filter on order status. `is_all()` means "no filter,
 /// every row passes"; otherwise the inner set is the canonical subset
 /// of [`OrderStatus`] tokens the caller listed in the request `status`
-/// CSV. `PendingNew` is rejected at parse time — it is a write-side
-/// synthetic status and never appears on a `live_orders` row.
+/// CSV. `PendingNew` and `PendingCancel` are rejected at parse time —
+/// both are write-side synthetic statuses and never appear on a
+/// `live_orders` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderStatusSet(std::collections::BTreeSet<OrderStatus>);
 
@@ -264,8 +265,8 @@ impl OrderStatusSet {
     /// Parse the request `status` parameter. `None` or all-whitespace
     /// means "all statuses"; anything else is split on `,`, trimmed,
     /// de-duplicated, and matched against the allow-list. An unknown
-    /// token (or `PENDING_NEW`, which is write-side only) returns
-    /// [`DomainError::InvalidParameter`].
+    /// token (or `PENDING_NEW` / `PENDING_CANCEL`, which are write-side
+    /// only) returns [`DomainError::InvalidParameter`].
     ///
     /// Whitespace-only input is treated as "all statuses" by design.
     /// This is asymmetric with the `cursor` parameter — a
@@ -865,8 +866,8 @@ where
             _ => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
         };
 
-        let status =
-            OrderStatusSet::from_csv(input.status.as_deref()).map_err(|err| anyhow::anyhow!(err))?;
+        let status = OrderStatusSet::from_csv(input.status.as_deref())
+            .map_err(|err| anyhow::anyhow!(err))?;
 
         let limit = match input.limit {
             None => ORDERS_DEFAULT_LIMIT,
@@ -1464,10 +1465,14 @@ mod tests {
     }
 
     #[test]
-    fn status_set_rejects_pending_new() {
-        // PendingNew is a write-side synthetic status and must not be
-        // accepted as a /orders filter — it never appears on a live_orders row.
+    fn status_set_rejects_pending_states() {
+        // PendingNew and PendingCancel are write-side synthetic statuses
+        // and must not be accepted as a /orders filter — neither appears
+        // on a live_orders row.
         let err = OrderStatusSet::from_csv(Some("PENDING_NEW")).expect_err("pending_new rejected");
+        assert_eq!(err, DomainError::InvalidParameter);
+        let err =
+            OrderStatusSet::from_csv(Some("PENDING_CANCEL")).expect_err("pending_cancel rejected");
         assert_eq!(err, DomainError::InvalidParameter);
     }
 
