@@ -183,12 +183,11 @@ impl Authenticator for PostgresAuthenticator {
             );
             DomainError::Unexpected
         })?;
-        let pn_seckey = SensitiveBytes::seckey(pn_seckey_plain).map_err(|err| {
+        let pn_seckey = SensitiveBytes::seckey(pn_seckey_plain).inspect_err(|_err| {
             tracing::error!(
                 account_id = %row.account_id,
                 "auth failed: pn_seckey plaintext has wrong length",
             );
-            err
         })?;
 
         // 7. Parse permissions. Unknown enum labels are skipped with a
