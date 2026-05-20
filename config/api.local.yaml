@@ -6,7 +6,7 @@ server:
   host: 0.0.0.0
   port: 8080
   # Enforced by the request_timeout hoop in services/api. Must exceed
-  # every chain timeout (place_order, cancel_order) by a safety margin —
+  # every chain timeout (place_order, cancel_order, place_batch) by a safety margin —
   # cutting off the HTTP request while the chain call is still in flight
   # would land the operation on chain while returning 504 to the client,
   # who would then not know its id (the worst failure mode for

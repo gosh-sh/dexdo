@@ -1110,7 +1110,7 @@ where
         input: CreateBatchOrdersInput,
     ) -> Result<SubmittedBatchOrders, DomainError> {
         // Empty batch is a client-shape error. The chain enforces the
-        // same (`ERR_EMPTY_BATCH`) but failing fast saves a round-trip
+        // same (162 `ERR_EMPTY_BATCH`) but failing fast saves a round-trip
         // and avoids needlessly contending for the per-PN `_busy` lock.
         if input.orders.is_empty() {
             return Err(DomainError::InvalidParameter);
@@ -1140,7 +1140,7 @@ where
         }
         // Per-outcome cap. Authoritative source is `/api/v1/markets`
         // (`outcome.max_batch_size`); the chain enforces the same
-        // (`ERR_BATCH_TOO_LARGE`). Reject locally so a misbehaving
+        // (161 `ERR_BATCH_TOO_LARGE`). Reject locally so a misbehaving
         // client gets `-1130 / 400` instead of paying a chain
         // round-trip on a doomed batch.
         if input.orders.len() > outcome.max_batch_size as usize {

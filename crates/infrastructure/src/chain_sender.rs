@@ -270,7 +270,9 @@ fn classify_chain_outcome<T>(
         Ok(Err(app_err)) => Err(map_bee_dex_error(&app_err, entry_point)),
         Err(_elapsed) => {
             // Gateway did not respond within the configured budget
-            // (`chain.{place,cancel}_order_timeout_ms`). Most often a
+            // (`chain.place_order_timeout_ms`,
+            // `chain.cancel_order_timeout_ms`,
+            // `chain.place_batch_timeout_ms`). Most often a
             // network partition or a gateway-side deadlock. Surface as
             // `RequestTimeout` (504 / -1007) so the client receives the
             // same "retry with the same id" contract as the HTTP

@@ -467,8 +467,9 @@ async fn over_max_batch_size_returns_400_minus_1130() {
 #[tokio::test]
 async fn per_item_missing_side_returns_400_minus_1102() {
     let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
-    let sender: SharedChainSender = Arc::new(RecordingBatchSender::ok());
-    let service = setup_with(repo, sender);
+    let sender = Arc::new(RecordingBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
 
     let body = valid_body_with(vec![
         valid_item("11"),
@@ -484,13 +485,15 @@ async fn per_item_missing_side_returns_400_minus_1102() {
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1102);
+    assert!(sender.calls().is_empty());
 }
 
 #[tokio::test]
 async fn per_item_invalid_side_returns_400_minus_1130() {
     let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
-    let sender: SharedChainSender = Arc::new(RecordingBatchSender::ok());
-    let service = setup_with(repo, sender);
+    let sender = Arc::new(RecordingBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
 
     let body = valid_body_with(vec![
         valid_item("11"),
@@ -505,6 +508,7 @@ async fn per_item_invalid_side_returns_400_minus_1130() {
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1130);
+    assert!(sender.calls().is_empty());
 }
 
 #[tokio::test]
