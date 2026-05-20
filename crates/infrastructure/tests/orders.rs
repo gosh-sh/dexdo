@@ -439,6 +439,24 @@ async fn default_status_returns_all_non_rejected_buckets() {
     scope.cleanup(&pool).await;
 }
 
+/// Empty owner baseline: a new account with no attributed rows receives an
+/// empty terminal page, without market joins or cursor state getting involved.
+#[tokio::test]
+async fn owner_with_no_orders_returns_empty_page() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
+
+    assert!(page.orders.is_empty());
+    assert!(page.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
 /// Rows missing either chain timestamp must be filtered in SQL before the
 /// mapper decodes them into non-null `time` / `updateTime` fields. This
 /// covers both duplicated `list_orders` SQL blocks.
@@ -1473,6 +1491,139 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         })
         .await
         .expect("page 2");
+    assert_eq!(page2.orders.len(), 1);
+    assert_eq!(page2.orders[0].order_id, "1");
+    assert!(page2.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+/// Cursor stays unstuck when a page-tail row carries an unrecognised raw
+/// status. The CHECK constraint normally prevents this; the test drops and
+/// restores it in a private scope to model schema drift/read-model corruption.
+#[tokio::test]
+async fn cursor_advances_past_unknown_status_row_at_page_tail() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_000,
+        "001",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "002",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        3,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_002,
+        "003",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        4,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_003,
+        "004",
+    )
+    .await;
+
+    sqlx::query("alter table live_orders drop constraint if exists live_orders_status_check")
+        .execute(&pool)
+        .await
+        .expect("drop status check");
+    sqlx::query(
+        "update live_orders set status = 'SOMETHING_ELSE'
+              where orderbook_address = $1 and order_id = 2::numeric",
+    )
+    .bind(&scope.book_yes)
+    .execute(&pool)
+    .await
+    .expect("corrupt status");
+
+    let page1_result = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::all(),
+            limit: 3,
+            cursor: None,
+        })
+        .await;
+
+    let page2_result = match &page1_result {
+        Ok(page1) => page1.next_cursor.clone().map(|cursor| async {
+            repo.list_orders(&OrdersQuery {
+                owner_pn_address: scope.owner.clone(),
+                market: None,
+                status: OrderStatusSet::all(),
+                limit: 3,
+                cursor: Some(cursor),
+            })
+            .await
+        }),
+        Err(_) => None,
+    };
+    let page2_result = match page2_result {
+        Some(fut) => Some(fut.await),
+        None => None,
+    };
+
+    sqlx::query("update live_orders set status = 'OPEN' where status not in ('OPEN', 'FILLED', 'CANCELLED')")
+        .execute(&pool)
+        .await
+        .expect("clear corrupt status before restoring check");
+
+    sqlx::query(
+        "alter table live_orders add constraint live_orders_status_check
+             check (status in ('OPEN', 'FILLED', 'CANCELLED'))",
+    )
+    .execute(&pool)
+    .await
+    .expect("restore status check");
+
+    let page1 = page1_result.expect("page 1");
+    assert_eq!(page1.orders.len(), 2);
+    assert_eq!(page1.orders[0].order_id, "4");
+    assert_eq!(page1.orders[1].order_id, "3");
+    let cursor = page1.next_cursor.expect("next_cursor set");
+    assert_eq!(cursor.as_str(), "002");
+
+    let page2 = page2_result.expect("page 2 attempted").expect("page 2");
     assert_eq!(page2.orders.len(), 1);
     assert_eq!(page2.orders[0].order_id, "1");
     assert!(page2.next_cursor.is_none());

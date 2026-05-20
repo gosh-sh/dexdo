@@ -223,7 +223,14 @@ pub struct DepthSnapshot {
     pub asks: Vec<PriceLevel>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderIdentity {
+    Chain(String),
+    Rejected,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Order {
     pub market_address: MarketAddress,
     pub symbol: Symbol,
@@ -241,6 +248,79 @@ pub struct Order {
     pub side: OrderSide,
     pub time: i64,
     pub update_time: i64,
+}
+
+impl Order {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        market_address: MarketAddress,
+        symbol: Symbol,
+        identity: OrderIdentity,
+        client_order_id: String,
+        price: String,
+        orig_qty: String,
+        executed_qty: String,
+        status: OrderStatus,
+        time_in_force: TimeInForce,
+        order_type: OrderType,
+        side: OrderSide,
+        time: i64,
+        update_time: i64,
+    ) -> Result<Self, DomainError> {
+        let order_id = match (status, identity) {
+            (OrderStatus::Rejected, OrderIdentity::Rejected) => {
+                if !decimal_string_is_zero(&executed_qty)? {
+                    return Err(DomainError::MarketInconsistent);
+                }
+                String::new()
+            }
+            (OrderStatus::Rejected, OrderIdentity::Chain(_)) => {
+                return Err(DomainError::MarketInconsistent);
+            }
+            (_, OrderIdentity::Rejected) => return Err(DomainError::MarketInconsistent),
+            (_, OrderIdentity::Chain(order_id)) => {
+                if order_id.trim().is_empty() {
+                    return Err(DomainError::MarketInconsistent);
+                }
+                order_id
+            }
+        };
+
+        if status == OrderStatus::Filled && decimal_string_is_zero(&executed_qty)? {
+            return Err(DomainError::MarketInconsistent);
+        }
+
+        Ok(Self {
+            market_address,
+            symbol,
+            order_id,
+            client_order_id,
+            price,
+            orig_qty,
+            executed_qty,
+            status,
+            time_in_force,
+            order_type,
+            side,
+            time,
+            update_time,
+        })
+    }
+}
+
+fn decimal_string_is_zero(s: &str) -> Result<bool, DomainError> {
+    let normalized = s.trim();
+    if normalized.is_empty() {
+        return Err(DomainError::MarketInconsistent);
+    }
+    let (whole, fractional) = normalized.split_once('.').unwrap_or((normalized, ""));
+    if whole.is_empty() && fractional.is_empty() {
+        return Err(DomainError::MarketInconsistent);
+    }
+    if !whole.chars().chain(fractional.chars()).all(|c| c.is_ascii_digit()) {
+        return Err(DomainError::MarketInconsistent);
+    }
+    Ok(whole.chars().all(|c| c == '0') && fractional.chars().all(|c| c == '0'))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,11 +467,9 @@ impl TimeInForce {
 /// `PendingNew`; the indexer-projected row in `live_orders` then
 /// surfaces as `NEW` through `GET /api/v1/orders`.
 ///
-/// Variant declaration order is load-bearing: the derived `Ord` is the
-/// declared discriminant order, and `OrderStatusSet::canonical_vec`
-/// (plus the read-API SQL fragment built from it) relies on that
-/// deterministic iteration. Do not reorder variants without auditing
-/// the depending sites.
+/// Variant declaration order is pinned by tests because API adapters and
+/// filters use deterministic status ordering for stable output and SQL
+/// composition. Do not reorder variants without auditing the depending sites.
 ///
 /// `PendingCancel` is the analogous state for cancellation: the moment
 /// `PrivateNote.cancelOrder` accepts and forwards to `OrderBook`, the
@@ -862,6 +940,48 @@ mod tests {
                 OrderStatus::Rejected,
             ]
         );
+    }
+
+    #[test]
+    fn order_constructor_rejects_filled_with_zero_executed_qty() {
+        let err = Order::new(
+            MarketAddress("0:market".into()),
+            Symbol("SYM".into()),
+            OrderIdentity::Chain("1".into()),
+            String::new(),
+            "1.00".into(),
+            "1.00".into(),
+            "0.00".into(),
+            OrderStatus::Filled,
+            TimeInForce::Gtc,
+            OrderType::Limit,
+            OrderSide::Buy,
+            1,
+            1,
+        )
+        .expect_err("FILLED with zero executed quantity rejected");
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn order_constructor_rejects_rejected_with_chain_identity() {
+        let err = Order::new(
+            MarketAddress("0:market".into()),
+            Symbol("SYM".into()),
+            OrderIdentity::Chain("123".into()),
+            String::new(),
+            "1.00".into(),
+            "1.00".into(),
+            "0.00".into(),
+            OrderStatus::Rejected,
+            TimeInForce::Gtc,
+            OrderType::Limit,
+            OrderSide::Buy,
+            1,
+            1,
+        )
+        .expect_err("REJECTED with chain identity rejected");
+        assert_eq!(err, DomainError::MarketInconsistent);
     }
 
     #[test]

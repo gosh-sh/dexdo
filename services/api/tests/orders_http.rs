@@ -578,6 +578,29 @@ async fn limit_out_of_range_returns_minus_1102() {
         assert_eq!(body.code, -1102);
     }
 
+    // limit=-1 (negative).
+    {
+        let ts = now_ms();
+        let canonical = canonical_query(&[
+            ("limit", "-1"),
+            ("recvWindow", "5000"),
+            ("timestamp", &ts.to_string()),
+        ]);
+        let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+        let mut resp = TestClient::get("http://test/api/v1/orders")
+            .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+            .query("limit", "-1")
+            .query("recvWindow", "5000")
+            .query("timestamp", ts.to_string())
+            .query("signature", sig)
+            .send(&service)
+            .await;
+        assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+        let body = resp.take_json::<ErrorBody>().await.expect("error body");
+        assert_eq!(body.code, -1102);
+    }
+
     // limit=65536 parses as i64 but exceeds both u16 and ORDERS_MAX_LIMIT;
     // it must remain an out-of-range numeric (-1102), not parse-invalid (-1130).
     {

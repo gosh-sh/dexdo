@@ -321,7 +321,7 @@ PrivateNote may emit additional confirmation events for account accounting (for 
 
 ### REJECTED — future work
 
-This is the scope deferred to a contracts + indexer follow-up PR, not implemented in the `/orders` merge.
+This scope depends on a contracts + indexer change outside the current read-model implementation.
 
 **Chain-side gap.** `OrderBook._notifyRejectedPlace` already calls `PrivateNote.onOrderRejected(...)` with the full original `PlaceParams` (outcomeId, isBuy, flags, price, amount, clientOrderId, opNonce). `onOrderRejected` restores the held balance but emits no public event. The external `OrderBook.Rejected(entryType, depositHash)` event has too little payload — no order parameters, no owner attribution — to reconstruct a `live_orders` row.
 
@@ -357,13 +357,13 @@ Destination tag: `address.makeAddrExtern(PRIVATENOTE_ORDER_REJECTED, bitCntAddre
 1. Add a `synthetic_id numeric(78,0) NOT NULL DEFAULT 0` column and extend the PK to `(orderbook_address, order_id, synthetic_id)`. REJECTED rows fill `synthetic_id` from a deterministic hash of `msg_chain_order`; all other lifecycles keep the default `0`.
 2. For REJECTED rows, store the hashed `msg_chain_order` directly in `order_id`, partitioning the id space ("real" chain ids are bounded by uint128; we can carve the high half for synthetic ids). Cheaper schema-wise but couples the column's meaning to its high bit.
 
-Decided when the follow-up PR is written; the choice should not perturb the `/orders` query plan (both options leave `(owner_pn_address, placed_chain_order)` as the seek key).
+Decide this with the contracts change; the choice should not perturb the `/orders` query plan (both options leave `(owner_pn_address, placed_chain_order)` as the seek key).
 
-**Schema impact.** Extend the `live_orders.status` CHECK to `IN ('OPEN', 'FILLED', 'CANCELLED', 'REJECTED')`. Either add `synthetic_id` (option 1) or document the high-bit reservation on `order_id` (option 2). Migration ships in the same follow-up PR; [`data-schema.md`](data-schema.md#live_orders) is updated synchronously.
+**Schema impact.** Extend the `live_orders.status` CHECK to `IN ('OPEN', 'FILLED', 'CANCELLED', 'REJECTED')`. Either add `synthetic_id` (option 1) or document the high-bit reservation on `order_id` (option 2). Update [`data-schema.md`](data-schema.md#live_orders) with the migration.
 
 **Idempotency.** `INSERT ... ON CONFLICT DO NOTHING` on the resulting PK. Replays of the same PN event must not double-write.
 
-**Test coverage** for the follow-up: scenarios in `crates/infrastructure/tests/orders.rs` exercising the projector with synthetic gateway fixtures, plus a `services/api/tests/orders_http.rs` case asserting that `status=REJECTED` switches from empty (pre-projector) to populated (post-projector) on the same fixture row.
+**Test coverage** for the contracts/indexer change: scenarios in `crates/infrastructure/tests/orders.rs` exercising the projector with synthetic gateway fixtures, plus a `services/api/tests/orders_http.rs` case asserting that `status=REJECTED` switches from empty before projector support to populated after projector support on the same fixture row.
 
 ### Test coverage
 

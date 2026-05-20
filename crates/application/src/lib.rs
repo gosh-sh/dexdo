@@ -252,14 +252,36 @@ pub struct GetDepthQuery {
 pub const ORDERS_DEFAULT_LIMIT: u16 = 100;
 pub const ORDERS_MAX_LIMIT: u16 = 500;
 
+/// Order statuses queryable through `GET /api/v1/orders`. This deliberately
+/// excludes write-side synthetic states (`PENDING_NEW`, `PENDING_CANCEL`) so
+/// SQL predicate construction cannot accidentally admit them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum QueryableOrderStatus {
+    New,
+    PartiallyFilled,
+    Filled,
+    Canceled,
+    Rejected,
+}
+
+impl QueryableOrderStatus {
+    pub fn as_public_status(self) -> OrderStatus {
+        match self {
+            Self::New => OrderStatus::New,
+            Self::PartiallyFilled => OrderStatus::PartiallyFilled,
+            Self::Filled => OrderStatus::Filled,
+            Self::Canceled => OrderStatus::Canceled,
+            Self::Rejected => OrderStatus::Rejected,
+        }
+    }
+}
+
 /// Caller-supplied filter on order status. `is_all()` means "no filter,
 /// every row passes"; otherwise the inner set is the canonical subset
-/// of [`OrderStatus`] tokens the caller listed in the request `status`
-/// CSV. `PendingNew` and `PendingCancel` are rejected at parse time —
-/// both are write-side synthetic statuses and never appear on a
-/// `live_orders` row.
+/// of queryable status tokens the caller listed in the request `status`
+/// CSV.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrderStatusSet(std::collections::BTreeSet<OrderStatus>);
+pub struct OrderStatusSet(std::collections::BTreeSet<QueryableOrderStatus>);
 
 impl OrderStatusSet {
     /// Parse the request `status` parameter. `None` or all-whitespace
@@ -291,11 +313,11 @@ impl OrderStatusSet {
             }
             had_token = true;
             let status = match trimmed {
-                "NEW" => OrderStatus::New,
-                "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
-                "FILLED" => OrderStatus::Filled,
-                "CANCELED" => OrderStatus::Canceled,
-                "REJECTED" => OrderStatus::Rejected,
+                "NEW" => QueryableOrderStatus::New,
+                "PARTIALLY_FILLED" => QueryableOrderStatus::PartiallyFilled,
+                "FILLED" => QueryableOrderStatus::Filled,
+                "CANCELED" => QueryableOrderStatus::Canceled,
+                "REJECTED" => QueryableOrderStatus::Rejected,
                 _ => return Err(DomainError::InvalidParameter),
             };
             set.insert(status);
@@ -314,14 +336,10 @@ impl OrderStatusSet {
         self.0.is_empty()
     }
 
-    pub fn canonical_vec(&self) -> Vec<OrderStatus> {
-        // BTreeSet iteration order is the enum's `Ord` — see the
-        // load-bearing-declaration-order note on
-        // [`OrderStatus`](dodex_domain::OrderStatus) for the
-        // authoritative variant list. The write-side synthetic states
-        // (`PendingNew`, `PendingCancel`) are rejected at parse time
-        // by `from_csv` and never enter the set, so the result is
-        // stable and pending-state-free.
+    pub fn canonical_vec(&self) -> Vec<QueryableOrderStatus> {
+        // BTreeSet iteration order is the enum's `Ord`. The enum contains
+        // only read-queryable statuses, so SQL composition has no pending
+        // states to defend against.
         self.0.iter().copied().collect()
     }
 }
@@ -331,10 +349,10 @@ impl OrderStatusSet {
 /// page; the server reads it as a lexicographic token via the strict
 /// `<` predicate in [`PostgresReadModelRepository::list_orders`].
 ///
-/// Construction goes through [`OrdersCursor::new`] which enforces the
-/// non-blank invariant. Values sourced from persisted `placed_chain_order`
-/// columns use [`OrdersCursor::from_db_token`], which applies the same
-/// invariant before the token is exposed as `nextCursor`.
+/// Construction goes through [`OrdersCursor::new`] which trims client input
+/// and rejects blank values. Values sourced from persisted `placed_chain_order`
+/// columns use [`OrdersCursor::from_db_token`], which treats blank storage
+/// values as read-model corruption.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrdersCursor(String);
 
@@ -352,7 +370,10 @@ impl OrdersCursor {
     }
 
     pub fn from_db_token(raw: String) -> Result<Self, DomainError> {
-        Self::new(raw)
+        if raw.trim().is_empty() {
+            return Err(DomainError::Unexpected);
+        }
+        Ok(Self(raw))
     }
 
     pub fn as_str(&self) -> &str {
@@ -846,8 +867,7 @@ where
 /// validation happens inside `execute`.
 pub struct GetOrdersInput {
     pub owner_pn_address: String,
-    pub market_address: Option<MarketAddress>,
-    pub symbol: Option<Symbol>,
+    pub market_filter: Option<OrdersMarketFilter>,
     pub status: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
@@ -868,14 +888,6 @@ where
     R: MarketReadRepository,
 {
     pub async fn execute(&self, input: GetOrdersInput) -> Result<OrdersPage, anyhow::Error> {
-        let market = match (input.market_address, input.symbol) {
-            (None, None) => None,
-            (Some(market_address), Some(symbol)) => {
-                Some(OrdersMarketFilter { market_address, symbol })
-            }
-            _ => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
-        };
-
         let status = OrderStatusSet::from_csv(input.status.as_deref())
             .map_err(|err| anyhow::anyhow!(err))?;
 
@@ -893,7 +905,7 @@ where
         self.repo
             .list_orders(&OrdersQuery {
                 owner_pn_address: input.owner_pn_address,
-                market,
+                market: input.market_filter,
                 status,
                 limit,
                 cursor,
@@ -1459,7 +1471,14 @@ mod tests {
     fn status_set_parses_csv_and_dedups() {
         let set = OrderStatusSet::from_csv(Some("NEW, FILLED ,NEW, CANCELED")).expect("valid CSV");
         let canonical = set.canonical_vec();
-        assert_eq!(canonical, vec![OrderStatus::New, OrderStatus::Filled, OrderStatus::Canceled]);
+        assert_eq!(
+            canonical,
+            vec![
+                QueryableOrderStatus::New,
+                QueryableOrderStatus::Filled,
+                QueryableOrderStatus::Canceled,
+            ]
+        );
     }
 
     #[test]
@@ -1488,11 +1507,11 @@ mod tests {
             assert_eq!(
                 set.canonical_vec(),
                 vec![
-                    OrderStatus::New,
-                    OrderStatus::PartiallyFilled,
-                    OrderStatus::Filled,
-                    OrderStatus::Canceled,
-                    OrderStatus::Rejected,
+                    QueryableOrderStatus::New,
+                    QueryableOrderStatus::PartiallyFilled,
+                    QueryableOrderStatus::Filled,
+                    QueryableOrderStatus::Canceled,
+                    QueryableOrderStatus::Rejected,
                 ],
                 "canonical order changed for input {csv}"
             );
@@ -1516,12 +1535,19 @@ mod tests {
         // The cursor is server-issued (`placed_chain_order` of the last
         // row of the previous page) and round-trips via the client. We
         // trim so a client that re-emits the value with stray padding
-        // is forgiven, but the inner string must remain byte-identical
-        // to what the server originally returned — otherwise the
-        // strict `<` predicate in `list_orders` advances the cursor to
-        // the wrong row and pagination silently breaks.
+        // is forgiven; after trimming, the value must match a server-issued
+        // token or the strict `<` predicate in `list_orders` advances the
+        // cursor to the wrong row and pagination silently breaks.
         let cursor = OrdersCursor::new("  003  ".into()).expect("trims and accepts");
         assert_eq!(cursor.as_str(), "003");
+    }
+
+    #[test]
+    fn orders_cursor_rejects_blank_db_token_as_unexpected() {
+        assert_eq!(
+            OrdersCursor::from_db_token("   ".into()).expect_err("blank DB token rejected"),
+            DomainError::Unexpected
+        );
     }
 
     #[test]

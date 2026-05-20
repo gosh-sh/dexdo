@@ -348,5 +348,6 @@ Every schema change ships as a new numbered migration file. Conventions:
 - For new columns, prefer `add column if not exists` with a sensible default — never break startup on an empty database.
 - Partial indices are preferred over full ones for "pending row" predicates; they shrink with reconciliation progress.
 - Add a header comment on every migration explaining *why* the change is needed and which code path requires it. Migrations are read by reviewers and operators as much as the code is.
+- Pre-deploy check: index builds inside sqlx transactions can block writers until the build finishes. For hot tables, estimate the lock window from production row counts before deploying or run the change through a non-transactional migration path.
 
 The full migration set (`migrations/*.sql`) is the canonical reference; this document summarises intent but does not replace it.

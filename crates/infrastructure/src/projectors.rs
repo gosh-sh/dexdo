@@ -629,12 +629,27 @@ async fn apply_order_filled(
     let filled_amount = uint_field_to_decimal(&event.value, "filledAmount")?;
     let chain_order = node_chain_order(node, "OrderFilled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    if chain_seconds.is_none() {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            msg_id = %node.msg_id,
+            created_at = ?node.created_at,
+            "OrderFilled has no parseable chain time; chain_updated_at will not advance",
+        );
+    }
 
     let updated = sqlx::query(
         r#"update live_orders
-              set amount_remaining = greatest(amount_remaining - $3::numeric, 0::numeric),
-                  status = case when amount_remaining - $3::numeric <= 0
-                                then 'FILLED' else status end,
+              set amount_remaining = case
+                                      when status = 'CANCELLED' then amount_remaining
+                                      else greatest(amount_remaining - $3::numeric, 0::numeric)
+                                  end,
+                  status = case
+                           when status = 'CANCELLED' then 'CANCELLED'
+                           when amount_remaining - $3::numeric <= 0 then 'FILLED'
+                           else status
+                       end,
                   last_chain_order = greatest(last_chain_order, $4),
                   chain_updated_at = greatest(chain_updated_at, to_timestamp($5::double precision)),
                   updated_at = now()
@@ -672,6 +687,15 @@ async fn apply_order_cancelled(
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let chain_order = node_chain_order(node, "OrderCancelled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    if chain_seconds.is_none() {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            msg_id = %node.msg_id,
+            created_at = ?node.created_at,
+            "OrderCancelled has no parseable chain time; chain_updated_at will not advance",
+        );
+    }
 
     // `status` uses a CASE expression so an OrderCancelled that races a
     // full fill cannot demote a `FILLED` row to `CANCELLED`. The chain

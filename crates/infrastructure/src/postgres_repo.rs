@@ -18,6 +18,7 @@ use dodex_application::OrderStatusSet;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
+use dodex_application::QueryableOrderStatus;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -29,6 +30,7 @@ use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
 use dodex_domain::OracleEntry;
 use dodex_domain::Order;
+use dodex_domain::OrderIdentity;
 use dodex_domain::OrderSide;
 use dodex_domain::OrderStatus;
 use dodex_domain::OrderType;
@@ -610,11 +612,20 @@ impl MarketReadRepository for PostgresReadModelRepository {
         }
 
         let next_cursor = if has_more {
-            orders_raw
-                .last()
-                .map(|row| OrdersCursor::from_db_token(row.placed_chain_order.clone()))
-                .transpose()
-                .map_err(|err| anyhow!(err))?
+            match orders_raw.last() {
+                Some(row) => Some(
+                    OrdersCursor::from_db_token(row.placed_chain_order.clone()).map_err(|err| {
+                        error!(
+                            market = %row.market_address,
+                            order_id = %row.order_id,
+                            placed_chain_order = %row.placed_chain_order,
+                            "live_orders row has invalid placed_chain_order for nextCursor"
+                        );
+                        anyhow!(err)
+                    })?,
+                ),
+                None => None,
+            }
         } else {
             None
         };
@@ -625,7 +636,16 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // past itself instead of freezing pagination — pinned by
         // `cursor_advances_past_corrupt_row_at_page_tail` in
         // crates/infrastructure/tests/orders.rs.
+        let raw_len = orders_raw.len();
         let orders = orders_raw.into_iter().filter_map(order_from_row).collect::<Vec<_>>();
+        let skipped = raw_len.saturating_sub(orders.len());
+        if skipped > 0 {
+            error!(
+                skipped_rows = skipped,
+                returned_rows = orders.len(),
+                "list_orders skipped corrupt live_orders rows while rendering page"
+            );
+        }
 
         Ok(OrdersPage { orders, next_cursor })
     }
@@ -732,14 +752,11 @@ fn build_status_predicate(set: &OrderStatusSet) -> Option<String> {
         .canonical_vec()
         .into_iter()
         .map(|status| match status {
-            OrderStatus::New => NEW,
-            OrderStatus::PartiallyFilled => PARTIALLY_FILLED,
-            OrderStatus::Filled => FILLED,
-            OrderStatus::Canceled => CANCELED,
-            OrderStatus::Rejected => REJECTED,
-            OrderStatus::PendingNew | OrderStatus::PendingCancel => unreachable!(
-                "OrderStatusSet::from_csv rejects PENDING_NEW and PENDING_CANCEL; reaching this arm means the application layer was bypassed"
-            ),
+            QueryableOrderStatus::New => NEW,
+            QueryableOrderStatus::PartiallyFilled => PARTIALLY_FILLED,
+            QueryableOrderStatus::Filled => FILLED,
+            QueryableOrderStatus::Canceled => CANCELED,
+            QueryableOrderStatus::Rejected => REJECTED,
         })
         .collect();
 
@@ -789,7 +806,15 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     // (for OPEN rows) the SQL-side `fully_filled` boolean.
     let status = match row.raw_status.as_str() {
         "OPEN" => {
-            let executed_is_zero = decimal_string_is_zero(&row.executed_qty);
+            let Some(executed_is_zero) = decimal_string_is_zero(&row.executed_qty) else {
+                error!(
+                    order_id = %row.order_id,
+                    market = %row.market_address,
+                    executed_qty = %row.executed_qty,
+                    "live_orders row has malformed executed quantity; skipping"
+                );
+                return None;
+            };
             if executed_is_zero {
                 OrderStatus::New
             } else if row.fully_filled {
@@ -811,7 +836,16 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
         "CANCELLED" => OrderStatus::Canceled,
         // Awaiting the contracts-side follow-up that extends the CHECK
         // constraint; current migrated rows cannot legally reach this arm.
-        "REJECTED" => OrderStatus::Rejected,
+        "REJECTED" => {
+            if row.order_id != "0" {
+                error!(
+                    order_id = %row.order_id,
+                    market = %row.market_address,
+                    "REJECTED live_orders row has unexpected chain order_id; rendering empty public orderId"
+                );
+            }
+            OrderStatus::Rejected
+        }
         other => {
             // Unknown raw_status: either schema drift the read path
             // hasn't caught up with, or read-model corruption. Either
@@ -826,36 +860,48 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
         }
     };
 
-    // REJECTED orders never receive a chain-assigned order_id.
-    let order_id = if status == OrderStatus::Rejected { String::new() } else { row.order_id };
+    let identity = if status == OrderStatus::Rejected {
+        OrderIdentity::Rejected
+    } else {
+        OrderIdentity::Chain(row.order_id)
+    };
 
-    Some(Order {
-        market_address: MarketAddress(row.market_address),
-        symbol: Symbol(row.symbol),
-        order_id,
-        client_order_id: row.client_order_id,
-        price: scale_uint_to_decimal(
-            &row.price,
-            u32::try_from(row.price_precision.max(0)).unwrap_or(0),
-        ),
-        orig_qty: scale_uint_to_decimal(&row.orig_qty, quantity_scale),
-        executed_qty: scale_uint_to_decimal(&row.executed_qty, quantity_scale),
+    let order = Order::new(
+        MarketAddress(row.market_address.clone()),
+        Symbol(row.symbol),
+        identity,
+        row.client_order_id,
+        scale_uint_to_decimal(&row.price, u32::try_from(row.price_precision.max(0)).unwrap_or(0)),
+        scale_uint_to_decimal(&row.orig_qty, quantity_scale),
+        scale_uint_to_decimal(&row.executed_qty, quantity_scale),
         status,
-        time_in_force: TimeInForce::Gtc,
-        order_type: OrderType::Limit,
-        side: if row.is_buy { OrderSide::Buy } else { OrderSide::Sell },
+        TimeInForce::Gtc,
+        OrderType::Limit,
+        if row.is_buy { OrderSide::Buy } else { OrderSide::Sell },
         // The API contract is unix milliseconds; storage and cursor are at
         // microsecond precision. Truncating div is fine — sub-ms detail is
         // not exposed externally.
-        time: row.chain_created_at_us / 1_000,
-        update_time: row.chain_updated_at_us / 1_000,
-    })
+        row.chain_created_at_us / 1_000,
+        row.chain_updated_at_us / 1_000,
+    );
+
+    match order {
+        Ok(order) => Some(order),
+        Err(err) => {
+            error!(
+                market = %row.market_address,
+                error = ?err,
+                "live_orders row violates Order DTO invariants; skipping"
+            );
+            None
+        }
+    }
 }
 
-fn decimal_string_is_zero(s: &str) -> bool {
+fn decimal_string_is_zero(s: &str) -> Option<bool> {
     match BigUint::parse_bytes(s.as_bytes(), 10) {
-        Some(v) => v == BigUint::from(0_u8),
-        None => true,
+        Some(v) => Some(v == BigUint::from(0_u8)),
+        None => None,
     }
 }
 

@@ -104,6 +104,15 @@ cargo run -p dodex-indexer
 
 The API needs Postgres running and the indexer feeding it; see the service READMEs for the bring-up sequence.
 
+## Deployment notes
+
+Schema migrations run through `sqlx::migrate!` at service startup. Transactional
+index builds, including the `live_orders_owner_idx` migration for account order
+reads, can hold write-blocking locks for the duration of the index build on a hot
+table. Before a data-bearing deploy, review pending migrations for `CREATE INDEX`
+/ `DROP INDEX` statements and schedule the deploy window or use a
+non-transactional migration path if write stalls are unacceptable.
+
 ## License
 
 See [LICENSE.md](LICENSE.md).

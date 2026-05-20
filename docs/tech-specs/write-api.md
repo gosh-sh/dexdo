@@ -127,7 +127,7 @@ Until the upstream SDK enables `arbitrary_precision`, both paths therefore enfor
 
 The backend does not deduplicate coids against past requests; `OrderBook.placeOrder` enforces uniqueness across the PN's still-live coids on-chain and rejects collisions with a `Rejected` event (no `OrderPlaced`). A coid is free to reuse once the corresponding order is FILLED or CANCELLED; the API does not track this lifecycle and does not block coid reuse.
 
-<!-- TODO: widen the public coid space to the full `uint128` range
+<!-- TODO(Tracking: NODE-XXXX): widen the public coid space to the full `uint128` range
 once the upstream `ackinacki-kit` build enables `serde_json`'s
 `arbitrary_precision` feature on its TVM-client dependency. Until
 then the chain ABI is uint128 in name but uint64 in practice;

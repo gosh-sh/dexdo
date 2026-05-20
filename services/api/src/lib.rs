@@ -31,6 +31,7 @@ use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
 use dodex_application::NewOrderInput;
 use dodex_application::OrdersCursor;
+use dodex_application::OrdersMarketFilter;
 use dodex_domain::DomainError;
 use dodex_domain::Market;
 use dodex_domain::MarketAddress;
@@ -490,6 +491,11 @@ async fn get_orders(
 
     let market_address = non_empty_query(req, "marketAddress").map(MarketAddress);
     let symbol = non_empty_query(req, "symbol").map(Symbol);
+    let market_filter = match (market_address, symbol) {
+        (None, None) => None,
+        (Some(market_address), Some(symbol)) => Some(OrdersMarketFilter { market_address, symbol }),
+        _ => return Err(ApiError::from(DomainError::MissingParameter)),
+    };
     // status: raw CSV, validated by OrderStatusSet::from_csv inside the
     // use case. Absent / blank → "all statuses".
     let status = req.query::<String>("status");
@@ -498,10 +504,9 @@ async fn get_orders(
     // to -1130 ("Invalid value for a query or body parameter") per the
     // api-spec.md error table, which is the precise diagnosis for a
     // non-numeric `limit`. Out-of-range numeric inputs (e.g. `limit=501`
-    // or `limit=0`) still come back as -1102 ("Mandatory parameter was
-    // not sent" — the api-spec.md §Orders §Behaviour bullet treats
-    // limit-out-of-range as a -1102 case) because the use case applies
-    // the `[1, 500]` bound check after parsing succeeds.
+    // or `limit=0`) still come back as -1102 because the use case applies
+    // the `[1, 500]` bound check after parsing succeeds; see
+    // `DomainError::MissingParameter` for the Binance-shaped wire message.
     let limit = optional_typed_query::<i64>(req, "limit")?;
     let cursor = req.query::<String>("cursor");
 
@@ -509,8 +514,7 @@ async fn get_orders(
     let page = use_case
         .execute(GetOrdersInput {
             owner_pn_address: ctx.trading_pn.pn_address.clone(),
-            market_address,
-            symbol,
+            market_filter,
             status,
             limit,
             cursor,

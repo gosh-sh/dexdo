@@ -1160,6 +1160,103 @@ async fn orderplaced_full_fill_then_cancel_keeps_filled_status() {
 }
 
 #[tokio::test]
+async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let indexer = IndexerRepository::new(pool.clone());
+    let read_model = PostgresReadModelRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_cancel_then_fill";
+    let pmp = format!("0:{test}_pmp");
+    let symbol = format!("{test}_YES");
+    let orderbook_addr = format!("0:{test}_book");
+    let owner_pn = format!("0:{test}_owner");
+    let order_id = "51";
+    let msg_id_place = format!("{test}-aplace-msg");
+    let msg_id_cancel = format!("{test}-bcancel-msg");
+    let msg_id_fill = format!("{test}-cfill-msg");
+    let msg_id_confirm = format!("{test}-dconfirm-msg");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_place.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_cancel.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_fill.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_confirm.as_str()),
+            ("delete from market_outcomes where symbol = $1", symbol.as_str()),
+            ("delete from markets where pmp_address = $1", pmp.as_str()),
+        ],
+    )
+    .await;
+
+    insert_reconciled_market(&pool, &pmp, &symbol, &orderbook_addr).await;
+    insert_raw(
+        &pool,
+        &msg_id_place,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        &json!({
+            "orderId": order_id,
+            "outcomeId": "1",
+            "isBuy": true,
+            "price": "100",
+            "amount": "1000",
+            "clientOrderId": "cancel-then-fill",
+        }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &msg_id_cancel,
+        &orderbook_addr,
+        "OrderBook.OrderCancelled",
+        &json!({ "orderId": order_id }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &msg_id_fill,
+        &orderbook_addr,
+        "OrderBook.OrderFilled",
+        &json!({ "orderId": order_id, "filledAmount": "1000" }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &msg_id_confirm,
+        &owner_pn,
+        "PrivateNote.OrderPlacedConfirmed",
+        &json!({ "orderBook": orderbook_addr, "orderId": order_id }),
+    )
+    .await;
+
+    indexer.reproject_pending(1000).await.expect("reproject");
+
+    let page = read_model
+        .list_orders(&OrdersQuery {
+            owner_pn_address: owner_pn,
+            market: None,
+            status: OrderStatusSet::all(),
+            limit: 100,
+            cursor: None,
+        })
+        .await
+        .expect("list_orders");
+
+    assert_eq!(page.orders.len(), 1);
+    let order = &page.orders[0];
+    assert_eq!(order.status.as_str(), "CANCELED");
+    assert_eq!(order.orig_qty, "10.00");
+    assert_eq!(
+        order.executed_qty, "0.00",
+        "a stale fill after cancellation must not erase the canceled remainder"
+    );
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
 async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
     // The PN-confirm projector must not overwrite an existing owner_pn_address
     // (defence against a second confirmation event with a different src landing
