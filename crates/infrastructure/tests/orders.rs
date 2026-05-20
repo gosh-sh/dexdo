@@ -209,6 +209,56 @@ async fn insert_order(
     .expect("insert live_orders");
 }
 
+/// Variant of [`insert_order`] that lets the caller pick `is_buy`. The
+/// default helper hardcodes BUY because most tests don't care about
+/// side, but the `is_buy` → `OrderSide` mapping is load-bearing and
+/// must be pinned by at least one test.
+#[allow(clippy::too_many_arguments)]
+async fn insert_order_with_side(
+    pool: &PgPool,
+    book: &str,
+    order_id: i64,
+    owner: Option<&str>,
+    is_buy: bool,
+    price: &str,
+    amount_initial: &str,
+    amount_remaining: &str,
+    status: &str,
+    created_sec: i64,
+    placed_chain_order: &str,
+) {
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, owner_pn_address,
+                client_order_id, status, last_chain_order,
+                placed_chain_order,
+                chain_created_at, chain_updated_at,
+                created_at, updated_at)
+           values ($1, $2::numeric, 1, $3, $4::numeric,
+                   $5::numeric, $6::numeric, $7, $8, $9,
+                   $10,
+                   $11,
+                   to_timestamp($12::bigint), to_timestamp(($12 + 1)::bigint),
+                   to_timestamp($12::bigint), to_timestamp(($12 + 1)::bigint))"#,
+    )
+    .bind(book)
+    .bind(order_id)
+    .bind(is_buy)
+    .bind(price)
+    .bind(amount_initial)
+    .bind(amount_remaining)
+    .bind(owner)
+    .bind(format!("client-{order_id}"))
+    .bind(status)
+    .bind(format!("5f800000000000{:06}", order_id))
+    .bind(placed_chain_order)
+    .bind(created_sec)
+    .execute(pool)
+    .await
+    .expect("insert live_orders with side");
+}
+
 /// Build a default `OrdersQuery` with a custom owner — no market filter, no
 /// cursor, no status filter, limit 100.
 fn query_all(owner: &str) -> OrdersQuery {
@@ -389,9 +439,13 @@ async fn default_status_returns_all_non_rejected_buckets() {
     scope.cleanup(&pool).await;
 }
 
-/// Status CSV filter narrows results.
-/// Seed NEW + PARTIALLY_FILLED + FILLED + CANCELLED.
-/// Query with status=FILLED,CANCELED. Assert: only FILLED + CANCELLED rows.
+/// Status CSV filter narrows results, one bucket at a time.
+/// Seed NEW + PARTIALLY_FILLED + FILLED + CANCELLED, then query each
+/// non-default status in isolation. Pins every disjunct in
+/// `build_status_predicate` against the same fixture:
+///   - `NEW` → only the row with `amount_remaining == amount_initial`;
+///   - `PARTIALLY_FILLED` → only the row with `0 < amount_remaining < amount_initial`;
+///   - `FILLED,CANCELED` → only the closed buckets, neither OPEN bucket.
 #[tokio::test]
 async fn status_csv_filter_narrows_results() {
     let Some(pool) = setup().await else { return };
@@ -453,25 +507,54 @@ async fn status_csv_filter_narrows_results() {
     )
     .await;
 
-    let status = OrderStatusSet::from_csv(Some("FILLED,CANCELED")).expect("valid CSV");
-    let page = repo
+    // NEW alone — pins `(status='OPEN' AND amount_remaining = amount_initial)`.
+    let page_new = repo
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status,
+            status: OrderStatusSet::from_csv(Some("NEW")).expect("valid NEW filter"),
+            limit: 100,
+            cursor: None,
+        })
+        .await
+        .expect("list_orders with NEW filter");
+    assert_eq!(page_new.orders.len(), 1, "only the NEW row");
+    assert_eq!(page_new.orders[0].order_id, "1");
+    assert_eq!(page_new.orders[0].status.as_str(), "NEW");
+
+    // PARTIALLY_FILLED alone — pins `(status='OPEN' AND amount_remaining < amount_initial AND amount_remaining > 0)`.
+    let page_pf = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::from_csv(Some("PARTIALLY_FILLED"))
+                .expect("valid PARTIALLY_FILLED filter"),
+            limit: 100,
+            cursor: None,
+        })
+        .await
+        .expect("list_orders with PARTIALLY_FILLED filter");
+    assert_eq!(page_pf.orders.len(), 1, "only the PARTIALLY_FILLED row");
+    assert_eq!(page_pf.orders[0].order_id, "2");
+    assert_eq!(page_pf.orders[0].status.as_str(), "PARTIALLY_FILLED");
+
+    // FILLED,CANCELED together — pins the two closed-state predicates,
+    // and that the OPEN predicates do NOT leak in.
+    let page_closed = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusSet::from_csv(Some("FILLED,CANCELED")).expect("valid CSV"),
             limit: 100,
             cursor: None,
         })
         .await
         .expect("list_orders with FILLED,CANCELED filter");
-
-    assert_eq!(page.orders.len(), 2, "only FILLED and CANCELLED rows");
-    let statuses: Vec<&str> = page.orders.iter().map(|o| o.status.as_str()).collect();
-    // DESC: CANCELLED row (004) then FILLED row (003)
-    assert!(statuses.contains(&"FILLED"), "FILLED present");
-    assert!(statuses.contains(&"CANCELED"), "CANCELED present");
-    assert!(!statuses.iter().any(|s| *s == "NEW" || *s == "PARTIALLY_FILLED"), "no OPEN rows");
-    assert!(page.next_cursor.is_none());
+    assert_eq!(page_closed.orders.len(), 2, "only FILLED and CANCELLED rows");
+    let statuses: Vec<&str> = page_closed.orders.iter().map(|o| o.status.as_str()).collect();
+    // DESC placed_chain_order puts the CANCELLED row (004) before FILLED (003).
+    assert_eq!(statuses, vec!["CANCELED", "FILLED"]);
+    assert!(page_closed.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
 }
@@ -601,6 +684,70 @@ async fn canceled_partial_fill_reports_nonzero_executed_qty() {
     scope.cleanup(&pool).await;
 }
 
+/// `is_buy` column maps to `OrderSide` per-row, not via a hardcoded constant.
+/// Other tests in this file use the BUY-only helper, which leaves the
+/// `if row.is_buy { Buy } else { Sell }` branch in `order_from_row`
+/// unexercised on the SELL side; this test pins both branches.
+#[tokio::test]
+async fn order_side_renders_buy_or_sell_per_is_buy_column() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // Two rows: one BUY (is_buy=true), one SELL (is_buy=false).
+    insert_order_with_side(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        true,
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "001",
+    )
+    .await;
+    insert_order_with_side(
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        false,
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
+
+    let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
+
+    assert_eq!(page.orders.len(), 2);
+    let by_id: std::collections::HashMap<&str, &str> = page
+        .orders
+        .iter()
+        .map(|o| {
+            (
+                o.order_id.as_str(),
+                match o.side {
+                    dodex_domain::OrderSide::Buy => "BUY",
+                    dodex_domain::OrderSide::Sell => "SELL",
+                },
+            )
+        })
+        .collect();
+    assert_eq!(by_id.get("1").copied(), Some("BUY"), "is_buy=true → BUY");
+    assert_eq!(by_id.get("2").copied(), Some("SELL"), "is_buy=false → SELL");
+
+    scope.cleanup(&pool).await;
+}
+
 /// Descending placed_chain_order sort.
 /// Seed 3 rows with placed_chain_order "001", "002", "003".
 /// Assert: response order is "003", "002", "001".
@@ -696,6 +843,143 @@ async fn cursor_advances_strictly_below_last_returned() {
     let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id.as_str()).collect();
     assert_eq!(ids2, vec!["2", "1"], "page 2 completes the set");
     assert!(page2.next_cursor.is_none(), "no further pages");
+
+    scope.cleanup(&pool).await;
+}
+
+/// Status filter and cursor pagination compose without leakage.
+/// Seed six mixed-status rows; filter `FILLED,CANCELED` selects four of
+/// them. With limit=2 the SQL must produce a coherent two-page result
+/// where the cursor's strict-`<` predicate and the status disjunction
+/// AND together correctly — a composition bug (wrong predicate
+/// precedence, dropped guard) would either leak OPEN rows or skip a
+/// matching row across the page boundary.
+#[tokio::test]
+async fn status_filter_combines_with_cursor_pagination() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // Six rows interleaving OPEN and closed statuses by placed_chain_order.
+    // Filter FILLED,CANCELED matches rows 6, 4, 3, 1 (DESC by placed_chain_order).
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "FILLED",
+        1_700_000_001,
+        "001",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        3,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "CANCELLED",
+        1_700_000_003,
+        "003",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        4,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "FILLED",
+        1_700_000_004,
+        "004",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        5,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "500",
+        "OPEN",
+        1_700_000_005,
+        "005",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        6,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "0",
+        "CANCELLED",
+        1_700_000_006,
+        "006",
+    )
+    .await;
+
+    let status = OrderStatusSet::from_csv(Some("FILLED,CANCELED")).expect("valid CSV");
+
+    // Page 1: limit=2 → DESC tail of the filtered set, "006" then "004".
+    let page1 = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: status.clone(),
+            limit: 2,
+            cursor: None,
+        })
+        .await
+        .expect("page 1 filtered");
+    let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id.as_str()).collect();
+    assert_eq!(ids1, vec!["6", "4"], "filtered page 1 skips OPEN row 005");
+    let cursor = page1.next_cursor.expect("cursor after partial filtered page");
+    assert_eq!(cursor.0, "004");
+
+    // Page 2: same filter + cursor → must skip OPEN row 002, return "003" then "001".
+    let page2 = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status,
+            limit: 2,
+            cursor: Some(OrdersCursor(cursor.0)),
+        })
+        .await
+        .expect("page 2 filtered");
+    let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id.as_str()).collect();
+    assert_eq!(ids2, vec!["3", "1"], "filtered page 2 skips OPEN row 002");
+    let statuses2: Vec<&str> = page2.orders.iter().map(|o| o.status.as_str()).collect();
+    assert!(
+        statuses2.iter().all(|s| *s == "FILLED" || *s == "CANCELED"),
+        "no OPEN rows leak across the boundary: {statuses2:?}"
+    );
+    assert!(page2.next_cursor.is_none(), "filtered set is exhausted");
 
     scope.cleanup(&pool).await;
 }

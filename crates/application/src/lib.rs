@@ -1465,6 +1465,31 @@ mod tests {
     }
 
     #[test]
+    fn orders_cursor_trims_surrounding_whitespace() {
+        // The cursor is server-issued (`placed_chain_order` of the last
+        // row of the previous page) and round-trips via the client. We
+        // trim so a client that re-emits the value with stray padding
+        // is forgiven, but the inner string must remain byte-identical
+        // to what the server originally returned — otherwise the
+        // strict `<` predicate in `list_orders` advances the cursor to
+        // the wrong row and pagination silently breaks.
+        let cursor = OrdersCursor::new("  003  ".into()).expect("trims and accepts");
+        assert_eq!(cursor.0, "003");
+    }
+
+    #[test]
+    fn orders_cursor_rejects_blank() {
+        assert_eq!(
+            OrdersCursor::new("   ".into()).expect_err("blank rejected"),
+            DomainError::MissingParameter
+        );
+        assert_eq!(
+            OrdersCursor::new(String::new()).expect_err("empty rejected"),
+            DomainError::MissingParameter
+        );
+    }
+
+    #[test]
     fn status_set_rejects_pending_states() {
         // PendingNew and PendingCancel are write-side synthetic statuses
         // and must not be accepted as a /orders filter — neither appears

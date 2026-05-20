@@ -197,11 +197,13 @@ async fn insert_market(pool: &PgPool, scope: &Scope) {
 /// ("OPEN", "FILLED", "CANCELLED"); `amount_remaining` is the residual
 /// after fills. The mapping from row state to the public `OrderStatus`
 /// is exercised on the read path; these tests only need raw inputs.
+#[allow(clippy::too_many_arguments)]
 async fn insert_order(
     pool: &PgPool,
     scope: &Scope,
     owner: &str,
     order_id: i64,
+    is_buy: bool,
     placed_chain_order: &str,
     raw_status: &str,
     amount_remaining: i64,
@@ -214,15 +216,16 @@ async fn insert_order(
                 placed_chain_order,
                 chain_created_at, chain_updated_at,
                 created_at, updated_at)
-           values ($1, $2::numeric, 1, false, 12345::numeric,
-                   1000::numeric, $3::numeric, $4,
-                   $5, $6, $7,
-                   $7,
+           values ($1, $2::numeric, 1, $3, 12345::numeric,
+                   1000::numeric, $4::numeric, $5,
+                   $6, $7, $8,
+                   $8,
                    to_timestamp(1700000000), to_timestamp(1700000001),
                    to_timestamp(1700000000), to_timestamp(1700000001))"#,
     )
     .bind(&scope.book)
     .bind(order_id)
+    .bind(is_buy)
     .bind(amount_remaining)
     .bind(owner)
     .bind(format!("client-{order_id}"))
@@ -245,11 +248,13 @@ async fn readonly_user_data_key_can_fetch_orders() {
     let owner = trading_pn(&pool).await;
 
     // Seed one row per public status bucket, with distinct placed_chain_order
-    // values so DESC sort is deterministic.
-    insert_order(&pool, &scope, &owner, 10, "5f80000000000000000a", "OPEN", 1000).await;
-    insert_order(&pool, &scope, &owner, 11, "5f80000000000000000b", "OPEN", 750).await;
-    insert_order(&pool, &scope, &owner, 12, "5f80000000000000000c", "FILLED", 0).await;
-    insert_order(&pool, &scope, &owner, 13, "5f80000000000000000d", "CANCELLED", 0).await;
+    // values so DESC sort is deterministic. Sides alternate BUY/SELL so the
+    // `is_buy` → `OrderSide` mapping is asserted positively below — a regression
+    // hardcoding `OrderSide::Buy` (or `Sell`) would surface here.
+    insert_order(&pool, &scope, &owner, 10, true, "5f80000000000000000a", "OPEN", 1000).await;
+    insert_order(&pool, &scope, &owner, 11, false, "5f80000000000000000b", "OPEN", 750).await;
+    insert_order(&pool, &scope, &owner, 12, true, "5f80000000000000000c", "FILLED", 0).await;
+    insert_order(&pool, &scope, &owner, 13, false, "5f80000000000000000d", "CANCELLED", 0).await;
 
     let ts = now_ms();
     let canonical_market = canonical_market_address(&scope.pmp);
@@ -301,17 +306,28 @@ async fn readonly_user_data_key_can_fetch_orders() {
         let _ = &o.executed_qty;
         assert_eq!(o.time_in_force, "GTC");
         assert_eq!(o.order_type, "LIMIT");
-        assert!(o.side == "BUY" || o.side == "SELL", "side: {}", o.side);
+        // Per-row side check — seeds at the top alternate BUY/SELL by
+        // `order_id` parity. Vacuous "BUY or SELL" would pass even
+        // against a hardcoded mapping, so assert the exact value.
+        let expected_side = if o.order_id.parse::<i64>().expect("numeric order_id") % 2 == 0 {
+            "BUY"
+        } else {
+            "SELL"
+        };
+        assert_eq!(o.side, expected_side, "side mapping for order_id={}", o.order_id);
         assert!(o.time > 0, "chain_created_at projected as positive ms");
         assert!(o.update_time >= o.time, "updateTime >= time");
     }
     assert!(body.next_cursor.is_none());
 }
 
-// marketAddress without symbol → -1102 / 400
+// Half-supplied (marketAddress, symbol) pair → -1102 / 400. Both
+// directions are pinned: the use case's invariant is "either both or
+// neither", and a regression that loosens it in one direction must
+// surface immediately.
 
 #[tokio::test]
-async fn returns_only_one_side_returns_minus_1102() {
+async fn market_address_without_symbol_returns_minus_1102() {
     let Some((service, _pool, _kek)) = common::setup().await else { return };
     let ts = now_ms();
     let market = "0:orders_one_sided";
@@ -327,6 +343,32 @@ async fn returns_only_one_side_returns_minus_1102() {
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
         .query("marketAddress", market)
         .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
+async fn symbol_without_market_address_returns_minus_1102() {
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let symbol = "ORDERS_ONE_SIDED_SYMBOL";
+    let canonical = canonical_query(&[
+        ("recvWindow", "5000"),
+        ("symbol", symbol),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/orders")
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .query("recvWindow", "5000")
+        .query("symbol", symbol)
         .query("timestamp", ts.to_string())
         .query("signature", sig)
         .send(&service)
@@ -600,11 +642,12 @@ async fn pagination_roundtrip_returns_descending_order() {
 
     // Seed 5 mixed-status rows with distinct placed_chain_order values
     // (ascending hex strings so DESC sort reverses them: row 5 comes first).
-    insert_order(&pool, &scope, &owner, 1, "5f80000000000000000000001", "OPEN", 1000).await;
-    insert_order(&pool, &scope, &owner, 2, "5f80000000000000000000002", "OPEN", 750).await;
-    insert_order(&pool, &scope, &owner, 3, "5f80000000000000000000003", "FILLED", 0).await;
-    insert_order(&pool, &scope, &owner, 4, "5f80000000000000000000004", "CANCELLED", 0).await;
-    insert_order(&pool, &scope, &owner, 5, "5f80000000000000000000005", "OPEN", 1000).await;
+    insert_order(&pool, &scope, &owner, 1, false, "5f80000000000000000000001", "OPEN", 1000).await;
+    insert_order(&pool, &scope, &owner, 2, false, "5f80000000000000000000002", "OPEN", 750).await;
+    insert_order(&pool, &scope, &owner, 3, false, "5f80000000000000000000003", "FILLED", 0).await;
+    insert_order(&pool, &scope, &owner, 4, false, "5f80000000000000000000004", "CANCELLED", 0)
+        .await;
+    insert_order(&pool, &scope, &owner, 5, false, "5f80000000000000000000005", "OPEN", 1000).await;
 
     // Page 1: rows 5 and 4 (DESC).
     let page1 = get_orders_page(&service, &scope, 2, None).await;
