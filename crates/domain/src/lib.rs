@@ -289,6 +289,9 @@ impl Order {
         if status == OrderStatus::Filled && decimal_string_is_zero(&executed_qty)? {
             return Err(DomainError::MarketInconsistent);
         }
+        if !decimal_string_lte(&executed_qty, &orig_qty)? {
+            return Err(DomainError::MarketInconsistent);
+        }
 
         Ok(Self {
             market_address,
@@ -309,6 +312,26 @@ impl Order {
 }
 
 fn decimal_string_is_zero(s: &str) -> Result<bool, DomainError> {
+    let (value, _) = parse_decimal_string(s)?;
+    Ok(value == BigUint::from(0_u8))
+}
+
+fn decimal_string_lte(left: &str, right: &str) -> Result<bool, DomainError> {
+    let (mut left_value, left_scale) = parse_decimal_string(left)?;
+    let (mut right_value, right_scale) = parse_decimal_string(right)?;
+    if left_scale < right_scale {
+        let shift =
+            u32::try_from(right_scale - left_scale).map_err(|_| DomainError::MarketInconsistent)?;
+        left_value *= BigUint::from(10_u8).pow(shift);
+    } else if right_scale < left_scale {
+        let shift =
+            u32::try_from(left_scale - right_scale).map_err(|_| DomainError::MarketInconsistent)?;
+        right_value *= BigUint::from(10_u8).pow(shift);
+    }
+    Ok(left_value <= right_value)
+}
+
+fn parse_decimal_string(s: &str) -> Result<(BigUint, usize), DomainError> {
     let normalized = s.trim();
     if normalized.is_empty() {
         return Err(DomainError::MarketInconsistent);
@@ -320,7 +343,10 @@ fn decimal_string_is_zero(s: &str) -> Result<bool, DomainError> {
     if !whole.chars().chain(fractional.chars()).all(|c| c.is_ascii_digit()) {
         return Err(DomainError::MarketInconsistent);
     }
-    Ok(whole.chars().all(|c| c == '0') && fractional.chars().all(|c| c == '0'))
+    let digits = format!("{whole}{fractional}");
+    let value =
+        BigUint::parse_bytes(digits.as_bytes(), 10).ok_or(DomainError::MarketInconsistent)?;
+    Ok((value, fractional.len()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -981,6 +1007,27 @@ mod tests {
             1,
         )
         .expect_err("REJECTED with chain identity rejected");
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn order_constructor_rejects_executed_qty_above_orig_qty() {
+        let err = Order::new(
+            MarketAddress("0:market".into()),
+            Symbol("SYM".into()),
+            OrderIdentity::Chain("123".into()),
+            String::new(),
+            "1.00".into(),
+            "1.00".into(),
+            "1.01".into(),
+            OrderStatus::PartiallyFilled,
+            TimeInForce::Gtc,
+            OrderType::Limit,
+            OrderSide::Buy,
+            1,
+            1,
+        )
+        .expect_err("executed quantity cannot exceed original quantity");
         assert_eq!(err, DomainError::MarketInconsistent);
     }
 

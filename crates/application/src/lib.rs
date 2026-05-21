@@ -297,7 +297,7 @@ impl OrderStatusSet {
     /// is an optional narrowing filter whose absence (any falsy form)
     /// trivially means "no filter applied", while `cursor` is an
     /// opaque server-issued token whose syntactic emptiness is always
-    /// a client-side bug. See api-spec.md §Orders behaviour bullets
+    /// a client-side bug. See docs/api-spec.md#orders (Behavior section)
     /// for the public contract. Do not collapse the two parsers into
     /// a shared "blank-is-empty" helper.
     pub fn from_csv(raw: Option<&str>) -> Result<Self, DomainError> {
@@ -396,8 +396,29 @@ pub struct OrdersQuery {
 
 #[derive(Debug, Clone)]
 pub struct OrdersMarketFilter {
-    pub market_address: MarketAddress,
-    pub symbol: Symbol,
+    market_address: MarketAddress,
+    symbol: Symbol,
+}
+
+impl OrdersMarketFilter {
+    pub fn pair(
+        market_address: Option<MarketAddress>,
+        symbol: Option<Symbol>,
+    ) -> Result<Option<Self>, DomainError> {
+        match (market_address, symbol) {
+            (None, None) => Ok(None),
+            (Some(market_address), Some(symbol)) => Ok(Some(Self { market_address, symbol })),
+            _ => Err(DomainError::MissingParameter),
+        }
+    }
+
+    pub fn market_address(&self) -> &MarketAddress {
+        &self.market_address
+    }
+
+    pub fn symbol(&self) -> &Symbol {
+        &self.symbol
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1522,6 +1543,31 @@ mod tests {
     fn status_set_treats_absent_and_empty_as_all() {
         assert!(OrderStatusSet::from_csv(None).expect("absent").is_all());
         assert!(OrderStatusSet::from_csv(Some("   ")).expect("blank").is_all());
+    }
+
+    #[test]
+    fn orders_market_filter_pair_rejects_half_filters() {
+        assert!(OrdersMarketFilter::pair(None, None).expect("absent pair").is_none());
+
+        assert_eq!(
+            OrdersMarketFilter::pair(Some(MarketAddress("0:market".into())), None)
+                .expect_err("market without symbol rejected"),
+            DomainError::MissingParameter
+        );
+        assert_eq!(
+            OrdersMarketFilter::pair(None, Some(Symbol("YES".into())))
+                .expect_err("symbol without market rejected"),
+            DomainError::MissingParameter
+        );
+
+        let filter = OrdersMarketFilter::pair(
+            Some(MarketAddress("0:market".into())),
+            Some(Symbol("YES".into())),
+        )
+        .expect("complete pair accepted")
+        .expect("filter present");
+        assert_eq!(filter.market_address().0, "0:market");
+        assert_eq!(filter.symbol().0, "YES");
     }
 
     #[test]

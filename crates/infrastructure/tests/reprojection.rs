@@ -1257,6 +1257,85 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
 }
 
 #[tokio::test]
+async fn ordercancelled_does_not_rewrite_rejected_row() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let indexer = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_cancel_rejected_guard";
+    let orderbook_addr = format!("0:{test}_book");
+    let msg_id_cancel = format!("{test}-cancel-msg");
+    let order_id = "0";
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_cancel.as_str()),
+        ],
+    )
+    .await;
+
+    sqlx::query("alter table live_orders drop constraint if exists live_orders_status_check")
+        .execute(&pool)
+        .await
+        .expect("drop status check for future-status fixture");
+    sqlx::query(
+        r#"insert into live_orders
+             (orderbook_address, order_id, outcome_id, is_buy, price, amount_initial,
+              amount_remaining, client_order_id, owner_pn_address, status,
+              placed_chain_order, last_chain_order, chain_created_at, chain_updated_at)
+           values ($1, $2::numeric, 1::numeric, true, 100::numeric, 1000::numeric,
+                   0::numeric, 55::numeric, '0:rejected-owner', 'REJECTED',
+                   '5f80000000000000000000000000000001',
+                   '5f80000000000000000000000000000001',
+                   to_timestamp(1700000000), to_timestamp(1700000000))"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert rejected row");
+
+    insert_raw(
+        &pool,
+        &msg_id_cancel,
+        &orderbook_addr,
+        "OrderBook.OrderCancelled",
+        &json!({ "orderId": order_id }),
+    )
+    .await;
+
+    let result = indexer.reproject_pending(1000).await;
+
+    let status: String =
+        sqlx::query_scalar("select status from live_orders where orderbook_address = $1")
+            .bind(&orderbook_addr)
+            .fetch_one(&pool)
+            .await
+            .expect("read status");
+
+    sqlx::query(
+        "update live_orders set status = 'OPEN' where orderbook_address = $1 and status = 'REJECTED'",
+    )
+    .bind(&orderbook_addr)
+    .execute(&pool)
+    .await
+    .expect("restore row status before constraint");
+    sqlx::query(
+        r#"alter table live_orders
+             add constraint live_orders_status_check
+             check (status in ('OPEN', 'FILLED', 'CANCELLED'))"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("restore status check");
+
+    result.expect("reproject");
+    assert_eq!(status, "REJECTED", "cancel projector must preserve future rejected rows");
+}
+
+#[tokio::test]
 async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
     // The PN-confirm projector must not overwrite an existing owner_pn_address
     // (defence against a second confirmation event with a different src landing

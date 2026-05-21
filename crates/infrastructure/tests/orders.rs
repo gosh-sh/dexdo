@@ -509,10 +509,11 @@ async fn filters_rows_missing_chain_timestamps_before_decoding() {
     let page_market = repo
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
-            market: Some(OrdersMarketFilter {
-                market_address: MarketAddress(scope.pmp_yes.clone()),
-                symbol: Symbol(scope.symbol_yes.clone()),
-            }),
+            market: OrdersMarketFilter::pair(
+                Some(MarketAddress(scope.pmp_yes.clone())),
+                Some(Symbol(scope.symbol_yes.clone())),
+            )
+            .expect("valid market filter"),
             status: OrderStatusSet::all(),
             limit: 100,
             cursor: None,
@@ -1331,10 +1332,11 @@ async fn pair_unknown_returns_invalid_market_or_symbol() {
     let err = repo
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
-            market: Some(OrdersMarketFilter {
-                market_address: MarketAddress("0:nonexistent_market_address".to_string()),
-                symbol: Symbol("NONEXISTENT_SYMBOL".to_string()),
-            }),
+            market: OrdersMarketFilter::pair(
+                Some(MarketAddress("0:nonexistent_market_address".to_string())),
+                Some(Symbol("NONEXISTENT_SYMBOL".to_string())),
+            )
+            .expect("valid market filter"),
             status: OrderStatusSet::all(),
             limit: 100,
             cursor: None,
@@ -1362,10 +1364,11 @@ async fn unreconciled_market_pair_returns_invalid_market_or_symbol() {
     let err = repo
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
-            market: Some(OrdersMarketFilter {
-                market_address: MarketAddress(scope.pmp_yes.clone()),
-                symbol: Symbol(scope.symbol_yes.clone()),
-            }),
+            market: OrdersMarketFilter::pair(
+                Some(MarketAddress(scope.pmp_yes.clone())),
+                Some(Symbol(scope.symbol_yes.clone())),
+            )
+            .expect("valid market filter"),
             status: OrderStatusSet::all(),
             limit: 100,
             cursor: None,

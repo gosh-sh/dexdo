@@ -491,11 +491,7 @@ async fn get_orders(
 
     let market_address = non_empty_query(req, "marketAddress").map(MarketAddress);
     let symbol = non_empty_query(req, "symbol").map(Symbol);
-    let market_filter = match (market_address, symbol) {
-        (None, None) => None,
-        (Some(market_address), Some(symbol)) => Some(OrdersMarketFilter { market_address, symbol }),
-        _ => return Err(ApiError::from(DomainError::MissingParameter)),
-    };
+    let market_filter = OrdersMarketFilter::pair(market_address, symbol).map_err(ApiError::from)?;
     // status: raw CSV, validated by OrderStatusSet::from_csv inside the
     // use case. Absent / blank → "all statuses".
     let status = req.query::<String>("status");
@@ -522,6 +518,9 @@ async fn get_orders(
         .await
         .map_err(|err| {
             if let Some(domain) = err.downcast_ref::<DomainError>() {
+                if *domain == DomainError::Unexpected {
+                    error!(?err, "get_orders failed with unexpected domain error");
+                }
                 return ApiError::from(*domain);
             }
             error!(?err, "get_orders failed");

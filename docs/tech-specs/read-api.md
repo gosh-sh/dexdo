@@ -210,7 +210,7 @@ Public `status` per row:
 | --- | --- | --- |
 | `OPEN` | `= amount_initial` | `NEW` |
 | `OPEN` | `> 0 AND < amount_initial` | `PARTIALLY_FILLED` |
-| `OPEN` | `0` | projector bug — log a warning and skip the row |
+| `OPEN` | `0` | projector bug — log an error and skip the row |
 | `FILLED` | (any) | `FILLED` |
 | `CANCELLED` | (any) | `CANCELED` |
 | `REJECTED` | (any) | `REJECTED` |
@@ -369,7 +369,7 @@ Decide this with the contracts change; the choice should not perturb the `/order
 
 Three integration suites, all gated on `TEST_DATABASE_URL`:
 
-- `crates/infrastructure/tests/orders.rs` — owner scoping, DESC sort, scaling, the three market-filter shapes, `status` CSV across all five tokens (REJECTED returns empty pre-follow-up), cursor advance, cursor stability under concurrent fills and cancellations (closed rows retain their position), `limit` defaults and bounds, invalid `status` tokens, invalid cursor, `executedQty > 0` for `CANCELED` partial-then-cancel rows.
+- `crates/infrastructure/tests/orders.rs` — owner scoping, DESC sort, scaling, the three market-filter shapes, `status` CSV across all five tokens (REJECTED returns empty before contracts/indexer support), cursor advance, cursor stability under concurrent fills and cancellations (closed rows retain their position), `limit` defaults and bounds, invalid `status` tokens, invalid cursor, `executedQty > 0` for `CANCELED` partial-then-cancel rows.
 - `crates/infrastructure/tests/reprojection.rs` — extend the existing deferred-replay tests to cover `OrderPlacedConfirmed` arriving after the row has already transitioned to `FILLED` / `CANCELLED`; assert the owner attaches and the row appears under those public statuses in `/orders`.
 - `services/api/tests/orders_http.rs` — happy path through the production router with the wrapped response, the four error codes (`-1102`, `-1121`, `-1130`, auth), and the pagination round-trip across mixed-status pages.
 

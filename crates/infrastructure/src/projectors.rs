@@ -635,11 +635,11 @@ async fn apply_order_filled(
             order_id = %order_id,
             msg_id = %node.msg_id,
             created_at = ?node.created_at,
-            "OrderFilled has no parseable chain time; chain_updated_at will not advance",
+            "OrderFilled has no parseable chain time; last_chain_order advances but chain_updated_at will not",
         );
     }
 
-    let updated = sqlx::query(
+    let ignored_terminal_fill: Option<bool> = sqlx::query_scalar(
         r#"update live_orders
               set amount_remaining = case
                                       when status = 'CANCELLED' then amount_remaining
@@ -653,19 +653,19 @@ async fn apply_order_filled(
                   last_chain_order = greatest(last_chain_order, $4),
                   chain_updated_at = greatest(chain_updated_at, to_timestamp($5::double precision)),
                   updated_at = now()
-            where orderbook_address = $1 and order_id = $2::numeric"#,
+            where orderbook_address = $1 and order_id = $2::numeric
+            returning status = 'CANCELLED'"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
     .bind(&filled_amount)
     .bind(chain_order)
     .bind(chain_seconds)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
-    .context("apply OrderFilled")?
-    .rows_affected();
+    .context("apply OrderFilled")?;
 
-    if updated == 0 {
+    if ignored_terminal_fill.is_none() {
         warn!(
             orderbook_address,
             order_id = %order_id,
@@ -673,6 +673,15 @@ async fn apply_order_filled(
             "OrderFilled observed before OrderPlaced; deferring"
         );
         return Ok(ProjectionOutcome::Deferred);
+    }
+    if ignored_terminal_fill == Some(true) {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            filled_amount = %filled_amount,
+            msg_id = %node.msg_id,
+            "OrderFilled applied to terminal row; fill amount ignored"
+        );
     }
     Ok(ProjectionOutcome::Applied)
 }
@@ -693,36 +702,42 @@ async fn apply_order_cancelled(
             order_id = %order_id,
             msg_id = %node.msg_id,
             created_at = ?node.created_at,
-            "OrderCancelled has no parseable chain time; chain_updated_at will not advance",
+            "OrderCancelled has no parseable chain time; last_chain_order advances but chain_updated_at will not",
         );
     }
 
     // `status` uses a CASE expression so an OrderCancelled that races a
-    // full fill cannot demote a `FILLED` row to `CANCELLED`. The chain
-    // contract is supposed to prevent this race (see
-    // docs/tech-specs/write-api.md §Response — "FILLED if matching
-    // raced the cancel"), but the guard is cheap and keeps this close
-    // path fail-closed if contract ordering ever drifts.
+    // terminal fill cannot demote a `FILLED` row to `CANCELLED`, and a
+    // future rejected row cannot be rewritten by a late cancel. The chain
+    // contract is supposed to prevent the filled race (see
+    // docs/tech-specs/write-api.md §Response — "FILLED if matching raced
+    // the cancel"), but the guard is cheap and keeps this path fail-closed
+    // if contract ordering ever drifts. `amount_remaining` is intentionally
+    // left unchanged so `executedQty` remains > 0 for partially-filled
+    // canceled rows.
     // `last_chain_order` / `chain_updated_at` still advance because the
     // cancel event itself did land on chain.
-    let updated = sqlx::query(
+    let terminal_status: Option<String> = sqlx::query_scalar(
         r#"update live_orders
-              set status = case when status = 'FILLED' then 'FILLED' else 'CANCELLED' end,
+              set status = case
+                           when status in ('FILLED', 'REJECTED') then status
+                           else 'CANCELLED'
+                       end,
                   last_chain_order = greatest(last_chain_order, $3),
                   chain_updated_at = greatest(chain_updated_at, to_timestamp($4::double precision)),
                   updated_at = now()
-            where orderbook_address = $1 and order_id = $2::numeric"#,
+            where orderbook_address = $1 and order_id = $2::numeric
+            returning status"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
     .bind(chain_order)
     .bind(chain_seconds)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
-    .context("apply OrderCancelled")?
-    .rows_affected();
+    .context("apply OrderCancelled")?;
 
-    if updated == 0 {
+    if terminal_status.is_none() {
         warn!(
             orderbook_address,
             order_id = %order_id,
@@ -730,6 +745,15 @@ async fn apply_order_cancelled(
             "OrderCancelled observed before OrderPlaced; deferring"
         );
         return Ok(ProjectionOutcome::Deferred);
+    }
+    if matches!(terminal_status.as_deref(), Some("FILLED" | "REJECTED")) {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            prior_status = %terminal_status.as_deref().unwrap_or(""),
+            msg_id = %node.msg_id,
+            "OrderCancelled applied to terminal row; status preserved"
+        );
     }
     Ok(ProjectionOutcome::Applied)
 }

@@ -487,8 +487,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           and mo.symbol = $2
                           and m.last_reconciled_at is not null"#,
                 )
-                .bind(filter.market_address.0.as_str())
-                .bind(filter.symbol.0.as_str())
+                .bind(filter.market_address().0.as_str())
+                .bind(filter.symbol().0.as_str())
                 .fetch_optional(&self.pool)
                 .await
                 .context("resolve orders market filter")?;
@@ -634,8 +634,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // error! inside). `next_cursor` was captured above from the
         // pre-filter tail, so a corrupt boundary row advances the cursor
         // past itself instead of freezing pagination — pinned by
-        // `cursor_advances_past_corrupt_row_at_page_tail` in
-        // crates/infrastructure/tests/orders.rs.
+        // `cursor_advances_past_corrupt_row_at_page_tail`.
         let raw_len = orders_raw.len();
         let orders = orders_raw.into_iter().filter_map(order_from_row).collect::<Vec<_>>();
         let skipped = raw_len.saturating_sub(orders.len());
