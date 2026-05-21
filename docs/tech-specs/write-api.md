@@ -173,7 +173,7 @@ A successful submission returns a deliberately minimal three-field body:
 | `transactTime` | `now_millis()` captured once at the start of the handler. |
 | `status` | Always `"PENDING_NEW"` — the order has been accepted by `PrivateNote.placeOrder` (chain return of `bee_dex::Dex::place_order` succeeded) but is **not yet on the book**; `OrderBook.executeBatch` is processing the internal message and will emit `OrderPlaced` with the chain-assigned `orderId` shortly after. |
 
-Why minimal: every other field a fully-populated order would carry (`marketAddress`, `symbol`, `side`, `type`, `timeInForce`, `price`, `origQty`) is **already in the request the client just sent** — echoing them adds bytes without adding information. Two specific fields the legacy Binance-style shape carries (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission: `orderId` is assigned by `OrderBook` after our return, and `executedQty` is always zero for a freshly-placed order. Surfacing them as `""` / `"0"` is worse than not surfacing them — it implies the order is further along the lifecycle than it actually is.
+Why minimal: every other field a fully-populated order would carry (`marketAddress`, `symbol`, `side`, `type`, `timeInForce`, `price`, `origQty`) is **already in the request the client just sent** — echoing them adds bytes without adding information. Two specific fields the Binance-style shape carries (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission: `orderId` is assigned by `OrderBook` after our return, and `executedQty` is always zero for a freshly-placed order. Surfacing them as `""` / `"0"` is worse than not surfacing them — it implies the order is further along the lifecycle than it actually is.
 
 The client correlates the response with future `live_orders` rows by polling `GET /api/v1/orders` and matching by `clientOrderId` in the returned `orders[]`. The `PENDING_NEW` status flips to `NEW` once the indexer projects `OrderPlaced`.
 
@@ -427,7 +427,7 @@ The resolved row supplies the chain-level fields once for the whole batch:
 
 ### Batch size cap
 
-The cap is sourced from `market_outcomes.max_batch_size` on the resolved outcome — the same value `/api/v1/markets` returns. The chain enforces its own `MAX_BATCH_SIZE` (5 today); the read-model value is the public contract clients can act on, so the local check uses it rather than a hard-coded constant. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
+The cap is sourced from `market_outcomes.max_batch_size` on the resolved outcome — the same value `/api/v1/markets` returns. The chain enforces its own `MAX_BATCH_SIZE` (`contracts/modifiers/modifiers.sol`); the read-model value is the public contract clients can act on, so the local check uses it rather than a hard-coded constant. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
 
 ### Per-item input validation
 
@@ -441,7 +441,7 @@ Same encoding table as `POST /api/v1/order` — see [Flags](#flags). The chain's
 
 ### `clientOrderId` generation
 
-Identical to the single-order path; see [§clientOrderId generation](#clientorderid-generation). One subtlety: the chain enforces uniqueness across the PN's still-live coids **and within the batch itself** — `PrivateNote.placeBatch` walks each item's `clientOrderId` and rejects intra-batch duplicates with `ERR_INVALID_PARAMS` (129). Caller-supplied duplicates the backend cannot disambiguate (they parse fine as u64) surface as `InvalidParameter` → 400 / -1130 via that chain code. Backend-generated coids are drawn independently for each item; the 2^62-bit collision space documented for the single-order path means intra-batch collisions are cosmologically negligible.
+Identical to the single-order path; see [§clientOrderId generation](#clientorderid-generation). One subtlety: the chain enforces uniqueness across the PN's still-live coids **and within the batch itself** — `PrivateNote.placeBatch` walks each item's `clientOrderId` and rejects intra-batch duplicates with `ERR_INVALID_PARAMS` (129). The backend does no intra-batch dedupe — caller-supplied duplicates parse fine as u64 and reach the chain unfiltered, where the whole batch reverts as `InvalidParameter` → 400 / -1130 via that exit code. Backend-generated coids are drawn independently for each item; the 2^62-bit collision space documented for the single-order path means intra-batch collisions are cosmologically negligible.
 
 ### Chain submission
 
@@ -474,7 +474,7 @@ One `PENDING_NEW` envelope per accepted item, returned as a flat array in reques
 | `transactTime` | `now_millis()` captured once at the start of the handler, repeated for every item — one chain submission, one moment of acceptance. |
 | `status` | Always `"PENDING_NEW"` — same rationale as the single-order path; the chain-assigned `orderId` arrives later through `/api/v1/openOrders`. |
 
-Why minimal: the same argument as POST /order applies item by item — every other field a fully-populated order would carry is already in the request the client just sent, and the only fields the legacy Binance-style shape adds (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission.
+Why minimal: the same argument as POST /order applies item by item — every other field a fully-populated order would carry is already in the request the client just sent, and the only fields the Binance-style shape adds (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission.
 
 ### Failure surface
 
@@ -528,7 +528,7 @@ The backend stores no inflight batch state and does not retry on its own. Client
 
 ### Concurrency
 
-Same per-PN serial constraint as the single-order path — `placeBatch` takes the same `_busy` lock and holds it until `onBatchComplete` arrives. A POST `/batchOrders` racing any other placement or cancellation from the same account surfaces as `OrderPnBusy` → 429 / -2014, with the same retry semantics. Submitting a 5-item batch instead of five sequential POSTs is the canonical way to get higher per-account placement throughput today — one chain message, one `_busy` lock, one `onBatchComplete` callback.
+Same per-PN serial constraint as the single-order path — `placeBatch` takes the same `_busy` lock and holds it until `onBatchComplete` arrives. A POST `/batchOrders` racing any other placement or cancellation from the same account surfaces as `OrderPnBusy` → 429 / -2014, with the same retry semantics. Submitting an N-item batch instead of N sequential POSTs is the canonical way to get higher per-account placement throughput — one chain message, one `_busy` lock, one `onBatchComplete` callback.
 
 ## `DELETE /api/v1/batchOrders`
 

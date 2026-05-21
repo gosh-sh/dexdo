@@ -932,21 +932,51 @@ fn build_batch_orders_input(
     let raw_orders = body.orders.ok_or(ApiError::from(DomainError::MissingParameter))?;
 
     let mut orders = Vec::with_capacity(raw_orders.len());
-    for item in raw_orders {
-        let side_str = non_empty(item.side).ok_or(ApiError::from(DomainError::MissingParameter))?;
-        let side =
-            OrderSide::parse(&side_str).ok_or(ApiError::from(DomainError::InvalidParameter))?;
-        let quantity =
-            non_empty(item.quantity).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    // Per-item enum/missing-field parse runs before the use case so a
+    // batch that fails here never reaches `validate_and_encode_order_item`
+    // (which logs `item_index`). The matching `warn!`s below give ops
+    // the same index when a 60-item batch trips on item 47.
+    for (item_index, item) in raw_orders.into_iter().enumerate() {
+        let side_str = non_empty(item.side).ok_or_else(|| {
+            warn!(item_index, field = "side", "batchOrders item rejected at parse");
+            ApiError::from(DomainError::MissingParameter)
+        })?;
+        let side = OrderSide::parse(&side_str).ok_or_else(|| {
+            warn!(
+                item_index,
+                field = "side",
+                value = %side_str,
+                "batchOrders item rejected at parse",
+            );
+            ApiError::from(DomainError::InvalidParameter)
+        })?;
+        let quantity = non_empty(item.quantity).ok_or_else(|| {
+            warn!(item_index, field = "quantity", "batchOrders item rejected at parse");
+            ApiError::from(DomainError::MissingParameter)
+        })?;
         let order_type = match item.order_type.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => OrderType::parse(s).ok_or(ApiError::from(DomainError::InvalidParameter))?,
+            Some(s) => OrderType::parse(s).ok_or_else(|| {
+                warn!(
+                    item_index,
+                    field = "type",
+                    value = %s,
+                    "batchOrders item rejected at parse",
+                );
+                ApiError::from(DomainError::InvalidParameter)
+            })?,
             None => OrderType::Limit,
         };
         let time_in_force =
             match item.time_in_force.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                Some(s) => Some(
-                    TimeInForce::parse(s).ok_or(ApiError::from(DomainError::InvalidParameter))?,
-                ),
+                Some(s) => Some(TimeInForce::parse(s).ok_or_else(|| {
+                    warn!(
+                        item_index,
+                        field = "timeInForce",
+                        value = %s,
+                        "batchOrders item rejected at parse",
+                    );
+                    ApiError::from(DomainError::InvalidParameter)
+                })?),
                 None => None,
             };
         orders.push(BatchOrderInputItem {

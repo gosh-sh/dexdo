@@ -675,11 +675,9 @@ pub struct CancelledOrder {
     pub client_order_id: Option<String>,
 }
 
-/// One body item of `POST /api/v1/batchOrders`. The HTTP layer parses
-/// each request `orders[]` entry into this shape; the use case applies
-/// the same per-item validation rules as `POST /api/v1/order` and
-/// assembles a single `NewBatchOrderPayload` that goes to the chain in
-/// one `PrivateNote.placeBatch` call.
+/// One body item of `POST /api/v1/batchOrders`. Validation rules are
+/// identical to `POST /api/v1/order` — both paths share
+/// `validate_and_encode_order_item`.
 #[derive(Debug, Clone)]
 pub struct BatchOrderInputItem {
     pub side: OrderSide,
@@ -690,11 +688,10 @@ pub struct BatchOrderInputItem {
     pub client_order_id: Option<String>,
 }
 
-/// Input shape for `CreateBatchOrdersUseCase`. Mirrors the body of
-/// `POST /api/v1/batchOrders` — one trading PN, one `(marketAddress,
-/// symbol)`, plus the per-item list. The chain ABI accepts only one
-/// `(eventId, oracleListHash, tokenType)` per batch, so all items share
-/// the same market/outcome resolution.
+/// Input shape for `CreateBatchOrdersUseCase`. One `(marketAddress,
+/// symbol)` per request: the chain ABI accepts only one `(eventId,
+/// oracleListHash, tokenType)` per batch, so all items share the same
+/// market/outcome resolution.
 #[derive(Debug, Clone)]
 pub struct CreateBatchOrdersInput {
     pub trading_pn: TradingPn,
@@ -705,11 +702,9 @@ pub struct CreateBatchOrdersInput {
     pub now_ms: i64,
 }
 
-/// Per-order chain-shaped fields the batch sender packs into
-/// `OrderBookOrder`. Identical in meaning to the corresponding fields
-/// in `NewOrderPayload`; carried separately because the chain ABI puts
-/// `(eventId, oracleListHash, tokenType)` at the batch level and only
-/// these fields per order.
+/// Per-item chain-shaped fields. Split from the batch-level
+/// `(eventId, oracleListHash, tokenType)` because the chain ABI carries
+/// those at the batch level and only these fields per order.
 #[derive(Debug, Clone)]
 pub struct BatchOrderPayloadItem {
     pub outcome_id: u32,
@@ -721,9 +716,8 @@ pub struct BatchOrderPayloadItem {
 }
 
 /// Chain-shaped payload handed to `ChainOrderSender::submit_batch_order`.
-/// Single market/outcome coordinates, multiple orders — matches
-/// `ackinacki-kit::PrivateNote::place_batch` (`ParamsOfPlaceBatch`)
-/// directly.
+/// Maps directly to `ackinacki-kit::PrivateNote::place_batch`
+/// (`ParamsOfPlaceBatch`).
 #[derive(Debug, Clone)]
 pub struct NewBatchOrderPayload {
     pub pn_address: String,
@@ -735,9 +729,9 @@ pub struct NewBatchOrderPayload {
     pub orders: Vec<BatchOrderPayloadItem>,
 }
 
-/// Output of `CreateBatchOrdersUseCase`. One `SubmittedOrder` per
-/// accepted item, in request order — the HTTP layer maps these into
-/// the `PENDING_NEW` array response per
+/// Output of `CreateBatchOrdersUseCase`. Request order is preserved so
+/// the HTTP layer can pair each `SubmittedOrder` with the input item by
+/// position — see
 /// [api-spec §New Batch Orders](../../docs/api-spec.md#new-batch-orders).
 #[derive(Debug, Clone)]
 pub struct SubmittedBatchOrders {
@@ -1113,7 +1107,11 @@ where
         // Empty batch is a client-shape error. The chain enforces the
         // same (162 `ERR_EMPTY_BATCH`) but failing fast saves a round-trip
         // and avoids needlessly contending for the per-PN `_busy` lock.
+        // Logged with `orders_len = 0` so ops can distinguish this from
+        // the symmetric oversize reject below — both map to -1130 on
+        // the wire.
         if input.orders.is_empty() {
+            warn!(orders_len = 0, "batchOrders rejected: empty orders[]");
             return Err(DomainError::InvalidParameter);
         }
 
@@ -1145,6 +1143,11 @@ where
         // client gets `-1130 / 400` instead of paying a chain
         // round-trip on a doomed batch.
         if input.orders.len() > outcome.max_batch_size as usize {
+            warn!(
+                orders_len = input.orders.len(),
+                max_batch_size = outcome.max_batch_size,
+                "batchOrders rejected: orders[] exceeds max_batch_size",
+            );
             return Err(DomainError::InvalidParameter);
         }
 
@@ -2536,11 +2539,12 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_generates_client_order_id_when_absent() {
-        // Mirror of the single-order coid-generation path: each item
-        // without `newOrderClientId` must get a fresh u64-bounded
-        // decimal id, and IDs MUST be unique across the batch
-        // (otherwise chain ERR_INVALID_PARAMS (129) on
-        // intra-batch coid collision would always fire).
+        // Smoke: each item without `newOrderClientId` gets a fresh
+        // u64-bounded decimal id, fed straight into the chain payload.
+        // Statistical uniqueness comes from the generator (Uuid::new_v4
+        // -> u128 -> u64), not from this two-sample check; the
+        // `assert_ne!` below catches the degenerate case where both
+        // items pick up the same constant.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
@@ -2555,10 +2559,122 @@ mod tests {
             assert!(coid.chars().all(|c| c.is_ascii_digit()));
             assert!(coid.parse::<u64>().is_ok());
         }
-        assert_ne!(coid_a, coid_b, "generated coids must not collide intra-batch");
+        assert_ne!(coid_a, coid_b);
         // Same ids must appear in the chain payload.
         let payload = &sender.batch_calls()[0];
         assert_eq!(payload.orders[0].client_order_id, *coid_a);
         assert_eq!(payload.orders[1].client_order_id, *coid_b);
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_per_item_market_with_explicit_price_aborts_whole_batch() {
+        // Parity with `create_order_market_rejects_explicit_price` — the
+        // `(Market, Some(price))` arm of `validate_and_encode_order_item`
+        // is shared, but the batch loop must run it per item and
+        // short-circuit the whole batch on the first failure.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut bad = batch_item(Some("2"));
+        bad.order_type = OrderType::Market;
+        bad.time_in_force = None;
+        // price still set → invalid (Market, Some(_)) combination
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), bad]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        assert!(sender.batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_per_item_market_buy_below_min_notional_aborts_whole_batch() {
+        // Parity for the MARKET-BUY arm of the notional check: `quantity`
+        // is the quote-asset spend, compared directly to `min_notional`.
+        // Raise the threshold so the base 1.5 spend underflows.
+        let mut market = trading_market("PM-YES");
+        market.outcomes[0].min_notional = "10".into();
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut bad = batch_item(Some("2"));
+        bad.order_type = OrderType::Market;
+        bad.side = OrderSide::Buy;
+        bad.time_in_force = None;
+        bad.price = None;
+        bad.quantity = "1.5".into(); // below min_notional=10
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), bad]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_per_item_market_sell_zero_quantity_aborts_whole_batch() {
+        // Parity with `create_order_market_sell_rejects_zero_quantity`.
+        // MARKET SELL skips the notional check, so the explicit
+        // `amount_lifted > 0` gate is the only thing standing between
+        // qty=0 and a chain `ERR_LOW_VALUE` round-trip.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut bad = batch_item(Some("2"));
+        bad.order_type = OrderType::Market;
+        bad.side = OrderSide::Sell;
+        bad.time_in_force = None;
+        bad.price = None;
+        bad.quantity = "0".into();
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), bad]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_per_item_quantity_exceeding_u64_aborts_whole_batch() {
+        // Parity with `create_order_rejects_quantity_exceeding_u64`: the
+        // effective ceiling on `amount` is `u64::MAX` (SDK panics above).
+        // Without the local gate the chain sender would 500 on serialise.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut bad = batch_item(Some("2"));
+        // u64::MAX = 18_446_744_073_709_551_615. With
+        // quantity_precision=6, "18446744073709.551616" lifts to
+        // u64::MAX + 1 — strictly inside (u64::MAX, u128::MAX).
+        bad.quantity = "18446744073709.551616".into();
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), bad]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_per_item_client_order_id_overflowing_u64_aborts_whole_batch() {
+        // Parity with `create_order_rejects_client_order_id_overflowing_u64`.
+        // Caller-supplied coid > u64::MAX must surface as -1130 before
+        // hitting the SDK's panic-on-u128 serialize path.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut bad = batch_item(None);
+        // u64::MAX + 1
+        bad.client_order_id = Some("18446744073709551616".into());
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), bad]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        assert!(sender.batch_calls().is_empty());
     }
 }

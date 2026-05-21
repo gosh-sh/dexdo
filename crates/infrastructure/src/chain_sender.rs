@@ -33,6 +33,7 @@ use num_bigint::BigUint;
 use tokio::time::timeout;
 use tracing::debug;
 use tracing::error;
+use tracing::info;
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -94,7 +95,7 @@ impl ChainOrderSender for BeeDexChainSender {
             price: payload.price_raw,
             amount,
             flags: payload.flags,
-            // MVP: neither field is exposed by api-spec; constants per
+            // Neither field is exposed by api-spec; constants per
             // bee_dex integration test convention. See `docs/tech-specs/
             // write-api.md §Chain submission` for the rationale.
             min_amount: 0,
@@ -169,23 +170,26 @@ impl ChainOrderSender for BeeDexChainSender {
         };
 
         // `client_order_ids` is the audit trail when a place_batch
-        // never returns (`RequestTimeout`) or the gateway raises
-        // `Unexpected`: without it, ops cannot reconcile which coids
+        // never returns (`RequestTimeout`) or the gateway raises an
+        // unmapped error: without it, ops cannot reconcile which coids
         // the chain may or may not have committed against the PN's
-        // `_clientOrderIds` map. Per-order price/amount are not
-        // logged here — those would balloon the line for a large
+        // `_clientOrderIds` map. Emitted at `info!` so the production
+        // default filter keeps it — `debug!` here would be dropped
+        // exactly when we need the breadcrumb. Per-order price/amount
+        // are not logged: they would balloon the line for a large
         // batch and the chain encodes them in the external message
-        // we can recover from the gateway side anyway.
+        // recoverable from the gateway side anyway.
         let client_order_ids: Vec<u128> =
             params.orders.iter().map(|o| o.client_order_id).collect();
-        debug!(
+        info!(
+            entry_point = "place_batch",
             pn = %payload.pn_address,
             event_id = %params.event_id,
             oracle_list_hash = %params.oracle_list_hash,
             token_type = params.token_type,
             order_count = params.orders.len(),
             ?client_order_ids,
-            "place_batch params",
+            "submitting place_batch",
         );
 
         let call = self.dex.place_batch(&payload.pn_address, params, signer);
@@ -218,9 +222,8 @@ fn encode_batch_item(
         flags: item.flags,
         price: item.price_raw.clone(),
         amount,
-        // MVP: matches the single-order path — neither field is
-        // exposed by api-spec and both stay at 0 until the SDK
-        // surfaces them.
+        // Matches the single-order path — neither field is exposed by
+        // api-spec and both stay at 0 until the SDK surfaces them.
         min_amount: 0,
         epoch_id: 0,
         client_order_id,

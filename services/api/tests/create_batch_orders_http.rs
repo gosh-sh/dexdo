@@ -83,15 +83,26 @@ impl Authenticator for FakeAuthenticator {
 struct FakeRepo {
     market: Mutex<Option<Market>>,
     resolver_error: Option<DomainError>,
+    /// Raw anyhow that doesn't wrap a DomainError — exercises the
+    /// non-domain fallback branch in `CreateBatchOrdersUseCase::execute`.
+    resolver_raw_error: Option<String>,
 }
 
 impl FakeRepo {
     fn with(market: Market) -> Self {
-        Self { market: Mutex::new(Some(market)), resolver_error: None }
+        Self { market: Mutex::new(Some(market)), resolver_error: None, resolver_raw_error: None }
     }
 
     fn empty() -> Self {
-        Self { market: Mutex::new(None), resolver_error: None }
+        Self { market: Mutex::new(None), resolver_error: None, resolver_raw_error: None }
+    }
+
+    fn failing_resolver_raw(msg: &str) -> Self {
+        Self {
+            market: Mutex::new(None),
+            resolver_error: None,
+            resolver_raw_error: Some(msg.to_string()),
+        }
     }
 }
 
@@ -116,6 +127,9 @@ impl MarketReadRepository for FakeRepo {
         symbol: &Symbol,
         _: i64,
     ) -> Result<MarketForPlacement, anyhow::Error> {
+        if let Some(msg) = &self.resolver_raw_error {
+            return Err(anyhow::anyhow!("{msg}"));
+        }
         if let Some(err) = self.resolver_error {
             return Err(anyhow::anyhow!(err));
         }
@@ -753,4 +767,74 @@ async fn caller_without_trade_permission_returns_401() {
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1002);
+}
+
+// ---- Resolver / timeout boundary -----------------------------------------
+
+#[tokio::test]
+async fn resolver_raw_anyhow_returns_1000() {
+    // Pin the non-domain fallback in `CreateBatchOrdersUseCase::execute`:
+    // a resolver anyhow without a `DomainError` cause must surface as
+    // 500/-1000, not be swallowed. Parity with the single-order test of
+    // the same name. The `error!` log on that branch is observable in
+    // CI logs and the branch is structurally exercised by this test.
+    let repo: SharedRepo = Arc::new(FakeRepo::failing_resolver_raw("simulated sqlx pool drop"));
+    let sender: SharedChainSender = Arc::new(RecordingBatchSender::ok());
+    let service = setup_with(repo, sender);
+
+    let body = valid_body_with(vec![valid_item("11")]);
+    let mut resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1000);
+}
+
+/// `ChainOrderSender` whose `submit_batch_order` hangs longer than any
+/// reasonable test budget. Used by `handler_exceeding_request_timeout`
+/// to drive the handler past `request_timeout` without a real chain.
+struct SlowBatchSender;
+
+#[async_trait]
+impl ChainOrderSender for SlowBatchSender {
+    async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
+        unreachable!("SlowBatchSender::submit_order called from POST /batchOrders test")
+    }
+
+    async fn cancel_order(&self, _: CancelOrderPayload) -> Result<(), DomainError> {
+        unreachable!("SlowBatchSender::cancel_order called from POST /batchOrders test")
+    }
+
+    async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
+        // 5 s is indefinitely longer than any reasonable budget; the
+        // test caps it at 50 ms so wall-clock stays in the tens of ms.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
+    // Parity with the single-order test of the same name: a chain call
+    // hanging past `request_timeout` must surface as 504/-1007 via the
+    // timeout hoop, not stall the worker. `SlowBatchSender` plays the
+    // stuck-chain role; 50 ms budget keeps the test fast.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender: SharedChainSender = Arc::new(SlowBatchSender);
+    let authenticator: SharedAuth =
+        Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
+    let state = AppState::new(repo, authenticator, sender)
+        .with_request_timeout(std::time::Duration::from_millis(50));
+    let service = Service::new(build_router(state));
+
+    let started = std::time::Instant::now();
+    let mut resp = post_batch(&service, valid_body_with(vec![valid_item("11"), valid_item("22")]))
+        .send(&service)
+        .await;
+    let elapsed = started.elapsed();
+    assert_eq!(resp.status_code, Some(StatusCode::GATEWAY_TIMEOUT));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1007);
+    // Tight bound — well below SlowBatchSender's 5 s sleep — confirms
+    // the hoop actually cancelled the handler.
+    assert!(elapsed < std::time::Duration::from_secs(1), "elapsed {elapsed:?}");
 }
