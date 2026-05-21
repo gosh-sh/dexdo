@@ -7,6 +7,7 @@ use num_bigint::BigUint;
 use serde_json::Value;
 use sqlx::Postgres;
 use sqlx::Transaction;
+use tracing::error;
 use tracing::warn;
 
 use crate::decoder::DecodedEvent;
@@ -630,12 +631,12 @@ async fn apply_order_filled(
     let chain_order = node_chain_order(node, "OrderFilled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     if chain_seconds.is_none() {
-        warn!(
+        error!(
             orderbook_address,
             order_id = %order_id,
             msg_id = %node.msg_id,
             created_at = ?node.created_at,
-            "OrderFilled has no parseable chain time; last_chain_order advances but chain_updated_at will not",
+            "OrderFilled has no parseable chain time; row mutates and last_chain_order advances, but public updateTime will remain stale",
         );
     }
 
@@ -675,7 +676,7 @@ async fn apply_order_filled(
         return Ok(ProjectionOutcome::Deferred);
     }
     if ignored_terminal_fill == Some(true) {
-        warn!(
+        error!(
             orderbook_address,
             order_id = %order_id,
             filled_amount = %filled_amount,
@@ -697,12 +698,12 @@ async fn apply_order_cancelled(
     let chain_order = node_chain_order(node, "OrderCancelled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     if chain_seconds.is_none() {
-        warn!(
+        error!(
             orderbook_address,
             order_id = %order_id,
             msg_id = %node.msg_id,
             created_at = ?node.created_at,
-            "OrderCancelled has no parseable chain time; last_chain_order advances but chain_updated_at will not",
+            "OrderCancelled has no parseable chain time; row mutates and last_chain_order advances, but public updateTime will remain stale",
         );
     }
 
@@ -747,7 +748,7 @@ async fn apply_order_cancelled(
         return Ok(ProjectionOutcome::Deferred);
     }
     if matches!(terminal_status.as_deref(), Some("FILLED" | "REJECTED")) {
-        warn!(
+        error!(
             orderbook_address,
             order_id = %order_id,
             prior_status = %terminal_status.as_deref().unwrap_or(""),

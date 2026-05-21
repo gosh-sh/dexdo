@@ -321,6 +321,51 @@ async fn readonly_user_data_key_can_fetch_orders() {
     assert!(body.next_cursor.is_none());
 }
 
+#[tokio::test]
+async fn status_filter_narrows_orders_through_http() {
+    let Some((service, pool, kek)) = common::setup().await else { return };
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    seed_readonly_key(&pool, &kek, &scope).await;
+    insert_market(&pool, &scope).await;
+    let owner = trading_pn(&pool).await;
+
+    insert_order(&pool, &scope, &owner, 20, true, "5f800000000000000020", "OPEN", 1000).await;
+    insert_order(&pool, &scope, &owner, 21, true, "5f800000000000000021", "FILLED", 0).await;
+    insert_order(&pool, &scope, &owner, 22, true, "5f800000000000000022", "CANCELLED", 0).await;
+
+    let ts = now_ms();
+    let canonical_market = canonical_market_address(&scope.pmp);
+    let canonical = canonical_query(&[
+        ("marketAddress", &canonical_market),
+        ("recvWindow", "5000"),
+        ("status", "FILLED"),
+        ("symbol", &scope.symbol),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(&scope.api_secret_hex, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/orders")
+        .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true)
+        .query("marketAddress", scope.pmp.as_str())
+        .query("symbol", scope.symbol.as_str())
+        .query("status", "FILLED")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    let status = resp.status_code;
+    let body = resp.take_json::<OrdersPageBody>().await.expect("orders body");
+    scope.cleanup(&pool).await;
+
+    assert_eq!(status, Some(StatusCode::OK));
+    assert_eq!(body.orders.len(), 1);
+    assert_eq!(body.orders[0].order_id, "21");
+    assert_eq!(body.orders[0].status, "FILLED");
+}
+
 // Half-supplied (marketAddress, symbol) pair → -1102 / 400. Both
 // directions are pinned: the use case's invariant is "either both or
 // neither", and a regression that loosens it in one direction must

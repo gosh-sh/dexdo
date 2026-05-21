@@ -19,6 +19,7 @@ use dodex_application::OrdersCursor;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
 use dodex_application::QueryableOrderStatus;
+use dodex_domain::decimal_string_is_zero;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -799,20 +800,29 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
 /// keeps the semantics in the type — the caller no longer has to
 /// `.ok()` away a fake error to express the same intent.
 fn order_from_row(row: OrderRow) -> Option<Order> {
-    let quantity_scale = u32::try_from(row.quantity_precision.max(0)).unwrap_or(0);
+    let Some(price_scale) = precision_to_scale(row.price_precision, "price", &row) else {
+        return None;
+    };
+    let Some(quantity_scale) = precision_to_scale(row.quantity_precision, "quantity", &row) else {
+        return None;
+    };
 
     // Derive the public OrderStatus from the stored raw_status and
     // (for OPEN rows) the SQL-side `fully_filled` boolean.
     let status = match row.raw_status.as_str() {
         "OPEN" => {
-            let Some(executed_is_zero) = decimal_string_is_zero(&row.executed_qty) else {
-                error!(
-                    order_id = %row.order_id,
-                    market = %row.market_address,
-                    executed_qty = %row.executed_qty,
-                    "live_orders row has malformed executed quantity; skipping"
-                );
-                return None;
+            let executed_is_zero = match decimal_string_is_zero(&row.executed_qty) {
+                Ok(value) => value,
+                Err(err) => {
+                    error!(
+                        order_id = %row.order_id,
+                        market = %row.market_address,
+                        executed_qty = %row.executed_qty,
+                        error = ?err,
+                        "live_orders row has malformed executed quantity; skipping"
+                    );
+                    return None;
+                }
             };
             if executed_is_zero {
                 OrderStatus::New
@@ -840,8 +850,9 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
                 error!(
                     order_id = %row.order_id,
                     market = %row.market_address,
-                    "REJECTED live_orders row has unexpected chain order_id; rendering empty public orderId"
+                    "REJECTED live_orders row has unexpected chain order_id; skipping"
                 );
+                return None;
             }
             OrderStatus::Rejected
         }
@@ -870,7 +881,7 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
         Symbol(row.symbol),
         identity,
         row.client_order_id,
-        scale_uint_to_decimal(&row.price, u32::try_from(row.price_precision.max(0)).unwrap_or(0)),
+        scale_uint_to_decimal(&row.price, price_scale),
         scale_uint_to_decimal(&row.orig_qty, quantity_scale),
         scale_uint_to_decimal(&row.executed_qty, quantity_scale),
         status,
@@ -897,10 +908,19 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     }
 }
 
-fn decimal_string_is_zero(s: &str) -> Option<bool> {
-    match BigUint::parse_bytes(s.as_bytes(), 10) {
-        Some(v) => Some(v == BigUint::from(0_u8)),
-        None => None,
+fn precision_to_scale(raw: i32, field: &str, row: &OrderRow) -> Option<u32> {
+    match u32::try_from(raw) {
+        Ok(scale) => Some(scale),
+        Err(_) => {
+            error!(
+                order_id = %row.order_id,
+                market = %row.market_address,
+                precision_field = field,
+                precision = raw,
+                "live_orders row has negative decimal precision; skipping"
+            );
+            None
+        }
     }
 }
 
@@ -1907,6 +1927,49 @@ mod tests {
         assert!(filter_orderbook("".into()).is_none());
         assert!(filter_orderbook("   ".into()).is_none());
         assert_eq!(filter_orderbook("0:abc".into()).as_deref(), Some("0:abc"));
+    }
+
+    fn order_row(raw_status: &str, executed_qty: &str) -> OrderRow {
+        OrderRow {
+            market_address: "0:market".into(),
+            symbol: "YES".into(),
+            order_id: "123".into(),
+            client_order_id: "456".into(),
+            price: "100".into(),
+            orig_qty: "1000".into(),
+            executed_qty: executed_qty.into(),
+            fully_filled: false,
+            is_buy: true,
+            chain_created_at_us: 1_700_000_000_000_000,
+            chain_updated_at_us: 1_700_000_001_000_000,
+            placed_chain_order: "5f80000000000000000000000000000123".into(),
+            price_precision: 2,
+            quantity_precision: 2,
+            raw_status: raw_status.into(),
+        }
+    }
+
+    #[test]
+    fn order_from_row_accepts_decimal_executed_qty_for_open_rows() {
+        let mut row = order_row("OPEN", "0.00");
+        row.orig_qty = "10.00".into();
+        row.quantity_precision = 0;
+        let order = order_from_row(row).expect("decimal zero must not be treated as malformed");
+        assert_eq!(order.status().as_str(), "NEW");
+        assert_eq!(order.executed_qty(), "0.00");
+    }
+
+    #[test]
+    fn order_from_row_skips_rejected_rows_with_chain_order_id() {
+        let row = order_row("REJECTED", "0");
+        assert!(order_from_row(row).is_none(), "corrupt REJECTED chain id must be skipped");
+    }
+
+    #[test]
+    fn order_from_row_skips_negative_precision() {
+        let mut row = order_row("OPEN", "0");
+        row.quantity_precision = -2;
+        assert!(order_from_row(row).is_none(), "negative quantity precision must be corruption");
     }
 
     #[test]

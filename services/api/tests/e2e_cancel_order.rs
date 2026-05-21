@@ -170,7 +170,7 @@ async fn cancel_order_against_shellnet() {
             }
         };
         if let Some(found) = owned.orders.iter().find(|o| o.client_order_id == coid_u128) {
-            chain_order_id = Some(found.order_id);
+            chain_order_id = Some(found.order_id.clone());
             break;
         }
     }

@@ -535,19 +535,19 @@ async fn get_orders(
 
 fn order_to_dto(order: Order) -> OrderResponse {
     OrderResponse {
-        market_address: order.market_address.0,
-        symbol: order.symbol.0,
-        order_id: order.order_id,
-        client_order_id: order.client_order_id,
-        price: order.price,
-        orig_qty: order.orig_qty,
-        executed_qty: order.executed_qty,
-        status: order.status.as_str(),
-        time_in_force: order.time_in_force.as_str(),
-        order_type: order.order_type.as_str(),
-        side: order.side.as_str(),
-        time: order.time,
-        update_time: order.update_time,
+        market_address: order.market_address().0.clone(),
+        symbol: order.symbol().0.clone(),
+        order_id: order.order_id().to_owned(),
+        client_order_id: order.client_order_id().to_owned(),
+        price: order.price().to_owned(),
+        orig_qty: order.orig_qty().to_owned(),
+        executed_qty: order.executed_qty().to_owned(),
+        status: order.status().as_str(),
+        time_in_force: order.time_in_force().as_str(),
+        order_type: order.order_type().as_str(),
+        side: order.side().as_str(),
+        time: order.time(),
+        update_time: order.update_time(),
     }
 }
 

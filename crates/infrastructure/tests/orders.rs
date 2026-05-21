@@ -360,7 +360,7 @@ async fn returns_only_owner_rows_across_all_statuses() {
 
     assert_eq!(page.orders.len(), 4, "exactly four owner-1 rows");
     // DESC placed_chain_order: "004" > "003" > "002" > "001"
-    let ids: Vec<&str> = page.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids: Vec<&str> = page.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids, vec!["4", "3", "2", "1"], "DESC placed_chain_order order");
     assert!(page.next_cursor.is_none());
 
@@ -457,6 +457,27 @@ async fn owner_with_no_orders_returns_empty_page() {
     scope.cleanup(&pool).await;
 }
 
+#[tokio::test]
+async fn owner_orders_index_shape_matches_read_query() {
+    let Some(pool) = setup().await else { return };
+
+    let (indexdef,): (String,) = sqlx::query_as(
+        r#"select indexdef
+             from pg_indexes
+            where schemaname = current_schema()
+              and tablename = 'live_orders'
+              and indexname = 'live_orders_owner_idx'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("live_orders_owner_idx exists");
+
+    assert!(indexdef.contains("owner_pn_address"), "{indexdef}");
+    assert!(indexdef.contains("placed_chain_order DESC"), "{indexdef}");
+    assert!(indexdef.contains("owner_pn_address IS NOT NULL"), "{indexdef}");
+    assert!(indexdef.contains("chain_created_at IS NOT NULL"), "{indexdef}");
+}
+
 /// Rows missing either chain timestamp must be filtered in SQL before the
 /// mapper decodes them into non-null `time` / `updateTime` fields. This
 /// covers both duplicated `list_orders` SQL blocks.
@@ -503,7 +524,7 @@ async fn filters_rows_missing_chain_timestamps_before_decoding() {
     .expect("clear chain_updated_at");
 
     let page_all = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders all");
-    let ids_all: Vec<&str> = page_all.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids_all: Vec<&str> = page_all.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids_all, vec!["1"], "unfiltered query drops both NULL timestamp rows");
 
     let page_market = repo
@@ -520,7 +541,7 @@ async fn filters_rows_missing_chain_timestamps_before_decoding() {
         })
         .await
         .expect("list_orders market-filtered");
-    let ids_market: Vec<&str> = page_market.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids_market: Vec<&str> = page_market.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids_market, vec!["1"], "market-filtered query drops both NULL timestamp rows");
 
     scope.cleanup(&pool).await;
@@ -606,8 +627,8 @@ async fn status_csv_filter_narrows_results() {
         .await
         .expect("list_orders with NEW filter");
     assert_eq!(page_new.orders.len(), 1, "only the NEW row");
-    assert_eq!(page_new.orders[0].order_id, "1");
-    assert_eq!(page_new.orders[0].status.as_str(), "NEW");
+    assert_eq!(page_new.orders[0].order_id(), "1");
+    assert_eq!(page_new.orders[0].status().as_str(), "NEW");
 
     // PARTIALLY_FILLED alone — pins `(status='OPEN' AND amount_remaining < amount_initial AND amount_remaining > 0)`.
     let page_pf = repo
@@ -622,8 +643,8 @@ async fn status_csv_filter_narrows_results() {
         .await
         .expect("list_orders with PARTIALLY_FILLED filter");
     assert_eq!(page_pf.orders.len(), 1, "only the PARTIALLY_FILLED row");
-    assert_eq!(page_pf.orders[0].order_id, "2");
-    assert_eq!(page_pf.orders[0].status.as_str(), "PARTIALLY_FILLED");
+    assert_eq!(page_pf.orders[0].order_id(), "2");
+    assert_eq!(page_pf.orders[0].status().as_str(), "PARTIALLY_FILLED");
 
     // FILLED,CANCELED together — pins the two closed-state predicates,
     // and that the OPEN predicates do NOT leak in.
@@ -638,7 +659,7 @@ async fn status_csv_filter_narrows_results() {
         .await
         .expect("list_orders with FILLED,CANCELED filter");
     assert_eq!(page_closed.orders.len(), 2, "only FILLED and CANCELLED rows");
-    let statuses: Vec<&str> = page_closed.orders.iter().map(|o| o.status.as_str()).collect();
+    let statuses: Vec<&str> = page_closed.orders.iter().map(|o| o.status().as_str()).collect();
     // DESC placed_chain_order puts the CANCELLED row (004) before FILLED (003).
     assert_eq!(statuses, vec!["CANCELED", "FILLED"]);
     assert!(page_closed.next_cursor.is_none());
@@ -654,8 +675,8 @@ async fn status_csv_filter_narrows_results() {
         .await
         .expect("list_orders with FILLED filter");
     assert_eq!(page_filled.orders.len(), 1, "only the FILLED row");
-    assert_eq!(page_filled.orders[0].order_id, "3");
-    assert_eq!(page_filled.orders[0].status.as_str(), "FILLED");
+    assert_eq!(page_filled.orders[0].order_id(), "3");
+    assert_eq!(page_filled.orders[0].status().as_str(), "FILLED");
 
     let page_canceled = repo
         .list_orders(&OrdersQuery {
@@ -668,8 +689,8 @@ async fn status_csv_filter_narrows_results() {
         .await
         .expect("list_orders with CANCELED filter");
     assert_eq!(page_canceled.orders.len(), 1, "only the CANCELED row");
-    assert_eq!(page_canceled.orders[0].order_id, "4");
-    assert_eq!(page_canceled.orders[0].status.as_str(), "CANCELED");
+    assert_eq!(page_canceled.orders[0].order_id(), "4");
+    assert_eq!(page_canceled.orders[0].status().as_str(), "CANCELED");
 
     scope.cleanup(&pool).await;
 }
@@ -791,9 +812,13 @@ async fn canceled_partial_fill_reports_nonzero_executed_qty() {
 
     assert_eq!(page.orders.len(), 1);
     let order = &page.orders[0];
-    assert_eq!(order.status.as_str(), "CANCELED", "public status is CANCELED (American spelling)");
-    assert_eq!(order.orig_qty, "10.00", "origQty scaled by 2 decimals");
-    assert_eq!(order.executed_qty, "7.00", "executedQty = (1000-300)/100 = 7.00");
+    assert_eq!(
+        order.status().as_str(),
+        "CANCELED",
+        "public status is CANCELED (American spelling)"
+    );
+    assert_eq!(order.orig_qty(), "10.00", "origQty scaled by 2 decimals");
+    assert_eq!(order.executed_qty(), "7.00", "executedQty = (1000-300)/100 = 7.00");
     assert!(page.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
@@ -849,8 +874,8 @@ async fn order_side_renders_buy_or_sell_per_is_buy_column() {
         .iter()
         .map(|o| {
             (
-                o.order_id.as_str(),
-                match o.side {
+                o.order_id(),
+                match o.side() {
                     dodex_domain::OrderSide::Buy => "BUY",
                     dodex_domain::OrderSide::Sell => "SELL",
                 },
@@ -893,7 +918,7 @@ async fn descending_placed_chain_order_sort() {
     let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
 
     assert_eq!(page.orders.len(), 3);
-    let placed: Vec<&str> = page.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let placed: Vec<&str> = page.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(placed, vec!["3", "2", "1"], "DESC placed_chain_order: 003 > 002 > 001");
     assert!(page.next_cursor.is_none());
 
@@ -939,7 +964,7 @@ async fn cursor_advances_strictly_below_last_returned() {
         .await
         .expect("page 1");
 
-    let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids1, vec!["6", "5", "4", "3"], "page 1 DESC");
     let cursor = page1.next_cursor.expect("next_cursor set after partial page");
     assert_eq!(cursor.as_str(), "003", "cursor is the placed_chain_order of the last returned row");
@@ -955,7 +980,7 @@ async fn cursor_advances_strictly_below_last_returned() {
         .await
         .expect("page 2");
 
-    let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids2, vec!["2", "1"], "page 2 completes the set");
     assert!(page2.next_cursor.is_none(), "no further pages");
 
@@ -999,7 +1024,7 @@ async fn limit_equal_to_row_count_has_no_next_cursor() {
         .await
         .expect("exact-size page");
 
-    let ids: Vec<&str> = page.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids: Vec<&str> = page.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids, vec!["3", "2", "1"]);
     assert!(page.next_cursor.is_none(), "exact-size page is terminal");
 
@@ -1095,8 +1120,8 @@ async fn shared_client_order_id_across_owners_does_not_leak_rows() {
 
     let page = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders");
     assert_eq!(page.orders.len(), 1);
-    assert_eq!(page.orders[0].order_id, "1");
-    assert_eq!(page.orders[0].client_order_id, "shared-coid");
+    assert_eq!(page.orders[0].order_id(), "1");
+    assert_eq!(page.orders[0].client_order_id(), "shared-coid");
 
     scope.cleanup(&pool).await;
 }
@@ -1210,7 +1235,7 @@ async fn status_filter_combines_with_cursor_pagination() {
         })
         .await
         .expect("page 1 filtered");
-    let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids1, vec!["6", "4"], "filtered page 1 skips OPEN row 005");
     let cursor = page1.next_cursor.expect("cursor after partial filtered page");
     assert_eq!(cursor.as_str(), "004");
@@ -1226,9 +1251,9 @@ async fn status_filter_combines_with_cursor_pagination() {
         })
         .await
         .expect("page 2 filtered");
-    let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids2, vec!["3", "1"], "filtered page 2 skips OPEN row 002");
-    let statuses2: Vec<&str> = page2.orders.iter().map(|o| o.status.as_str()).collect();
+    let statuses2: Vec<&str> = page2.orders.iter().map(|o| o.status().as_str()).collect();
     assert!(
         statuses2.iter().all(|s| *s == "FILLED" || *s == "CANCELED"),
         "no OPEN rows leak across the boundary: {statuses2:?}"
@@ -1280,7 +1305,7 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
         .await
         .expect("page 1");
 
-    let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids1, vec!["4", "3"], "page 1 has rows 4 and 3");
     let cursor = page1.next_cursor.expect("cursor present");
     assert_eq!(cursor.as_str(), "003");
@@ -1309,11 +1334,11 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
         .expect("page 2");
 
     assert_eq!(page2.orders.len(), 2, "rows 2 and 1 appear on page 2");
-    let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id.as_str()).collect();
+    let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids2, vec!["2", "1"], "page 2 DESC: row 2 then row 1");
     // Confirm the transitioned row has FILLED status in the response.
-    let transitioned = page2.orders.iter().find(|o| o.order_id == "2").unwrap();
-    assert_eq!(transitioned.status.as_str(), "FILLED", "transitioned row shows FILLED");
+    let transitioned = page2.orders.iter().find(|o| o.order_id() == "2").unwrap();
+    assert_eq!(transitioned.status().as_str(), "FILLED", "transitioned row shows FILLED");
     assert!(page2.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
@@ -1478,8 +1503,8 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         .await
         .expect("page 1");
     assert_eq!(page1.orders.len(), 2);
-    assert_eq!(page1.orders[0].order_id, "4");
-    assert_eq!(page1.orders[1].order_id, "3");
+    assert_eq!(page1.orders[0].order_id(), "4");
+    assert_eq!(page1.orders[1].order_id(), "3");
     let cursor = page1.next_cursor.expect("next_cursor set");
     assert_eq!(cursor.as_str(), "002");
 
@@ -1495,7 +1520,7 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         .await
         .expect("page 2");
     assert_eq!(page2.orders.len(), 1);
-    assert_eq!(page2.orders[0].order_id, "1");
+    assert_eq!(page2.orders[0].order_id(), "1");
     assert!(page2.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
@@ -1621,14 +1646,14 @@ async fn cursor_advances_past_unknown_status_row_at_page_tail() {
 
     let page1 = page1_result.expect("page 1");
     assert_eq!(page1.orders.len(), 2);
-    assert_eq!(page1.orders[0].order_id, "4");
-    assert_eq!(page1.orders[1].order_id, "3");
+    assert_eq!(page1.orders[0].order_id(), "4");
+    assert_eq!(page1.orders[1].order_id(), "3");
     let cursor = page1.next_cursor.expect("next_cursor set");
     assert_eq!(cursor.as_str(), "002");
 
     let page2 = page2_result.expect("page 2 attempted").expect("page 2");
     assert_eq!(page2.orders.len(), 1);
-    assert_eq!(page2.orders[0].order_id, "1");
+    assert_eq!(page2.orders[0].order_id(), "1");
     assert!(page2.next_cursor.is_none());
 
     scope.cleanup(&pool).await;

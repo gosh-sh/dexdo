@@ -232,22 +232,22 @@ pub enum OrderIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Order {
-    pub market_address: MarketAddress,
-    pub symbol: Symbol,
+    market_address: MarketAddress,
+    symbol: Symbol,
     /// Chain-side order id as a decimal string. Empty when the row's
     /// `status` is `Rejected` — the chain never assigns an id to a
     /// rejected placement.
-    pub order_id: String,
-    pub client_order_id: String,
-    pub price: String,
-    pub orig_qty: String,
-    pub executed_qty: String,
-    pub status: OrderStatus,
-    pub time_in_force: TimeInForce,
-    pub order_type: OrderType,
-    pub side: OrderSide,
-    pub time: i64,
-    pub update_time: i64,
+    order_id: String,
+    client_order_id: String,
+    price: String,
+    orig_qty: String,
+    executed_qty: String,
+    status: OrderStatus,
+    time_in_force: TimeInForce,
+    order_type: OrderType,
+    side: OrderSide,
+    time: i64,
+    update_time: i64,
 }
 
 impl Order {
@@ -286,11 +286,23 @@ impl Order {
             }
         };
 
-        if status == OrderStatus::Filled && decimal_string_is_zero(&executed_qty)? {
-            return Err(DomainError::MarketInconsistent);
-        }
+        let executed_is_zero = decimal_string_is_zero(&executed_qty)?;
         if !decimal_string_lte(&executed_qty, &orig_qty)? {
             return Err(DomainError::MarketInconsistent);
+        }
+        match status {
+            OrderStatus::New if !executed_is_zero => {
+                return Err(DomainError::MarketInconsistent);
+            }
+            OrderStatus::PartiallyFilled
+                if executed_is_zero || !decimal_string_lt(&executed_qty, &orig_qty)? =>
+            {
+                return Err(DomainError::MarketInconsistent);
+            }
+            OrderStatus::Filled if executed_is_zero => {
+                return Err(DomainError::MarketInconsistent);
+            }
+            _ => {}
         }
 
         Ok(Self {
@@ -309,14 +321,74 @@ impl Order {
             update_time,
         })
     }
+
+    pub fn market_address(&self) -> &MarketAddress {
+        &self.market_address
+    }
+
+    pub fn symbol(&self) -> &Symbol {
+        &self.symbol
+    }
+
+    pub fn order_id(&self) -> &str {
+        &self.order_id
+    }
+
+    pub fn client_order_id(&self) -> &str {
+        &self.client_order_id
+    }
+
+    pub fn price(&self) -> &str {
+        &self.price
+    }
+
+    pub fn orig_qty(&self) -> &str {
+        &self.orig_qty
+    }
+
+    pub fn executed_qty(&self) -> &str {
+        &self.executed_qty
+    }
+
+    pub fn status(&self) -> OrderStatus {
+        self.status
+    }
+
+    pub fn time_in_force(&self) -> TimeInForce {
+        self.time_in_force
+    }
+
+    pub fn order_type(&self) -> OrderType {
+        self.order_type
+    }
+
+    pub fn side(&self) -> OrderSide {
+        self.side
+    }
+
+    pub fn time(&self) -> i64 {
+        self.time
+    }
+
+    pub fn update_time(&self) -> i64 {
+        self.update_time
+    }
 }
 
-fn decimal_string_is_zero(s: &str) -> Result<bool, DomainError> {
+pub fn decimal_string_is_zero(s: &str) -> Result<bool, DomainError> {
     let (value, _) = parse_decimal_string(s)?;
     Ok(value == BigUint::from(0_u8))
 }
 
-fn decimal_string_lte(left: &str, right: &str) -> Result<bool, DomainError> {
+pub fn decimal_string_lte(left: &str, right: &str) -> Result<bool, DomainError> {
+    Ok(decimal_string_cmp(left, right)? != std::cmp::Ordering::Greater)
+}
+
+pub fn decimal_string_lt(left: &str, right: &str) -> Result<bool, DomainError> {
+    Ok(decimal_string_cmp(left, right)? == std::cmp::Ordering::Less)
+}
+
+fn decimal_string_cmp(left: &str, right: &str) -> Result<std::cmp::Ordering, DomainError> {
     let (mut left_value, left_scale) = parse_decimal_string(left)?;
     let (mut right_value, right_scale) = parse_decimal_string(right)?;
     if left_scale < right_scale {
@@ -328,7 +400,7 @@ fn decimal_string_lte(left: &str, right: &str) -> Result<bool, DomainError> {
             u32::try_from(left_scale - right_scale).map_err(|_| DomainError::MarketInconsistent)?;
         right_value *= BigUint::from(10_u8).pow(shift);
     }
-    Ok(left_value <= right_value)
+    Ok(left_value.cmp(&right_value))
 }
 
 fn parse_decimal_string(s: &str) -> Result<(BigUint, usize), DomainError> {
@@ -1029,6 +1101,50 @@ mod tests {
         )
         .expect_err("executed quantity cannot exceed original quantity");
         assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn order_constructor_rejects_new_with_nonzero_executed_qty() {
+        let err = Order::new(
+            MarketAddress("0:market".into()),
+            Symbol("SYM".into()),
+            OrderIdentity::Chain("123".into()),
+            String::new(),
+            "1.00".into(),
+            "1.00".into(),
+            "0.01".into(),
+            OrderStatus::New,
+            TimeInForce::Gtc,
+            OrderType::Limit,
+            OrderSide::Buy,
+            1,
+            1,
+        )
+        .expect_err("NEW requires zero executed quantity");
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn order_constructor_rejects_partially_filled_boundary_quantities() {
+        for executed_qty in ["0.00", "1.00"] {
+            let err = Order::new(
+                MarketAddress("0:market".into()),
+                Symbol("SYM".into()),
+                OrderIdentity::Chain("123".into()),
+                String::new(),
+                "1.00".into(),
+                "1.00".into(),
+                executed_qty.into(),
+                OrderStatus::PartiallyFilled,
+                TimeInForce::Gtc,
+                OrderType::Limit,
+                OrderSide::Buy,
+                1,
+                1,
+            )
+            .expect_err("PARTIALLY_FILLED requires 0 < executed quantity < original quantity");
+            assert_eq!(err, DomainError::MarketInconsistent);
+        }
     }
 
     #[test]

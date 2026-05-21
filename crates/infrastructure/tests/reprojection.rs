@@ -1042,10 +1042,11 @@ async fn orderplaced_fill_cancel_pipeline_reports_partial_executed_qty() {
 
     assert_eq!(page.orders.len(), 1);
     let order = &page.orders[0];
-    assert_eq!(order.status.as_str(), "CANCELED");
-    assert_eq!(order.orig_qty, "10.00");
+    assert_eq!(order.status().as_str(), "CANCELED");
+    assert_eq!(order.orig_qty(), "10.00");
     assert_eq!(
-        order.executed_qty, "3.00",
+        order.executed_qty(),
+        "3.00",
         "executedQty must reflect the fill before cancellation, not the canceled remainder"
     );
     assert!(page.next_cursor.is_none());
@@ -1150,12 +1151,12 @@ async fn orderplaced_full_fill_then_cancel_keeps_filled_status() {
     assert_eq!(page.orders.len(), 1);
     let order = &page.orders[0];
     assert_eq!(
-        order.status.as_str(),
+        order.status().as_str(),
         "FILLED",
         "filled wins: a cancel arriving after a full fill must not demote the row to CANCELED"
     );
-    assert_eq!(order.orig_qty, "10.00");
-    assert_eq!(order.executed_qty, "10.00", "fully filled");
+    assert_eq!(order.orig_qty(), "10.00");
+    assert_eq!(order.executed_qty(), "10.00", "fully filled");
     assert!(page.next_cursor.is_none());
 }
 
@@ -1247,10 +1248,11 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
 
     assert_eq!(page.orders.len(), 1);
     let order = &page.orders[0];
-    assert_eq!(order.status.as_str(), "CANCELED");
-    assert_eq!(order.orig_qty, "10.00");
+    assert_eq!(order.status().as_str(), "CANCELED");
+    assert_eq!(order.orig_qty(), "10.00");
     assert_eq!(
-        order.executed_qty, "0.00",
+        order.executed_qty(),
+        "0.00",
         "a stale fill after cancellation must not erase the canceled remainder"
     );
     assert!(page.next_cursor.is_none());
