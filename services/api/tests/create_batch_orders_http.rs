@@ -196,6 +196,7 @@ impl ChainOrderSender for RecordingBatchSender {
 
 const PN_ADDRESS: &str = "0:fake-pn";
 const SYMBOL: &str = "PM-FAKE-YES";
+const SYMBOL_NO: &str = "PM-FAKE-NO";
 const MARKET_ADDRESS: &str = "0:market-fake";
 
 fn trading_market() -> Market {
@@ -228,6 +229,26 @@ fn trading_market() -> Market {
             max_batch_size: 5,
         }],
     }
+}
+
+/// Same shape as `trading_market` but with a second outcome (`NO`,
+/// outcome_id=2) on the same market. Used to pin that the symbol-resolved
+/// outcome propagates to the chain payload — a future refactor that
+/// mis-binds to `outcomes[0]` would silently pass a one-outcome fixture.
+fn trading_market_with_no_outcome() -> Market {
+    let mut market = trading_market();
+    market.outcomes.push(Outcome {
+        outcome_id: 2,
+        outcome_name: "NO".into(),
+        symbol: Symbol(SYMBOL_NO.into()),
+        price_precision: 3,
+        quantity_precision: 6,
+        tick_size: "0.001".into(),
+        step_size: "0.000001".into(),
+        min_notional: "0.5".into(),
+        max_batch_size: 5,
+    });
+    market
 }
 
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
@@ -328,6 +349,31 @@ async fn happy_path_two_items_returns_pending_new_array() {
 }
 
 #[tokio::test]
+async fn multi_outcome_market_routes_to_symbol_outcome() {
+    // Symbol resolves to `outcomes[1]` (outcome_id=2). Pins that the
+    // payload carries the symbol-resolved outcome, not `outcomes[0]` —
+    // catches a future refactor that hard-codes the first outcome on a
+    // market that now has more than one.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market_with_no_outcome()));
+    let sender = Arc::new(RecordingBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let body = json!({
+        "marketAddress": MARKET_ADDRESS,
+        "symbol": SYMBOL_NO,
+        "orders": [valid_item("11"), valid_item("22")],
+    });
+    let resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].orders.len(), 2);
+    assert!(calls[0].orders.iter().all(|o| o.outcome_id == 2));
+}
+
+#[tokio::test]
 async fn generated_client_order_ids_when_absent() {
     // Per spec §clientOrderId generation: items without
     // `newOrderClientId` get a fresh u64-bounded decimal id, distinct
@@ -386,6 +432,27 @@ async fn missing_market_address_returns_400_minus_1102() {
     let service = setup_with(repo, sender);
 
     let body = json!({
+        "symbol": SYMBOL,
+        "orders": [valid_item("11")],
+    });
+    let mut resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+}
+
+#[tokio::test]
+async fn empty_market_address_returns_400_minus_1102() {
+    // Present-but-blank `marketAddress` collapses through `non_empty`
+    // to the same -1102 the missing-field path returns. Locks the
+    // NonEmpty boundary so a future refactor that swaps the helper for
+    // a raw `Option::is_some` check doesn't quietly accept `""`.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender: SharedChainSender = Arc::new(RecordingBatchSender::ok());
+    let service = setup_with(repo, sender);
+
+    let body = json!({
+        "marketAddress": "",
         "symbol": SYMBOL,
         "orders": [valid_item("11")],
     });
@@ -603,6 +670,25 @@ async fn intra_batch_client_order_id_collision_returns_400_minus_1130() {
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1130);
+}
+
+#[tokio::test]
+async fn chain_timeout_returns_504_minus_1007() {
+    // Sender raising `RequestTimeout` simulates an elapsed
+    // `place_batch_timeout_ms` budget inside `classify_chain_outcome`.
+    // Pins that the use-case error propagates through the handler's
+    // `?` — a dropped propagation would silently land the request as
+    // 200 with an empty body.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender: SharedChainSender =
+        Arc::new(RecordingBatchSender::failing(DomainError::RequestTimeout));
+    let service = setup_with(repo, sender);
+
+    let body = valid_body_with(vec![valid_item("11"), valid_item("22")]);
+    let mut resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::GATEWAY_TIMEOUT));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1007);
 }
 
 #[tokio::test]

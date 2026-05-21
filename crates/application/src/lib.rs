@@ -25,6 +25,7 @@ use dodex_domain::Symbol;
 use dodex_domain::TimeInForce;
 use num_bigint::BigUint;
 use tracing::error;
+use tracing::warn;
 use uuid::Uuid;
 
 /// Per-request authorization state assembled by the HMAC middleware and
@@ -1151,11 +1152,13 @@ where
 
         let mut encoded_orders = Vec::with_capacity(input.orders.len());
         let mut submitted_items = Vec::with_capacity(input.orders.len());
-        for item in input.orders {
+        for (item_index, item) in input.orders.into_iter().enumerate() {
             // First per-item failure short-circuits the whole batch —
             // matches the chain's atomic placeBatch semantics. The
             // caller can re-submit with the offending entry removed or
-            // corrected.
+            // corrected. `item_index` is logged so ops can correlate
+            // a -1111/-1102/-1130 against the offending position; the
+            // wire shape stays one error object per api-spec.
             let encoded = validate_and_encode_order_item(
                 item.side,
                 &item.quantity,
@@ -1164,7 +1167,10 @@ where
                 item.time_in_force,
                 item.client_order_id.as_deref(),
                 &outcome,
-            )?;
+            )
+            .inspect_err(|err| {
+                warn!(item_index, ?err, "batch item failed validation");
+            })?;
             submitted_items
                 .push(SubmittedOrder { client_order_id: encoded.client_order_id.clone() });
             encoded_orders.push(encoded);
@@ -2385,7 +2391,6 @@ mod tests {
         assert_eq!(payload.oracle_list_hash, "0xdead");
         assert_eq!(payload.token_type, 1);
         assert_eq!(payload.orders.len(), 2);
-        // Order preserved; per-item encoding matches single-order helper.
         assert_eq!(payload.orders[0].client_order_id, "11");
         assert_eq!(payload.orders[1].client_order_id, "22");
         assert_eq!(payload.orders[0].outcome_id, 1);
@@ -2413,13 +2418,14 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_rejects_above_max_batch_size() {
-        // test_outcome().max_batch_size == 5; 6 items must fail
-        // locally with -1130 instead of paying a chain ERR_BATCH_TOO_LARGE.
+        // `max_batch_size + 1` items must fail locally with -1130 instead
+        // of paying a chain ERR_BATCH_TOO_LARGE round-trip.
         let market = trading_market("PM-YES");
+        let max = test_outcome("PM-YES").max_batch_size as usize;
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
 
-        let orders = (0..6).map(|i| batch_item(Some(&i.to_string()))).collect();
+        let orders = (0..=max).map(|i| batch_item(Some(&i.to_string()))).collect();
         let err = uc.execute(base_batch_input("PM-YES", orders)).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
         assert!(sender.batch_calls().is_empty());
@@ -2431,13 +2437,14 @@ mod tests {
         // Catches a future off-by-one (e.g. `>=` instead of `>`) that
         // would reject the boundary value.
         let market = trading_market("PM-YES");
+        let max = test_outcome("PM-YES").max_batch_size as usize;
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
 
-        let orders: Vec<_> = (0..5).map(|i| batch_item(Some(&i.to_string()))).collect();
+        let orders: Vec<_> = (0..max).map(|i| batch_item(Some(&i.to_string()))).collect();
         let out = uc.execute(base_batch_input("PM-YES", orders)).await.expect("max size accepted");
-        assert_eq!(out.items.len(), 5);
-        assert_eq!(sender.batch_calls()[0].orders.len(), 5);
+        assert_eq!(out.items.len(), max);
+        assert_eq!(sender.batch_calls()[0].orders.len(), max);
     }
 
     #[tokio::test]

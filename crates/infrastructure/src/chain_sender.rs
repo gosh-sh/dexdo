@@ -156,8 +156,8 @@ impl ChainOrderSender for BeeDexChainSender {
         let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
 
         let mut orders = Vec::with_capacity(payload.orders.len());
-        for item in &payload.orders {
-            orders.push(encode_batch_item(item)?);
+        for (item_index, item) in payload.orders.iter().enumerate() {
+            orders.push(encode_batch_item(item, item_index)?);
         }
 
         let params = ParamsOfPlaceBatch {
@@ -187,13 +187,16 @@ impl ChainOrderSender for BeeDexChainSender {
 /// `submit_order`'s amount/coid checks — the application layer already
 /// caps both at `u64::MAX`, so reaching the error arm means a gate
 /// upstream was bypassed.
-fn encode_batch_item(item: &BatchOrderPayloadItem) -> Result<OrderBookOrder, DomainError> {
+fn encode_batch_item(
+    item: &BatchOrderPayloadItem,
+    item_index: usize,
+) -> Result<OrderBookOrder, DomainError> {
     let amount = item.amount_raw.parse::<u128>().map_err(|err| {
-        error!(?err, raw = %item.amount_raw, "amount_raw is not uint128");
+        error!(item_index, ?err, raw = %item.amount_raw, "amount_raw is not uint128");
         DomainError::Unexpected
     })?;
     let client_order_id = item.client_order_id.parse::<u128>().map_err(|err| {
-        error!(?err, raw = %item.client_order_id, "client_order_id is not uint128");
+        error!(item_index, ?err, raw = %item.client_order_id, "client_order_id is not uint128");
         DomainError::Unexpected
     })?;
     Ok(OrderBookOrder {
