@@ -472,8 +472,7 @@ async fn owner_orders_index_shape_matches_read_query() {
     .await
     .expect("live_orders_owner_idx exists");
 
-    assert!(indexdef.contains("owner_pn_address"), "{indexdef}");
-    assert!(indexdef.contains("placed_chain_order DESC"), "{indexdef}");
+    assert!(indexdef.contains("(owner_pn_address, placed_chain_order DESC)"), "{indexdef}");
     assert!(indexdef.contains("owner_pn_address IS NOT NULL"), "{indexdef}");
     assert!(indexdef.contains("chain_created_at IS NOT NULL"), "{indexdef}");
 }

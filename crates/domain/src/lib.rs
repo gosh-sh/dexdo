@@ -231,6 +231,24 @@ pub enum OrderIdentity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
+pub struct OrderParts {
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
+    pub order_id: String,
+    pub client_order_id: String,
+    pub price: String,
+    pub orig_qty: String,
+    pub executed_qty: String,
+    pub status: OrderStatus,
+    pub time_in_force: TimeInForce,
+    pub order_type: OrderType,
+    pub side: OrderSide,
+    pub time: i64,
+    pub update_time: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Order {
     market_address: MarketAddress,
     symbol: Symbol,
@@ -299,7 +317,9 @@ impl Order {
             {
                 return Err(DomainError::MarketInconsistent);
             }
-            OrderStatus::Filled if executed_is_zero => {
+            OrderStatus::Filled
+                if executed_is_zero || decimal_string_lt(&executed_qty, &orig_qty)? =>
+            {
                 return Err(DomainError::MarketInconsistent);
             }
             _ => {}
@@ -373,6 +393,24 @@ impl Order {
     pub fn update_time(&self) -> i64 {
         self.update_time
     }
+
+    pub fn into_parts(self) -> OrderParts {
+        OrderParts {
+            market_address: self.market_address,
+            symbol: self.symbol,
+            order_id: self.order_id,
+            client_order_id: self.client_order_id,
+            price: self.price,
+            orig_qty: self.orig_qty,
+            executed_qty: self.executed_qty,
+            status: self.status,
+            time_in_force: self.time_in_force,
+            order_type: self.order_type,
+            side: self.side,
+            time: self.time,
+            update_time: self.update_time,
+        }
+    }
 }
 
 pub fn decimal_string_is_zero(s: &str) -> Result<bool, DomainError> {
@@ -380,11 +418,11 @@ pub fn decimal_string_is_zero(s: &str) -> Result<bool, DomainError> {
     Ok(value == BigUint::from(0_u8))
 }
 
-pub fn decimal_string_lte(left: &str, right: &str) -> Result<bool, DomainError> {
+fn decimal_string_lte(left: &str, right: &str) -> Result<bool, DomainError> {
     Ok(decimal_string_cmp(left, right)? != std::cmp::Ordering::Greater)
 }
 
-pub fn decimal_string_lt(left: &str, right: &str) -> Result<bool, DomainError> {
+fn decimal_string_lt(left: &str, right: &str) -> Result<bool, DomainError> {
     Ok(decimal_string_cmp(left, right)? == std::cmp::Ordering::Less)
 }
 
@@ -1144,6 +1182,53 @@ mod tests {
             )
             .expect_err("PARTIALLY_FILLED requires 0 < executed quantity < original quantity");
             assert_eq!(err, DomainError::MarketInconsistent);
+        }
+    }
+
+    #[test]
+    fn order_constructor_rejects_filled_below_orig_qty() {
+        let err = Order::new(
+            MarketAddress("0:market".into()),
+            Symbol("SYM".into()),
+            OrderIdentity::Chain("123".into()),
+            String::new(),
+            "1.00".into(),
+            "1.00".into(),
+            "0.99".into(),
+            OrderStatus::Filled,
+            TimeInForce::Gtc,
+            OrderType::Limit,
+            OrderSide::Buy,
+            1,
+            1,
+        )
+        .expect_err("FILLED requires executed quantity to equal original quantity");
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn order_constructor_accepts_public_status_quantity_shapes() {
+        for (status, executed_qty) in [
+            (OrderStatus::New, "0.00"),
+            (OrderStatus::PartiallyFilled, "0.50"),
+            (OrderStatus::Filled, "1.00"),
+        ] {
+            Order::new(
+                MarketAddress("0:market".into()),
+                Symbol("SYM".into()),
+                OrderIdentity::Chain("123".into()),
+                String::new(),
+                "1.00".into(),
+                "1.00".into(),
+                executed_qty.into(),
+                status,
+                TimeInForce::Gtc,
+                OrderType::Limit,
+                OrderSide::Buy,
+                1,
+                1,
+            )
+            .expect("valid status/executed/orig quantity shape accepted");
         }
     }
 

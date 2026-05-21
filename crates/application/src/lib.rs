@@ -337,9 +337,9 @@ impl OrderStatusSet {
     }
 
     pub fn canonical_vec(&self) -> Vec<QueryableOrderStatus> {
-        // BTreeSet iteration order is the enum's `Ord`. The enum contains
-        // only read-queryable statuses, so SQL composition has no pending
-        // states to defend against.
+        // BTreeSet iteration order is QueryableOrderStatus's `Ord`. The
+        // set contains only read-queryable statuses, so SQL composition has
+        // no pending states to defend against.
         self.0.iter().copied().collect()
     }
 }

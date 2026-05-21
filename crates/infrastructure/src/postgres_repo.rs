@@ -737,9 +737,8 @@ fn build_status_predicate(set: &OrderStatusSet) -> Option<String> {
         return None;
     }
     // Mirrors docs/tech-specs/read-api.md §Status mapping. Iteration order
-    // is the BTreeSet's Ord-derived enum-declaration order, which is
-    // load-bearing for deterministic SQL composition; see the docstring
-    // on dodex_domain::OrderStatus.
+    // is QueryableOrderStatus's Ord-derived enum-declaration order, which
+    // is load-bearing for deterministic SQL composition.
     const NEW: &str = "(lo.status = 'OPEN' AND lo.amount_remaining = lo.amount_initial)";
     const PARTIALLY_FILLED: &str = "(lo.status = 'OPEN' AND lo.amount_remaining < lo.amount_initial AND lo.amount_remaining > 0)";
     const FILLED: &str = "lo.status = 'FILLED'";
@@ -800,12 +799,8 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
 /// keeps the semantics in the type — the caller no longer has to
 /// `.ok()` away a fake error to express the same intent.
 fn order_from_row(row: OrderRow) -> Option<Order> {
-    let Some(price_scale) = precision_to_scale(row.price_precision, "price", &row) else {
-        return None;
-    };
-    let Some(quantity_scale) = precision_to_scale(row.quantity_precision, "quantity", &row) else {
-        return None;
-    };
+    let price_scale = precision_to_scale(row.price_precision, "price", &row)?;
+    let quantity_scale = precision_to_scale(row.quantity_precision, "quantity", &row)?;
 
     // Derive the public OrderStatus from the stored raw_status and
     // (for OPEN rows) the SQL-side `fully_filled` boolean.
@@ -1970,6 +1965,23 @@ mod tests {
         let mut row = order_row("OPEN", "0");
         row.quantity_precision = -2;
         assert!(order_from_row(row).is_none(), "negative quantity precision must be corruption");
+    }
+
+    #[test]
+    fn order_from_row_skips_negative_price_precision() {
+        let mut row = order_row("OPEN", "0");
+        row.price_precision = -1;
+        row.quantity_precision = 2;
+        assert!(order_from_row(row).is_none(), "negative price precision must be corruption");
+    }
+
+    #[test]
+    fn order_from_row_accepts_rejected_sentinel_identity() {
+        let mut row = order_row("REJECTED", "0");
+        row.order_id = "0".into();
+        let order = order_from_row(row).expect("REJECTED sentinel row should render");
+        assert_eq!(order.status().as_str(), "REJECTED");
+        assert_eq!(order.order_id(), "");
     }
 
     #[test]

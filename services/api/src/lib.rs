@@ -38,6 +38,7 @@ use dodex_domain::MarketAddress;
 use dodex_domain::MarketEvent;
 use dodex_domain::MarketStatus;
 use dodex_domain::Order;
+use dodex_domain::OrderParts;
 use dodex_domain::OrderSide;
 use dodex_domain::OrderStatus;
 use dodex_domain::OrderType;
@@ -534,20 +535,37 @@ async fn get_orders(
 }
 
 fn order_to_dto(order: Order) -> OrderResponse {
+    let OrderParts {
+        market_address,
+        symbol,
+        order_id,
+        client_order_id,
+        price,
+        orig_qty,
+        executed_qty,
+        status,
+        time_in_force,
+        order_type,
+        side,
+        time,
+        update_time,
+        ..
+    } = order.into_parts();
+
     OrderResponse {
-        market_address: order.market_address().0.clone(),
-        symbol: order.symbol().0.clone(),
-        order_id: order.order_id().to_owned(),
-        client_order_id: order.client_order_id().to_owned(),
-        price: order.price().to_owned(),
-        orig_qty: order.orig_qty().to_owned(),
-        executed_qty: order.executed_qty().to_owned(),
-        status: order.status().as_str(),
-        time_in_force: order.time_in_force().as_str(),
-        order_type: order.order_type().as_str(),
-        side: order.side().as_str(),
-        time: order.time(),
-        update_time: order.update_time(),
+        market_address: market_address.0,
+        symbol: symbol.0,
+        order_id,
+        client_order_id,
+        price,
+        orig_qty,
+        executed_qty,
+        status: status.as_str(),
+        time_in_force: time_in_force.as_str(),
+        order_type: order_type.as_str(),
+        side: side.as_str(),
+        time,
+        update_time,
     }
 }
 
