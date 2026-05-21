@@ -309,6 +309,9 @@ impl Order {
             return Err(DomainError::MarketInconsistent);
         }
         match status {
+            OrderStatus::PendingNew | OrderStatus::PendingCancel => {
+                return Err(DomainError::MarketInconsistent);
+            }
             OrderStatus::New if !executed_is_zero => {
                 return Err(DomainError::MarketInconsistent);
             }
@@ -603,9 +606,9 @@ impl TimeInForce {
 /// `PendingNew`; the indexer-projected row in `live_orders` then
 /// surfaces as `NEW` through `GET /api/v1/orders`.
 ///
-/// Variant declaration order is pinned by tests because API adapters and
-/// filters use deterministic status ordering for stable output and SQL
-/// composition. Do not reorder variants without auditing the depending sites.
+/// Variant declaration order is pinned by a regression test so the public
+/// wire sequence stays deliberate. SQL status-filter composition uses
+/// `QueryableOrderStatus`, not this enum.
 ///
 /// `PendingCancel` is the analogous state for cancellation: the moment
 /// `PrivateNote.cancelOrder` accepts and forwards to `OrderBook`, the
@@ -1118,6 +1121,29 @@ mod tests {
         )
         .expect_err("REJECTED with chain identity rejected");
         assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn order_constructor_rejects_pending_read_model_statuses() {
+        for status in [OrderStatus::PendingNew, OrderStatus::PendingCancel] {
+            let err = Order::new(
+                MarketAddress("0:market".into()),
+                Symbol("SYM".into()),
+                OrderIdentity::Chain("123".into()),
+                String::new(),
+                "1.00".into(),
+                "1.00".into(),
+                "0.00".into(),
+                status,
+                TimeInForce::Gtc,
+                OrderType::Limit,
+                OrderSide::Buy,
+                1,
+                1,
+            )
+            .expect_err("pending statuses cannot appear in live_orders read DTOs");
+            assert_eq!(err, DomainError::MarketInconsistent);
+        }
     }
 
     #[test]

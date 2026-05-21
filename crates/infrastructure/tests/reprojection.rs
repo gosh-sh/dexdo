@@ -1370,12 +1370,14 @@ async fn ordercancelled_does_not_rewrite_rejected_row() {
 
     let result = indexer.reproject_pending(1000).await;
 
-    let status: String =
+    // Capture the read result without panicking — the CHECK constraint must
+    // be restored before any assertion fires, or a failure here would leak
+    // a constraint-less table into every subsequent test in the suite.
+    let status_result: Result<String, sqlx::Error> =
         sqlx::query_scalar("select status from live_orders where orderbook_address = $1")
             .bind(&orderbook_addr)
             .fetch_one(&pool)
-            .await
-            .expect("read status");
+            .await;
 
     sqlx::query(
         "update live_orders set status = 'OPEN' where orderbook_address = $1 and status = 'REJECTED'",
@@ -1393,8 +1395,88 @@ async fn ordercancelled_does_not_rewrite_rejected_row() {
     .await
     .expect("restore status check");
 
+    let status = status_result.expect("read status");
     result.expect("reproject");
     assert_eq!(status, "REJECTED", "cancel projector must preserve future rejected rows");
+}
+
+#[tokio::test]
+async fn orderfilled_does_not_rewrite_rejected_row() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let indexer = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_fill_rejected_guard";
+    let orderbook_addr = format!("0:{test}_book");
+    let msg_id_fill = format!("{test}-fill-msg");
+    let order_id = "0";
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_fill.as_str()),
+        ],
+    )
+    .await;
+
+    sqlx::query("alter table live_orders drop constraint if exists live_orders_status_check")
+        .execute(&pool)
+        .await
+        .expect("drop status check for future-status fixture");
+    sqlx::query(
+        r#"insert into live_orders
+             (orderbook_address, order_id, outcome_id, is_buy, price, amount_initial,
+              amount_remaining, client_order_id, owner_pn_address, status,
+              placed_chain_order, last_chain_order, chain_created_at, chain_updated_at)
+           values ($1, $2::numeric, 1::numeric, true, 100::numeric, 1000::numeric,
+                   0::numeric, 55::numeric, '0:rejected-owner', 'REJECTED',
+                   '5f80000000000000000000000000000001',
+                   '5f80000000000000000000000000000001',
+                   to_timestamp(1700000000), to_timestamp(1700000000))"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert rejected row");
+
+    insert_raw(
+        &pool,
+        &msg_id_fill,
+        &orderbook_addr,
+        "OrderBook.OrderFilled",
+        &json!({ "orderId": order_id, "filledAmount": "100" }),
+    )
+    .await;
+
+    let result = indexer.reproject_pending(1000).await;
+
+    let status_result: Result<String, sqlx::Error> =
+        sqlx::query_scalar("select status from live_orders where orderbook_address = $1")
+            .bind(&orderbook_addr)
+            .fetch_one(&pool)
+            .await;
+
+    sqlx::query(
+        "update live_orders set status = 'OPEN' where orderbook_address = $1 and status = 'REJECTED'",
+    )
+    .bind(&orderbook_addr)
+    .execute(&pool)
+    .await
+    .expect("restore row status before constraint");
+    sqlx::query(
+        r#"alter table live_orders
+             add constraint live_orders_status_check
+             check (status in ('OPEN', 'FILLED', 'CANCELLED'))"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("restore status check");
+
+    let status = status_result.expect("read status");
+    result.expect("reproject");
+    assert_eq!(status, "REJECTED", "fill projector must preserve future rejected rows");
 }
 
 #[tokio::test]
@@ -1468,4 +1550,82 @@ async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
     .await
     .expect("read owner");
     assert_eq!(owner, original_owner, "owner must not change once attributed");
+}
+
+#[tokio::test]
+async fn orderplaced_replay_reopens_terminal_row() {
+    // Pins the documented behaviour of the OrderPlaced ON CONFLICT arm: it
+    // overwrites status with 'OPEN'. Replaying placement alone against a
+    // FILLED row therefore reopens it, which is why
+    // docs/migrations/orders-cancel-remainder-cutover.md requires
+    // reprojecting the full lifecycle (place + fill + cancel), not only
+    // placement. If a future change protects terminal rows on conflict,
+    // this assertion flips — and the cutover doc must flip with it.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_replay_reopens_terminal";
+    let orderbook_addr = format!("0:{test}_book");
+    let msg_id_place = format!("{test}-place-msg");
+    let order_id = "77";
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_place.as_str()),
+        ],
+    )
+    .await;
+
+    // Seed a terminal row directly. amount_remaining=0 and status=FILLED
+    // mimic a fully-filled order whose lifecycle was previously projected.
+    sqlx::query(
+        r#"insert into live_orders
+             (orderbook_address, order_id, outcome_id, is_buy, price, amount_initial,
+              amount_remaining, client_order_id, owner_pn_address, status,
+              placed_chain_order, last_chain_order, chain_created_at, chain_updated_at)
+           values ($1, $2::numeric, 1::numeric, true, 100::numeric, 50::numeric,
+                   0::numeric, 9::numeric, '0:terminal-owner', 'FILLED',
+                   '5f80000000000000000000000000000077',
+                   '5f80000000000000000000000000000077',
+                   to_timestamp(1700000000), to_timestamp(1700000500))"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("seed FILLED row");
+
+    insert_raw(
+        &pool,
+        &msg_id_place,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": "9",
+        }),
+    )
+    .await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let (status, amount_remaining): (String, String) = sqlx::query_as(
+        r#"select status, amount_remaining::text
+             from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read terminal row");
+
+    assert_eq!(status, "OPEN", "isolated OrderPlaced replay reopens the row to OPEN");
+    assert_eq!(
+        amount_remaining, "50",
+        "ON CONFLICT writes excluded.amount_remaining (= amount_initial) into the terminal row"
+    );
 }

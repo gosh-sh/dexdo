@@ -161,6 +161,17 @@ impl IndexerRepository {
                         result.projection_deferred += 1;
                     }
                     Ok(ProjectionOutcome::Unknown) => {
+                        // The row is still marked processed so the cursor
+                        // advances — blocking it would stall ingestion on
+                        // every newly deployed contract emitting an event
+                        // we don't yet teach. The warn! is the observability
+                        // hook: a new event type produces one log line per
+                        // occurrence so operators see the gap.
+                        warn!(
+                            msg_id = %edge.node.msg_id,
+                            event_type = %decoded_event.event_type,
+                            "projector has no handler for event type; marking processed and advancing cursor"
+                        );
                         sp.commit().await.context("projector savepoint release")?;
                         mark_processed_by_msg_id(&mut tx, &edge.node.msg_id).await?;
                     }
@@ -252,6 +263,11 @@ impl IndexerRepository {
                     stats.deferred += 1;
                 }
                 Ok(ProjectionOutcome::Unknown) => {
+                    warn!(
+                        msg_id = %row.msg_id,
+                        event_type = %event.event_type,
+                        "reprojection has no handler for event type; marking processed and advancing"
+                    );
                     sp.commit().await.context("reproject savepoint release")?;
                     mark_processed_by_id(&mut tx, row.id).await?;
                     stats.unknown += 1;

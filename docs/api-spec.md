@@ -902,7 +902,7 @@ Behavior:
 - If `cursor` is empty or whitespace-only, returns `-1102` with HTTP `400`. A well-formed cursor that points past the current set of orders is not an error — the response is `{ "orders": [], "nextCursor": null }`.
 - If `status` contains an unknown token, returns `-1130` with HTTP `400`.
 - If the `(marketAddress, symbol)` pair does not exist, returns `-1121` with HTTP `404`.
-- Empty results are returned as `{ "orders": [], "nextCursor": null }`.
+- Empty results are returned as `{ "orders": [], "nextCursor": null }`. A page may also return `orders: []` together with a non-null `nextCursor`; clients should keep paging until `nextCursor` is `null`.
 - Results are sorted by a single server-internal chain-order key, **descending** (most recently placed first). For all-market requests this ordering is global across all returned orders.
 - Pagination is cursor-based on the same chain-order key. The key is set once when the order is placed and never moves for the life of the order — subsequent fills, cancels, and status transitions do not touch it — so concurrent activity between page reads cannot duplicate or skip rows.
 - The endpoint is eventually consistent: a freshly placed order may briefly not appear, between the time the public `OrderPlaced` event is indexed and the time the private confirmation that carries owner attribution is indexed.

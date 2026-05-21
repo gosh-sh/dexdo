@@ -520,6 +520,11 @@ async fn apply_order_placed(
                    to_timestamp($9::double precision), to_timestamp($9::double precision),
                    $8,
                    now())
+           -- On replay this conflict arm overwrites status with 'OPEN', so
+           -- isolated replay of an OrderPlaced against a FILLED/CANCELLED
+           -- row reopens it. Data-bearing cutovers must reproject the full
+           -- order lifecycle, not only placement; see
+           -- docs/migrations/orders-cancel-remainder-cutover.md.
            on conflict (orderbook_address, order_id) do update
                set outcome_id = excluded.outcome_id,
                    is_buy = excluded.is_buy,
@@ -642,20 +647,20 @@ async fn apply_order_filled(
         );
     }
 
-    let prior_status: Option<String> = sqlx::query_scalar(
+    let prior: Option<(String, bool)> = sqlx::query_as(
         r#"with prior as (
-              select status
+              select status, amount_remaining
                 from live_orders
                where orderbook_address = $1 and order_id = $2::numeric
                for update
            )
            update live_orders as lo
               set amount_remaining = case
-                                      when prior.status in ('FILLED', 'CANCELLED') then lo.amount_remaining
+                                      when prior.status in ('FILLED', 'CANCELLED', 'REJECTED') then lo.amount_remaining
                                       else greatest(lo.amount_remaining - $3::numeric, 0::numeric)
                                   end,
                   status = case
-                           when prior.status in ('FILLED', 'CANCELLED') then prior.status
+                           when prior.status in ('FILLED', 'CANCELLED', 'REJECTED') then prior.status
                            when lo.amount_remaining - $3::numeric <= 0 then 'FILLED'
                            else lo.status
                        end,
@@ -664,7 +669,10 @@ async fn apply_order_filled(
                   updated_at = now()
              from prior
             where lo.orderbook_address = $1 and lo.order_id = $2::numeric
-            returning prior.status"#,
+            returning
+                prior.status,
+                (prior.status not in ('FILLED', 'CANCELLED', 'REJECTED')
+                 and $3::numeric > prior.amount_remaining) as overshoot"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
@@ -675,7 +683,7 @@ async fn apply_order_filled(
     .await
     .context("apply OrderFilled")?;
 
-    if prior_status.is_none() {
+    let Some((prior_status, overshoot)) = prior else {
         warn!(
             orderbook_address,
             order_id = %order_id,
@@ -683,15 +691,29 @@ async fn apply_order_filled(
             "OrderFilled observed before OrderPlaced; deferring"
         );
         return Ok(ProjectionOutcome::Deferred);
-    }
-    if matches!(prior_status.as_deref(), Some("FILLED" | "CANCELLED")) {
+    };
+    if matches!(prior_status.as_str(), "FILLED" | "CANCELLED" | "REJECTED") {
         warn!(
             orderbook_address,
             order_id = %order_id,
             filled_amount = %filled_amount,
             msg_id = %node.msg_id,
-            prior_status = %prior_status.as_deref().unwrap_or(""),
+            prior_status = %prior_status,
             "OrderFilled applied to terminal row; fill amount ignored"
+        );
+    } else if overshoot {
+        // filledAmount exceeded the row's remaining quantity. The CASE arms
+        // above still flip status to 'FILLED' and clamp amount_remaining to
+        // 0, so the user-facing state is correct — but the contract-side
+        // invariant `filledAmount <= amount_remaining` was violated and the
+        // excess is lost. Surface it: per-occurrence warn so operators can
+        // triage.
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            filled_amount = %filled_amount,
+            msg_id = %node.msg_id,
+            "OrderFilled exceeded amount_remaining; clamping to FILLED and dropping excess"
         );
     }
     Ok(ProjectionOutcome::Applied)

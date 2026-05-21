@@ -14,6 +14,8 @@
 | [tech-specs/auth.md](tech-specs/auth.md) | Authentication, authorization, account/api-key lifecycle | shared |
 | [tech-specs/data-schema.md](tech-specs/data-schema.md) | Postgres tables, indexes, migrations | shared |
 
+Operational cutover notes for specific schema/projector changes live in [migrations/](migrations/).
+
 ## Contracts
 
 - [contract-specs/](contract-specs/) — on-chain DODEX contracts. Event routing in [dex-events-routing.md](contract-specs/dex-events-routing.md); flow/object diagrams as HTML and drawio.

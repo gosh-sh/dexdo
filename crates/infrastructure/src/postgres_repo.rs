@@ -531,6 +531,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.amount_initial::text as orig_qty,
                           greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
                           (lo.amount_remaining = 0) as fully_filled,
+                          (lo.amount_remaining > lo.amount_initial) as corrupt_remainder,
                           lo.is_buy as is_buy,
                           (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
                           (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
@@ -574,6 +575,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.amount_initial::text as orig_qty,
                           greatest(lo.amount_initial - lo.amount_remaining, 0)::text as executed_qty,
                           (lo.amount_remaining = 0) as fully_filled,
+                          (lo.amount_remaining > lo.amount_initial) as corrupt_remainder,
                           lo.is_buy as is_buy,
                           (extract(epoch from lo.chain_created_at) * 1000000)::bigint as chain_created_at_us,
                           (extract(epoch from lo.chain_updated_at) * 1000000)::bigint as chain_updated_at_us,
@@ -706,10 +708,15 @@ struct OrderRow {
     price: String,
     orig_qty: String,
     executed_qty: String,
-    /// `amount_remaining = 0` evaluated in SQL. Drives the OPEN-row
-    /// status derivation without relying on `numeric::text` canonical
-    /// formatting matching across `orig_qty` and `executed_qty`.
+    /// `amount_remaining = 0` evaluated in SQL. Used only as a fail-closed
+    /// guard for corrupt OPEN rows; NEW vs PARTIALLY_FILLED is derived from
+    /// `executed_qty`.
     fully_filled: bool,
+    /// `amount_remaining > amount_initial` evaluated in SQL. A `true` here
+    /// is a storage-invariant violation: more units claim to remain than
+    /// were ever placed, so `executed_qty` (clamped to 0 in SQL) would
+    /// otherwise render a corrupt row as a clean `NEW`. Fail closed.
+    corrupt_remainder: bool,
     is_buy: bool,
     // Microseconds since the epoch — sourced from chain_created_at /
     // chain_updated_at (timestamptz). The API renders `time` / `updateTime`
@@ -799,6 +806,15 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
 /// keeps the semantics in the type — the caller no longer has to
 /// `.ok()` away a fake error to express the same intent.
 fn order_from_row(row: OrderRow) -> Option<Order> {
+    if row.corrupt_remainder {
+        error!(
+            order_id = %row.order_id,
+            market = %row.market_address,
+            raw_status = %row.raw_status,
+            "live_orders row has amount_remaining > amount_initial (storage invariant violated); skipping"
+        );
+        return None;
+    }
     let price_scale = precision_to_scale(row.price_precision, "price", &row)?;
     let quantity_scale = precision_to_scale(row.quantity_precision, "quantity", &row)?;
 
@@ -1934,6 +1950,7 @@ mod tests {
             orig_qty: "1000".into(),
             executed_qty: executed_qty.into(),
             fully_filled: false,
+            corrupt_remainder: false,
             is_buy: true,
             chain_created_at_us: 1_700_000_000_000_000,
             chain_updated_at_us: 1_700_000_001_000_000,
@@ -1973,6 +1990,16 @@ mod tests {
         row.price_precision = -1;
         row.quantity_precision = 2;
         assert!(order_from_row(row).is_none(), "negative price precision must be corruption");
+    }
+
+    #[test]
+    fn order_from_row_skips_corrupt_remainder_rows() {
+        let mut row = order_row("OPEN", "0");
+        row.corrupt_remainder = true;
+        assert!(
+            order_from_row(row).is_none(),
+            "amount_remaining > amount_initial must not render as NEW"
+        );
     }
 
     #[test]

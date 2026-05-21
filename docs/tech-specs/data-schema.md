@@ -232,7 +232,7 @@ both see them.
 | `is_buy` | `boolean` | Side. `true` = bid, `false` = ask. |
 | `price` | `numeric(78,0)` | Order price as the contract emitted it (raw uint256). Scaled to a decimal at API render time. |
 | `amount_initial` | `numeric(78,0)` | Original order quantity from `OrderBook.OrderPlaced`. Used with `amount_remaining` to render `origQty` and `executedQty` in account order endpoints. |
-| `amount_remaining` | `numeric(78,0)` | Quantity not yet filled. Set by the `OrderPlaced` event and decremented by the `OrderFilled` event. `OrderCancelled` preserves the current value as the cancelled remainder so `/api/v1/orders.executedQty` can be derived as `amount_initial - amount_remaining`; depth ignores the row because `status != 'OPEN'`. See [Migration requirement: cancel-preserves-remainder semantics](#migration-requirement-cancel-preserves-remainder-semantics). |
+| `amount_remaining` | `numeric(78,0)` | Quantity not yet filled. Set by the `OrderPlaced` event and decremented by the `OrderFilled` event. `OrderCancelled` preserves the current value as the cancelled remainder so `/api/v1/orders.executedQty` can be derived as `amount_initial - amount_remaining`; depth ignores the row because `status != 'OPEN'`. See the [orders cancel-remainder cutover note](../migrations/orders-cancel-remainder-cutover.md) for data-bearing deployment guidance. |
 | `client_order_id` | `text` | Optional client-supplied id. |
 | `owner_pn_address` | `text` | Trading PrivateNote address that owns the order. Initially NULL from `OrderBook.OrderPlaced`; attached by `PrivateNote.OrderPlacedConfirmed` using the event source address. NULL rows can still contribute to public depth, but cannot appear in account-scoped order responses. |
 | `status` | `text` CHECK `IN ('OPEN', 'FILLED', 'CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. The CHECK is extended to include `'REJECTED'` by the contracts-side follow-up documented in [read-api.md §REJECTED — future work](read-api.md#rejected--future-work); until then no row carries that value. |
@@ -254,35 +254,13 @@ to owner-attributed rows whose timestamps are renderable. Status filtering (`OPE
 covers both the default "all statuses" query and any CSV-driven subset; per-owner row counts are
 small enough that this is cheaper than maintaining a wider composite index.
 
-The `chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` conditions previously attached
-to the OPEN-only index were moved into the SQL query as heap filters, keeping the index
-independent of the display-only timestamp columns. This avoids unnecessary index maintenance when
-`chain_updated_at` advances on every `OrderFilled` event.
+The `chain_updated_at IS NOT NULL` condition stays in the SQL query as a heap filter, keeping the
+index independent of a display-only timestamp column that advances on every `OrderFilled` event.
 
-This index supersedes the OPEN-only `live_orders_open_owner_idx`, which is dropped in the same
-migration that introduces `/api/v1/orders` (see [read-api.md §Index reliance](read-api.md#index-reliance)
-and [`0002_orders_owner_index.sql`](../../migrations/0002_orders_owner_index.sql)).
-
-#### Migration requirement: cancel-preserves-remainder semantics
-
-The cancel projector's [`amount_remaining`](#live_orders) write semantics changed: the previous
-projector wrote `amount_remaining = 0` on `OrderCancelled`, while the current
-one preserves the row's value so `executedQty = amount_initial - amount_remaining`
-holds across cancellation. Any deployment whose `live_orders` already carries
-CANCELLED rows from the prior projector MUST clear and reproject those rows
-through the current projector before exposing `/api/v1/orders` — otherwise
-`executedQty` over-reports as `amount_initial` (fully filled) for every legacy
-cancellation. The expected backfill sequence is: (1) set
-`raw_events.processed_at = NULL` for `OrderBook.OrderPlaced` /
-`OrderBook.OrderFilled` / `OrderBook.OrderCancelled` rows belonging to affected
-orders, (2) delete the affected `live_orders` rows, (3) let the indexer's
-`reproject_pending` replay the events through the current projector.
-
-No backfill ships in this repo because no prior endpoint surfaced CANCELLED
-rows publicly (`GET /api/v1/openOrders` filtered `amount_remaining > 0`, and
-`GET /api/v1/allOrders` never shipped), so the regression has zero public
-exposure today. Re-verify before any data-bearing deploy that has been running
-the prior projector.
+Cancel projection preserves [`amount_remaining`](#live_orders), so
+`executedQty = amount_initial - amount_remaining` holds across cancellation.
+Data-bearing cutover guidance lives in
+[`orders-cancel-remainder-cutover.md`](../migrations/orders-cancel-remainder-cutover.md).
 
 ### `order_book_snapshots`
 

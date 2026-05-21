@@ -1,25 +1,26 @@
 -- migrations/0002_orders_owner_index.sql
 --
--- /api/v1/orders supersedes the OPEN-only /api/v1/openOrders. The new
--- endpoint returns rows across all five public statuses
--- (NEW / PARTIALLY_FILLED / FILLED / CANCELED / REJECTED), so the
--- partial predicate on `status = 'OPEN' AND amount_remaining > 0`
--- no longer fits. Status filtering becomes a heap-side predicate;
+-- Owner order reads cover all public statuses
+-- (NEW / PARTIALLY_FILLED / FILLED / CANCELED / REJECTED), so status
+-- filtering is a heap-side predicate over an owner/cursor seek range;
 -- per-owner cardinalities are small enough that this is cheaper than
 -- maintaining a wider composite index.
 --
 -- The partial predicate is intentionally narrower than the SQL
 -- WHERE clause: the runtime query also checks
 -- `chain_updated_at IS NOT NULL`, but the index omits that conjunct.
--- Rationale: the projector writes `chain_created_at` and
--- `chain_updated_at` together (greatest(...) updates on every
--- order-book event, so once `chain_created_at` is non-null
--- `chain_updated_at` is non-null as well). Including the second
--- conjunct in the partial predicate would force index maintenance on
--- every `OrderFilled` (which advances `chain_updated_at`) without
--- buying selectivity. The runtime check stays as a heap filter for
--- defence in depth against the rare ingestion path where the gateway
--- omits `created_at` on an edge.
+-- Rationale: the invariant
+--   `chain_created_at IS NOT NULL ⇒ chain_updated_at IS NOT NULL`
+-- holds because `OrderPlaced` initialises both timestamps from the
+-- same gateway value (both NULL or both non-NULL), and subsequent
+-- `OrderFilled` / `OrderCancelled` events update only
+-- `chain_updated_at` via `greatest(existing, to_timestamp(...))`,
+-- which preserves a non-NULL `chain_updated_at` even when the new
+-- event has no parseable chain time. Including the second conjunct
+-- in the partial predicate would force index maintenance on every
+-- `OrderFilled` without buying selectivity. The runtime check stays
+-- as a heap filter for defence in depth against the rare ingestion
+-- path where the gateway omits `created_at` on an edge.
 --
 -- `CREATE INDEX` (no `CONCURRENTLY`) matches the rest of the project's
 -- sqlx-driven migrations, which run each file inside a transaction —

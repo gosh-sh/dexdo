@@ -152,7 +152,7 @@ Empty string means no OrderBook event has touched this pair yet. The value never
 
 ## `/api/v1/orders`
 
-This endpoint replaces the former `/api/v1/openOrders` (GET) and `/api/v1/allOrders` (GET). `DELETE /api/v1/openOrders` (cancel-all-open) is a separate TRADE operation and is out of scope here — its tech spec lives in [write-api.md](write-api.md).
+`DELETE /api/v1/openOrders` (cancel-all-open) is a separate TRADE operation and is out of scope here — its tech spec lives in [write-api.md](write-api.md).
 
 ### Source data
 
@@ -160,6 +160,7 @@ The endpoint reads exclusively from [`live_orders`](data-schema.md#live_orders).
 
 - `owner_pn_address = ctx.trading_pn.pn_address` — caller is the owner.
 - The parent market in [`markets`](data-schema.md#markets) has `last_reconciled_at IS NOT NULL` — pre-reconcile markets are hidden symmetrically with `/api/v1/markets`.
+- `chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` — rows that the gateway delivered without a parseable timestamp would otherwise crash the decoder when mapping `NULL` into the `time` / `updateTime` `i64` fields. See [§ SQL](#sql) for how this is enforced and [§ Index reliance](#index-reliance) for why only the `chain_created_at` conjunct is part of the partial index.
 - The row's `status` (combined with `amount_remaining` vs `amount_initial` for OPEN rows) maps to at least one of the public statuses requested in the `status` filter — or, if `status` is omitted, all rows pass.
 
 The query joins through `markets` and [`market_outcomes`](data-schema.md#market_outcomes) to recover the public identifiers `pmp_address` and `symbol` for each row, plus `price_precision` / `quantity_precision` for scaling. See [§ SQL](#sql) for the two query variants.
@@ -176,7 +177,7 @@ Market filter (same three shapes as before):
 
 The pair-resolution lookup is a separate SQL round-trip that runs before the main query so the unknown-pair case can be distinguished cleanly from "owner has no orders here". Resolution is bound by `last_reconciled_at IS NOT NULL` so a pair that exists in `markets` but has never reconciled is reported the same way as a pair that does not exist.
 
-Status filter (CSV). The handler parses `status` once at request entry into a `BTreeSet<PublicOrderStatus>`:
+Status filter (CSV). The handler parses `status` once at request entry into `OrderStatusSet`, backed by a `BTreeSet<QueryableOrderStatus>`:
 
 1. Split on `,`, trim each token of ASCII whitespace, drop empty tokens, de-duplicate.
 2. Each token must match exactly one of the five canonical strings `NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`. Anything else → `DomainError::InvalidParameter` → `-1130` / 400.
@@ -270,11 +271,11 @@ The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses
 
 ### SQL
 
-Both variants share the same projection list (`pmp_address`, `symbol`, `order_id`, `client_order_id`, `price`, `amount_initial`, `amount_remaining`, `is_buy`, `chain_created_at_us`, `chain_updated_at_us`, `placed_chain_order`, `lo.status`, `price_precision`, `quantity_precision`). The base predicate is `owner_pn_address = $1 AND m.last_reconciled_at IS NOT NULL AND chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL`.
+Both variants share the same projection list (`pmp_address`, `symbol`, `order_id`, `client_order_id`, `price`, `orig_qty`, `executed_qty`, `fully_filled`, `is_buy`, `chain_created_at_us`, `chain_updated_at_us`, `placed_chain_order`, `lo.status`, `price_precision`, `quantity_precision`). The base predicate is `owner_pn_address = $1 AND m.last_reconciled_at IS NOT NULL AND chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL`.
 
 `chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` are SQL-side heap filters. They guard against a rare ingestion path in which the GraphQL gateway omits `created_at` on an edge — such rows must not surface through the endpoint (otherwise the response decoder would fail when mapping `NULL` into `i64`) — while keeping the index independent of the display-only timestamp columns.
 
-The status predicate is built dynamically from the parsed `BTreeSet<PublicOrderStatus>`:
+The status predicate is built dynamically from `OrderStatusSet`, which wraps a `BTreeSet<QueryableOrderStatus>`:
 
 - Empty set / `status` absent → no status predicate (every row passes).
 - Otherwise → `AND (<per-status predicate> OR <per-status predicate> ...)`, one disjunct per public-status token, drawn from the [§ Status mapping](#status-mapping) table. The disjunct fragments are compile-time string constants; only the allow-listed set drives which fragments are joined.
@@ -285,10 +286,7 @@ The filtered variant pre-resolves `(orderbook_address, outcome_id)` via a separa
 
 ### Index reliance
 
-The existing `live_orders_open_owner_idx` is partial on `status = 'OPEN' AND amount_remaining > 0` — it covers the OPEN-only path but cannot serve closed-row queries. It is replaced (migration ships with the implementation):
-
-- **Drop**: `live_orders_open_owner_idx`.
-- **Create**: `live_orders_owner_idx` — partial index on `(owner_pn_address, placed_chain_order DESC)` with predicate `owner_pn_address IS NOT NULL AND chain_created_at IS NOT NULL`. Covers the default-status query (all five statuses) and any CSV-driven subset.
+`live_orders_owner_idx` is a partial index on `(owner_pn_address, placed_chain_order DESC)` with predicate `owner_pn_address IS NOT NULL AND chain_created_at IS NOT NULL`. It covers the default-status query (all five statuses) and any CSV-driven subset.
 
 Status filters become heap predicates on top of the index range. Per-owner cardinalities are expected in the hundreds even on power-trader accounts; a heap filter over a single-owner range is cheap relative to maintaining a wider composite index that would also need to track the derived NEW/PARTIALLY_FILLED split.
 
