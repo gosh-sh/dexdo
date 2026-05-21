@@ -1,12 +1,31 @@
 # `tests/fixtures/` — `[SHELLNET-TESTKEYS]`
 
-End-to-end test fixtures consumed by `services/api/tests/e2e_order.rs`
-and `services/api/tests/e2e_cancel_order.rs`.
+End-to-end test fixtures consumed by the api crate's `e2e_*.rs`
+integration tests.
 
 ## Files
 
 - `test_pns.json` — **plaintext `owner_secret_key_hex` for FOUR
   shellnet-only throwaway trading PNs**.
+
+## PN slot ownership
+
+Every e2e test that calls `TestPnPool::slot(idx)` claims an exclusive
+slot for the duration of its run. Each chain op (`deployPMP`, `setStake`,
+`splitFullSet`, `placeOrder`, `cancelOrder`, …) takes the PN's
+`_busy` lock, so two tests sharing the same slot would race each other
+to `ERR_NOTE_BUSY`. Assignments:
+
+| slot | purpose             |
+| ---- | ------------------- |
+| 0    | POST `/order`       |
+| 1    | DELETE `/order`     |
+| 2    | POST `/batchOrders` |
+| 3    | reserved            |
+
+A new e2e test that needs its own deployer-PN takes the next free slot
+and adds the row here; top up the pool via `mint_pn_pool` when adding
+slots beyond the four currently in `test_pns.json`.
 
 ## `[SHELLNET-TESTKEYS]` — read before reusing
 

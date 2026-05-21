@@ -775,9 +775,9 @@ async fn caller_without_trade_permission_returns_401() {
 async fn resolver_raw_anyhow_returns_1000() {
     // Pin the non-domain fallback in `CreateBatchOrdersUseCase::execute`:
     // a resolver anyhow without a `DomainError` cause must surface as
-    // 500/-1000, not be swallowed. Parity with the single-order test of
-    // the same name. The `error!` log on that branch is observable in
-    // CI logs and the branch is structurally exercised by this test.
+    // 500/-1000, not be swallowed. The `error!` log on that branch is
+    // observable in CI logs and the branch is structurally exercised
+    // by this test.
     let repo: SharedRepo = Arc::new(FakeRepo::failing_resolver_raw("simulated sqlx pool drop"));
     let sender: SharedChainSender = Arc::new(RecordingBatchSender::ok());
     let service = setup_with(repo, sender);
@@ -790,9 +790,23 @@ async fn resolver_raw_anyhow_returns_1000() {
 }
 
 /// `ChainOrderSender` whose `submit_batch_order` hangs longer than any
-/// reasonable test budget. Used by `handler_exceeding_request_timeout`
-/// to drive the handler past `request_timeout` without a real chain.
-struct SlowBatchSender;
+/// reasonable test budget. The `entered` counter is bumped on first
+/// dispatch so the timeout test can prove the handler actually reached
+/// the chain sender (rather than failing earlier — at auth, market
+/// resolve, or use-case validation).
+struct SlowBatchSender {
+    entered: std::sync::atomic::AtomicU32,
+}
+
+impl SlowBatchSender {
+    fn new() -> Self {
+        Self { entered: std::sync::atomic::AtomicU32::new(0) }
+    }
+
+    fn entered_count(&self) -> u32 {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 #[async_trait]
 impl ChainOrderSender for SlowBatchSender {
@@ -805,6 +819,7 @@ impl ChainOrderSender for SlowBatchSender {
     }
 
     async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
+        self.entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // 5 s is indefinitely longer than any reasonable budget; the
         // test caps it at 50 ms so wall-clock stays in the tens of ms.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -814,15 +829,16 @@ impl ChainOrderSender for SlowBatchSender {
 
 #[tokio::test]
 async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
-    // Parity with the single-order test of the same name: a chain call
-    // hanging past `request_timeout` must surface as 504/-1007 via the
-    // timeout hoop, not stall the worker. `SlowBatchSender` plays the
-    // stuck-chain role; 50 ms budget keeps the test fast.
+    // A chain call hanging past `request_timeout` must surface as
+    // 504/-1007 via the timeout hoop, not stall the worker.
+    // `SlowBatchSender` plays the stuck-chain role; 50 ms budget keeps
+    // the test fast.
     let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
-    let sender: SharedChainSender = Arc::new(SlowBatchSender);
+    let sender = Arc::new(SlowBatchSender::new());
+    let sender_dyn: SharedChainSender = sender.clone();
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    let state = AppState::new(repo, authenticator, sender)
+    let state = AppState::new(repo, authenticator, sender_dyn)
         .with_request_timeout(std::time::Duration::from_millis(50));
     let service = Service::new(build_router(state));
 
@@ -837,4 +853,9 @@ async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
     // Tight bound — well below SlowBatchSender's 5 s sleep — confirms
     // the hoop actually cancelled the handler.
     assert!(elapsed < std::time::Duration::from_secs(1), "elapsed {elapsed:?}");
+    // Pin that the cancellation happened MID-`submit_batch_order`, not
+    // before the handler reached it — otherwise this test would also
+    // pass against an unrelated upstream short-circuit (auth/resolve)
+    // that happens to take >50 ms.
+    assert_eq!(sender.entered_count(), 1, "submit_batch_order was not entered");
 }

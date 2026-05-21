@@ -67,12 +67,13 @@ async fn cancel_order_against_shellnet() {
     };
 
     // ---- Phase 1: deploy a fresh market and place an order so we
-    // ---- have something concrete to cancel. The placement step
-    // ---- is intentionally minimal here — exhaustive POST coverage
-    // ---- lives in `e2e_order.rs`; this test owns the DELETE path.
-    // Slot 1 belongs to this test (`e2e_order.rs` owns slot 0) so
-    // parallel `cargo test -- --ignored` runs do not contend on the
-    // same PN's chain-side `_busy` lock.
+    // ---- have something concrete to cancel. The placement step is
+    // ---- intentionally minimal here — exhaustive POST coverage lives
+    // ---- in the dedicated POST e2e test; this one owns DELETE.
+    // Slot 1 per the slot-ownership table in
+    // `tests/fixtures/README.md#pn-slot-ownership` — every e2e test
+    // claims a unique PN so a parallel `cargo test -- --ignored` run
+    // never contends on the same PN's chain-side `_busy` lock.
     let pn_pool = TestPnPool::load();
     let trader = pn_pool.slot(1).clone();
     let market = deploy_ephemeral_market(

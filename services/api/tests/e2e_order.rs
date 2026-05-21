@@ -78,9 +78,10 @@ async fn buy_limit_gtc_against_shellnet() {
     // Deploy a fresh PMP + OrderBook on shellnet. The deployer-PN is
     // the same PN we then trade against — `splitFullSet` primed its
     // outcome-token balance during deploy.
-    // Slot 0 belongs to this test. `e2e_cancel_order.rs` takes slot 1
-    // so a parallel `cargo test -- --ignored` run does not contend on
-    // the same PN's chain-side `_busy` lock.
+    // Slot 0 per the slot-ownership table in
+    // `tests/fixtures/README.md#pn-slot-ownership` — every e2e test
+    // claims a unique PN so a parallel `cargo test -- --ignored` run
+    // never contends on the same PN's chain-side `_busy` lock.
     let pn_pool = TestPnPool::load();
     let trader = pn_pool.slot(0).clone();
     let market = deploy_ephemeral_market(
@@ -153,114 +154,127 @@ async fn buy_limit_gtc_against_shellnet() {
     // share the same buffer; `take_string` is `&mut self`.
     let status = resp.status_code;
     let body = resp.take_string().await.expect("response body");
-    assert_eq!(status, Some(StatusCode::OK), "POST /api/v1/order; body: {body}");
+    let post_ok = status == Some(StatusCode::OK);
+
+    // Record-then-cancel-then-panic: from here on we may have a live
+    // order on the chain. Accumulate failures, run cleanup
+    // unconditionally, then raise a single combined panic. A naked
+    // `assert!` between this point and the explicit cancel below
+    // would leak collateral on the trading PN.
+    let mut failures: Vec<String> = Vec::new();
+    if !post_ok {
+        failures.push(format!("POST /api/v1/order status={status:?}; body: {body}"));
+    }
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Ok {
+    struct OkBody {
         client_order_id: String,
         transact_time: i64,
         status: String,
     }
-    let ok: Ok = serde_json::from_str(&body).expect("happy path body");
-    // Minimal-response contract: three fields, status PENDING_NEW
-    // until `OrderBook.OrderPlaced` projects through the indexer
-    // (which surfaces the row as NEW via /api/v1/orders).
-    assert_eq!(ok.status, "PENDING_NEW");
-    assert_eq!(ok.client_order_id, coid);
-    assert!(ok.transact_time > 0);
 
-    // Poll OrderBook until the chain reflects placement (60s budget,
-    // 2s ticks — same as bee_dex integration tests).
+    let coid_u128: u128 = coid.parse().expect("coid u128");
     use bee_dex::Dex as RawDex;
     let raw_dex = RawDex::new(vec![SHELLNET_ENDPOINT.to_string()]).expect("RawDex::new");
-    let coid_u128: u128 = coid.parse().expect("coid u128");
-    let mut surfaced = false;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let owned = match raw_dex
-            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
-            .await
-        {
-            Ok(o) => o,
-            Err(err) => {
-                eprintln!("[e2e_order] get_orders_by_owner errored (will retry): {err:?}");
-                continue;
-            }
-        };
-        if owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
-            surfaced = true;
-            break;
-        }
-    }
-    assert!(
-        surfaced,
-        "order with client_order_id={coid} did not surface in getOrdersByOwner within 60s",
-    );
 
-    // ---- Cleanup: cancel through bee_dex so the test does not leave
-    // ---- collateral locked. `cancelOrderByClient` keys off the same
-    // ---- `clientOrderId` — no need to track the chain-assigned id.
-    use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
-    use ackinacki_kit::tvm_client::abi::Signer;
-    use ackinacki_kit::tvm_client::crypto::KeyPair;
-    let signer = Signer::Keys {
-        keys: KeyPair {
-            public: trader.owner_public_key_hex.clone(),
-            secret: trader.owner_secret_key_hex.clone(),
-        },
-    };
-    let cancel_params = ParamsOfCancelOrderByClient {
-        event_id: market.event_id.clone(),
-        oracle_list_hash: market.oracle_list_hash.clone(),
-        token_type: market.token_type,
-        client_order_id: coid_u128,
-    };
-    let mut cancel_sent = false;
-    let mut last_err: Option<bee_dex::errors::AppError> = None;
-    for attempt in 1..=5 {
-        match raw_dex
-            .cancel_order_by_client(&trader.address, cancel_params.clone(), signer.clone())
-            .await
-        {
-            Ok(_) => {
-                cancel_sent = true;
+    if post_ok {
+        match serde_json::from_str::<OkBody>(&body) {
+            Ok(parsed) => {
+                // Minimal-response contract: three fields, status
+                // PENDING_NEW until `OrderBook.OrderPlaced` projects
+                // through the indexer.
+                if parsed.status != "PENDING_NEW" {
+                    failures.push(format!("status={}, want PENDING_NEW", parsed.status));
+                }
+                if parsed.client_order_id != coid {
+                    failures.push(format!(
+                        "clientOrderId={}, want {coid}",
+                        parsed.client_order_id,
+                    ));
+                }
+                if parsed.transact_time <= 0 {
+                    failures.push(format!("transactTime={}, want > 0", parsed.transact_time));
+                }
+            }
+            Err(err) => failures.push(format!("happy path body parse: {err}")),
+        }
+
+        // Poll OrderBook until the chain reflects placement (60s
+        // budget, 2s ticks — same as bee_dex integration tests).
+        let mut surfaced = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let owned = match raw_dex
+                .get_orders_by_owner(
+                    &market.order_book_address,
+                    trader.deposit_identifier_hash.clone(),
+                )
+                .await
+            {
+                Ok(o) => o,
+                Err(err) => {
+                    eprintln!("[e2e_order] get_orders_by_owner errored (will retry): {err:?}");
+                    continue;
+                }
+            };
+            if owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
+                surfaced = true;
                 break;
             }
-            Err(err) => {
-                eprintln!("[e2e_order] cancel attempt {attempt} failed, retrying: {err:?}");
-                last_err = Some(err);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
         }
-    }
-    assert!(
-        cancel_sent,
-        "cancel_order_by_client failed after 5 attempts (last error: {last_err:?})",
-    );
+        if !surfaced {
+            failures.push(format!(
+                "order with client_order_id={coid} did not surface in getOrdersByOwner \
+                 within 60s",
+            ));
+        }
 
-    // Poll until the order is gone — same 60s budget as placement.
-    let mut cancelled = false;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let owned = match raw_dex
-            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
-            .await
-        {
-            Ok(o) => o,
-            Err(err) => {
-                eprintln!("[e2e_order] cleanup poll errored (will retry): {err:?}");
-                continue;
+        // Cleanup runs unconditionally when the POST returned OK so a
+        // failed `surfaced` poll above does not leak collateral.
+        common::cleanup::cancel_coids_best_effort(
+            &raw_dex,
+            &trader,
+            &market,
+            &[coid_u128],
+            "e2e_order",
+        )
+        .await;
+
+        // Poll until the order is gone — same 60s budget as placement.
+        // Only meaningful if surfacing succeeded.
+        if surfaced {
+            let mut cancelled = false;
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let owned = match raw_dex
+                    .get_orders_by_owner(
+                        &market.order_book_address,
+                        trader.deposit_identifier_hash.clone(),
+                    )
+                    .await
+                {
+                    Ok(o) => o,
+                    Err(err) => {
+                        eprintln!("[e2e_order] cleanup poll errored (will retry): {err:?}");
+                        continue;
+                    }
+                };
+                if !owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
+                    cancelled = true;
+                    break;
+                }
             }
-        };
-        if !owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
-            cancelled = true;
-            break;
+            if !cancelled {
+                failures.push(format!(
+                    "cancellation of client_order_id={coid} did not remove the order from \
+                     getOrdersByOwner within 60s — trading PN may still have collateral locked",
+                ));
+            }
         }
     }
-    assert!(
-        cancelled,
-        "cancellation of client_order_id={coid} did not remove the order from \
-         getOrdersByOwner within 60s — trading PN may still have collateral locked",
-    );
+
+    if !failures.is_empty() {
+        panic!("e2e_order failures:\n  - {}", failures.join("\n  - "));
+    }
 }

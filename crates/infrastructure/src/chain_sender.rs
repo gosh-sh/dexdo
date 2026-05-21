@@ -223,7 +223,7 @@ fn encode_batch_item(
         price: item.price_raw.clone(),
         amount,
         // Matches the single-order path — neither field is exposed by
-        // api-spec and both stay at 0 until the SDK surfaces them.
+        // api-spec and both are pinned to 0 at the chain boundary.
         min_amount: 0,
         epoch_id: 0,
         client_order_id,

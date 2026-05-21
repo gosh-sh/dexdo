@@ -1107,11 +1107,12 @@ where
         // Empty batch is a client-shape error. The chain enforces the
         // same (162 `ERR_EMPTY_BATCH`) but failing fast saves a round-trip
         // and avoids needlessly contending for the per-PN `_busy` lock.
-        // Logged with `orders_len = 0` so ops can distinguish this from
-        // the symmetric oversize reject below — both map to -1130 on
-        // the wire.
+        // `phase = "shape"` + `orders_len = 0` lets ops query the single
+        // substring `batchOrders rejected` and disambiguate this empty
+        // case from the symmetric oversize reject below — both map to
+        // -1130 on the wire.
         if input.orders.is_empty() {
-            warn!(orders_len = 0, "batchOrders rejected: empty orders[]");
+            warn!(phase = "shape", orders_len = 0, "batchOrders rejected");
             return Err(DomainError::InvalidParameter);
         }
 
@@ -1144,9 +1145,10 @@ where
         // round-trip on a doomed batch.
         if input.orders.len() > outcome.max_batch_size as usize {
             warn!(
+                phase = "shape",
                 orders_len = input.orders.len(),
                 max_batch_size = outcome.max_batch_size,
-                "batchOrders rejected: orders[] exceeds max_batch_size",
+                "batchOrders rejected",
             );
             return Err(DomainError::InvalidParameter);
         }
@@ -1173,7 +1175,7 @@ where
                 &outcome,
             )
             .inspect_err(|err| {
-                warn!(item_index, ?err, "batch item failed validation");
+                warn!(phase = "validate", item_index, ?err, "batchOrders rejected");
             })?;
             submitted_items
                 .push(SubmittedOrder { client_order_id: encoded.client_order_id.clone() });
@@ -2567,11 +2569,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_batch_orders_first_item_failure_aborts_whole_batch() {
+        // The other per-item parity tests put the bad item at index 1
+        // with a valid item at index 0. This pins the symmetric case:
+        // a bad item at index 0 must also abort. Guards against a
+        // future `enumerate().skip(N)` regression that would silently
+        // skip index 0 validation while still passing every other test.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut bad = batch_item(Some("1"));
+        bad.price = Some("0.6155".into()); // 4 dp > pricePrecision=3
+        let err = uc
+            .execute(base_batch_input("PM-YES", vec![bad, batch_item(Some("2"))]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DomainError::PrecisionExceeded);
+        assert!(sender.batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_batch_orders_market_buy_happy_path() {
+        // Happy path for the MARKET-BUY arm — the other MARKET tests
+        // only cover rejections. Pins that a well-formed MARKET item
+        // flows through `submit_batch_order` and lands as a chain
+        // payload with `flags == MARKET_FLAG` and `price_raw == "0"`.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let mut item = batch_item(Some("1"));
+        item.order_type = OrderType::Market;
+        item.side = OrderSide::Buy;
+        item.time_in_force = None;
+        item.price = None;
+        item.quantity = "5".into(); // notional 5 > min_notional 0.5
+        let out = uc.execute(base_batch_input("PM-YES", vec![item])).await.expect("market happy");
+        assert_eq!(out.items.len(), 1);
+
+        let calls = sender.batch_calls();
+        assert_eq!(calls.len(), 1);
+        let payload = &calls[0].orders[0];
+        assert!(payload.is_buy);
+        // MARKET items carry `price_raw = "0"` per the encode helper.
+        assert_eq!(payload.price_raw, "0");
+        // Flags for MARKET (no TIF). `encode_order_flags` documents the
+        // bit layout; non-zero is the contract here.
+        assert_ne!(payload.flags, 0);
+    }
+
+    #[tokio::test]
     async fn create_batch_orders_per_item_market_with_explicit_price_aborts_whole_batch() {
-        // Parity with `create_order_market_rejects_explicit_price` — the
-        // `(Market, Some(price))` arm of `validate_and_encode_order_item`
-        // is shared, but the batch loop must run it per item and
-        // short-circuit the whole batch on the first failure.
+        // The `(Market, Some(price))` arm of `validate_and_encode_order_item`
+        // must reject per-item, and the batch loop must short-circuit
+        // the whole batch on the first failure.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
@@ -2590,9 +2642,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_per_item_market_buy_below_min_notional_aborts_whole_batch() {
-        // Parity for the MARKET-BUY arm of the notional check: `quantity`
-        // is the quote-asset spend, compared directly to `min_notional`.
-        // Raise the threshold so the base 1.5 spend underflows.
+        // MARKET-BUY notional arm: `quantity` is the quote-asset spend,
+        // compared directly to `min_notional`. Raise the threshold so
+        // the base 1.5 spend underflows.
         let mut market = trading_market("PM-YES");
         market.outcomes[0].min_notional = "10".into();
         let sender = Arc::new(FakeSender::ok());
@@ -2614,10 +2666,10 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_per_item_market_sell_zero_quantity_aborts_whole_batch() {
-        // Parity with `create_order_market_sell_rejects_zero_quantity`.
         // MARKET SELL skips the notional check, so the explicit
         // `amount_lifted > 0` gate is the only thing standing between
-        // qty=0 and a chain `ERR_LOW_VALUE` round-trip.
+        // qty=0 and a chain `ERR_LOW_VALUE` round-trip. Pin that the
+        // batch loop runs that gate per item.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
@@ -2638,9 +2690,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_per_item_quantity_exceeding_u64_aborts_whole_batch() {
-        // Parity with `create_order_rejects_quantity_exceeding_u64`: the
-        // effective ceiling on `amount` is `u64::MAX` (SDK panics above).
-        // Without the local gate the chain sender would 500 on serialise.
+        // The effective ceiling on `amount` is `u64::MAX` — the upstream
+        // SDK serialisation path panics above. Without the local gate
+        // the chain sender would 500 on serialise. Pin per-item.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
@@ -2660,9 +2712,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_per_item_client_order_id_overflowing_u64_aborts_whole_batch() {
-        // Parity with `create_order_rejects_client_order_id_overflowing_u64`.
         // Caller-supplied coid > u64::MAX must surface as -1130 before
-        // hitting the SDK's panic-on-u128 serialize path.
+        // hitting the SDK's panic-on-u128 serialize path. Pin per-item.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());

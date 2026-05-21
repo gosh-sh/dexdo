@@ -21,9 +21,11 @@
 // === SECURITY NOTE ===
 // `tests/fixtures/test_pns.json` ships plaintext `owner_secret_key_hex`
 // values for shellnet-only throwaway trading PNs. Safe ONLY because
-// shellnet is a public devnet and the PNs hold test NACKL. Do NOT
-// repurpose this format outside devnet — see `e2e_order.rs` for the
-// canonical version of these constraints.
+// shellnet is a public devnet and the PNs hold test NACKL. The keys
+// are loaded into memory by every test that calls `TestPnPool::load()`;
+// never copy this fixture format into a stage or prod config. See the
+// `SECURITY NOTE` block in the POST e2e test for the canonical version
+// of these constraints and the `[SHELLNET-TESTKEYS]` tag.
 
 mod common;
 
@@ -70,10 +72,10 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
         return;
     };
 
-    // Slot 2 belongs to this test. `e2e_order.rs` owns slot 0 and
-    // `e2e_cancel_order.rs` owns slot 1; a parallel `cargo test --
-    // --ignored` run must not contend on the same PN's chain-side
-    // `_busy` lock.
+    // Slot 2 per the slot-ownership table in
+    // `tests/fixtures/README.md#pn-slot-ownership` — every e2e test
+    // claims a unique PN so a parallel `cargo test -- --ignored` run
+    // never contends on the same PN's chain-side `_busy` lock.
     let pn_pool = TestPnPool::load();
     let trader = pn_pool.slot(2).clone();
     let market = deploy_ephemeral_market(
@@ -161,7 +163,18 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
 
     let status = resp.status_code;
     let resp_body = resp.take_string().await.expect("response body");
-    assert_eq!(status, Some(StatusCode::OK), "POST /api/v1/batchOrders; body: {resp_body}");
+    let post_ok = status == Some(StatusCode::OK);
+
+    // From this point on we may have live orders on the chain. The
+    // assertion shape is `record-then-cancel-then-panic`: accumulate
+    // failures in `failures`, run cleanup unconditionally, then raise
+    // a single combined panic at the very end. A naked `assert!` here
+    // would leak collateral on the trading PN if any of the polls or
+    // chain-side checks below tripped.
+    let mut failures: Vec<String> = Vec::new();
+    if !post_ok {
+        failures.push(format!("POST /api/v1/batchOrders status={status:?}; body: {resp_body}"));
+    }
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -170,127 +183,136 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
         transact_time: i64,
         status: String,
     }
-    let items: Vec<BatchItem> = serde_json::from_str(&resp_body).expect("batch body");
-    assert_eq!(items.len(), 2, "expected 2 batch items, got {}", items.len());
-    for item in &items {
-        assert_eq!(item.status, "PENDING_NEW");
-        assert!(item.transact_time > 0);
-    }
-    // api-spec: one `transactTime` per batch — every item carries the
-    // handler's single `now_ms`, not a per-item re-clock.
-    assert_eq!(items[0].transact_time, items[1].transact_time);
-    assert_eq!(items[0].client_order_id, coid_a);
-    assert_eq!(items[1].client_order_id, coid_b);
 
-    // Poll OrderBook until the chain reflects BOTH placements (60s
-    // budget, 2s ticks). `placeBatch` is atomic on the chain — once
-    // one coid surfaces the other should follow within the same tick,
-    // but we wait on both before declaring success so a partial
-    // observation does not silently pass.
-    use bee_dex::Dex as RawDex;
-    let raw_dex = RawDex::new(vec![SHELLNET_ENDPOINT.to_string()]).expect("RawDex::new");
     let coid_a_u128: u128 = coid_a.parse().expect("coid_a u128");
     let coid_b_u128: u128 = coid_b.parse().expect("coid_b u128");
-    let mut both_surfaced = false;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let owned = match raw_dex
-            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
-            .await
-        {
-            Ok(o) => o,
-            Err(err) => {
-                eprintln!("[e2e_batch_orders] get_orders_by_owner errored (retry): {err:?}");
-                continue;
-            }
-        };
-        let has_a = owned.orders.iter().any(|o| o.client_order_id == coid_a_u128);
-        let has_b = owned.orders.iter().any(|o| o.client_order_id == coid_b_u128);
-        if has_a && has_b {
-            both_surfaced = true;
-            break;
-        }
-    }
-    assert!(
-        both_surfaced,
-        "batch items (coid_a={coid_a}, coid_b={coid_b}) did not both surface in \
-         getOrdersByOwner within 60s",
-    );
+    use bee_dex::Dex as RawDex;
+    let raw_dex = RawDex::new(vec![SHELLNET_ENDPOINT.to_string()]).expect("RawDex::new");
 
-    // ---- Cleanup: cancel each order by clientOrderId so the test
-    // ---- does not leave collateral locked on the trading PN. We use
-    // ---- `cancelOrderByClient` per item rather than `cancelBatch`
-    // ---- because the latter takes chain-assigned `orderId`s which
-    // ---- we would have to look up first — `cancelOrderByClient`
-    // ---- keys off the same `clientOrderId`s we already hold.
-    use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
-    use ackinacki_kit::tvm_client::abi::Signer;
-    use ackinacki_kit::tvm_client::crypto::KeyPair;
-    let signer = Signer::Keys {
-        keys: KeyPair {
-            public: trader.owner_public_key_hex.clone(),
-            secret: trader.owner_secret_key_hex.clone(),
-        },
-    };
-    for coid_u128 in [coid_a_u128, coid_b_u128] {
-        let cancel_params = ParamsOfCancelOrderByClient {
-            event_id: market.event_id.clone(),
-            oracle_list_hash: market.oracle_list_hash.clone(),
-            token_type: market.token_type,
-            client_order_id: coid_u128,
-        };
-        let mut cancel_sent = false;
-        let mut last_err: Option<bee_dex::errors::AppError> = None;
-        for attempt in 1..=5 {
-            match raw_dex
-                .cancel_order_by_client(&trader.address, cancel_params.clone(), signer.clone())
+    if post_ok {
+        match serde_json::from_str::<Vec<BatchItem>>(&resp_body) {
+            Ok(items) => {
+                if items.len() != 2 {
+                    failures.push(format!("expected 2 batch items, got {}", items.len()));
+                } else {
+                    for item in &items {
+                        if item.status != "PENDING_NEW" {
+                            failures.push(format!("item status={}, want PENDING_NEW", item.status));
+                        }
+                        if item.transact_time <= 0 {
+                            failures.push(format!("item transactTime={}, want > 0", item.transact_time));
+                        }
+                    }
+                    // api-spec: one `transactTime` per batch — every item carries
+                    // the handler's single `now_ms`, not a per-item re-clock.
+                    if items[0].transact_time != items[1].transact_time {
+                        failures.push(format!(
+                            "transactTime mismatch: {} vs {}",
+                            items[0].transact_time, items[1].transact_time,
+                        ));
+                    }
+                    if items[0].client_order_id != coid_a {
+                        failures.push(format!(
+                            "items[0].clientOrderId={}, want {coid_a}",
+                            items[0].client_order_id,
+                        ));
+                    }
+                    if items[1].client_order_id != coid_b {
+                        failures.push(format!(
+                            "items[1].clientOrderId={}, want {coid_b}",
+                            items[1].client_order_id,
+                        ));
+                    }
+                }
+            }
+            Err(err) => failures.push(format!("batch body parse: {err}")),
+        }
+
+        // Poll OrderBook until the chain reflects BOTH placements (60s
+        // budget, 2s ticks). `placeBatch` is atomic on the chain —
+        // once one coid surfaces the other should follow within the
+        // same tick.
+        let mut both_surfaced = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let owned = match raw_dex
+                .get_orders_by_owner(
+                    &market.order_book_address,
+                    trader.deposit_identifier_hash.clone(),
+                )
                 .await
             {
-                Ok(_) => {
-                    cancel_sent = true;
+                Ok(o) => o,
+                Err(err) => {
+                    eprintln!("[e2e_batch_orders] get_orders_by_owner errored (retry): {err:?}");
+                    continue;
+                }
+            };
+            let has_a = owned.orders.iter().any(|o| o.client_order_id == coid_a_u128);
+            let has_b = owned.orders.iter().any(|o| o.client_order_id == coid_b_u128);
+            if has_a && has_b {
+                both_surfaced = true;
+                break;
+            }
+        }
+        if !both_surfaced {
+            failures.push(format!(
+                "batch items (coid_a={coid_a}, coid_b={coid_b}) did not both surface in \
+                 getOrdersByOwner within 60s",
+            ));
+        }
+
+        // ---- Cleanup runs UNCONDITIONALLY when the POST returned OK,
+        // ---- even if surfacing failed. `cancel_order_by_client` is a
+        // ---- no-op against an already-rejected order on the chain side
+        // ---- (the PN's `_clientOrderIds` map drives the lookup) so
+        // ---- this is safe to run on any state.
+        common::cleanup::cancel_coids_best_effort(
+            &raw_dex,
+            &trader,
+            &market,
+            &[coid_a_u128, coid_b_u128],
+            "e2e_batch_orders",
+        )
+        .await;
+
+        // Poll until both orders are gone — 60s budget, same as
+        // placement. Only meaningful if surfacing succeeded.
+        if both_surfaced {
+            let mut both_cancelled = false;
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let owned = match raw_dex
+                    .get_orders_by_owner(
+                        &market.order_book_address,
+                        trader.deposit_identifier_hash.clone(),
+                    )
+                    .await
+                {
+                    Ok(o) => o,
+                    Err(err) => {
+                        eprintln!("[e2e_batch_orders] cleanup poll errored (retry): {err:?}");
+                        continue;
+                    }
+                };
+                let still_a = owned.orders.iter().any(|o| o.client_order_id == coid_a_u128);
+                let still_b = owned.orders.iter().any(|o| o.client_order_id == coid_b_u128);
+                if !still_a && !still_b {
+                    both_cancelled = true;
                     break;
                 }
-                Err(err) => {
-                    eprintln!(
-                        "[e2e_batch_orders] cancel coid={coid_u128} attempt {attempt} failed, \
-                         retrying: {err:?}"
-                    );
-                    last_err = Some(err);
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
+            }
+            if !both_cancelled {
+                failures.push(format!(
+                    "cancellation of coid_a={coid_a} / coid_b={coid_b} did not remove the \
+                     orders from getOrdersByOwner within 60s — trading PN may still have \
+                     collateral locked",
+                ));
             }
         }
-        assert!(
-            cancel_sent,
-            "cancel_order_by_client(coid={coid_u128}) failed after 5 attempts \
-             (last error: {last_err:?})",
-        );
     }
 
-    // Poll until both orders are gone — 60s budget, same as placement.
-    let mut both_cancelled = false;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let owned = match raw_dex
-            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
-            .await
-        {
-            Ok(o) => o,
-            Err(err) => {
-                eprintln!("[e2e_batch_orders] cleanup poll errored (retry): {err:?}");
-                continue;
-            }
-        };
-        let still_a = owned.orders.iter().any(|o| o.client_order_id == coid_a_u128);
-        let still_b = owned.orders.iter().any(|o| o.client_order_id == coid_b_u128);
-        if !still_a && !still_b {
-            both_cancelled = true;
-            break;
-        }
+    if !failures.is_empty() {
+        panic!("e2e_batch_orders failures:\n  - {}", failures.join("\n  - "));
     }
-    assert!(
-        both_cancelled,
-        "cancellation of coid_a={coid_a} / coid_b={coid_b} did not remove the orders from \
-         getOrdersByOwner within 60s — trading PN may still have collateral locked",
-    );
 }

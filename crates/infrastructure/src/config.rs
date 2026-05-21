@@ -134,7 +134,10 @@ fn default_cancel_order_timeout_ms() -> u64 {
 /// Same 30 s budget as single-order placement. `PrivateNote.placeBatch`
 /// runs more validation per call but the synchronous chain return
 /// fires off the same external message as `placeOrder` — the wait is
-/// bounded by network latency, not by per-item work.
+/// bounded by network latency, not by per-item work. The symmetry is
+/// conservative-pending-data: once we have shellnet `placeBatch`
+/// latency measurements for batches at `max_batch_size`, this default
+/// should be revisited rather than carrying the assumption forward.
 fn default_place_batch_timeout_ms() -> u64 {
     30_000
 }

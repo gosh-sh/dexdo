@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+pub mod cleanup;
 pub mod deploy_market;
 pub mod e2e_setup;
 pub mod test_pns;
