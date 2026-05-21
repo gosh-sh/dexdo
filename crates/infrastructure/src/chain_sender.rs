@@ -1,10 +1,11 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Production implementation of `ChainOrderSender` that dispatches
-// `PrivateNote.placeOrder` and `PrivateNote.cancelOrder` through
-// `bee_dex::Dex`. The wrapper does nothing except translate the
-// application-layer payloads into the chain ABI's `ParamsOfPlaceOrder`
-// / `ParamsOfCancelOrder` and forward the call — ABI encoding, signing,
+// `PrivateNote.placeOrder`, `PrivateNote.cancelOrder`, and
+// `PrivateNote.placeBatch` through `bee_dex::Dex`. The wrapper does
+// nothing except translate the application-layer payloads into the
+// chain ABI's `ParamsOfPlaceOrder` / `ParamsOfCancelOrder` /
+// `ParamsOfPlaceBatch` and forward the call — ABI encoding, signing,
 // and gateway transport all live in `bee_dex`.
 //
 // See `docs/tech-specs/write-api.md §Chain submission` for the layering
@@ -167,12 +168,23 @@ impl ChainOrderSender for BeeDexChainSender {
             orders,
         };
 
+        // `client_order_ids` is the audit trail when a place_batch
+        // never returns (`RequestTimeout`) or the gateway raises
+        // `Unexpected`: without it, ops cannot reconcile which coids
+        // the chain may or may not have committed against the PN's
+        // `_clientOrderIds` map. Per-order price/amount are not
+        // logged here — those would balloon the line for a large
+        // batch and the chain encodes them in the external message
+        // we can recover from the gateway side anyway.
+        let client_order_ids: Vec<u128> =
+            params.orders.iter().map(|o| o.client_order_id).collect();
         debug!(
             pn = %payload.pn_address,
             event_id = %params.event_id,
             oracle_list_hash = %params.oracle_list_hash,
             token_type = params.token_type,
             order_count = params.orders.len(),
+            ?client_order_ids,
             "place_batch params",
         );
 
@@ -183,10 +195,11 @@ impl ChainOrderSender for BeeDexChainSender {
 }
 
 /// Translate one application-layer `BatchOrderPayloadItem` into the
-/// chain `OrderBookOrder` tuple. Defence-in-depth conversions match
-/// `submit_order`'s amount/coid checks — the application layer already
-/// caps both at `u64::MAX`, so reaching the error arm means a gate
-/// upstream was bypassed.
+/// chain `OrderBookOrder` tuple. The `amount_raw` / `client_order_id`
+/// parses are defence-in-depth: `validate_and_encode_order_item`
+/// (application crate) already enforces both stay within `u64::MAX`
+/// per the `bee_dex` / `serde_json` ceiling, so reaching the error
+/// arm means that upstream invariant was bypassed.
 fn encode_batch_item(
     item: &BatchOrderPayloadItem,
     item_index: usize,
@@ -341,11 +354,19 @@ fn map_tvm_exit_code(code: u16) -> Option<DomainError> {
         // ERR_NOTE_BUSY: another `placeOrder` is in flight for this PN.
         // Distinct retry semantics — 429 / -2014 instead of -2010.
         121 => Some(DomainError::OrderPnBusy),
-        // ERR_INVALID_PARAMS: client-shape error from `placeBatch` —
-        // intra-batch `clientOrderId` collision, or `MARKET BUY` with
-        // a non-zero `minAmount`. The batch path always sends
-        // `minAmount = 0`, so practically this surfaces only for
-        // colliding coids the client supplied.
+        // ERR_INVALID_PARAMS: applies to both `placeOrder` and
+        // `placeBatch`. The PN guards two client-shape invariants
+        // under this code:
+        //   1. `clientOrderId` collision — the chain holds a single
+        //      per-PN `_clientOrderIds` map covering BOTH still-live
+        //      coids from earlier `placeOrder`s and sentinels for an
+        //      in-flight `placeBatch`. So 129 fires for intra-batch
+        //      duplicates AND for a coid the caller already used in
+        //      a prior placement that has not closed yet.
+        //   2. `minAmount != 0` on any MARKET order (the chain's
+        //      MARKET path does not support `minAmount`). Our wire
+        //      payload always sends `minAmount = 0` for every order,
+        //      so practically only (1) reaches us.
         129 => Some(DomainError::InvalidParameter),
         // ERR_INVALID_OUTCOME_ID: the `outcomeId` we pulled from
         // `market_outcomes` does not exist on the on-chain PMP. That

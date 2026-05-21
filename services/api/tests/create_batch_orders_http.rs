@@ -1,14 +1,17 @@
 // HTTP-level integration tests for `POST /api/v1/batchOrders` that
 // exercise the handler + use case end to end **without** a database or
-// a real chain. Mirrors the triad in `create_order_http.rs`: a fake
-// `Authenticator` short-circuits HMAC, a fake `MarketReadRepository`
-// returns a configurable `Market`, and a recording `ChainOrderSender`
-// captures the batch payload the handler would dispatch in production.
+// a real chain. Three fakes plug into the boundaries the production
+// router takes by trait: a fake `Authenticator` short-circuits HMAC,
+// a fake `MarketReadRepository` returns a configurable `Market`, and
+// a recording `ChainOrderSender` captures the batch payload the
+// handler would dispatch.
 //
-// The chain-side `AppError → DomainError` mapping is covered by
-// `chain_sender::tests` (unit-level against real `bee_dex::AppError`
-// values). These tests fake the sender at the `DomainError` boundary
-// and focus on the HTTP shape contract.
+// The chain-side `AppError → DomainError` mapping is exercised
+// against real `bee_dex::AppError` values in `chain_sender::tests`.
+// The tests here fake the sender at the `DomainError` boundary and
+// pin the HTTP shape contract: response envelopes, status codes,
+// error code numbers, and which inputs short-circuit before the
+// chain is touched.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -151,9 +154,10 @@ impl MarketReadRepository for FakeRepo {
 }
 
 /// `ChainOrderSender` that records every batch payload it sees, or
-/// fails with a configured `DomainError`. The single-order arms panic
-/// on call — `create_batch_orders_http.rs` covers POST /batchOrders
-/// only and reaching them would mean the suite mixed concerns.
+/// fails with a configured `DomainError`. The `submit_order` /
+/// `cancel_order` arms panic on call: this fake is scoped to the
+/// POST /batchOrders path and reaching them would mean the router
+/// fanned out the request to the wrong handler.
 struct RecordingBatchSender {
     recorded: Mutex<Vec<NewBatchOrderPayload>>,
     fail_with: Option<DomainError>,
@@ -325,6 +329,9 @@ async fn happy_path_two_items_returns_pending_new_array() {
         assert_eq!(item.status, "PENDING_NEW");
         assert!(item.transact_time > 0);
     }
+    // api-spec: one `transactTime` per batch — every item carries the
+    // handler's single `now_ms`, not a per-item re-clock.
+    assert_eq!(items[0].transact_time, items[1].transact_time);
     assert_eq!(items[0].client_order_id, "11");
     assert_eq!(items[1].client_order_id, "22");
 
@@ -670,6 +677,29 @@ async fn intra_batch_client_order_id_collision_returns_400_minus_1130() {
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1130);
+}
+
+#[tokio::test]
+async fn intra_batch_duplicate_coids_reach_chain_unfiltered() {
+    // Companion to the chain-fails-129 pin above: pins the local
+    // contract that intra-batch duplicate `newOrderClientId` values
+    // are NOT filtered before the chain. If a future refactor adds
+    // a local HashSet pre-check, both coids would no longer reach
+    // the payload and `submit_batch_order` would not be called.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let body = valid_body_with(vec![valid_item("11"), valid_item("11")]);
+    let resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].orders.len(), 2);
+    assert_eq!(calls[0].orders[0].client_order_id, "11");
+    assert_eq!(calls[0].orders[1].client_order_id, "11");
 }
 
 #[tokio::test]

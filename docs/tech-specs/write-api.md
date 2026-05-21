@@ -486,7 +486,7 @@ Same three-class split as `POST /api/v1/order`:
 
    | chain `exit_code` | source | `DomainError` |
    | --- | --- | --- |
-   | `129` `ERR_INVALID_PARAMS` | intra-batch `clientOrderId` collision (the only way batches can trigger this — `placeBatch` enforces no other client-supplied invariant) | `InvalidParameter` → 400 / -1130 |
+   | `129` `ERR_INVALID_PARAMS` | `clientOrderId` collision against the PN's `_clientOrderIds` map — covers both intra-batch duplicates AND any still-live coid from an earlier `placeOrder` on the same PN. The chain also raises 129 for `minAmount != 0` on any MARKET order, but our wire payload always sends `minAmount = 0`. | `InvalidParameter` → 400 / -1130 |
    | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — the use case already enforces the same range locally | `InvalidParameter` → 400 / -1130 |
    | `168` `ERR_NOTIONAL_OVERFLOW` | `price * amount` overflowed uint256 inside `placeBatch` (only the chain checks for this; the read-model has no equivalent ceiling) | `OrderValidationFailed` → 400 / -2010 |
 

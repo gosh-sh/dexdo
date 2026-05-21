@@ -912,9 +912,14 @@ async fn create_batch_orders(
 }
 
 /// Translate the parsed body + auth context into a
-/// `CreateBatchOrdersInput`. Mirrors `build_new_order_input` but loops
-/// over `orders[]`; missing/unknown enum values on any item collapse
-/// the whole request with the appropriate `DomainError`.
+/// `CreateBatchOrdersInput`. The top-level (`marketAddress`, `symbol`)
+/// resolves once for the whole request; per-item fields go through
+/// the same trim+enum-parse the single-order handler runs. Any
+/// missing or unknown enum value on any item collapses the whole
+/// request with the matching `DomainError` (`MissingParameter`
+/// → -1102 or `InvalidParameter` → -1130). Empty `orders[]` parses
+/// here without complaint; the use case enforces non-empty + the
+/// per-outcome `max_batch_size` cap.
 fn build_batch_orders_input(
     body: BatchOrdersRequest,
     ctx: AuthContext,

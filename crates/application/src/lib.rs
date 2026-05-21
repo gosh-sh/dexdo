@@ -1157,8 +1157,9 @@ where
             // matches the chain's atomic placeBatch semantics. The
             // caller can re-submit with the offending entry removed or
             // corrected. `item_index` is logged so ops can correlate
-            // a -1111/-1102/-1130 against the offending position; the
-            // wire shape stays one error object per api-spec.
+            // the per-item `DomainError` (whatever code it maps to)
+            // against the offending position; the wire shape stays
+            // one error object per api-spec.
             let encoded = validate_and_encode_order_item(
                 item.side,
                 &item.quantity,
@@ -2498,9 +2499,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_per_item_zero_quantity_aborts_whole_batch() {
-        // Regression mirror of `create_order_limit_rejects_zero_quantity`
-        // — the per-item zero-qty gate must fire inside the batch
-        // loop too and short-circuit before the chain call.
+        // `quantity == "0"` passes `precision_within` and
+        // `is_multiple_of` (zero is a multiple of every non-zero
+        // step), so the explicit strictly-positive gate in
+        // `validate_and_encode_order_item` is the only thing that
+        // catches it on the LIMIT path. Pin that the batch loop
+        // runs that gate per item and short-circuits before the
+        // chain.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
