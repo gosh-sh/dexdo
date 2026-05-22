@@ -534,13 +534,23 @@ async fn apply_order_placed(
                    to_timestamp($9::double precision), to_timestamp($9::double precision),
                    $8,
                    now())
-           -- The ON CONFLICT arm is WHERE-guarded against terminal rows:
-           -- an OrderPlaced replay landing on a row that already reached
-           -- FILLED / CANCELLED / REJECTED is treated as a no-op so an
-           -- isolated partial replay cannot demote the public status back
-           -- to OPEN. Data-bearing cutovers still wipe live_orders and
-           -- reproject the full lifecycle in chain_order order; the WHERE
-           -- guard does not affect that path because the row does not yet
+           -- The ON CONFLICT arm is WHERE-guarded to fire only on a row
+           -- that is still in its fresh, unmutated state — `status` is
+           -- non-terminal AND `amount_remaining = amount_initial` (no
+           -- fills observed yet). The legitimate case is a genuine
+           -- idempotent replay of the same OrderPlaced (no-op-equivalent
+           -- write). Two attack shapes are refused:
+           --   * terminal-status row → an isolated OrderPlaced replay
+           --     cannot demote `FILLED` / `CANCELLED` / `REJECTED` back
+           --     to OPEN;
+           --   * partial-fill OPEN row → an isolated OrderPlaced replay
+           --     cannot silently overwrite `amount_remaining` back to
+           --     `amount_initial`, erasing the OrderFilled history.
+           -- Either case surfaces at `warn!` (rows_affected = 0) so an
+           -- operator-driven partial replay is diagnosable from logs.
+           -- Data-bearing cutovers still wipe live_orders and reproject
+           -- the full lifecycle in chain_order order; the WHERE guard
+           -- does not affect that path because the row does not yet
            -- exist when OrderPlaced lands. See
            -- docs/migrations/orders-cancel-remainder-cutover.md.
            on conflict (orderbook_address, order_id) do update
@@ -566,7 +576,8 @@ async fn apply_order_placed(
                    placed_chain_order = coalesce(live_orders.placed_chain_order,
                                                  excluded.placed_chain_order),
                    updated_at = now()
-               where live_orders.status not in ('FILLED', 'CANCELLED', 'REJECTED')"#,
+               where live_orders.status not in ('FILLED', 'CANCELLED', 'REJECTED')
+                 and live_orders.amount_remaining = live_orders.amount_initial"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
@@ -584,17 +595,18 @@ async fn apply_order_placed(
     // Postgres reports `rows_affected = 0` only when the conflict arm's
     // WHERE filter rejected the update — the INSERT path always counts 1,
     // and an unfiltered conflict path also counts 1. Zero here means an
-    // OrderPlaced event hit an already-terminal row and the projector
-    // refused to reopen it. Surface it so the operator-replay path is
-    // diagnosable from logs even though the projector still reports
-    // Applied (the event was processed by being intentionally dropped).
+    // OrderPlaced event hit either a terminal row or a partially-filled
+    // OPEN row, and the projector refused to overwrite mutated state.
+    // Surface it so the operator-replay path is diagnosable from logs
+    // even though the projector still reports Applied (the event was
+    // processed by being intentionally dropped).
     if result.rows_affected() == 0 {
         warn!(
             orderbook_address,
             order_id = %order_id,
             msg_id = %node.msg_id,
             chain_order = %chain_order,
-            "OrderPlaced replay refused on terminal row; partial-replay cutover suspected",
+            "OrderPlaced replay refused on mutated row (terminal status or partial fill); partial-replay cutover suspected",
         );
     }
 
@@ -606,8 +618,16 @@ async fn apply_order_placed_confirmed(
     event: &DecodedEvent,
     node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
-    let owner_pn_address =
-        node.src.as_deref().context("OrderPlacedConfirmed: src missing on event message")?;
+    // `as_deref().context(...)` alone only catches `None`. An empty
+    // string from the gateway would otherwise bind `owner_pn_address =
+    // ""` into `live_orders` — a row no `/orders` query or
+    // `resolve_for_cancel` predicate can ever match, leaving the order
+    // stuck on the book with no API path to cancel.
+    let owner_pn_address = node
+        .src
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .context("OrderPlacedConfirmed: src missing or empty on event message")?;
     let orderbook_address = field_str(&event.value, "orderBook")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
 
@@ -713,7 +733,7 @@ async fn apply_order_filled(
         );
     }
 
-    let prior: Option<(String, bool)> = sqlx::query_as(
+    let prior: Option<(String, bool, bool)> = sqlx::query_as(
         r#"with prior as (
               select status, amount_remaining
                 from live_orders
@@ -727,6 +747,18 @@ async fn apply_order_filled(
                                   end,
                   status = case
                            when prior.status in ('FILLED', 'CANCELLED', 'REJECTED') then prior.status
+                           -- Sentinel state: status='OPEN' with
+                           -- amount_remaining=0 is a corrupt-row
+                           -- shape (operator edit, legacy projector
+                           -- residue) that `order_from_row` already
+                           -- drops via the `fully_filled` guard.
+                           -- Refuse to auto-heal it to FILLED — a
+                           -- non-zero filled_amount would otherwise
+                           -- satisfy `lo.amount_remaining - $3 <= 0`
+                           -- and the row would surface as a fake
+                           -- fully-filled order with executed_qty =
+                           -- amount_initial.
+                           when lo.amount_remaining = 0 then lo.status
                            when lo.amount_remaining - $3::numeric <= 0 then 'FILLED'
                            else lo.status
                        end,
@@ -744,7 +776,9 @@ async fn apply_order_filled(
             returning
                 prior.status,
                 (prior.status not in ('FILLED', 'CANCELLED', 'REJECTED')
-                 and $3::numeric > prior.amount_remaining) as overshoot"#,
+                 and prior.amount_remaining > 0
+                 and $3::numeric > prior.amount_remaining) as overshoot,
+                (prior.status = 'OPEN' and prior.amount_remaining = 0) as sentinel"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
@@ -755,7 +789,7 @@ async fn apply_order_filled(
     .await
     .context("apply OrderFilled")?;
 
-    let Some((prior_status, overshoot)) = prior else {
+    let Some((prior_status, overshoot, sentinel)) = prior else {
         warn!(
             orderbook_address,
             order_id = %order_id,
@@ -774,13 +808,28 @@ async fn apply_order_filled(
             prior_status = %prior_status,
             "OrderFilled applied to terminal row; fill amount ignored"
         );
+    } else if sentinel {
+        // Corrupt-row shape (status='OPEN' with amount_remaining=0
+        // before the fill). The SQL CASE refused to auto-heal the
+        // status to 'FILLED' — surface it loudly so an operator can
+        // investigate the source (manual edit, legacy projector
+        // residue). The row stays invisible to /orders via the
+        // existing `fully_filled` guard in `order_from_row`.
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            filled_amount = %filled_amount,
+            msg_id = %node.msg_id,
+            chain_order = %chain_order,
+            "OrderFilled applied to sentinel row (OPEN with amount_remaining=0); auto-heal to FILLED refused, fill amount ignored"
+        );
     } else if overshoot {
-        // filledAmount exceeded the row's remaining quantity. The CASE arms
-        // above still flip status to 'FILLED' and clamp amount_remaining to
-        // 0, so the user-facing state is correct — but the contract-side
-        // invariant `filledAmount <= amount_remaining` was violated and the
-        // excess is lost. Surface it: per-occurrence warn so operators can
-        // triage.
+        // filledAmount exceeded the row's (positive) remaining
+        // quantity. The CASE arms above flip status to 'FILLED' and
+        // clamp amount_remaining to 0, so the user-facing state is
+        // correct — but the contract-side invariant `filledAmount <=
+        // amount_remaining` was violated and the excess is lost.
+        // Surface it: per-occurrence warn so operators can triage.
         warn!(
             orderbook_address,
             order_id = %order_id,
@@ -838,15 +887,15 @@ async fn apply_order_cancelled(
            )
            update live_orders as lo
               set status = case
-                           when prior.status in ('FILLED', 'REJECTED') then prior.status
+                           when prior.status in ('FILLED', 'CANCELLED', 'REJECTED') then prior.status
                            else 'CANCELLED'
                        end,
                   last_chain_order = case
-                                      when prior.status in ('FILLED', 'REJECTED') then lo.last_chain_order
+                                      when prior.status in ('FILLED', 'CANCELLED', 'REJECTED') then lo.last_chain_order
                                       else greatest(lo.last_chain_order, $3)
                                   end,
                   chain_updated_at = case
-                                      when prior.status in ('FILLED', 'REJECTED') then lo.chain_updated_at
+                                      when prior.status in ('FILLED', 'CANCELLED', 'REJECTED') then lo.chain_updated_at
                                       else greatest(lo.chain_updated_at, to_timestamp($4::double precision))
                                   end,
                   updated_at = now()
@@ -871,7 +920,7 @@ async fn apply_order_cancelled(
         );
         return Ok(ProjectionOutcome::Deferred);
     }
-    if matches!(prior_status.as_deref(), Some("FILLED" | "REJECTED")) {
+    if matches!(prior_status.as_deref(), Some("FILLED" | "CANCELLED" | "REJECTED")) {
         warn!(
             orderbook_address,
             order_id = %order_id,

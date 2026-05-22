@@ -9,11 +9,14 @@ it today:
   holds across cancellation. Older projector output zeroed
   `amount_remaining` on cancel, breaking `executedQty` for partially
   filled cancels.
-- **Terminal-state ON CONFLICT guard.** `apply_order_placed` now
-  `WHERE`-guards its conflict arm so an isolated `OrderPlaced` replay
-  against a row that is already `FILLED` / `CANCELLED` / `REJECTED`
-  is dropped instead of demoting the public status back to `OPEN`.
-  Older projector output would silently reopen a terminal row when
+- **Mutated-row ON CONFLICT guard.** `apply_order_placed` now
+  `WHERE`-guards its conflict arm to fire only on a row that is still
+  in its fresh, unmutated state (status non-terminal AND
+  `amount_remaining = amount_initial`). An isolated `OrderPlaced`
+  replay against a row that is `FILLED` / `CANCELLED` / `REJECTED`,
+  or against a partial-fill OPEN row, is dropped instead of overwriting
+  the mutated state. Older projector output would silently reopen a
+  terminal row or zero out fill history on a partial-fill row when
   only the placement event was replayed.
 
 Either condition means historical `live_orders` rows may not match the
@@ -27,10 +30,11 @@ lifecycle before exposing `/api/v1/orders`:
 
 Replays must include the full lifecycle, not only the placement event. Step
 2's `delete` is what enables the `OrderPlaced` insert to land cleanly: the
-projector's `ON CONFLICT` arm is `WHERE`-guarded against terminal rows
-(`FILLED` / `CANCELLED` / `REJECTED`), so an `OrderPlaced` replay against a
-row that is already in a terminal state is dropped rather than demoting the
-public status back to `OPEN`. A skipped replay is logged at `warn!` with
-`"OrderPlaced replay refused on terminal row; partial-replay cutover
-suspected"` — operators should expect to see that line zero times in a
-correct wipe-and-reproject; a non-zero count means step 2 missed rows.
+projector's `ON CONFLICT` arm only fires on a row in its fresh, unmutated
+state, so an `OrderPlaced` replay against a terminal row OR a partial-fill
+OPEN row is dropped rather than overwriting the mutated state. A skipped
+replay is logged at `warn!` with
+`"OrderPlaced replay refused on mutated row (terminal status or partial
+fill); partial-replay cutover suspected"` — operators should expect to see
+that line zero times in a correct wipe-and-reproject; a non-zero count
+means step 2 missed rows.

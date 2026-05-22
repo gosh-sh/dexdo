@@ -1785,6 +1785,94 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
     scope.cleanup(&pool).await;
 }
 
+/// Multi-row corrupt window: every row in a `has_more=true` page is
+/// filtered out by `order_from_row`. The expected behaviour is an
+/// empty page with `next_cursor=Some(...)` so the client can advance
+/// through the window. Treating this as `Unexpected` would strand
+/// the client at 500 with no usable cursor (the cursor isn't
+/// extractable from an error response). The next page lands on the
+/// valid row below the window.
+#[tokio::test]
+async fn empty_page_with_cursor_advances_past_window_of_corrupt_rows() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // One healthy row at the bottom, four corrupt OPEN+remaining=0
+    // rows above it (placed_chain_order 002..005). DESC fetch with
+    // limit=3 pulls the top three corrupt rows; every one is dropped
+    // by the mapper, leaving the page empty but the cursor positioned
+    // at row 003 (the last retained pre-filter) so the next page
+    // crosses the rest of the window.
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_000,
+        "001",
+    )
+    .await;
+    for (i, placed) in [(2_i64, "002"), (3, "003"), (4, "004"), (5, "005")] {
+        insert_order(
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "12345",
+            "1000",
+            "0",
+            "OPEN",
+            1_700_000_000 + i,
+            placed,
+        )
+        .await;
+    }
+
+    // Page 1: limit=3. DESC raw fetch: 005, 004, 003, 002 (limit+1).
+    // has_more=true → truncate to [005, 004, 003]; next_cursor="003".
+    // filter_map drops all three (each is corrupt) → orders=[].
+    let page1 = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(3),
+            cursor: None,
+        })
+        .await
+        .expect("page 1 must succeed even though every row was filtered");
+    assert!(page1.orders.is_empty(), "every retained row was corrupt");
+    let cursor = page1
+        .next_cursor
+        .expect("next_cursor must be Some so the client can cross the corrupt window");
+    assert_eq!(cursor.as_str(), "003");
+
+    // Page 2: strict-< against "003" → DESC fetch: 002, 001. Row 002 is
+    // corrupt and dropped; row 001 surfaces.
+    let page2 = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(3),
+            cursor: Some(cursor),
+        })
+        .await
+        .expect("page 2");
+    assert_eq!(page2.orders.len(), 1);
+    assert_eq!(page2.orders[0].order_id(), "1");
+    assert!(page2.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
 /// `amount_initial = amount_remaining = 0` is a projector-bug shape: the
 /// row satisfies the SQL NEW predicate (`amount_remaining = amount_initial`)
 /// AND `fully_filled = true`. read-api.md §Field projection requires

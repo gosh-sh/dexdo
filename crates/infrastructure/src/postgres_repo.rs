@@ -653,23 +653,14 @@ impl MarketReadRepository for PostgresReadModelRepository {
             );
         }
 
-        // try_new enforces the invariant that `next_cursor` is None
-        // whenever `orders` is empty — `order_from_row` can drop every
-        // row in the truncated page, so this guard fires only when the
-        // entire page was corrupt-and-skipped (an Unexpected on
-        // /orders surfaces to the client; the row-level error! is
-        // already logged in order_from_row). A dedicated error! at
-        // the try_new failure site ties the -1000 surfacing to the
-        // operator-actionable cause via one grep.
-        let next_cursor_for_log = next_cursor.as_ref().map(|c| c.as_str().to_string());
-        OrdersPage::try_new(orders, next_cursor).map_err(|err| {
-            error!(
-                skipped_rows = skipped,
-                next_cursor = ?next_cursor_for_log,
-                "list_orders: every row in a page with has_more=true was corrupt; failing closed",
-            );
-            anyhow!(err)
-        })
+        // (empty orders, Some(cursor)) is the corrupt-window page:
+        // every row in this `has_more=true` page was filtered by
+        // `order_from_row` (per-row error! already logged inside the
+        // mapper). Surface the page anyway so the client can paginate
+        // past the corrupt window via the cursor — `next_cursor` was
+        // captured from the last retained row *before* the filter
+        // pass for exactly this case (read-api.md §SQL).
+        Ok(OrdersPage { orders, next_cursor })
     }
 }
 
@@ -948,9 +939,19 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     }
 }
 
+/// Upper bound on `market_outcomes.price_precision` /
+/// `quantity_precision` accepted by the read path. Matches the SQL
+/// NUMERIC(38, …) cap — financial decimal precision never reaches this
+/// in practice, but `scale_uint_to_decimal` allocates `O(scale)` bytes
+/// per row via `"0".repeat(...)`, so an unbounded value on a corrupt
+/// row would OOM the API process on the first page that touches it.
+/// The `market_outcomes` column has no `CHECK` in 0001_initial.sql; this
+/// is the read-side defence.
+const MAX_DECIMAL_PRECISION: u32 = 38;
+
 fn precision_to_scale(raw: i32, field: &str, row: &OrderRow) -> Option<u32> {
-    match u32::try_from(raw) {
-        Ok(scale) => Some(scale),
+    let scale = match u32::try_from(raw) {
+        Ok(scale) => scale,
         Err(_) => {
             error!(
                 order_id = %row.order_id,
@@ -959,9 +960,21 @@ fn precision_to_scale(raw: i32, field: &str, row: &OrderRow) -> Option<u32> {
                 precision = raw,
                 "live_orders row has negative decimal precision; skipping"
             );
-            None
+            return None;
         }
+    };
+    if scale > MAX_DECIMAL_PRECISION {
+        error!(
+            order_id = %row.order_id,
+            market = %row.market_address,
+            precision_field = field,
+            precision = raw,
+            max = MAX_DECIMAL_PRECISION,
+            "live_orders row has decimal precision above MAX_DECIMAL_PRECISION; skipping to prevent unbounded allocation in scale_uint_to_decimal"
+        );
+        return None;
     }
+    Some(scale)
 }
 
 impl PostgresReadModelRepository {
@@ -2019,6 +2032,27 @@ mod tests {
         row.price_precision = -1;
         row.quantity_precision = 2;
         assert!(order_from_row(row).is_none(), "negative price precision must be corruption");
+    }
+
+    /// `market_outcomes.*_precision` has no SQL `CHECK`, so an absurd
+    /// positive value would slip past the DB into `scale_uint_to_decimal`,
+    /// where `"0".repeat(scale)` allocates `O(scale)` bytes per row and
+    /// can OOM the API process. The read-path guard rejects values above
+    /// `MAX_DECIMAL_PRECISION` before the scaler is called.
+    #[test]
+    fn order_from_row_skips_precision_above_max() {
+        let mut row = order_row("OPEN", "0");
+        row.price_precision = i32::try_from(MAX_DECIMAL_PRECISION).unwrap() + 1;
+        row.quantity_precision = 2;
+        assert!(
+            order_from_row(row).is_none(),
+            "price_precision above MAX_DECIMAL_PRECISION must skip the row",
+        );
+
+        let mut row = order_row("OPEN", "0");
+        row.price_precision = 3;
+        row.quantity_precision = i32::MAX;
+        assert!(order_from_row(row).is_none(), "quantity_precision at i32::MAX must skip the row",);
     }
 
     #[test]

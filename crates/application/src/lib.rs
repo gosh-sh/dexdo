@@ -362,21 +362,36 @@ impl OrderStatusFilter {
 ///
 /// Both [`OrdersCursor::new`] (client input) and
 /// [`OrdersCursor::from_db_token`] (storage token) trim surrounding
-/// whitespace and reject blank values. They differ only in the error
-/// variant: a blank client value is `MissingParameter` (a -1102 client
-/// error), a blank stored value is `Unexpected` (storage corruption).
+/// whitespace, reject blank values, and reject lengths above
+/// [`MAX_CURSOR_LEN`]. They differ only in the error variant: a
+/// blank or oversized client value surfaces as `MissingParameter`
+/// (blank) or `InvalidParameter` (oversized); a corrupt stored
+/// value surfaces as `Unexpected`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrdersCursor(String);
 
+/// Hard cap on the length of a cursor token after trimming. The
+/// gateway-issued `msg_chain_order` is ~32-50 chars in practice; 128
+/// keeps generous headroom while making a hostile 10 MB
+/// `?cursor=AAA...` request fail before reaching the SQL layer (the
+/// cursor binds as `$4::text` and Postgres performs the comparison
+/// per scanned index entry).
+pub const MAX_CURSOR_LEN: usize = 128;
+
 impl OrdersCursor {
-    /// Validating constructor: trims whitespace, rejects blank input
-    /// as [`DomainError::MissingParameter`] (mirrors the public
-    /// `/api/v1/orders` contract — a whitespace-only `?cursor=` is
-    /// always a client-side bug, not "no cursor").
+    /// Validating constructor for client input. Trims whitespace and
+    /// rejects blank as [`DomainError::MissingParameter`]; rejects
+    /// lengths above [`MAX_CURSOR_LEN`] as
+    /// [`DomainError::InvalidParameter`] (the value is present, just
+    /// malformed). Both maps surface to the documented `/api/v1/orders`
+    /// error codes — see read-api.md §error mapping.
     pub fn new(raw: String) -> Result<Self, DomainError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err(DomainError::MissingParameter);
+        }
+        if trimmed.len() > MAX_CURSOR_LEN {
+            return Err(DomainError::InvalidParameter);
         }
         Ok(Self(trimmed.to_string()))
     }
@@ -386,9 +401,12 @@ impl OrdersCursor {
         if trimmed.is_empty() {
             return Err(DomainError::Unexpected);
         }
-        // Symmetric with `new`: trim so the round-trip
-        // (DB → cursor → client → cursor) cannot break lex comparison
-        // because of padding the projector might one day store.
+        // Symmetric with `new`: a corrupt storage row with an
+        // unbounded `placed_chain_order` would otherwise resurface on
+        // the next page as a hostile-shaped cursor.
+        if trimmed.len() > MAX_CURSOR_LEN {
+            return Err(DomainError::Unexpected);
+        }
         Ok(Self(trimmed.to_string()))
     }
 
@@ -482,29 +500,24 @@ impl OrdersMarketFilter {
     }
 }
 
-/// Result of `MarketReadRepository::list_orders`. The `next_cursor`
-/// field is built from the last retained row of the page, so
-/// `(orders.is_empty() && next_cursor.is_some())` is an invalid
-/// state. The production builder routes through `try_new` to enforce
-/// it; fields are public for read access and test-construction
-/// ergonomics, so the invariant holds by convention there, not
-/// structurally.
+/// Result of `MarketReadRepository::list_orders`. All four combinations
+/// of `(orders, next_cursor)` are legal:
+///
+/// - `(non-empty, Some)`: typical page with more results.
+/// - `(non-empty, None)`: last page in the scan.
+/// - `(empty, None)`: end of results (no rows in scope, or the cursor
+///   advanced past every row).
+/// - `(empty, Some)`: a `has_more=true` page in which every retained
+///   row was filtered out by `order_from_row` (entire window is
+///   corrupt). The cursor is built from the last retained row
+///   *before* the filter pass — see read-api.md §SQL — so the client
+///   can paginate through the corrupt window using the cursor without
+///   ever re-reading the dropped rows. Surfacing `Unexpected` here
+///   instead would strand the client at 500 with no usable cursor.
 #[derive(Debug, Clone)]
 pub struct OrdersPage {
     pub orders: Vec<Order>,
     pub next_cursor: Option<OrdersCursor>,
-}
-
-impl OrdersPage {
-    pub fn try_new(
-        orders: Vec<Order>,
-        next_cursor: Option<OrdersCursor>,
-    ) -> Result<Self, DomainError> {
-        if orders.is_empty() && next_cursor.is_some() {
-            return Err(DomainError::Unexpected);
-        }
-        Ok(Self { orders, next_cursor })
-    }
 }
 
 pub struct GetMarketsUseCase<R> {
@@ -1660,14 +1673,19 @@ mod tests {
         }
     }
 
+    /// `(empty orders, Some(cursor))` is the corrupt-window page —
+    /// every row in a `has_more=true` page was filtered by
+    /// `order_from_row`. The cursor still advances past the dropped
+    /// rows so the client can paginate through. A previous version
+    /// of this codebase rejected this state as `Unexpected` and
+    /// stranded the client at 500; this test pins that the shape
+    /// constructs cleanly.
     #[test]
-    fn orders_page_try_new_rejects_empty_with_cursor() {
+    fn orders_page_allows_empty_with_cursor_for_corrupt_window() {
         let cursor = OrdersCursor::new("token".into()).expect("valid cursor");
-        let err = OrdersPage::try_new(vec![], Some(cursor))
-            .expect_err("empty orders + Some(cursor) must fail");
-        assert_eq!(err, DomainError::Unexpected);
-        // Sanity: the legal shapes still build.
-        OrdersPage::try_new(vec![], None).expect("empty + None is legal");
+        let page = OrdersPage { orders: vec![], next_cursor: Some(cursor.clone()) };
+        assert!(page.orders.is_empty());
+        assert_eq!(page.next_cursor, Some(cursor));
     }
 
     #[test]
@@ -1739,6 +1757,34 @@ mod tests {
         assert_eq!(
             OrdersCursor::new(String::new()).expect_err("empty rejected"),
             DomainError::MissingParameter
+        );
+    }
+
+    /// A client could otherwise post a 10 MB `?cursor=…` and the value
+    /// would bind as `$cursor::text` for the `placed_chain_order < $cursor`
+    /// comparison, costing per-row CPU at the Postgres side.
+    /// `MAX_CURSOR_LEN` is the read-path defence.
+    #[test]
+    fn orders_cursor_rejects_oversized_client_input() {
+        let over = "A".repeat(MAX_CURSOR_LEN + 1);
+        assert_eq!(
+            OrdersCursor::new(over).expect_err("oversized client cursor rejected"),
+            DomainError::InvalidParameter,
+        );
+        let at_cap = "A".repeat(MAX_CURSOR_LEN);
+        OrdersCursor::new(at_cap).expect("exactly MAX_CURSOR_LEN is accepted");
+    }
+
+    /// Symmetric guard at the storage boundary: a corrupt
+    /// `placed_chain_order` cell with an oversized value would
+    /// otherwise resurface on the next page as a hostile-shaped cursor
+    /// the client never typed.
+    #[test]
+    fn orders_cursor_rejects_oversized_db_token_as_unexpected() {
+        let over = "A".repeat(MAX_CURSOR_LEN + 1);
+        assert_eq!(
+            OrdersCursor::from_db_token(over).expect_err("oversized DB token rejected"),
+            DomainError::Unexpected,
         );
     }
 

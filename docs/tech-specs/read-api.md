@@ -235,7 +235,7 @@ Consequence: between two paginated reads, an order that transitions to FILLED or
 
 #### Cursor format
 
-The cursor is the `placed_chain_order` value of the last retained row and is returned verbatim. The server validates only that the value is a non-empty UTF-8 string after trimming whitespace; a corrupted or empty cursor surfaces as `DomainError::MissingParameter` → `-1102` / `400`. A well-formed cursor whose value lexicographically precedes every order in scope returns an empty page with `nextCursor: null` and is not treated as an error.
+The cursor is the `placed_chain_order` value of the last retained row and is returned verbatim. The server validates that the value is a non-empty UTF-8 string after trimming whitespace AND no longer than `MAX_CURSOR_LEN` (128 chars — real `msg_chain_order` values are an order of magnitude shorter); an empty / blank cursor surfaces as `DomainError::MissingParameter` → `-1102` / `400`, an oversized cursor as `DomainError::InvalidParameter` → `-1130` / `400`. The length cap prevents an authenticated client from binding a multi-megabyte string into the SQL `placed_chain_order < $cursor::text` comparison. A well-formed cursor whose value lexicographically precedes every order in scope returns an empty page with `nextCursor: null` and is not treated as an error.
 
 The format is not opaque: clients may read the cursor as a plain string, but they must not parse its internal structure or generate cursors of their own. It should be treated as a token to pass back verbatim.
 
@@ -263,6 +263,7 @@ The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses
 | `limit` out of `[1, 500]` | `MissingParameter` | `-1102` | 400 |
 | `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
 | `cursor` is empty or whitespace-only | `MissingParameter` | `-1102` | 400 |
+| `cursor` length exceeds `MAX_CURSOR_LEN` (128) | `InvalidParameter` | `-1130` | 400 |
 | Unknown token in `status` CSV | `InvalidParameter` | `-1130` | 400 |
 | Pair not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
 | Missing / invalid signature / API key / timestamp | upstream auth | `-1003` | 401 |
