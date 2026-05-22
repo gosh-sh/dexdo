@@ -17,26 +17,19 @@ use bee_dex::Dex;
 use super::deploy_market::EphemeralMarket;
 use super::test_pns::TestPn;
 
-/// Per-attempt timeout — bounds cleanup against a hung gateway.
+/// Per-attempt timeout — bounds cleanup against a hung shellnet endpoint.
 const CANCEL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Pause between retries.
 const CANCEL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Number of cancel attempts per coid before giving up.
 const CANCEL_MAX_ATTEMPTS: u32 = 5;
 
-/// Fire `cancel_order_by_client` for every coid in `coids` against the
-/// shellnet `Dex`, retrying each up to `CANCEL_MAX_ATTEMPTS` with a
-/// per-attempt `CANCEL_ATTEMPT_TIMEOUT` and `CANCEL_RETRY_BACKOFF`
-/// between attempts. Logs and continues on every failure shape (chain
-/// error, timeout) — the caller is already on the cleanup path and a
-/// panic here would swallow the real test failure.
+/// Best-effort cleanup — logs and continues on every failure shape
+/// (chain error, timeout); a panic here would swallow the real test
+/// failure.
 ///
-/// `label` is the prefix on each `eprintln!`; with `cargo test
-/// --nocapture` and parallel `--ignored` runs, per-test stderr capture
-/// is bypassed and the label is the only thing that disambiguates
-/// interleaved output across the e2e tests.
+/// `label` disambiguates interleaved stderr across parallel e2e tests
+/// when `cargo test --nocapture` bypasses per-test capture.
 ///
 /// **The caller is responsible for verifying the order is actually
 /// gone**: every error here lands in captured-stderr that only shows

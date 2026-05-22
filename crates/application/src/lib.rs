@@ -2613,7 +2613,7 @@ mod tests {
         // MARKET items carry `price_raw = "0"` per the encode helper.
         assert_eq!(payload.price_raw, "0");
         // Pin FLAG_MARKET specifically — `assert_ne!(flags, 0)`
-        // would accept any stray TIF bit and is too loose.
+        // would accept any stray TIF bit.
         assert!(payload.flags & FLAG_MARKET != 0, "flags=0x{:02x}", payload.flags);
     }
 

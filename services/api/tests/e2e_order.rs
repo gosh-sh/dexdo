@@ -241,11 +241,8 @@ async fn buy_limit_gtc_against_shellnet() {
         )
         .await;
 
-        // Absence-poll: after a POST-OK the chain may hold a live
-        // order, and `cancel_coids_best_effort` reports its errors
-        // only to captured-stderr. This poll is the only path that
-        // turns a leaked order into a recorded test failure instead
-        // of locked collateral on the trading PN.
+        // Absence-poll: turn a leaked order (silent on captured stderr
+        // from `cancel_coids_best_effort`) into a recorded failure.
         let mut cancelled = false;
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_secs(2)).await;
