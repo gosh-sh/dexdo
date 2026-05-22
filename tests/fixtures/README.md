@@ -21,7 +21,7 @@ to `ERR_NOTE_BUSY`. Assignments:
 | 0    | POST `/order`       |
 | 1    | DELETE `/order`     |
 | 2    | POST `/batchOrders` |
-| 3    | reserved            |
+| 3    | unclaimed           |
 
 A new e2e test that needs its own deployer-PN takes the next free slot
 and adds the row here; top up the pool via `mint_pn_pool` when adding

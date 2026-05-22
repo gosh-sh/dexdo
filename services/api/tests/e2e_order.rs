@@ -241,36 +241,39 @@ async fn buy_limit_gtc_against_shellnet() {
         )
         .await;
 
-        // Poll until the order is gone — same 60s budget as placement.
-        // Only meaningful if surfacing succeeded.
-        if surfaced {
-            let mut cancelled = false;
-            for _ in 0..30 {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let owned = match raw_dex
-                    .get_orders_by_owner(
-                        &market.order_book_address,
-                        trader.deposit_identifier_hash.clone(),
-                    )
-                    .await
-                {
-                    Ok(o) => o,
-                    Err(err) => {
-                        eprintln!("[e2e_order] cleanup poll errored (will retry): {err:?}");
-                        continue;
-                    }
-                };
-                if !owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
-                    cancelled = true;
-                    break;
+        // Poll until the order is gone — runs unconditionally on
+        // post_ok, even when the surface poll above timed out. The
+        // chain may have placed the order just past the 60 s surface
+        // budget; in that case `cancel_coids_best_effort` is the only
+        // shot at retiring it, and silently skipping the absence
+        // check would let the order leak with `eprintln!`-only
+        // diagnostics that vanish on a (then-failing) green assert.
+        let mut cancelled = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let owned = match raw_dex
+                .get_orders_by_owner(
+                    &market.order_book_address,
+                    trader.deposit_identifier_hash.clone(),
+                )
+                .await
+            {
+                Ok(o) => o,
+                Err(err) => {
+                    eprintln!("[e2e_order] cleanup poll errored (will retry): {err:?}");
+                    continue;
                 }
+            };
+            if !owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
+                cancelled = true;
+                break;
             }
-            if !cancelled {
-                failures.push(format!(
-                    "cancellation of client_order_id={coid} did not remove the order from \
-                     getOrdersByOwner within 60s — trading PN may still have collateral locked",
-                ));
-            }
+        }
+        if !cancelled {
+            failures.push(format!(
+                "cancellation of client_order_id={coid} did not remove the order from \
+                 getOrdersByOwner within 60s — trading PN may still have collateral locked",
+            ));
         }
     }
 

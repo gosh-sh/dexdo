@@ -276,39 +276,43 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
         )
         .await;
 
-        // Poll until both orders are gone — 60s budget, same as
-        // placement. Only meaningful if surfacing succeeded.
-        if both_surfaced {
-            let mut both_cancelled = false;
-            for _ in 0..30 {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let owned = match raw_dex
-                    .get_orders_by_owner(
-                        &market.order_book_address,
-                        trader.deposit_identifier_hash.clone(),
-                    )
-                    .await
-                {
-                    Ok(o) => o,
-                    Err(err) => {
-                        eprintln!("[e2e_batch_orders] cleanup poll errored (retry): {err:?}");
-                        continue;
-                    }
-                };
-                let still_a = owned.orders.iter().any(|o| o.client_order_id == coid_a_u128);
-                let still_b = owned.orders.iter().any(|o| o.client_order_id == coid_b_u128);
-                if !still_a && !still_b {
-                    both_cancelled = true;
-                    break;
+        // Poll until both orders are gone — runs unconditionally on
+        // post_ok, even when the surface poll timed out. The chain
+        // may have placed one or both items just past the 60 s
+        // surface budget; in that case `cancel_coids_best_effort` is
+        // the only shot at retiring them, and silently skipping the
+        // absence check would let the order(s) leak with
+        // `eprintln!`-only diagnostics that vanish on a (then-failing)
+        // green assert.
+        let mut both_cancelled = false;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let owned = match raw_dex
+                .get_orders_by_owner(
+                    &market.order_book_address,
+                    trader.deposit_identifier_hash.clone(),
+                )
+                .await
+            {
+                Ok(o) => o,
+                Err(err) => {
+                    eprintln!("[e2e_batch_orders] cleanup poll errored (retry): {err:?}");
+                    continue;
                 }
+            };
+            let still_a = owned.orders.iter().any(|o| o.client_order_id == coid_a_u128);
+            let still_b = owned.orders.iter().any(|o| o.client_order_id == coid_b_u128);
+            if !still_a && !still_b {
+                both_cancelled = true;
+                break;
             }
-            if !both_cancelled {
-                failures.push(format!(
-                    "cancellation of coid_a={coid_a} / coid_b={coid_b} did not remove the \
-                     orders from getOrdersByOwner within 60s — trading PN may still have \
-                     collateral locked",
-                ));
-            }
+        }
+        if !both_cancelled {
+            failures.push(format!(
+                "cancellation of coid_a={coid_a} / coid_b={coid_b} did not remove the \
+                 orders from getOrdersByOwner within 60s — trading PN may still have \
+                 collateral locked",
+            ));
         }
     }
 

@@ -1309,6 +1309,7 @@ mod tests {
     use dodex_domain::MarketEvent;
     use dodex_domain::MarketName;
     use dodex_domain::Outcome;
+    use dodex_domain::FLAG_MARKET;
 
     #[derive(Clone)]
     struct FakeCancelableOrder {
@@ -2570,11 +2571,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_first_item_failure_aborts_whole_batch() {
-        // The other per-item parity tests put the bad item at index 1
-        // with a valid item at index 0. This pins the symmetric case:
-        // a bad item at index 0 must also abort. Guards against a
-        // future `enumerate().skip(N)` regression that would silently
-        // skip index 0 validation while still passing every other test.
+        // A bad item at index 0 must abort the whole batch — guards
+        // against a future `enumerate().skip(N)` regression that
+        // would silently skip index 0 validation.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
@@ -2591,10 +2590,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_market_buy_happy_path() {
-        // Happy path for the MARKET-BUY arm — the other MARKET tests
-        // only cover rejections. Pins that a well-formed MARKET item
-        // flows through `submit_batch_order` and lands as a chain
-        // payload with `flags == MARKET_FLAG` and `price_raw == "0"`.
+        // A well-formed MARKET-BUY item must flow through
+        // `submit_batch_order` and land as a chain payload with
+        // `FLAG_MARKET` set and `price_raw == "0"`.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
@@ -2614,9 +2612,11 @@ mod tests {
         assert!(payload.is_buy);
         // MARKET items carry `price_raw = "0"` per the encode helper.
         assert_eq!(payload.price_raw, "0");
-        // Flags for MARKET (no TIF). `encode_order_flags` documents the
-        // bit layout; non-zero is the contract here.
-        assert_ne!(payload.flags, 0);
+        // Pin the MARKET bit specifically — `assert_ne!(flags, 0)`
+        // would pass on any TIF flag escaping into a MARKET payload
+        // (e.g. a future encoder change leaking IOC), defeating the
+        // point of the test.
+        assert!(payload.flags & FLAG_MARKET != 0, "flags=0x{:02x}", payload.flags);
     }
 
     #[tokio::test]
