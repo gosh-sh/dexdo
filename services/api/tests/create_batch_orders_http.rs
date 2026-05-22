@@ -35,8 +35,8 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsRequest;
 use dodex_application::NewBatchOrderPayload;
 use dodex_application::NewOrderPayload;
-use dodex_application::OpenOrdersPage;
-use dodex_application::OpenOrdersQuery;
+use dodex_application::OrdersPage;
+use dodex_application::OrdersQuery;
 use dodex_application::OrderForCancel;
 use dodex_application::TradingPn;
 use dodex_domain::DepthSnapshot;
@@ -165,8 +165,8 @@ impl MarketReadRepository for FakeRepo {
         unimplemented!("resolve_for_cancel is not exercised by create_batch_orders_http tests")
     }
 
-    async fn list_open_orders(&self, _: &OpenOrdersQuery) -> Result<OpenOrdersPage, anyhow::Error> {
-        unimplemented!("list_open_orders is not exercised by create_batch_orders_http tests")
+    async fn list_orders(&self, _: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
+        unimplemented!("list_orders is not exercised by create_batch_orders_http tests")
     }
 }
 
