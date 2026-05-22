@@ -1,17 +1,36 @@
-# Orders Cancel-Remainder Cutover
+# Orders Read-Model Cutover
 
-`OrderBook.OrderCancelled` preserves the row's `amount_remaining` value so
-`executedQty = amount_initial - amount_remaining` holds across cancellation.
+This document covers the wipe-and-reproject procedure for `live_orders`
+data produced by older projector logic. Two concrete instances motivate
+it today:
 
-If a data-bearing environment contains `CANCELLED` `live_orders` rows produced
-by a projector that zeroed `amount_remaining`, clear and reproject the full
-order lifecycle before exposing `/api/v1/orders`:
+- **Cancel-remainder.** `OrderBook.OrderCancelled` now preserves the
+  row's `amount_remaining` so `executedQty = amount_initial - amount_remaining`
+  holds across cancellation. Older projector output zeroed
+  `amount_remaining` on cancel, breaking `executedQty` for partially
+  filled cancels.
+- **Terminal-state ON CONFLICT guard.** `apply_order_placed` now
+  `WHERE`-guards its conflict arm so an isolated `OrderPlaced` replay
+  against a row that is already `FILLED` / `CANCELLED` / `REJECTED`
+  is dropped instead of demoting the public status back to `OPEN`.
+  Older projector output would silently reopen a terminal row when
+  only the placement event was replayed.
+
+Either condition means historical `live_orders` rows may not match the
+shape the current projector emits. Clear and reproject the full order
+lifecycle before exposing `/api/v1/orders`:
 
 1. Set `raw_events.processed_at = NULL` for affected `OrderBook.OrderPlaced`,
    `OrderBook.OrderFilled`, and `OrderBook.OrderCancelled` rows.
 2. Delete the affected `live_orders` rows.
 3. Let `reproject_pending` replay the lifecycle through the current projector.
 
-Replays must include the full lifecycle, not only the placement event, because
-`OrderPlaced` can reopen a row on conflict before later fill/cancel events
-restore the final status and executed quantity.
+Replays must include the full lifecycle, not only the placement event. Step
+2's `delete` is what enables the `OrderPlaced` insert to land cleanly: the
+projector's `ON CONFLICT` arm is `WHERE`-guarded against terminal rows
+(`FILLED` / `CANCELLED` / `REJECTED`), so an `OrderPlaced` replay against a
+row that is already in a terminal state is dropped rather than demoting the
+public status back to `OPEN`. A skipped replay is logged at `warn!` with
+`"OrderPlaced replay refused on terminal row; partial-replay cutover
+suspected"` — operators should expect to see that line zero times in a
+correct wipe-and-reproject; a non-zero count means step 2 missed rows.

@@ -14,7 +14,7 @@ use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
 use dodex_application::OrderForCancel;
-use dodex_application::OrderStatusSet;
+use dodex_application::OrderStatusFilter;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
@@ -471,7 +471,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             event_id: row.event_id,
             oracle_list_hash,
             token_type: row.token_type,
-            status,
+            market_status: status,
             client_order_id,
         })
     }
@@ -505,7 +505,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None => None,
         };
 
-        let limit_plus_one = i64::from(query.limit) + 1;
+        let limit_plus_one = i64::from(query.limit.get()) + 1;
         let status_sql = match build_status_predicate(&query.status) {
             Some(clause) => format!(" AND ({clause}) "),
             None => String::new(),
@@ -607,7 +607,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             }
         };
 
-        let limit = usize::from(query.limit);
+        let limit = usize::from(query.limit.get());
         let has_more = rows.len() > limit;
         let mut orders_raw = rows;
         if has_more {
@@ -615,20 +615,24 @@ impl MarketReadRepository for PostgresReadModelRepository {
         }
 
         let next_cursor = if has_more {
-            match orders_raw.last() {
-                Some(row) => Some(
-                    OrdersCursor::from_db_token(row.placed_chain_order.clone()).map_err(|err| {
-                        error!(
-                            market = %row.market_address,
-                            order_id = %row.order_id,
-                            placed_chain_order = %row.placed_chain_order,
-                            "live_orders row has invalid placed_chain_order for nextCursor"
-                        );
-                        anyhow!(err)
-                    })?,
-                ),
-                None => None,
-            }
+            // `GetOrdersUseCase::execute` clamps `limit` to
+            // `[1, ORDERS_MAX_LIMIT]` before constructing the query;
+            // combined with `has_more = rows.len() > limit`, the
+            // post-truncate page is non-empty. A non-HTTP caller
+            // bypassing the use case would turn this into a panic —
+            // the application-side tests
+            // `get_orders_defaults_limit_when_absent` and
+            // `get_orders_rejects_limit_out_of_range` pin that invariant.
+            let row = orders_raw.last().expect("has_more implies non-empty page");
+            Some(OrdersCursor::from_db_token(row.placed_chain_order.clone()).map_err(|err| {
+                error!(
+                    market = %row.market_address,
+                    order_id = %row.order_id,
+                    placed_chain_order = %row.placed_chain_order,
+                    "live_orders row has invalid placed_chain_order for nextCursor"
+                );
+                anyhow!(err)
+            })?)
         } else {
             None
         };
@@ -649,7 +653,23 @@ impl MarketReadRepository for PostgresReadModelRepository {
             );
         }
 
-        Ok(OrdersPage { orders, next_cursor })
+        // try_new enforces the invariant that `next_cursor` is None
+        // whenever `orders` is empty — `order_from_row` can drop every
+        // row in the truncated page, so this guard fires only when the
+        // entire page was corrupt-and-skipped (an Unexpected on
+        // /orders surfaces to the client; the row-level error! is
+        // already logged in order_from_row). A dedicated error! at
+        // the try_new failure site ties the -1000 surfacing to the
+        // operator-actionable cause via one grep.
+        let next_cursor_for_log = next_cursor.as_ref().map(|c| c.as_str().to_string());
+        OrdersPage::try_new(orders, next_cursor).map_err(|err| {
+            error!(
+                skipped_rows = skipped,
+                next_cursor = ?next_cursor_for_log,
+                "list_orders: every row in a page with has_more=true was corrupt; failing closed",
+            );
+            anyhow!(err)
+        })
     }
 }
 
@@ -708,9 +728,11 @@ struct OrderRow {
     price: String,
     orig_qty: String,
     executed_qty: String,
-    /// `amount_remaining = 0` evaluated in SQL. Used only as a fail-closed
-    /// guard for corrupt OPEN rows; NEW vs PARTIALLY_FILLED is derived from
-    /// `executed_qty`.
+    /// Primary discriminator: `true` either drops a corrupt OPEN row
+    /// (amount_remaining = 0 with status still OPEN) or, in the
+    /// amount_initial = amount_remaining = 0 sentinel case, prevents
+    /// the row from being mis-bucketed as NEW. NEW vs PARTIALLY_FILLED
+    /// for surviving OPEN rows is then derived from `executed_qty`.
     fully_filled: bool,
     /// `amount_remaining > amount_initial` evaluated in SQL. A `true` here
     /// is a storage-invariant violation: more units claim to remain than
@@ -739,13 +761,14 @@ struct OrderRow {
 ///
 /// The fragment is composed from compile-time `const &str` literals chosen
 /// by an exhaustive `match`; no user-supplied bytes ever reach the SQL.
-fn build_status_predicate(set: &OrderStatusSet) -> Option<String> {
-    if set.is_all() {
-        return None;
-    }
-    // Mirrors docs/tech-specs/read-api.md §Status mapping. Iteration order
-    // is QueryableOrderStatus's Ord-derived enum-declaration order, which
-    // is load-bearing for deterministic SQL composition.
+fn build_status_predicate(filter: &OrderStatusFilter) -> Option<String> {
+    let statuses = match filter {
+        OrderStatusFilter::All => return None,
+        OrderStatusFilter::Only(statuses) => statuses,
+    };
+    // Mirrors docs/tech-specs/read-api.md §Status mapping. BTreeSet
+    // iteration is QueryableOrderStatus's Ord-derived enum-declaration
+    // order, which is load-bearing for deterministic SQL composition.
     const NEW: &str = "(lo.status = 'OPEN' AND lo.amount_remaining = lo.amount_initial)";
     const PARTIALLY_FILLED: &str = "(lo.status = 'OPEN' AND lo.amount_remaining < lo.amount_initial AND lo.amount_remaining > 0)";
     const FILLED: &str = "lo.status = 'FILLED'";
@@ -754,9 +777,9 @@ fn build_status_predicate(set: &OrderStatusSet) -> Option<String> {
     // follow-up extends the live_orders.status CHECK to admit REJECTED rows.
     const REJECTED: &str = "lo.status = 'REJECTED'";
 
-    let disjuncts: Vec<&'static str> = set
-        .canonical_vec()
-        .into_iter()
+    let disjuncts: Vec<&'static str> = statuses
+        .iter()
+        .copied()
         .map(|status| match status {
             QueryableOrderStatus::New => NEW,
             QueryableOrderStatus::PartiallyFilled => PARTIALLY_FILLED,
@@ -802,9 +825,10 @@ fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
 /// guarantee (OPEN with `amount_remaining = 0`, or an unrecognised
 /// `raw_status`). The skip is logged inside this function; callers
 /// just `filter_map(order_from_row)` to drop bad rows from the page.
-/// Encoding "skip" as `None` rather than a synthetic `Err(Unexpected)`
-/// keeps the semantics in the type — the caller no longer has to
-/// `.ok()` away a fake error to express the same intent.
+/// "Skip" is encoded as `None` rather than a synthetic
+/// `Err(Unexpected)` so the semantics live in the type and the caller
+/// composes with `filter_map` directly instead of erasing a synthetic
+/// error.
 fn order_from_row(row: OrderRow) -> Option<Order> {
     if row.corrupt_remainder {
         error!(
@@ -822,6 +846,22 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     // (for OPEN rows) the SQL-side `fully_filled` boolean.
     let status = match row.raw_status.as_str() {
         "OPEN" => {
+            // `fully_filled` (amount_remaining == 0) is checked before
+            // `executed_is_zero` because amount_initial = amount_remaining = 0
+            // satisfies both predicates: ordering the executed-zero branch
+            // first would mis-bucket the row as NEW with origQty=0 and
+            // never reach this guard. Per read-api.md §Field projection,
+            // any OPEN row with amount_remaining == 0 is a projector bug
+            // — fail closed at error! (storage-invariant violation,
+            // per-occurrence is the right granularity for operator triage).
+            if row.fully_filled {
+                error!(
+                    order_id = %row.order_id,
+                    market = %row.market_address,
+                    "live_orders row has status=OPEN with amount_remaining=0 (projector bug); skipping"
+                );
+                return None;
+            }
             let executed_is_zero = match decimal_string_is_zero(&row.executed_qty) {
                 Ok(value) => value,
                 Err(err) => {
@@ -837,17 +877,6 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
             };
             if executed_is_zero {
                 OrderStatus::New
-            } else if row.fully_filled {
-                // amount_remaining == 0 but status is still OPEN: projector bug.
-                // Fail closed — do NOT surface as New or silently mis-bucket.
-                // error! (not warn!) because this is a storage-invariant violation
-                // operators must triage; per-occurrence is the right granularity.
-                error!(
-                    order_id = %row.order_id,
-                    market = %row.market_address,
-                    "live_orders row has status=OPEN with amount_remaining=0 (projector bug); skipping"
-                );
-                return None;
             } else {
                 OrderStatus::PartiallyFilled
             }
@@ -1999,6 +2028,22 @@ mod tests {
         assert!(
             order_from_row(row).is_none(),
             "amount_remaining > amount_initial must not render as NEW"
+        );
+    }
+
+    /// `amount_initial = amount_remaining = 0` satisfies both
+    /// `executed_qty == 0` and `fully_filled == true`. The projector-bug
+    /// guard must take precedence; otherwise the row surfaces as a
+    /// valid NEW order with origQty=0 instead of being log-and-skipped
+    /// per read-api.md §Field projection.
+    #[test]
+    fn order_from_row_skips_open_with_zero_initial_and_zero_remainder() {
+        let mut row = order_row("OPEN", "0");
+        row.orig_qty = "0".into();
+        row.fully_filled = true;
+        assert!(
+            order_from_row(row).is_none(),
+            "OPEN with amount_initial = amount_remaining = 0 must be projector-bug-skipped"
         );
     }
 

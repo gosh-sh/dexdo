@@ -19,7 +19,8 @@ use std::env;
 use std::time::Duration;
 
 use dodex_application::MarketReadRepository;
-use dodex_application::OrderStatusSet;
+use dodex_application::OrderStatusFilter;
+use dodex_application::OrdersLimit;
 use dodex_application::OrdersQuery;
 use dodex_infrastructure::database;
 use dodex_infrastructure::indexer_repo::IndexerRepository;
@@ -1033,8 +1034,8 @@ async fn orderplaced_fill_cancel_pipeline_reports_partial_executed_qty() {
         .list_orders(&OrdersQuery {
             owner_pn_address: owner_pn,
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 100,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -1141,8 +1142,8 @@ async fn orderplaced_full_fill_then_cancel_keeps_filled_status() {
         .list_orders(&OrdersQuery {
             owner_pn_address: owner_pn,
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 100,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -1239,8 +1240,8 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
         .list_orders(&OrdersQuery {
             owner_pn_address: owner_pn,
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 100,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -1256,6 +1257,25 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
         "a stale fill after cancellation must not erase the canceled remainder"
     );
     assert!(page.next_cursor.is_none());
+
+    // executed_qty is `greatest(amount_initial - amount_remaining, 0)` in
+    // SQL, so a co-mutation of `amount_initial` (kept = 1000) and
+    // `amount_remaining` (zeroed by a stale fill) would still render
+    // executed_qty = 0. Assert the stored `amount_remaining` directly
+    // to pin the storage truth.
+    let amount_remaining: String = sqlx::query_scalar(
+        "select amount_remaining::text from live_orders
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read amount_remaining");
+    assert_eq!(
+        amount_remaining, "1000",
+        "OrderCancelled before OrderFilled preserves the unfilled remainder",
+    );
 }
 
 #[tokio::test]
@@ -1295,19 +1315,33 @@ async fn orderfilled_on_filled_row_preserves_remainder() {
     .await
     .expect("insert filled row");
 
-    insert_raw(
+    // Event timestamp strictly later than the seeded chain_updated_at
+    // (1_700_000_000s) so the unconditional `greatest(...)` form would
+    // move chain_updated_at forward. The CASE in apply_order_filled must
+    // hold it at the seed value because the row is already FILLED.
+    insert_raw_with_ts(
         &pool,
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
+        1_700_001_000,
         &json!({ "orderId": order_id, "filledAmount": "100" }),
     )
     .await;
 
     indexer.reproject_pending(1000).await.expect("reproject");
 
-    let (status, amount_remaining): (String, String) = sqlx::query_as(
-        "select status, amount_remaining::text from live_orders where orderbook_address = $1",
+    let (status, amount_remaining, chain_updated_ms, last_chain_order): (
+        String,
+        String,
+        i64,
+        String,
+    ) = sqlx::query_as(
+        r#"select status,
+                      amount_remaining::text,
+                      (extract(epoch from chain_updated_at) * 1000)::bigint,
+                      last_chain_order
+                 from live_orders where orderbook_address = $1"#,
     )
     .bind(&orderbook_addr)
     .fetch_one(&pool)
@@ -1316,6 +1350,16 @@ async fn orderfilled_on_filled_row_preserves_remainder() {
 
     assert_eq!(status, "FILLED");
     assert_eq!(amount_remaining, "300", "stale fill must not mutate terminal remainder");
+    assert_eq!(
+        chain_updated_ms, 1_700_000_000_000,
+        "stale fill on terminal row must not move public updateTime",
+    );
+    // last_chain_order is gated by the same terminal CASE — a stale
+    // fill must not move /depth lastUpdateId for the pair either.
+    assert_eq!(
+        last_chain_order, "5f80000000000000000000000000000001",
+        "stale fill on terminal row must not advance last_chain_order",
+    );
 }
 
 #[tokio::test]
@@ -1359,11 +1403,16 @@ async fn ordercancelled_does_not_rewrite_rejected_row() {
     .await
     .expect("insert rejected row");
 
-    insert_raw(
+    // Event timestamp strictly later than the seeded chain_updated_at so
+    // a regression to an unconditional `greatest(...)` on chain_updated_at
+    // would move the public updateTime; the CASE must keep it pinned to
+    // the seed value because the row is REJECTED.
+    insert_raw_with_ts(
         &pool,
         &msg_id_cancel,
         &orderbook_addr,
         "OrderBook.OrderCancelled",
+        1_700_001_000,
         &json!({ "orderId": order_id }),
     )
     .await;
@@ -1373,11 +1422,15 @@ async fn ordercancelled_does_not_rewrite_rejected_row() {
     // Capture the read result without panicking — the CHECK constraint must
     // be restored before any assertion fires, or a failure here would leak
     // a constraint-less table into every subsequent test in the suite.
-    let status_result: Result<String, sqlx::Error> =
-        sqlx::query_scalar("select status from live_orders where orderbook_address = $1")
-            .bind(&orderbook_addr)
-            .fetch_one(&pool)
-            .await;
+    let row_result: Result<(String, i64, String), sqlx::Error> = sqlx::query_as(
+        r#"select status,
+                  (extract(epoch from chain_updated_at) * 1000)::bigint,
+                  last_chain_order
+             from live_orders where orderbook_address = $1"#,
+    )
+    .bind(&orderbook_addr)
+    .fetch_one(&pool)
+    .await;
 
     sqlx::query(
         "update live_orders set status = 'OPEN' where orderbook_address = $1 and status = 'REJECTED'",
@@ -1395,9 +1448,18 @@ async fn ordercancelled_does_not_rewrite_rejected_row() {
     .await
     .expect("restore status check");
 
-    let status = status_result.expect("read status");
+    let (status, chain_updated_ms, last_chain_order) =
+        row_result.expect("read status + chain_updated_at + last_chain_order");
     result.expect("reproject");
     assert_eq!(status, "REJECTED", "cancel projector must preserve future rejected rows");
+    assert_eq!(
+        chain_updated_ms, 1_700_000_000_000,
+        "stale cancel on terminal row must not move public updateTime",
+    );
+    assert_eq!(
+        last_chain_order, "5f80000000000000000000000000000001",
+        "stale cancel on terminal row must not advance last_chain_order",
+    );
 }
 
 #[tokio::test]
@@ -1553,19 +1615,20 @@ async fn orderplaced_confirmed_is_idempotent_when_already_attributed() {
 }
 
 #[tokio::test]
-async fn orderplaced_replay_reopens_terminal_row() {
-    // Pins the documented behaviour of the OrderPlaced ON CONFLICT arm: it
-    // overwrites status with 'OPEN'. Replaying placement alone against a
-    // FILLED row therefore reopens it, which is why
-    // docs/migrations/orders-cancel-remainder-cutover.md requires
-    // reprojecting the full lifecycle (place + fill + cancel), not only
-    // placement. If a future change protects terminal rows on conflict,
-    // this assertion flips — and the cutover doc must flip with it.
+async fn orderplaced_replay_refused_on_terminal_row() {
+    // Pins the ON CONFLICT WHERE guard at apply_order_placed: a stale
+    // OrderPlaced replay landing on a row that is already FILLED /
+    // CANCELLED / REJECTED is treated as a no-op so an isolated
+    // partial replay cannot demote the public status back to OPEN.
+    // The wipe-and-reproject path documented in
+    // docs/migrations/orders-cancel-remainder-cutover.md is unaffected
+    // because step 2 (`delete`) ensures the row does not yet exist when
+    // OrderPlaced lands.
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
     let repo = IndexerRepository::new(pool.clone());
 
-    let test = "reproj_orderplaced_replay_reopens_terminal";
+    let test = "reproj_orderplaced_replay_refused_on_terminal";
     let orderbook_addr = format!("0:{test}_book");
     let msg_id_place = format!("{test}-place-msg");
     let order_id = "77";
@@ -1623,9 +1686,63 @@ async fn orderplaced_replay_reopens_terminal_row() {
     .await
     .expect("read terminal row");
 
-    assert_eq!(status, "OPEN", "isolated OrderPlaced replay reopens the row to OPEN");
+    assert_eq!(status, "FILLED", "WHERE-guarded ON CONFLICT preserves terminal status");
     assert_eq!(
-        amount_remaining, "50",
-        "ON CONFLICT writes excluded.amount_remaining (= amount_initial) into the terminal row"
+        amount_remaining, "0",
+        "WHERE-guarded ON CONFLICT preserves terminal amount_remaining"
     );
+}
+
+/// `apply_order_placed` accepts `clientOrderId` only as a string (or
+/// `None` / `null`). A non-string JSON payload is schema drift, not a
+/// legitimate "no clientOrderId" — the four-arm match must reject the
+/// event so the user-correlatable id never silently lands NULL. The
+/// reproject loop reports it as failed and the live_orders row is
+/// never created.
+#[tokio::test]
+async fn orderplaced_rejects_non_string_client_order_id() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_orderplaced_non_string_coid";
+    let orderbook_addr = format!("0:{test}_book");
+    let msg_id_place = format!("{test}-place-msg");
+    let order_id = "88";
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_place.as_str()),
+        ],
+    )
+    .await;
+
+    insert_raw(
+        &pool,
+        &msg_id_place,
+        &orderbook_addr,
+        "OrderBook.OrderPlaced",
+        // clientOrderId as integer 12345 — schema drift, not absent.
+        &json!({
+            "orderId": order_id, "outcomeId": "1", "isBuy": true,
+            "price": "100", "amount": "50", "clientOrderId": 12345,
+        }),
+    )
+    .await;
+
+    let stats = repo.reproject_pending(1000).await.expect("reproject");
+    assert_eq!(stats.failed, 1, "non-string clientOrderId must be reported as a failed projection");
+
+    let row_count: i64 = sqlx::query_scalar(
+        r#"select count(*) from live_orders
+            where orderbook_address = $1 and order_id = $2::numeric"#,
+    )
+    .bind(&orderbook_addr)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count live_orders");
+    assert_eq!(row_count, 0, "no live_orders row may materialise when clientOrderId is non-string",);
 }

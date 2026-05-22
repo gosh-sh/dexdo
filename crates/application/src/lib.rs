@@ -138,7 +138,7 @@ pub struct OrderForCancel {
     pub event_id: String,
     pub oracle_list_hash: String,
     pub token_type: i32,
-    pub status: MarketStatus,
+    pub market_status: MarketStatus,
     /// `live_orders.client_order_id`. NULL in the DB surfaces as `None`
     /// here; the handler renders it as the empty string per
     /// api-spec §Cancel Order.
@@ -276,42 +276,68 @@ impl QueryableOrderStatus {
     }
 }
 
-/// Caller-supplied filter on order status. `is_all()` means "no filter,
-/// every row passes"; otherwise the inner set is the canonical subset
-/// of queryable status tokens the caller listed in the request `status`
-/// CSV.
+/// Non-empty subset of read-queryable statuses. The constructor is
+/// crate-private and `from_csv` is the only way to build one from
+/// outside, so `OrderStatusFilter::Only(_)` is non-empty by
+/// construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrderStatusSet(std::collections::BTreeSet<QueryableOrderStatus>);
+pub struct NonEmptyStatusSet(std::collections::BTreeSet<QueryableOrderStatus>);
 
-impl OrderStatusSet {
+impl NonEmptyStatusSet {
+    fn new(set: std::collections::BTreeSet<QueryableOrderStatus>) -> Option<Self> {
+        if set.is_empty() {
+            None
+        } else {
+            Some(Self(set))
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &QueryableOrderStatus> + '_ {
+        self.0.iter()
+    }
+}
+
+/// Caller-supplied filter on order status. Either matches every row
+/// (no `status` parameter on the request) or narrows to a non-empty
+/// set of queryable tokens. Callers pattern-match on the variant
+/// directly — `All` is plainly visible at the type level rather than
+/// hidden behind an `is_all()` predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderStatusFilter {
+    /// No filter — every row passes.
+    All,
+    /// Filter to the listed statuses. The inner type's constructor is
+    /// crate-private, so this variant is always non-empty.
+    Only(NonEmptyStatusSet),
+}
+
+impl OrderStatusFilter {
     /// Parse the request `status` parameter. `None` or all-whitespace
-    /// means "all statuses"; anything else is split on `,`, trimmed,
+    /// returns `All`; anything else is split on `,`, trimmed,
     /// de-duplicated, and matched against the allow-list. An unknown
     /// token (or `PENDING_NEW` / `PENDING_CANCEL`, which are write-side
     /// only) returns [`DomainError::InvalidParameter`].
     ///
-    /// Whitespace-only input is treated as "all statuses" by design.
-    /// This is asymmetric with the `cursor` parameter — a
-    /// whitespace-only `cursor` is rejected as `MissingParameter` —
-    /// because the two parameters express different intents: `status`
-    /// is an optional narrowing filter whose absence (any falsy form)
-    /// trivially means "no filter applied", while `cursor` is an
-    /// opaque server-issued token whose syntactic emptiness is always
-    /// a client-side bug. See docs/api-spec.md#orders (Behavior section)
-    /// for the public contract. Do not collapse the two parsers into
-    /// a shared "blank-is-empty" helper.
+    /// Whitespace-only input is treated as `All` by design. This is
+    /// asymmetric with the `cursor` parameter — a whitespace-only
+    /// `cursor` is rejected as `MissingParameter` — because the two
+    /// parameters express different intents: `status` is an optional
+    /// narrowing filter whose absence (any falsy form) trivially means
+    /// "no filter applied", while `cursor` is an opaque server-issued
+    /// token whose syntactic emptiness is always a client-side bug.
+    /// See docs/api-spec.md#orders (Behavior section) for the public
+    /// contract. Do not collapse the two parsers into a shared
+    /// "blank-is-empty" helper.
     pub fn from_csv(raw: Option<&str>) -> Result<Self, DomainError> {
         let Some(value) = raw else {
-            return Ok(Self::all());
+            return Ok(Self::All);
         };
         let mut set = std::collections::BTreeSet::new();
-        let mut had_token = false;
         for token in value.split(',') {
             let trimmed = token.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            had_token = true;
             let status = match trimmed {
                 "NEW" => QueryableOrderStatus::New,
                 "PARTIALLY_FILLED" => QueryableOrderStatus::PartiallyFilled,
@@ -322,25 +348,10 @@ impl OrderStatusSet {
             };
             set.insert(status);
         }
-        if !had_token {
-            return Ok(Self::all());
+        match NonEmptyStatusSet::new(set) {
+            Some(non_empty) => Ok(Self::Only(non_empty)),
+            None => Ok(Self::All),
         }
-        Ok(Self(set))
-    }
-
-    pub fn all() -> Self {
-        Self(std::collections::BTreeSet::new())
-    }
-
-    pub fn is_all(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn canonical_vec(&self) -> Vec<QueryableOrderStatus> {
-        // BTreeSet iteration order is QueryableOrderStatus's `Ord`. The
-        // set contains only read-queryable statuses, so SQL composition has
-        // no pending states to defend against.
-        self.0.iter().copied().collect()
     }
 }
 
@@ -349,10 +360,11 @@ impl OrderStatusSet {
 /// page; the server reads it as a lexicographic token via the strict
 /// `<` predicate in [`PostgresReadModelRepository::list_orders`].
 ///
-/// Construction goes through [`OrdersCursor::new`] which trims client input
-/// and rejects blank values. Values sourced from persisted `placed_chain_order`
-/// columns use [`OrdersCursor::from_db_token`], which treats blank storage
-/// values as read-model corruption.
+/// Both [`OrdersCursor::new`] (client input) and
+/// [`OrdersCursor::from_db_token`] (storage token) trim surrounding
+/// whitespace and reject blank values. They differ only in the error
+/// variant: a blank client value is `MissingParameter` (a -1102 client
+/// error), a blank stored value is `Unexpected` (storage corruption).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrdersCursor(String);
 
@@ -370,10 +382,14 @@ impl OrdersCursor {
     }
 
     pub fn from_db_token(raw: String) -> Result<Self, DomainError> {
-        if raw.trim().is_empty() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
             return Err(DomainError::Unexpected);
         }
-        Ok(Self(raw))
+        // Symmetric with `new`: trim so the round-trip
+        // (DB → cursor → client → cursor) cannot break lex comparison
+        // because of padding the projector might one day store.
+        Ok(Self(trimmed.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -385,12 +401,57 @@ impl OrdersCursor {
     }
 }
 
+/// Page-size cap for `/api/v1/orders`. The constructor enforces
+/// `1..=ORDERS_MAX_LIMIT`, lifting the "must be at least 1" invariant
+/// into the type so the Postgres cursor builder's
+/// `last() == Some` after `truncate(limit)` holds by construction
+/// rather than by a runtime `expect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrdersLimit(u16);
+
+impl OrdersLimit {
+    /// Default page size when `limit` is absent on the request.
+    /// Routes through `from_const` so the validating `assert!` runs at
+    /// compile time — a future bump of `ORDERS_DEFAULT_LIMIT` above
+    /// `ORDERS_MAX_LIMIT` would fail to build rather than producing an
+    /// out-of-range default that bypasses the runtime guard in `new`.
+    pub const DEFAULT: Self = Self::from_const(ORDERS_DEFAULT_LIMIT);
+
+    /// Validating constructor for runtime input. Out-of-range values
+    /// surface as `MissingParameter` — matches the public `-1102` error
+    /// the HTTP handler emits.
+    pub fn new(value: u16) -> Result<Self, DomainError> {
+        if value == 0 || value > ORDERS_MAX_LIMIT {
+            return Err(DomainError::MissingParameter);
+        }
+        Ok(Self(value))
+    }
+
+    /// Const constructor for statically-known values (test fixtures,
+    /// derived defaults). The `assert!` is evaluated at compile time
+    /// only when the call site is itself in a const context (a const
+    /// item, another const fn, etc.); a non-const call site evaluates
+    /// the assert at runtime and panics on out-of-range input. Use
+    /// `OrdersLimit::new` for runtime construction with a typed error.
+    pub const fn from_const(value: u16) -> Self {
+        assert!(
+            value >= 1 && value <= ORDERS_MAX_LIMIT,
+            "OrdersLimit must be within 1..=ORDERS_MAX_LIMIT",
+        );
+        Self(value)
+    }
+
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OrdersQuery {
     pub owner_pn_address: String,
     pub market: Option<OrdersMarketFilter>,
-    pub status: OrderStatusSet,
-    pub limit: u16,
+    pub status: OrderStatusFilter,
+    pub limit: OrdersLimit,
     pub cursor: Option<OrdersCursor>,
 }
 
@@ -421,10 +482,29 @@ impl OrdersMarketFilter {
     }
 }
 
+/// Result of `MarketReadRepository::list_orders`. The `next_cursor`
+/// field is built from the last retained row of the page, so
+/// `(orders.is_empty() && next_cursor.is_some())` is an invalid
+/// state. The production builder routes through `try_new` to enforce
+/// it; fields are public for read access and test-construction
+/// ergonomics, so the invariant holds by convention there, not
+/// structurally.
 #[derive(Debug, Clone)]
 pub struct OrdersPage {
     pub orders: Vec<Order>,
     pub next_cursor: Option<OrdersCursor>,
+}
+
+impl OrdersPage {
+    pub fn try_new(
+        orders: Vec<Order>,
+        next_cursor: Option<OrdersCursor>,
+    ) -> Result<Self, DomainError> {
+        if orders.is_empty() && next_cursor.is_some() {
+            return Err(DomainError::Unexpected);
+        }
+        Ok(Self { orders, next_cursor })
+    }
 }
 
 pub struct GetMarketsUseCase<R> {
@@ -832,7 +912,7 @@ where
     S: ChainOrderSender,
 {
     pub async fn execute(&self, input: CancelOrderInput) -> Result<CancelledOrder, DomainError> {
-        let OrderForCancel { event_id, oracle_list_hash, token_type, status, client_order_id } =
+        let OrderForCancel { event_id, oracle_list_hash, token_type, market_status, client_order_id } =
             self.repo
                 .resolve_for_cancel(
                     &input.market_address,
@@ -850,7 +930,7 @@ where
                     DomainError::Unexpected
                 })?;
 
-        if status != MarketStatus::Trading {
+        if market_status != MarketStatus::Trading {
             return Err(DomainError::OrderValidationFailed);
         }
 
@@ -909,13 +989,20 @@ where
     R: MarketReadRepository,
 {
     pub async fn execute(&self, input: GetOrdersInput) -> Result<OrdersPage, anyhow::Error> {
-        let status = OrderStatusSet::from_csv(input.status.as_deref())
+        let status = OrderStatusFilter::from_csv(input.status.as_deref())
             .map_err(|err| anyhow::anyhow!(err))?;
 
         let limit = match input.limit {
-            None => ORDERS_DEFAULT_LIMIT,
-            Some(v) if (1..=i64::from(ORDERS_MAX_LIMIT)).contains(&v) => v as u16,
-            Some(_) => return Err(anyhow::anyhow!(DomainError::MissingParameter)),
+            None => OrdersLimit::DEFAULT,
+            Some(v) => {
+                // u16::try_from rejects negative and over-u16 inputs;
+                // OrdersLimit::new then enforces the [1, MAX] bound. Both
+                // failure modes collapse to `MissingParameter` (the public
+                // `-1102` error per api-spec.md).
+                let raw =
+                    u16::try_from(v).map_err(|_| anyhow::anyhow!(DomainError::MissingParameter))?;
+                OrdersLimit::new(raw).map_err(|err| anyhow::anyhow!(err))?
+            }
         };
 
         let cursor = match input.cursor {
@@ -996,19 +1083,44 @@ mod tests {
     struct FakeRepo {
         market: Option<Market>,
         cancelable_order: Option<FakeCancelableOrder>,
+        orders_response: OrdersPage,
+        recorded_orders_queries: Mutex<Vec<OrdersQuery>>,
+    }
+
+    fn empty_orders_page() -> OrdersPage {
+        OrdersPage { orders: vec![], next_cursor: None }
     }
 
     impl FakeRepo {
         fn with(market: Market) -> Self {
-            Self { market: Some(market), cancelable_order: None }
+            Self {
+                market: Some(market),
+                cancelable_order: None,
+                orders_response: empty_orders_page(),
+                recorded_orders_queries: Mutex::new(Vec::new()),
+            }
         }
 
         fn empty() -> Self {
-            Self { market: None, cancelable_order: None }
+            Self {
+                market: None,
+                cancelable_order: None,
+                orders_response: empty_orders_page(),
+                recorded_orders_queries: Mutex::new(Vec::new()),
+            }
         }
 
         fn with_cancelable_order(market: Market, order: FakeCancelableOrder) -> Self {
-            Self { market: Some(market), cancelable_order: Some(order) }
+            Self {
+                market: Some(market),
+                cancelable_order: Some(order),
+                orders_response: empty_orders_page(),
+                recorded_orders_queries: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn recorded_orders_queries(&self) -> Vec<OrdersQuery> {
+            self.recorded_orders_queries.lock().unwrap().clone()
         }
     }
 
@@ -1085,13 +1197,14 @@ mod tests {
                 event_id: market.event.event_id,
                 oracle_list_hash: market.oracle_list_hash,
                 token_type: market.token_type,
-                status: market.status,
+                market_status: market.status,
                 client_order_id: order.client_order_id,
             })
         }
 
-        async fn list_orders(&self, _: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
-            unimplemented!("list_orders is not exercised by CreateOrderUseCase tests")
+        async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
+            self.recorded_orders_queries.lock().unwrap().push(query.clone());
+            Ok(self.orders_response.clone())
         }
     }
 
@@ -1489,9 +1602,13 @@ mod tests {
     }
 
     #[test]
-    fn status_set_parses_csv_and_dedups() {
-        let set = OrderStatusSet::from_csv(Some("NEW, FILLED ,NEW, CANCELED")).expect("valid CSV");
-        let canonical = set.canonical_vec();
+    fn status_filter_parses_csv_and_dedups() {
+        let filter =
+            OrderStatusFilter::from_csv(Some("NEW, FILLED ,NEW, CANCELED")).expect("valid CSV");
+        let OrderStatusFilter::Only(set) = filter else {
+            panic!("expected Only, got All");
+        };
+        let canonical: Vec<_> = set.iter().copied().collect();
         assert_eq!(
             canonical,
             vec![
@@ -1503,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn status_set_canonical_vec_orders_all_public_read_statuses_exhaustively() {
+    fn status_filter_iteration_orders_all_public_read_statuses_exhaustively() {
         fn permutations(values: Vec<&'static str>) -> Vec<Vec<&'static str>> {
             if values.is_empty() {
                 return vec![Vec::new()];
@@ -1524,9 +1641,13 @@ mod tests {
         let statuses = ["REJECTED", "CANCELED", "FILLED", "PARTIALLY_FILLED", "NEW"];
         for permutation in permutations(statuses.to_vec()) {
             let csv = permutation.join(",");
-            let set = OrderStatusSet::from_csv(Some(&csv)).expect("valid exhaustive CSV");
+            let filter = OrderStatusFilter::from_csv(Some(&csv)).expect("valid exhaustive CSV");
+            let OrderStatusFilter::Only(set) = filter else {
+                panic!("expected Only for exhaustive CSV {csv}");
+            };
+            let canonical: Vec<_> = set.iter().copied().collect();
             assert_eq!(
-                set.canonical_vec(),
+                canonical,
                 vec![
                     QueryableOrderStatus::New,
                     QueryableOrderStatus::PartiallyFilled,
@@ -1540,9 +1661,22 @@ mod tests {
     }
 
     #[test]
-    fn status_set_treats_absent_and_empty_as_all() {
-        assert!(OrderStatusSet::from_csv(None).expect("absent").is_all());
-        assert!(OrderStatusSet::from_csv(Some("   ")).expect("blank").is_all());
+    fn orders_page_try_new_rejects_empty_with_cursor() {
+        let cursor = OrdersCursor::new("token".into()).expect("valid cursor");
+        let err = OrdersPage::try_new(vec![], Some(cursor))
+            .expect_err("empty orders + Some(cursor) must fail");
+        assert_eq!(err, DomainError::Unexpected);
+        // Sanity: the legal shapes still build.
+        OrdersPage::try_new(vec![], None).expect("empty + None is legal");
+    }
+
+    #[test]
+    fn status_filter_treats_absent_and_empty_as_all() {
+        assert_eq!(OrderStatusFilter::from_csv(None).expect("absent"), OrderStatusFilter::All);
+        assert_eq!(
+            OrderStatusFilter::from_csv(Some("   ")).expect("blank"),
+            OrderStatusFilter::All,
+        );
     }
 
     #[test]
@@ -1571,8 +1705,8 @@ mod tests {
     }
 
     #[test]
-    fn status_set_rejects_unknown_token() {
-        let err = OrderStatusSet::from_csv(Some("NEW,SUPER_FILLED")).expect_err("unknown token");
+    fn status_filter_rejects_unknown_token() {
+        let err = OrderStatusFilter::from_csv(Some("NEW,SUPER_FILLED")).expect_err("unknown token");
         assert_eq!(err, DomainError::InvalidParameter);
     }
 
@@ -1609,14 +1743,15 @@ mod tests {
     }
 
     #[test]
-    fn status_set_rejects_pending_states() {
+    fn status_filter_rejects_pending_states() {
         // PendingNew and PendingCancel are write-side synthetic statuses
         // and must not be accepted as a /orders filter — neither appears
         // on a live_orders row.
-        let err = OrderStatusSet::from_csv(Some("PENDING_NEW")).expect_err("pending_new rejected");
-        assert_eq!(err, DomainError::InvalidParameter);
         let err =
-            OrderStatusSet::from_csv(Some("PENDING_CANCEL")).expect_err("pending_cancel rejected");
+            OrderStatusFilter::from_csv(Some("PENDING_NEW")).expect_err("pending_new rejected");
+        assert_eq!(err, DomainError::InvalidParameter);
+        let err = OrderStatusFilter::from_csv(Some("PENDING_CANCEL"))
+            .expect_err("pending_cancel rejected");
         assert_eq!(err, DomainError::InvalidParameter);
     }
 
@@ -1799,5 +1934,127 @@ mod tests {
         );
         let err = uc.execute(base_cancel_input("PM-YES", 123)).await.unwrap_err();
         assert_eq!(err, DomainError::OrderPnBusy);
+    }
+
+    fn base_get_orders_input() -> GetOrdersInput {
+        GetOrdersInput {
+            owner_pn_address: "0:pn".into(),
+            market_filter: None,
+            status: None,
+            limit: None,
+            cursor: None,
+        }
+    }
+
+    /// Pin the wiring from `GetOrdersInput` to `OrdersQuery`: every
+    /// caller-supplied field (owner, market_filter, status CSV, limit,
+    /// cursor) must reach the repository unchanged after parsing. A
+    /// regression that drops one — e.g. forgetting to forward
+    /// `input.market_filter` into `OrdersQuery::market` — would silently
+    /// widen the result set, and the HTTP suite is the only thing that
+    /// catches it today.
+    #[tokio::test]
+    async fn get_orders_propagates_inputs_to_repo_query() {
+        let filter = OrdersMarketFilter::pair(
+            Some(MarketAddress("0:market".into())),
+            Some(Symbol("PM-YES".into())),
+        )
+        .expect("valid pair")
+        .expect("non-empty pair");
+
+        let repo = Arc::new(FakeRepo::empty());
+        let uc = GetOrdersUseCase::new(repo.clone());
+        uc.execute(GetOrdersInput {
+            owner_pn_address: "0:owner".into(),
+            market_filter: Some(filter.clone()),
+            status: Some("NEW,FILLED".into()),
+            limit: Some(50),
+            cursor: Some("  abc123  ".into()),
+        })
+        .await
+        .expect("ok");
+
+        let queries = repo.recorded_orders_queries();
+        assert_eq!(queries.len(), 1, "list_orders called exactly once");
+        let q = &queries[0];
+        assert_eq!(q.owner_pn_address, "0:owner");
+        let captured = q.market.as_ref().expect("market filter forwarded");
+        assert_eq!(captured.market_address().0, filter.market_address().0);
+        assert_eq!(captured.symbol().0, filter.symbol().0);
+        assert_eq!(
+            q.status,
+            OrderStatusFilter::from_csv(Some("NEW,FILLED")).expect("valid status CSV"),
+            "status CSV must be parsed and forwarded"
+        );
+        assert_eq!(q.limit, OrdersLimit::from_const(50));
+        // OrdersCursor::new trims surrounding whitespace; the trimmed
+        // value must reach the repo verbatim.
+        assert_eq!(q.cursor.as_ref().expect("cursor forwarded").as_str(), "abc123");
+    }
+
+    /// Absent `limit` must collapse to `OrdersLimit::DEFAULT`. Combined
+    /// with the type-level `1..=ORDERS_MAX_LIMIT` invariant on
+    /// `OrdersLimit`, this is what guarantees the Postgres cursor
+    /// builder's `last() == Some` after `truncate(limit)`.
+    #[tokio::test]
+    async fn get_orders_defaults_limit_when_absent() {
+        let repo = Arc::new(FakeRepo::empty());
+        let uc = GetOrdersUseCase::new(repo.clone());
+        uc.execute(base_get_orders_input()).await.expect("ok");
+
+        let q = repo.recorded_orders_queries().pop().expect("one call");
+        assert_eq!(q.limit, OrdersLimit::DEFAULT);
+    }
+
+    /// Out-of-range `limit` (0, > `ORDERS_MAX_LIMIT`, negative) must trip
+    /// `MissingParameter` before the repository is touched. The type-level
+    /// invariant on `OrdersLimit` makes the panic at
+    /// `expect("has_more implies non-empty page")` unreachable by
+    /// construction; this test pins the wiring that maps a non-HTTP
+    /// caller's bad input to `MissingParameter` instead of letting it
+    /// reach the repository.
+    #[tokio::test]
+    async fn get_orders_rejects_limit_out_of_range() {
+        for bad_limit in [0_i64, -1, i64::from(ORDERS_MAX_LIMIT) + 1, i64::MAX] {
+            let repo = Arc::new(FakeRepo::empty());
+            let uc = GetOrdersUseCase::new(repo.clone());
+            let err = uc
+                .execute(GetOrdersInput { limit: Some(bad_limit), ..base_get_orders_input() })
+                .await
+                .expect_err("out-of-range limit must fail");
+            let domain = err
+                .downcast_ref::<DomainError>()
+                .expect("out-of-range limit surfaces as typed DomainError");
+            assert_eq!(*domain, DomainError::MissingParameter, "limit={bad_limit}");
+            assert!(
+                repo.recorded_orders_queries().is_empty(),
+                "repo must not be touched for invalid limit={bad_limit}",
+            );
+        }
+    }
+
+    /// Blank / whitespace-only `cursor` must trip `MissingParameter`
+    /// before the repository is touched. Mirrors the strict contract on
+    /// `OrdersCursor::new` and the HTTP-layer test for blank cursor —
+    /// covering the application layer closes the gap where a non-HTTP
+    /// caller could pass `Some("  ")` directly.
+    #[tokio::test]
+    async fn get_orders_rejects_blank_cursor() {
+        for blank in ["", "   ", "\t\n"] {
+            let repo = Arc::new(FakeRepo::empty());
+            let uc = GetOrdersUseCase::new(repo.clone());
+            let err = uc
+                .execute(GetOrdersInput { cursor: Some(blank.into()), ..base_get_orders_input() })
+                .await
+                .expect_err("blank cursor must fail");
+            let domain = err
+                .downcast_ref::<DomainError>()
+                .expect("blank cursor surfaces as typed DomainError");
+            assert_eq!(*domain, DomainError::MissingParameter, "cursor={blank:?}");
+            assert!(
+                repo.recorded_orders_queries().is_empty(),
+                "repo must not be touched for blank cursor={blank:?}",
+            );
+        }
     }
 }

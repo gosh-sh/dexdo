@@ -342,7 +342,7 @@ Three failure classes — two synchronous, one async — same shape as POST.
    - **Owner mismatch** — `_doCancel` silently no-ops if `o.depositHash` does not match the caller's. The pre-submit ownership lookup makes this case unreachable under normal operation; it remains possible only under read-model corruption.
    - **Queue overflow** — `OrderBook.Rejected` fires; the indexer records the raw event but does not touch `live_orders`. The order stays `OPEN`.
 
-   An HTTP 200 `PENDING_CANCEL` is therefore not a guarantee that the cancel will land — it confirms only that `PrivateNote.cancelOrder` accepted the request. Clients detect class-3 outcomes by polling `/api/v1/orders` and observing whether the `orderId`'s stored status flips off `PENDING_CANCEL` within a reasonable window.
+   An HTTP 200 `PENDING_CANCEL` is therefore not a guarantee that the cancel will land — it confirms only that `PrivateNote.cancelOrder` accepted the request. `PENDING_CANCEL` is the DELETE response token only; it is never persisted to `live_orders.status`, so polling `/api/v1/orders` continues to report `NEW` / `PARTIALLY_FILLED` until the indexer applies `OrderCancelled` or `OrderFilled` and flips the stored status to `CANCELED` or `FILLED`. Clients detect class-3 outcomes by watching for that flip on the `orderId` within a reasonable window.
 
 Transport-level failures (gateway drop, decode error) collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error`, same as POST.
 

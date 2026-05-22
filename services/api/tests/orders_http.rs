@@ -299,7 +299,11 @@ async fn readonly_user_data_key_can_fetch_orders() {
         // supply one; either form is well-formed (no NULL on the
         // wire). Decoded as plain String, not Option<String>.
         let _ = &o.client_order_id;
-        assert!(!o.price.is_empty(), "price rendered as decimal string");
+        // insert_order seeds raw price = 12345; market_outcomes
+        // price_precision = 3 → "12.345". Exact equality catches a
+        // wire-shape regression (e.g. price/origQty swap in the JSON
+        // mapper) that a non-empty check would miss.
+        assert_eq!(o.price, "12.345", "price scaled against price_precision=3");
         assert!(!o.orig_qty.is_empty(), "orig_qty rendered as decimal string");
         // `executedQty` is allowed to be "0" or non-zero depending on
         // status; we only assert it decoded cleanly, not its value.
@@ -315,8 +319,14 @@ async fn readonly_user_data_key_can_fetch_orders() {
             "SELL"
         };
         assert_eq!(o.side, expected_side, "side mapping for order_id={}", o.order_id);
-        assert!(o.time > 0, "chain_created_at projected as positive ms");
-        assert!(o.update_time >= o.time, "updateTime >= time");
+        // time/updateTime are unix ms (api-spec §Orders). Storage is µs
+        // (SQL `extract(epoch from ...) * 1_000_000`), projector divides
+        // by 1_000. Seed `chain_created_at = to_timestamp(1700000000)`
+        // → 1_700_000_000_000 ms; `chain_updated_at = to_timestamp(1700000001)`
+        // → 1_700_000_001_000 ms. Exact equality catches a unit-conversion
+        // regression that a `> 0` check misses — µs would be 1e3× larger.
+        assert_eq!(o.time, 1_700_000_000_000, "time must be unix ms (seed * 1000)");
+        assert_eq!(o.update_time, 1_700_000_001_000, "updateTime must be unix ms (seed * 1000)");
     }
     assert!(body.next_cursor.is_none());
 }
@@ -364,6 +374,169 @@ async fn status_filter_narrows_orders_through_http() {
     assert_eq!(body.orders.len(), 1);
     assert_eq!(body.orders[0].order_id, "21");
     assert_eq!(body.orders[0].status, "FILLED");
+}
+
+/// `?status=PARTIALLY_FILLED` exercises the 3-conjunct OPEN heap predicate
+/// (`status='OPEN' AND amount_remaining < amount_initial AND amount_remaining > 0`)
+/// end-to-end through the production router. A regression that loosened
+/// any conjunct — e.g. dropping the `> 0` guard and leaking a stale
+/// projector-bug row, or dropping the `< amount_initial` guard and
+/// returning unfilled NEW rows — would surface here.
+#[tokio::test]
+async fn partially_filled_status_filter_narrows_orders_through_http() {
+    let Some((service, pool, kek)) = common::setup().await else { return };
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    seed_readonly_key(&pool, &kek, &scope).await;
+    insert_market(&pool, &scope).await;
+    let owner = trading_pn(&pool).await;
+
+    // amount_initial is hardcoded to 1000 in insert_order; amount_remaining
+    // = 1000 → NEW, 0 → FILLED/CANCELED (per raw_status), 0 < x < 1000 → PARTIAL.
+    insert_order(&pool, &scope, &owner, 30, true, "5f800000000000000030", "OPEN", 1000).await;
+    insert_order(&pool, &scope, &owner, 31, true, "5f800000000000000031", "OPEN", 750).await;
+    insert_order(&pool, &scope, &owner, 32, true, "5f800000000000000032", "FILLED", 0).await;
+    insert_order(&pool, &scope, &owner, 33, true, "5f800000000000000033", "CANCELLED", 0).await;
+
+    let ts = now_ms();
+    let canonical_market = canonical_market_address(&scope.pmp);
+    let canonical = canonical_query(&[
+        ("marketAddress", &canonical_market),
+        ("recvWindow", "5000"),
+        ("status", "PARTIALLY_FILLED"),
+        ("symbol", &scope.symbol),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(&scope.api_secret_hex, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/orders")
+        .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true)
+        .query("marketAddress", scope.pmp.as_str())
+        .query("symbol", scope.symbol.as_str())
+        .query("status", "PARTIALLY_FILLED")
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    let status = resp.status_code;
+    let body = resp.take_json::<OrdersPageBody>().await.expect("orders body");
+    scope.cleanup(&pool).await;
+
+    assert_eq!(status, Some(StatusCode::OK));
+    assert_eq!(body.orders.len(), 1, "only the partial-fill row passes the 3-conjunct filter");
+    assert_eq!(body.orders[0].order_id, "31");
+    assert_eq!(body.orders[0].status, "PARTIALLY_FILLED");
+    assert!(body.next_cursor.is_none());
+}
+
+/// Multi-token `?status=NEW,FILLED` reaches the production router with a
+/// real comma in the canonical and renders the disjunctive SQL predicate
+/// for two buckets. A regression that mis-parsed a valid multi-token CSV
+/// (treating the entire string as one token, or dropping all but one
+/// element) would slip past the single-token and invalid-CSV cases the
+/// rest of this suite covers.
+#[tokio::test]
+async fn multi_token_status_csv_narrows_orders_through_http() {
+    let Some((service, pool, kek)) = common::setup().await else { return };
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    seed_readonly_key(&pool, &kek, &scope).await;
+    insert_market(&pool, &scope).await;
+    let owner = trading_pn(&pool).await;
+
+    insert_order(&pool, &scope, &owner, 40, true, "5f800000000000000040", "OPEN", 1000).await;
+    insert_order(&pool, &scope, &owner, 41, true, "5f800000000000000041", "OPEN", 750).await;
+    insert_order(&pool, &scope, &owner, 42, true, "5f800000000000000042", "FILLED", 0).await;
+    insert_order(&pool, &scope, &owner, 43, true, "5f800000000000000043", "CANCELLED", 0).await;
+
+    let ts = now_ms();
+    let canonical_market = canonical_market_address(&scope.pmp);
+    // %2C in canonical to match the URL bytes the HMAC verifier signs;
+    // TestClient::query would re-encode and break the signature, so the
+    // URL is built manually (mirrors empty_cursor_returns_minus_1102).
+    let canonical = canonical_query(&[
+        ("marketAddress", &canonical_market),
+        ("recvWindow", "5000"),
+        ("status", "NEW%2CFILLED"),
+        ("symbol", &scope.symbol),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(&scope.api_secret_hex, &canonical, b"");
+
+    let url = format!(
+        "http://test/api/v1/orders?marketAddress={canonical_market}&recvWindow=5000&status=NEW%2CFILLED&symbol={}&timestamp={ts}&signature={sig}",
+        scope.symbol,
+    );
+    let mut resp = TestClient::get(url)
+        .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true)
+        .send(&service)
+        .await;
+
+    let status = resp.status_code;
+    let body = resp.take_json::<OrdersPageBody>().await.expect("orders body");
+    scope.cleanup(&pool).await;
+
+    assert_eq!(status, Some(StatusCode::OK));
+    // DESC placed_chain_order: 42 (FILLED) > 40 (NEW); PARTIAL=41 and
+    // CANCELED=43 must be excluded.
+    let ids: Vec<&str> = body.orders.iter().map(|o| o.order_id.as_str()).collect();
+    assert_eq!(ids, vec!["42", "40"], "only NEW + FILLED tokens pass");
+    let statuses: Vec<&str> = body.orders.iter().map(|o| o.status.as_str()).collect();
+    assert_eq!(statuses, vec!["FILLED", "NEW"]);
+    assert!(body.next_cursor.is_none());
+}
+
+/// HTTP-layer owner scoping: the handler must filter by
+/// `ctx.trading_pn.pn_address` so a row owned by a different PrivateNote
+/// on the same book never appears in the response. The repo-layer
+/// equivalent (`returns_only_owner_rows_across_all_statuses`) pins the SQL
+/// predicate; this test pins the handler → use case → repo wiring so a
+/// regression that drops the owner from `GetOrdersInput`, reads the wrong
+/// context field, or stops binding `$1` would surface end-to-end.
+#[tokio::test]
+async fn foreign_owner_rows_are_filtered_out() {
+    let Some((service, pool, kek)) = common::setup().await else { return };
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    seed_readonly_key(&pool, &kek, &scope).await;
+    insert_market(&pool, &scope).await;
+    let owner = trading_pn(&pool).await;
+    let foreign_owner = format!("0:foreign_owner_{}", uuid::Uuid::new_v4().simple());
+
+    insert_order(&pool, &scope, &owner, 30, true, "5f800000000000000030", "OPEN", 1000).await;
+    insert_order(&pool, &scope, &foreign_owner, 31, true, "5f800000000000000031", "OPEN", 1000)
+        .await;
+
+    let ts = now_ms();
+    let canonical_market = canonical_market_address(&scope.pmp);
+    let canonical = canonical_query(&[
+        ("marketAddress", &canonical_market),
+        ("recvWindow", "5000"),
+        ("symbol", &scope.symbol),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(&scope.api_secret_hex, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/orders")
+        .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true)
+        .query("marketAddress", scope.pmp.as_str())
+        .query("symbol", scope.symbol.as_str())
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    let status = resp.status_code;
+    let body = resp.take_json::<OrdersPageBody>().await.expect("orders body");
+    scope.cleanup(&pool).await;
+
+    assert_eq!(status, Some(StatusCode::OK));
+    assert_eq!(body.orders.len(), 1, "foreign-owned row must not appear");
+    assert_eq!(body.orders[0].order_id, "30");
+    assert!(body.next_cursor.is_none());
 }
 
 // Half-supplied (marketAddress, symbol) pair → -1102 / 400. Both
@@ -416,6 +589,91 @@ async fn symbol_without_market_address_returns_minus_1102() {
         .query("symbol", symbol)
         .query("timestamp", ts.to_string())
         .query("signature", sig)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+// Present-but-blank `marketAddress` / `symbol` trips -1102 instead of
+// silently collapsing to "no filter". Mirrors the cursor contract — a
+// client sending `?marketAddress=&symbol=` is signalling an unbound
+// template variable, not "all markets". The HMAC verifier signs the
+// raw query bytes, so the URL is built manually to keep blank values
+// intact (TestClient::query would re-encode and break the signature).
+
+#[tokio::test]
+async fn blank_market_address_with_symbol_returns_minus_1102() {
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let symbol = "ORDERS_BLANK_MA";
+    let canonical = canonical_query(&[
+        ("marketAddress", ""),
+        ("recvWindow", "5000"),
+        ("symbol", symbol),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let url = format!(
+        "http://test/api/v1/orders?marketAddress=&recvWindow=5000&symbol={symbol}&timestamp={ts}&signature={sig}",
+    );
+    let mut resp = TestClient::get(url)
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
+async fn blank_symbol_with_market_address_returns_minus_1102() {
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let market = "0:orders_blank_symbol";
+    let canonical_market = canonical_market_address(market);
+    let canonical = canonical_query(&[
+        ("marketAddress", &canonical_market),
+        ("recvWindow", "5000"),
+        ("symbol", ""),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let url = format!(
+        "http://test/api/v1/orders?marketAddress={canonical_market}&recvWindow=5000&symbol=&timestamp={ts}&signature={sig}",
+    );
+    let mut resp = TestClient::get(url)
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
+        .send(&service)
+        .await;
+
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(body.code, -1102);
+}
+
+#[tokio::test]
+async fn both_blank_market_pair_returns_minus_1102() {
+    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let ts = now_ms();
+    let canonical = canonical_query(&[
+        ("marketAddress", ""),
+        ("recvWindow", "5000"),
+        ("symbol", ""),
+        ("timestamp", &ts.to_string()),
+    ]);
+    let sig = sign(SEED_API_SECRET, &canonical, b"");
+
+    let url = format!(
+        "http://test/api/v1/orders?marketAddress=&recvWindow=5000&symbol=&timestamp={ts}&signature={sig}",
+    );
+    let mut resp = TestClient::get(url)
+        .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
         .send(&service)
         .await;
 

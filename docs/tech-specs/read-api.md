@@ -177,7 +177,7 @@ Market filter (same three shapes as before):
 
 The pair-resolution lookup is a separate SQL round-trip that runs before the main query so the unknown-pair case can be distinguished cleanly from "owner has no orders here". Resolution is bound by `last_reconciled_at IS NOT NULL` so a pair that exists in `markets` but has never reconciled is reported the same way as a pair that does not exist.
 
-Status filter (CSV). The handler parses `status` once at request entry into `OrderStatusSet`, backed by a `BTreeSet<QueryableOrderStatus>`:
+Status filter (CSV). The handler parses `status` once at request entry into `OrderStatusFilter`, an `All | Only(BTreeSet<QueryableOrderStatus>)` enum:
 
 1. Split on `,`, trim each token of ASCII whitespace, drop empty tokens, de-duplicate.
 2. Each token must match exactly one of the five canonical strings `NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`. Anything else → `DomainError::InvalidParameter` → `-1130` / 400.
@@ -259,7 +259,7 @@ The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses
 
 | Condition | `DomainError` | API code | HTTP |
 | --- | --- | --- | --- |
-| Exactly one of `marketAddress` / `symbol` present | `MissingParameter` | `-1102` | 400 |
+| `marketAddress` / `symbol` pair is incomplete (only one present, or either is present but blank/whitespace) | `MissingParameter` | `-1102` | 400 |
 | `limit` out of `[1, 500]` | `MissingParameter` | `-1102` | 400 |
 | `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
 | `cursor` is empty or whitespace-only | `MissingParameter` | `-1102` | 400 |
@@ -271,11 +271,11 @@ The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses
 
 ### SQL
 
-Both variants share the same projection list (`pmp_address`, `symbol`, `order_id`, `client_order_id`, `price`, `orig_qty`, `executed_qty`, `fully_filled`, `is_buy`, `chain_created_at_us`, `chain_updated_at_us`, `placed_chain_order`, `lo.status`, `price_precision`, `quantity_precision`). The base predicate is `owner_pn_address = $1 AND m.last_reconciled_at IS NOT NULL AND chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL`.
+Both variants share the same projection list (`pmp_address`, `symbol`, `order_id`, `client_order_id`, `price`, `orig_qty`, `executed_qty`, `fully_filled`, `corrupt_remainder`, `is_buy`, `chain_created_at_us`, `chain_updated_at_us`, `placed_chain_order`, `lo.status as raw_status`, `price_precision`, `quantity_precision`). The base predicate is `owner_pn_address = $1 AND m.last_reconciled_at IS NOT NULL AND chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL`.
 
 `chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` are SQL-side heap filters. They guard against a rare ingestion path in which the GraphQL gateway omits `created_at` on an edge — such rows must not surface through the endpoint (otherwise the response decoder would fail when mapping `NULL` into `i64`) — while keeping the index independent of the display-only timestamp columns.
 
-The status predicate is built dynamically from `OrderStatusSet`, which wraps a `BTreeSet<QueryableOrderStatus>`:
+The status predicate is built dynamically from `OrderStatusFilter`. `OrderStatusFilter::All` emits no predicate; `OrderStatusFilter::Only` carries a non-empty `BTreeSet<QueryableOrderStatus>`:
 
 - Empty set / `status` absent → no status predicate (every row passes).
 - Otherwise → `AND (<per-status predicate> OR <per-status predicate> ...)`, one disjunct per public-status token, drawn from the [§ Status mapping](#status-mapping) table. The disjunct fragments are compile-time string constants; only the allow-listed set drives which fragments are joined.
@@ -368,7 +368,7 @@ Decide this with the contracts change; the choice should not perturb the `/order
 Three integration suites, all gated on `TEST_DATABASE_URL`:
 
 - `crates/infrastructure/tests/orders.rs` — owner scoping, DESC sort, scaling, the three market-filter shapes, `status` CSV across all five tokens (REJECTED returns empty before contracts/indexer support), cursor advance, cursor stability under concurrent fills and cancellations (closed rows retain their position), `limit` defaults and bounds, invalid `status` tokens, invalid cursor, `executedQty > 0` for `CANCELED` partial-then-cancel rows.
-- `crates/infrastructure/tests/reprojection.rs` — extend the existing deferred-replay tests to cover `OrderPlacedConfirmed` arriving after the row has already transitioned to `FILLED` / `CANCELLED`; assert the owner attaches and the row appears under those public statuses in `/orders`.
+- `crates/infrastructure/tests/reprojection.rs` — `OrderPlacedConfirmed` deferred-replay and idempotency-on-already-attributed paths pin owner attribution, and full place/fill/cancel pipeline scenarios pin terminal-state precedence: cancel-after-full-fill stays `FILLED`, cancel-before-fill stays `CANCELED` with the unfilled remainder, partial-fill-then-cancel reports a non-zero `executedQty`.
 - `services/api/tests/orders_http.rs` — happy path through the production router with the wrapped response, the four error codes (`-1102`, `-1121`, `-1130`, auth), and the pagination round-trip across mixed-status pages.
 
 ## `/api/v1/account`

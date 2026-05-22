@@ -182,7 +182,7 @@ fn trading_order(client_order_id: Option<&str>) -> OrderForCancel {
         event_id: "0xevent".into(),
         oracle_list_hash: "0xfeedface".into(),
         token_type: 3,
-        status: MarketStatus::Trading,
+        market_status: MarketStatus::Trading,
         client_order_id: client_order_id.map(|s| s.to_string()),
     }
 }
@@ -364,7 +364,7 @@ async fn unknown_order_returns_404_minus_2011() {
 #[tokio::test]
 async fn non_trading_market_returns_400_minus_2010() {
     let mut order = trading_order(None);
-    order.status = MarketStatus::Resolving;
+    order.market_status = MarketStatus::Resolving;
     let repo: SharedRepo = Arc::new(FakeRepo::with(order));
     let sender: SharedChainSender = Arc::new(RecordingCancelSender::ok());
     let service = setup_with(repo, sender);

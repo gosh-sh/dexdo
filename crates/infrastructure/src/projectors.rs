@@ -7,6 +7,8 @@ use num_bigint::BigUint;
 use serde_json::Value;
 use sqlx::Postgres;
 use sqlx::Transaction;
+use tracing::debug;
+use tracing::error;
 use tracing::warn;
 
 use crate::decoder::DecodedEvent;
@@ -484,7 +486,19 @@ async fn apply_order_placed(
         .context("OrderPlaced: missing field `isBuy`")?;
     let price = uint_field_to_decimal(&event.value, "price")?;
     let amount = uint_field_to_decimal(&event.value, "amount")?;
-    let client_order_id = field_str(&event.value, "clientOrderId").ok().map(String::from);
+    // `clientOrderId` is genuinely optional (some placements omit it),
+    // so absent / JSON null collapse to `None`. A present-but-non-string
+    // payload is schema drift, not "no clientOrderId" — propagate as an
+    // error so the user-correlatable id does not silently land NULL.
+    let client_order_id = match event.value.get("clientOrderId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) => {
+            return Err(anyhow!(
+                "OrderPlaced: field `clientOrderId` has unexpected JSON type: {other:?}"
+            ));
+        }
+    };
     let chain_order = node_chain_order(node, "OrderPlaced")?;
 
     // chain_created_at / chain_updated_at survive sub-second precision via
@@ -508,7 +522,7 @@ async fn apply_order_placed(
         );
     }
 
-    sqlx::query(
+    let result = sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, client_order_id, status, last_chain_order,
@@ -520,10 +534,14 @@ async fn apply_order_placed(
                    to_timestamp($9::double precision), to_timestamp($9::double precision),
                    $8,
                    now())
-           -- On replay this conflict arm overwrites status with 'OPEN', so
-           -- isolated replay of an OrderPlaced against a FILLED/CANCELLED
-           -- row reopens it. Data-bearing cutovers must reproject the full
-           -- order lifecycle, not only placement; see
+           -- The ON CONFLICT arm is WHERE-guarded against terminal rows:
+           -- an OrderPlaced replay landing on a row that already reached
+           -- FILLED / CANCELLED / REJECTED is treated as a no-op so an
+           -- isolated partial replay cannot demote the public status back
+           -- to OPEN. Data-bearing cutovers still wipe live_orders and
+           -- reproject the full lifecycle in chain_order order; the WHERE
+           -- guard does not affect that path because the row does not yet
+           -- exist when OrderPlaced lands. See
            -- docs/migrations/orders-cancel-remainder-cutover.md.
            on conflict (orderbook_address, order_id) do update
                set outcome_id = excluded.outcome_id,
@@ -547,7 +565,8 @@ async fn apply_order_placed(
                                                excluded.chain_updated_at),
                    placed_chain_order = coalesce(live_orders.placed_chain_order,
                                                  excluded.placed_chain_order),
-                   updated_at = now()"#,
+                   updated_at = now()
+               where live_orders.status not in ('FILLED', 'CANCELLED', 'REJECTED')"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
@@ -556,11 +575,28 @@ async fn apply_order_placed(
     .bind(&price)
     .bind(&amount)
     .bind(client_order_id)
-    .bind(chain_order)
+    .bind(&chain_order)
     .bind(chain_seconds)
     .execute(&mut **tx)
     .await
     .context("upsert live_orders for OrderBook.OrderPlaced")?;
+
+    // Postgres reports `rows_affected = 0` only when the conflict arm's
+    // WHERE filter rejected the update — the INSERT path always counts 1,
+    // and an unfiltered conflict path also counts 1. Zero here means an
+    // OrderPlaced event hit an already-terminal row and the projector
+    // refused to reopen it. Surface it so the operator-replay path is
+    // diagnosable from logs even though the projector still reports
+    // Applied (the event was processed by being intentionally dropped).
+    if result.rows_affected() == 0 {
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            msg_id = %node.msg_id,
+            chain_order = %chain_order,
+            "OrderPlaced replay refused on terminal row; partial-replay cutover suspected",
+        );
+    }
 
     Ok(ProjectionOutcome::Applied)
 }
@@ -575,51 +611,78 @@ async fn apply_order_placed_confirmed(
     let orderbook_address = field_str(&event.value, "orderBook")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
 
-    let updated = sqlx::query(
-        r#"update live_orders
-              set owner_pn_address = $3,
-                  updated_at = now()
-            where orderbook_address = $1
-              and order_id = $2::numeric
-              and owner_pn_address is null"#,
+    // Single statement: CTE locks the row, UPDATE attaches the owner
+    // when the prior value was NULL (no-op otherwise), RETURNING yields
+    // the prior owner so the caller can distinguish four outcomes:
+    //   * no row returned → row not yet present → defer (the same
+    //     batch's OrderPlaced has not arrived);
+    //   * prior owner NULL → just attached on this UPDATE → Applied;
+    //   * prior owner == incoming → idempotent retry → Applied + debug;
+    //   * prior owner != incoming → misattribution attempt → Applied
+    //     + error. Marked Applied because retry cannot self-resolve a
+    //     misattribution; the `error!` line is the operator signal.
+    // Mirrors the apply_order_filled / apply_order_cancelled pattern
+    // (CTE + FOR UPDATE), so the row is row-locked across the read
+    // and the conditional write — no race window between the two.
+    let prior_owner: Option<Option<String>> = sqlx::query_scalar(
+        r#"with prior as (
+              select owner_pn_address
+                from live_orders
+               where orderbook_address = $1 and order_id = $2::numeric
+               for update
+           )
+           update live_orders as lo
+              set owner_pn_address = case
+                                      when lo.owner_pn_address is null then $3
+                                      else lo.owner_pn_address
+                                  end,
+                  updated_at = case
+                                when lo.owner_pn_address is null then now()
+                                else lo.updated_at
+                            end
+             from prior
+            where lo.orderbook_address = $1 and lo.order_id = $2::numeric
+            returning prior.owner_pn_address"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
     .bind(owner_pn_address)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
-    .context("attach owner_pn_address on OrderPlacedConfirmed")?
-    .rows_affected();
+    .context("attach owner_pn_address on OrderPlacedConfirmed")?;
 
-    if updated > 0 {
-        return Ok(ProjectionOutcome::Applied);
-    }
-
-    // Either the row doesn't exist yet (defer and retry once OrderPlaced lands)
-    // or it already has an owner attached (idempotent no-op).
-    let row_exists: bool = sqlx::query_scalar(
-        r#"select exists(
-               select 1 from live_orders
-                where orderbook_address = $1 and order_id = $2::numeric
-           )"#,
-    )
-    .bind(orderbook_address)
-    .bind(&order_id)
-    .fetch_one(&mut **tx)
-    .await
-    .context("check live_orders row existence for OrderPlacedConfirmed")?;
-
-    if row_exists {
-        Ok(ProjectionOutcome::Applied)
-    } else {
-        warn!(
-            orderbook_address,
-            order_id = %order_id,
-            owner_pn_address,
-            msg_id = %node.msg_id,
-            "OrderPlacedConfirmed observed before OrderPlaced; deferring"
-        );
-        Ok(ProjectionOutcome::Deferred)
+    match prior_owner {
+        None => {
+            warn!(
+                orderbook_address,
+                order_id = %order_id,
+                owner_pn_address,
+                msg_id = %node.msg_id,
+                "OrderPlacedConfirmed observed before OrderPlaced; deferring"
+            );
+            Ok(ProjectionOutcome::Deferred)
+        }
+        Some(None) => Ok(ProjectionOutcome::Applied),
+        Some(Some(persisted_owner)) if persisted_owner == owner_pn_address => {
+            debug!(
+                orderbook_address,
+                order_id = %order_id,
+                owner_pn_address,
+                "OrderPlacedConfirmed idempotent retry; owner already attached"
+            );
+            Ok(ProjectionOutcome::Applied)
+        }
+        Some(Some(persisted_owner)) => {
+            error!(
+                orderbook_address,
+                order_id = %order_id,
+                persisted_owner = %persisted_owner,
+                incoming_owner = %owner_pn_address,
+                msg_id = %node.msg_id,
+                "OrderPlacedConfirmed attribution conflict; refusing to overwrite"
+            );
+            Ok(ProjectionOutcome::Applied)
+        }
     }
 }
 
@@ -635,15 +698,18 @@ async fn apply_order_filled(
     let chain_order = node_chain_order(node, "OrderFilled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     if chain_seconds.is_none() {
-        // The event still advances last_chain_order and may mutate amount_remaining
-        // / status. `chain_updated_at` remains unchanged because the gateway time
-        // is not parseable, so public updateTime can lag behind the cursor state.
+        // For a non-terminal row this event advances `amount_remaining`,
+        // `status`, and `last_chain_order`; `chain_updated_at` is left
+        // alone because the gateway time is unparseable, so public
+        // `updateTime` can lag behind the cursor state. For a terminal
+        // prior row the SQL CASE guards below ignore the event entirely
+        // (all four mutation columns are held).
         warn!(
             orderbook_address,
             order_id = %order_id,
             msg_id = %node.msg_id,
             created_at = ?node.created_at,
-            "OrderFilled has no parseable chain time; row mutates and last_chain_order advances, but public updateTime will remain stale",
+            "OrderFilled has no parseable chain time; public updateTime will remain stale on a non-terminal mutation",
         );
     }
 
@@ -664,8 +730,14 @@ async fn apply_order_filled(
                            when lo.amount_remaining - $3::numeric <= 0 then 'FILLED'
                            else lo.status
                        end,
-                  last_chain_order = greatest(lo.last_chain_order, $4),
-                  chain_updated_at = greatest(lo.chain_updated_at, to_timestamp($5::double precision)),
+                  last_chain_order = case
+                                      when prior.status in ('FILLED', 'CANCELLED', 'REJECTED') then lo.last_chain_order
+                                      else greatest(lo.last_chain_order, $4)
+                                  end,
+                  chain_updated_at = case
+                                      when prior.status in ('FILLED', 'CANCELLED', 'REJECTED') then lo.chain_updated_at
+                                      else greatest(lo.chain_updated_at, to_timestamp($5::double precision))
+                                  end,
                   updated_at = now()
              from prior
             where lo.orderbook_address = $1 and lo.order_id = $2::numeric
@@ -677,7 +749,7 @@ async fn apply_order_filled(
     .bind(orderbook_address)
     .bind(&order_id)
     .bind(&filled_amount)
-    .bind(chain_order)
+    .bind(&chain_order)
     .bind(chain_seconds)
     .fetch_optional(&mut **tx)
     .await
@@ -698,6 +770,7 @@ async fn apply_order_filled(
             order_id = %order_id,
             filled_amount = %filled_amount,
             msg_id = %node.msg_id,
+            chain_order = %chain_order,
             prior_status = %prior_status,
             "OrderFilled applied to terminal row; fill amount ignored"
         );
@@ -730,15 +803,17 @@ async fn apply_order_cancelled(
     let chain_order = node_chain_order(node, "OrderCancelled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     if chain_seconds.is_none() {
-        // The event still advances last_chain_order and updated_at while the
-        // CASE expression preserves terminal public state. `chain_updated_at`
-        // remains unchanged without a parseable gateway timestamp.
+        // For a non-terminal row this event advances `status`,
+        // `last_chain_order`, and `updated_at`; `chain_updated_at` is
+        // left alone because the gateway time is unparseable. For a
+        // terminal prior row the SQL CASE guards below ignore the
+        // event entirely (all three mutation columns are held).
         warn!(
             orderbook_address,
             order_id = %order_id,
             msg_id = %node.msg_id,
             created_at = ?node.created_at,
-            "OrderCancelled has no parseable chain time; row mutates and last_chain_order advances, but public updateTime will remain stale",
+            "OrderCancelled has no parseable chain time; public updateTime will remain stale on a non-terminal mutation",
         );
     }
 
@@ -751,8 +826,9 @@ async fn apply_order_cancelled(
     // if contract ordering ever drifts. `amount_remaining` is intentionally
     // left unchanged so `executedQty` remains > 0 for partially-filled
     // canceled rows.
-    // `last_chain_order` / `chain_updated_at` still advance because the
-    // cancel event itself did land on chain.
+    // `last_chain_order` and `chain_updated_at` both mirror the status
+    // CASE: an event the row's public state ignores must not move
+    // `/orders` updateTime or `/depth` lastUpdateId for this row.
     let prior_status: Option<String> = sqlx::query_scalar(
         r#"with prior as (
               select status
@@ -765,8 +841,14 @@ async fn apply_order_cancelled(
                            when prior.status in ('FILLED', 'REJECTED') then prior.status
                            else 'CANCELLED'
                        end,
-                  last_chain_order = greatest(lo.last_chain_order, $3),
-                  chain_updated_at = greatest(lo.chain_updated_at, to_timestamp($4::double precision)),
+                  last_chain_order = case
+                                      when prior.status in ('FILLED', 'REJECTED') then lo.last_chain_order
+                                      else greatest(lo.last_chain_order, $3)
+                                  end,
+                  chain_updated_at = case
+                                      when prior.status in ('FILLED', 'REJECTED') then lo.chain_updated_at
+                                      else greatest(lo.chain_updated_at, to_timestamp($4::double precision))
+                                  end,
                   updated_at = now()
              from prior
             where lo.orderbook_address = $1 and lo.order_id = $2::numeric
@@ -774,7 +856,7 @@ async fn apply_order_cancelled(
     )
     .bind(orderbook_address)
     .bind(&order_id)
-    .bind(chain_order)
+    .bind(&chain_order)
     .bind(chain_seconds)
     .fetch_optional(&mut **tx)
     .await
@@ -795,6 +877,7 @@ async fn apply_order_cancelled(
             order_id = %order_id,
             prior_status = %prior_status.as_deref().unwrap_or(""),
             msg_id = %node.msg_id,
+            chain_order = %chain_order,
             "OrderCancelled applied to terminal row; status preserved"
         );
     }

@@ -162,7 +162,7 @@ async fn resolve_for_cancel_happy_path() {
         .await
         .expect("resolve happy path");
 
-    assert_eq!(resolved.status, MarketStatus::Trading);
+    assert_eq!(resolved.market_status, MarketStatus::Trading);
     assert_eq!(resolved.event_id, "42");
     assert_eq!(resolved.oracle_list_hash, "1");
     assert_eq!(resolved.token_type, 3);
@@ -438,5 +438,5 @@ async fn resolve_for_cancel_derives_non_trading_status_for_caller_check() {
         )
         .await
         .expect("cancelled-market row must still resolve");
-    assert_eq!(resolved.status, MarketStatus::Cancelled);
+    assert_eq!(resolved.market_status, MarketStatus::Cancelled);
 }

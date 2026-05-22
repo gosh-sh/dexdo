@@ -199,11 +199,15 @@ create table live_orders (
 create index live_orders_open_book_idx
     on live_orders (orderbook_address, outcome_id, is_buy, price desc)
     where status = 'OPEN';
-create index live_orders_open_owner_idx
-    on live_orders (owner_pn_address, placed_chain_order)
+
+-- Owner-scoped /api/v1/orders pagination. The `placed_chain_order DESC`
+-- key ordering, the partial predicate, and the omission of
+-- `chain_updated_at IS NOT NULL` are all justified in
+-- docs/tech-specs/read-api.md#index-reliance.
+create index live_orders_owner_idx
+    on live_orders (owner_pn_address, placed_chain_order desc)
     where owner_pn_address is not null
-      and status = 'OPEN'
-      and amount_remaining > 0;
+      and chain_created_at is not null;
 
 create table accounts (
     id uuid primary key default gen_random_uuid(),

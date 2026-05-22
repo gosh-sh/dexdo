@@ -304,6 +304,20 @@ impl Order {
             }
         };
 
+        // Quantities are validated by `decimal_string_*` below; `price` only
+        // needs well-formedness here because no downstream check parses it.
+        // The scaler upstream emits a decimal string from a numeric column,
+        // so a parse failure here is a storage-invariant violation.
+        decimal_string_validate(&price)?;
+        // `orig_qty == 0` is structurally invalid for every status —
+        // every projector path that builds an Order has a non-zero
+        // `amount_initial` from the placement event. A zero here is a
+        // chain-side bug or storage corruption and would otherwise
+        // make `(NEW: executed == 0)` and `(FILLED: executed == orig)`
+        // both trivially admit the same all-zeros row.
+        if decimal_string_is_zero(&orig_qty)? {
+            return Err(DomainError::MarketInconsistent);
+        }
         let executed_is_zero = decimal_string_is_zero(&executed_qty)?;
         if !decimal_string_lte(&executed_qty, &orig_qty)? {
             return Err(DomainError::MarketInconsistent);
@@ -419,6 +433,14 @@ impl Order {
 pub fn decimal_string_is_zero(s: &str) -> Result<bool, DomainError> {
     let (value, _) = parse_decimal_string(s)?;
     Ok(value == BigUint::from(0_u8))
+}
+
+/// Parse-and-discard variant for fields that only need a well-formedness
+/// check (no comparison or zero-test). Returns `MarketInconsistent` on
+/// malformed input, mirroring the failure mode of the other
+/// `decimal_string_*` helpers.
+pub fn decimal_string_validate(s: &str) -> Result<(), DomainError> {
+    parse_decimal_string(s).map(|_| ())
 }
 
 fn decimal_string_lte(left: &str, right: &str) -> Result<bool, DomainError> {
@@ -1079,6 +1101,54 @@ mod tests {
                 OrderStatus::Rejected,
             ]
         );
+    }
+
+    /// `orig_qty == 0` is structurally invalid for every status — the
+    /// infrastructure-level test only exercises the OPEN path (where
+    /// `order_from_row` already drops the row before `Order::new`
+    /// runs). Pin the domain-side guard directly for the non-OPEN
+    /// terminals.
+    #[test]
+    fn order_constructor_rejects_zero_orig_qty_on_terminal_statuses() {
+        for status in [OrderStatus::Filled, OrderStatus::Canceled] {
+            let err = Order::new(
+                MarketAddress("0:market".into()),
+                Symbol("SYM".into()),
+                OrderIdentity::Chain("1".into()),
+                String::new(),
+                "1.000".into(),
+                "0".into(),
+                "0".into(),
+                status,
+                TimeInForce::Gtc,
+                OrderType::Limit,
+                OrderSide::Buy,
+                1,
+                1,
+            )
+            .expect_err("orig_qty == 0 must be rejected for {status:?}");
+            assert_eq!(err, DomainError::MarketInconsistent, "status={status:?}");
+        }
+        // Rejected: pairs with OrderIdentity::Rejected (the chain
+        // never assigns an id), and orig_qty=0 must still be rejected
+        // by the same guard.
+        let err = Order::new(
+            MarketAddress("0:market".into()),
+            Symbol("SYM".into()),
+            OrderIdentity::Rejected,
+            String::new(),
+            "1.000".into(),
+            "0".into(),
+            "0".into(),
+            OrderStatus::Rejected,
+            TimeInForce::Gtc,
+            OrderType::Limit,
+            OrderSide::Buy,
+            1,
+            1,
+        )
+        .expect_err("orig_qty == 0 must be rejected for REJECTED");
+        assert_eq!(err, DomainError::MarketInconsistent);
     }
 
     #[test]

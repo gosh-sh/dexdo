@@ -8,8 +8,9 @@ use std::env;
 use std::time::Duration;
 
 use dodex_application::MarketReadRepository;
-use dodex_application::OrderStatusSet;
+use dodex_application::OrderStatusFilter;
 use dodex_application::OrdersCursor;
+use dodex_application::OrdersLimit;
 use dodex_application::OrdersMarketFilter;
 use dodex_application::OrdersQuery;
 use dodex_domain::DomainError;
@@ -265,8 +266,8 @@ fn query_all(owner: &str) -> OrdersQuery {
     OrdersQuery {
         owner_pn_address: owner.to_string(),
         market: None,
-        status: OrderStatusSet::all(),
-        limit: 100,
+        status: OrderStatusFilter::All,
+        limit: OrdersLimit::from_const(100),
         cursor: None,
     }
 }
@@ -363,11 +364,19 @@ async fn returns_only_owner_rows_across_all_statuses() {
     let ids: Vec<&str> = page.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids, vec!["4", "3", "2", "1"], "DESC placed_chain_order order");
     assert!(page.next_cursor.is_none());
+    // Seeded raw price = "1000", market_outcomes.price_precision = 3, so
+    // the scaler must emit "1.000". A precision swap (e.g., reading
+    // `quantity_precision` here) would render "10.00" and fail this
+    // assertion — the only positive observation of the price scaler in
+    // this suite.
+    for order in &page.orders {
+        assert_eq!(order.price(), "1.000", "price scaled against price_precision=3");
+    }
 
     scope.cleanup(&pool).await;
 }
 
-/// Default status (is_all) returns all non-rejected buckets.
+/// Default status (`OrderStatusFilter::All`) returns all non-rejected buckets.
 /// Seed owner-1 with NEW + PARTIALLY_FILLED + FILLED + CANCELLED.
 /// No status filter. Assert: all four rows returned.
 #[tokio::test]
@@ -457,24 +466,34 @@ async fn owner_with_no_orders_returns_empty_page() {
     scope.cleanup(&pool).await;
 }
 
+/// Behavioural index-usage check: a representative `/orders` SELECT must
+/// hit `live_orders_owner_idx`, not a sequential scan. Pinning the plan
+/// (not the `pg_indexes.indexdef` string) catches a query rewrite that
+/// stops matching the partial-index predicate — a real perf regression —
+/// without breaking on cosmetic changes to the index definition.
 #[tokio::test]
-async fn owner_orders_index_shape_matches_read_query() {
+async fn list_orders_query_uses_owner_index() {
     let Some(pool) = setup().await else { return };
 
-    let (indexdef,): (String,) = sqlx::query_as(
-        r#"select indexdef
-             from pg_indexes
-            where schemaname = current_schema()
-              and tablename = 'live_orders'
-              and indexname = 'live_orders_owner_idx'"#,
+    let plan_lines: Vec<String> = sqlx::query_scalar(
+        r#"explain
+             select 1
+               from live_orders
+              where owner_pn_address = '0:explain_probe'
+                and chain_created_at is not null
+                and chain_updated_at is not null
+              order by placed_chain_order desc
+              limit 100"#,
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
-    .expect("live_orders_owner_idx exists");
+    .expect("EXPLAIN on /orders query shape");
+    let plan = plan_lines.join("\n");
 
-    assert!(indexdef.contains("(owner_pn_address, placed_chain_order DESC)"), "{indexdef}");
-    assert!(indexdef.contains("owner_pn_address IS NOT NULL"), "{indexdef}");
-    assert!(indexdef.contains("chain_created_at IS NOT NULL"), "{indexdef}");
+    assert!(
+        plan.contains("live_orders_owner_idx"),
+        "expected live_orders_owner_idx in plan:\n{plan}",
+    );
 }
 
 /// Rows missing either chain timestamp must be filtered in SQL before the
@@ -534,14 +553,84 @@ async fn filters_rows_missing_chain_timestamps_before_decoding() {
                 Some(Symbol(scope.symbol_yes.clone())),
             )
             .expect("valid market filter"),
-            status: OrderStatusSet::all(),
-            limit: 100,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
         .expect("list_orders market-filtered");
     let ids_market: Vec<&str> = page_market.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids_market, vec!["1"], "market-filtered query drops both NULL timestamp rows");
+
+    scope.cleanup(&pool).await;
+}
+
+/// Pre-attribution rows (`owner_pn_address IS NULL`) must not surface in
+/// `/api/v1/orders`. Between `OrderBook.OrderPlaced` and
+/// `PrivateNote.OrderPlacedConfirmed` the row lives in `live_orders` with
+/// a NULL owner; visibility is enforced by the `owner_pn_address = $1`
+/// equality (NULL ≠ any value) and the partial index
+/// `live_orders_owner_idx … WHERE owner_pn_address IS NOT NULL`. A
+/// regression that loosened either side — for instance an `IS NOT
+/// DISTINCT FROM` or a dropped partial predicate — would silently leak
+/// half-projected orders across accounts.
+#[tokio::test]
+async fn null_owner_rows_are_invisible_to_owner_query() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "001",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        2,
+        None,
+        "1000",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
+
+    let page_all = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders all");
+    let ids_all: Vec<&str> = page_all.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids_all, vec!["1"], "unfiltered query hides the NULL-owner row");
+    assert!(page_all.next_cursor.is_none());
+
+    let page_market = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: OrdersMarketFilter::pair(
+                Some(MarketAddress(scope.pmp_yes.clone())),
+                Some(Symbol(scope.symbol_yes.clone())),
+            )
+            .expect("valid market filter"),
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
+            cursor: None,
+        })
+        .await
+        .expect("list_orders market-filtered");
+    let ids_market: Vec<&str> = page_market.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids_market, vec!["1"], "market-filtered query hides the NULL-owner row");
+    assert!(page_market.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
 }
@@ -619,8 +708,8 @@ async fn status_csv_filter_narrows_results() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::from_csv(Some("NEW")).expect("valid NEW filter"),
-            limit: 100,
+            status: OrderStatusFilter::from_csv(Some("NEW")).expect("valid NEW filter"),
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -634,9 +723,9 @@ async fn status_csv_filter_narrows_results() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::from_csv(Some("PARTIALLY_FILLED"))
+            status: OrderStatusFilter::from_csv(Some("PARTIALLY_FILLED"))
                 .expect("valid PARTIALLY_FILLED filter"),
-            limit: 100,
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -651,8 +740,8 @@ async fn status_csv_filter_narrows_results() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::from_csv(Some("FILLED,CANCELED")).expect("valid CSV"),
-            limit: 100,
+            status: OrderStatusFilter::from_csv(Some("FILLED,CANCELED")).expect("valid CSV"),
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -667,8 +756,8 @@ async fn status_csv_filter_narrows_results() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::from_csv(Some("FILLED")).expect("valid FILLED filter"),
-            limit: 100,
+            status: OrderStatusFilter::from_csv(Some("FILLED")).expect("valid FILLED filter"),
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -681,8 +770,8 @@ async fn status_csv_filter_narrows_results() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::from_csv(Some("CANCELED")).expect("valid CANCELED filter"),
-            limit: 100,
+            status: OrderStatusFilter::from_csv(Some("CANCELED")).expect("valid CANCELED filter"),
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -762,13 +851,13 @@ async fn rejected_filter_returns_only_rejected_rows() {
     )
     .await;
 
-    let status = OrderStatusSet::from_csv(Some("REJECTED")).expect("valid CSV");
+    let status = OrderStatusFilter::from_csv(Some("REJECTED")).expect("valid CSV");
     let page = repo
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
             status,
-            limit: 100,
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -956,8 +1045,8 @@ async fn cursor_advances_strictly_below_last_returned() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 4,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(4),
             cursor: None,
         })
         .await
@@ -972,8 +1061,8 @@ async fn cursor_advances_strictly_below_last_returned() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 4,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(4),
             cursor: Some(cursor.clone()),
         })
         .await
@@ -1016,8 +1105,8 @@ async fn limit_equal_to_row_count_has_no_next_cursor() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 3,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(3),
             cursor: None,
         })
         .await
@@ -1059,8 +1148,8 @@ async fn out_of_range_cursor_returns_empty_page() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 100,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
             cursor: Some(OrdersCursor::new("001".into()).expect("valid cursor")),
         })
         .await
@@ -1221,7 +1310,7 @@ async fn status_filter_combines_with_cursor_pagination() {
     )
     .await;
 
-    let status = OrderStatusSet::from_csv(Some("FILLED,CANCELED")).expect("valid CSV");
+    let status = OrderStatusFilter::from_csv(Some("FILLED,CANCELED")).expect("valid CSV");
 
     // Page 1: limit=2 → DESC tail of the filtered set, "006" then "004".
     let page1 = repo
@@ -1229,7 +1318,7 @@ async fn status_filter_combines_with_cursor_pagination() {
             owner_pn_address: scope.owner.clone(),
             market: None,
             status: status.clone(),
-            limit: 2,
+            limit: OrdersLimit::from_const(2),
             cursor: None,
         })
         .await
@@ -1245,7 +1334,7 @@ async fn status_filter_combines_with_cursor_pagination() {
             owner_pn_address: scope.owner.clone(),
             market: None,
             status,
-            limit: 2,
+            limit: OrdersLimit::from_const(2),
             cursor: Some(cursor),
         })
         .await
@@ -1297,8 +1386,8 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 2,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(2),
             cursor: None,
         })
         .await
@@ -1325,8 +1414,8 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 2,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(2),
             cursor: Some(cursor),
         })
         .await
@@ -1339,6 +1428,177 @@ async fn cursor_stable_when_open_row_transitions_to_filled_between_pages() {
     let transitioned = page2.orders.iter().find(|o| o.order_id() == "2").unwrap();
     assert_eq!(transitioned.status().as_str(), "FILLED", "transitioned row shows FILLED");
     assert!(page2.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+/// Cursor stable when open row transitions to CANCELED between pages.
+/// Mirrors the FILLED variant — read-api.md §Test coverage enumerates
+/// "concurrent fills and cancellations" and the CANCELED transition uses
+/// the same projector branch as FILLED (different terminal status, no
+/// amount_remaining mutation), so the FILLED test alone would miss a
+/// regression that special-cased CANCELED.
+#[tokio::test]
+async fn cursor_stable_when_open_row_transitions_to_canceled_between_pages() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    for i in 1_i64..=4 {
+        insert_order(
+            &pool,
+            &scope.book_yes,
+            i,
+            Some(&scope.owner),
+            "1000",
+            "1000",
+            "1000",
+            "OPEN",
+            1_700_000_000 + i,
+            &format!("{:03}", i),
+        )
+        .await;
+    }
+
+    let page1 = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(2),
+            cursor: None,
+        })
+        .await
+        .expect("page 1");
+    let ids1: Vec<&str> = page1.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids1, vec!["4", "3"], "page 1 has rows 4 and 3");
+    let cursor = page1.next_cursor.expect("cursor present");
+    assert_eq!(cursor.as_str(), "003");
+
+    // amount_remaining is intentionally left at 1000 — the projector's
+    // OrderCancelled path preserves the unfilled remainder, so this
+    // mirrors what live data looks like (executedQty stays at 0 for a
+    // fully-unfilled cancel).
+    sqlx::query(
+        "update live_orders set status = 'CANCELLED'
+              where orderbook_address = $1 and order_id = 2::numeric",
+    )
+    .bind(&scope.book_yes)
+    .execute(&pool)
+    .await
+    .expect("transition row 2 to CANCELLED");
+
+    let page2 = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(2),
+            cursor: Some(cursor),
+        })
+        .await
+        .expect("page 2");
+
+    assert_eq!(page2.orders.len(), 2, "rows 2 and 1 appear on page 2");
+    let ids2: Vec<&str> = page2.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids2, vec!["2", "1"], "page 2 DESC: row 2 then row 1");
+    let transitioned = page2.orders.iter().find(|o| o.order_id() == "2").unwrap();
+    assert_eq!(transitioned.status().as_str(), "CANCELED", "transitioned row shows CANCELED");
+    assert!(page2.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+/// Pair filter narrows the result to the requested market; the
+/// all-markets variant returns rows from every market the owner has.
+/// Seed two reconciled markets with one OPEN row each owned by the
+/// caller. Query with the YES pair → exactly the YES row. Query without
+/// a market filter → both rows in DESC `placed_chain_order` order. Pins
+/// the `lo.orderbook_address = $X AND lo.outcome_id = $Y` predicate in
+/// the filtered SQL block and confirms the all-markets block does not
+/// inherit a stray pair predicate.
+#[tokio::test]
+async fn pair_filter_narrows_versus_all_markets_returns_both() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+    insert_market(&pool, &scope.pmp_no, &scope.symbol_no, &scope.book_no).await;
+
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_001,
+        "001",
+    )
+    .await;
+    insert_order(
+        &pool,
+        &scope.book_no,
+        2,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_002,
+        "002",
+    )
+    .await;
+
+    // Pair-filtered (YES): must return only the YES row.
+    let page_yes = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: OrdersMarketFilter::pair(
+                Some(MarketAddress(scope.pmp_yes.clone())),
+                Some(Symbol(scope.symbol_yes.clone())),
+            )
+            .expect("valid market filter"),
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
+            cursor: None,
+        })
+        .await
+        .expect("list_orders YES");
+    let ids_yes: Vec<&str> = page_yes.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids_yes, vec!["1"], "pair filter must exclude the NO-market row");
+    assert!(page_yes.next_cursor.is_none());
+
+    // Symmetric pair-filtered (NO): must return only the NO row.
+    let page_no = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: OrdersMarketFilter::pair(
+                Some(MarketAddress(scope.pmp_no.clone())),
+                Some(Symbol(scope.symbol_no.clone())),
+            )
+            .expect("valid market filter"),
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
+            cursor: None,
+        })
+        .await
+        .expect("list_orders NO");
+    let ids_no: Vec<&str> = page_no.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids_no, vec!["2"], "pair filter must exclude the YES-market row");
+    assert!(page_no.next_cursor.is_none());
+
+    // All-markets (no pair filter): both rows, DESC `placed_chain_order`
+    // ("002" > "001").
+    let page_all = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders all");
+    let ids_all: Vec<&str> = page_all.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids_all, vec!["2", "1"], "all-markets returns rows from both markets");
+    assert!(page_all.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
 }
@@ -1361,8 +1621,8 @@ async fn pair_unknown_returns_invalid_market_or_symbol() {
                 Some(Symbol("NONEXISTENT_SYMBOL".to_string())),
             )
             .expect("valid market filter"),
-            status: OrderStatusSet::all(),
-            limit: 100,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -1393,8 +1653,8 @@ async fn unreconciled_market_pair_returns_invalid_market_or_symbol() {
                 Some(Symbol(scope.symbol_yes.clone())),
             )
             .expect("valid market filter"),
-            status: OrderStatusSet::all(),
-            limit: 100,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(100),
             cursor: None,
         })
         .await
@@ -1495,8 +1755,8 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 3,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(3),
             cursor: None,
         })
         .await
@@ -1512,8 +1772,8 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 3,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(3),
             cursor: Some(cursor),
         })
         .await
@@ -1521,6 +1781,79 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
     assert_eq!(page2.orders.len(), 1);
     assert_eq!(page2.orders[0].order_id(), "1");
     assert!(page2.next_cursor.is_none());
+
+    scope.cleanup(&pool).await;
+}
+
+/// `amount_initial = amount_remaining = 0` is a projector-bug shape: the
+/// row satisfies the SQL NEW predicate (`amount_remaining = amount_initial`)
+/// AND `fully_filled = true`. read-api.md §Field projection requires
+/// log-and-skip; this test pins that the mapper enforces it end-to-end
+/// through the SQL → `order_from_row` path, including in the no-status-filter
+/// case where the SQL does not impose a `> 0` guard.
+#[tokio::test]
+async fn open_with_zero_initial_and_zero_remainder_is_skipped() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let scope = Scope::new();
+    scope.cleanup(&pool).await;
+    insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
+
+    // Healthy NEW row — must surface.
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        1,
+        Some(&scope.owner),
+        "12345",
+        "1000",
+        "1000",
+        "OPEN",
+        1_700_000_000,
+        "001",
+    )
+    .await;
+    // Projector-bug row: amount_initial = amount_remaining = 0 satisfies
+    // both the NEW SQL predicate and `fully_filled = true`. The mapper
+    // must drop it rather than render it as a zero-quantity NEW order.
+    insert_order(
+        &pool,
+        &scope.book_yes,
+        2,
+        Some(&scope.owner),
+        "12345",
+        "0",
+        "0",
+        "OPEN",
+        1_700_000_001,
+        "002",
+    )
+    .await;
+
+    // Default status filter (`OrderStatusFilter::All`) — exercises the
+    // no-status-predicate SQL block, where the row would otherwise leak.
+    let page_all = repo.list_orders(&query_all(&scope.owner)).await.expect("list_orders all");
+    let ids_all: Vec<&str> = page_all.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids_all, vec!["1"], "default-filter query drops the zero-initial row");
+    assert!(page_all.next_cursor.is_none());
+
+    // NEW-only filter — exercises the SQL NEW predicate
+    // (`amount_remaining = amount_initial`), which by design admits the
+    // zero/zero row at the SQL layer; the mapper guard is the only
+    // line of defence here.
+    let page_new = repo
+        .list_orders(&OrdersQuery {
+            owner_pn_address: scope.owner.clone(),
+            market: None,
+            status: OrderStatusFilter::from_csv(Some("NEW")).expect("valid status csv"),
+            limit: OrdersLimit::from_const(100),
+            cursor: None,
+        })
+        .await
+        .expect("list_orders NEW");
+    let ids_new: Vec<&str> = page_new.orders.iter().map(|o| o.order_id()).collect();
+    assert_eq!(ids_new, vec!["1"], "NEW-filter query drops the zero-initial row");
+    assert!(page_new.next_cursor.is_none());
 
     scope.cleanup(&pool).await;
 }
@@ -1606,8 +1939,8 @@ async fn cursor_advances_past_unknown_status_row_at_page_tail() {
         .list_orders(&OrdersQuery {
             owner_pn_address: scope.owner.clone(),
             market: None,
-            status: OrderStatusSet::all(),
-            limit: 3,
+            status: OrderStatusFilter::All,
+            limit: OrdersLimit::from_const(3),
             cursor: None,
         })
         .await;
@@ -1617,8 +1950,8 @@ async fn cursor_advances_past_unknown_status_row_at_page_tail() {
             repo.list_orders(&OrdersQuery {
                 owner_pn_address: scope.owner.clone(),
                 market: None,
-                status: OrderStatusSet::all(),
-                limit: 3,
+                status: OrderStatusFilter::All,
+                limit: OrdersLimit::from_const(3),
                 cursor: Some(cursor),
             })
             .await

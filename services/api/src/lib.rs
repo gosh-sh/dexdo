@@ -490,10 +490,10 @@ async fn get_orders(
         })?
         .clone();
 
-    let market_address = non_empty_query(req, "marketAddress").map(MarketAddress);
-    let symbol = non_empty_query(req, "symbol").map(Symbol);
+    let market_address = non_blank_query(req, "marketAddress")?.map(MarketAddress);
+    let symbol = non_blank_query(req, "symbol")?.map(Symbol);
     let market_filter = OrdersMarketFilter::pair(market_address, symbol).map_err(ApiError::from)?;
-    // status: raw CSV, validated by OrderStatusSet::from_csv inside the
+    // status: raw CSV, validated by OrderStatusFilter::from_csv inside the
     // use case. Absent / blank → "all statuses".
     let status = req.query::<String>("status");
     // `optional_typed_query` returns `Err(InvalidParameter)` when the
@@ -505,6 +505,12 @@ async fn get_orders(
     // the `[1, 500]` bound check after parsing succeeds; see
     // `DomainError::MissingParameter` for the Binance-shaped wire message.
     let limit = optional_typed_query::<i64>(req, "limit")?;
+    // cursor: raw string forwarded to `OrdersCursor::new` inside the
+    // use case, which trims and rejects blank as `MissingParameter`.
+    // The blank-rejects-loudly contract lives in the cursor type, not
+    // at this call site; `marketAddress` / `symbol` enforce the same
+    // contract one layer up via `non_blank_query` because the use
+    // case never sees their raw strings.
     let cursor = req.query::<String>("cursor");
 
     let use_case = GetOrdersUseCase::new(state.repo);
@@ -519,9 +525,6 @@ async fn get_orders(
         .await
         .map_err(|err| {
             if let Some(domain) = err.downcast_ref::<DomainError>() {
-                if *domain == DomainError::Unexpected {
-                    error!(?err, "get_orders failed with unexpected domain error");
-                }
                 return ApiError::from(*domain);
             }
             error!(?err, "get_orders failed");
@@ -571,6 +574,22 @@ fn order_to_dto(order: Order) -> OrderResponse {
 
 fn non_empty_query(req: &mut Request, key: &str) -> Option<String> {
     req.query::<String>(key).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Strict variant of [`non_empty_query`]: a present-but-blank value is
+/// rejected as `MissingParameter` instead of being silently collapsed
+/// to "absent". Mirrors `OrdersCursor::new`'s contract — a client that
+/// sends `?marketAddress=&symbol=` is signalling a bug (an unbound
+/// template variable), not "no filter". See read-api.md §error table.
+fn non_blank_query(req: &mut Request, key: &str) -> Result<Option<String>, ApiError> {
+    let Some(raw) = req.query::<String>(key) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::from(DomainError::MissingParameter));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 /// Parse an optional typed query parameter the strict way:
