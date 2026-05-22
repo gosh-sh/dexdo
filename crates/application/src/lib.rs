@@ -981,8 +981,12 @@ fn validate_and_encode_order_item(
         // returned, so this arm is structurally unreachable. Collapse
         // to `Unexpected` (500) rather than `panic!` so a future
         // refactor that broke the invariant could not turn into an
-        // opaque crash in the request handler.
-        (OrderType::Limit, _, None) => return Err(DomainError::Unexpected),
+        // opaque crash in the request handler. Log the breach so the
+        // 500 carries a breadcrumb instead of being a bare wire error.
+        (OrderType::Limit, _, None) => {
+            error!("validate_and_encode_order_item: (Limit, _, None) reached — match arms drifted from invariant");
+            return Err(DomainError::Unexpected);
+        }
     }
 
     // Caller-supplied `newOrderClientId` is bounded at `u64::MAX`
@@ -2615,27 +2619,6 @@ mod tests {
         // Pin FLAG_MARKET specifically — `assert_ne!(flags, 0)`
         // would accept any stray TIF bit.
         assert!(payload.flags & FLAG_MARKET != 0, "flags=0x{:02x}", payload.flags);
-    }
-
-    #[tokio::test]
-    async fn create_batch_orders_per_item_market_with_explicit_price_aborts_whole_batch() {
-        // The `(Market, Some(price))` arm of `validate_and_encode_order_item`
-        // must reject per-item, and the batch loop must short-circuit
-        // the whole batch on the first failure.
-        let market = trading_market("PM-YES");
-        let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
-
-        let mut bad = batch_item(Some("2"));
-        bad.order_type = OrderType::Market;
-        bad.time_in_force = None;
-        // price still set → invalid (Market, Some(_)) combination
-        let err = uc
-            .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), bad]))
-            .await
-            .unwrap_err();
-        assert_eq!(err, DomainError::InvalidParameter);
-        assert!(sender.batch_calls().is_empty());
     }
 
     #[tokio::test]

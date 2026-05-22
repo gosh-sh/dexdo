@@ -8,7 +8,7 @@ Postgres and hosts authenticated private API routes.
 - Functional REST requirements: [docs/api-spec.md](../../docs/api-spec.md).
 - Authentication implementation: [docs/tech-specs/auth.md](../../docs/tech-specs/auth.md).
 - Read API implementation (all `GET` endpoints): [docs/tech-specs/read-api.md](../../docs/tech-specs/read-api.md).
-- Write API implementation (order placement / cancellation / batching): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md).
+- Write API implementation (order placement / cancellation / batching): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md). Covers `POST /api/v1/order`, `DELETE /api/v1/order`, and `POST /api/v1/batchOrders` today; `DELETE /api/v1/batchOrders` and `DELETE /api/v1/openOrders` are stub sections inside that doc.
 - Data schema: [docs/tech-specs/data-schema.md](../../docs/tech-specs/data-schema.md).
 
 Implementation details belong in the tech specs above, not in this README.

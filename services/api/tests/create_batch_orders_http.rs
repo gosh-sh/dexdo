@@ -13,10 +13,13 @@
 // error code numbers, and which inputs short-circuit before the
 // chain is touched.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use common::now_ms;
 use dodex_api::testkit::build_router;
 use dodex_api::testkit::AppState;
 use dodex_api::testkit::SharedAuth;
@@ -334,14 +337,22 @@ async fn happy_path_two_items_returns_pending_new_array() {
     let service = setup_with(repo, chain_sender);
 
     let body = valid_body_with(vec![valid_item("11"), valid_item("22")]);
+    let before_ms = now_ms();
     let mut resp = post_batch(&service, body).send(&service).await;
+    let after_ms = now_ms();
     assert_eq!(resp.status_code, Some(StatusCode::OK));
 
     let items = resp.take_json::<Vec<BatchItemOk>>().await.expect("batch ok body");
     assert_eq!(items.len(), 2);
     for item in &items {
         assert_eq!(item.status, "PENDING_NEW");
-        assert!(item.transact_time > 0);
+        assert!(
+            (before_ms..=after_ms).contains(&item.transact_time),
+            "transactTime {} outside window [{}, {}]",
+            item.transact_time,
+            before_ms,
+            after_ms,
+        );
     }
     // api-spec: one `transactTime` per batch — every item carries the
     // handler's single `now_ms`, not a per-item re-clock.
@@ -625,6 +636,113 @@ async fn per_item_excess_precision_returns_400_minus_1111() {
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1111);
     assert!(sender.calls().is_empty(), "chain hit despite per-item reject");
+}
+
+#[tokio::test]
+async fn exactly_max_batch_size_returns_pending_new_array() {
+    // `max_batch_size = 5` per the trading_market fixture. A batch of
+    // exactly 5 items must reach the chain and round-trip a 5-item
+    // PENDING_NEW array — pins the boundary against an off-by-one in
+    // the `orders.len() > max_batch_size` gate.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let orders: Vec<_> = (0..5).map(|i| valid_item(&i.to_string())).collect();
+    let mut resp = post_batch(&service, valid_body_with(orders)).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let items = resp.take_json::<Vec<BatchItemOk>>().await.expect("batch ok body");
+    assert_eq!(items.len(), 5);
+    for item in &items {
+        assert_eq!(item.status, "PENDING_NEW");
+    }
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].orders.len(), 5);
+}
+
+#[tokio::test]
+async fn per_item_missing_quantity_returns_400_minus_1102() {
+    // Per-item required-field guard analog to the missing-`side` test:
+    // a missing `quantity` must short-circuit at the shape gate with
+    // -1102, before market resolution or chain dispatch.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let body = valid_body_with(vec![
+        valid_item("11"),
+        json!({
+            "newOrderClientId": "22",
+            "side": "BUY",
+            "price": "0.615",
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+        }),
+    ]);
+    let mut resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+    assert!(sender.calls().is_empty());
+}
+
+#[tokio::test]
+async fn per_item_quantity_excess_precision_returns_400_minus_1111() {
+    // Symmetric to `per_item_excess_precision_returns_400_minus_1111`
+    // but on the quantity side: stepSize = 0.000001 → 6 dp; 7 dp must
+    // reject the whole batch with -1111 before the chain is touched.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let body = valid_body_with(vec![
+        valid_item("11"),
+        json!({
+            "newOrderClientId": "22",
+            "side": "BUY",
+            "quantity": "1.5000005",
+            "price": "0.615",
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+        }),
+    ]);
+    let mut resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1111);
+    assert!(sender.calls().is_empty());
+}
+
+#[tokio::test]
+async fn per_item_below_min_notional_returns_400_minus_2010() {
+    // minNotional = 0.5; a LIMIT BUY at price=0.001 × quantity=0.000001
+    // = 1e-9 notional must reject the whole batch with -2010
+    // (OrderValidationFailed) before the chain is touched.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender = Arc::new(RecordingBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let body = valid_body_with(vec![
+        valid_item("11"),
+        json!({
+            "newOrderClientId": "22",
+            "side": "BUY",
+            "quantity": "0.000001",
+            "price": "0.001",
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+        }),
+    ]);
+    let mut resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -2010);
+    assert!(sender.calls().is_empty());
 }
 
 // ---- Market/status failures ----------------------------------------------

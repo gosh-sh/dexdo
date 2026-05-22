@@ -158,28 +158,26 @@ async fn cancel_order_against_shellnet() {
     use bee_dex::Dex as RawDex;
     let raw_dex = RawDex::new(vec![SHELLNET_ENDPOINT.to_string()]).expect("RawDex::new");
     let coid_u128: u128 = coid.parse().expect("coid u128");
-    let mut chain_order_id: Option<u128> = None;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let owned = match raw_dex
-            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
-            .await
-        {
-            Ok(o) => o,
-            Err(err) => {
-                eprintln!("[e2e_cancel_order] get_orders_by_owner errored (retry): {err:?}");
-                continue;
-            }
-        };
-        if let Some(found) = owned.orders.iter().find(|o| o.client_order_id == coid_u128) {
-            chain_order_id = Some(found.order_id);
-            break;
-        }
-    }
-    let order_id = chain_order_id.expect(
-        "order with the supplied clientOrderId did not surface in getOrdersByOwner within 60s — \
-         can't drive the cancel path without a chain-assigned orderId",
-    );
+    use common::cleanup::PollOutcome;
+    let order_id = match common::cleanup::poll_orders_find(
+        &raw_dex,
+        &market,
+        &trader,
+        "e2e_cancel_order",
+        |orders| orders.iter().find(|o| o.client_order_id == coid_u128).map(|o| o.order_id),
+    )
+    .await
+    {
+        PollOutcome::Found(id) => id,
+        PollOutcome::NotFound => panic!(
+            "order with the supplied clientOrderId did not surface in getOrdersByOwner within \
+             60s — can't drive the cancel path without a chain-assigned orderId",
+        ),
+        PollOutcome::ChainSilent => panic!(
+            "surface-poll never got a successful `get_orders_by_owner` response — can't drive \
+             the cancel path without a chain-assigned orderId",
+        ),
+    };
 
     // The DELETE handler's `resolve_for_cancel` does an ownership
     // lookup against `live_orders` — which is normally populated by
@@ -257,27 +255,20 @@ async fn cancel_order_against_shellnet() {
     // ---- Phase 3: poll until the chain removes the order. 60s
     // ---- budget — `cancelOrder` is queued on the chain side
     // ---- (`OrderBook.executeBatch`), the same shape as placement.
-    let mut cancelled = false;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let owned = match raw_dex
-            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
-            .await
-        {
-            Ok(o) => o,
-            Err(err) => {
-                eprintln!("[e2e_cancel_order] cancel-poll errored (retry): {err:?}");
-                continue;
-            }
-        };
-        if !owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
-            cancelled = true;
-            break;
-        }
+    match common::cleanup::poll_orders(&raw_dex, &market, &trader, "e2e_cancel_order", |orders| {
+        !orders.iter().any(|o| o.client_order_id == coid_u128)
+    })
+    .await
+    {
+        PollOutcome::Found(()) => {}
+        PollOutcome::NotFound => panic!(
+            "order with client_order_id={coid} did not disappear from getOrdersByOwner within \
+             60s after DELETE /api/v1/order — chain may have queued cancel but not yet \
+             executed it",
+        ),
+        PollOutcome::ChainSilent => panic!(
+            "absence-poll never got a successful `get_orders_by_owner` response — cannot \
+             verify cancellation of client_order_id={coid}",
+        ),
     }
-    assert!(
-        cancelled,
-        "order with client_order_id={coid} did not disappear from getOrdersByOwner within 60s \
-         after DELETE /api/v1/order — chain may have queued cancel but not yet executed it",
-    );
 }

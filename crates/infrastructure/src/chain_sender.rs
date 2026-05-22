@@ -173,14 +173,14 @@ impl ChainOrderSender for BeeDexChainSender {
         // never returns (`RequestTimeout`) or the gateway raises an
         // unmapped error: without it, ops cannot reconcile which coids
         // the chain may or may not have committed against the PN's
-        // `_clientOrderIds` map. Emitted at `info!` so the production
-        // default filter keeps it — `debug!` here would be dropped
-        // exactly when we need the breadcrumb. Per-order price/amount
-        // are not logged: they would balloon the line for a large
-        // batch and the chain encodes them in the external message
-        // recoverable from the gateway side anyway.
-        let client_order_ids: Vec<u128> =
-            params.orders.iter().map(|o| o.client_order_id).collect();
+        // `_clientOrderIds` map. `classify_chain_outcome` does not
+        // carry coids on its error/timeout logs, so this line is the
+        // only place they appear — emit at `info!` so the production
+        // default filter keeps it. Per-order price/amount are not
+        // logged: they would balloon the line for a large batch and
+        // the chain encodes them in the external message recoverable
+        // from the gateway side anyway.
+        let client_order_ids: Vec<u128> = params.orders.iter().map(|o| o.client_order_id).collect();
         info!(
             entry_point = "place_batch",
             pn = %payload.pn_address,
@@ -329,7 +329,11 @@ fn map_bee_dex_error(err: &AppError, entry_point: &'static str) -> DomainError {
         warn!(
             entry_point,
             exit_code = code,
-            ?err,
+            err_message = %err.message,
+            err_details = ?err.details,
+            err_module = ?err.module,
+            err_kind = ?err.kind,
+            tvm_error = ?err.tvm_error,
             domain_error = ?mapped,
             "chain rejected request",
         );
@@ -394,10 +398,13 @@ fn map_tvm_exit_code(code: u16) -> Option<DomainError> {
         // ERR_BATCH_TOO_LARGE / ERR_EMPTY_BATCH: chain-side
         // defence-in-depth against the same length checks the use
         // case pre-applies (`orders.len()` ∈ [1, `max_batch_size`]).
-        // Reaching them means the local guard was bypassed; surface
-        // as `InvalidParameter` so the client sees the same -1130
-        // either way.
-        161 | 162 => Some(DomainError::InvalidParameter),
+        // Reaching them means the local guard was bypassed — i.e.
+        // the read-model's `max_batch_size` drifted from the on-chain
+        // ceiling — which is a server-state inconsistency, not a
+        // client error. Surface as `MarketInconsistent` (503 / -1500)
+        // so ops sees it instead of confusing the client with a
+        // -1130 they cannot act on.
+        161 | 162 => Some(DomainError::MarketInconsistent),
         // ERR_AMOUNT_NOT_LOT_MULTIPLE / ERR_PRICE_NOT_TICK_MULTIPLE:
         // amount or price not aligned to chain lattice. Our local
         // precision checks against `step_size` / `tick_size` should

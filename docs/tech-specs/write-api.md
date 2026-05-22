@@ -170,7 +170,7 @@ A successful submission returns a deliberately minimal three-field body:
 | Field | Source |
 | --- | --- |
 | `clientOrderId` | Echoed from the request, or the backend-generated value (see [`clientOrderId` generation](#clientorderid-generation)). |
-| `transactTime` | `now_millis()` captured once at the start of the handler. |
+| `transactTime` | `now_pair()` captured once at the start of the handler. |
 | `status` | Always `"PENDING_NEW"` — the order has been accepted by `PrivateNote.placeOrder` (chain return of `bee_dex::Dex::place_order` succeeded) but is **not yet on the book**; `OrderBook.executeBatch` is processing the internal message and will emit `OrderPlaced` with the chain-assigned `orderId` shortly after. |
 
 Why minimal: every other field a fully-populated order would carry (`marketAddress`, `symbol`, `side`, `type`, `timeInForce`, `price`, `origQty`) is **already in the request the client just sent** — echoing them adds bytes without adding information. Two specific fields the Binance-style shape carries (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission: `orderId` is assigned by `OrderBook` after our return, and `executedQty` is always zero for a freshly-placed order. Surfacing them as `""` / `"0"` is worse than not surfacing them — it implies the order is further along the lifecycle than it actually is.
@@ -317,7 +317,7 @@ A successful submission returns the four-field body from [api-spec §Cancel Orde
 | --- | --- |
 | `orderId` | Echoed from the request. |
 | `clientOrderId` | `live_orders.client_order_id` from the resolved row. Empty string when the column is NULL (order was placed without a `newOrderClientId`). |
-| `transactTime` | `now_millis()` captured once at the start of the handler. |
+| `transactTime` | `now_pair()` captured once at the start of the handler. |
 | `status` | Always `"PENDING_CANCEL"` — `PrivateNote.cancelOrder` has accepted the request and forwarded to OrderBook, but the order has **not been removed from the book yet**. `OrderBook` will emit `OrderCancelled` once it dequeues the entry, and the indexer will flip [`live_orders.status`](data-schema.md#live_orders) to `CANCELLED` then. |
 
 The client correlates by `orderId` against `/api/v1/orders` (the stored status flips to `CANCELED`, or to `FILLED` if matching raced the cancel).
@@ -471,7 +471,7 @@ One `PENDING_NEW` envelope per accepted item, returned as a flat array in reques
 | Field | Source |
 | --- | --- |
 | `clientOrderId` | Per-item: caller-supplied `newOrderClientId`, or the backend-generated value. |
-| `transactTime` | `now_millis()` captured once at the start of the handler, repeated for every item — one chain submission, one moment of acceptance. |
+| `transactTime` | `now_pair()` captured once at the start of the handler, repeated for every item — one chain submission, one moment of acceptance. |
 | `status` | Always `"PENDING_NEW"` — same rationale as the single-order path; the chain-assigned `orderId` arrives later through `/api/v1/openOrders`. |
 
 Why minimal: the same argument as POST /order applies item by item — every other field a fully-populated order would carry is already in the request the client just sent, and the only fields the Binance-style shape adds (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission.

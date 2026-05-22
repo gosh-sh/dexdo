@@ -188,10 +188,8 @@ async fn buy_limit_gtc_against_shellnet() {
                     failures.push(format!("status={}, want PENDING_NEW", parsed.status));
                 }
                 if parsed.client_order_id != coid {
-                    failures.push(format!(
-                        "clientOrderId={}, want {coid}",
-                        parsed.client_order_id,
-                    ));
+                    failures
+                        .push(format!("clientOrderId={}, want {coid}", parsed.client_order_id,));
                 }
                 if parsed.transact_time <= 0 {
                     failures.push(format!("transactTime={}, want > 0", parsed.transact_time));
@@ -202,36 +200,26 @@ async fn buy_limit_gtc_against_shellnet() {
 
         // Poll OrderBook until the chain reflects placement (60s
         // budget, 2s ticks — same as bee_dex integration tests).
-        let mut surfaced = false;
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let owned = match raw_dex
-                .get_orders_by_owner(
-                    &market.order_book_address,
-                    trader.deposit_identifier_hash.clone(),
-                )
-                .await
-            {
-                Ok(o) => o,
-                Err(err) => {
-                    eprintln!("[e2e_order] get_orders_by_owner errored (will retry): {err:?}");
-                    continue;
-                }
-            };
-            if owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
-                surfaced = true;
-                break;
-            }
-        }
-        if !surfaced {
-            failures.push(format!(
+        use common::cleanup::PollOutcome;
+        match common::cleanup::poll_orders(&raw_dex, &market, &trader, "e2e_order", |orders| {
+            orders.iter().any(|o| o.client_order_id == coid_u128)
+        })
+        .await
+        {
+            PollOutcome::Found(()) => {}
+            PollOutcome::NotFound => failures.push(format!(
                 "order with client_order_id={coid} did not surface in getOrdersByOwner \
                  within 60s",
-            ));
+            )),
+            PollOutcome::ChainSilent => failures.push(
+                "surface-poll never got a successful `get_orders_by_owner` response — \
+                 cannot verify placement"
+                    .into(),
+            ),
         }
 
         // Cleanup runs unconditionally when the POST returned OK so a
-        // failed `surfaced` poll above does not leak collateral.
+        // missed `surfaced` poll above does not leak collateral.
         common::cleanup::cancel_coids_best_effort(
             &raw_dex,
             &trader,
@@ -243,32 +231,21 @@ async fn buy_limit_gtc_against_shellnet() {
 
         // Absence-poll: turn a leaked order (silent on captured stderr
         // from `cancel_coids_best_effort`) into a recorded failure.
-        let mut cancelled = false;
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let owned = match raw_dex
-                .get_orders_by_owner(
-                    &market.order_book_address,
-                    trader.deposit_identifier_hash.clone(),
-                )
-                .await
-            {
-                Ok(o) => o,
-                Err(err) => {
-                    eprintln!("[e2e_order] cleanup poll errored (will retry): {err:?}");
-                    continue;
-                }
-            };
-            if !owned.orders.iter().any(|o| o.client_order_id == coid_u128) {
-                cancelled = true;
-                break;
-            }
-        }
-        if !cancelled {
-            failures.push(format!(
+        match common::cleanup::poll_orders(&raw_dex, &market, &trader, "e2e_order", |orders| {
+            !orders.iter().any(|o| o.client_order_id == coid_u128)
+        })
+        .await
+        {
+            PollOutcome::Found(()) => {}
+            PollOutcome::NotFound => failures.push(format!(
                 "cancellation of client_order_id={coid} did not remove the order from \
                  getOrdersByOwner within 60s — trading PN may still have collateral locked",
-            ));
+            )),
+            PollOutcome::ChainSilent => failures.push(
+                "absence-poll never got a successful `get_orders_by_owner` response — \
+                 cannot verify cancellation; trading PN may still have collateral locked"
+                    .into(),
+            ),
         }
     }
 

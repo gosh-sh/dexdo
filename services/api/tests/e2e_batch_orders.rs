@@ -200,7 +200,10 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
                             failures.push(format!("item status={}, want PENDING_NEW", item.status));
                         }
                         if item.transact_time <= 0 {
-                            failures.push(format!("item transactTime={}, want > 0", item.transact_time));
+                            failures.push(format!(
+                                "item transactTime={}, want > 0",
+                                item.transact_time
+                            ));
                         }
                     }
                     // api-spec: one `transactTime` per batch — every item carries
@@ -232,34 +235,30 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
         // budget, 2s ticks). `placeBatch` is atomic on the chain —
         // once one coid surfaces the other should follow within the
         // same tick.
-        let mut both_surfaced = false;
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let owned = match raw_dex
-                .get_orders_by_owner(
-                    &market.order_book_address,
-                    trader.deposit_identifier_hash.clone(),
-                )
-                .await
-            {
-                Ok(o) => o,
-                Err(err) => {
-                    eprintln!("[e2e_batch_orders] get_orders_by_owner errored (retry): {err:?}");
-                    continue;
-                }
-            };
-            let has_a = owned.orders.iter().any(|o| o.client_order_id == coid_a_u128);
-            let has_b = owned.orders.iter().any(|o| o.client_order_id == coid_b_u128);
-            if has_a && has_b {
-                both_surfaced = true;
-                break;
-            }
-        }
-        if !both_surfaced {
-            failures.push(format!(
+        use common::cleanup::PollOutcome;
+        match common::cleanup::poll_orders(
+            &raw_dex,
+            &market,
+            &trader,
+            "e2e_batch_orders",
+            |orders| {
+                let has_a = orders.iter().any(|o| o.client_order_id == coid_a_u128);
+                let has_b = orders.iter().any(|o| o.client_order_id == coid_b_u128);
+                has_a && has_b
+            },
+        )
+        .await
+        {
+            PollOutcome::Found(()) => {}
+            PollOutcome::NotFound => failures.push(format!(
                 "batch items (coid_a={coid_a}, coid_b={coid_b}) did not both surface in \
                  getOrdersByOwner within 60s",
-            ));
+            )),
+            PollOutcome::ChainSilent => failures.push(
+                "surface-poll never got a successful `get_orders_by_owner` response — \
+                 cannot verify placement"
+                    .into(),
+            ),
         }
 
         // ---- Cleanup runs UNCONDITIONALLY when the POST returned OK,
@@ -278,35 +277,30 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
 
         // Absence-poll: turn leaked orders (silent on captured stderr
         // from `cancel_coids_best_effort`) into a recorded failure.
-        let mut both_cancelled = false;
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let owned = match raw_dex
-                .get_orders_by_owner(
-                    &market.order_book_address,
-                    trader.deposit_identifier_hash.clone(),
-                )
-                .await
-            {
-                Ok(o) => o,
-                Err(err) => {
-                    eprintln!("[e2e_batch_orders] cleanup poll errored (retry): {err:?}");
-                    continue;
-                }
-            };
-            let still_a = owned.orders.iter().any(|o| o.client_order_id == coid_a_u128);
-            let still_b = owned.orders.iter().any(|o| o.client_order_id == coid_b_u128);
-            if !still_a && !still_b {
-                both_cancelled = true;
-                break;
-            }
-        }
-        if !both_cancelled {
-            failures.push(format!(
+        match common::cleanup::poll_orders(
+            &raw_dex,
+            &market,
+            &trader,
+            "e2e_batch_orders",
+            |orders| {
+                let still_a = orders.iter().any(|o| o.client_order_id == coid_a_u128);
+                let still_b = orders.iter().any(|o| o.client_order_id == coid_b_u128);
+                !still_a && !still_b
+            },
+        )
+        .await
+        {
+            PollOutcome::Found(()) => {}
+            PollOutcome::NotFound => failures.push(format!(
                 "cancellation of coid_a={coid_a} / coid_b={coid_b} did not remove the \
                  orders from getOrdersByOwner within 60s — trading PN may still have \
                  collateral locked",
-            ));
+            )),
+            PollOutcome::ChainSilent => failures.push(
+                "absence-poll never got a successful `get_orders_by_owner` response — \
+                 cannot verify cancellation; trading PN may still have collateral locked"
+                    .into(),
+            ),
         }
     }
 

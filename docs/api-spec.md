@@ -654,6 +654,8 @@ Response fields:
 
 The response confirms acceptance only. The final outcome — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/orders`](#orders) shortly after.
 
+An order is cancellable only once it appears in [`GET /api/v1/openOrders`](#current-open-orders) — i.e. after the chain has emitted `OrderPlaced` and the indexer has flipped the row to live. Attempting to cancel before then (status [`PENDING_NEW`](#order-status), still in flight on the chain) returns `-2011 / 404`; the same code surfaces on a second cancel after the order has already moved to [`PENDING_CANCEL`](#order-status).
+
 ### New Batch Orders
 
 ```http
@@ -670,13 +672,13 @@ Body parameters:
 | --- | --- | --- | --- |
 | `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/markets`. |
+| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/markets`. An empty array is rejected with `-1130 / 400`. |
 
 Each order item:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. Each item is generated or accepted independently; intra-batch duplicates are rejected. |
+| `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. Each item is generated or accepted independently; intra-batch duplicates are detected by the exchange during placement and surface as `-1130 / 400`. |
 | `side` | ENUM | YES | Order side. See [Order Side](#order-side). |
 | `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
@@ -745,7 +747,9 @@ Response items, in request order:
 
 The response confirms acceptance only. For each item, the full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/openOrders`](#current-open-orders) shortly after; look up by `clientOrderId`.
 
-Batch creation is atomic: if any order in the batch fails validation, the whole request is rejected and no orders are created. Validation runs item by item in request order and the first failure returns its error code; the response carries one error object, not an array. Atomicity holds on the exchange side too — even after the request is accepted, if the exchange rejects any item during placement the whole batch is reverted.
+Response shape depends on outcome: on success the body is a JSON array with one object per accepted item, in request order; on failure the body is a single standard error envelope (`{ "code": ..., "msg": ... }`), never an array.
+
+Batch creation is atomic: if any order in the batch fails validation, the whole request is rejected and no orders are created. Validation runs item by item in request order and the first failure returns its error code. Atomicity holds on the exchange side too — even after the request is accepted, if the exchange rejects any item during placement the whole batch is reverted.
 
 ### Cancel Batch Orders
 
