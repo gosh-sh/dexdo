@@ -548,7 +548,7 @@ Top-level body fields:
 | --- | --- | --- |
 | `marketAddress` | `MarketAddress` | Mandatory. |
 | `symbol` | `Symbol` | Mandatory. |
-| `orderIds` | `Vec<String>` | Mandatory and non-empty. Maximum length equals the resolved outcome's `max_batch_size`. Each element is parsed as `u64::from_str` in the use case; out-of-range or non-numeric → `InvalidParameter` → 400 / -1130 — same `arbitrary_precision` constraint documented for the single-order path. |
+| `orderIds` | `Vec<String>` | Mandatory and non-empty. Maximum length equals the resolved outcome's `max_batch_size`. Each element is parsed as `u64::from_str` in the use case; out-of-range or non-numeric → `InvalidParameter` → 400 / -1130 — same `arbitrary_precision` constraint documented for the single-order path. A blank or whitespace-only element is treated as an absent slot and surfaces as `MissingParameter` → 400 / -1102, matching the single-order DELETE's handling of a blank `orderId` query value. |
 
 Intra-batch duplicate `orderId` values are rejected with `InvalidParameter` → 400 / -1130 before the chain submission. Duplicates would produce two `PENDING_CANCEL` receipts for the same id (useless to the caller) and waste one slot in the chain's `MAX_BATCH_SIZE` window; the local check keeps the surface honest and the chain's `_busy` budget intact.
 
@@ -621,7 +621,7 @@ Three failure classes — two synchronous, one async — same split as `DELETE /
    | chain `exit_code` | source | `DomainError` |
    | --- | --- | --- |
    | `121` `ERR_NOTE_BUSY` | another op from this PN is still in flight (`_busy` not cleared) | `OrderPnBusy` → 429 / -2014 |
-   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — the use case already enforces the same range locally | `InvalidParameter` → 400 / -1130 |
+   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the read-model's `max_batch_size` drifted from the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
    | any other `tvm_exit` code | unmapped chain code | `Unexpected` → 500 / -1000, logged at `error` for ops triage |
 
 3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancels from its internal queue in a later transaction. The single-order DELETE's three async outcomes (race with fill/earlier cancel, owner mismatch under read-model corruption, queue overflow) extend to the batch case **per order**: the batch as a whole can have some ids land as `CANCELED`, some as `FILLED` (matching raced the cancel), and — under queue overflow — some remain `OPEN`. The indexer projects each outcome independently into `live_orders`; clients reconcile by polling `/api/v1/openOrders` (each cancelled id disappears) and `/api/v1/allOrders` (each terminal outcome surfaces).
@@ -638,9 +638,9 @@ Transport-level failures (gateway drop, decode error) collapse to `Unexpected` �
 | Body exceeds the auth-hoop body cap | `RequestTooLarge` | 413 |
 | Caller lacks `TRADE` permission | `AuthRequired` | 401 |
 | Mandatory body field missing | `MissingParameter` | 400 |
-| Any `orderId` not numeric or overflows u64; empty `orderIds[]`; length above `max_batch_size`; intra-batch duplicate; chain `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` | `InvalidParameter` | 400 |
+| Any `orderId` not numeric or overflows u64; empty `orderIds[]`; length above `max_batch_size`; intra-batch duplicate | `InvalidParameter` | 400 |
 | Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
-| Reconciled market with NULL `oracle_list_hash` | `MarketInconsistent` | 503 |
+| Reconciled market with NULL `oracle_list_hash`, or chain `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` (read-model drift from on-chain ceiling) | `MarketInconsistent` | 503 |
 | Any `orderId` does not resolve to an OPEN order owned by the caller on the resolved outcome (covers unknown order, wrong owner, wrong market, already closed) | `UnknownOrder` | 404 |
 | Resolved market `status != TRADING` | `OrderValidationFailed` | 400 |
 | Chain `ERR_NOTE_BUSY` (per-PN serial; another op still in flight) | `OrderPnBusy` | 429 |

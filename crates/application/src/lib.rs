@@ -861,10 +861,8 @@ pub trait ChainOrderSender: Send + Sync {
     /// Per-order OrderBook outcomes (silent no-op on owner-mismatch or
     /// already-closed, queue overflow) remain asynchronous and surface
     /// through the indexer.
-    async fn cancel_batch_order(
-        &self,
-        payload: CancelBatchOrderPayload,
-    ) -> Result<(), DomainError>;
+    async fn cancel_batch_order(&self, payload: CancelBatchOrderPayload)
+        -> Result<(), DomainError>;
 }
 
 #[async_trait]
@@ -1328,7 +1326,11 @@ where
         &self,
         input: CancelBatchOrdersInput,
     ) -> Result<Vec<CancelledBatchOrder>, DomainError> {
+        // `phase = "shape"` lets ops query the substring
+        // `cancelBatch rejected` and disambiguate empty/duplicate/oversize
+        // — symmetric with `CreateBatchOrdersUseCase`.
         if input.order_ids.is_empty() {
+            warn!(phase = "shape", order_ids_len = 0, "cancelBatch rejected");
             return Err(DomainError::InvalidParameter);
         }
 
@@ -1339,6 +1341,11 @@ where
             std::collections::HashSet::with_capacity(input.order_ids.len());
         for &id in &input.order_ids {
             if !seen.insert(id) {
+                warn!(
+                    phase = "shape",
+                    order_ids_len = input.order_ids.len(),
+                    "cancelBatch rejected",
+                );
                 return Err(DomainError::InvalidParameter);
             }
         }
@@ -1366,6 +1373,12 @@ where
             return Err(DomainError::MarketInconsistent);
         }
         if input.order_ids.len() > outcome.max_batch_size as usize {
+            warn!(
+                phase = "shape",
+                order_ids_len = input.order_ids.len(),
+                max_batch_size = outcome.max_batch_size,
+                "cancelBatch rejected",
+            );
             return Err(DomainError::InvalidParameter);
         }
 
@@ -1711,9 +1724,9 @@ mod tests {
             let rows = order_ids
                 .iter()
                 .filter_map(|&id| {
-                    self.live_orders.iter().find(|o| {
-                        o.order_id == id && o.owner_pn_address == owner_pn_address
-                    })
+                    self.live_orders
+                        .iter()
+                        .find(|o| o.order_id == id && o.owner_pn_address == owner_pn_address)
                 })
                 .map(|o| CancelBatchOrderRow {
                     order_id: o.order_id,
@@ -3073,19 +3086,12 @@ mod tests {
         let sender = Arc::new(FakeSender::ok());
         let repo = FakeRepo::with_live_orders(
             market,
-            vec![
-                live_order(11, Some("a")),
-                live_order(22, Some("b")),
-                live_order(33, Some("c")),
-            ],
+            vec![live_order(11, Some("a")), live_order(22, Some("b")), live_order(33, Some("c"))],
         );
         let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
 
         // Input: 33, 11, 22 (deliberately scrambled).
-        let out = uc
-            .execute(base_cancel_batch_input("PM-YES", vec![33, 11, 22]))
-            .await
-            .unwrap();
+        let out = uc.execute(base_cancel_batch_input("PM-YES", vec![33, 11, 22])).await.unwrap();
 
         assert_eq!(out.iter().map(|o| o.order_id).collect::<Vec<_>>(), vec![33, 11, 22]);
         assert_eq!(
@@ -3134,10 +3140,8 @@ mod tests {
         let sender = Arc::new(FakeSender::ok());
         let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
 
-        let err = uc
-            .execute(base_cancel_batch_input("PM-YES", vec![10, 20, 10]))
-            .await
-            .unwrap_err();
+        let err =
+            uc.execute(base_cancel_batch_input("PM-YES", vec![10, 20, 10])).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
         assert!(sender.cancel_batch_calls().is_empty());
     }
@@ -3151,10 +3155,7 @@ mod tests {
             FakeRepo::with_live_orders(market, vec![live_order(1, None), live_order(2, None)]);
         let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
 
-        let err = uc
-            .execute(base_cancel_batch_input("PM-YES", vec![1, 2]))
-            .await
-            .unwrap_err();
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
         assert_eq!(err, DomainError::OrderValidationFailed);
         assert!(sender.cancel_batch_calls().is_empty());
     }
@@ -3167,10 +3168,7 @@ mod tests {
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
         let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
 
-        let err = uc
-            .execute(base_cancel_batch_input("PM-YES", vec![1]))
-            .await
-            .unwrap_err();
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
         assert!(sender.cancel_batch_calls().is_empty());
     }
@@ -3184,10 +3182,7 @@ mod tests {
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
         let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
 
-        let err = uc
-            .execute(base_cancel_batch_input("PM-YES", vec![1, 2]))
-            .await
-            .unwrap_err();
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
         assert_eq!(err, DomainError::UnknownOrder);
         assert!(sender.cancel_batch_calls().is_empty());
     }
@@ -3209,10 +3204,7 @@ mod tests {
             sender.clone(),
         );
 
-        let err = uc
-            .execute(base_cancel_batch_input("PM-YES", vec![1]))
-            .await
-            .unwrap_err();
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::UnknownOrder);
         assert!(sender.cancel_batch_calls().is_empty());
     }
@@ -3224,10 +3216,7 @@ mod tests {
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
         let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
 
-        let err = uc
-            .execute(base_cancel_batch_input("PM-YES", vec![1]))
-            .await
-            .unwrap_err();
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::OrderPnBusy);
     }
 }

@@ -228,13 +228,23 @@ impl ChainOrderSender for BeeDexChainSender {
             order_ids,
         };
 
-        debug!(
+        // `order_ids` is the audit trail when a cancel_batch never
+        // returns (`RequestTimeout`) or the gateway raises an unmapped
+        // error: without it, ops cannot reconcile which orderIds the
+        // chain may or may not have forwarded to `OrderBook.executeBatch`.
+        // `classify_chain_outcome` does not carry them on its
+        // error/timeout logs, so this line is the only place they
+        // appear — emit at `info!` so the production default filter
+        // keeps it. Symmetric with `place_batch`.
+        info!(
+            entry_point = "cancel_batch",
             pn = %payload.pn_address,
             event_id = %params.event_id,
             oracle_list_hash = %params.oracle_list_hash,
             token_type = params.token_type,
             order_count = params.order_ids.len(),
-            "cancel_batch params",
+            ?params.order_ids,
+            "submitting cancel_batch",
         );
 
         let call = self.dex.cancel_batch(&payload.pn_address, params, signer);

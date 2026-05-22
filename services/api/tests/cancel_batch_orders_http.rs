@@ -30,9 +30,9 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsRequest;
 use dodex_application::NewBatchOrderPayload;
 use dodex_application::NewOrderPayload;
+use dodex_application::OrderForCancel;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
-use dodex_application::OrderForCancel;
 use dodex_application::TradingPn;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -179,10 +179,8 @@ impl MarketReadRepository for FakeRepo {
         // so a "request fewer than stored" case (the rare overlap-
         // scenario) still works.
         let stored = self.rows.lock().unwrap().clone();
-        let mut matched: Vec<CancelBatchOrderRow> = stored
-            .into_iter()
-            .filter(|r| order_ids.iter().any(|&id| id == r.order_id))
-            .collect();
+        let mut matched: Vec<CancelBatchOrderRow> =
+            stored.into_iter().filter(|r| order_ids.iter().any(|&id| id == r.order_id)).collect();
         if self.scrambled_rows {
             matched.reverse();
         }
@@ -220,11 +218,15 @@ impl RecordingCancelBatchSender {
 #[async_trait]
 impl ChainOrderSender for RecordingCancelBatchSender {
     async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
-        unreachable!("RecordingCancelBatchSender::submit_order called from DELETE /batchOrders test")
+        unreachable!(
+            "RecordingCancelBatchSender::submit_order called from DELETE /batchOrders test"
+        )
     }
 
     async fn cancel_order(&self, _: CancelOrderPayload) -> Result<(), DomainError> {
-        unreachable!("RecordingCancelBatchSender::cancel_order called from DELETE /batchOrders test")
+        unreachable!(
+            "RecordingCancelBatchSender::cancel_order called from DELETE /batchOrders test"
+        )
     }
 
     async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
@@ -389,8 +391,7 @@ async fn response_preserves_input_order_when_repo_returns_scrambled_rows() {
     // Input: 33, 11, 22 (deliberately scrambled). The repo above also
     // reverses what it returns, so the only way the response can come
     // back in [33, 11, 22] order is the handler's reorder step.
-    let mut resp =
-        delete_batch(&service, valid_body(vec!["33", "11", "22"])).send(&service).await;
+    let mut resp = delete_batch(&service, valid_body(vec!["33", "11", "22"])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
 
     let items = resp.take_json::<Vec<CancelBatchItem>>().await.expect("cancel batch body");
@@ -513,8 +514,7 @@ async fn intra_batch_duplicate_returns_400_minus_1130() {
     let chain_sender: SharedChainSender = sender.clone();
     let service = setup_with(repo, chain_sender);
 
-    let mut resp =
-        delete_batch(&service, valid_body(vec!["10", "20", "10"])).send(&service).await;
+    let mut resp = delete_batch(&service, valid_body(vec!["10", "20", "10"])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1130);
@@ -543,8 +543,7 @@ async fn over_u64_order_id_returns_400_minus_1130() {
     let service = setup_with(repo, sender);
 
     let overflow = "18446744073709551616"; // u64::MAX + 1
-    let mut resp =
-        delete_batch(&service, valid_body(vec!["1", overflow])).send(&service).await;
+    let mut resp = delete_batch(&service, valid_body(vec!["1", overflow])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1130);
@@ -558,8 +557,7 @@ async fn blank_order_id_string_returns_400_minus_1102() {
     let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
     let service = setup_with(repo, sender);
 
-    let mut resp =
-        delete_batch(&service, valid_body(vec!["1", ""])).send(&service).await;
+    let mut resp = delete_batch(&service, valid_body(vec!["1", ""])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1102);
@@ -619,8 +617,7 @@ async fn unknown_order_returns_404_minus_2011() {
     let chain_sender: SharedChainSender = sender.clone();
     let service = setup_with(repo, chain_sender);
 
-    let mut resp =
-        delete_batch(&service, valid_body(vec!["1", "2"])).send(&service).await;
+    let mut resp = delete_batch(&service, valid_body(vec!["1", "2"])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -2011);
@@ -632,16 +629,13 @@ async fn unknown_order_returns_404_minus_2011() {
 async fn partial_shortfall_rejects_whole_batch_with_minus_2011() {
     // Two ids requested, only one resolves — atomic surface returns
     // UnknownOrder for the whole request. No chain message sent.
-    let repo: SharedRepo = Arc::new(FakeRepo::with_market_and_rows(
-        trading_market(),
-        vec![row(1, Some("a"))],
-    ));
+    let repo: SharedRepo =
+        Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, Some("a"))]));
     let sender = Arc::new(RecordingCancelBatchSender::ok());
     let chain_sender: SharedChainSender = sender.clone();
     let service = setup_with(repo, chain_sender);
 
-    let mut resp =
-        delete_batch(&service, valid_body(vec!["1", "2"])).send(&service).await;
+    let mut resp = delete_batch(&service, valid_body(vec!["1", "2"])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -2011);
@@ -651,23 +645,26 @@ async fn partial_shortfall_rejects_whole_batch_with_minus_2011() {
 // ---- Chain-side failures -------------------------------------------------
 
 #[tokio::test]
-async fn chain_invalid_parameter_returns_400_minus_1130() {
+async fn chain_batch_size_drift_returns_503_minus_1500() {
     // Defence-in-depth: the use case pre-rejects oversize/empty batches
     // locally, but the chain still raises ERR_BATCH_TOO_LARGE (161) /
-    // ERR_EMPTY_BATCH (162) if the local guard is bypassed. Both map to
-    // `DomainError::InvalidParameter` in `chain_sender::map_tvm_exit_code`
-    // and must surface as `-1130 / 400`. Simulate the chain leg with a
-    // failing sender; this pins the HTTP shape contract for the path.
+    // ERR_EMPTY_BATCH (162) if the local guard is bypassed. Reaching
+    // either code means the read-model's `max_batch_size` drifted from
+    // the on-chain ceiling — a server-state inconsistency, not a client
+    // bug — so `chain_sender::map_tvm_exit_code` surfaces it as
+    // `DomainError::MarketInconsistent` → 503 / -1500. Simulate the
+    // chain leg with a failing sender; this pins the HTTP shape contract
+    // for that path.
     let repo: SharedRepo =
         Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
     let sender: SharedChainSender =
-        Arc::new(RecordingCancelBatchSender::failing(DomainError::InvalidParameter));
+        Arc::new(RecordingCancelBatchSender::failing(DomainError::MarketInconsistent));
     let service = setup_with(repo, sender);
 
     let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
-    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    assert_eq!(resp.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
-    assert_eq!(err.code, -1130);
+    assert_eq!(err.code, -1500);
 }
 
 #[tokio::test]
@@ -675,10 +672,8 @@ async fn pn_busy_returns_429_minus_2014() {
     // Sender raising `OrderPnBusy` simulates a real `ERR_NOTE_BUSY`
     // (121) coming back from `bee_dex::Dex::cancel_batch` while another
     // op from the same PN is still in flight.
-    let repo: SharedRepo = Arc::new(FakeRepo::with_market_and_rows(
-        trading_market(),
-        vec![row(1, None)],
-    ));
+    let repo: SharedRepo =
+        Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
     let sender: SharedChainSender =
         Arc::new(RecordingCancelBatchSender::failing(DomainError::OrderPnBusy));
     let service = setup_with(repo, sender);

@@ -7,6 +7,7 @@
 use std::env;
 use std::time::Duration;
 
+use dodex_application::CancelBatchOrderRow;
 use dodex_application::MarketReadRepository;
 use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
@@ -439,4 +440,183 @@ async fn resolve_for_cancel_derives_non_trading_status_for_caller_check() {
         .await
         .expect("cancelled-market row must still resolve");
     assert_eq!(resolved.market_status, MarketStatus::Cancelled);
+}
+
+// ---- resolve_for_cancel_batch -------------------------------------------
+//
+// Bulk variant for DELETE /api/v1/batchOrders. The SQL mirrors
+// `resolve_for_cancel`'s predicate set (status='OPEN', amount_remaining>0,
+// owner_pn_address match, m.last_reconciled_at IS NOT NULL) but adds
+// `lo.order_id = ANY($3::text[]::numeric[])` and returns a Vec. The
+// single-cancel suite above already pins the predicate semantics; these
+// tests focus on what is bulk-specific: the array bind+cast, partial
+// shortfall, and per-row owner filtering inside one request.
+
+fn sort_rows(mut rows: Vec<CancelBatchOrderRow>) -> Vec<CancelBatchOrderRow> {
+    rows.sort_by_key(|r| r.order_id);
+    rows
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
+    // Three ids requested, all three resolve. Exercises the
+    // `ANY($3::text[]::numeric[])` cast on a non-trivial input set.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_happy_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_HAPPY_YES";
+    let pn = "0:resolve_cancel_batch_happy_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, 1001, 7, pn, "OPEN", "1500000", Some("a")).await;
+    seed_live_order(&pool, pmp, 1002, 7, pn, "OPEN", "1500000", Some("b")).await;
+    seed_live_order(&pool, pmp, 1003, 7, pn, "OPEN", "1500000", None).await;
+
+    let rows = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[1001, 1002, 1003],
+            pn,
+        )
+        .await
+        .expect("bulk resolve happy path");
+
+    let rows = sort_rows(rows);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].order_id, 1001);
+    assert_eq!(rows[0].client_order_id.as_deref(), Some("a"));
+    assert_eq!(rows[1].order_id, 1002);
+    assert_eq!(rows[1].client_order_id.as_deref(), Some("b"));
+    assert_eq!(rows[2].order_id, 1003);
+    assert!(rows[2].client_order_id.is_none());
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_partial_shortfall_returns_only_matching() {
+    // Three ids requested, only two exist in live_orders. The bulk SELECT
+    // returns the matched subset; the use case layer is what converts a
+    // shortfall into `UnknownOrder` for the whole batch. Pinning the repo
+    // contract here keeps that boundary honest.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_shortfall_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_SHORTFALL_YES";
+    let pn = "0:resolve_cancel_batch_shortfall_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, 2001, 7, pn, "OPEN", "1500000", Some("a")).await;
+    seed_live_order(&pool, pmp, 2003, 7, pn, "OPEN", "1500000", Some("c")).await;
+
+    let rows = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[2001, 2002, 2003],
+            pn,
+        )
+        .await
+        .expect("bulk resolve partial shortfall");
+
+    let rows = sort_rows(rows);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].order_id, 2001);
+    assert_eq!(rows[1].order_id, 2003);
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_wrong_owner_filtered_out() {
+    // Critical bulk-specific case: a request that mixes own ids with
+    // another account's id MUST NOT leak the attacker's row. The
+    // `owner_pn_address = $4` predicate excludes it from the result;
+    // the use case then sees a shortfall and rejects the whole batch.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_wrong_owner_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_WRONG_OWNER_YES";
+    let mine = "0:resolve_cancel_batch_wrong_owner_mine_pn";
+    let attacker = "0:resolve_cancel_batch_wrong_owner_attacker_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, 3001, 7, mine, "OPEN", "1500000", Some("m1")).await;
+    seed_live_order(&pool, pmp, 3002, 7, mine, "OPEN", "1500000", Some("m2")).await;
+    seed_live_order(&pool, pmp, 3099, 7, attacker, "OPEN", "1500000", Some("att")).await;
+
+    let rows = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[3001, 3002, 3099],
+            mine,
+        )
+        .await
+        .expect("bulk resolve with wrong owner mixed in");
+
+    let rows = sort_rows(rows);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].order_id, 3001);
+    assert_eq!(rows[1].order_id, 3002);
+    assert!(rows.iter().all(|r| r.order_id != 3099));
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_pre_reconcile_market_invisible() {
+    // Same visibility gate as single-cancel: a market without
+    // `last_reconciled_at` does not expose its live_orders rows. With
+    // only one such market in scope, the bulk SELECT returns empty —
+    // the use case then surfaces UnknownOrder for the whole batch.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_pre_reconcile_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_PRE_RECONCILE_YES";
+    let pn = "0:resolve_cancel_batch_pre_reconcile_pn";
+    purge(&pool, pmp, symbol).await;
+
+    let market_id: i64 = sqlx::query_scalar(
+        r#"insert into markets
+               (pmp_address, market_id, name, token_type, token_code,
+                event_id, orderbook_address,
+                stake_start, stake_end, result_start, result_end,
+                frozen_at)
+           values ($1, $1, $1, 3, 'USDC',
+                   42::numeric, $1,
+                   1700000100, 1700000200, 1700000300, 1700000400,
+                   1700000210)
+           returning id"#,
+    )
+    .bind(pmp)
+    .fetch_one(&pool)
+    .await
+    .expect("insert pre-reconcile market");
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 7, 'YES', $3,
+                   2, 4, '0.01', '0.0001', '5.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(symbol)
+    .execute(&pool)
+    .await
+    .expect("insert market_outcomes");
+    seed_live_order(&pool, pmp, 4001, 7, pn, "OPEN", "1500000", Some("x")).await;
+    seed_live_order(&pool, pmp, 4002, 7, pn, "OPEN", "1500000", Some("y")).await;
+
+    let rows = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[4001, 4002],
+            pn,
+        )
+        .await
+        .expect("pre-reconcile bulk resolve should return empty, not error");
+    assert!(rows.is_empty());
 }
