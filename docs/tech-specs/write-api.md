@@ -384,7 +384,7 @@ The backend stores no inflight cancel state and does not retry on its own. Dupli
 
 ### Concurrency
 
-Cancellation contends for the same per-PN `_busy` lock as placement — see [§Concurrency for POST /order](#concurrency). A DELETE that races a POST (or another DELETE) from the same account surfaces as `OrderPnBusy` → 429 / -2014 with the same retry semantics. Clients that need to cancel multiple orders without back-pressure should use `DELETE /api/v1/batchOrders` once that endpoint lands — one chain message under a single `_busy` lock.
+Cancellation contends for the same per-PN `_busy` lock as placement — see [§Concurrency for POST /order](#concurrency). A DELETE that races a POST (or another DELETE) from the same account surfaces as `OrderPnBusy` → 429 / -2014 with the same retry semantics.
 
 ## `POST /api/v1/batchOrders`
 
@@ -487,7 +487,7 @@ Same three-class split as `POST /api/v1/order`:
    | chain `exit_code` | source | `DomainError` |
    | --- | --- | --- |
    | `129` `ERR_INVALID_PARAMS` | `clientOrderId` collision against the PN's `_clientOrderIds` map — covers both intra-batch duplicates AND any still-live coid from an earlier `placeOrder` on the same PN. The chain also raises 129 for `minAmount != 0` on any MARKET order, but our wire payload always sends `minAmount = 0`. | `InvalidParameter` → 400 / -1130 |
-   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — the use case already enforces the same range locally | `InvalidParameter` → 400 / -1130 |
+   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the read-model's `max_batch_size` drifted from the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
    | `168` `ERR_NOTIONAL_OVERFLOW` | `price * amount` overflowed uint256 inside `placeBatch` (only the chain checks for this; the read-model has no equivalent ceiling) | `OrderValidationFailed` → 400 / -2010 |
 
 3. **OrderBook chain-side, surfaced asynchronously** — same shape as the single-order path: the internal `executeBatch` message runs in a later transaction and `OrderBook.Rejected` events (e.g. queue overflow) are visible only through the indexer.
@@ -502,9 +502,9 @@ Transport-level failures collapse to `Unexpected` → 500 / -1000, same as the s
 | Body exceeds the auth-hoop body cap | `RequestTooLarge` | 413 |
 | Caller lacks `TRADE` permission | `AuthRequired` | 401 |
 | Mandatory body field missing (top-level or per-item) | `MissingParameter` | 400 |
-| Unknown enum value, unsupported `type` × `timeInForce` combination, empty `orders[]`, length above `max_batch_size`, non-numeric or over-u64 `newOrderClientId`; chain `ERR_INVALID_PARAMS` / `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` | `InvalidParameter` | 400 |
+| Unknown enum value, unsupported `type` × `timeInForce` combination, empty `orders[]`, length above `max_batch_size`, non-numeric or over-u64 `newOrderClientId`; chain `ERR_INVALID_PARAMS` (intra-batch coid collision) | `InvalidParameter` | 400 |
 | Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
-| Reconciled market with NULL `oracle_list_hash`, or chain `ERR_INVALID_OUTCOME_ID` | `MarketInconsistent` | 503 |
+| Reconciled market with NULL `oracle_list_hash`, chain `ERR_INVALID_OUTCOME_ID`, or chain `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` (read-model drift from on-chain ceiling) | `MarketInconsistent` | 503 |
 | Market `status != TRADING`; per-item notional below `minNotional`; chain `ERR_LOW_VALUE` / `ERR_STAKE_NOT_EXISTS` / `ERR_DEBT_NON_ZERO` / `ERR_INVALID_STATE` / `ERR_ORDER_TOO_SMALL` / `ERR_NOTIONAL_OVERFLOW` | `OrderValidationFailed` | 400 |
 | Per-item precision / tick / step violation; chain `ERR_AMOUNT_NOT_LOT_MULTIPLE` / `ERR_PRICE_NOT_TICK_MULTIPLE` | `PrecisionExceeded` | 400 |
 | Chain `ERR_NOTE_BUSY` (per-PN serial; another op still in flight on this PN) | `OrderPnBusy` | 429 |

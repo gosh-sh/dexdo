@@ -7,7 +7,8 @@
 // SECURITY: `test_pns.json` ships plaintext `owner_secret_key_hex` for
 // shellnet-only throwaway PNs. Safe ONLY because the PNs hold test
 // NACKL and the network is a public devnet. Never repurpose this for
-// stage/prod — see the SECURITY NOTE block in `e2e_order.rs`.
+// stage/prod — see `tests/fixtures/README.md` for the canonical
+// constraint set under the `[SHELLNET-TESTKEYS]` tag.
 
 #![allow(dead_code)]
 

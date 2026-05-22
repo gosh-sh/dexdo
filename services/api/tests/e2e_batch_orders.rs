@@ -1,18 +1,18 @@
 // End-to-end smoke test for `POST /api/v1/batchOrders` against a real
-// shellnet OrderBook. Mirrors `e2e_order.rs` for setup (deploy fresh
-// PMP + OrderBook, provision api_key, drive the production router
-// with `BeeDexChainSender` / `PostgresAuthenticator` /
-// `PostgresReadModelRepository`), then submits a two-item batch of
-// BUY LIMIT GTC orders, polls `OrderBook.getOrdersByOwner` until
-// **both** `clientOrderId`s surface, and cleans up each by
-// `bee_dex::Dex::cancel_order_by_client` so collateral does not
-// remain locked.
+// shellnet OrderBook. Deploys a fresh PMP + OrderBook, provisions an
+// HMAC api_key, drives the production router with `BeeDexChainSender`
+// / `PostgresAuthenticator` / `PostgresReadModelRepository`, then
+// submits a two-item batch of BUY LIMIT GTC orders, polls
+// `OrderBook.getOrdersByOwner` until **both** `clientOrderId`s
+// surface, and cleans up each by `bee_dex::Dex::cancel_order_by_client`
+// so collateral does not remain locked.
 //
 // Marked `#[ignore]` because it needs:
 //   - TEST_DATABASE_URL (test Postgres up — see README.md#test-postgres)
 //   - reachable shellnet endpoint
 //   - the bundled fixture `tests/fixtures/test_pns.json` (PN with
-//     enough NACKL — see `e2e_order.rs` and `mint_pn_pool`).
+//     enough NACKL — see `tests/fixtures/README.md` for fixture setup
+//     and topping up via `mint_pn_pool`).
 //
 // Run explicitly:
 //
@@ -23,9 +23,9 @@
 // values for shellnet-only throwaway trading PNs. Safe ONLY because
 // shellnet is a public devnet and the PNs hold test NACKL. The keys
 // are loaded into memory by every test that calls `TestPnPool::load()`;
-// never copy this fixture format into a stage or prod config. See the
-// `SECURITY NOTE` block in the POST e2e test for the canonical version
-// of these constraints and the `[SHELLNET-TESTKEYS]` tag.
+// never copy this fixture format into a stage or prod config. The
+// `[SHELLNET-TESTKEYS]` tag in `tests/fixtures/README.md` is the
+// canonical entry point for this constraint set.
 
 mod common;
 

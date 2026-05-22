@@ -157,8 +157,11 @@ impl ChainOrderSender for BeeDexChainSender {
     async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError> {
         let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
 
+        // Consume `payload.orders` by value so per-item `price_raw`
+        // moves into the chain payload instead of being cloned.
+        let pn_address = payload.pn_address;
         let mut orders = Vec::with_capacity(payload.orders.len());
-        for (item_index, item) in payload.orders.iter().enumerate() {
+        for (item_index, item) in payload.orders.into_iter().enumerate() {
             orders.push(encode_batch_item(item, item_index)?);
         }
 
@@ -183,7 +186,7 @@ impl ChainOrderSender for BeeDexChainSender {
         let client_order_ids: Vec<u128> = params.orders.iter().map(|o| o.client_order_id).collect();
         info!(
             entry_point = "place_batch",
-            pn = %payload.pn_address,
+            pn = %pn_address,
             event_id = %params.event_id,
             oracle_list_hash = %params.oracle_list_hash,
             token_type = params.token_type,
@@ -192,7 +195,7 @@ impl ChainOrderSender for BeeDexChainSender {
             "submitting place_batch",
         );
 
-        let call = self.dex.place_batch(&payload.pn_address, params, signer);
+        let call = self.dex.place_batch(&pn_address, params, signer);
         let outcome = timeout(self.place_batch_timeout, call).await;
         classify_chain_outcome(outcome, self.place_batch_timeout.as_millis() as u64, "place_batch")
     }
@@ -205,7 +208,7 @@ impl ChainOrderSender for BeeDexChainSender {
 /// per the `bee_dex` / `serde_json` ceiling, so reaching the error
 /// arm means that upstream invariant was bypassed.
 fn encode_batch_item(
-    item: &BatchOrderPayloadItem,
+    item: BatchOrderPayloadItem,
     item_index: usize,
 ) -> Result<OrderBookOrder, DomainError> {
     let amount = item.amount_raw.parse::<u128>().map_err(|err| {
@@ -220,7 +223,7 @@ fn encode_batch_item(
         outcome_id: item.outcome_id,
         is_buy: item.is_buy,
         flags: item.flags,
-        price: item.price_raw.clone(),
+        price: item.price_raw,
         amount,
         // Matches the single-order path — neither field is exposed by
         // api-spec and both are pinned to 0 at the chain boundary.
@@ -278,7 +281,8 @@ fn build_signer(pn_pubkey: &str, pn_seckey: &SensitiveBytes) -> Result<Signer, D
 /// `ChainOrderSender` entirely and would not catch a future refactor
 /// that breaks the wiring between `map_bee_dex_error` and the chain
 /// dispatch. `entry_point` is included in the timeout / unmapped-error
-/// logs so ops can tell place from cancel without correlation.
+/// logs so ops can disambiguate place / cancel / place_batch without
+/// correlation.
 fn classify_chain_outcome<T>(
     outcome: Result<Result<T, AppError>, tokio::time::error::Elapsed>,
     timeout_ms: u64,
@@ -514,8 +518,14 @@ mod tests {
             map_bee_dex_error(&tvm_exit(160), "place_order"),
             DomainError::OrderValidationFailed
         );
-        assert_eq!(map_bee_dex_error(&tvm_exit(161), "place_batch"), DomainError::InvalidParameter);
-        assert_eq!(map_bee_dex_error(&tvm_exit(162), "place_batch"), DomainError::InvalidParameter);
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(161), "place_batch"),
+            DomainError::MarketInconsistent
+        );
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(162), "place_batch"),
+            DomainError::MarketInconsistent
+        );
         assert_eq!(
             map_bee_dex_error(&tvm_exit(163), "place_order"),
             DomainError::PrecisionExceeded
@@ -578,8 +588,8 @@ mod tests {
             (121, DomainError::OrderPnBusy),              // ERR_NOTE_BUSY
             (129, DomainError::InvalidParameter),         // ERR_INVALID_PARAMS (batch-coid dupe)
             (130, DomainError::MarketInconsistent),       // ERR_INVALID_OUTCOME_ID
-            (161, DomainError::InvalidParameter),         // ERR_BATCH_TOO_LARGE
-            (162, DomainError::InvalidParameter),         // ERR_EMPTY_BATCH
+            (161, DomainError::MarketInconsistent),       // ERR_BATCH_TOO_LARGE
+            (162, DomainError::MarketInconsistent),       // ERR_EMPTY_BATCH
             (163, DomainError::PrecisionExceeded),        // ERR_AMOUNT_NOT_LOT_MULTIPLE
             (168, DomainError::OrderValidationFailed),    // ERR_NOTIONAL_OVERFLOW
         ];

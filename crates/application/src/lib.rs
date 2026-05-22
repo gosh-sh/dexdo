@@ -2050,10 +2050,11 @@ mod tests {
 
     #[test]
     fn generated_client_order_id_fits_in_u64() {
-        // Regression guard: the generated decimal must fit in u64
-        // because bee_dex / serde_json cannot serialize larger client
-        // order ids on this path. 256 samples are enough to surface
-        // accidental use of a full UUID-sized integer.
+        // The generator MUST stay inside u64: `bee_dex` / `serde_json`
+        // panic on serialize for values above u64::MAX, so a
+        // `Uuid::new_v4().as_u128()` regression would crash the worker
+        // ~50 % of the time. 256 samples is more than enough to
+        // surface that regression.
         for _ in 0..256 {
             let coid = generate_client_order_id();
             assert!(

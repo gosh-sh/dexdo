@@ -1,17 +1,18 @@
 // End-to-end smoke test for `DELETE /api/v1/order` against a real
-// shellnet OrderBook. Mirrors `e2e_order.rs` for setup (deploy fresh
-// PMP + OrderBook, provision api_key, post a LIMIT GTC order, poll
-// `getOrdersByOwner` until the chain accepts it), then drives the
-// **HTTP cancel path** through the production router and verifies
-// that the order disappears from `getOrdersByOwner` — proving the
-// `DELETE /order` handler → use case → `BeeDexChainSender::cancel_order`
-// → chain → `OrderBook.OrderCancelled` round-trip end to end.
+// shellnet OrderBook. Deploys a fresh PMP + OrderBook, provisions an
+// HMAC api_key, posts a LIMIT GTC order, polls `getOrdersByOwner`
+// until the chain accepts it, then drives the **HTTP cancel path**
+// through the production router and verifies that the order
+// disappears from `getOrdersByOwner` — proving the `DELETE /order`
+// handler → use case → `BeeDexChainSender::cancel_order` → chain →
+// `OrderBook.OrderCancelled` round-trip end to end.
 //
-// Marked `#[ignore]` because it needs the same setup as `e2e_order`:
+// Marked `#[ignore]` because it needs:
 //   - TEST_DATABASE_URL (test Postgres up — see README.md#test-postgres)
 //   - reachable shellnet endpoint
 //   - the bundled fixture `tests/fixtures/test_pns.json` (PN with
-//     enough NACKL — see `e2e_order.rs` and `mint_pn_pool`).
+//     enough NACKL — see `tests/fixtures/README.md` for fixture setup
+//     and topping up via `mint_pn_pool`).
 //
 // Run explicitly:
 //

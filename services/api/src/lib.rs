@@ -249,9 +249,10 @@ impl ApiError {
             // failed" (502).
             DomainError::RequestTimeout => StatusCode::GATEWAY_TIMEOUT,
             // Per-PN serialisation is a chain invariant: only one
-            // `placeOrder` per trading PN can be in flight. 429 is the
-            // canonical "you sent too many to this PN; back off and
-            // retry" — distinct from a 401 (auth) or 400 (bad order).
+            // chain operation per trading PN can be in flight at a
+            // time. 429 is the canonical "you sent too many to this
+            // PN; back off and retry" — distinct from a 401 (auth)
+            // or 400 (bad order).
             DomainError::OrderPnBusy => StatusCode::TOO_MANY_REQUESTS,
             DomainError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::BAD_REQUEST,
@@ -810,7 +811,15 @@ fn build_new_order_input(
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
-    value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    let s = value?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else if trimmed.len() == s.len() {
+        Some(s)
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// `DELETE /api/v1/order`. Auth hoop verified the request; this
