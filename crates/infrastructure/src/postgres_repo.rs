@@ -516,15 +516,16 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            // numeric(78,0) text → u64 with the same hard cap as the
-            // single-order path. Any value above u64::MAX would mean
-            // an indexer wrote a chain-side id we cannot represent;
-            // surface as MarketInconsistent so retries don't help.
+            // numeric(78,0) → u64: an overflow means the indexer wrote a
+            // chain-side id we cannot represent — read-model corruption,
+            // retries won't help. Wrap as a DomainError so the use case's
+            // `downcast_ref::<DomainError>()` catches it; a plain anyhow!
+            // would fall through to `Unexpected` (500/-1000).
             let order_id = row.order_id.parse::<u64>().map_err(|err| {
-                anyhow!(
+                anyhow!(DomainError::MarketInconsistent).context(format!(
                     "resolve_for_cancel_batch: live_orders.order_id={} overflows u64: {err}",
                     row.order_id,
-                )
+                ))
             })?;
             let client_order_id = row.client_order_id.and_then(|raw| {
                 let trimmed = raw.trim();

@@ -1055,22 +1055,35 @@ async fn delete_batch_orders(
         })?
         .clone();
 
-    let body: CancelBatchOrdersRequest = req.parse_json().await.map_err(|err| {
+    // DELETE-with-required-body: some HTTP proxies / SDKs strip bodies
+    // from DELETE requests. An empty body is shaped like a missing
+    // top-level field (MissingParameter / -1102), distinct from a body
+    // present-but-malformed (InvalidParameter / -1130). auth_hoop has
+    // already cached the bytes via `payload_with_max_size`, so this is
+    // not a second read off the wire.
+    let raw_body = req.payload().await.map_err(|err| {
+        warn!(?err, "DELETE /api/v1/batchOrders payload read failed");
+        ApiError::from(DomainError::InvalidParameter)
+    })?;
+    if raw_body.is_empty() {
+        return Err(ApiError::from(DomainError::MissingParameter));
+    }
+    let body: CancelBatchOrdersRequest = serde_json::from_slice(raw_body).map_err(|err| {
         warn!(?err, "DELETE /api/v1/batchOrders body did not parse");
         ApiError::from(DomainError::InvalidParameter)
     })?;
 
     let (now_seconds, now_ms) = now_pair();
-    let input = build_cancel_batch_orders_input(body, ctx, now_seconds, now_ms)?;
-    let request_order_ids: Vec<u64> = input.order_ids.clone();
+    let input = build_cancel_batch_orders_input(body, ctx, now_seconds)?;
+    let request_len = input.order_ids.len();
 
     let use_case = CancelBatchOrdersUseCase::new(state.repo, state.chain_sender);
     let cancelled = use_case.execute(input).await.map_err(ApiError::from)?;
 
-    // The use case guarantees response order matches input order; the
-    // explicit length check below is defence-in-depth in case that
-    // invariant is ever relaxed.
-    debug_assert_eq!(cancelled.len(), request_order_ids.len());
+    // The use case guarantees one response item per input id, in input
+    // order; this assertion catches a regression in that invariant during
+    // tests.
+    debug_assert_eq!(cancelled.len(), request_len);
 
     let response = cancelled
         .into_iter()
@@ -1093,7 +1106,6 @@ fn build_cancel_batch_orders_input(
     body: CancelBatchOrdersRequest,
     ctx: AuthContext,
     now_seconds: i64,
-    now_ms: i64,
 ) -> Result<CancelBatchOrdersInput, ApiError> {
     let market_address =
         non_empty(body.market_address).ok_or(ApiError::from(DomainError::MissingParameter))?;
@@ -1117,7 +1129,6 @@ fn build_cancel_batch_orders_input(
         symbol: Symbol(symbol),
         order_ids,
         now_seconds,
-        now_ms,
     })
 }
 

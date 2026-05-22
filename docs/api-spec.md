@@ -804,6 +804,17 @@ Response:
 ]
 ```
 
+Response fields (one element per requested `orderId`, in request order):
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `orderId` | STRING | The `orderId` from the request, echoed for correlation. |
+| `clientOrderId` | STRING | The order's `clientOrderId` as recorded on placement. Empty string if the order was placed without one. |
+| `transactTime` | LONG | Server timestamp (Unix ms) when the cancel batch was accepted. Identical across every item — one chain submission, one moment of acceptance. |
+| `status` | ENUM | Always [`PENDING_CANCEL`](#order-status) on success. |
+
+The response confirms acceptance only. The final outcome per id — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/orders`](#orders) shortly after.
+
 ### Cancel All Open Orders On Symbol
 
 ```http

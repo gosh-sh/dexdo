@@ -776,7 +776,6 @@ pub struct CancelBatchOrdersInput {
     pub symbol: Symbol,
     pub order_ids: Vec<u64>,
     pub now_seconds: i64,
-    pub now_ms: i64,
 }
 
 /// Chain-shaped payload handed to `ChainOrderSender::cancel_batch_order`.
@@ -1334,22 +1333,6 @@ where
             return Err(DomainError::InvalidParameter);
         }
 
-        // Intra-batch duplicates would produce two PENDING_CANCEL
-        // receipts for the same id and waste one slot in the chain's
-        // MAX_BATCH_SIZE window — reject before resolving anything.
-        let mut seen: std::collections::HashSet<u64> =
-            std::collections::HashSet::with_capacity(input.order_ids.len());
-        for &id in &input.order_ids {
-            if !seen.insert(id) {
-                warn!(
-                    phase = "shape",
-                    order_ids_len = input.order_ids.len(),
-                    "cancelBatch rejected",
-                );
-                return Err(DomainError::InvalidParameter);
-            }
-        }
-
         let MarketForPlacement { event_id, oracle_list_hash, token_type, status, outcome } = self
             .repo
             .resolve_for_new_order(&input.market_address, &input.symbol, input.now_seconds)
@@ -1372,6 +1355,9 @@ where
         if oracle_list_hash.is_empty() {
             return Err(DomainError::MarketInconsistent);
         }
+        // Cap check runs BEFORE the dedup HashSet allocation and BEFORE
+        // the bulk SELECT so an oversize input is rejected without paying
+        // O(N) memory or a second DB round trip.
         if input.order_ids.len() > outcome.max_batch_size as usize {
             warn!(
                 phase = "shape",
@@ -1380,6 +1366,22 @@ where
                 "cancelBatch rejected",
             );
             return Err(DomainError::InvalidParameter);
+        }
+
+        // Intra-batch duplicates would produce two PENDING_CANCEL
+        // receipts for the same id and waste one slot in the chain's
+        // MAX_BATCH_SIZE window. Bounded by max_batch_size above.
+        let mut seen: std::collections::HashSet<u64> =
+            std::collections::HashSet::with_capacity(input.order_ids.len());
+        for &id in &input.order_ids {
+            if !seen.insert(id) {
+                warn!(
+                    phase = "shape",
+                    order_ids_len = input.order_ids.len(),
+                    "cancelBatch rejected",
+                );
+                return Err(DomainError::InvalidParameter);
+            }
         }
 
         let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
@@ -1412,16 +1414,19 @@ where
             return Err(DomainError::UnknownOrder);
         }
 
+        let rows_len = rows.len();
         let mut by_id: std::collections::HashMap<u64, Option<String>> =
-            std::collections::HashMap::with_capacity(rows.len());
+            std::collections::HashMap::with_capacity(rows_len);
         for row in rows {
             by_id.insert(row.order_id, row.client_order_id);
         }
-        // Defence-in-depth: `live_orders.order_id` is unique per
-        // orderbook (schema invariant) and the input is deduped above,
-        // so `by_id.len() == rows.len()` always. A shortfall would mean
-        // either a corrupted unique constraint or a SELECT returning a
-        // row outside the input set; both surface as UnknownOrder.
+        // `live_orders.order_id` is unique per orderbook (schema PK on
+        // `(orderbook_address, order_id)`) and the input is deduped above,
+        // so `by_id.len() == rows.len()` always. The assertion pins the
+        // invariant: a schema regression that returned the same id twice
+        // would silently overwrite client_order_ids in the response
+        // without triggering the `ok_or(UnknownOrder)` below.
+        debug_assert_eq!(by_id.len(), rows_len);
         let response: Vec<CancelledBatchOrder> = input
             .order_ids
             .iter()
@@ -3035,7 +3040,6 @@ mod tests {
             symbol: Symbol(symbol.into()),
             order_ids,
             now_seconds: 1_000,
-            now_ms: 1_000_000,
         }
     }
 
@@ -3116,6 +3120,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_batch_orders_accepts_exactly_max_batch_size() {
+        // Boundary pin: `outcome.max_batch_size` ids must succeed.
+        // Catches a future off-by-one (e.g. `>=` instead of `>`) at the
+        // cap check that would reject the boundary value.
+        let market = trading_market("PM-YES");
+        let max = test_outcome("PM-YES").max_batch_size as usize;
+        let sender = Arc::new(FakeSender::ok());
+        let live: Vec<FakeCancelableOrder> =
+            (0..max).map(|i| live_order(1000 + i as u64, None)).collect();
+        let repo = FakeRepo::with_live_orders(market, live);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let ids: Vec<u64> = (0..max).map(|i| 1000 + i as u64).collect();
+        let out = uc
+            .execute(base_cancel_batch_input("PM-YES", ids.clone()))
+            .await
+            .expect("max size accepted");
+        assert_eq!(out.len(), max);
+        assert_eq!(sender.cancel_batch_calls()[0].order_ids, ids);
+    }
+
+    #[tokio::test]
     async fn cancel_batch_orders_rejects_above_max_batch_size() {
         // test_outcome().max_batch_size == 5; 6 ids must fail locally
         // with -1130 instead of paying a chain ERR_BATCH_TOO_LARGE.
@@ -3135,7 +3161,7 @@ mod tests {
     async fn cancel_batch_orders_rejects_intra_batch_duplicates() {
         // Two PENDING_CANCEL receipts for the same id would be useless
         // and would also waste a MAX_BATCH_SIZE slot — reject before
-        // touching the read model.
+        // chain submission.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());

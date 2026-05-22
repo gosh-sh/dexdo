@@ -427,6 +427,28 @@ async fn malformed_json_body_returns_400_minus_1130() {
 }
 
 #[tokio::test]
+async fn empty_body_returns_400_minus_1102() {
+    // Some HTTP proxies / SDKs strip bodies from DELETE requests. An
+    // absent body is shaped like the top-level fields being missing —
+    // surface as MissingParameter (-1102), distinct from a body present
+    // but malformed (-1130 above).
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
+    let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
+    let service = setup_with(repo, sender);
+
+    let mut req = TestClient::delete("http://test/api/v1/batchOrders")
+        .add_header("X-DODEX-APIKEY", "fake", true)
+        .add_header("content-type", "application/json", true);
+    for (k, v) in auth_envelope() {
+        req = req.query(k, v);
+    }
+    let mut resp = req.body(Vec::<u8>::new()).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+}
+
+#[tokio::test]
 async fn missing_market_address_returns_400_minus_1102() {
     let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
     let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
@@ -701,4 +723,81 @@ async fn caller_without_trade_permission_returns_401() {
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1002);
+}
+
+// ---- Resolver / timeout boundary -----------------------------------------
+
+/// `ChainOrderSender` whose `cancel_batch_order` hangs longer than any
+/// reasonable test budget. The `entered` counter is bumped on first
+/// dispatch so the timeout test can prove the handler actually reached
+/// the chain sender (rather than failing earlier — at auth, market
+/// resolve, or use-case validation).
+struct SlowCancelBatchSender {
+    entered: std::sync::atomic::AtomicU32,
+}
+
+impl SlowCancelBatchSender {
+    fn new() -> Self {
+        Self { entered: std::sync::atomic::AtomicU32::new(0) }
+    }
+
+    fn entered_count(&self) -> u32 {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ChainOrderSender for SlowCancelBatchSender {
+    async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
+        unreachable!("SlowCancelBatchSender::submit_order called from DELETE /batchOrders test")
+    }
+
+    async fn cancel_order(&self, _: CancelOrderPayload) -> Result<(), DomainError> {
+        unreachable!("SlowCancelBatchSender::cancel_order called from DELETE /batchOrders test")
+    }
+
+    async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
+        unreachable!(
+            "SlowCancelBatchSender::submit_batch_order called from DELETE /batchOrders test"
+        )
+    }
+
+    async fn cancel_batch_order(&self, _: CancelBatchOrderPayload) -> Result<(), DomainError> {
+        self.entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // 5 s is indefinitely longer than any reasonable budget; the
+        // test caps it at 50 ms so wall-clock stays in the tens of ms.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
+    // A chain cancel_batch hanging past `request_timeout` must surface as
+    // 504/-1007 via the timeout hoop, not stall the worker. Symmetric
+    // with the create-batch sibling test.
+    let repo: SharedRepo =
+        Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
+    let sender = Arc::new(SlowCancelBatchSender::new());
+    let sender_dyn: SharedChainSender = sender.clone();
+    let authenticator: SharedAuth =
+        Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
+    let state = AppState::new(repo, authenticator, sender_dyn)
+        .with_request_timeout(std::time::Duration::from_millis(50));
+    let service = Service::new(build_router(state));
+
+    let started = std::time::Instant::now();
+    let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
+    let elapsed = started.elapsed();
+    assert_eq!(resp.status_code, Some(StatusCode::GATEWAY_TIMEOUT));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1007);
+    // Tight bound — well below SlowCancelBatchSender's 5 s sleep —
+    // confirms the hoop actually cancelled the handler.
+    assert!(elapsed < std::time::Duration::from_secs(1), "elapsed {elapsed:?}");
+    // Pin that the cancellation happened MID-`cancel_batch_order`, not
+    // before the handler reached it — otherwise this test would also
+    // pass against an unrelated upstream short-circuit (auth/resolve)
+    // that happens to take >50 ms.
+    assert_eq!(sender.entered_count(), 1, "cancel_batch_order was not entered");
 }

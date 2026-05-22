@@ -88,7 +88,7 @@ impl ChainOrderSender for BeeDexChainSender {
         // `u64::MAX`, so reaching the error arm means the gate was
         // bypassed. Log loudly and fail closed.
         let amount = payload.amount_raw.parse::<u128>().map_err(|err| {
-            error!(?err, raw = %payload.amount_raw, "amount_raw is not uint128");
+            error!(?err, raw = %payload.amount_raw, "amount_raw exceeds uint128");
             DomainError::Unexpected
         })?;
         let client_order_id = payload.client_order_id.parse::<u128>().map_err(|err| {
@@ -214,11 +214,31 @@ impl ChainOrderSender for BeeDexChainSender {
         &self,
         payload: CancelBatchOrderPayload,
     ) -> Result<(), DomainError> {
+        // `order_ids` is the audit trail when a cancel_batch never
+        // returns (`RequestTimeout`) or the gateway raises an unmapped
+        // error: without it, ops cannot reconcile which orderIds the
+        // chain may or may not have forwarded to `OrderBook.executeBatch`.
+        // `classify_chain_outcome` does not carry them on its
+        // error/timeout logs, so this line is the only place they
+        // appear — emit at `info!` so the production default filter
+        // keeps it. Logged BEFORE `build_signer` so a key-shape failure
+        // (rotation-time drift in `accounts.pn_seckey_enc`) still leaves
+        // ops the orderIds the caller intended.
+        info!(
+            entry_point = "cancel_batch",
+            pn = %payload.pn_address,
+            event_id = %payload.event_id,
+            oracle_list_hash = %payload.oracle_list_hash,
+            token_type = payload.token_type,
+            order_count = payload.order_ids.len(),
+            ?payload.order_ids,
+            "submitting cancel_batch",
+        );
+
         let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
 
-        // The application layer caps each `order_id` at u64::MAX; the
-        // chain ABI is uint128[]. Upcast is loss-less. Same constraint
-        // as the single-order cancel path.
+        // The chain ABI is uint128[]; `payload.order_ids` is `Vec<u64>`
+        // at the application boundary, upcast is loss-less.
         let order_ids: Vec<u128> = payload.order_ids.iter().map(|&id| id as u128).collect();
 
         let params = ParamsOfCancelBatch {
@@ -227,25 +247,6 @@ impl ChainOrderSender for BeeDexChainSender {
             token_type: payload.token_type,
             order_ids,
         };
-
-        // `order_ids` is the audit trail when a cancel_batch never
-        // returns (`RequestTimeout`) or the gateway raises an unmapped
-        // error: without it, ops cannot reconcile which orderIds the
-        // chain may or may not have forwarded to `OrderBook.executeBatch`.
-        // `classify_chain_outcome` does not carry them on its
-        // error/timeout logs, so this line is the only place they
-        // appear — emit at `info!` so the production default filter
-        // keeps it. Symmetric with `place_batch`.
-        info!(
-            entry_point = "cancel_batch",
-            pn = %payload.pn_address,
-            event_id = %params.event_id,
-            oracle_list_hash = %params.oracle_list_hash,
-            token_type = params.token_type,
-            order_count = params.order_ids.len(),
-            ?params.order_ids,
-            "submitting cancel_batch",
-        );
 
         let call = self.dex.cancel_batch(&payload.pn_address, params, signer);
         let outcome = timeout(self.cancel_batch_timeout, call).await;
