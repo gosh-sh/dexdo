@@ -654,8 +654,6 @@ Response fields:
 
 The response confirms acceptance only. The final outcome — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/orders`](#orders) shortly after.
 
-An order is cancellable only once it appears in [`GET /api/v1/openOrders`](#current-open-orders) — i.e. after the chain has emitted `OrderPlaced` and the indexer has flipped the row to live. Attempting to cancel before then (status [`PENDING_NEW`](#order-status), still in flight on the chain) returns `-2011 / 404`; the same code surfaces on a second cancel after the order has already moved to [`PENDING_CANCEL`](#order-status).
-
 ### New Batch Orders
 
 ```http
@@ -672,7 +670,7 @@ Body parameters:
 | --- | --- | --- | --- |
 | `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/markets`. An empty array is rejected with `-1130 / 400`. |
+| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/markets`. The backend rejects an empty array before submission with `-1130 / 400`. |
 
 Each order item:
 

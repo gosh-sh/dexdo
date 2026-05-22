@@ -811,15 +811,7 @@ fn build_new_order_input(
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
-    let s = value?;
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        None
-    } else if trimmed.len() == s.len() {
-        Some(s)
-    } else {
-        Some(trimmed.to_string())
-    }
+    value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// `DELETE /api/v1/order`. Auth hoop verified the request; this

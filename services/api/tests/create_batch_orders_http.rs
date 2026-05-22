@@ -870,6 +870,26 @@ async fn pn_busy_returns_429_minus_2014() {
     assert_eq!(err.code, -2014);
 }
 
+#[tokio::test]
+async fn chain_market_inconsistent_returns_503_minus_1500() {
+    // Sender raising `MarketInconsistent` simulates `ERR_BATCH_TOO_LARGE`
+    // (161) or `ERR_EMPTY_BATCH` (162) coming back from the chain — i.e.
+    // the local guard and the chain's defence-in-depth disagree on the
+    // batch-size envelope. The use case classifies that as a service-state
+    // inconsistency, not a client error, and the wire shape must surface
+    // as 503/-1500 so ops sees it instead of the client retrying a -1130.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
+    let sender: SharedChainSender =
+        Arc::new(RecordingBatchSender::failing(DomainError::MarketInconsistent));
+    let service = setup_with(repo, sender);
+
+    let body = valid_body_with(vec![valid_item("11"), valid_item("22")]);
+    let mut resp = post_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1500);
+}
+
 // ---- Authorization -------------------------------------------------------
 
 #[tokio::test]

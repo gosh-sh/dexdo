@@ -984,7 +984,7 @@ fn validate_and_encode_order_item(
         // opaque crash in the request handler. Log the breach so the
         // 500 carries a breadcrumb instead of being a bare wire error.
         (OrderType::Limit, _, None) => {
-            error!("validate_and_encode_order_item: (Limit, _, None) reached — match arms drifted from invariant");
+            error!("validate_and_encode_order_item: (Limit, _, None) reached — price_input resolution invariant (Limit orders carry Some(price)) drifted");
             return Err(DomainError::Unexpected);
         }
     }
