@@ -2612,10 +2612,8 @@ mod tests {
         assert!(payload.is_buy);
         // MARKET items carry `price_raw = "0"` per the encode helper.
         assert_eq!(payload.price_raw, "0");
-        // Pin the MARKET bit specifically — `assert_ne!(flags, 0)`
-        // would pass on any TIF flag escaping into a MARKET payload
-        // (e.g. a future encoder change leaking IOC), defeating the
-        // point of the test.
+        // Pin FLAG_MARKET specifically — `assert_ne!(flags, 0)`
+        // would accept any stray TIF bit and is too loose.
         assert!(payload.flags & FLAG_MARKET != 0, "flags=0x{:02x}", payload.flags);
     }
 

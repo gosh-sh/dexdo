@@ -241,13 +241,11 @@ async fn buy_limit_gtc_against_shellnet() {
         )
         .await;
 
-        // Poll until the order is gone — runs unconditionally on
-        // post_ok, even when the surface poll above timed out. The
-        // chain may have placed the order just past the 60 s surface
-        // budget; in that case `cancel_coids_best_effort` is the only
-        // shot at retiring it, and silently skipping the absence
-        // check would let the order leak with `eprintln!`-only
-        // diagnostics that vanish on a (then-failing) green assert.
+        // Absence-poll: after a POST-OK the chain may hold a live
+        // order, and `cancel_coids_best_effort` reports its errors
+        // only to captured-stderr. This poll is the only path that
+        // turns a leaked order into a recorded test failure instead
+        // of locked collateral on the trading PN.
         let mut cancelled = false;
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_secs(2)).await;

@@ -1,24 +1,9 @@
-// Best-effort `cancel_order_by_client` for the e2e tests. The
-// placement-flow shape is record-then-cancel-then-panic: when a
-// request returns OK, the test may already have live orders on the
-// chain, so failures accumulate in a `Vec<String>`, cleanup runs
-// unconditionally, and a single combined panic fires at the end. This
-// helper is the cleanup step — without it a panic between OK-response
-// and the explicit cancel would leak collateral on the trading PN.
-//
-// The helper never panics — it sits on the cleanup path and a panic
-// here would mask the original test failure. It also never reports
-// upward: every per-attempt failure goes to `eprintln!`, which
-// `cargo test` only surfaces when the *outer* test fails (stderr is
-// captured per-test and replayed only on FAIL). On a green run, all
-// cancel errors here are silent. **Callers MUST follow this call with
-// a `getOrdersByOwner` absence-poll** so a silently-leaked order
-// turns into a real test failure instead of locked collateral.
-//
-// Per-attempt timing: each `cancel_order_by_client` call is wrapped
-// in a 30 s `tokio::time::timeout` so an unreachable shellnet endpoint
-// cannot stall the call indefinitely. The 30 s mirrors the per-op
-// budgets `BeeDexChainSender` uses in the production e2e setup.
+// Best-effort `cancel_order_by_client` for the e2e tests — never
+// panics, never reports upward. Per-attempt errors go to `eprintln!`,
+// which `cargo test` captures and replays only on FAIL, so a green
+// run swallows them silently. **Callers MUST follow each call with a
+// `getOrdersByOwner` absence-poll**, otherwise a leaked order shows
+// up only as locked collateral on the trading PN.
 
 #![allow(dead_code)]
 
@@ -32,28 +17,26 @@ use bee_dex::Dex;
 use super::deploy_market::EphemeralMarket;
 use super::test_pns::TestPn;
 
-/// Per-attempt timeout for `cancel_order_by_client`. Bounds each
-/// retry against a hung or unreachable shellnet endpoint; without it
-/// the SDK call has no inherent ceiling and a single attempt could
-/// stall the entire cleanup path.
+/// Per-attempt timeout — bounds cleanup against a hung gateway.
 const CANCEL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Gap between retry attempts. Matches the 2 s tick used in the
-/// surface / absence polls so a transient shellnet hiccup gets a
-/// fresh attempt at the next likely-healthy moment.
+/// Pause between retries.
 const CANCEL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Maximum cancel attempts per coid. Five gives roughly a minute of
-/// total cover (worst case: 5 × 30 s timeout + 4 × 2 s backoff =
-/// ~158 s) before the helper gives up and moves on.
+/// Number of cancel attempts per coid before giving up.
 const CANCEL_MAX_ATTEMPTS: u32 = 5;
 
 /// Fire `cancel_order_by_client` for every coid in `coids` against the
-/// shellnet `Dex`. Each coid gets up to `CANCEL_MAX_ATTEMPTS` tries
-/// wrapped in a `CANCEL_ATTEMPT_TIMEOUT`, with `CANCEL_RETRY_BACKOFF`
+/// shellnet `Dex`, retrying each up to `CANCEL_MAX_ATTEMPTS` with a
+/// per-attempt `CANCEL_ATTEMPT_TIMEOUT` and `CANCEL_RETRY_BACKOFF`
 /// between attempts. Logs and continues on every failure shape (chain
 /// error, timeout) — the caller is already on the cleanup path and a
 /// panic here would swallow the real test failure.
+///
+/// `label` is the prefix on each `eprintln!`; with `cargo test
+/// --nocapture` and parallel `--ignored` runs, per-test stderr capture
+/// is bypassed and the label is the only thing that disambiguates
+/// interleaved output across the e2e tests.
 ///
 /// **The caller is responsible for verifying the order is actually
 /// gone**: every error here lands in captured-stderr that only shows
