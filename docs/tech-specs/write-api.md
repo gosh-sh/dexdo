@@ -580,7 +580,9 @@ One SELECT joins [`live_orders`](data-schema.md#live_orders) against the resolve
 
 The SELECT also returns each row's `live_orders.client_order_id` (echoed in the response). The use case asserts `rows.len() == input.order_ids.len()`; any shortfall — unknown id, wrong owner, wrong book, already closed — surfaces as `UnknownOrder` → 404 / -2011 for the whole batch, with the same deliberate opacity as single-order DELETE (differentiating those cases would leak order existence and account binding). Validation is atomic: no chain message is sent if any item is unresolved.
 
-This is the new `MarketReadRepository::resolve_for_cancel_batch` method. It mirrors `resolve_for_cancel`'s join shape (live_orders ⨝ markets ⨝ market_outcomes) but with `lo.order_id = ANY(:orderIds)` and returns `Vec<{order_id, client_order_id}>` — one row per matched id, order not guaranteed. The use case reorders into the request's `orderIds[]` sequence by `order_id` and assembles the response array there; a missing id surfaces as `UnknownOrder` for the whole batch.
+This is the new `MarketReadRepository::resolve_for_cancel_batch` method. It mirrors `resolve_for_cancel`'s join shape (live_orders ⨝ markets ⨝ market_outcomes) but with `lo.order_id = ANY(:orderIds)` and returns `Vec<{order_id, client_order_id, market_status}>` — one row per matched id, order not guaranteed. The use case reorders into the request's `orderIds[]` sequence by `order_id` and assembles the response array there; a missing id surfaces as `UnknownOrder` for the whole batch.
+
+The bulk SELECT projects the same market-timing columns as `resolve_for_cancel` and runs `compute_status` once per row, so each row's `market_status` comes from the same MVCC snapshot that matched the order. The use case re-checks `rows[0].market_status == Trading` after the shortfall gate and rejects with `OrderValidationFailed` otherwise. Single-cancel achieves the same atomicity in one SELECT; for the batch path the placement-shape lookup (`resolve_for_new_order`) and the bulk order resolution run in two independent statements, and without the post-SELECT re-check a reconciler commit between them could let `cancelBatch` reach the chain on a market that had just left `Trading`.
 
 ### Chain submission
 
@@ -640,7 +642,7 @@ Transport-level failures (gateway drop, decode error) collapse to `Unexpected` �
 | Mandatory body field missing | `MissingParameter` | 400 |
 | Any `orderId` not numeric or overflows u64; empty `orderIds[]`; length above `max_batch_size`; intra-batch duplicate | `InvalidParameter` | 400 |
 | Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
-| Reconciled market with NULL `oracle_list_hash`, or chain `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` (read-model drift from on-chain ceiling) | `MarketInconsistent` | 503 |
+| Reconciled market with NULL `oracle_list_hash`; chain `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` (read-model drift from on-chain ceiling); bulk SELECT returns duplicate `order_id` (live_orders PK violation — read-model corruption) | `MarketInconsistent` | 503 |
 | Any `orderId` does not resolve to an OPEN order owned by the caller on the resolved outcome (covers unknown order, wrong owner, wrong market, already closed) | `UnknownOrder` | 404 |
 | Resolved market `status != TRADING` | `OrderValidationFailed` | 400 |
 | Chain `ERR_NOTE_BUSY` (per-PN serial; another op still in flight) | `OrderPnBusy` | 429 |

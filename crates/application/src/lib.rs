@@ -208,12 +208,20 @@ pub trait MarketReadRepository: Send + Sync {
     /// requested, and the use case collapses any shortfall to
     /// `DomainError::UnknownOrder`. Non-domain errors from the SELECT
     /// surface through `anyhow`.
+    ///
+    /// Each returned row carries `market_status` derived from the same
+    /// `markets` row the order is joined against and `now`. The use case
+    /// re-checks this status post-SELECT so a market that flipped out
+    /// of `Trading` between the placement-shape lookup and this bulk
+    /// resolution still rejects with `OrderValidationFailed` instead of
+    /// reaching the chain.
     async fn resolve_for_cancel_batch(
         &self,
         market_address: &MarketAddress,
         symbol: &Symbol,
         order_ids: &[u64],
         owner_pn_address: &str,
+        now: i64,
     ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error>;
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error>;
@@ -260,8 +268,11 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         symbol: &Symbol,
         order_ids: &[u64],
         owner_pn_address: &str,
+        now: i64,
     ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
-        (**self).resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address).await
+        (**self)
+            .resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address, now)
+            .await
     }
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
@@ -804,6 +815,13 @@ pub struct CancelBatchOrderRow {
     /// handler renders that as the empty string per
     /// api-spec §Cancel Batch Orders.
     pub client_order_id: Option<String>,
+    /// `MarketStatus` derived from the same `markets` row the JOIN
+    /// matched, evaluated at the use-case-provided `now`. Constant
+    /// across rows in any one result set (the SELECT is filtered to
+    /// one `(pmp_address, symbol)` pair). The use case re-checks this
+    /// post-SELECT to close the race window against the earlier
+    /// `resolve_for_new_order` snapshot.
+    pub market_status: MarketStatus,
 }
 
 /// Output of `CancelBatchOrdersUseCase`. One entry per request item, in
@@ -1393,6 +1411,7 @@ where
                 &input.symbol,
                 &input.order_ids,
                 &input.trading_pn.pn_address,
+                input.now_seconds,
             )
             .await
             .map_err(|err| {
@@ -1414,19 +1433,50 @@ where
             return Err(DomainError::UnknownOrder);
         }
 
+        // Authoritative status re-check: `resolve_for_new_order` above
+        // ran in its own MVCC snapshot. Between the two queries the
+        // reconciler can flip the market out of `Trading` (e.g. to
+        // `Resolving` or `Cancelled`), but `resolve_for_cancel_batch`'s
+        // predicate set only filters by `last_reconciled_at IS NOT NULL`
+        // — it does not re-derive status. Without this gate the batch
+        // could dispatch `PrivateNote.cancelBatch` against a market
+        // that single-cancel would have rejected. `rows` is non-empty
+        // here (the shortfall branch above returned), and every row
+        // carries the same market_status because the JOIN is filtered
+        // to one `(pmp_address, symbol)`.
+        if rows[0].market_status != MarketStatus::Trading {
+            return Err(DomainError::OrderValidationFailed);
+        }
+
         let rows_len = rows.len();
         let mut by_id: std::collections::HashMap<u64, Option<String>> =
             std::collections::HashMap::with_capacity(rows_len);
         for row in rows {
             by_id.insert(row.order_id, row.client_order_id);
         }
-        // `live_orders.order_id` is unique per orderbook (schema PK on
-        // `(orderbook_address, order_id)`) and the input is deduped above,
-        // so `by_id.len() == rows.len()` always. The assertion pins the
-        // invariant: a schema regression that returned the same id twice
-        // would silently overwrite client_order_ids in the response
-        // without triggering the `ok_or(UnknownOrder)` below.
-        debug_assert_eq!(by_id.len(), rows_len);
+        // `live_orders` is PK'd on `(orderbook_address, order_id)`,
+        // and the SELECT filters to one `(pmp_address, symbol)` →
+        // one orderbook → one row per `order_id`. Input is deduped
+        // above, so `by_id.len() == rows_len` always. A schema
+        // regression that yields two rows for the same id would lose
+        // one client_order_id to the HashMap's last-insert-wins
+        // semantics; the resulting `by_id.len() < rows_len` is
+        // read-model corruption (peer of the NULL-`oracle_list_hash`
+        // case in `resolve_for_*`), so surface it as the same
+        // `MarketInconsistent` → 503 / -1500 the spec maps that
+        // class of corruption to, rather than letting it mask as
+        // `UnknownOrder` further down through the `remove`/`ok_or`
+        // chain.
+        if by_id.len() != rows_len {
+            warn!(
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                rows_len,
+                unique_ids = by_id.len(),
+                "resolve_for_cancel_batch returned duplicate order_ids (read-model corruption)",
+            );
+            return Err(DomainError::MarketInconsistent);
+        }
         let response: Vec<CancelledBatchOrder> = input
             .order_ids
             .iter()
@@ -1578,6 +1628,17 @@ mod tests {
         market: Option<Market>,
         cancelable_order: Option<FakeCancelableOrder>,
         live_orders: Vec<FakeCancelableOrder>,
+        /// Lets a test simulate a race between `resolve_for_new_order`
+        /// and `resolve_for_cancel_batch`: `self.market.status` answers
+        /// the first call (placement-shape snapshot), this override
+        /// answers the second (order-resolution snapshot). `None`
+        /// means "same status as the market" — the no-race default.
+        cancel_batch_status_override: Option<MarketStatus>,
+        /// When true, `resolve_for_cancel_batch` emits the first
+        /// matched row twice. Models the read-model corruption case
+        /// where the bulk SELECT yields duplicate `order_id` values
+        /// despite the (orderbook_address, order_id) PK.
+        cancel_batch_duplicate_first_row: bool,
         orders_response: OrdersPage,
         recorded_orders_queries: Mutex<Vec<OrdersQuery>>,
     }
@@ -1592,6 +1653,8 @@ mod tests {
                 market: Some(market),
                 cancelable_order: None,
                 live_orders: Vec::new(),
+                cancel_batch_status_override: None,
+                cancel_batch_duplicate_first_row: false,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1602,6 +1665,8 @@ mod tests {
                 market: None,
                 cancelable_order: None,
                 live_orders: Vec::new(),
+                cancel_batch_status_override: None,
+                cancel_batch_duplicate_first_row: false,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1612,6 +1677,8 @@ mod tests {
                 market: Some(market),
                 cancelable_order: Some(order),
                 live_orders: Vec::new(),
+                cancel_batch_status_override: None,
+                cancel_batch_duplicate_first_row: false,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1622,9 +1689,24 @@ mod tests {
                 market: Some(market),
                 cancelable_order: None,
                 live_orders: orders,
+                cancel_batch_status_override: None,
+                cancel_batch_duplicate_first_row: false,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Builder that ONLY affects the bulk-cancel SELECT's status,
+        /// leaving `resolve_for_new_order` to answer with the market's
+        /// declared status. Models the inter-SELECT race directly.
+        fn with_cancel_batch_status(mut self, status: MarketStatus) -> Self {
+            self.cancel_batch_status_override = Some(status);
+            self
+        }
+
+        fn with_cancel_batch_duplicate_first_row(mut self) -> Self {
+            self.cancel_batch_duplicate_first_row = true;
+            self
         }
 
         fn recorded_orders_queries(&self) -> Vec<OrdersQuery> {
@@ -1716,6 +1798,7 @@ mod tests {
             symbol: &Symbol,
             order_ids: &[u64],
             owner_pn_address: &str,
+            _: i64,
         ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
             // Mirror Postgres impl: any predicate miss simply yields
             // fewer rows than asked. The use case promotes a shortfall
@@ -1726,7 +1809,8 @@ mod tests {
             if !market.outcomes.iter().any(|o| o.symbol == *symbol) {
                 return Ok(Vec::new());
             }
-            let rows = order_ids
+            let market_status = self.cancel_batch_status_override.unwrap_or(market.status);
+            let mut rows: Vec<CancelBatchOrderRow> = order_ids
                 .iter()
                 .filter_map(|&id| {
                     self.live_orders
@@ -1736,8 +1820,18 @@ mod tests {
                 .map(|o| CancelBatchOrderRow {
                     order_id: o.order_id,
                     client_order_id: o.client_order_id.clone(),
+                    market_status,
                 })
                 .collect();
+            if self.cancel_batch_duplicate_first_row && rows.len() >= 2 {
+                // Realistic shape of read-model corruption: a join
+                // pathology yields the first id twice while another id
+                // is silently dropped, so `rows.len() == input.len()`
+                // (shortfall check passes) but `by_id` collapses to
+                // fewer unique keys than the input — exactly the case
+                // the use case must catch as MarketInconsistent.
+                rows[1] = rows[0].clone();
+            }
             Ok(rows)
         }
 
@@ -3187,6 +3281,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_batch_orders_rejects_when_market_flips_between_selects() {
+        // `resolve_for_new_order` sees `Trading` (the placement-shape
+        // snapshot); `resolve_for_cancel_batch` then returns rows
+        // tagged `Resolving` (the order-resolution snapshot). Without
+        // the post-SELECT status re-check the request would dispatch
+        // `cancelBatch` against a market that single-cancel would
+        // reject — single-cancel does both reads in one atomic JOIN
+        // and naturally sees the later state. Pins the race-window
+        // closure.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let repo =
+            FakeRepo::with_live_orders(market, vec![live_order(1, None), live_order(2, None)])
+                .with_cancel_batch_status(MarketStatus::Resolving);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
     async fn cancel_batch_orders_rejects_when_market_missing_oracle_list_hash() {
         let mut market = trading_market("PM-YES");
         market.oracle_list_hash = String::new();
@@ -3232,6 +3348,28 @@ mod tests {
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::UnknownOrder);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_duplicate_rows_as_market_inconsistent() {
+        // `live_orders` is PK'd on (orderbook_address, order_id), so
+        // the bulk SELECT MUST return at most one row per id. A
+        // schema/JOIN regression that produces two rows for the same
+        // id is read-model corruption — peer of the NULL-
+        // oracle_list_hash case. Surface as MarketInconsistent (503)
+        // rather than letting the HashMap's last-insert-wins silently
+        // mask one client_order_id and the request fail downstream
+        // as UnknownOrder, which would mislead ops.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let repo =
+            FakeRepo::with_live_orders(market, vec![live_order(1, Some("a")), live_order(2, None)])
+                .with_cancel_batch_duplicate_first_row();
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
         assert!(sender.cancel_batch_calls().is_empty());
     }
 

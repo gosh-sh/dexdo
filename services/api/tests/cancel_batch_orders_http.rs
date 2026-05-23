@@ -172,6 +172,7 @@ impl MarketReadRepository for FakeRepo {
         _: &Symbol,
         order_ids: &[u64],
         _: &str,
+        _: i64,
     ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
         // Production Postgres returns matching rows in arbitrary order;
         // when `scrambled_rows` is set we reverse to verify the use
@@ -286,7 +287,11 @@ fn trading_market() -> Market {
 }
 
 fn row(order_id: u64, coid: Option<&str>) -> CancelBatchOrderRow {
-    CancelBatchOrderRow { order_id, client_order_id: coid.map(|s| s.to_string()) }
+    CancelBatchOrderRow {
+        order_id,
+        client_order_id: coid.map(|s| s.to_string()),
+        market_status: MarketStatus::Trading,
+    }
 }
 
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {

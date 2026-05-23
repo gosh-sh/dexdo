@@ -479,6 +479,7 @@ async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
             &Symbol(symbol.into()),
             &[1001, 1002, 1003],
             pn,
+            NOW_TRADING,
         )
         .await
         .expect("bulk resolve happy path");
@@ -487,10 +488,14 @@ async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].order_id, 1001);
     assert_eq!(rows[0].client_order_id.as_deref(), Some("a"));
+    assert_eq!(rows[0].market_status, MarketStatus::Trading);
     assert_eq!(rows[1].order_id, 1002);
     assert_eq!(rows[1].client_order_id.as_deref(), Some("b"));
     assert_eq!(rows[2].order_id, 1003);
     assert!(rows[2].client_order_id.is_none());
+    // All rows joined the same `markets` row, so all carry the same
+    // status — the use case picks rows[0] and that pick is safe.
+    assert!(rows.iter().all(|r| r.market_status == MarketStatus::Trading));
 }
 
 #[tokio::test]
@@ -516,6 +521,7 @@ async fn resolve_for_cancel_batch_partial_shortfall_returns_only_matching() {
             &Symbol(symbol.into()),
             &[2001, 2002, 2003],
             pn,
+            NOW_TRADING,
         )
         .await
         .expect("bulk resolve partial shortfall");
@@ -551,6 +557,7 @@ async fn resolve_for_cancel_batch_wrong_owner_filtered_out() {
             &Symbol(symbol.into()),
             &[3001, 3002, 3099],
             mine,
+            NOW_TRADING,
         )
         .await
         .expect("bulk resolve with wrong owner mixed in");
@@ -615,8 +622,50 @@ async fn resolve_for_cancel_batch_pre_reconcile_market_invisible() {
             &Symbol(symbol.into()),
             &[4001, 4002],
             pn,
+            NOW_TRADING,
         )
         .await
         .expect("pre-reconcile bulk resolve should return empty, not error");
     assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_carries_resolving_status_when_now_past_result_start() {
+    // Now that the use case re-checks market_status from the bulk
+    // SELECT to close the race against `resolve_for_new_order`'s
+    // earlier snapshot, the repo must derive status from the same row
+    // that produced the orders. Seed timings make the market RESOLVING
+    // at `NOW_RESOLVING`; rows still satisfy the order-level predicates
+    // (status='OPEN', amount_remaining>0) and surface, but with
+    // `market_status = Resolving` so the use case rejects the batch
+    // with `OrderValidationFailed` before chain dispatch.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_resolving_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_RESOLVING_YES";
+    let pn = "0:resolve_cancel_batch_resolving_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, 5001, 7, pn, "OPEN", "1500000", Some("r")).await;
+
+    // result_start = 1_700_000_300; result_end = 1_700_000_400; frozen
+    // is set. 1_700_000_350 lands the market in RESOLVING per
+    // `compute_status`.
+    const NOW_RESOLVING: i64 = 1_700_000_350;
+
+    let rows = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[5001],
+            pn,
+            NOW_RESOLVING,
+        )
+        .await
+        .expect("bulk resolve carries derived status");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].order_id, 5001);
+    assert_eq!(rows[0].market_status, MarketStatus::Resolving);
 }

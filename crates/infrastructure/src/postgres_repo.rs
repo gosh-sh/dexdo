@@ -483,16 +483,27 @@ impl MarketReadRepository for PostgresReadModelRepository {
         symbol: &Symbol,
         order_ids: &[u64],
         owner_pn_address: &str,
+        now: i64,
     ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
         // Mirror `resolve_for_cancel`'s join shape (live_orders ⨝
         // markets ⨝ market_outcomes) but with `lo.order_id = ANY(...)`.
         // `lo.order_id` is numeric(78,0); bind the array as text[] and
         // cast to numeric[] inside the query — same pattern the single
-        // path uses for the scalar bind.
+        // path uses for the scalar bind. Market timing columns project
+        // in the same statement so `compute_status` runs against the
+        // snapshot that matched the orders, not an earlier one.
         let order_ids_decimal: Vec<String> = order_ids.iter().map(|id| id.to_string()).collect();
         let rows: Vec<CancelBatchRow> = sqlx::query_as(
             r#"select lo.order_id::text       as order_id,
-                      lo.client_order_id      as client_order_id
+                      lo.client_order_id      as client_order_id,
+                      m.stake_start           as stake_start,
+                      m.stake_end             as stake_end,
+                      m.result_start          as result_start,
+                      m.result_end            as result_end,
+                      m.frozen_at             as frozen_at,
+                      m.resolved_at           as resolved_at,
+                      m.cancelled_at          as cancelled_at,
+                      m.is_cancelled          as is_cancelled
                  from live_orders lo
                  join markets m on m.orderbook_address = lo.orderbook_address
                  join market_outcomes mo
@@ -516,17 +527,18 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            // numeric(78,0) → u64: an overflow means the indexer wrote a
-            // chain-side id we cannot represent — read-model corruption,
-            // retries won't help. Wrap as a DomainError so the use case's
-            // `downcast_ref::<DomainError>()` catches it; a plain anyhow!
-            // would fall through to `Unexpected` (500/-1000).
-            let order_id = row.order_id.parse::<u64>().map_err(|err| {
-                anyhow!(DomainError::MarketInconsistent).context(format!(
-                    "resolve_for_cancel_batch: live_orders.order_id={} overflows u64: {err}",
-                    row.order_id,
-                ))
-            })?;
+            // Invariant: `lo.order_id = ANY($3::text[]::numeric[])` only
+            // matches rows whose `order_id` numerically equals one of the
+            // bound values; the bind array `order_ids_decimal` is built
+            // from `&[u64]` via `id.to_string()`, so every value in it
+            // is ≤ `u64::MAX`. Therefore any matched row's `order_id` is
+            // u64-representable and this parse cannot fail. A future
+            // widening of the application-layer type past u64 (e.g.
+            // u128, decimal-string) will trip the `expect` and flag this
+            // call site as one of the places the type also needs to grow.
+            let order_id = row.order_id.parse::<u64>().expect(
+                "resolve_for_cancel_batch: live_orders.order_id matched a u64-bound ANY filter",
+            );
             let client_order_id = row.client_order_id.and_then(|raw| {
                 let trimmed = raw.trim();
                 if trimmed.is_empty() {
@@ -535,7 +547,18 @@ impl MarketReadRepository for PostgresReadModelRepository {
                     Some(trimmed.to_string())
                 }
             });
-            out.push(CancelBatchOrderRow { order_id, client_order_id });
+            let market_status = compute_status(
+                row.cancelled_at,
+                row.is_cancelled,
+                row.resolved_at,
+                row.stake_start,
+                row.stake_end,
+                row.result_start,
+                row.result_end,
+                row.frozen_at,
+                now,
+            );
+            out.push(CancelBatchOrderRow { order_id, client_order_id, market_status });
         }
         Ok(out)
     }
@@ -771,6 +794,18 @@ struct CancelRow {
 struct CancelBatchRow {
     order_id: String,
     client_order_id: Option<String>,
+    // Market timing columns join in the same statement as the order
+    // row, so `compute_status` runs against the snapshot that produced
+    // this `live_orders` row — closing the race against
+    // `resolve_for_new_order`'s separate MVCC view.
+    stake_start: Option<i64>,
+    stake_end: Option<i64>,
+    result_start: Option<i64>,
+    result_end: Option<i64>,
+    frozen_at: Option<i64>,
+    resolved_at: Option<i64>,
+    cancelled_at: Option<i64>,
+    is_cancelled: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
