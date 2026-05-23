@@ -609,7 +609,7 @@ One `PENDING_CANCEL` envelope per accepted item, returned as a flat array in req
 | --- | --- |
 | `orderId` | Echoed from the request item. |
 | `clientOrderId` | Per-item `live_orders.client_order_id` from the resolved row. Empty string when the column is NULL. |
-| `transactTime` | `now_millis()` captured once at the start of the handler, repeated for every item — one chain submission, one moment of acceptance. |
+| `transactTime` | `now_pair()` captured once at the start of the handler, repeated for every item — one chain submission, one moment of acceptance. |
 | `status` | Always `"PENDING_CANCEL"` — `PrivateNote.cancelBatch` has accepted the request and forwarded to OrderBook, but no order has been removed from the book yet. Each `OrderCancelled` event surfaces individually through the indexer. |
 
 ### Failure surface
@@ -626,7 +626,7 @@ Three failure classes — two synchronous, one async — same split as `DELETE /
    | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the read-model's `max_batch_size` drifted from the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
    | any other `tvm_exit` code | unmapped chain code | `Unexpected` → 500 / -1000, logged at `error` for ops triage |
 
-3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancels from its internal queue in a later transaction. The single-order DELETE's three async outcomes (race with fill/earlier cancel, owner mismatch under read-model corruption, queue overflow) extend to the batch case **per order**: the batch as a whole can have some ids land as `CANCELED`, some as `FILLED` (matching raced the cancel), and — under queue overflow — some remain `OPEN`. The indexer projects each outcome independently into `live_orders`; clients reconcile by polling `/api/v1/openOrders` (each cancelled id disappears) and `/api/v1/allOrders` (each terminal outcome surfaces).
+3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancels from its internal queue in a later transaction. The single-order DELETE's three async outcomes (race with fill/earlier cancel, owner mismatch under read-model corruption, queue overflow) extend to the batch case **per order**: the batch as a whole can have some ids land as `CANCELED`, some as `FILLED` (matching raced the cancel), and — under queue overflow — some remain `OPEN`. The indexer projects each outcome independently into `live_orders`; clients reconcile by polling `/api/v1/orders` (cancelled ids leave the OPEN slice, and any terminal outcome flips the stored status to `CANCELED` or `FILLED`).
 
    An HTTP 200 `PENDING_CANCEL` array is therefore not a guarantee that every cancel will land — it confirms only that `PrivateNote.cancelBatch` accepted the request.
 
@@ -654,7 +654,7 @@ Transport-level failures (gateway drop, decode error) collapse to `Unexpected` �
 | Layer | Responsibility |
 | --- | --- |
 | `crates/domain` | No new types — `OrderStatus::PendingCancel` is reused. |
-| `crates/application` | `CancelBatchOrdersInput` (HTTP-shaped), `CancelBatchOrderPayload` (chain-shaped, one per batch), `CancelledBatchOrder` per-item (`order_id`, `client_order_id`); `CancelBatchOrdersUseCase`. Extends `ChainOrderSender` with `cancel_batch_order`. Extends `MarketReadRepository` with `resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address)` returning `Vec<OrderForCancelBatch{order_id, client_order_id, market_status}>` — the use case reorders by input. |
+| `crates/application` | `CancelBatchOrdersInput` (HTTP-shaped), `CancelBatchOrderPayload` (chain-shaped, one per batch), `CancelledBatchOrder` per-item (`order_id`, `client_order_id`); `CancelBatchOrdersUseCase`. Extends `ChainOrderSender` with `cancel_batch_order`. Extends `MarketReadRepository` with `resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address, now)` returning `Vec<OrderForCancelBatch{order_id, client_order_id, market_status}>` — the use case reorders by input. |
 | `crates/infrastructure` | `BeeDexChainSender::cancel_batch_order` wraps `bee_dex::Dex::cancel_batch` and packs `order_ids: Vec<u64>` into the `uint128[]` chain ABI. `PostgresReadModelRepository::resolve_for_cancel_batch` runs the bulk SELECT with `ANY(:orderIds)`. `ChainSection` grows `cancel_batch_timeout_ms` with the same validation invariant as the existing timeouts. |
 | `services/api` | `delete_batch_orders` handler attached as `Router::with_path("api/v1/batchOrders").delete(delete_batch_orders)` on the existing auth subrouter (alongside `.post(create_batch_orders)`). HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` extends the `BeeDexChainSender` constructor with `Duration::from_millis(config.chain.cancel_batch_timeout_ms)`. |
 

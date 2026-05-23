@@ -22,7 +22,6 @@ use dodex_application::AuthContext;
 use dodex_application::AuthenticateRequest;
 use dodex_application::Authenticator;
 use dodex_application::CancelBatchOrderPayload;
-use dodex_application::OrderForCancelBatch;
 use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::MarketForPlacement;
@@ -31,6 +30,7 @@ use dodex_application::MarketsRequest;
 use dodex_application::NewBatchOrderPayload;
 use dodex_application::NewOrderPayload;
 use dodex_application::OrderForCancel;
+use dodex_application::OrderForCancelBatch;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
 use dodex_application::TradingPn;
@@ -89,12 +89,25 @@ impl Authenticator for FakeAuthenticator {
 /// production rows can come back in any order.
 struct FakeRepo {
     market: Mutex<Option<Market>>,
-    rows: Mutex<Vec<OrderForCancelBatch>>,
+    /// Pair of (owner_pn_address, row). Default owner for rows added
+    /// via `with_market_and_rows` is `PN_ADDRESS`; cross-account tests
+    /// use `with_market_and_owned_rows` to seed rows owned by another
+    /// account so the production `lo.owner_pn_address = $4` predicate
+    /// stays modelled at the HTTP boundary.
+    rows: Mutex<Vec<(String, OrderForCancelBatch)>>,
     scrambled_rows: bool,
 }
 
 impl FakeRepo {
     fn with_market_and_rows(market: Market, rows: Vec<OrderForCancelBatch>) -> Self {
+        let owned = rows.into_iter().map(|r| (PN_ADDRESS.to_string(), r)).collect();
+        Self { market: Mutex::new(Some(market)), rows: Mutex::new(owned), scrambled_rows: false }
+    }
+
+    fn with_market_and_owned_rows(
+        market: Market,
+        rows: Vec<(String, OrderForCancelBatch)>,
+    ) -> Self {
         Self { market: Mutex::new(Some(market)), rows: Mutex::new(rows), scrambled_rows: false }
     }
 
@@ -171,17 +184,23 @@ impl MarketReadRepository for FakeRepo {
         _: &MarketAddress,
         _: &Symbol,
         order_ids: &[u64],
-        _: &str,
+        owner_pn_address: &str,
         _: i64,
     ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
         // Production Postgres returns matching rows in arbitrary order;
         // when `scrambled_rows` is set we reverse to verify the use
-        // case reorders into the request sequence. Filter by input ids
-        // so a "request fewer than stored" case (the rare overlap-
-        // scenario) still works.
+        // case reorders into the request sequence. Owner and id filters
+        // mirror the production predicate set so a regression that
+        // drops `lo.owner_pn_address = $4` would actually fail an HTTP
+        // test, not slip through silently.
         let stored = self.rows.lock().unwrap().clone();
-        let mut matched: Vec<OrderForCancelBatch> =
-            stored.into_iter().filter(|r| order_ids.iter().any(|&id| id == r.order_id)).collect();
+        let mut matched: Vec<OrderForCancelBatch> = stored
+            .into_iter()
+            .filter(|(owner, row)| {
+                owner == owner_pn_address && order_ids.iter().any(|&id| id == row.order_id)
+            })
+            .map(|(_, row)| row)
+            .collect();
         if self.scrambled_rows {
             matched.reverse();
         }
@@ -684,6 +703,31 @@ async fn partial_shortfall_rejects_whole_batch_with_minus_2011() {
     let service = setup_with(repo, chain_sender);
 
     let mut resp = delete_batch(&service, valid_body(vec!["1", "2"])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -2011);
+    assert!(sender.calls().is_empty());
+}
+
+#[tokio::test]
+async fn wrong_owner_returns_404_minus_2011() {
+    // Pins the `lo.owner_pn_address = $4` predicate at the HTTP
+    // boundary: a row owned by another account must be invisible to
+    // this caller, collapsing the batch into a shortfall → -2011 with
+    // the same deliberate opacity as single-cancel. Without the fake's
+    // owner filter, a regression that drops the predicate from
+    // postgres_repo.rs would only be caught by the pg integration
+    // tests.
+    let foreign_row = row(1, Some("attackers-coid"));
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market_and_owned_rows(
+        trading_market(),
+        vec![("0:someone-else".to_string(), foreign_row)],
+    ));
+    let sender = Arc::new(RecordingCancelBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -2011);

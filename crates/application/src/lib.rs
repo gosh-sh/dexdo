@@ -1455,10 +1455,12 @@ where
         for row in rows {
             by_id.insert(row.order_id, row.client_order_id);
         }
-        // Two rows for one `order_id` collapse to one entry under
-        // HashMap last-insert-wins; surface as MarketInconsistent so
-        // read-model corruption is visible to ops, not masked as
-        // UnknownOrder by the input-ordered reassembly below.
+        // `live_orders` is PK'd on `(orderbook_address, order_id)`, so
+        // two rows for one id are only possible under read-model
+        // corruption. HashMap last-insert-wins would collapse them
+        // silently; surface as MarketInconsistent instead so corruption
+        // is visible to ops, not masked as UnknownOrder by the
+        // input-ordered reassembly below.
         if by_id.len() != rows_len {
             warn!(
                 market_address = %input.market_address.0,
@@ -1811,7 +1813,13 @@ mod tests {
                 })
                 .map(|o| OrderForCancelBatch {
                     order_id: o.order_id,
-                    client_order_id: o.client_order_id.clone(),
+                    // Mirror Postgres: NULL or whitespace-only
+                    // `client_order_id` demotes to `None` so the
+                    // fake doesn't hide trim drift from unit tests.
+                    client_order_id: o.client_order_id.as_ref().and_then(|raw| {
+                        let trimmed = raw.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                    }),
                     market_status,
                 })
                 .collect();

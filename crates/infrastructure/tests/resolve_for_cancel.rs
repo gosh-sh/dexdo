@@ -7,8 +7,8 @@
 use std::env;
 use std::time::Duration;
 
-use dodex_application::OrderForCancelBatch;
 use dodex_application::MarketReadRepository;
+use dodex_application::OrderForCancelBatch;
 use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;

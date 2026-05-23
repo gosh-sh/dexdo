@@ -35,9 +35,9 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsRequest;
 use dodex_application::NewBatchOrderPayload;
 use dodex_application::NewOrderPayload;
+use dodex_application::OrderForCancel;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
-use dodex_application::OrderForCancel;
 use dodex_application::TradingPn;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -229,9 +229,7 @@ impl ChainOrderSender for RecordingBatchSender {
         &self,
         _: dodex_application::CancelBatchOrderPayload,
     ) -> Result<(), DomainError> {
-        unreachable!(
-            "RecordingBatchSender::cancel_batch_order called from POST /batchOrders test"
-        )
+        unreachable!("RecordingBatchSender::cancel_batch_order called from POST /batchOrders test")
     }
 }
 
