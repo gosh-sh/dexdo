@@ -548,7 +548,7 @@ Top-level body fields:
 | --- | --- | --- |
 | `marketAddress` | `MarketAddress` | Mandatory. |
 | `symbol` | `Symbol` | Mandatory. |
-| `orderIds` | `Vec<String>` | Mandatory and non-empty. Maximum length equals the resolved outcome's `max_batch_size`. Each element is parsed as `u64::from_str` in the use case; out-of-range or non-numeric → `InvalidParameter` → 400 / -1130 — same `arbitrary_precision` constraint documented for the single-order path. A blank or whitespace-only element is treated as an absent slot and surfaces as `MissingParameter` → 400 / -1102, matching the single-order DELETE's handling of a blank `orderId` query value. |
+| `orderIds` | `Vec<String>` | Mandatory and non-empty. Maximum length equals the resolved outcome's `max_batch_size`. Each element is parsed as `u64::from_str` in the handler (`build_cancel_batch_orders_input`); out-of-range or non-numeric → `InvalidParameter` → 400 / -1130 — same `arbitrary_precision` constraint documented for the single-order path. A blank or whitespace-only element is treated as an absent slot and surfaces as `MissingParameter` → 400 / -1102, matching the single-order DELETE's handling of a blank `orderId`. |
 
 Intra-batch duplicate `orderId` values are rejected with `InvalidParameter` → 400 / -1130 before the chain submission. Duplicates would produce two `PENDING_CANCEL` receipts for the same id (useless to the caller) and waste one slot in the chain's `MAX_BATCH_SIZE` window; the local check keeps the surface honest and the chain's `_busy` budget intact.
 
@@ -571,9 +571,9 @@ Sourced from `market_outcomes.max_batch_size` on the resolved outcome, same as `
 
 ### Order resolution
 
-One SELECT joins [`live_orders`](data-schema.md#live_orders) against the resolved `(orderbook_address, owner_pn_address)` pair and applies the predicate set used by the single-order DELETE in bulk:
+One SELECT joins [`live_orders`](data-schema.md#live_orders) against `markets ⨝ market_outcomes` filtered by the resolved `(pmp_address, symbol)` and applies the predicate set used by the single-order DELETE in bulk:
 
-- `live_orders.orderbook_address = :orderbook_address` — scoped to the resolved outcome's book.
+- Scoping to the resolved outcome's book goes through the `markets ⨝ live_orders` join on `orderbook_address`, mirrored on the single-cancel path.
 - `live_orders.owner_pn_address = :pn_address` — pins the caller as the owner of every row.
 - `live_orders.order_id = ANY(:orderIds)` — the input list.
 - `live_orders.status = 'OPEN'` AND `live_orders.amount_remaining > 0` — same belt-and-suspenders pair as `/api/v1/openOrders` and single-order DELETE; keeps the transient `OPEN`/`amount_remaining = 0` slice invisible to cancel.
@@ -642,7 +642,7 @@ Transport-level failures (gateway drop, decode error) collapse to `Unexpected` �
 | Mandatory body field missing | `MissingParameter` | 400 |
 | Any `orderId` not numeric or overflows u64; empty `orderIds[]`; length above `max_batch_size`; intra-batch duplicate | `InvalidParameter` | 400 |
 | Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
-| Reconciled market with NULL `oracle_list_hash`; chain `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` (read-model drift from on-chain ceiling); bulk SELECT returns duplicate `order_id` (live_orders PK violation — read-model corruption) | `MarketInconsistent` | 503 |
+| Reconciled market with NULL `oracle_list_hash`; negative `markets.token_type` (`u32::try_from` rejects — same guard as single-cancel); chain `ERR_BATCH_TOO_LARGE` / `ERR_EMPTY_BATCH` (read-model drift from on-chain ceiling); bulk SELECT returns duplicate `order_id` (live_orders PK violation — read-model corruption) | `MarketInconsistent` | 503 |
 | Any `orderId` does not resolve to an OPEN order owned by the caller on the resolved outcome (covers unknown order, wrong owner, wrong market, already closed) | `UnknownOrder` | 404 |
 | Resolved market `status != TRADING` | `OrderValidationFailed` | 400 |
 | Chain `ERR_NOTE_BUSY` (per-PN serial; another op still in flight) | `OrderPnBusy` | 429 |
@@ -654,7 +654,7 @@ Transport-level failures (gateway drop, decode error) collapse to `Unexpected` �
 | Layer | Responsibility |
 | --- | --- |
 | `crates/domain` | No new types — `OrderStatus::PendingCancel` is reused. |
-| `crates/application` | `CancelBatchOrdersInput` (HTTP-shaped), `CancelBatchOrderPayload` (chain-shaped, one per batch), `CancelledBatchOrder` per-item (`order_id`, `client_order_id`); `CancelBatchOrdersUseCase`. Extends `ChainOrderSender` with `cancel_batch_order`. Extends `MarketReadRepository` with `resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address)` returning `Vec<CancelBatchOrderRow{order_id, client_order_id}>` — the use case reorders by input. |
+| `crates/application` | `CancelBatchOrdersInput` (HTTP-shaped), `CancelBatchOrderPayload` (chain-shaped, one per batch), `CancelledBatchOrder` per-item (`order_id`, `client_order_id`); `CancelBatchOrdersUseCase`. Extends `ChainOrderSender` with `cancel_batch_order`. Extends `MarketReadRepository` with `resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address)` returning `Vec<OrderForCancelBatch{order_id, client_order_id, market_status}>` — the use case reorders by input. |
 | `crates/infrastructure` | `BeeDexChainSender::cancel_batch_order` wraps `bee_dex::Dex::cancel_batch` and packs `order_ids: Vec<u64>` into the `uint128[]` chain ABI. `PostgresReadModelRepository::resolve_for_cancel_batch` runs the bulk SELECT with `ANY(:orderIds)`. `ChainSection` grows `cancel_batch_timeout_ms` with the same validation invariant as the existing timeouts. |
 | `services/api` | `delete_batch_orders` handler attached as `Router::with_path("api/v1/batchOrders").delete(delete_batch_orders)` on the existing auth subrouter (alongside `.post(create_batch_orders)`). HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` extends the `BeeDexChainSender` constructor with `Duration::from_millis(config.chain.cancel_batch_timeout_ms)`. |
 

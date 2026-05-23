@@ -8,7 +8,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use dodex_application::CancelBatchOrderRow;
+use dodex_application::OrderForCancelBatch;
 use dodex_application::MarketForPlacement;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
@@ -484,7 +484,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         order_ids: &[u64],
         owner_pn_address: &str,
         now: i64,
-    ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
+    ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
         // Mirror `resolve_for_cancel`'s join shape (live_orders ⨝
         // markets ⨝ market_outcomes) but with `lo.order_id = ANY(...)`.
         // `lo.order_id` is numeric(78,0); bind the array as text[] and
@@ -558,7 +558,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 row.frozen_at,
                 now,
             );
-            out.push(CancelBatchOrderRow { order_id, client_order_id, market_status });
+            out.push(OrderForCancelBatch { order_id, client_order_id, market_status });
         }
         Ok(out)
     }

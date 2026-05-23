@@ -22,7 +22,7 @@ use dodex_application::AuthContext;
 use dodex_application::AuthenticateRequest;
 use dodex_application::Authenticator;
 use dodex_application::CancelBatchOrderPayload;
-use dodex_application::CancelBatchOrderRow;
+use dodex_application::OrderForCancelBatch;
 use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::MarketForPlacement;
@@ -89,12 +89,12 @@ impl Authenticator for FakeAuthenticator {
 /// production rows can come back in any order.
 struct FakeRepo {
     market: Mutex<Option<Market>>,
-    rows: Mutex<Vec<CancelBatchOrderRow>>,
+    rows: Mutex<Vec<OrderForCancelBatch>>,
     scrambled_rows: bool,
 }
 
 impl FakeRepo {
-    fn with_market_and_rows(market: Market, rows: Vec<CancelBatchOrderRow>) -> Self {
+    fn with_market_and_rows(market: Market, rows: Vec<OrderForCancelBatch>) -> Self {
         Self { market: Mutex::new(Some(market)), rows: Mutex::new(rows), scrambled_rows: false }
     }
 
@@ -173,14 +173,14 @@ impl MarketReadRepository for FakeRepo {
         order_ids: &[u64],
         _: &str,
         _: i64,
-    ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
+    ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
         // Production Postgres returns matching rows in arbitrary order;
         // when `scrambled_rows` is set we reverse to verify the use
         // case reorders into the request sequence. Filter by input ids
         // so a "request fewer than stored" case (the rare overlap-
         // scenario) still works.
         let stored = self.rows.lock().unwrap().clone();
-        let mut matched: Vec<CancelBatchOrderRow> =
+        let mut matched: Vec<OrderForCancelBatch> =
             stored.into_iter().filter(|r| order_ids.iter().any(|&id| id == r.order_id)).collect();
         if self.scrambled_rows {
             matched.reverse();
@@ -286,8 +286,8 @@ fn trading_market() -> Market {
     }
 }
 
-fn row(order_id: u64, coid: Option<&str>) -> CancelBatchOrderRow {
-    CancelBatchOrderRow {
+fn row(order_id: u64, coid: Option<&str>) -> OrderForCancelBatch {
+    OrderForCancelBatch {
         order_id,
         client_order_id: coid.map(|s| s.to_string()),
         market_status: MarketStatus::Trading,
@@ -360,6 +360,10 @@ async fn happy_path_two_ids_returns_pending_cancel_array() {
         assert_eq!(item.status, "PENDING_CANCEL");
         assert!(item.transact_time > 0);
     }
+    // api-spec §Cancel Batch Orders: "Identical across every item —
+    // one chain submission, one moment of acceptance." A regression
+    // that calls `now_millis()` per item would break this.
+    assert_eq!(items[0].transact_time, items[1].transact_time);
     assert_eq!(items[0].order_id, "123");
     assert_eq!(items[0].client_order_id, "client-42");
     assert_eq!(items[1].order_id, "456");
@@ -432,11 +436,11 @@ async fn malformed_json_body_returns_400_minus_1130() {
 }
 
 #[tokio::test]
-async fn empty_body_returns_400_minus_1102() {
-    // Some HTTP proxies / SDKs strip bodies from DELETE requests. An
-    // absent body is shaped like the top-level fields being missing —
-    // surface as MissingParameter (-1102), distinct from a body present
-    // but malformed (-1130 above).
+async fn empty_body_returns_400_minus_1130() {
+    // Some HTTP proxies / SDKs strip bodies from DELETE requests; an
+    // empty body fails JSON parsing the same way a malformed one does
+    // and routes through the same `parse_json` → InvalidParameter
+    // channel as `POST /order` and `POST /batchOrders`.
     let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
     let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
     let service = setup_with(repo, sender);
@@ -450,7 +454,7 @@ async fn empty_body_returns_400_minus_1102() {
     let mut resp = req.body(Vec::<u8>::new()).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
-    assert_eq!(err.code, -1102);
+    assert_eq!(err.code, -1130);
 }
 
 #[tokio::test]
@@ -590,6 +594,23 @@ async fn blank_order_id_string_returns_400_minus_1102() {
     assert_eq!(err.code, -1102);
 }
 
+#[tokio::test]
+async fn whitespace_only_order_id_string_returns_400_minus_1102() {
+    // A whitespace-only element is the same "absent slot" case as the
+    // empty-string one above — `non_empty` trims before checking, so
+    // both must route to -1102. Pinning this catches a regression that
+    // drops the trim step and lets `"  ".parse::<u64>()` collapse the
+    // case into -1130 InvalidParameter.
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
+    let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
+    let service = setup_with(repo, sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1", "  "])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+}
+
 // ---- Market-side failures ------------------------------------------------
 
 #[tokio::test]
@@ -709,6 +730,27 @@ async fn pn_busy_returns_429_minus_2014() {
     assert_eq!(resp.status_code, Some(StatusCode::TOO_MANY_REQUESTS));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -2014);
+}
+
+#[tokio::test]
+async fn chain_request_timeout_returns_504_minus_1007() {
+    // `classify_chain_outcome` maps the elapsed branch to
+    // `DomainError::RequestTimeout` when `bee_dex::Dex::cancel_batch`
+    // doesn't return within `chain.cancel_batch_timeout_ms`. The
+    // `SlowCancelBatchSender` test below exercises the wall-clock hoop
+    // around the whole handler; this one pins the HTTP shape for the
+    // chain-leg timeout specifically, symmetric with the create-batch
+    // sibling `chain_timeout_returns_504_minus_1007`.
+    let repo: SharedRepo =
+        Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
+    let sender: SharedChainSender =
+        Arc::new(RecordingCancelBatchSender::failing(DomainError::RequestTimeout));
+    let service = setup_with(repo, sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::GATEWAY_TIMEOUT));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1007);
 }
 
 // ---- Authorization -------------------------------------------------------

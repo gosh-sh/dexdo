@@ -1,6 +1,8 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -222,7 +224,7 @@ pub trait MarketReadRepository: Send + Sync {
         order_ids: &[u64],
         owner_pn_address: &str,
         now: i64,
-    ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error>;
+    ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error>;
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error>;
 }
@@ -269,7 +271,7 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         order_ids: &[u64],
         owner_pn_address: &str,
         now: i64,
-    ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
+    ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
         (**self)
             .resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address, now)
             .await
@@ -809,7 +811,7 @@ pub struct CancelBatchOrderPayload {
 /// SELECT predicates: open, owned by caller, on the right book);
 /// `client_order_id` echoes back into the response.
 #[derive(Debug, Clone)]
-pub struct CancelBatchOrderRow {
+pub struct OrderForCancelBatch {
     pub order_id: u64,
     /// `live_orders.client_order_id`. NULL surfaces as `None`; the
     /// handler renders that as the empty string per
@@ -1389,13 +1391,13 @@ where
         // Intra-batch duplicates would produce two PENDING_CANCEL
         // receipts for the same id and waste one slot in the chain's
         // MAX_BATCH_SIZE window. Bounded by max_batch_size above.
-        let mut seen: std::collections::HashSet<u64> =
-            std::collections::HashSet::with_capacity(input.order_ids.len());
+        let mut seen: HashSet<u64> = HashSet::with_capacity(input.order_ids.len());
         for &id in &input.order_ids {
             if !seen.insert(id) {
                 warn!(
                     phase = "shape",
                     order_ids_len = input.order_ids.len(),
+                    duplicate_id = id,
                     "cancelBatch rejected",
                 );
                 return Err(DomainError::InvalidParameter);
@@ -1449,24 +1451,14 @@ where
         }
 
         let rows_len = rows.len();
-        let mut by_id: std::collections::HashMap<u64, Option<String>> =
-            std::collections::HashMap::with_capacity(rows_len);
+        let mut by_id: HashMap<u64, Option<String>> = HashMap::with_capacity(rows_len);
         for row in rows {
             by_id.insert(row.order_id, row.client_order_id);
         }
-        // `live_orders` is PK'd on `(orderbook_address, order_id)`,
-        // and the SELECT filters to one `(pmp_address, symbol)` →
-        // one orderbook → one row per `order_id`. Input is deduped
-        // above, so `by_id.len() == rows_len` always. A schema
-        // regression that yields two rows for the same id would lose
-        // one client_order_id to the HashMap's last-insert-wins
-        // semantics; the resulting `by_id.len() < rows_len` is
-        // read-model corruption (peer of the NULL-`oracle_list_hash`
-        // case in `resolve_for_*`), so surface it as the same
-        // `MarketInconsistent` → 503 / -1500 the spec maps that
-        // class of corruption to, rather than letting it mask as
-        // `UnknownOrder` further down through the `remove`/`ok_or`
-        // chain.
+        // Two rows for one `order_id` collapse to one entry under
+        // HashMap last-insert-wins; surface as MarketInconsistent so
+        // read-model corruption is visible to ops, not masked as
+        // UnknownOrder by the input-ordered reassembly below.
         if by_id.len() != rows_len {
             warn!(
                 market_address = %input.market_address.0,
@@ -1799,7 +1791,7 @@ mod tests {
             order_ids: &[u64],
             owner_pn_address: &str,
             _: i64,
-        ) -> Result<Vec<CancelBatchOrderRow>, anyhow::Error> {
+        ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
             // Mirror Postgres impl: any predicate miss simply yields
             // fewer rows than asked. The use case promotes a shortfall
             // to `UnknownOrder` for the whole batch.
@@ -1810,14 +1802,14 @@ mod tests {
                 return Ok(Vec::new());
             }
             let market_status = self.cancel_batch_status_override.unwrap_or(market.status);
-            let mut rows: Vec<CancelBatchOrderRow> = order_ids
+            let mut rows: Vec<OrderForCancelBatch> = order_ids
                 .iter()
                 .filter_map(|&id| {
                     self.live_orders
                         .iter()
                         .find(|o| o.order_id == id && o.owner_pn_address == owner_pn_address)
                 })
-                .map(|o| CancelBatchOrderRow {
+                .map(|o| OrderForCancelBatch {
                     order_id: o.order_id,
                     client_order_id: o.client_order_id.clone(),
                     market_status,
@@ -3382,5 +3374,34 @@ mod tests {
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::OrderPnBusy);
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_propagates_sender_request_timeout() {
+        // Mirrors the elapsed branch of `classify_chain_outcome`: the
+        // chain leg outran `cancel_batch_timeout_ms`. The use case must
+        // pass it through unchanged so the HTTP layer can render the
+        // documented 504 / -1007.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::failing(DomainError::RequestTimeout));
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::RequestTimeout);
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_propagates_sender_unexpected() {
+        // Unmapped chain `tvm_exit` codes and gateway transport failures
+        // surface as `Unexpected` from `classify_chain_outcome`; same
+        // pass-through contract as the other two sender errors.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::failing(DomainError::Unexpected));
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::Unexpected);
     }
 }

@@ -7,7 +7,7 @@
 use std::env;
 use std::time::Duration;
 
-use dodex_application::CancelBatchOrderRow;
+use dodex_application::OrderForCancelBatch;
 use dodex_application::MarketReadRepository;
 use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
@@ -452,7 +452,7 @@ async fn resolve_for_cancel_derives_non_trading_status_for_caller_check() {
 // tests focus on what is bulk-specific: the array bind+cast, partial
 // shortfall, and per-row owner filtering inside one request.
 
-fn sort_rows(mut rows: Vec<CancelBatchOrderRow>) -> Vec<CancelBatchOrderRow> {
+fn sort_rows(mut rows: Vec<OrderForCancelBatch>) -> Vec<OrderForCancelBatch> {
     rows.sort_by_key(|r| r.order_id);
     rows
 }
@@ -668,4 +668,129 @@ async fn resolve_for_cancel_batch_carries_resolving_status_when_now_past_result_
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].order_id, 5001);
     assert_eq!(rows[0].market_status, MarketStatus::Resolving);
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_closed_status_row_invisible() {
+    // Peer of `resolve_for_cancel_closed_order_is_unknown_order`: a row
+    // with `status='CANCELLED'` must not be returned by the bulk SELECT.
+    // Without this test, a regression that drops `lo.status = 'OPEN'`
+    // from the `ANY(:orderIds)` query would still pass every other case
+    // here (they all seed `'OPEN'`).
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_closed_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_CLOSED_YES";
+    let pn = "0:resolve_cancel_batch_closed_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, 6001, 7, pn, "OPEN", "1500000", Some("ok")).await;
+    seed_live_order(&pool, pmp, 6002, 7, pn, "CANCELLED", "0", Some("c")).await;
+
+    let rows = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[6001, 6002],
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect("bulk resolve filters closed rows out");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].order_id, 6001);
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_zero_remaining_open_row_invisible() {
+    // Peer of `resolve_for_cancel_zero_remaining_open_row_is_invisible`:
+    // a row with `status='OPEN'` but `amount_remaining=0` is the
+    // transient slice between `OrderFilled` zeroing remaining and the
+    // status flip to `'FILLED'`. The `amount_remaining > 0` predicate
+    // keeps it out of cancel; without this test a regression that drops
+    // the predicate would slip past the other cases (all seed non-zero).
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_zero_remaining_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_ZERO_REMAINING_YES";
+    let pn = "0:resolve_cancel_batch_zero_remaining_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, 7001, 7, pn, "OPEN", "1500000", Some("ok")).await;
+    seed_live_order(&pool, pmp, 7002, 7, pn, "OPEN", "0", Some("z")).await;
+
+    let rows = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[7001, 7002],
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect("bulk resolve filters zero-remaining rows out");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].order_id, 7001);
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_other_symbol_on_same_market_invisible() {
+    // Pins the `mo.symbol = $2` join filter: an order on the NO book of
+    // a two-outcome market must NOT surface when the request queries
+    // the YES symbol of the same market. Without this test a regression
+    // that drops the symbol predicate would let one outcome's owner
+    // cancel another outcome's order on the same `pmp_address`.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_other_symbol_pmp";
+    let symbol_yes = "RESOLVE_CANCEL_BATCH_OTHER_SYMBOL_YES";
+    let symbol_no = "RESOLVE_CANCEL_BATCH_OTHER_SYMBOL_NO";
+    let pn = "0:resolve_cancel_batch_other_symbol_pn";
+    purge(&pool, pmp, symbol_yes).await;
+    purge(&pool, pmp, symbol_no).await;
+    seed_trading_market(&pool, pmp, symbol_yes, 3, 7).await;
+
+    // Add a second outcome (NO, outcome_id=8) onto the same market.
+    let market_id: i64 = sqlx::query_scalar("select id from markets where pmp_address = $1")
+        .bind(pmp)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch market id");
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 8, 'NO', $3,
+                   2, 4, '0.01', '0.0001', '5.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(symbol_no)
+    .execute(&pool)
+    .await
+    .expect("insert NO outcome");
+
+    seed_live_order(&pool, pmp, 8001, 7, pn, "OPEN", "1500000", Some("y")).await;
+    seed_live_order(&pool, pmp, 8002, 8, pn, "OPEN", "1500000", Some("n")).await;
+
+    // Query YES; only the YES-side order may come back.
+    let rows = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol_yes.into()),
+            &[8001, 8002],
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect("bulk resolve filters other-outcome rows out");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].order_id, 8001);
 }
