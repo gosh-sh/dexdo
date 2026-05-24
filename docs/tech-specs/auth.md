@@ -92,15 +92,16 @@ Provisioning is operator-only in this version. The HTTP contract for self-servic
 
 ## Balance Source
 
-The trading PN is the source of truth for user balances. The backend does not maintain its own balance ledger; balances are read from chain state when a client requests `/api/v1/account`.
+The trading PN is the source of truth for user balances. The backend does not maintain its own balance ledger; balances are read from chain state on every request to `/api/v1/account` and `/api/v1/account/balances`.
 
-| Field | Source |
-| --- | --- |
-| `balances[].free` (collateral) | `PrivateNote.getDetails()._balance[tokenType]` |
-| `outcome_balances[].free` (outcome tokens) | `PrivateNote.getStakes()` |
-| `balances[].locked` / `outcome_balances[].lockedInOrders` | Computed from the indexed `live_orders` read-model — sum of open orders owned by this PN |
+| Field | Endpoint | Source |
+| --- | --- | --- |
+| `balances[].free` (collateral) | `/api/v1/account` | `PrivateNote.getDetails()._balance[tokenType]` |
+| `balances[].locked` (collateral) | `/api/v1/account` | `PrivateNote.getDetails()._lockedInOrders[tokenType]` |
+| `balances[].free` (outcome tokens) | `/api/v1/account/balances` | `PrivateNote._stakes` — TVM Solidity auto-getter for the public mapping (returns the full `map(uint256 → StakeInfo)` in one call; the API looks up `map[hash]` after the chain returns). Key is `tvm.hash(abi.encode(eventId, oracleListHash, tokenType))`. Returned value is summed across the three stake pools (`amount`, `debtAmount`, `couponsAmount`) per outcome. |
+| `balances[].lockedInOrders` (outcome tokens) | `/api/v1/account/balances` | Sum of `amount_remaining` over OPEN sell rows in the indexed `live_orders` read-model for this PN on the market's order book |
 
-The `_lockedInOrders` mapping inside `PrivateNote.sol` is not exposed by a public getter, so the locked amounts come from the indexed `live_orders` table rather than a chain getter. This stays consistent with on-chain state because the contract uses the same lock/release rules at order placement and at fill or cancel.
+Collateral `free` and `locked` both come from one `getDetails()` call — the API runs the chain getter once per `/api/v1/account` request via the off-chain TVM executor (`tvm_runner::run_getter`). Outcome `free` comes from a second per-market getter call (`_stakes(hash)`) on `/api/v1/account/balances`. Outcome `lockedInOrders` is read from `live_orders` because the contract has no public getter for resting orders' outcome quantities — they live inside the `OrderBook` contract's internal order tree, not on the `PrivateNote` — so the indexed read-model is the only available source. See [read-api.md §Locked source split](read-api.md#locked-source-split) for the consistency consequences.
 
 ## Not Included
 

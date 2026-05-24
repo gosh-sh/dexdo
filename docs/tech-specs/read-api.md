@@ -374,6 +374,140 @@ Three integration suites, all gated on `TEST_DATABASE_URL`:
 
 ## `/api/v1/account`
 
-See [api-spec §Account Balance](../api-spec.md#account-balance) for the public contract. Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
+Public contract: [api-spec §Account Balance](../api-spec.md#account-balance). Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
 
-_Implementation tech spec to be filled in._
+The endpoint reads collateral balances directly from chain state — every request runs one off-chain getter call against the caller's trading PrivateNote. Outcome-token holdings live behind [`/api/v1/account/balances`](#apiv1accountbalances) instead, because outcome ownership is scoped per market and the chain-side accessor (`PrivateNote._stakes`) is a per-market mapping lookup.
+
+### Source data
+
+Two inputs feed one response:
+
+1. **Trading PN state.** The auth context resolves the caller to a `pn_address` (from [`accounts.pn_address`](data-schema.md#accounts)). The handler fetches that PN's BOC through the GraphQL gateway (`accounts(address: $pn_address) { boc }`) and executes the `getDetails()` getter against it via `tvm_runner::run_getter` (the same off-chain TVM executor the market reconciler uses — see [indexer.md §Reconciler](indexer.md)). The getter returns `_balance: map[uint32 → uint128]` and `_lockedInOrders: map[uint32 → uint128]`, both keyed by `tokenType`.
+2. **Token reference.** [`ref_tokens`](data-schema.md#ref_tokens) maps each `tokenType` to its public `token_code` and `decimals`. The lookup is a per-`tokenType` SELECT; cardinality is small (three tokens today) and the JOIN happens on the API side, not in SQL.
+
+### Pipeline
+
+1. `require_auth(Permission::UserData)` resolves `(account_id, pn_address)`.
+2. Capture `now_ms` once at handler entry — surfaces as `updateTime`.
+3. Fetch the PN BOC. A missing account (`Account::is_none`), an HTTP failure, or a decode error all collapse to `DomainError::MarketInconsistent` → 503. The 503 is deliberate: every failure mode here is transient (gateway hiccup, indexer behind chain head) — clients should retry rather than treat the account as broken.
+4. Run `getDetails()` through `tvm_runner`. ABI decode errors → `MarketInconsistent`.
+5. For each key in `_balance`, look up the matching `ref_tokens` row. A key absent from `ref_tokens` → `MarketInconsistent` (the indexer ships with the canonical set; an unknown token type means data drift the API cannot resolve safely).
+6. Build `balances[]`: one entry per `tokenType` in `_balance`, with `free` from `_balance[tokenType]` and `locked` from `_lockedInOrders[tokenType]` (defaulting to `0` when the key is missing on the locked side). Scale both with `ref_tokens.decimals`. Sort by `asset` ASC for deterministic output.
+
+### Fail-closed validation
+
+After assembly, the API checks:
+
+| Rule | Source |
+| --- | --- |
+| Every `tokenType` returned by `getDetails()._balance` resolves to a `ref_tokens` row | `ref_tokens` is authoritative for token codes/decimals |
+| `accountId` is non-nil (UUID) | Auth context guarantee; sanity check before serializing |
+
+Violations surface as `MarketInconsistent` → 503.
+
+### Eventual consistency
+
+The endpoint never reads `live_orders`, so it does not inherit any indexer-backlog window. The single chain-side read is atomic with the PN state at the time the gateway captured the account snapshot.
+
+### Error mapping
+
+| Condition | DomainError | API code | HTTP |
+| --- | --- | --- | --- |
+| Missing / invalid auth envelope | upstream | `-1003` | 401 |
+| Unknown / disabled key, or key lacks `USER_DATA` | upstream | `-1002` | 401 |
+| Chain getter / BOC fetch / decode failure / unknown token type | `MarketInconsistent` | `-1500` | 503 |
+| Request budget elapsed | `RequestTimeout` | `-1007` | 504 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+## `/api/v1/account/balances`
+
+Public contract: [api-spec §Market Outcome Balances](../api-spec.md#market-outcome-balances). Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
+
+Returns the caller's outcome-token holdings for one market. `free` comes from a chain-side mapping lookup on the trading PrivateNote; `lockedInOrders` comes from the indexed `live_orders` read-model. The two sources differ on purpose — see [Locked source split](#locked-source-split) below.
+
+### Source data
+
+Three inputs feed one response:
+
+1. **Market resolution.** A SELECT against [`markets`](data-schema.md#markets) joined with [`market_outcomes`](data-schema.md#market_outcomes) returns `(event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, [(outcome_id, symbol, quantity_precision) …])`. The query is gated on `last_reconciled_at IS NOT NULL`; pre-reconcile markets are hidden symmetrically with `/api/v1/markets`. The market lifecycle status is NOT a gate — terminal markets still serve balances so holders can see what they own until they claim or settle.
+2. **PN stake state.** The chain-side accessor is the auto-generated getter for the public mapping `PrivateNote._stakes`. TVM Solidity auto-getters for public mappings take no arguments and return the entire `map(uint256 → StakeInfo)` — see the PN ABI under `contracts/abi/dex/PrivateNote.abi.json`. The API computes the per-market key `stake_hash = tvm.hash(abi.encode(event_id, oracle_list_hash, token_type))` — the same hash the PN itself uses internally — and looks it up on the returned map. The hash is built off-chain in Rust via a thin wrapper around `tvm_types`. Each `StakeInfo` value carries three parallel `uint128[]` arrays (`amount`, `debtAmount`, `couponsAmount`) indexed by `outcome_id`, plus housekeeping fields the API ignores. A missing key on the returned map (caller never staked on this market) is treated as "all outcomes at zero", not as an error.
+
+   Returning the whole mapping in one call costs the same as one keyed lookup would on EVM (the ABI shape is fixed by TVM Solidity), so this is an opportunity, not a tax: a future "all my outcomes" view across markets needs no additional chain calls.
+3. **`live_orders` aggregation.** One SQL groups OPEN sell orders by outcome:
+
+   ```sql
+   SELECT outcome_id, SUM(amount_remaining) AS locked
+     FROM live_orders
+    WHERE orderbook_address = $1
+      AND owner_pn_address  = $2
+      AND status = 'OPEN'
+      AND is_buy = false
+    GROUP BY outcome_id;
+   ```
+
+   The partial index `live_orders_owner_idx` (`owner_pn_address IS NOT NULL`) backs this scan; the `(orderbook_address, status, is_buy)` predicates fall on the heap, but per-owner cardinality is small enough that adding a wider composite index is not worth it.
+
+### Pipeline
+
+1. `require_auth(Permission::UserData)` resolves `(account_id, pn_address)`.
+2. Parse `marketAddress` — blank or missing → `MissingParameter` → 400 / `-1102`.
+3. Run the market-resolution SELECT. Unknown market or `last_reconciled_at IS NULL` → `InvalidMarketOrSymbol` → 404 / `-1121`.
+4. Compute `stake_hash = tvm.hash(abi.encode(event_id, oracle_list_hash, token_type))`.
+5. In parallel (`tokio::join!`):
+   - Fetch the PN BOC and run the `_stakes` getter through `tvm_runner` (returns the full `map(uint256 → StakeInfo)`); the API then looks up `map[stake_hash]`.
+   - Run the `live_orders` aggregation SELECT.
+6. Build `balances[]` in `outcome_id` ASC order. For each outcome:
+   - `free = scale(amount[outcome_id] + debtAmount[outcome_id] + couponsAmount[outcome_id], quantity_precision)`. The three pools are summed because the public surface is "what the user owns" — clean, debt-bound, and coupon-bound stakes are all the user's tokens; the distinction is internal accounting that the UI does not need at this layer.
+   - `lockedInOrders = scale(coalesce(SUM, 0), quantity_precision)` from the aggregation map; outcomes without a row default to 0.
+7. Capture `now_ms` once at handler entry — surfaces as `updateTime`.
+
+### Locked source split
+
+Why `free` reads chain and `lockedInOrders` reads `live_orders`:
+
+- `free` comes from `PrivateNote._stakes(hash)`, which the contract mutates atomically with every stake / claim / split / merge / cancel-callback. There is no equivalent indexer projection today, and building one would require nine separate event projectors before the endpoint is usable — see the [stake-projection follow-up](#stake-projection--future-work).
+- `lockedInOrders` is the sum of resting sell orders against this outcome. The indexer already tracks these in `live_orders`, with a partial index already sized for per-owner queries. The chain-side analogue would require iterating the OrderBook's internal red-black tree of orders — there is no public per-outcome getter for it.
+
+The split means the two numbers can drift while the indexer is replaying behind chain head: a sell that just landed on chain shows up in `_stakes.amount` (because the OB has not yet acknowledged the lock) AND in `live_orders` (because `OrderPlaced` was projected) — appearing as if both `free` and `lockedInOrders` count it. The window is small (seconds) and self-resolves once `OrderPlacedConfirmed` advances PN state; it surfaces to clients as the same eventual-consistency note that already applies to `/api/v1/orders`.
+
+### Fail-closed validation
+
+The check runs after assembly, in `postgres_repo.rs::validate_balances_invariants`:
+
+| Rule | Source |
+| --- | --- |
+| Resolved market has a non-blank `orderbook_address` | DB schema CHECK (`last_reconciled_at IS NULL OR orderbook_address IS NOT NULL`) plus a whitespace re-check, matching `/api/v1/depth`'s contract |
+| `_stakes.amount.len() == num_outcomes` (and same for `debtAmount`, `couponsAmount`) when any array is non-empty | The contract initializes all three arrays to `num_outcomes` length on first stake; a mismatch means the indexer's view of `num_outcomes` diverged from chain state |
+| Every `live_orders.outcome_id` returned by the aggregation is within `[0, num_outcomes)` | Sanity: a row outside this range is indexer corruption (`OrderBook.OrderPlaced` projector wrote an unknown `outcome_id`) |
+
+Violations surface as `MarketInconsistent` → 503.
+
+### Eventual consistency
+
+`lockedInOrders` inherits the same indexer-backlog window as `/api/v1/orders`: a sell order whose `OrderBook.OrderPlaced` event has not been projected yet is invisible here. Once projected (typically seconds later), the next response shows it. `free` is read live from chain state and does not inherit this window.
+
+### Error mapping
+
+| Condition | DomainError | API code | HTTP |
+| --- | --- | --- | --- |
+| Missing / invalid auth envelope | upstream | `-1003` | 401 |
+| Unknown / disabled key, or key lacks `USER_DATA` | upstream | `-1002` | 401 |
+| `marketAddress` missing or blank | `MissingParameter` | `-1102` | 400 |
+| `marketAddress` not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
+| Chain getter / BOC fetch / decode failure, or invariant violation on assembled DTO | `MarketInconsistent` | `-1500` | 503 |
+| Request budget elapsed | `RequestTimeout` | `-1007` | 504 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+### Stake projection — future work
+
+The current design reads `_stakes` from chain on every request. Each request costs one GraphQL `accounts(...) { boc }` fetch plus one local TVM execution. For low call rates (one frontend session per user) this is acceptable; for power users polling rapidly or for shared dashboards this becomes the bottleneck.
+
+A future projection table would mirror PN stake state in Postgres so the API can serve `free` from a DB read. The projection requires handling the full PN-side stake-mutation surface — at least `StakeAccepted`, `StakeConfirmed`, `StakeCancelled`, `ClaimAccepted`, `SplitAccepted`, `MergeAccepted`, and the batch variants — and a reproject path that drains all of them in chain order before responses become trustworthy. The on-demand getter shipping in v1 lets the endpoint be useful immediately and gives us evidence about real-world call patterns before we commit to projector complexity.
+
+### Test coverage
+
+Three test suites, all gated on `TEST_DATABASE_URL`:
+
+- `crates/infrastructure/tests/balances.rs` — use case + repo: happy path with multi-outcome stake, absent-key (caller never staked) case, OPEN buy not counted in `lockedInOrders`, FILLED / CANCELLED rows ignored, foreign-owner orders ignored, unknown market, unreconciled market, stake-array length mismatch.
+- `services/api/tests/account_http.rs` — HTTP wiring for `/account`: happy path, missing/disabled key error matrix, chain-getter failure → 503, forced request-timeout.
+- `services/api/tests/account_balances_http.rs` — HTTP wiring for `/account/balances`: happy path, missing `marketAddress`, unknown / unreconciled market, stake-shape mismatch → 503, `outcomeId` ASC ordering when `live_orders` returns out-of-order groups.

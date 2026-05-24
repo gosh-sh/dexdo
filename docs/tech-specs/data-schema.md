@@ -287,7 +287,7 @@ One row per logical user. Holds the custodied trading PrivateNote inline; multip
 | --- | --- | --- |
 | `id` | `uuid` PK default `gen_random_uuid()` | Stable `accountId` surfaced to clients. The only identifier that crosses the API boundary. |
 | `label` | `text` (nullable) | Operator-facing label. Not exposed by the API. |
-| `pn_address` | `text` UNIQUE | Address of the trading PrivateNote bound to this account. Source of balances for `GET /api/v1/account`. |
+| `pn_address` | `text` UNIQUE | Address of the trading PrivateNote bound to this account. Source of balances for `GET /api/v1/account` and `GET /api/v1/account/balances`. |
 | `pn_pubkey` | `numeric(78, 0)` | PN signing pubkey. |
 | `pn_seckey_enc` | `bytea` | PN signing seckey, encrypted at rest under the backend master key (`crates/infrastructure/src/crypto.rs`). Never read by the API; used by the trading path to submit transactions. |
 | `pn_dih` | `numeric(78, 0)` UNIQUE | Deploy-init hash of the PN. Disambiguates PNs that may share an address across redeploys. |

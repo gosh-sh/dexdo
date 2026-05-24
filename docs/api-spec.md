@@ -18,6 +18,7 @@
     - [Order Book](#order-book)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
+    - [Market Outcome Balances](#market-outcome-balances)
   - [Trading Endpoints](#trading-endpoints)
     - [New Order](#new-order)
     - [Cancel Order](#cancel-order)
@@ -186,7 +187,8 @@ envelope field failed or why a credential was rejected.
 | --- | --- | --- | --- |
 | List markets | `GET` | `/api/v1/markets` | `NONE` |
 | Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
-| Fetch account balance | `GET` | `/api/v1/account` | `USER_DATA` |
+| Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
+| Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
 | Create single order | `POST` | `/api/v1/order` | `TRADE` |
 | Cancel single order by ID | `DELETE` | `/api/v1/order` | `TRADE` |
 | Create batch orders | `POST` | `/api/v1/batchOrders` | `TRADE` |
@@ -515,7 +517,7 @@ GET /api/v1/account
 
 Security: `USER_DATA`
 
-Fetch account collateral balances and outcome-token balances.
+Fetch account collateral balances. Outcome-token holdings are scoped per market and live on a separate endpoint — see [Market Outcome Balances](#market-outcome-balances).
 
 Parameters:
 
@@ -546,17 +548,89 @@ Response:
       "free": "25000.00",
       "locked": "3750.00"
     }
-  ],
-  "outcome_balances": [
+  ]
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `accountId` | STRING | Stable account UUID. |
+| `updateTime` | LONG | Server timestamp (Unix ms) captured when the request was served. |
+| `balances` | ARRAY | One entry per quote-asset token type held by the trading PrivateNote, sorted by `asset` ascending. A token type with `free = 0 AND locked = 0` is still included when the PN has a row for it; clients SHOULD treat the absence of a token as "never funded". |
+| `balances[].asset` | STRING | User-facing asset code (`NACKL`, `USDC`, …). |
+| `balances[].free` | DECIMAL | Spendable balance, scaled by the token's on-chain `decimals`. |
+| `balances[].locked` | DECIMAL | Collateral locked in open buy orders, same scaling. |
+
+### Market Outcome Balances
+
+```http
+GET /api/v1/account/balances
+```
+
+Security: `USER_DATA`
+
+Fetch the authenticated account's outcome-token holdings for one market. The response lists every outcome of the market — outcomes the caller has never traded surface as `free = "0", lockedInOrders = "0"` so clients can render the full picker without a second lookup.
+
+This endpoint is unaffected by market lifecycle status: balances are returned for any market that has been reconciled at least once, including terminal phases (`RESOLVED`, `CANCELLED`, `EXPIRED`) — holders still own their outcome tokens until they claim or settle.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+
+Signed parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+Response:
+
+```json
+{
+  "marketAddress": "0:market-address",
+  "updateTime": 1710000000000,
+  "balances": [
     {
-      "marketAddress": "0:market-address",
-      "symbol": "PM-2026-ELECTION-YES",
+      "outcomeId": 0,
+      "symbol": "PM-2026-ELECTION-NO",
       "free": "10.00",
+      "lockedInOrders": "0.00"
+    },
+    {
+      "outcomeId": 1,
+      "symbol": "PM-2026-ELECTION-YES",
+      "free": "5.50",
       "lockedInOrders": "1000.00"
     }
   ]
 }
 ```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `marketAddress` | STRING | Echoed from the request. |
+| `updateTime` | LONG | Server timestamp (Unix ms) captured when the request was served. |
+| `balances` | ARRAY | One entry per outcome of the market, sorted by `outcomeId` ascending. Length equals the market's `outcomes[]` length in `/api/v1/markets`. |
+| `balances[].outcomeId` | INT | Stable outcome id; matches `outcomes[].outcomeId` from `/api/v1/markets`. |
+| `balances[].symbol` | STRING | Outcome-token symbol; matches `outcomes[].symbol` from `/api/v1/markets`. |
+| `balances[].free` | DECIMAL | Outcome tokens currently held by the trading PrivateNote across clean, debt, and coupon stake pools, scaled by the outcome's `quantityPrecision`. |
+| `balances[].lockedInOrders` | DECIMAL | Outcome tokens locked in resting SELL orders on this outcome, scaled by the outcome's `quantityPrecision`. |
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `marketAddress` missing or blank | `-1102` | 400 |
+| `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| Backend could not read the trading PrivateNote state (gateway timeout, malformed reply, unknown token type) | `-1500` | 503 |
 
 ## Trading Endpoints
 
@@ -1004,4 +1078,4 @@ Order creation MUST validate:
 | For `LIMIT` orders, `price * quantity` is at least `minNotional` | `/api/v1/markets` |
 | For `MARKET` buy orders, `quantity` in the market `quoteAsset` is at least `minNotional` | `/api/v1/markets` |
 | For `MARKET` buy orders, `quantityPrecision` and `stepSize` apply to the quote-asset spend amount, not to outcome-token units | `/api/v1/markets` |
-| Account has enough available balance | `/api/v1/account` |
+| Account has enough available balance (collateral for buys, outcome tokens for sells) | `/api/v1/account`, `/api/v1/account/balances` |
