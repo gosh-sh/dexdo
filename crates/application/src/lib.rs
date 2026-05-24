@@ -649,7 +649,7 @@ where
     ) -> Result<dodex_domain::AccountBalances, anyhow::Error> {
         let details = self.pn.get_details(&input.pn_address).await.map_err(|e| {
             warn!(error = ?e, pn = %input.pn_address, "get_details failed");
-            anyhow::Error::from(dodex_domain::DomainError::MarketInconsistent)
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
         })?;
 
         // Index locked_in_orders by token_type for O(1) lookup.
@@ -667,7 +667,7 @@ where
                 .await?
                 .ok_or_else(|| {
                     warn!(token_type = tt, "balance carries unknown token_type");
-                    dodex_domain::DomainError::MarketInconsistent
+                    anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
                 })?;
             let raw_locked =
                 locked_by_tt.get(tt).cloned().unwrap_or_else(|| "0".to_string());
@@ -687,14 +687,16 @@ where
     }
 }
 
-/// Scale a non-negative decimal string `raw` (interpreted as a uint
-/// representation in the smallest unit) by `decimals` digits to the
-/// right of the decimal point. `"10000000000"` with `decimals=9` →
-/// `"10.000000000"`; `"0"` with any decimals → `"0"`.
+/// Scale a non-negative integer-decimal string `raw` (the smallest-unit
+/// uint representation) to a fixed-point decimal with `decimals` digits
+/// to the right of the point.
 ///
-/// Padding rule: always pad to `decimals` digits to the right of the
-/// point, even if trailing zeros. Matches the wire shape in
-/// api-spec.md examples (e.g. `"10.000000"` not `"10"`).
+/// Non-zero inputs are padded to exactly `decimals` fractional digits
+/// (e.g. `"10000000000"` with `decimals=9` → `"10.000000000"`,
+/// `"1"` → `"0.000000001"`). The literal zero case (`raw == "0"` or
+/// empty) short-circuits to bare `"0"`; clients SHOULD treat `"0"`
+/// and `"0.000000"` as equivalent. `decimals == 0` returns `raw`
+/// unchanged.
 fn scale_decimal(raw: &str, decimals: u8) -> String {
     if raw == "0" || raw.is_empty() {
         return "0".to_string();
