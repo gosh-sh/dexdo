@@ -30,6 +30,7 @@ use dodex_application::AuthenticateRequest;
 use dodex_application::Authenticator;
 use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
+use dodex_application::MarketBalancesResolution;
 use dodex_application::MarketForPlacement;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsRequest;
@@ -167,6 +168,21 @@ impl MarketReadRepository for FakeRepo {
 
     async fn list_orders(&self, _: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         unimplemented!("list_orders is not exercised by create_batch_orders_http tests")
+    }
+
+    async fn resolve_market_for_balances(
+        &self,
+        _: &MarketAddress,
+    ) -> Result<MarketBalancesResolution, anyhow::Error> {
+        unimplemented!("resolve_market_for_balances is not exercised by create_batch_orders_http tests")
+    }
+
+    async fn sum_open_sell_remaining(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+        unimplemented!("sum_open_sell_remaining is not exercised by create_batch_orders_http tests")
     }
 }
 
