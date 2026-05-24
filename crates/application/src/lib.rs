@@ -617,6 +617,101 @@ where
     }
 }
 
+/// Input for `GetAccountUseCase`. Built by the HTTP layer from the
+/// resolved auth context plus the request-entry timestamp.
+#[derive(Debug, Clone)]
+pub struct GetAccountInput {
+    pub account_id: uuid::Uuid,
+    pub pn_address: String,
+    /// Unix milliseconds. Echoed as `updateTime` in the response.
+    pub now_ms: i64,
+}
+
+pub struct GetAccountUseCase<P, R> {
+    pn: P,
+    refs: R,
+}
+
+impl<P, R> GetAccountUseCase<P, R> {
+    pub fn new(pn: P, refs: R) -> Self {
+        Self { pn, refs }
+    }
+}
+
+impl<P, R> GetAccountUseCase<P, R>
+where
+    P: PnStateReader,
+    R: ReferenceRepository,
+{
+    pub async fn execute(
+        &self,
+        input: GetAccountInput,
+    ) -> Result<dodex_domain::AccountBalances, anyhow::Error> {
+        let details = self.pn.get_details(&input.pn_address).await.map_err(|e| {
+            warn!(error = ?e, pn = %input.pn_address, "get_details failed");
+            anyhow::Error::from(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+
+        // Index locked_in_orders by token_type for O(1) lookup.
+        let mut locked_by_tt: std::collections::HashMap<i32, String> =
+            std::collections::HashMap::new();
+        for (tt, amount) in &details.locked_in_orders {
+            locked_by_tt.insert(*tt, amount.clone());
+        }
+
+        let mut rows: Vec<dodex_domain::AssetBalance> = Vec::with_capacity(details.balance.len());
+        for (tt, raw_free) in &details.balance {
+            let token = self
+                .refs
+                .lookup_ref_token(*tt)
+                .await?
+                .ok_or_else(|| {
+                    warn!(token_type = tt, "balance carries unknown token_type");
+                    dodex_domain::DomainError::MarketInconsistent
+                })?;
+            let raw_locked =
+                locked_by_tt.get(tt).cloned().unwrap_or_else(|| "0".to_string());
+            rows.push(dodex_domain::AssetBalance {
+                asset: token.token_code.clone(),
+                free: scale_decimal(raw_free, token.decimals),
+                locked: scale_decimal(&raw_locked, token.decimals),
+            });
+        }
+        rows.sort_by(|a, b| a.asset.cmp(&b.asset));
+
+        Ok(dodex_domain::AccountBalances {
+            account_id: input.account_id,
+            update_time_ms: input.now_ms,
+            balances: rows,
+        })
+    }
+}
+
+/// Scale a non-negative decimal string `raw` (interpreted as a uint
+/// representation in the smallest unit) by `decimals` digits to the
+/// right of the decimal point. `"10000000000"` with `decimals=9` →
+/// `"10.000000000"`; `"0"` with any decimals → `"0"`.
+///
+/// Padding rule: always pad to `decimals` digits to the right of the
+/// point, even if trailing zeros. Matches the wire shape in
+/// api-spec.md examples (e.g. `"10.000000"` not `"10"`).
+fn scale_decimal(raw: &str, decimals: u8) -> String {
+    if raw == "0" || raw.is_empty() {
+        return "0".to_string();
+    }
+    let d = decimals as usize;
+    if d == 0 {
+        return raw.to_string();
+    }
+    if raw.len() <= d {
+        let padded = "0".repeat(d - raw.len()) + raw;
+        format!("0.{padded}")
+    } else {
+        let split = raw.len() - d;
+        format!("{}.{}", &raw[..split], &raw[split..])
+    }
+}
+
 /// Input shape for `CreateOrderUseCase`. The HTTP layer parses
 /// `POST /api/v1/order` body + `AuthContext` + clock into this struct.
 /// All decimal fields stay as strings — exact-decimal validation runs
@@ -2877,6 +2972,151 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
         assert!(sender.batch_calls().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod get_account_use_case_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    struct StubPn {
+        details: Result<PnDetails, String>,
+    }
+
+    #[async_trait]
+    impl PnStateReader for StubPn {
+        async fn get_details(&self, _pn_address: &str) -> anyhow::Result<PnDetails> {
+            self.details.clone().map_err(|e| anyhow::anyhow!(e))
+        }
+        async fn get_stake(
+            &self,
+            _pn: &str,
+            _hash: &str,
+        ) -> anyhow::Result<Option<PnStake>> {
+            unreachable!("get_account never calls get_stake")
+        }
+    }
+
+    struct StubRefs {
+        rows: Mutex<std::collections::HashMap<i32, RefToken>>,
+    }
+
+    #[async_trait]
+    impl ReferenceRepository for StubRefs {
+        async fn lookup_ref_token(&self, t: i32) -> anyhow::Result<Option<RefToken>> {
+            Ok(self.rows.lock().unwrap().get(&t).cloned())
+        }
+    }
+
+    fn make_refs() -> StubRefs {
+        let mut m = std::collections::HashMap::new();
+        m.insert(1, RefToken { token_type: 1, token_code: "NACKL".into(), decimals: 9 });
+        m.insert(3, RefToken { token_type: 3, token_code: "USDC".into(), decimals: 6 });
+        StubRefs { rows: Mutex::new(m) }
+    }
+
+    #[tokio::test]
+    async fn renders_two_assets_sorted_by_code_asc() {
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![
+                    (3, "25000000000".to_string()), // 25_000 USDC at 6 decimals
+                    (1, "10000000000".to_string()), // 10 NACKL at 9 decimals
+                ],
+                locked_in_orders: vec![
+                    (3, "3750000000".to_string()),  // 3_750 USDC locked
+                    (1, "1500000000".to_string()),  // 1.5 NACKL locked
+                ],
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let out = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 1710000000000,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances.len(), 2);
+        assert_eq!(out.balances[0].asset, "NACKL");
+        assert_eq!(out.balances[0].free, "10.000000000");
+        assert_eq!(out.balances[0].locked, "1.500000000");
+        assert_eq!(out.balances[1].asset, "USDC");
+        assert_eq!(out.balances[1].free, "25000.000000");
+        assert_eq!(out.balances[1].locked, "3750.000000");
+        assert_eq!(out.update_time_ms, 1710000000000);
+    }
+
+    #[tokio::test]
+    async fn locked_defaults_to_zero_when_key_absent_in_locked_map() {
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![(1, "5000000000".to_string())], // 5 NACKL
+                locked_in_orders: vec![],                     // empty
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let out = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances[0].free, "5.000000000");
+        assert_eq!(out.balances[0].locked, "0");
+    }
+
+    #[tokio::test]
+    async fn unknown_token_type_yields_market_inconsistent() {
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![(99, "1".to_string())],
+                locked_in_orders: vec![],
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let err = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn pn_reader_failure_yields_market_inconsistent() {
+        let pn = StubPn { details: Err("gateway down".into()) };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let err = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn scale_decimal_pads_to_full_precision() {
+        assert_eq!(scale_decimal("10000000000", 9), "10.000000000");
+        assert_eq!(scale_decimal("1500000000", 9), "1.500000000");
+        assert_eq!(scale_decimal("1", 9), "0.000000001");
+        assert_eq!(scale_decimal("0", 9), "0");
+        assert_eq!(scale_decimal("", 9), "0");
+        assert_eq!(scale_decimal("25000000000", 6), "25000.000000");
+        assert_eq!(scale_decimal("42", 0), "42");
     }
 }
 
