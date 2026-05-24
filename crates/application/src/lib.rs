@@ -789,6 +789,101 @@ impl<T: ?Sized + ChainOrderSender> ChainOrderSender for Arc<T> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Balances ports + value objects (NODE-3445).
+// ─────────────────────────────────────────────────────────────────────
+
+/// One row of `ref_tokens` exposed to the application layer.
+#[derive(Debug, Clone)]
+pub struct RefToken {
+    pub token_type: i32,
+    pub token_code: String,
+    pub decimals: u8,
+}
+
+/// Source of `ref_tokens` lookups. Kept as a separate port from
+/// `MarketReadRepository` because callers (use cases) need only
+/// `lookup_ref_token` and dragging in the heavy MarketRead surface
+/// would coupling-test downstream traits unnecessarily.
+#[async_trait]
+pub trait ReferenceRepository: Send + Sync {
+    /// Returns `None` for an unknown `token_type`. Use cases turn `None`
+    /// into `DomainError::MarketInconsistent` (the indexer ships with
+    /// the canonical set; an unknown type is read-model corruption).
+    async fn lookup_ref_token(
+        &self,
+        token_type: i32,
+    ) -> Result<Option<RefToken>, anyhow::Error>;
+}
+
+#[async_trait]
+impl<T: ?Sized + ReferenceRepository> ReferenceRepository for Arc<T> {
+    async fn lookup_ref_token(
+        &self,
+        token_type: i32,
+    ) -> Result<Option<RefToken>, anyhow::Error> {
+        (**self).lookup_ref_token(token_type).await
+    }
+}
+
+/// Detokenized `PrivateNote.getDetails()` output (only the fields the
+/// account-balance path needs). `balance` and `locked_in_orders` mirror
+/// the on-chain `map(uint32 → uint128)` shape as `(token_type, raw_uint128_decimal_string)`
+/// pairs — the use case scales them with `RefToken.decimals` before
+/// returning to the API. The raw amounts stay as strings because
+/// `serde_json` cannot round-trip `u128` safely.
+#[derive(Debug, Clone)]
+pub struct PnDetails {
+    pub balance: Vec<(i32, String)>,
+    pub locked_in_orders: Vec<(i32, String)>,
+}
+
+/// Detokenized `PrivateNote._stakes(hash)` value object — only the three
+/// outcome-amount arrays. Arrays are indexed by `outcome_id`. Empty
+/// arrays mean "no stake key for this market" (TVM auto-getter returns
+/// a zero-default struct).
+#[derive(Debug, Clone, Default)]
+pub struct PnStake {
+    pub amount: Vec<String>,
+    pub debt_amount: Vec<String>,
+    pub coupons_amount: Vec<String>,
+}
+
+/// On-demand reader for `PrivateNote` chain state. Implementations
+/// fetch the PN BOC from the GraphQL gateway and run the requested
+/// off-chain getter; failures (gateway down, account absent, ABI
+/// mismatch) bubble up as `anyhow::Error` which the use case lifts
+/// to `DomainError::MarketInconsistent`.
+#[async_trait]
+pub trait PnStateReader: Send + Sync {
+    /// Run `getDetails()` against the PN at `pn_address`.
+    async fn get_details(&self, pn_address: &str) -> Result<PnDetails, anyhow::Error>;
+
+    /// Run `_stakes` (no args — TVM Solidity public-mapping auto-getter
+    /// returns the whole map). Implementation locates the matching key
+    /// by `stake_hash`; returns `None` when the key is absent.
+    async fn get_stake(
+        &self,
+        pn_address: &str,
+        stake_hash: &str,
+    ) -> Result<Option<PnStake>, anyhow::Error>;
+}
+
+#[async_trait]
+impl<T: ?Sized + PnStateReader> PnStateReader for Arc<T> {
+    async fn get_details(&self, pn_address: &str) -> Result<PnDetails, anyhow::Error> {
+        (**self).get_details(pn_address).await
+    }
+
+    async fn get_stake(
+        &self,
+        pn_address: &str,
+        stake_hash: &str,
+    ) -> Result<Option<PnStake>, anyhow::Error> {
+        (**self).get_stake(pn_address, stake_hash).await
+    }
+}
+
 /// Orchestrates `POST /api/v1/order`: resolves market, derives status,
 /// validates input per spec §Input validation, encodes flags, builds the
 /// chain payload, dispatches through `ChainOrderSender`, and returns
@@ -2709,5 +2804,40 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
         assert!(sender.batch_calls().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod balances_port_tests {
+    use super::*;
+
+    // Existence-only test: this compiles iff the trait is dyn-compatible
+    // and the value-object fields have the expected names/types. We
+    // exercise behaviour via the use case tests in Task 3.
+    #[test]
+    fn pn_state_reader_is_dyn_compatible() {
+        fn _accepts_dyn(_: &dyn PnStateReader) {}
+    }
+
+    #[test]
+    fn reference_repository_is_dyn_compatible() {
+        fn _accepts_dyn(_: &dyn ReferenceRepository) {}
+    }
+
+    #[test]
+    fn pn_details_constructs_with_named_fields() {
+        let _ = PnDetails {
+            balance: vec![(1, "100".to_string())],
+            locked_in_orders: vec![(1, "10".to_string())],
+        };
+    }
+
+    #[test]
+    fn pn_stake_constructs_with_arrays() {
+        let _ = PnStake {
+            amount: vec!["1".to_string(), "2".to_string()],
+            debt_amount: vec!["0".to_string(), "0".to_string()],
+            coupons_amount: vec!["0".to_string(), "0".to_string()],
+        };
     }
 }
