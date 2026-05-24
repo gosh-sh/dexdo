@@ -102,6 +102,11 @@ struct FakeRepo {
     /// `Unexpected` → 500 / -1000.
     resolve_for_new_order_raw_anyhow: Option<String>,
     resolve_for_cancel_batch_raw_anyhow: Option<String>,
+    /// Overrides `market_status` on every row returned by
+    /// `resolve_for_cancel_batch` while leaving `resolve_for_new_order`
+    /// untouched — simulates a reconciler commit between the two
+    /// independent MVCC snapshots.
+    cancel_batch_status_override: Option<MarketStatus>,
 }
 
 impl FakeRepo {
@@ -113,6 +118,7 @@ impl FakeRepo {
             scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: None,
+            cancel_batch_status_override: None,
         }
     }
 
@@ -126,6 +132,7 @@ impl FakeRepo {
             scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: None,
+            cancel_batch_status_override: None,
         }
     }
 
@@ -136,11 +143,17 @@ impl FakeRepo {
             scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: None,
+            cancel_batch_status_override: None,
         }
     }
 
     fn scrambled(mut self) -> Self {
         self.scrambled_rows = true;
+        self
+    }
+
+    fn with_cancel_batch_status(mut self, status: MarketStatus) -> Self {
+        self.cancel_batch_status_override = Some(status);
         self
     }
 
@@ -151,6 +164,7 @@ impl FakeRepo {
             scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: None,
+            cancel_batch_status_override: None,
         }
     }
 
@@ -161,6 +175,7 @@ impl FakeRepo {
             scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: Some(msg.to_string()),
             resolve_for_cancel_batch_raw_anyhow: None,
+            cancel_batch_status_override: None,
         }
     }
 
@@ -171,6 +186,7 @@ impl FakeRepo {
             scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: Some(msg.to_string()),
+            cancel_batch_status_override: None,
         }
     }
 }
@@ -253,6 +269,11 @@ impl MarketReadRepository for FakeRepo {
             })
             .map(|(_, row)| row)
             .collect();
+        if let Some(status) = self.cancel_batch_status_override {
+            for row in &mut matched {
+                row.market_status = status;
+            }
+        }
         if self.scrambled_rows {
             matched.reverse();
         }
@@ -711,6 +732,30 @@ async fn non_trading_market_returns_400_minus_2010() {
 }
 
 #[tokio::test]
+async fn market_flip_between_selects_returns_400_minus_2010() {
+    // HTTP-peer to the unit test
+    // `cancel_batch_orders_rejects_when_market_flips_between_selects`:
+    // `resolve_for_new_order` returns `Trading`, but the bulk SELECT's
+    // own snapshot rows are tagged non-Trading. The use case's
+    // post-SELECT `rows[0].market_status == Trading` gate must reject
+    // before chain dispatch, otherwise a regression that drops it slips
+    // past the HTTP matrix.
+    let repo: SharedRepo = Arc::new(
+        FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)])
+            .with_cancel_batch_status(MarketStatus::Resolving),
+    );
+    let sender = Arc::new(RecordingCancelBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -2010);
+    assert!(sender.calls().is_empty());
+}
+
+#[tokio::test]
 async fn blank_oracle_list_hash_returns_503_minus_1500() {
     let mut market = trading_market();
     market.oracle_list_hash = String::new();
@@ -847,6 +892,26 @@ async fn chain_request_timeout_returns_504_minus_1007() {
     assert_eq!(resp.status_code, Some(StatusCode::GATEWAY_TIMEOUT));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1007);
+}
+
+#[tokio::test]
+async fn chain_unexpected_returns_500_minus_1000() {
+    // HTTP-peer to the unit test
+    // `cancel_batch_orders_propagates_sender_unexpected`: unmapped
+    // `tvm_exit` codes and gateway transport failures surface as
+    // `DomainError::Unexpected` from `classify_chain_outcome`. The HTTP
+    // layer must render that as 500 / -1000, symmetric with the other
+    // chain-leg shape tests above.
+    let repo: SharedRepo =
+        Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
+    let sender: SharedChainSender =
+        Arc::new(RecordingCancelBatchSender::failing(DomainError::Unexpected));
+    let service = setup_with(repo, sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1000);
 }
 
 // ---- Non-domain resolver failures ----------------------------------------

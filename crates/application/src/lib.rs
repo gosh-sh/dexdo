@@ -1435,17 +1435,11 @@ where
             return Err(DomainError::UnknownOrder);
         }
 
-        // Authoritative status re-check: `resolve_for_new_order` above
-        // ran in its own MVCC snapshot. Between the two queries the
-        // reconciler can flip the market out of `Trading` (e.g. to
-        // `Resolving` or `Cancelled`), but `resolve_for_cancel_batch`'s
-        // predicate set only filters by `last_reconciled_at IS NOT NULL`
-        // — it does not re-derive status. Without this gate the batch
-        // could dispatch `PrivateNote.cancelBatch` against a market
-        // that single-cancel would have rejected. `rows` is non-empty
-        // here (the shortfall branch above returned), and every row
-        // carries the same market_status because the JOIN is filtered
-        // to one `(pmp_address, symbol)`.
+        // Close the race between `resolve_for_new_order` and the bulk
+        // SELECT: a reconciler commit between the two MVCC snapshots
+        // could flip the market out of `Trading`. `rows[0]` is safe —
+        // shortfall returned above, and one JOIN row supplies the
+        // status for all rows.
         if rows[0].market_status != MarketStatus::Trading {
             return Err(DomainError::OrderValidationFailed);
         }

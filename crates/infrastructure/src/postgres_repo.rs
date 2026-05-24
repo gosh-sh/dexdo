@@ -527,15 +527,10 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            // Invariant: `lo.order_id = ANY($3::text[]::numeric[])` only
-            // matches rows whose `order_id` numerically equals one of the
-            // bound values; the bind array `order_ids_decimal` is built
-            // from `&[u64]` via `id.to_string()`, so every value in it
-            // is ≤ `u64::MAX`. Therefore any matched row's `order_id` is
-            // u64-representable and this parse cannot fail. A future
-            // widening of the application-layer type past u64 (e.g.
-            // u128, decimal-string) will trip the `expect` and flag this
-            // call site as one of the places the type also needs to grow.
+            // Bind values came from `&[u64]`, so the matched
+            // `order_id` is always u64-representable. A future widening
+            // past u64 will trip this `expect` as a flag to grow the
+            // type here too.
             let order_id = row.order_id.parse::<u64>().expect(
                 "resolve_for_cancel_batch: live_orders.order_id matched a u64-bound ANY filter",
             );
