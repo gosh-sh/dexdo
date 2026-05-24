@@ -161,6 +161,28 @@ pub struct MarketForPlacement {
     pub outcome: Outcome,
 }
 
+/// Per-outcome metadata needed to render a market-balances row.
+#[derive(Debug, Clone)]
+pub struct BalanceOutcome {
+    pub outcome_id: u32,
+    pub symbol: Symbol,
+    pub quantity_precision: u8,
+}
+
+/// Result of resolving `marketAddress` for a balances request. Contains
+/// every chain-side field (`event_id`, `oracle_list_hash`, `token_type`)
+/// needed to compute `stake_hash` plus the outcome list used to render
+/// the response.
+#[derive(Debug, Clone)]
+pub struct MarketBalancesResolution {
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    pub token_type: i32,
+    pub orderbook_address: String,
+    pub num_outcomes: i32,
+    pub outcomes: Vec<BalanceOutcome>,
+}
+
 #[async_trait]
 pub trait MarketReadRepository: Send + Sync {
     async fn list_markets(&self, request: &MarketsRequest) -> Result<MarketsPage, anyhow::Error>;
@@ -201,6 +223,27 @@ pub trait MarketReadRepository: Send + Sync {
     ) -> Result<OrderForCancel, anyhow::Error>;
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error>;
+
+    /// Resolve a market for the balances path: returns chain-side
+    /// fields needed to compute `stake_hash` plus the outcome list
+    /// used to render the response. Gated by
+    /// `last_reconciled_at IS NOT NULL`. Misses collapse to
+    /// `DomainError::InvalidMarketOrSymbol`.
+    async fn resolve_market_for_balances(
+        &self,
+        market_address: &MarketAddress,
+    ) -> Result<MarketBalancesResolution, anyhow::Error>;
+
+    /// Sum `amount_remaining` over OPEN SELL rows owned by `owner_pn`
+    /// on `orderbook_address`, grouped by `outcome_id`. Returns a map
+    /// keyed by `outcome_id` with raw uint128 values as decimal strings
+    /// (scaled by the API). Missing outcomes default to "0" on the
+    /// caller side.
+    async fn sum_open_sell_remaining(
+        &self,
+        orderbook_address: &str,
+        owner_pn_address: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error>;
 }
 
 #[async_trait]
@@ -240,6 +283,21 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         (**self).list_orders(query).await
+    }
+
+    async fn resolve_market_for_balances(
+        &self,
+        market_address: &MarketAddress,
+    ) -> Result<MarketBalancesResolution, anyhow::Error> {
+        (**self).resolve_market_for_balances(market_address).await
+    }
+
+    async fn sum_open_sell_remaining(
+        &self,
+        orderbook_address: &str,
+        owner_pn_address: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+        (**self).sum_open_sell_remaining(orderbook_address, owner_pn_address).await
     }
 }
 
@@ -1543,6 +1601,21 @@ mod tests {
             self.recorded_orders_queries.lock().unwrap().push(query.clone());
             Ok(self.orders_response.clone())
         }
+
+        async fn resolve_market_for_balances(
+            &self,
+            _: &MarketAddress,
+        ) -> Result<MarketBalancesResolution, anyhow::Error> {
+            unimplemented!("resolve_market_for_balances not exercised by FakeRepo")
+        }
+
+        async fn sum_open_sell_remaining(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+            unimplemented!("sum_open_sell_remaining not exercised by FakeRepo")
+        }
     }
 
     struct FakeSender {
@@ -2838,6 +2911,29 @@ mod balances_port_tests {
             amount: vec!["1".to_string(), "2".to_string()],
             debt_amount: vec!["0".to_string(), "0".to_string()],
             coupons_amount: vec!["0".to_string(), "0".to_string()],
+        };
+    }
+
+    #[test]
+    fn market_balances_resolution_constructs() {
+        let _ = MarketBalancesResolution {
+            event_id: "12345".to_string(),
+            oracle_list_hash: "67890".to_string(),
+            token_type: 1,
+            orderbook_address: "0:orderbook".to_string(),
+            num_outcomes: 2,
+            outcomes: vec![
+                BalanceOutcome {
+                    outcome_id: 0,
+                    symbol: Symbol("X-NO".to_string()),
+                    quantity_precision: 2,
+                },
+                BalanceOutcome {
+                    outcome_id: 1,
+                    symbol: Symbol("X-YES".to_string()),
+                    quantity_precision: 2,
+                },
+            ],
         };
     }
 }

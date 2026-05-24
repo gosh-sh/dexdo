@@ -662,6 +662,21 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // pass for exactly this case (read-api.md §SQL).
         Ok(OrdersPage { orders, next_cursor })
     }
+
+    async fn resolve_market_for_balances(
+        &self,
+        _market_address: &dodex_domain::MarketAddress,
+    ) -> Result<dodex_application::MarketBalancesResolution, anyhow::Error> {
+        anyhow::bail!("resolve_market_for_balances not yet implemented")
+    }
+
+    async fn sum_open_sell_remaining(
+        &self,
+        _orderbook_address: &str,
+        _owner_pn_address: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+        anyhow::bail!("sum_open_sell_remaining not yet implemented")
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
