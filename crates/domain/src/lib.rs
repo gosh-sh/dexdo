@@ -987,6 +987,46 @@ impl DomainError {
     }
 }
 
+/// One collateral-asset row in `GET /api/v1/account` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetBalance {
+    pub asset: String,
+    pub free: String,
+    pub locked: String,
+}
+
+/// Full response shape for `GET /api/v1/account`. The HTTP layer maps
+/// this into the wire envelope; this type lives in `domain` so the
+/// use case can return a typed value rather than untyped json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountBalances {
+    pub account_id: uuid::Uuid,
+    pub update_time_ms: i64,
+    pub balances: Vec<AssetBalance>,
+}
+
+/// One outcome row in `GET /api/v1/account/balances` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeBalance {
+    pub outcome_id: u32,
+    pub symbol: Symbol,
+    pub free: String,
+    pub locked_in_orders: String,
+}
+
+/// Full response shape for `GET /api/v1/account/balances`. Sorted by
+/// `outcome_id` ASC; length equals the market's outcome count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketBalances {
+    pub market_address: MarketAddress,
+    pub update_time_ms: i64,
+    pub balances: Vec<OutcomeBalance>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1570,5 +1610,33 @@ mod tests {
                 tif.as_str(),
             );
         }
+    }
+
+    #[test]
+    fn asset_balance_json_uses_camel_case() {
+        let b = AssetBalance {
+            asset: "USDC".to_string(),
+            free: "25000.00".to_string(),
+            locked: "3750.00".to_string(),
+        };
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["asset"], "USDC");
+        assert_eq!(v["free"], "25000.00");
+        assert_eq!(v["locked"], "3750.00");
+    }
+
+    #[test]
+    fn outcome_balance_json_uses_camel_case() {
+        let b = OutcomeBalance {
+            outcome_id: 1,
+            symbol: Symbol("PM-X-YES".to_string()),
+            free: "5.50".to_string(),
+            locked_in_orders: "1000.00".to_string(),
+        };
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["outcomeId"], 1);
+        assert_eq!(v["symbol"], "PM-X-YES");
+        assert_eq!(v["free"], "5.50");
+        assert_eq!(v["lockedInOrders"], "1000.00");
     }
 }
