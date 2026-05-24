@@ -96,19 +96,37 @@ struct FakeRepo {
     /// stays modelled at the HTTP boundary.
     rows: Mutex<Vec<(String, OrderForCancelBatch)>>,
     scrambled_rows: bool,
+    /// Raw anyhow (no `DomainError` cause) to return from the named
+    /// resolver method — exercises the non-domain downcast fallback in
+    /// `CancelBatchOrdersUseCase::execute` that maps the failure to
+    /// `Unexpected` → 500 / -1000.
+    resolve_for_new_order_raw_anyhow: Option<String>,
+    resolve_for_cancel_batch_raw_anyhow: Option<String>,
 }
 
 impl FakeRepo {
     fn with_market_and_rows(market: Market, rows: Vec<OrderForCancelBatch>) -> Self {
         let owned = rows.into_iter().map(|r| (PN_ADDRESS.to_string(), r)).collect();
-        Self { market: Mutex::new(Some(market)), rows: Mutex::new(owned), scrambled_rows: false }
+        Self {
+            market: Mutex::new(Some(market)),
+            rows: Mutex::new(owned),
+            scrambled_rows: false,
+            resolve_for_new_order_raw_anyhow: None,
+            resolve_for_cancel_batch_raw_anyhow: None,
+        }
     }
 
     fn with_market_and_owned_rows(
         market: Market,
         rows: Vec<(String, OrderForCancelBatch)>,
     ) -> Self {
-        Self { market: Mutex::new(Some(market)), rows: Mutex::new(rows), scrambled_rows: false }
+        Self {
+            market: Mutex::new(Some(market)),
+            rows: Mutex::new(rows),
+            scrambled_rows: false,
+            resolve_for_new_order_raw_anyhow: None,
+            resolve_for_cancel_batch_raw_anyhow: None,
+        }
     }
 
     fn with_market(market: Market) -> Self {
@@ -116,6 +134,8 @@ impl FakeRepo {
             market: Mutex::new(Some(market)),
             rows: Mutex::new(Vec::new()),
             scrambled_rows: false,
+            resolve_for_new_order_raw_anyhow: None,
+            resolve_for_cancel_batch_raw_anyhow: None,
         }
     }
 
@@ -125,7 +145,33 @@ impl FakeRepo {
     }
 
     fn empty() -> Self {
-        Self { market: Mutex::new(None), rows: Mutex::new(Vec::new()), scrambled_rows: false }
+        Self {
+            market: Mutex::new(None),
+            rows: Mutex::new(Vec::new()),
+            scrambled_rows: false,
+            resolve_for_new_order_raw_anyhow: None,
+            resolve_for_cancel_batch_raw_anyhow: None,
+        }
+    }
+
+    fn failing_resolve_for_new_order_raw(market: Market, msg: &str) -> Self {
+        Self {
+            market: Mutex::new(Some(market)),
+            rows: Mutex::new(Vec::new()),
+            scrambled_rows: false,
+            resolve_for_new_order_raw_anyhow: Some(msg.to_string()),
+            resolve_for_cancel_batch_raw_anyhow: None,
+        }
+    }
+
+    fn failing_resolve_for_cancel_batch_raw(market: Market, msg: &str) -> Self {
+        Self {
+            market: Mutex::new(Some(market)),
+            rows: Mutex::new(Vec::new()),
+            scrambled_rows: false,
+            resolve_for_new_order_raw_anyhow: None,
+            resolve_for_cancel_batch_raw_anyhow: Some(msg.to_string()),
+        }
     }
 }
 
@@ -150,6 +196,9 @@ impl MarketReadRepository for FakeRepo {
         symbol: &Symbol,
         _: i64,
     ) -> Result<MarketForPlacement, anyhow::Error> {
+        if let Some(msg) = &self.resolve_for_new_order_raw_anyhow {
+            return Err(anyhow::anyhow!("{msg}"));
+        }
         let Some(market) = self.market.lock().unwrap().clone() else {
             return Err(anyhow::anyhow!(DomainError::InvalidMarketOrSymbol));
         };
@@ -187,6 +236,9 @@ impl MarketReadRepository for FakeRepo {
         owner_pn_address: &str,
         _: i64,
     ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
+        if let Some(msg) = &self.resolve_for_cancel_batch_raw_anyhow {
+            return Err(anyhow::anyhow!("{msg}"));
+        }
         // Production Postgres returns matching rows in arbitrary order;
         // when `scrambled_rows` is set we reverse to verify the use
         // case reorders into the request sequence. Owner and id filters
@@ -795,6 +847,48 @@ async fn chain_request_timeout_returns_504_minus_1007() {
     assert_eq!(resp.status_code, Some(StatusCode::GATEWAY_TIMEOUT));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1007);
+}
+
+// ---- Non-domain resolver failures ----------------------------------------
+
+#[tokio::test]
+async fn resolve_for_new_order_raw_anyhow_returns_500_minus_1000() {
+    // Pin the non-domain fallback in CancelBatchOrdersUseCase::execute:
+    // a `resolve_for_new_order` anyhow without a DomainError cause (e.g.
+    // sqlx pool drop) must surface as 500/-1000, not be swallowed.
+    let repo: SharedRepo = Arc::new(FakeRepo::failing_resolve_for_new_order_raw(
+        trading_market(),
+        "simulated sqlx pool drop",
+    ));
+    let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
+    let service = setup_with(repo, sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1000);
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_raw_anyhow_returns_500_minus_1000() {
+    // Symmetric pin for the second fallback in
+    // CancelBatchOrdersUseCase::execute — the bulk order resolution leg
+    // has its own downcast branch and its own `error!` log; a
+    // regression there would silently lose the -1000 mapping.
+    let repo: SharedRepo = Arc::new(FakeRepo::failing_resolve_for_cancel_batch_raw(
+        trading_market(),
+        "simulated bulk SELECT failure",
+    ));
+    let sender = Arc::new(RecordingCancelBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1000);
+    // Bulk resolution failure must short-circuit before chain dispatch.
+    assert!(sender.calls().is_empty());
 }
 
 // ---- Authorization -------------------------------------------------------

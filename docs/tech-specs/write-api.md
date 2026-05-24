@@ -540,7 +540,7 @@ Same hoop as `POST /api/v1/batchOrders`. The handler calls `require_auth(depot, 
 
 ### Request parsing
 
-Body fields are taken byte-exact from the request as transmitted; the HMAC layer has already verified the signature over those exact bytes. Mandatory-field absence (top-level) returns `MissingParameter` → 400.
+Body fields are taken byte-exact from the request as transmitted; the HMAC layer has already verified the signature over those exact bytes. An empty or malformed body short-circuits at `parse_json` to `InvalidParameter` → 400 / -1130, same channel `POST /order` and `POST /batchOrders` use. `MissingParameter` → 400 / -1102 covers only fields absent within an otherwise-valid JSON object.
 
 Top-level body fields:
 
@@ -597,7 +597,7 @@ cancelBatch(
 )
 ```
 
-`PrivateNote.cancelBatch` performs no ownership or existence check on the ids — only the per-PN busy guard (`require(!_busy.hasValue(), ERR_NOTE_BUSY)`) and the chain-side range guards (`ERR_EMPTY_BATCH`, `ERR_BATCH_TOO_LARGE`), then forwards one `OrderBook.executeBatch(noOrders, orderIds)` message. The PN sets `_pendingBatchActive = true` and holds `_busy` until `onBatchComplete` arrives back from OrderBook — same busy-window shape as `placeBatch`, longer than single-order cancel. The OrderBook side runs in a separate transaction; per-order `_doCancel` silently no-ops on orders that are no longer on the book or whose owner doesn't match. See [Batch cancel failure surface](#failure-surface-3).
+`PrivateNote.cancelBatch` performs no ownership or existence check on the ids — only the per-PN busy guard (`require(!_busy.hasValue(), ERR_NOTE_BUSY)`) and the chain-side range guards (`ERR_EMPTY_BATCH`, `ERR_BATCH_TOO_LARGE`), then forwards one `OrderBook.executeBatch` message with an empty placements array and the orderIds for cancellation. The PN sets `_pendingBatchActive = true` and holds `_busy` until `onBatchComplete` arrives back from OrderBook — same busy-window shape as `placeBatch`, longer than single-order cancel. The OrderBook side runs in a separate transaction; per-order `_doCancel` silently no-ops on orders that are no longer on the book or whose owner doesn't match. See [Batch cancel failure surface](#failure-surface-3).
 
 Sender boundary: the existing `ChainOrderSender` trait grows `async fn cancel_batch_order(&self, payload: CancelBatchOrderPayload) -> Result<(), DomainError>`. The production `BeeDexChainSender` impl wraps `bee_dex::Dex::cancel_batch`, reuses `build_signer` and `classify_chain_outcome` from `crates/infrastructure/src/chain_sender.rs`. A dedicated `chain.cancel_batch_timeout_ms` config knob bounds the per-call wait; `ApiConfig::validate` pins `server.request_timeout_ms > chain.cancel_batch_timeout_ms` at boot so the HTTP timeout cannot fire while a submission is still in flight.
 
@@ -626,7 +626,7 @@ Three failure classes — two synchronous, one async — same split as `DELETE /
    | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the read-model's `max_batch_size` drifted from the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
    | any other `tvm_exit` code | unmapped chain code | `Unexpected` → 500 / -1000, logged at `error` for ops triage |
 
-3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancels from its internal queue in a later transaction. The single-order DELETE's three async outcomes (race with fill/earlier cancel, owner mismatch under read-model corruption, queue overflow) extend to the batch case **per order**: the batch as a whole can have some ids land as `CANCELED`, some as `FILLED` (matching raced the cancel), and — under queue overflow — some remain `OPEN`. The indexer projects each outcome independently into `live_orders`; clients reconcile by polling `/api/v1/orders` (cancelled ids leave the OPEN slice, and any terminal outcome flips the stored status to `CANCELED` or `FILLED`).
+3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancels from its internal queue in a later transaction. The single-order DELETE's three async outcomes (race with fill/earlier cancel, owner mismatch under read-model corruption, queue overflow) extend to the batch case **per order**: the batch as a whole can have some ids land as `CANCELED`, some as `FILLED` (matching raced the cancel), and — under queue overflow — some remain `OPEN`. The indexer projects each outcome independently into `live_orders` (stored status `CANCELLED` / `FILLED`); clients reconcile by polling `/api/v1/orders`, which surfaces each id with the public-spec status `CANCELED` or `FILLED`.
 
    An HTTP 200 `PENDING_CANCEL` array is therefore not a guarantee that every cancel will land — it confirms only that `PrivateNote.cancelBatch` accepted the request.
 
