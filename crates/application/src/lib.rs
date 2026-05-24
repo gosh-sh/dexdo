@@ -714,6 +714,137 @@ fn scale_decimal(raw: &str, decimals: u8) -> String {
     }
 }
 
+/// Input for `GetMarketBalancesUseCase`. The HTTP layer assembles it
+/// from the validated query plus the resolved auth context.
+#[derive(Debug, Clone)]
+pub struct GetMarketBalancesInput {
+    pub pn_address: String,
+    pub market_address: MarketAddress,
+    /// Unix milliseconds. Echoed as `updateTime` in the response.
+    pub now_ms: i64,
+}
+
+/// Signature for the off-chain hash function — the use case takes it
+/// as a generic parameter so unit tests can plug a stub hasher without
+/// pulling in the real `tvm_abi` machinery.
+pub type StakeHasher = fn(event_id: &str, oracle_list_hash: &str, token_type: i32) -> String;
+
+pub struct GetMarketBalancesUseCase<P, R> {
+    pn: P,
+    repo: R,
+    hasher: StakeHasher,
+}
+
+impl<P, R> GetMarketBalancesUseCase<P, R> {
+    pub fn new(pn: P, repo: R, hasher: StakeHasher) -> Self {
+        Self { pn, repo, hasher }
+    }
+}
+
+impl<P, R> GetMarketBalancesUseCase<P, R>
+where
+    P: PnStateReader,
+    R: MarketReadRepository,
+{
+    pub async fn execute(
+        &self,
+        input: GetMarketBalancesInput,
+    ) -> Result<dodex_domain::MarketBalances, anyhow::Error> {
+        // 1. Resolve the market. The repo lifts unknown / unreconciled
+        //    pairs to InvalidMarketOrSymbol; pass that error through
+        //    verbatim.
+        let res =
+            self.repo.resolve_market_for_balances(&input.market_address).await?;
+
+        // 2. Compute the stake hash off chain.
+        let stake_hash = (self.hasher)(&res.event_id, &res.oracle_list_hash, res.token_type);
+
+        // 3. Fan out: chain-side stake lookup + DB-side sell aggregation.
+        //    The two are independent, so we issue them in parallel.
+        let pn_address = input.pn_address.clone();
+        let stake_fut = self.pn.get_stake(&pn_address, &stake_hash);
+        let sum_fut = self.repo.sum_open_sell_remaining(
+            &res.orderbook_address,
+            &input.pn_address,
+        );
+        let (stake_opt, sums) = tokio::try_join!(stake_fut, sum_fut).map_err(|e| {
+            tracing::warn!(error = ?e, "balances fan-out failed");
+            anyhow::Error::from(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+
+        let n = res.num_outcomes as usize;
+
+        // 4. Shape validation: arrays in PnStake must be either empty
+        //    (absent key) OR exactly num_outcomes long.
+        if let Some(ref s) = stake_opt {
+            for (label, arr) in
+                [("amount", &s.amount), ("debtAmount", &s.debt_amount), ("couponsAmount", &s.coupons_amount)]
+            {
+                if !arr.is_empty() && arr.len() != n {
+                    tracing::warn!(
+                        field = label,
+                        got = arr.len(),
+                        expected = n,
+                        "stake array length mismatch"
+                    );
+                    return Err(dodex_domain::DomainError::MarketInconsistent.into());
+                }
+            }
+        }
+
+        // 5. Sanity: every aggregated outcome_id falls within [0, n).
+        for k in sums.keys() {
+            if (*k as usize) >= n {
+                tracing::warn!(outcome_id = k, "aggregation returned out-of-range outcome_id");
+                return Err(dodex_domain::DomainError::MarketInconsistent.into());
+            }
+        }
+
+        // 6. Compose response, sorted by outcome_id ASC (resolution is
+        //    already in ascending order by construction in the repo).
+        let mut rows: Vec<dodex_domain::OutcomeBalance> = Vec::with_capacity(n);
+        for outcome in &res.outcomes {
+            let i = outcome.outcome_id as usize;
+            let raw_free: String = match stake_opt {
+                Some(ref s) if !s.amount.is_empty() => {
+                    add_decimal_strs(&s.amount[i], &s.debt_amount[i], &s.coupons_amount[i])?
+                }
+                _ => "0".to_string(),
+            };
+            let raw_locked = sums.get(&outcome.outcome_id).cloned().unwrap_or_else(|| "0".to_string());
+            rows.push(dodex_domain::OutcomeBalance {
+                outcome_id: outcome.outcome_id,
+                symbol: outcome.symbol.clone(),
+                free: scale_decimal(&raw_free, outcome.quantity_precision),
+                locked_in_orders: scale_decimal(&raw_locked, outcome.quantity_precision),
+            });
+        }
+
+        Ok(dodex_domain::MarketBalances {
+            market_address: input.market_address,
+            update_time_ms: input.now_ms,
+            balances: rows,
+        })
+    }
+}
+
+/// Sum three non-negative integer decimal strings. Uses
+/// `num_bigint::BigUint` so 128-bit-ish values cannot overflow.
+fn add_decimal_strs(a: &str, b: &str, c: &str) -> Result<String, anyhow::Error> {
+    use std::str::FromStr;
+    let parse = |s: &str| -> Result<BigUint, anyhow::Error> {
+        if s.is_empty() {
+            return Ok(BigUint::from(0u32));
+        }
+        BigUint::from_str(s).map_err(|e| {
+            tracing::warn!(value = s, error = ?e, "decimal parse failed");
+            anyhow::Error::from(dodex_domain::DomainError::MarketInconsistent)
+        })
+    };
+    let total = parse(a)? + parse(b)? + parse(c)?;
+    Ok(total.to_string())
+}
+
 /// Input shape for `CreateOrderUseCase`. The HTTP layer parses
 /// `POST /api/v1/order` body + `AuthContext` + clock into this struct.
 /// All decimal fields stay as strings — exact-decimal validation runs
@@ -3177,5 +3308,251 @@ mod balances_port_tests {
                 },
             ],
         };
+    }
+}
+
+#[cfg(test)]
+mod get_market_balances_use_case_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    struct StubPn {
+        stake: Mutex<Option<PnStake>>,
+        last_hash: Mutex<Option<String>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl PnStateReader for StubPn {
+        async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
+            unreachable!("balances use case never calls get_details")
+        }
+        async fn get_stake(
+            &self,
+            _pn: &str,
+            hash: &str,
+        ) -> anyhow::Result<Option<PnStake>> {
+            if self.fail {
+                anyhow::bail!("gateway down")
+            }
+            *self.last_hash.lock().unwrap() = Some(hash.to_string());
+            Ok(self.stake.lock().unwrap().clone())
+        }
+    }
+
+    struct StubRepo {
+        resolution: Mutex<Result<MarketBalancesResolution, dodex_domain::DomainError>>,
+        sums: Mutex<std::collections::HashMap<u32, String>>,
+    }
+
+    #[async_trait]
+    impl MarketReadRepository for StubRepo {
+        async fn list_markets(&self, _: &MarketsRequest) -> anyhow::Result<MarketsPage> {
+            unreachable!()
+        }
+        async fn get_depth(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u16,
+        ) -> anyhow::Result<DepthSnapshot> {
+            unreachable!()
+        }
+        async fn resolve_for_new_order(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: i64,
+        ) -> anyhow::Result<MarketForPlacement> {
+            unreachable!()
+        }
+        async fn resolve_for_cancel(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u64,
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<OrderForCancel> {
+            unreachable!()
+        }
+        async fn list_orders(&self, _: &OrdersQuery) -> anyhow::Result<OrdersPage> {
+            unreachable!()
+        }
+        async fn resolve_market_for_balances(
+            &self,
+            _: &MarketAddress,
+        ) -> anyhow::Result<MarketBalancesResolution> {
+            self.resolution
+                .lock()
+                .unwrap()
+                .clone()
+                .map_err(anyhow::Error::from)
+        }
+        async fn sum_open_sell_remaining(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<std::collections::HashMap<u32, String>> {
+            Ok(self.sums.lock().unwrap().clone())
+        }
+    }
+
+    fn make_resolution(num_outcomes: i32) -> MarketBalancesResolution {
+        let outcomes: Vec<_> = (0..num_outcomes)
+            .map(|i| BalanceOutcome {
+                outcome_id: i as u32,
+                symbol: Symbol(format!("X-{i}")),
+                quantity_precision: 2,
+            })
+            .collect();
+        MarketBalancesResolution {
+            event_id: "1".into(),
+            oracle_list_hash: "2".into(),
+            token_type: 1,
+            orderbook_address: "0:ob".into(),
+            num_outcomes,
+            outcomes,
+        }
+    }
+
+    fn make_pn(stake: Option<PnStake>) -> StubPn {
+        StubPn { stake: Mutex::new(stake), last_hash: Mutex::new(None), fail: false }
+    }
+
+    // Concrete stake_hash impl plugged in via the use case constructor —
+    // the use case doesn't depend on the real hash, only that the same
+    // input produces the same string.
+    fn stub_hasher(_e: &str, _o: &str, _t: i32) -> String {
+        "deadbeef".to_string()
+    }
+
+    #[tokio::test]
+    async fn happy_path_sums_three_pools_per_outcome() {
+        let stake = PnStake {
+            amount: vec!["10".into(), "5".into()],            // outcome 0=10, 1=5
+            debt_amount: vec!["0".into(), "1".into()],        //         0=0, 1=1
+            coupons_amount: vec!["2".into(), "0".into()],     //         0=2, 1=0
+        };
+        let pn = make_pn(Some(stake));
+        let mut sums = std::collections::HashMap::new();
+        sums.insert(1u32, "100".into()); // outcome 1 has 100 locked
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(sums),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let out = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances.len(), 2);
+        // outcome 0: free = 10+0+2 = 12, scale=2 → "0.12"; locked=0 → "0"
+        assert_eq!(out.balances[0].outcome_id, 0);
+        assert_eq!(out.balances[0].free, "0.12");
+        assert_eq!(out.balances[0].locked_in_orders, "0");
+        // outcome 1: free = 5+1+0 = 6, scale=2 → "0.06"; locked=100 → "1.00"
+        assert_eq!(out.balances[1].outcome_id, 1);
+        assert_eq!(out.balances[1].free, "0.06");
+        assert_eq!(out.balances[1].locked_in_orders, "1.00");
+    }
+
+    #[tokio::test]
+    async fn missing_stake_key_yields_zero_free() {
+        let pn = make_pn(None); // simulates absent key
+        let mut sums = std::collections::HashMap::new();
+        sums.insert(0u32, "500".into());
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(sums),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let out = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances.len(), 2);
+        assert_eq!(out.balances[0].free, "0");
+        assert_eq!(out.balances[0].locked_in_orders, "5.00");
+        assert_eq!(out.balances[1].free, "0");
+        assert_eq!(out.balances[1].locked_in_orders, "0");
+    }
+
+    #[tokio::test]
+    async fn stake_array_shorter_than_num_outcomes_is_market_inconsistent() {
+        let stake = PnStake {
+            amount: vec!["1".into()],          // only one entry for two outcomes
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        };
+        let pn = make_pn(Some(stake));
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn unknown_market_yields_invalid_market_or_symbol() {
+        let pn = make_pn(None);
+        let repo = StubRepo {
+            resolution: Mutex::new(Err(DomainError::InvalidMarketOrSymbol)),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:unknown".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::InvalidMarketOrSymbol));
+    }
+
+    #[tokio::test]
+    async fn pn_failure_yields_market_inconsistent() {
+        let pn = StubPn {
+            stake: Mutex::new(None),
+            last_hash: Mutex::new(None),
+            fail: true,
+        };
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
     }
 }
