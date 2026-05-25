@@ -29,12 +29,12 @@ use crate::tvm_runner::run_getter;
 const PN_ABI: &str = include_str!("../../../contracts/abi/dex/PrivateNote.abi.json");
 
 #[derive(Clone)]
-pub struct PostgresPnStateReader {
+pub struct GraphqlPnStateReader {
     graphql: Arc<GraphqlClient>,
     abi: Arc<Contract>,
 }
 
-impl PostgresPnStateReader {
+impl GraphqlPnStateReader {
     pub fn new(graphql: Arc<GraphqlClient>) -> anyhow::Result<Self> {
         let abi = Contract::load(Cursor::new(PN_ABI)).context("load PrivateNote ABI")?;
         Ok(Self { graphql, abi: Arc::new(abi) })
@@ -50,7 +50,7 @@ impl PostgresPnStateReader {
 }
 
 #[async_trait]
-impl PnStateReader for PostgresPnStateReader {
+impl PnStateReader for GraphqlPnStateReader {
     async fn get_details(&self, pn_address: &str) -> anyhow::Result<PnDetails> {
         let boc = self.fetch_boc(pn_address).await?;
         let v = run_getter(&self.abi, &boc, "getDetails", &json!({}))

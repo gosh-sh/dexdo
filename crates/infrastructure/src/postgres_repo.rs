@@ -731,6 +731,17 @@ impl MarketReadRepository for PostgresReadModelRepository {
             })
             .collect();
 
+        // `num_outcomes` is `integer` (signed) in Postgres but non-negative
+        // by contract. Treat a negative value as read-model corruption.
+        let num_outcomes: u32 = num_outcomes.try_into().map_err(|_| {
+            tracing::warn!(
+                pmp = %market_address.0,
+                raw = num_outcomes,
+                "num_outcomes is negative — read-model corruption"
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+
         Ok(dodex_application::MarketBalancesResolution {
             event_id,
             oracle_list_hash,

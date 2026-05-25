@@ -179,7 +179,10 @@ pub struct MarketBalancesResolution {
     pub oracle_list_hash: String,
     pub token_type: i32,
     pub orderbook_address: String,
-    pub num_outcomes: i32,
+    /// Number of outcomes for this market. `u32` because outcome counts
+    /// are non-negative; the Postgres `integer` column is cast at the
+    /// repo boundary (negative DB values → `MarketInconsistent`).
+    pub num_outcomes: u32,
     pub outcomes: Vec<BalanceOutcome>,
 }
 
@@ -3426,10 +3429,10 @@ mod get_market_balances_use_case_tests {
         }
     }
 
-    fn make_resolution(num_outcomes: i32) -> MarketBalancesResolution {
+    fn make_resolution(num_outcomes: u32) -> MarketBalancesResolution {
         let outcomes: Vec<_> = (0..num_outcomes)
             .map(|i| BalanceOutcome {
-                outcome_id: i as u32,
+                outcome_id: i,
                 symbol: Symbol(format!("X-{i}")),
                 quantity_precision: 2,
             })

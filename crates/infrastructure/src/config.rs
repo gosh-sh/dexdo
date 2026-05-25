@@ -150,8 +150,15 @@ fn default_place_batch_timeout_ms() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphqlSection {
     pub endpoint: String,
+    /// Batch page size for paginated GraphQL queries (indexer path).
+    /// Optional at the API tier, which does not paginate; defaults to 100.
+    #[serde(default = "default_graphql_page_size")]
     pub page_size: u32,
     pub request_timeout_ms: u64,
+}
+
+fn default_graphql_page_size() -> u32 {
+    100
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,7 +219,6 @@ impl ApiConfig {
         self.auth.validate()?;
         self.chain.validate()?;
         anyhow::ensure!(!self.graphql.endpoint.is_empty(), "graphql.endpoint must not be empty");
-        anyhow::ensure!(self.graphql.page_size > 0, "graphql.page_size must be > 0");
         anyhow::ensure!(
             self.graphql.request_timeout_ms > 0,
             "graphql.request_timeout_ms must be > 0",
@@ -422,10 +428,10 @@ indexer:
     }
 
     #[test]
-    fn api_config_now_accepts_graphql_section_for_balances() {
-        // NODE-3445 added on-demand PN BOC reads to the API. The API now
-        // owns its own `graphql` section (separate from the indexer's
-        // mainline; live configs may point to the same gateway).
+    fn api_config_accepts_graphql_section() {
+        // The API owns its own `graphql` section for on-demand PN BOC reads.
+        // page_size is optional at the API tier (defaults to 100) and may be
+        // omitted — this verifies the default kicks in.
         let raw = format!(
             "{COMMON}
 server:
@@ -438,12 +444,12 @@ chain:
   gateway_endpoint: shellnet.ackinacki.org
 graphql:
   endpoint: https://graphql.example.invalid
-  page_size: 100
   request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
         assert_eq!(cfg.graphql.endpoint, "https://graphql.example.invalid");
+        assert_eq!(cfg.graphql.page_size, 100);
         cfg.validate().expect("validate");
     }
 

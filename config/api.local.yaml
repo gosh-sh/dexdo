@@ -39,5 +39,4 @@ graphql:
   # Points at the same gateway URL the indexer uses (see
   # config/indexer.local.yaml). Production may diverge.
   endpoint: https://shellnet.ackinacki.org/graphql
-  page_size: 100
   request_timeout_ms: 10000

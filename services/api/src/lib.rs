@@ -1258,7 +1258,7 @@ pub async fn run() -> anyhow::Result<()> {
         Duration::from_millis(config.graphql.request_timeout_ms),
     )?);
     let pn_reader: SharedPnReader =
-        Arc::new(dodex_infrastructure::pn_state_reader::PostgresPnStateReader::new(graphql)?);
+        Arc::new(dodex_infrastructure::pn_state_reader::GraphqlPnStateReader::new(graphql)?);
     let ref_repo: SharedRefRepo =
         Arc::new(dodex_infrastructure::postgres_repo::PostgresReferenceRepository::new(
             pool.clone(),
