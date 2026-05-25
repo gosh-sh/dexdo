@@ -735,14 +735,24 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let outcomes = outcomes
+        let outcomes: Vec<dodex_application::BalanceOutcome> = outcomes
             .into_iter()
-            .map(|(outcome_id, symbol, qp)| dodex_application::BalanceOutcome {
-                outcome_id: outcome_id as u32,
-                symbol: dodex_domain::Symbol(symbol),
-                quantity_precision: qp as u8,
+            .map(|(outcome_id, symbol, qp)| -> Result<_, anyhow::Error> {
+                let outcome_id = u32::try_from(outcome_id).map_err(|_| {
+                    tracing::warn!(pmp = %market_address.0, raw = outcome_id, "outcome_id is negative");
+                    anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+                })?;
+                let quantity_precision = u8::try_from(qp).map_err(|_| {
+                    tracing::warn!(pmp = %market_address.0, outcome_id, raw = qp, "quantity_precision out of range");
+                    anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+                })?;
+                Ok(dodex_application::BalanceOutcome {
+                    outcome_id,
+                    symbol: dodex_domain::Symbol(symbol),
+                    quantity_precision,
+                })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         // `num_outcomes` is `integer` (signed) in Postgres but non-negative
         // by contract. Treat a negative value as read-model corruption.
@@ -783,7 +793,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .bind(owner_pn_address)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(oid, sum)| (oid as u32, sum)).collect())
+        rows.into_iter()
+            .map(|(oid, sum)| {
+                let oid = u32::try_from(oid).map_err(|_| {
+                    tracing::warn!(raw = oid, "outcome_id in live_orders is negative");
+                    anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+                })?;
+                Ok((oid, sum))
+            })
+            .collect()
     }
 }
 
@@ -2412,10 +2430,13 @@ impl dodex_application::ReferenceRepository for PostgresReferenceRepository {
         .bind(token_type)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(token_code, decimals)| dodex_application::RefToken {
-            token_type,
-            token_code,
-            decimals: decimals as u8,
-        }))
+        row.map(|(token_code, decimals)| -> Result<_, anyhow::Error> {
+            let decimals = u8::try_from(decimals).map_err(|_| {
+                tracing::warn!(token_type, raw = decimals, "decimals is out of range for u8");
+                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+            })?;
+            Ok(dodex_application::RefToken { token_type, token_code, decimals })
+        })
+        .transpose()
     }
 }
