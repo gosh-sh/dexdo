@@ -726,8 +726,11 @@ pub struct GetMarketBalancesInput {
 
 /// Signature for the off-chain hash function — the use case takes it
 /// as a generic parameter so unit tests can plug a stub hasher without
-/// pulling in the real `tvm_abi` machinery.
-pub type StakeHasher = fn(event_id: &str, oracle_list_hash: &str, token_type: i32) -> String;
+/// pulling in the real `tvm_abi` machinery. Returns `Err(DomainError::MarketInconsistent)`
+/// on parse or hash failure so read-model corruption surfaces as a 503
+/// instead of silently producing all-zero outcome balances.
+pub type StakeHasher =
+    fn(event_id: &str, oracle_list_hash: &str, token_type: i32) -> Result<String, DomainError>;
 
 pub struct GetMarketBalancesUseCase<P, R> {
     pn: P,
@@ -756,8 +759,11 @@ where
         let res =
             self.repo.resolve_market_for_balances(&input.market_address).await?;
 
-        // 2. Compute the stake hash off chain.
-        let stake_hash = (self.hasher)(&res.event_id, &res.oracle_list_hash, res.token_type);
+        // 2. Compute the stake hash off chain. The hasher returns Err on
+        //    parse / hash failure (read-model corruption) — propagate as
+        //    MarketInconsistent so the caller receives a 503.
+        let stake_hash = (self.hasher)(&res.event_id, &res.oracle_list_hash, res.token_type)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         // 3. Fan out: chain-side stake lookup + DB-side sell aggregation.
         //    The two are independent, so we issue them in parallel.
@@ -3445,8 +3451,12 @@ mod get_market_balances_use_case_tests {
     // Concrete stake_hash impl plugged in via the use case constructor —
     // the use case doesn't depend on the real hash, only that the same
     // input produces the same string.
-    fn stub_hasher(_e: &str, _o: &str, _t: i32) -> String {
-        "deadbeef".to_string()
+    fn stub_hasher(_e: &str, _o: &str, _t: i32) -> Result<String, DomainError> {
+        Ok("deadbeef".to_string())
+    }
+
+    fn failing_hasher(_e: &str, _o: &str, _t: i32) -> Result<String, DomainError> {
+        Err(DomainError::MarketInconsistent)
     }
 
     #[tokio::test]
@@ -3588,6 +3598,50 @@ mod get_market_balances_use_case_tests {
         let repo = StubRepo {
             resolution: Mutex::new(Ok(make_resolution(2))),
             sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn hasher_failure_yields_market_inconsistent() {
+        let pn = make_pn(None);
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, failing_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn out_of_range_outcome_id_yields_market_inconsistent() {
+        // sum_open_sell_remaining returns outcome_id=99 which is >= num_outcomes=2.
+        // The bounds-check loop must catch this and return MarketInconsistent.
+        let pn = make_pn(None);
+        let mut sums = std::collections::HashMap::new();
+        sums.insert(99u32, "5".into()); // outcome 99 is out of range for a 2-outcome market
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(sums),
         };
         let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
         let err = uc

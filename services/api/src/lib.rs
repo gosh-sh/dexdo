@@ -1158,23 +1158,25 @@ async fn get_account_balances(
     Ok(Json(MarketBalancesResponse::from_domain(out)))
 }
 
-/// Production adapter for `application::StakeHasher`. Fail-soft by
-/// design: a non-numeric `event_id` / `oracle_list_hash` (read-model
-/// corruption) collapses to `BigUint::default()`, and a hash failure
-/// collapses to `""`. Either case misses on `_stakes.get("")` and
-/// the caller observes all-zero outcome balances rather than a 5xx.
-/// The `StakeHasher` type alias returns `String` (not `Result`), so
-/// no domain error can be surfaced here — see Task 10 step 7 of the
-/// implementation plan for the rationale and the future-strengthening
-/// alternative.
-fn balances_stake_hash(event_id: &str, oracle_list_hash: &str, token_type: i32) -> String {
+/// Production adapter for `application::StakeHasher`. Fails closed:
+/// a non-numeric `event_id` or `oracle_list_hash` (read-model corruption)
+/// returns `Err(DomainError::MarketInconsistent)`, as does any failure
+/// from the underlying `tvm_hash::stake_hash` call. The caller propagates
+/// this as a 503 rather than silently producing all-zero outcome balances.
+fn balances_stake_hash(
+    event_id: &str,
+    oracle_list_hash: &str,
+    token_type: i32,
+) -> Result<String, dodex_domain::DomainError> {
     use num_bigint::BigUint;
     use std::str::FromStr;
-    let event = BigUint::from_str(event_id).unwrap_or_default();
-    let oracle = BigUint::from_str(oracle_list_hash).unwrap_or_default();
+    let event = BigUint::from_str(event_id)
+        .map_err(|_| dodex_domain::DomainError::MarketInconsistent)?;
+    let oracle = BigUint::from_str(oracle_list_hash)
+        .map_err(|_| dodex_domain::DomainError::MarketInconsistent)?;
     let token_type = token_type as u32;
     dodex_infrastructure::tvm_hash::stake_hash(&event, &oracle, token_type)
-        .unwrap_or_else(|_| String::new())
+        .map_err(|_| dodex_domain::DomainError::MarketInconsistent)
 }
 
 /// Assemble the production router around `state`. Kept as a separate
