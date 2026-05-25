@@ -715,7 +715,10 @@ struct BatchOrderResponseItem {
 /// destructive write surface: a typo like `orderIDs` would otherwise
 /// silently deserialise as `order_ids = None` and surface as
 /// MissingParameter, masking the real bug — better to 400 with
-/// `unknown field` and let the caller fix the key.
+/// `unknown field` and let the caller fix the key. `CreateOrderRequest`
+/// and `BatchOrdersRequest` ship lenient by historical default;
+/// flipping them strict is a repo-wide DTO policy change and is
+/// tracked separately, not here.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CancelBatchOrdersRequest {

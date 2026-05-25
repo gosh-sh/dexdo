@@ -1,12 +1,13 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Production implementation of `ChainOrderSender` that dispatches
-// `PrivateNote.placeOrder`, `PrivateNote.cancelOrder`, and
-// `PrivateNote.placeBatch` through `bee_dex::Dex`. The wrapper does
-// nothing except translate the application-layer payloads into the
-// chain ABI's `ParamsOfPlaceOrder` / `ParamsOfCancelOrder` /
-// `ParamsOfPlaceBatch` and forward the call — ABI encoding, signing,
-// and gateway transport all live in `bee_dex`.
+// `PrivateNote.placeOrder`, `PrivateNote.cancelOrder`,
+// `PrivateNote.placeBatch`, and `PrivateNote.cancelBatch` through
+// `bee_dex::Dex`. The wrapper does nothing except translate the
+// application-layer payloads into the chain ABI's `ParamsOfPlaceOrder`
+// / `ParamsOfCancelOrder` / `ParamsOfPlaceBatch` / `ParamsOfCancelBatch`
+// and forward the call — ABI encoding, signing, and gateway transport
+// all live in `bee_dex`.
 //
 // See `docs/tech-specs/write-api.md §Chain submission` for the layering
 // contract this implements.
@@ -478,9 +479,12 @@ fn map_bee_dex_error(err: &AppError, ctx: &ChainCallContext<'_>) -> DomainError 
     DomainError::Unexpected
 }
 
-/// `PrivateNote.placeOrder` exit codes from
-/// `contracts/modifiers/errors.sol`. Only the codes the trading path
-/// can plausibly raise are mapped; everything else returns `None` so
+/// `PrivateNote` exit codes from `contracts/modifiers/errors.sol`,
+/// shared across the four entry points (`placeOrder`, `cancelOrder`,
+/// `placeBatch`, `cancelBatch`) the wrapper dispatches — the
+/// originating entry point is carried in `ChainCallContext.entry_point`
+/// for the unmapped-code log site. Only codes the trading path can
+/// plausibly raise are mapped; everything else returns `None` so
 /// `map_bee_dex_error` can fall through to `Unexpected` (and log the
 /// raw error for later triage).
 fn map_tvm_exit_code(code: u16) -> Option<DomainError> {
@@ -490,8 +494,10 @@ fn map_tvm_exit_code(code: u16) -> Option<DomainError> {
         // `amount <= 0` (the last is normally caught by our local
         // precision check, but the contract guards it too).
         102 => Some(DomainError::OrderValidationFailed),
-        // ERR_NOTE_BUSY: another `placeOrder` is in flight for this PN.
-        // Distinct retry semantics — 429 / -2014 instead of -2010.
+        // ERR_NOTE_BUSY: another PN-level op (any of placeOrder /
+        // cancelOrder / placeBatch / cancelBatch) is still holding the
+        // `_busy` lock for this PN. Distinct retry semantics — 429 /
+        // -2014 instead of -2010.
         121 => Some(DomainError::OrderPnBusy),
         // ERR_INVALID_PARAMS: applies to both `placeOrder` and
         // `placeBatch`. The PN guards two client-shape invariants

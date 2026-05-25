@@ -209,6 +209,18 @@ pub trait MarketReadRepository: Send + Sync {
     /// `bind_idx` (its position in `order_ids`) and the use case
     /// reconstructs the chain `orderId` from the input slice.
     ///
+    /// Impls MUST return `bind_idx` strictly in `[0, order_ids.len())`
+    /// AND each `bind_idx` value at most once across the returned
+    /// orders. The use case sorts by `bind_idx` and zips against
+    /// `order_ids` positionally; an out-of-range value would silently
+    /// mispair the response, and a duplicate would let two rows claim
+    /// the same input position. The Postgres impl rejects out-of-range
+    /// values as `Unexpected` (PG `WITH ORDINALITY` contract violated)
+    /// and relies on the `(orderbook_address, order_id)` primary key
+    /// to prevent duplicates; any new impl owes both guarantees.
+    /// Duplicates that slip past an impl are caught downstream by the
+    /// use case as `MarketInconsistent`, never reaching the chain.
+    ///
     /// `None` means zero matches — the use case maps that to
     /// `DomainError::UnknownOrder`. A partial shortfall (some matches,
     /// some not) surfaces as `Some` with `orders.len() < order_ids.len()`;
@@ -807,6 +819,13 @@ pub struct CancelBatchOrdersInput {
 /// Mirrors `NewBatchOrderPayload` but the ABI is narrower —
 /// `PrivateNote.cancelBatch` takes only event/oracle/token coordinates
 /// plus the chain-assigned `orderId[]`. No price, amount, or flags.
+///
+/// `order_ids` and `client_order_ids` are parallel arrays by convention
+/// — same length, same order. The pair is constructed in one pass at
+/// `CancelBatchOrdersUseCase::execute` (the only construction site in
+/// production) and consumed in parallel by the chain sender (encodes
+/// `order_ids`) and the audit log (joins `client_order_ids`). The
+/// invariant is held by single-site construction, not by the type.
 #[derive(Debug, Clone)]
 pub struct CancelBatchOrderPayload {
     pub pn_address: String,
@@ -1029,7 +1048,15 @@ where
         // `PMP.getDetails()`, so a negative here would mean the DB row
         // was corrupted post-reconcile — fail closed with 503 instead
         // of pushing a sign-folded value to chain.
-        let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
+        let token_type = u32::try_from(token_type).map_err(|_| {
+            error!(
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                token_type,
+                "resolve_for_new_order: token_type does not fit u32",
+            );
+            DomainError::MarketInconsistent
+        })?;
 
         let payload = NewOrderPayload {
             pn_address: input.trading_pn.pn_address,
@@ -1232,7 +1259,15 @@ where
             return Err(DomainError::MarketInconsistent);
         }
 
-        let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
+        let token_type = u32::try_from(token_type).map_err(|_| {
+            error!(
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                token_type,
+                "resolve_for_cancel: token_type does not fit u32",
+            );
+            DomainError::MarketInconsistent
+        })?;
 
         let payload = CancelOrderPayload {
             pn_address: input.trading_pn.pn_address,
@@ -1325,7 +1360,15 @@ where
             return Err(DomainError::InvalidParameter);
         }
 
-        let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
+        let token_type = u32::try_from(token_type).map_err(|_| {
+            error!(
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                token_type,
+                "resolve_for_new_order: token_type does not fit u32",
+            );
+            DomainError::MarketInconsistent
+        })?;
 
         let mut encoded_orders = Vec::with_capacity(input.orders.len());
         let mut submitted_items = Vec::with_capacity(input.orders.len());
@@ -1709,6 +1752,13 @@ mod tests {
         /// where the bulk SELECT yields duplicate `order_id` values
         /// despite the (orderbook_address, order_id) PK.
         cancel_batch_duplicate_first_row: bool,
+        /// When true, `resolve_for_cancel_batch` appends an extra row
+        /// duplicating the first match, so `orders.len() ==
+        /// input.order_ids.len() + 1`. Models the overage variant of
+        /// the same corruption: the shortfall gate (`orders.len() <
+        /// input.order_ids.len()`) does not fire, so the windows(2)
+        /// duplicate sweep is what must catch it.
+        cancel_batch_extra_duplicate_row: bool,
         orders_response: OrdersPage,
         recorded_orders_queries: Mutex<Vec<OrdersQuery>>,
     }
@@ -1725,6 +1775,7 @@ mod tests {
                 live_orders: Vec::new(),
                 cancel_batch_status_override: None,
                 cancel_batch_duplicate_first_row: false,
+                cancel_batch_extra_duplicate_row: false,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1737,6 +1788,7 @@ mod tests {
                 live_orders: Vec::new(),
                 cancel_batch_status_override: None,
                 cancel_batch_duplicate_first_row: false,
+                cancel_batch_extra_duplicate_row: false,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1749,6 +1801,7 @@ mod tests {
                 live_orders: Vec::new(),
                 cancel_batch_status_override: None,
                 cancel_batch_duplicate_first_row: false,
+                cancel_batch_extra_duplicate_row: false,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1761,6 +1814,7 @@ mod tests {
                 live_orders: orders,
                 cancel_batch_status_override: None,
                 cancel_batch_duplicate_first_row: false,
+                cancel_batch_extra_duplicate_row: false,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1776,6 +1830,11 @@ mod tests {
 
         fn with_cancel_batch_duplicate_first_row(mut self) -> Self {
             self.cancel_batch_duplicate_first_row = true;
+            self
+        }
+
+        fn with_cancel_batch_extra_duplicate_row(mut self) -> Self {
+            self.cancel_batch_extra_duplicate_row = true;
             self
         }
 
@@ -1911,6 +1970,13 @@ mod tests {
                 // `bind_idx` — exactly the case the use case must
                 // catch as MarketInconsistent.
                 orders[1] = orders[0].clone();
+            }
+            if self.cancel_batch_extra_duplicate_row && !orders.is_empty() {
+                // Overage variant: an extra row appended, no input
+                // row dropped, so `orders.len() == input.len() + 1`.
+                // The shortfall gate does not fire on overage, so the
+                // windows(2) duplicate sweep is what must catch this.
+                orders.push(orders[0].clone());
             }
             Ok(Some(CancelBatchResolution {
                 event_id: market.event.event_id,
@@ -3329,16 +3395,18 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_batch_orders_rejects_above_max_batch_size() {
-        // test_outcome().max_batch_size == 5; 6 ids must fail locally
-        // with -1130 instead of paying a chain ERR_BATCH_TOO_LARGE.
+        // Boundary pin from the other side: `max + 1` ids must fail
+        // locally with -1130 instead of paying a chain
+        // ERR_BATCH_TOO_LARGE round-trip. Pairs with
+        // `cancel_batch_orders_accepts_exactly_max_batch_size`.
         let market = trading_market("PM-YES");
+        let max = test_outcome("PM-YES").max_batch_size as usize;
         let sender = Arc::new(FakeSender::ok());
         let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
 
-        let err = uc
-            .execute(base_cancel_batch_input("PM-YES", vec![1, 2, 3, 4, 5, 6]))
-            .await
-            .unwrap_err();
+        let ids: Vec<u64> = (0..=max).map(|i| 1 + i as u64).collect();
+        let err =
+            uc.execute(base_cancel_batch_input("PM-YES", ids)).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
         assert!(sender.cancel_batch_calls().is_empty());
     }
@@ -3474,6 +3542,27 @@ mod tests {
         let repo =
             FakeRepo::with_live_orders(market, vec![live_order(1, Some("a")), live_order(2, None)])
                 .with_cancel_batch_duplicate_first_row();
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_overage_extra_row_as_market_inconsistent() {
+        // Overage variant of the duplicate-rows case: the bulk SELECT
+        // returns one row more than asked. The shortfall gate
+        // (`orders.len() < input.order_ids.len()`) does not fire here,
+        // so the windows(2) duplicate sweep is the only thing standing
+        // between read-model corruption and a wrong-coid response. The
+        // equal-length duplicate test above pins the same gate from
+        // the other side of the size relationship.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let repo =
+            FakeRepo::with_live_orders(market, vec![live_order(1, Some("a")), live_order(2, None)])
+                .with_cancel_batch_extra_duplicate_row();
         let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();

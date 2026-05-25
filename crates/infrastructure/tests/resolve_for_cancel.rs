@@ -447,10 +447,15 @@ async fn resolve_for_cancel_derives_non_trading_status_for_caller_check() {
 //
 // Bulk variant for DELETE /api/v1/batchOrders. The SQL mirrors
 // `resolve_for_cancel`'s predicate set (status='OPEN', amount_remaining>0,
-// owner_pn_address match, m.last_reconciled_at IS NOT NULL) but adds
-// `lo.order_id = ANY($3::text[]::numeric[])` and returns a Vec. The
-// single-cancel suite above already pins the predicate semantics; these
-// tests focus on what is bulk-specific: the array bind+cast, partial
+// owner_pn_address match, m.last_reconciled_at IS NOT NULL) but joins
+// `live_orders.order_id` against `unnest($3::text[]) WITH ORDINALITY` and
+// projects `bind_idx` (the input array position) so the use case can
+// reconstruct `order_id` without parsing the row back. Identity and
+// market_status are lifted to `CancelBatchResolution` once — every row
+// joins the same (markets, market_outcomes) snapshot, so per-row
+// projection would be redundant. The single-cancel suite above already
+// pins the predicate semantics; these tests focus on what is
+// bulk-specific: the WITH-ORDINALITY position mapping, partial
 // shortfall, and per-row owner filtering inside one request.
 
 fn sort_orders(mut orders: Vec<OrderForCancelBatch>) -> Vec<OrderForCancelBatch> {
@@ -468,7 +473,9 @@ fn into_orders(resolution: Option<CancelBatchResolution>) -> Vec<OrderForCancelB
 #[tokio::test]
 async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
     // Three ids requested, all three resolve. Exercises the
-    // `ANY($3::text[]::numeric[])` cast on a non-trivial input set.
+    // `unnest($3::text[]) WITH ORDINALITY` join on a non-trivial input
+    // set — `bind_idx` must come back as the request position (0, 1, 2)
+    // regardless of the order PG actually returns the rows in.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -510,6 +517,40 @@ async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
     assert_eq!(orders[1].client_order_id.as_deref(), Some("b"));
     assert_eq!(orders[2].bind_idx, 2);
     assert!(orders[2].client_order_id.is_none());
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_whitespace_only_client_order_id_surfaces_as_none() {
+    // `client_order_id` is `text` in Postgres — whitespace round-trips
+    // verbatim. The infra layer trims and collapses blank-after-trim to
+    // None so the response renders the empty-string convention. NULL
+    // and non-empty are already pinned by the happy-path and partial
+    // tests; without explicit whitespace seeding a future SQL-side
+    // change (e.g. dropping the trim) would slip past the bulk suite.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_ws_cid_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_WS_CID_YES";
+    let pn = "0:resolve_cancel_batch_ws_cid_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, 9001, 7, pn, "OPEN", "1500000", Some("   ")).await;
+
+    let orders = into_orders(
+        repo.resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[9001],
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect("bulk resolve with whitespace-only client_order_id"),
+    );
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0].bind_idx, 0);
+    assert!(orders[0].client_order_id.is_none());
 }
 
 #[tokio::test]
@@ -690,7 +731,7 @@ async fn resolve_for_cancel_batch_closed_status_row_invisible() {
     // Peer of `resolve_for_cancel_closed_order_is_unknown_order`: a row
     // with `status='CANCELLED'` must not be returned by the bulk SELECT.
     // Without this test, a regression that drops `lo.status = 'OPEN'`
-    // from the `ANY(:orderIds)` query would still pass every other case
+    // from the WITH-ORDINALITY join would still pass every other case
     // here (they all seed `'OPEN'`).
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());

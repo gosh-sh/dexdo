@@ -551,10 +551,13 @@ async fn malformed_json_body_returns_400_minus_1130() {
 
 #[tokio::test]
 async fn empty_body_returns_400_minus_1130() {
-    // Some HTTP proxies / SDKs strip bodies from DELETE requests; an
-    // empty body fails JSON parsing the same way a malformed one does
-    // and routes through the same `parse_json` → InvalidParameter
-    // channel as `POST /order` and `POST /batchOrders`.
+    // Some HTTP proxies / SDKs strip bodies from DELETE requests. An
+    // empty body short-circuits in `parse_strict_body` *before* it
+    // reaches `serde_json::from_slice`, emitting `reason = empty`
+    // (distinct from the `reason = malformed` tag the sibling
+    // `malformed_json_body_returns_400_minus_1130` test exercises
+    // through the same helper). Both route to `InvalidParameter` →
+    // -1130, peer of `POST /order` and `POST /batchOrders`.
     let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
     let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
     let service = setup_with(repo, sender);
@@ -693,6 +696,36 @@ async fn empty_order_ids_returns_400_minus_1130() {
     assert_eq!(err.code, -1130);
     // Pre-flight gate must fire before chain.
     assert!(sender.calls().is_empty());
+}
+
+#[tokio::test]
+async fn exactly_max_batch_size_returns_pending_cancel_array() {
+    // trading_market().outcomes[0].max_batch_size == 5. Exactly five
+    // ids must reach the chain and round-trip a 5-item PENDING_CANCEL
+    // array — pins the `>` boundary against an off-by-one that would
+    // either reject the at-cap call (`>=`) or let an oversized one
+    // through. Peer of create-batch's
+    // `exactly_max_batch_size_returns_pending_new_array`.
+    let ids: Vec<u64> = (1..=5).collect();
+    let rows: Vec<(u64, OrderForCancelBatch)> =
+        ids.iter().map(|id| row(*id, Some(&format!("c-{id}")))).collect();
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market_and_rows(trading_market(), rows));
+    let sender = Arc::new(RecordingCancelBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let id_strs: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    let body_ids: Vec<&str> = id_strs.iter().map(String::as_str).collect();
+    let mut resp = delete_batch(&service, valid_body(body_ids)).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let items = resp.take_json::<Vec<CancelBatchItem>>().await.expect("cancel batch body");
+    assert_eq!(items.len(), 5);
+    for item in &items {
+        assert_eq!(item.status, "PENDING_CANCEL");
+    }
+    let calls = sender.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].order_ids, ids);
 }
 
 #[tokio::test]

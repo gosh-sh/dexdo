@@ -540,7 +540,7 @@ Same hoop as `POST /api/v1/batchOrders`. The handler calls `require_auth(depot, 
 
 ### Request parsing
 
-Body fields are taken byte-exact from the request as transmitted; the HMAC layer has already verified the signature over those exact bytes. An empty or malformed body short-circuits at `parse_json` to `InvalidParameter` → 400 / -1130, same channel `POST /order` and `POST /batchOrders` use. `MissingParameter` → 400 / -1102 covers only fields absent within an otherwise-valid JSON object.
+Body fields are taken byte-exact from the request as transmitted; the HMAC layer has already verified the signature over those exact bytes. An empty or malformed body short-circuits at `parse_strict_body` to `InvalidParameter` → 400 / -1130 — the helper emits `reason = empty / malformed / truncated / shape_mismatch` (one per failure mode) for ops triage, and backs `POST /order` and `POST /batchOrders` through the same path. `MissingParameter` → 400 / -1102 covers only fields absent within an otherwise-valid JSON object.
 
 Top-level body fields:
 
@@ -567,7 +567,7 @@ The resolved row supplies the chain-level fields once for the whole batch:
 
 ### Batch size cap
 
-Sourced from `market_outcomes.max_batch_size` on the resolved outcome, same as `POST /api/v1/batchOrders`. The chain's own `MAX_BATCH_SIZE` (5 today) is the floor the local check honours; using the read-model value keeps the public surface aligned with `/api/v1/markets`. An empty `orderIds[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
+Sourced from `market_outcomes.max_batch_size` on the resolved outcome, same as `POST /api/v1/batchOrders`. The chain's own `MAX_BATCH_SIZE` (5 today) is the ceiling the local check must not exceed; using the read-model value keeps the public surface aligned with `/api/v1/markets`. An empty `orderIds[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
 
 ### Order resolution
 
@@ -575,14 +575,14 @@ One SELECT joins [`live_orders`](data-schema.md#live_orders) against `markets �
 
 - Scoping to the resolved outcome's book goes through the `markets ⨝ live_orders` join on `orderbook_address`, mirrored on the single-cancel path.
 - `live_orders.owner_pn_address = :pn_address` — pins the caller as the owner of every row.
-- `live_orders.order_id = ANY(:orderIds)` — the input list.
+- `live_orders.order_id` joined against the input list expanded as `unnest($3::text[]) WITH ORDINALITY` — the join side-table carries `(val::numeric, idx)`, and the SELECT projects `idx - 1` as `bind_idx` so the use case can reconstruct `order_id` from `input.order_ids[bind_idx]` without round-tripping the u64 through numeric/text on the way back.
 - `live_orders.status = 'OPEN'` AND `live_orders.amount_remaining > 0` — same belt-and-suspenders pair as `/api/v1/openOrders` and single-order DELETE; keeps the transient `OPEN`/`amount_remaining = 0` slice invisible to cancel.
 
 The SELECT also returns each row's `live_orders.client_order_id` (echoed in the response). The use case asserts `rows.len() == input.order_ids.len()`; any shortfall — unknown id, wrong owner, wrong book, already closed — surfaces as `UnknownOrder` → 404 / -2011 for the whole batch, with the same deliberate opacity as single-order DELETE (differentiating those cases would leak order existence and account binding). Validation is atomic: no chain message is sent if any item is unresolved.
 
-This is the new `MarketReadRepository::resolve_for_cancel_batch` method. It mirrors `resolve_for_cancel`'s join shape (live_orders ⨝ markets ⨝ market_outcomes) but with `lo.order_id = ANY(:orderIds)` and returns `Vec<{order_id, client_order_id, market_status}>` — one row per matched id, order not guaranteed. The use case reorders into the request's `orderIds[]` sequence by `order_id` and assembles the response array there; a missing id surfaces as `UnknownOrder` for the whole batch.
+This is the new `MarketReadRepository::resolve_for_cancel_batch` method. It mirrors `resolve_for_cancel`'s join shape (live_orders ⨝ markets ⨝ market_outcomes) but joins `live_orders.order_id` against an `unnest($3::text[]) WITH ORDINALITY` side-table and returns `Option<CancelBatchResolution>`. The resolution carries `event_id`, `oracle_list_hash`, `token_type`, `market_status` once (the SELECT filter `m.pmp_address = $1 AND mo.symbol = $2` pins every matched row to the same `(markets, market_outcomes)` snapshot) and `orders: Vec<OrderForCancelBatch{bind_idx, client_order_id}>` — one entry per matched id, order not guaranteed. The use case reconstructs `order_id` from `input.order_ids[bind_idx]` and assembles the response array sorted by `bind_idx`; a shortfall (matched count below input length, including the `None` case when zero rows joined) surfaces as `UnknownOrder` for the whole batch.
 
-The bulk SELECT projects the same market-timing columns as `resolve_for_cancel` and runs `compute_status` once per row, so each row's `market_status` comes from the same MVCC snapshot that matched the order. The use case re-checks `rows[0].market_status == Trading` after the shortfall gate and rejects with `OrderValidationFailed` otherwise. Single-cancel achieves the same atomicity in one SELECT; for the batch path the placement-shape lookup (`resolve_for_new_order`) and the bulk order resolution run in two independent statements, and without the post-SELECT re-check a reconciler commit between them could let `cancelBatch` reach the chain on a market that had just left `Trading`.
+The bulk SELECT projects the same market-timing columns as `resolve_for_cancel`. Because every matched row shares one `(markets, market_outcomes)` snapshot, the infrastructure layer runs `compute_status` once against the head row and projects the result into `CancelBatchResolution.market_status`. The use case re-checks `resolution.market_status == Trading` after the shortfall gate and rejects with `OrderValidationFailed` otherwise. Single-cancel achieves the same atomicity in one SELECT; for the batch path the placement-shape lookup (`resolve_for_new_order`) and the bulk order resolution run in two independent statements, and without the post-SELECT re-check a reconciler commit between them could let `cancelBatch` reach the chain on a market that had just left `Trading`.
 
 ### Chain submission
 
@@ -654,8 +654,8 @@ Transport-level failures (gateway drop, decode error) collapse to `Unexpected` �
 | Layer | Responsibility |
 | --- | --- |
 | `crates/domain` | No new types — `OrderStatus::PendingCancel` is reused. |
-| `crates/application` | `CancelBatchOrdersInput` (HTTP-shaped), `CancelBatchOrderPayload` (chain-shaped, one per batch), `CancelledBatchOrder` per-item (`order_id`, `client_order_id`); `CancelBatchOrdersUseCase`. Extends `ChainOrderSender` with `cancel_batch_order`. Extends `MarketReadRepository` with `resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address, now)` returning `Vec<OrderForCancelBatch{order_id, client_order_id, market_status}>` — the use case reorders by input. |
-| `crates/infrastructure` | `BeeDexChainSender::cancel_batch_order` wraps `bee_dex::Dex::cancel_batch` and packs `order_ids: Vec<u64>` into the `uint128[]` chain ABI. `PostgresReadModelRepository::resolve_for_cancel_batch` runs the bulk SELECT with `ANY(:orderIds)`. `ChainSection` grows `cancel_batch_timeout_ms` with the same validation invariant as the existing timeouts. |
+| `crates/application` | `CancelBatchOrdersInput` (HTTP-shaped), `CancelBatchOrderPayload` (chain-shaped, one per batch), `CancelledBatchOrder` per-item (`order_id`, `client_order_id`); `CancelBatchOrdersUseCase`. Extends `ChainOrderSender` with `cancel_batch_order`. Extends `MarketReadRepository` with `resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address, now)` returning `Option<CancelBatchResolution{event_id, oracle_list_hash, token_type, market_status, orders: Vec<OrderForCancelBatch{bind_idx, client_order_id}>}>` — the use case maps `bind_idx` back to `input.order_ids[bind_idx]`. |
+| `crates/infrastructure` | `BeeDexChainSender::cancel_batch_order` wraps `bee_dex::Dex::cancel_batch` and packs `order_ids: Vec<u64>` into the `uint128[]` chain ABI. `PostgresReadModelRepository::resolve_for_cancel_batch` runs the bulk SELECT joining against `unnest($3::text[]) WITH ORDINALITY` and projecting `bind_idx`. `ChainSection` grows `cancel_batch_timeout_ms` with the same validation invariant as the existing timeouts. |
 | `services/api` | `delete_batch_orders` handler attached as `Router::with_path("api/v1/batchOrders").delete(delete_batch_orders)` on the existing auth subrouter (alongside `.post(create_batch_orders)`). HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` extends the `BeeDexChainSender` constructor with `Duration::from_millis(config.chain.cancel_batch_timeout_ms)`. |
 
 Use case constructors take trait objects; `services/api/tests/cancel_batch_orders_http.rs` injects `FakeRepo` + `FakeAuthenticator` + a `RecordingCancelBatchSender` variant that records cancel-batch payloads, matching the triad established by `create_batch_orders_http.rs`.
