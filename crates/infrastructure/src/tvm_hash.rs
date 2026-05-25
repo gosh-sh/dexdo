@@ -81,11 +81,12 @@ mod tests {
     }
 
     /// Recorded vector — must not change unless `tvm_abi` semantics
-    /// intentionally shift. If this test fails after a dependency
-    /// bump, do NOT just update the expected hash: re-verify against
-    /// a real PN's `_stakes` map keys (the integration suite in
-    /// crates/infrastructure/tests/balances.rs + the API e2e test
-    /// drive this in production).
+    /// intentionally shift. No other suite cross-checks this against
+    /// a live PN's `_stakes` keys today (tests/balances.rs and the
+    /// API integration tests both mock `PnStateReader`), so a
+    /// failure here after a dependency bump must be re-verified
+    /// manually against a real PN BOC before updating the expected
+    /// hash.
     #[test]
     fn pinned_vector_does_not_drift() {
         let e = BigUint::from(0x42u32);

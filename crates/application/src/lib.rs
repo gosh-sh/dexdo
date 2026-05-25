@@ -727,11 +727,12 @@ pub struct GetMarketBalancesInput {
     pub now_ms: i64,
 }
 
-/// Signature for the off-chain hash function — the use case takes it
-/// as a generic parameter so unit tests can plug a stub hasher without
-/// pulling in the real `tvm_abi` machinery. Returns `Err(DomainError::MarketInconsistent)`
-/// on parse or hash failure so read-model corruption surfaces as a 503
-/// instead of silently producing all-zero outcome balances.
+/// Signature for the off-chain hash function — the use case holds it
+/// as a function pointer so unit tests can plug a stub hasher without
+/// pulling in the real `tvm_abi` machinery. Returns
+/// `Err(DomainError::MarketInconsistent)` on parse or hash failure so
+/// read-model corruption surfaces as a 503 instead of silently
+/// producing all-zero outcome balances.
 pub type StakeHasher =
     fn(event_id: &str, oracle_list_hash: &str, token_type: i32) -> Result<String, DomainError>;
 
@@ -1115,7 +1116,8 @@ pub struct RefToken {
 /// Source of `ref_tokens` lookups. Kept as a separate port from
 /// `MarketReadRepository` because callers (use cases) need only
 /// `lookup_ref_token` and dragging in the heavy MarketRead surface
-/// would coupling-test downstream traits unnecessarily.
+/// would unnecessarily couple this trait's consumers to the wider
+/// market-read API.
 #[async_trait]
 pub trait ReferenceRepository: Send + Sync {
     /// Returns `None` for an unknown `token_type`. Use cases turn `None`
