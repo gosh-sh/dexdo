@@ -177,7 +177,10 @@ pub struct BalanceOutcome {
 pub struct MarketBalancesResolution {
     pub event_id: String,
     pub oracle_list_hash: String,
-    pub token_type: i32,
+    /// Already validated as non-negative at the repo boundary
+    /// (`try_into().map_err(MarketInconsistent)`); callers can use it
+    /// directly as `u32` without a secondary cast.
+    pub token_type: u32,
     pub orderbook_address: String,
     /// Number of outcomes for this market. `u32` because outcome counts
     /// are non-negative; the Postgres `integer` column is cast at the
@@ -694,16 +697,14 @@ where
 /// uint representation) to a fixed-point decimal with `decimals` digits
 /// to the right of the point.
 ///
-/// Non-zero inputs are padded to exactly `decimals` fractional digits
-/// (e.g. `"10000000000"` with `decimals=9` → `"10.000000000"`,
-/// `"1"` → `"0.000000001"`). The literal zero case (`raw == "0"` or
-/// empty) short-circuits to bare `"0"`; clients SHOULD treat `"0"`
-/// and `"0.000000"` as equivalent. `decimals == 0` returns `raw`
-/// unchanged.
+/// All inputs — including `"0"` and the empty string — are padded to
+/// exactly `decimals` fractional digits (e.g. `"10000000000"` with
+/// `decimals=9` → `"10.000000000"`, `"1"` → `"0.000000001"`,
+/// `"0"` → `"0.000000000"`). The empty string is normalised to `"0"`
+/// before scaling. `decimals == 0` returns `raw` unchanged (or `"0"`
+/// for an empty input).
 fn scale_decimal(raw: &str, decimals: u8) -> String {
-    if raw == "0" || raw.is_empty() {
-        return "0".to_string();
-    }
+    let raw = if raw.is_empty() { "0" } else { raw };
     let d = decimals as usize;
     if d == 0 {
         return raw.to_string();
@@ -733,8 +734,11 @@ pub struct GetMarketBalancesInput {
 /// `Err(DomainError::MarketInconsistent)` on parse or hash failure so
 /// read-model corruption surfaces as a 503 instead of silently
 /// producing all-zero outcome balances.
+///
+/// `token_type` is `u32` because the repo boundary already validates
+/// that the DB value is non-negative; callers never need to cast.
 pub type StakeHasher =
-    fn(event_id: &str, oracle_list_hash: &str, token_type: i32) -> Result<String, DomainError>;
+    fn(event_id: &str, oracle_list_hash: &str, token_type: u32) -> Result<String, DomainError>;
 
 pub struct GetMarketBalancesUseCase<P, R> {
     pn: P,
@@ -765,6 +769,7 @@ where
         // Compute the stake hash off chain. The hasher returns Err on
         // parse / hash failure (read-model corruption) — propagate as
         // MarketInconsistent so the caller receives a 503.
+        // `res.token_type` is already `u32` (validated at the repo boundary).
         let stake_hash = (self.hasher)(&res.event_id, &res.oracle_list_hash, res.token_type)
             .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -3228,7 +3233,7 @@ mod get_account_use_case_tests {
             .await
             .expect("ok");
         assert_eq!(out.balances[0].free, "5.000000000");
-        assert_eq!(out.balances[0].locked, "0");
+        assert_eq!(out.balances[0].locked, "0.000000000");
     }
 
     #[tokio::test]
@@ -3273,10 +3278,11 @@ mod get_account_use_case_tests {
         assert_eq!(scale_decimal("10000000000", 9), "10.000000000");
         assert_eq!(scale_decimal("1500000000", 9), "1.500000000");
         assert_eq!(scale_decimal("1", 9), "0.000000001");
-        assert_eq!(scale_decimal("0", 9), "0");
-        assert_eq!(scale_decimal("", 9), "0");
+        assert_eq!(scale_decimal("0", 9), "0.000000000");
+        assert_eq!(scale_decimal("", 9), "0.000000000");
         assert_eq!(scale_decimal("25000000000", 6), "25000.000000");
         assert_eq!(scale_decimal("42", 0), "42");
+        assert_eq!(scale_decimal("0", 0), "0");
     }
 }
 
@@ -3451,11 +3457,11 @@ mod get_market_balances_use_case_tests {
     // Concrete stake_hash impl plugged in via the use case constructor —
     // the use case doesn't depend on the real hash, only that the same
     // input produces the same string.
-    fn stub_hasher(_e: &str, _o: &str, _t: i32) -> Result<String, DomainError> {
+    fn stub_hasher(_e: &str, _o: &str, _t: u32) -> Result<String, DomainError> {
         Ok("deadbeef".to_string())
     }
 
-    fn failing_hasher(_e: &str, _o: &str, _t: i32) -> Result<String, DomainError> {
+    fn failing_hasher(_e: &str, _o: &str, _t: u32) -> Result<String, DomainError> {
         Err(DomainError::MarketInconsistent)
     }
 
@@ -3483,10 +3489,10 @@ mod get_market_balances_use_case_tests {
             .await
             .expect("ok");
         assert_eq!(out.balances.len(), 2);
-        // outcome 0: free = 10+0+2 = 12, scale=2 → "0.12"; locked=0 → "0"
+        // outcome 0: free = 10+0+2 = 12, scale=2 → "0.12"; locked=0 → "0.00"
         assert_eq!(out.balances[0].outcome_id, 0);
         assert_eq!(out.balances[0].free, "0.12");
-        assert_eq!(out.balances[0].locked_in_orders, "0");
+        assert_eq!(out.balances[0].locked_in_orders, "0.00");
         // outcome 1: free = 5+1+0 = 6, scale=2 → "0.06"; locked=100 → "1.00"
         assert_eq!(out.balances[1].outcome_id, 1);
         assert_eq!(out.balances[1].free, "0.06");
@@ -3512,10 +3518,10 @@ mod get_market_balances_use_case_tests {
             .await
             .expect("ok");
         assert_eq!(out.balances.len(), 2);
-        assert_eq!(out.balances[0].free, "0");
+        assert_eq!(out.balances[0].free, "0.00");
         assert_eq!(out.balances[0].locked_in_orders, "5.00");
-        assert_eq!(out.balances[1].free, "0");
-        assert_eq!(out.balances[1].locked_in_orders, "0");
+        assert_eq!(out.balances[1].free, "0.00");
+        assert_eq!(out.balances[1].locked_in_orders, "0.00");
     }
 
     #[tokio::test]

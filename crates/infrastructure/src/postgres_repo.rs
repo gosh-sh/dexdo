@@ -692,7 +692,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        let (event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, market_id) =
+        let (event_id, oracle_list_hash, token_type_raw, orderbook_address, num_outcomes, market_id) =
             match market {
                 Some(m) => m,
                 None => return Err(anyhow::anyhow!(dodex_domain::DomainError::InvalidMarketOrSymbol)),
@@ -711,6 +711,19 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 tracing::warn!(pmp = %market_address.0, "reconciled market has NULL/blank orderbook_address");
                 anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
             })?;
+
+        // `token_type` is `integer` (signed) in Postgres but non-negative by
+        // contract (written by the reconciler from `PMP.getDetails()`).
+        // Treat a negative value as read-model corruption, mirroring the
+        // `num_outcomes` check below.
+        let token_type: u32 = token_type_raw.try_into().map_err(|_| {
+            tracing::warn!(
+                pmp = %market_address.0,
+                raw = token_type_raw,
+                "token_type is negative — read-model corruption"
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
 
         let outcomes: Vec<(i32, String, i32)> = sqlx::query_as(
             r#"select outcome_id, symbol, quantity_precision

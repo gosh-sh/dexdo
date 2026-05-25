@@ -1163,10 +1163,13 @@ async fn get_account_balances(
 /// returns `Err(DomainError::MarketInconsistent)`, as does any failure
 /// from the underlying `tvm_hash::stake_hash` call. The caller propagates
 /// this as a 503 rather than silently producing all-zero outcome balances.
+///
+/// `token_type` is `u32` because the repo boundary already validates
+/// that the DB value is non-negative — no secondary cast is needed here.
 fn balances_stake_hash(
     event_id: &str,
     oracle_list_hash: &str,
-    token_type: i32,
+    token_type: u32,
 ) -> Result<String, dodex_domain::DomainError> {
     use num_bigint::BigUint;
     use std::str::FromStr;
@@ -1174,7 +1177,6 @@ fn balances_stake_hash(
         .map_err(|_| dodex_domain::DomainError::MarketInconsistent)?;
     let oracle = BigUint::from_str(oracle_list_hash)
         .map_err(|_| dodex_domain::DomainError::MarketInconsistent)?;
-    let token_type = token_type as u32;
     dodex_infrastructure::tvm_hash::stake_hash(&event, &oracle, token_type)
         .map_err(|_| dodex_domain::DomainError::MarketInconsistent)
 }

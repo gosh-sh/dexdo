@@ -166,7 +166,7 @@ async fn happy_path_returns_outcomes_sorted_by_id() {
     assert_eq!(body.balances[0].outcome_id, 0);
     assert_eq!(body.balances[0].symbol, "happy-bal-NO");
     assert_eq!(body.balances[0].free, "10.00");
-    assert_eq!(body.balances[0].locked_in_orders, "0");
+    assert_eq!(body.balances[0].locked_in_orders, "0.00");
     assert_eq!(body.balances[1].outcome_id, 1);
     assert_eq!(body.balances[1].symbol, "happy-bal-YES");
     assert_eq!(body.balances[1].free, "5.00");
@@ -193,7 +193,7 @@ async fn no_stake_yields_zero_free_with_nonzero_locked() {
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_json::<BalancesBody>().await.expect("ok");
-    assert_eq!(body.balances[0].free, "0");
+    assert_eq!(body.balances[0].free, "0.00");
     assert_eq!(body.balances[0].locked_in_orders, "0.75");
 }
 
