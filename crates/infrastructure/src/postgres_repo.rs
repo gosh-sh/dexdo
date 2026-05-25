@@ -695,7 +695,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         let (event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, market_id) =
             match market {
                 Some(m) => m,
-                None => return Err(dodex_domain::DomainError::InvalidMarketOrSymbol.into()),
+                None => return Err(anyhow::anyhow!(dodex_domain::DomainError::InvalidMarketOrSymbol)),
             };
 
         // `oracle_list_hash` is nullable at the schema level (pre-reconcile),
@@ -703,13 +703,13 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // means data corruption.
         let oracle_list_hash = oracle_list_hash.ok_or_else(|| {
             tracing::warn!(pmp = %market_address.0, "reconciled market has NULL oracle_list_hash");
-            dodex_domain::DomainError::MarketInconsistent
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
         })?;
         let orderbook_address = orderbook_address
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| {
                 tracing::warn!(pmp = %market_address.0, "reconciled market has NULL/blank orderbook_address");
-                dodex_domain::DomainError::MarketInconsistent
+                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
             })?;
 
         let outcomes: Vec<(i32, String, i32)> = sqlx::query_as(
