@@ -665,17 +665,101 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
     async fn resolve_market_for_balances(
         &self,
-        _market_address: &dodex_domain::MarketAddress,
+        market_address: &dodex_domain::MarketAddress,
     ) -> Result<dodex_application::MarketBalancesResolution, anyhow::Error> {
-        anyhow::bail!("resolve_market_for_balances not yet implemented")
+        // Resolve the market row + outcomes in two SELECTs to keep types
+        // simple. The visibility gate `last_reconciled_at IS NOT NULL`
+        // matches /api/v1/markets — pre-reconcile markets are invisible.
+        let market: Option<(
+            String,         // event_id (numeric → text via ::text)
+            Option<String>, // oracle_list_hash
+            i32,            // token_type
+            Option<String>, // orderbook_address
+            i32,            // num_outcomes
+            i64,            // markets.id
+        )> = sqlx::query_as(
+            r#"select event_id::text,
+                      oracle_list_hash::text,
+                      token_type,
+                      orderbook_address,
+                      num_outcomes,
+                      id
+                 from markets
+                where pmp_address = $1
+                  and last_reconciled_at is not null"#,
+        )
+        .bind(&market_address.0)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let (event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, market_id) =
+            match market {
+                Some(m) => m,
+                None => return Err(dodex_domain::DomainError::InvalidMarketOrSymbol.into()),
+            };
+
+        // `oracle_list_hash` is nullable at the schema level (pre-reconcile),
+        // but we already gated on last_reconciled_at IS NOT NULL — a NULL here
+        // means data corruption.
+        let oracle_list_hash = oracle_list_hash.ok_or_else(|| {
+            tracing::warn!(pmp = %market_address.0, "reconciled market has NULL oracle_list_hash");
+            dodex_domain::DomainError::MarketInconsistent
+        })?;
+        let orderbook_address = orderbook_address
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                tracing::warn!(pmp = %market_address.0, "reconciled market has NULL/blank orderbook_address");
+                dodex_domain::DomainError::MarketInconsistent
+            })?;
+
+        let outcomes: Vec<(i32, String, i32)> = sqlx::query_as(
+            r#"select outcome_id, symbol, quantity_precision
+                 from market_outcomes
+                where market_id_fk = $1
+                order by outcome_id asc"#,
+        )
+        .bind(market_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let outcomes = outcomes
+            .into_iter()
+            .map(|(outcome_id, symbol, qp)| dodex_application::BalanceOutcome {
+                outcome_id: outcome_id as u32,
+                symbol: dodex_domain::Symbol(symbol),
+                quantity_precision: qp as u8,
+            })
+            .collect();
+
+        Ok(dodex_application::MarketBalancesResolution {
+            event_id,
+            oracle_list_hash,
+            token_type,
+            orderbook_address,
+            num_outcomes,
+            outcomes,
+        })
     }
 
     async fn sum_open_sell_remaining(
         &self,
-        _orderbook_address: &str,
-        _owner_pn_address: &str,
+        orderbook_address: &str,
+        owner_pn_address: &str,
     ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
-        anyhow::bail!("sum_open_sell_remaining not yet implemented")
+        let rows: Vec<(i32, String)> = sqlx::query_as(
+            r#"select outcome_id, sum(amount_remaining)::text
+                 from live_orders
+                where orderbook_address = $1
+                  and owner_pn_address  = $2
+                  and status = 'OPEN'
+                  and is_buy = false
+                group by outcome_id"#,
+        )
+        .bind(orderbook_address)
+        .bind(owner_pn_address)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(oid, sum)| (oid as u32, sum)).collect())
     }
 }
 
@@ -2272,5 +2356,45 @@ mod tests {
         );
         l.sort = MarketsSort::CreatedAtDesc;
         assert_placeholders_match_params("full combo", &l);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PostgresReferenceRepository (NODE-3445).
+// Separate type because the balance code paths need only ref_tokens
+// lookups and the heavy `MarketReadRepository` surface is irrelevant
+// there.
+// ─────────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct PostgresReferenceRepository {
+    pool: PgPool,
+}
+
+impl PostgresReferenceRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl dodex_application::ReferenceRepository for PostgresReferenceRepository {
+    async fn lookup_ref_token(
+        &self,
+        token_type: i32,
+    ) -> Result<Option<dodex_application::RefToken>, anyhow::Error> {
+        let row: Option<(String, i32)> = sqlx::query_as(
+            r#"select token_code, decimals
+                 from ref_tokens
+                where token_type = $1"#,
+        )
+        .bind(token_type)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(token_code, decimals)| dodex_application::RefToken {
+            token_type,
+            token_code,
+            decimals: decimals as u8,
+        }))
     }
 }
