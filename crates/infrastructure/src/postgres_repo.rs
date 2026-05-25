@@ -2370,13 +2370,10 @@ mod tests {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// PostgresReferenceRepository (NODE-3445).
-// Separate type because the balance code paths need only ref_tokens
-// lookups and the heavy `MarketReadRepository` surface is irrelevant
-// there.
-// ─────────────────────────────────────────────────────────────────────
-
+/// Postgres-backed repository for `ref_tokens` lookups. Kept as a
+/// separate type from `PostgresMarketReadRepository` because callers
+/// on the balance path need only `lookup_ref_token` and pulling in
+/// the full market-read surface would widen coupling unnecessarily.
 #[derive(Clone)]
 pub struct PostgresReferenceRepository {
     pool: PgPool,

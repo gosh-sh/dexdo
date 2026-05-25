@@ -756,20 +756,19 @@ where
         &self,
         input: GetMarketBalancesInput,
     ) -> Result<dodex_domain::MarketBalances, anyhow::Error> {
-        // 1. Resolve the market. The repo lifts unknown / unreconciled
-        //    pairs to InvalidMarketOrSymbol; pass that error through
-        //    verbatim.
+        // Resolve the market. The repo lifts unknown / unreconciled
+        // pairs to InvalidMarketOrSymbol; pass that error through verbatim.
         let res =
             self.repo.resolve_market_for_balances(&input.market_address).await?;
 
-        // 2. Compute the stake hash off chain. The hasher returns Err on
-        //    parse / hash failure (read-model corruption) — propagate as
-        //    MarketInconsistent so the caller receives a 503.
+        // Compute the stake hash off chain. The hasher returns Err on
+        // parse / hash failure (read-model corruption) — propagate as
+        // MarketInconsistent so the caller receives a 503.
         let stake_hash = (self.hasher)(&res.event_id, &res.oracle_list_hash, res.token_type)
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        // 3. Fan out: chain-side stake lookup + DB-side sell aggregation.
-        //    The two are independent, so we issue them in parallel.
+        // Fan out: chain-side stake lookup + DB-side sell aggregation.
+        // The two are independent, so we issue them in parallel.
         let pn_address = input.pn_address.clone();
         let stake_fut = self.pn.get_stake(&pn_address, &stake_hash);
         let sum_fut = self.repo.sum_open_sell_remaining(
@@ -783,8 +782,8 @@ where
 
         let n = res.num_outcomes as usize;
 
-        // 4. Shape validation: arrays in PnStake must be either empty
-        //    (absent key) OR exactly num_outcomes long.
+        // Shape validation: arrays in PnStake must be either empty
+        // (absent key) OR exactly num_outcomes long.
         if let Some(ref s) = stake_opt {
             let any_empty = s.amount.is_empty() || s.debt_amount.is_empty() || s.coupons_amount.is_empty();
             let all_empty = s.amount.is_empty() && s.debt_amount.is_empty() && s.coupons_amount.is_empty();
@@ -812,7 +811,7 @@ where
             }
         }
 
-        // 5. Sanity: every aggregated outcome_id falls within [0, n).
+        // Sanity: every aggregated outcome_id must fall within [0, n).
         for k in sums.keys() {
             if (*k as usize) >= n {
                 tracing::warn!(outcome_id = k, "aggregation returned out-of-range outcome_id");
@@ -830,8 +829,8 @@ where
             }
         }
 
-        // 6. Compose response, sorted by outcome_id ASC (resolution is
-        //    already in ascending order by construction in the repo).
+        // Compose response, sorted by outcome_id ASC (resolution is
+        // already in ascending order by construction in the repo).
         let mut rows: Vec<dodex_domain::OutcomeBalance> = Vec::with_capacity(n);
         for outcome in &res.outcomes {
             let i = outcome.outcome_id as usize;
@@ -1104,10 +1103,6 @@ impl<T: ?Sized + ChainOrderSender> ChainOrderSender for Arc<T> {
         (**self).submit_batch_order(payload).await
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────
-// Balances ports + value objects (NODE-3445).
-// ─────────────────────────────────────────────────────────────────────
 
 /// One row of `ref_tokens` exposed to the application layer.
 #[derive(Debug, Clone)]
@@ -3287,9 +3282,9 @@ mod get_account_use_case_tests {
 mod balances_port_tests {
     use super::*;
 
-    // Existence-only test: this compiles iff the trait is dyn-compatible
-    // and the value-object fields have the expected names/types. We
-    // exercise behaviour via the use case tests in Task 3.
+    // Compile-time guard: passes iff the trait is dyn-compatible and the
+    // value-object fields have the expected names and types. Behavioural
+    // coverage lives in get_market_balances_use_case_tests.
     #[test]
     fn pn_state_reader_is_dyn_compatible() {
         fn _accepts_dyn(_: &dyn PnStateReader) {}
