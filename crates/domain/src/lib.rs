@@ -138,21 +138,21 @@ pub enum TerminalKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CancelReason {
-    PmpCancelled,
+    PmpRejectedByOracle,
     EventCancelled,
 }
 
 impl CancelReason {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::PmpCancelled => "PMP_CANCELLED",
+            Self::PmpRejectedByOracle => "PMP_REJECTED_BY_ORACLE",
             Self::EventCancelled => "EVENT_CANCELLED",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "PMP_CANCELLED" => Some(Self::PmpCancelled),
+            "PMP_REJECTED_BY_ORACLE" => Some(Self::PmpRejectedByOracle),
             "EVENT_CANCELLED" => Some(Self::EventCancelled),
             _ => None,
         }

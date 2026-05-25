@@ -433,7 +433,7 @@ Example for a non-terminal market (any of the six live statuses, including the t
 | `kind` | ENUM | `RESOLVED`, `CANCELLED`, or `EXPIRED`. Mirrors `status` (see table above). |
 | `at` | LONG | Unix seconds. Time when the market entered the terminal state. |
 | `resolvedOutcomeId` | INT \| null | The winning outcome's `outcomeId`. Present only when `kind == "RESOLVED"`; `null` otherwise. Without it the client cannot know which side won. |
-| `cancelReason` | ENUM \| null | `PMP_CANCELLED` or `EVENT_CANCELLED`. Present only when `kind == "CANCELLED"`; `null` otherwise. |
+| `cancelReason` | ENUM \| null | `PMP_REJECTED_BY_ORACLE` or `EVENT_CANCELLED`. Present only when `kind == "CANCELLED"`; `null` otherwise. |
 
 ##### Outcome
 

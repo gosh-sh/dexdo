@@ -1657,7 +1657,7 @@ fn validate_invariants(
             }
         }
         MarketStatus::Cancelled => {
-            // tech-spec.md:103: cancelReason MUST distinguish PMP_CANCELLED vs
+            // tech-spec.md:103: cancelReason MUST distinguish PMP_REJECTED_BY_ORACLE vs
             // EVENT_CANCELLED. A NULL on the row OR an unknown string on the
             // row both manifest here as `cancel_reason.is_none()` after
             // `build_terminal`'s `CancelReason::parse` filter.
@@ -1995,7 +1995,7 @@ mod tests {
     #[test]
     fn validate_cancelled_without_reason_fails() {
         // A CANCELLED row whose `cancel_reason` column is a string outside
-        // `{PMP_CANCELLED, EVENT_CANCELLED}` is parsed to `None` by
+        // `{PMP_REJECTED_BY_ORACLE, EVENT_CANCELLED}` is parsed to `None` by
         // `build_terminal::CancelReason::parse`. Validating the built DTO
         // catches the invalid terminal shape.
         let err = validate_invariants(
@@ -2051,7 +2051,7 @@ mod tests {
         validate_invariants(
             MarketStatus::Cancelled,
             &Some(timings_full(Some(250))),
-            &Some(terminal_cancelled(Some(CancelReason::PmpCancelled))),
+            &Some(terminal_cancelled(Some(CancelReason::PmpRejectedByOracle))),
         )
         .unwrap();
         validate_invariants(

@@ -51,8 +51,8 @@ pub async fn project_event(
         "PMP.EventCancelled" => {
             apply_pmp_cancellation(tx, node, "EVENT_CANCELLED").await.with_context(context)
         }
-        "PMP.PMPCancelled" => {
-            apply_pmp_cancellation(tx, node, "PMP_CANCELLED").await.with_context(context)
+        "PMP.PMPRejected" => {
+            apply_pmp_cancellation(tx, node, "PMP_REJECTED_BY_ORACLE").await.with_context(context)
         }
         "OrderBook.OrderPlaced" => apply_order_placed(tx, event, node).await.with_context(context),
         "OrderBook.OrderFilled" => apply_order_filled(tx, event, node).await.with_context(context),

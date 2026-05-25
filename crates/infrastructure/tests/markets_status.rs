@@ -80,7 +80,7 @@ async fn insert_market(
 
 #[tokio::test]
 async fn cancelled_without_reason_fails_closed_single() {
-    // tech-spec.md:103 — `cancelReason` MUST distinguish PMP_CANCELLED vs
+    // tech-spec.md:103 — `cancelReason` MUST distinguish PMP_REJECTED_BY_ORACLE vs
     // EVENT_CANCELLED. The reconciler stamps `is_cancelled` from
     // `getDetails()` but does not know the cause; until the corresponding
     // cancellation event is replayed, `cancel_reason` stays NULL and the
@@ -143,7 +143,7 @@ async fn cancelled_without_reason_fails_closed_listing() {
 async fn cancelled_with_reason_is_served() {
     // Sanity check the fail-closed path does not over-fire: a fully
     // consistent CANCELLED row (cancel_reason populated by either the
-    // PMPCancelled or EventCancelled projector) must serialize normally.
+    // PMPRejected or EventCancelled projector) must serialize normally.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -155,7 +155,7 @@ async fn cancelled_with_reason_is_served() {
     purge_market(&pool, &pmp).await;
     insert_market(&pool, &pmp, &market_name, &orderbook, true, Some(1_700_000_050)).await;
     sqlx::query("update markets set cancel_reason = $1 where pmp_address = $2")
-        .bind("PMP_CANCELLED")
+        .bind("PMP_REJECTED_BY_ORACLE")
         .bind(&pmp)
         .execute(&pool)
         .await
@@ -407,7 +407,7 @@ async fn resolved_without_outcome_id_fails_closed() {
 async fn cancelled_with_garbage_reason_fails_closed() {
     // `build_terminal` runs
     // `row.cancel_reason.as_deref().and_then(CancelReason::parse)`. If the
-    // column holds a string outside {PMP_CANCELLED, EVENT_CANCELLED} —
+    // column holds a string outside {PMP_REJECTED_BY_ORACLE, EVENT_CANCELLED} —
     // historical data, projector bug, manual SQL — parse returns None and
     // the API would surface `cancelReason: null`, violating
     // tech-spec.md:103. The row-level `cancel_reason.is_none()` check missed
