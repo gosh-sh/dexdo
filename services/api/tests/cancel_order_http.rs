@@ -135,7 +135,7 @@ impl MarketReadRepository for FakeRepo {
         _: &[u64],
         _: &str,
         _: i64,
-    ) -> Result<Vec<dodex_application::OrderForCancelBatch>, anyhow::Error> {
+    ) -> Result<Option<dodex_application::CancelBatchResolution>, anyhow::Error> {
         unimplemented!("resolve_for_cancel_batch is not exercised by cancel_order_http tests")
     }
 

@@ -22,6 +22,7 @@ use dodex_application::AuthContext;
 use dodex_application::AuthenticateRequest;
 use dodex_application::Authenticator;
 use dodex_application::CancelBatchOrderPayload;
+use dodex_application::CancelBatchResolution;
 use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::MarketForPlacement;
@@ -87,14 +88,21 @@ impl Authenticator for FakeAuthenticator {
 /// `resolve_for_cancel_batch` so the use case's reordering is genuinely
 /// exercised — Postgres has no `ORDER BY` on the underlying SELECT and
 /// production rows can come back in any order.
+/// Storage shape for one seeded row. `OrderForCancelBatch` no longer
+/// carries `order_id` (it carries `bind_idx`, derived from input
+/// position), so the fake stores the id explicitly alongside the
+/// prototype row and stamps `bind_idx` at lookup time.
+type StoredRow = (String, u64, OrderForCancelBatch);
+
 struct FakeRepo {
     market: Mutex<Option<Market>>,
-    /// Pair of (owner_pn_address, row). Default owner for rows added
-    /// via `with_market_and_rows` is `PN_ADDRESS`; cross-account tests
-    /// use `with_market_and_owned_rows` to seed rows owned by another
-    /// account so the production `lo.owner_pn_address = $4` predicate
-    /// stays modelled at the HTTP boundary.
-    rows: Mutex<Vec<(String, OrderForCancelBatch)>>,
+    /// Triple of (owner_pn_address, order_id, row prototype). Default
+    /// owner for rows added via `with_market_and_rows` is `PN_ADDRESS`;
+    /// cross-account tests use `with_market_and_owned_rows` to seed
+    /// rows owned by another account so the production
+    /// `lo.owner_pn_address = $4` predicate stays modelled at the HTTP
+    /// boundary.
+    rows: Mutex<Vec<StoredRow>>,
     scrambled_rows: bool,
     /// Raw anyhow (no `DomainError` cause) to return from the named
     /// resolver method — exercises the non-domain downcast fallback in
@@ -110,8 +118,9 @@ struct FakeRepo {
 }
 
 impl FakeRepo {
-    fn with_market_and_rows(market: Market, rows: Vec<OrderForCancelBatch>) -> Self {
-        let owned = rows.into_iter().map(|r| (PN_ADDRESS.to_string(), r)).collect();
+    fn with_market_and_rows(market: Market, rows: Vec<(u64, OrderForCancelBatch)>) -> Self {
+        let owned =
+            rows.into_iter().map(|(id, proto)| (PN_ADDRESS.to_string(), id, proto)).collect();
         Self {
             market: Mutex::new(Some(market)),
             rows: Mutex::new(owned),
@@ -122,10 +131,7 @@ impl FakeRepo {
         }
     }
 
-    fn with_market_and_owned_rows(
-        market: Market,
-        rows: Vec<(String, OrderForCancelBatch)>,
-    ) -> Self {
+    fn with_market_and_owned_rows(market: Market, rows: Vec<StoredRow>) -> Self {
         Self {
             market: Mutex::new(Some(market)),
             rows: Mutex::new(rows),
@@ -251,33 +257,45 @@ impl MarketReadRepository for FakeRepo {
         order_ids: &[u64],
         owner_pn_address: &str,
         _: i64,
-    ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
+    ) -> Result<Option<CancelBatchResolution>, anyhow::Error> {
         if let Some(msg) = &self.resolve_for_cancel_batch_raw_anyhow {
             return Err(anyhow::anyhow!("{msg}"));
         }
         // Production Postgres returns matching rows in arbitrary order;
         // when `scrambled_rows` is set we reverse to verify the use
-        // case reorders into the request sequence. Owner and id filters
-        // mirror the production predicate set so a regression that
-        // drops `lo.owner_pn_address = $4` would actually fail an HTTP
-        // test, not slip through silently.
+        // case reorders by `bind_idx`. Owner and id filters mirror the
+        // production predicate set so a regression that drops
+        // `lo.owner_pn_address = $4` would actually fail an HTTP test,
+        // not slip through silently. `bind_idx` is stamped at lookup
+        // time as the position of the matched id in `order_ids` — same
+        // contract as `WITH ORDINALITY` in the real SELECT.
+        let Some(market) = self.market.lock().unwrap().clone() else {
+            return Ok(None);
+        };
         let stored = self.rows.lock().unwrap().clone();
-        let mut matched: Vec<OrderForCancelBatch> = stored
-            .into_iter()
-            .filter(|(owner, row)| {
-                owner == owner_pn_address && order_ids.iter().any(|&id| id == row.order_id)
+        let mut orders: Vec<OrderForCancelBatch> = order_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(bind_idx, &id)| {
+                stored
+                    .iter()
+                    .find(|(owner, stored_id, _)| owner == owner_pn_address && *stored_id == id)
+                    .map(|(_, _, proto)| OrderForCancelBatch { bind_idx, ..proto.clone() })
             })
-            .map(|(_, row)| row)
             .collect();
-        if let Some(status) = self.cancel_batch_status_override {
-            for row in &mut matched {
-                row.market_status = status;
-            }
+        if orders.is_empty() {
+            return Ok(None);
         }
         if self.scrambled_rows {
-            matched.reverse();
+            orders.reverse();
         }
-        Ok(matched)
+        Ok(Some(CancelBatchResolution {
+            event_id: market.event.event_id,
+            oracle_list_hash: market.oracle_list_hash,
+            token_type: market.token_type,
+            market_status: self.cancel_batch_status_override.unwrap_or(market.status),
+            orders,
+        }))
     }
 
     async fn list_orders(&self, _: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
@@ -378,12 +396,16 @@ fn trading_market() -> Market {
     }
 }
 
-fn row(order_id: u64, coid: Option<&str>) -> OrderForCancelBatch {
-    OrderForCancelBatch {
+/// Build a seedable (id, prototype) pair. `bind_idx` is a placeholder
+/// — the fake stamps the real position when `resolve_for_cancel_batch`
+/// runs, mirroring how `WITH ORDINALITY` derives it in production.
+/// Market identity flows from the fake's `Market` fixture, not from
+/// individual rows, so this helper only needs the per-row fields.
+fn row(order_id: u64, coid: Option<&str>) -> (u64, OrderForCancelBatch) {
+    (
         order_id,
-        client_order_id: coid.map(|s| s.to_string()),
-        market_status: MarketStatus::Trading,
-    }
+        OrderForCancelBatch { bind_idx: 0, client_order_id: coid.map(|s| s.to_string()) },
+    )
 }
 
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
@@ -582,6 +604,67 @@ async fn missing_symbol_returns_400_minus_1102() {
 }
 
 #[tokio::test]
+async fn blank_market_address_returns_400_minus_1102() {
+    // `non_empty` trims at the boundary, so a whitespace-only
+    // `marketAddress` collapses to `None` — pinned here so the trim
+    // can't silently drift to a permissive accept.
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
+    let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
+    let service = setup_with(repo, sender);
+
+    let body = json!({
+        "marketAddress": "   ",
+        "symbol": SYMBOL,
+        "orderIds": ["1"],
+    });
+    let mut resp = delete_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+}
+
+#[tokio::test]
+async fn unknown_field_in_body_returns_400_minus_1130() {
+    // `#[serde(deny_unknown_fields)]` surfaces caller typos (e.g.
+    // `orderIDs` vs `orderIds`) as a structural reject (-1130
+    // InvalidParameter via the body-parse `reason = "shape_mismatch"`
+    // path), not as a misleading `MissingParameter` from the now-silently
+    // `None` real field. Pins the strict-input contract on this
+    // destructive write surface.
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
+    let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
+    let service = setup_with(repo, sender);
+
+    let body = json!({
+        "marketAddress": MARKET_ADDRESS,
+        "symbol": SYMBOL,
+        "orderIds": ["1"],
+        "orderIDs": ["typo"],
+    });
+    let mut resp = delete_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1130);
+}
+
+#[tokio::test]
+async fn blank_symbol_returns_400_minus_1102() {
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
+    let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
+    let service = setup_with(repo, sender);
+
+    let body = json!({
+        "marketAddress": MARKET_ADDRESS,
+        "symbol": "\t\n",
+        "orderIds": ["1"],
+    });
+    let mut resp = delete_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+}
+
+#[tokio::test]
 async fn missing_order_ids_field_returns_400_minus_1102() {
     let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
     let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
@@ -757,9 +840,14 @@ async fn market_flip_between_selects_returns_400_minus_2010() {
 
 #[tokio::test]
 async fn blank_oracle_list_hash_returns_503_minus_1500() {
+    // `oracle_list_hash` flows from the bulk-SELECT resolution, not
+    // the earlier `resolve_for_new_order` snapshot — pinned by seeding
+    // an otherwise-Trading market with a blank hash and a matchable
+    // row, then asserting the use case rejects after the bulk fetch.
     let mut market = trading_market();
     market.oracle_list_hash = String::new();
-    let repo: SharedRepo = Arc::new(FakeRepo::with_market(market));
+    let repo: SharedRepo =
+        Arc::new(FakeRepo::with_market_and_rows(market, vec![row(1, Some("a"))]));
     let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
     let service = setup_with(repo, sender);
 
@@ -815,10 +903,10 @@ async fn wrong_owner_returns_404_minus_2011() {
     // owner filter, a regression that drops the predicate from
     // postgres_repo.rs would only be caught by the pg integration
     // tests.
-    let foreign_row = row(1, Some("attackers-coid"));
+    let (foreign_id, foreign_proto) = row(1, Some("attackers-coid"));
     let repo: SharedRepo = Arc::new(FakeRepo::with_market_and_owned_rows(
         trading_market(),
-        vec![("0:someone-else".to_string(), foreign_row)],
+        vec![("0:someone-else".to_string(), foreign_id, foreign_proto)],
     ));
     let sender = Arc::new(RecordingCancelBatchSender::ok());
     let chain_sender: SharedChainSender = sender.clone();

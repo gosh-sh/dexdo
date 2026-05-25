@@ -7,6 +7,7 @@
 use std::env;
 use std::time::Duration;
 
+use dodex_application::CancelBatchResolution;
 use dodex_application::MarketReadRepository;
 use dodex_application::OrderForCancelBatch;
 use dodex_domain::DomainError;
@@ -452,9 +453,16 @@ async fn resolve_for_cancel_derives_non_trading_status_for_caller_check() {
 // tests focus on what is bulk-specific: the array bind+cast, partial
 // shortfall, and per-row owner filtering inside one request.
 
-fn sort_rows(mut rows: Vec<OrderForCancelBatch>) -> Vec<OrderForCancelBatch> {
-    rows.sort_by_key(|r| r.order_id);
-    rows
+fn sort_orders(mut orders: Vec<OrderForCancelBatch>) -> Vec<OrderForCancelBatch> {
+    // `bind_idx` is the input-position contract: PG returns matched
+    // rows in arbitrary order; sorting by bind_idx restores
+    // request-array order regardless of Postgres' execution choices.
+    orders.sort_by_key(|r| r.bind_idx);
+    orders
+}
+
+fn into_orders(resolution: Option<CancelBatchResolution>) -> Vec<OrderForCancelBatch> {
+    resolution.map(|r| sort_orders(r.orders)).unwrap_or_default()
 }
 
 #[tokio::test]
@@ -473,7 +481,7 @@ async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
     seed_live_order(&pool, pmp, 1002, 7, pn, "OPEN", "1500000", Some("b")).await;
     seed_live_order(&pool, pmp, 1003, 7, pn, "OPEN", "1500000", None).await;
 
-    let rows = repo
+    let resolution = repo
         .resolve_for_cancel_batch(
             &MarketAddress(pmp.into()),
             &Symbol(symbol.into()),
@@ -482,20 +490,26 @@ async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
             NOW_TRADING,
         )
         .await
-        .expect("bulk resolve happy path");
+        .expect("bulk resolve happy path")
+        .expect("matched rows yield a resolution");
 
-    let rows = sort_rows(rows);
-    assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].order_id, 1001);
-    assert_eq!(rows[0].client_order_id.as_deref(), Some("a"));
-    assert_eq!(rows[0].market_status, MarketStatus::Trading);
-    assert_eq!(rows[1].order_id, 1002);
-    assert_eq!(rows[1].client_order_id.as_deref(), Some("b"));
-    assert_eq!(rows[2].order_id, 1003);
-    assert!(rows[2].client_order_id.is_none());
-    // All rows joined the same `markets` row, so all carry the same
-    // status — the use case picks rows[0] and that pick is safe.
-    assert!(rows.iter().all(|r| r.market_status == MarketStatus::Trading));
+    // Identity pulled up to the resolution: pinned once, not per row.
+    // Seed values are `token_type=3`, `event_id=42::numeric`,
+    // `oracle_list_hash=1::numeric`.
+    assert_eq!(resolution.market_status, MarketStatus::Trading);
+    assert_eq!(resolution.token_type, 3);
+    assert_eq!(resolution.event_id, "42");
+    assert_eq!(resolution.oracle_list_hash, "1");
+
+    let orders = sort_orders(resolution.orders);
+    assert_eq!(orders.len(), 3);
+    // Input was [1001, 1002, 1003]; bind_idx encodes the position.
+    assert_eq!(orders[0].bind_idx, 0);
+    assert_eq!(orders[0].client_order_id.as_deref(), Some("a"));
+    assert_eq!(orders[1].bind_idx, 1);
+    assert_eq!(orders[1].client_order_id.as_deref(), Some("b"));
+    assert_eq!(orders[2].bind_idx, 2);
+    assert!(orders[2].client_order_id.is_none());
 }
 
 #[tokio::test]
@@ -515,8 +529,8 @@ async fn resolve_for_cancel_batch_partial_shortfall_returns_only_matching() {
     seed_live_order(&pool, pmp, 2001, 7, pn, "OPEN", "1500000", Some("a")).await;
     seed_live_order(&pool, pmp, 2003, 7, pn, "OPEN", "1500000", Some("c")).await;
 
-    let rows = repo
-        .resolve_for_cancel_batch(
+    let orders = into_orders(
+        repo.resolve_for_cancel_batch(
             &MarketAddress(pmp.into()),
             &Symbol(symbol.into()),
             &[2001, 2002, 2003],
@@ -524,12 +538,12 @@ async fn resolve_for_cancel_batch_partial_shortfall_returns_only_matching() {
             NOW_TRADING,
         )
         .await
-        .expect("bulk resolve partial shortfall");
-
-    let rows = sort_rows(rows);
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].order_id, 2001);
-    assert_eq!(rows[1].order_id, 2003);
+        .expect("bulk resolve partial shortfall"),
+    );
+    assert_eq!(orders.len(), 2);
+    // Input [2001, 2002, 2003]; bind_idx 1 (id 2002) is absent.
+    assert_eq!(orders[0].bind_idx, 0);
+    assert_eq!(orders[1].bind_idx, 2);
 }
 
 #[tokio::test]
@@ -551,8 +565,8 @@ async fn resolve_for_cancel_batch_wrong_owner_filtered_out() {
     seed_live_order(&pool, pmp, 3002, 7, mine, "OPEN", "1500000", Some("m2")).await;
     seed_live_order(&pool, pmp, 3099, 7, attacker, "OPEN", "1500000", Some("att")).await;
 
-    let rows = repo
-        .resolve_for_cancel_batch(
+    let orders = into_orders(
+        repo.resolve_for_cancel_batch(
             &MarketAddress(pmp.into()),
             &Symbol(symbol.into()),
             &[3001, 3002, 3099],
@@ -560,13 +574,13 @@ async fn resolve_for_cancel_batch_wrong_owner_filtered_out() {
             NOW_TRADING,
         )
         .await
-        .expect("bulk resolve with wrong owner mixed in");
-
-    let rows = sort_rows(rows);
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].order_id, 3001);
-    assert_eq!(rows[1].order_id, 3002);
-    assert!(rows.iter().all(|r| r.order_id != 3099));
+        .expect("bulk resolve with wrong owner mixed in"),
+    );
+    assert_eq!(orders.len(), 2);
+    // Input [3001, 3002, 3099]; bind_idx 2 (attacker's id) is absent.
+    assert_eq!(orders[0].bind_idx, 0);
+    assert_eq!(orders[1].bind_idx, 1);
+    assert!(orders.iter().all(|r| r.bind_idx != 2));
 }
 
 #[tokio::test]
@@ -616,7 +630,7 @@ async fn resolve_for_cancel_batch_pre_reconcile_market_invisible() {
     seed_live_order(&pool, pmp, 4001, 7, pn, "OPEN", "1500000", Some("x")).await;
     seed_live_order(&pool, pmp, 4002, 7, pn, "OPEN", "1500000", Some("y")).await;
 
-    let rows = repo
+    let resolution = repo
         .resolve_for_cancel_batch(
             &MarketAddress(pmp.into()),
             &Symbol(symbol.into()),
@@ -625,8 +639,8 @@ async fn resolve_for_cancel_batch_pre_reconcile_market_invisible() {
             NOW_TRADING,
         )
         .await
-        .expect("pre-reconcile bulk resolve should return empty, not error");
-    assert!(rows.is_empty());
+        .expect("pre-reconcile bulk resolve should return None, not error");
+    assert!(resolution.is_none());
 }
 
 #[tokio::test]
@@ -654,7 +668,7 @@ async fn resolve_for_cancel_batch_carries_resolving_status_when_now_past_result_
     // `compute_status`.
     const NOW_RESOLVING: i64 = 1_700_000_350;
 
-    let rows = repo
+    let resolution = repo
         .resolve_for_cancel_batch(
             &MarketAddress(pmp.into()),
             &Symbol(symbol.into()),
@@ -663,11 +677,12 @@ async fn resolve_for_cancel_batch_carries_resolving_status_when_now_past_result_
             NOW_RESOLVING,
         )
         .await
-        .expect("bulk resolve carries derived status");
+        .expect("bulk resolve carries derived status")
+        .expect("matched rows yield a resolution");
 
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].order_id, 5001);
-    assert_eq!(rows[0].market_status, MarketStatus::Resolving);
+    assert_eq!(resolution.market_status, MarketStatus::Resolving);
+    assert_eq!(resolution.orders.len(), 1);
+    assert_eq!(resolution.orders[0].bind_idx, 0);
 }
 
 #[tokio::test]
@@ -688,8 +703,8 @@ async fn resolve_for_cancel_batch_closed_status_row_invisible() {
     seed_live_order(&pool, pmp, 6001, 7, pn, "OPEN", "1500000", Some("ok")).await;
     seed_live_order(&pool, pmp, 6002, 7, pn, "CANCELLED", "0", Some("c")).await;
 
-    let rows = repo
-        .resolve_for_cancel_batch(
+    let orders = into_orders(
+        repo.resolve_for_cancel_batch(
             &MarketAddress(pmp.into()),
             &Symbol(symbol.into()),
             &[6001, 6002],
@@ -697,10 +712,11 @@ async fn resolve_for_cancel_batch_closed_status_row_invisible() {
             NOW_TRADING,
         )
         .await
-        .expect("bulk resolve filters closed rows out");
-
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].order_id, 6001);
+        .expect("bulk resolve filters closed rows out"),
+    );
+    assert_eq!(orders.len(), 1);
+    // Input [6001, 6002]; only bind_idx 0 survives (6002 is CANCELLED).
+    assert_eq!(orders[0].bind_idx, 0);
 }
 
 #[tokio::test]
@@ -722,8 +738,8 @@ async fn resolve_for_cancel_batch_zero_remaining_open_row_invisible() {
     seed_live_order(&pool, pmp, 7001, 7, pn, "OPEN", "1500000", Some("ok")).await;
     seed_live_order(&pool, pmp, 7002, 7, pn, "OPEN", "0", Some("z")).await;
 
-    let rows = repo
-        .resolve_for_cancel_batch(
+    let orders = into_orders(
+        repo.resolve_for_cancel_batch(
             &MarketAddress(pmp.into()),
             &Symbol(symbol.into()),
             &[7001, 7002],
@@ -731,10 +747,11 @@ async fn resolve_for_cancel_batch_zero_remaining_open_row_invisible() {
             NOW_TRADING,
         )
         .await
-        .expect("bulk resolve filters zero-remaining rows out");
-
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].order_id, 7001);
+        .expect("bulk resolve filters zero-remaining rows out"),
+    );
+    assert_eq!(orders.len(), 1);
+    // Input [7001, 7002]; only bind_idx 0 survives (7002 has amount_remaining=0).
+    assert_eq!(orders[0].bind_idx, 0);
 }
 
 #[tokio::test]
@@ -780,8 +797,8 @@ async fn resolve_for_cancel_batch_other_symbol_on_same_market_invisible() {
     seed_live_order(&pool, pmp, 8002, 8, pn, "OPEN", "1500000", Some("n")).await;
 
     // Query YES; only the YES-side order may come back.
-    let rows = repo
-        .resolve_for_cancel_batch(
+    let orders = into_orders(
+        repo.resolve_for_cancel_batch(
             &MarketAddress(pmp.into()),
             &Symbol(symbol_yes.into()),
             &[8001, 8002],
@@ -789,8 +806,51 @@ async fn resolve_for_cancel_batch_other_symbol_on_same_market_invisible() {
             NOW_TRADING,
         )
         .await
-        .expect("bulk resolve filters other-outcome rows out");
+        .expect("bulk resolve filters other-outcome rows out"),
+    );
+    assert_eq!(orders.len(), 1);
+    // Input [8001, 8002]; only bind_idx 0 survives (8002 is on the NO book).
+    assert_eq!(orders[0].bind_idx, 0);
+}
 
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].order_id, 8001);
+#[tokio::test]
+async fn resolve_for_cancel_batch_u64_max_id_round_trips_via_with_ordinality() {
+    // Pins the ceiling of the public-API id range. The SELECT binds
+    // ids as text[] and casts to numeric[] inside `unnest WITH
+    // ORDINALITY`; the projection then carries `bind_idx`, not the
+    // numeric value, so values up to `u64::MAX` never round-trip
+    // through `i64`/`u64::parse` and the application reconstructs
+    // `order_id` from `input.order_ids[bind_idx]`. Without this test a
+    // regression that re-introduced a `numeric::text::parse::<u64>`
+    // round-trip on the matched ids would compile fine but silently
+    // truncate or panic at the boundary.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_u64_max_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_U64_MAX_YES";
+    let pn = "0:resolve_cancel_batch_u64_max_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, u64::MAX, 7, pn, "OPEN", "1500000", Some("ceil")).await;
+    seed_live_order(&pool, pmp, u64::MAX - 1, 7, pn, "OPEN", "1500000", Some("ceil-1")).await;
+
+    let resolution = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[u64::MAX, u64::MAX - 1],
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect("u64::MAX-class ids match")
+        .expect("matched rows yield a resolution");
+
+    let orders = sort_orders(resolution.orders);
+    assert_eq!(orders.len(), 2);
+    assert_eq!(orders[0].bind_idx, 0);
+    assert_eq!(orders[0].client_order_id.as_deref(), Some("ceil"));
+    assert_eq!(orders[1].bind_idx, 1);
+    assert_eq!(orders[1].client_order_id.as_deref(), Some("ceil-1"));
 }

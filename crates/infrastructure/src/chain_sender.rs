@@ -96,8 +96,15 @@ impl ChainOrderSender for BeeDexChainSender {
             DomainError::Unexpected
         })?;
 
+        // Move payload's correlation fields out before they flow into
+        // `params` (which `dex.place_order` consumes); the post-await
+        // `ChainCallContext` then borrows them so timeout / unmapped-
+        // error logs carry the same `pn`/`event_id` as the audit lines
+        // for this dispatch.
+        let pn_address = payload.pn_address;
+        let event_id = payload.event_id;
         let params = ParamsOfPlaceOrder {
-            event_id: payload.event_id,
+            event_id: event_id.clone(),
             oracle_list_hash: payload.oracle_list_hash,
             token_type: payload.token_type,
             outcome_id: payload.outcome_id,
@@ -114,7 +121,7 @@ impl ChainOrderSender for BeeDexChainSender {
         };
 
         debug!(
-            pn = %payload.pn_address,
+            pn = %pn_address,
             event_id = %params.event_id,
             oracle_list_hash = %params.oracle_list_hash,
             token_type = params.token_type,
@@ -127,16 +134,24 @@ impl ChainOrderSender for BeeDexChainSender {
             "place_order params",
         );
 
-        let call = self.dex.place_order(&payload.pn_address, params, signer);
+        let call = self.dex.place_order(&pn_address, params, signer);
         let outcome = timeout(self.place_order_timeout, call).await;
-        classify_chain_outcome(outcome, self.place_order_timeout.as_millis() as u64, "place_order")
+        let ctx = ChainCallContext {
+            entry_point: "place_order",
+            pn: &pn_address,
+            event_id: &event_id,
+            order_count: 1,
+        };
+        classify_chain_outcome(outcome, self.place_order_timeout.as_millis() as u64, &ctx)
     }
 
     async fn cancel_order(&self, payload: CancelOrderPayload) -> Result<(), DomainError> {
         let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
 
+        let pn_address = payload.pn_address;
+        let event_id = payload.event_id;
         let params = ParamsOfCancelOrder {
-            event_id: payload.event_id,
+            event_id: event_id.clone(),
             oracle_list_hash: payload.oracle_list_hash,
             token_type: payload.token_type,
             // The application layer caps `order_id` at u64::MAX; the
@@ -147,7 +162,7 @@ impl ChainOrderSender for BeeDexChainSender {
         };
 
         debug!(
-            pn = %payload.pn_address,
+            pn = %pn_address,
             event_id = %params.event_id,
             oracle_list_hash = %params.oracle_list_hash,
             token_type = params.token_type,
@@ -155,33 +170,18 @@ impl ChainOrderSender for BeeDexChainSender {
             "cancel_order params",
         );
 
-        let call = self.dex.cancel_order(&payload.pn_address, params, signer);
+        let call = self.dex.cancel_order(&pn_address, params, signer);
         let outcome = timeout(self.cancel_order_timeout, call).await;
-        classify_chain_outcome(
-            outcome,
-            self.cancel_order_timeout.as_millis() as u64,
-            "cancel_order",
-        )
+        let ctx = ChainCallContext {
+            entry_point: "cancel_order",
+            pn: &pn_address,
+            event_id: &event_id,
+            order_count: 1,
+        };
+        classify_chain_outcome(outcome, self.cancel_order_timeout.as_millis() as u64, &ctx)
     }
 
     async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError> {
-        let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
-
-        // Consume `payload.orders` by value so per-item `price_raw`
-        // moves into the chain payload instead of being cloned.
-        let pn_address = payload.pn_address;
-        let mut orders = Vec::with_capacity(payload.orders.len());
-        for (item_index, item) in payload.orders.into_iter().enumerate() {
-            orders.push(encode_batch_item(item, item_index)?);
-        }
-
-        let params = ParamsOfPlaceBatch {
-            event_id: payload.event_id,
-            oracle_list_hash: payload.oracle_list_hash,
-            token_type: payload.token_type,
-            orders,
-        };
-
         // `client_order_ids` is the audit trail when a place_batch
         // never returns (`RequestTimeout`) or the gateway raises an
         // unmapped error: without it, ops cannot reconcile which coids
@@ -192,38 +192,73 @@ impl ChainOrderSender for BeeDexChainSender {
         // default filter keeps it. Per-order price/amount are not
         // logged: they would balloon the line for a large batch and
         // the chain encodes them in the external message recoverable
-        // from the gateway side anyway.
-        let client_order_ids: Vec<u128> = params.orders.iter().map(|o| o.client_order_id).collect();
+        // from the gateway side anyway. Emit the audit line before any
+        // fallible step (mirroring `cancel_batch_order`) so a key-shape
+        // failure (`accounts.pn_seckey_enc` rotation drift) surfacing
+        // inside `build_signer`, or a defence-in-depth `encode_batch_item`
+        // bypass on amount/coid parse, still leaves ops the
+        // clientOrderIds the caller intended.
+        let client_order_ids: Vec<&str> =
+            payload.orders.iter().map(|o| o.client_order_id.as_str()).collect();
         info!(
             entry_point = "place_batch",
-            pn = %pn_address,
-            event_id = %params.event_id,
-            oracle_list_hash = %params.oracle_list_hash,
-            token_type = params.token_type,
-            order_count = params.orders.len(),
+            pn = %payload.pn_address,
+            event_id = %payload.event_id,
+            oracle_list_hash = %payload.oracle_list_hash,
+            token_type = payload.token_type,
+            order_count = payload.orders.len(),
             ?client_order_ids,
             "submitting place_batch",
         );
 
+        let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
+
+        // Consume `payload.orders` by value so per-item `price_raw`
+        // moves into the chain payload instead of being cloned. Stash
+        // correlation fields up front so the post-await
+        // `ChainCallContext` can borrow them after `params` consumes
+        // their originals.
+        let order_count = payload.orders.len();
+        let pn_address = payload.pn_address;
+        let event_id = payload.event_id;
+        let mut orders = Vec::with_capacity(order_count);
+        for (item_index, item) in payload.orders.into_iter().enumerate() {
+            orders.push(encode_batch_item(item, item_index)?);
+        }
+
+        let params = ParamsOfPlaceBatch {
+            event_id: event_id.clone(),
+            oracle_list_hash: payload.oracle_list_hash,
+            token_type: payload.token_type,
+            orders,
+        };
+
         let call = self.dex.place_batch(&pn_address, params, signer);
         let outcome = timeout(self.place_batch_timeout, call).await;
-        classify_chain_outcome(outcome, self.place_batch_timeout.as_millis() as u64, "place_batch")
+        let ctx = ChainCallContext {
+            entry_point: "place_batch",
+            pn: &pn_address,
+            event_id: &event_id,
+            order_count,
+        };
+        classify_chain_outcome(outcome, self.place_batch_timeout.as_millis() as u64, &ctx)
     }
 
     async fn cancel_batch_order(
         &self,
         payload: CancelBatchOrderPayload,
     ) -> Result<(), DomainError> {
-        // `order_ids` is the audit trail when a cancel_batch never
-        // returns (`RequestTimeout`) or the gateway raises an unmapped
-        // error: without it, ops cannot reconcile which orderIds the
-        // chain may or may not have forwarded to `OrderBook.executeBatch`.
+        // `order_ids` is the primary correlation key (chain-assigned,
+        // known to caller) and `client_order_ids` mirrors the
+        // resolution so an ops incident triaged by customer-visible
+        // coid can be greppped without joining `live_orders` back to
+        // recover them. Both must appear here because
         // `classify_chain_outcome` does not carry them on its
-        // error/timeout logs, so this line is the only place they
-        // appear — emit at `info!` so the production default filter
-        // keeps it. Logged BEFORE `build_signer` so a key-shape failure
-        // (rotation-time drift in `accounts.pn_seckey_enc`) still leaves
-        // ops the orderIds the caller intended.
+        // error/timeout logs — emit at `info!` so the production
+        // default filter keeps the line. Audit emits before any
+        // fallible step so a key-shape failure
+        // (`accounts.pn_seckey_enc` rotation drift) surfacing inside
+        // `build_signer` still leaves ops the ids the caller intended.
         info!(
             entry_point = "cancel_batch",
             pn = %payload.pn_address,
@@ -232,6 +267,7 @@ impl ChainOrderSender for BeeDexChainSender {
             token_type = payload.token_type,
             order_count = payload.order_ids.len(),
             ?payload.order_ids,
+            ?payload.client_order_ids,
             "submitting cancel_batch",
         );
 
@@ -239,22 +275,27 @@ impl ChainOrderSender for BeeDexChainSender {
 
         // The chain ABI is uint128[]; `payload.order_ids` is `Vec<u64>`
         // at the application boundary, upcast is loss-less.
+        let order_count = payload.order_ids.len();
         let order_ids: Vec<u128> = payload.order_ids.iter().map(|&id| id as u128).collect();
+        let pn_address = payload.pn_address;
+        let event_id = payload.event_id;
 
         let params = ParamsOfCancelBatch {
-            event_id: payload.event_id,
+            event_id: event_id.clone(),
             oracle_list_hash: payload.oracle_list_hash,
             token_type: payload.token_type,
             order_ids,
         };
 
-        let call = self.dex.cancel_batch(&payload.pn_address, params, signer);
+        let call = self.dex.cancel_batch(&pn_address, params, signer);
         let outcome = timeout(self.cancel_batch_timeout, call).await;
-        classify_chain_outcome(
-            outcome,
-            self.cancel_batch_timeout.as_millis() as u64,
-            "cancel_batch",
-        )
+        let ctx = ChainCallContext {
+            entry_point: "cancel_batch",
+            pn: &pn_address,
+            event_id: &event_id,
+            order_count,
+        };
+        classify_chain_outcome(outcome, self.cancel_batch_timeout.as_millis() as u64, &ctx)
     }
 }
 
@@ -331,36 +372,56 @@ fn build_signer(pn_pubkey: &str, pn_seckey: &SensitiveBytes) -> Result<Signer, D
     Ok(Signer::Keys { keys })
 }
 
+/// Correlation context threaded into every timeout / unmapped-error
+/// log so ops can match a `bee_dex` failure back to the `info!` audit
+/// line each dispatcher emits before calling out. Without these
+/// fields, the elapsed/unmapped logs collapsed every in-flight chain
+/// call of one kind into a single undifferentiated event.
+#[derive(Debug, Clone, Copy)]
+struct ChainCallContext<'a> {
+    entry_point: &'static str,
+    pn: &'a str,
+    event_id: &'a str,
+    /// `1` for single-order entry points; `payload.orders.len()` /
+    /// `payload.order_ids.len()` for batch entry points.
+    order_count: usize,
+}
+
 /// Translate the `(timeout, chain-call)` result chain into the typed
 /// `DomainError` surface. Lifted out of the per-method dispatchers so
 /// the three arms can be exercised by unit tests against real
 /// `bee_dex::AppError` values — the HTTP integration tests fake
 /// `ChainOrderSender` entirely and would not catch a future refactor
 /// that breaks the wiring between `map_bee_dex_error` and the chain
-/// dispatch. `entry_point` is included in the timeout / unmapped-error
-/// logs so ops can disambiguate place / cancel / place_batch without
-/// correlation.
+/// dispatch. `ctx` carries `entry_point` + `pn`/`event_id`/`order_count`
+/// so the timeout and unmapped-error logs self-correlate with the audit
+/// line each caller emits before dispatch.
 fn classify_chain_outcome<T>(
     outcome: Result<Result<T, AppError>, tokio::time::error::Elapsed>,
     timeout_ms: u64,
-    entry_point: &'static str,
+    ctx: &ChainCallContext<'_>,
 ) -> Result<(), DomainError> {
     match outcome {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(app_err)) => Err(map_bee_dex_error(&app_err, entry_point)),
+        Ok(Err(app_err)) => Err(map_bee_dex_error(&app_err, ctx)),
         Err(_elapsed) => {
             // Gateway did not respond within the configured budget
             // (`chain.place_order_timeout_ms`,
             // `chain.cancel_order_timeout_ms`,
-            // `chain.place_batch_timeout_ms`). Most often a
+            // `chain.place_batch_timeout_ms`,
+            // `chain.cancel_batch_timeout_ms`). Most often a
             // network partition or a gateway-side deadlock. Surface as
             // `RequestTimeout` (504 / -1007) so the client receives the
             // same "retry with the same id" contract as the HTTP
             // request-timeout hoop — see
             // `docs/tech-specs/write-api.md §Failure surface`.
             error!(
-                entry_point,
-                timeout_ms, "bee_dex chain call timed out before gateway responded",
+                entry_point = ctx.entry_point,
+                pn = ctx.pn,
+                event_id = ctx.event_id,
+                order_count = ctx.order_count,
+                timeout_ms,
+                "bee_dex chain call timed out before gateway responded",
             );
             Err(DomainError::RequestTimeout)
         }
@@ -381,14 +442,17 @@ fn classify_chain_outcome<T>(
 /// new chain error variant cannot silently surface as a misleading
 /// 400. See [`docs/tech-specs/write-api.md` §Failure surface] for the
 /// per-code contract this enforces.
-fn map_bee_dex_error(err: &AppError, entry_point: &'static str) -> DomainError {
+fn map_bee_dex_error(err: &AppError, ctx: &ChainCallContext<'_>) -> DomainError {
     if err.kind.as_deref() == Some("tvm_exit")
         && let Some(code_str) = err.error_code.as_deref()
         && let Ok(code) = code_str.parse::<u16>()
         && let Some(mapped) = map_tvm_exit_code(code)
     {
         warn!(
-            entry_point,
+            entry_point = ctx.entry_point,
+            pn = ctx.pn,
+            event_id = ctx.event_id,
+            order_count = ctx.order_count,
             exit_code = code,
             err_message = %err.message,
             err_details = ?err.details,
@@ -403,7 +467,14 @@ fn map_bee_dex_error(err: &AppError, entry_point: &'static str) -> DomainError {
     // Unmapped path: full diagnostic at error level since this is
     // either a transport failure or a chain code we have not learned
     // to handle yet.
-    error!(entry_point, ?err, "bee_dex chain call failed (unmapped)");
+    error!(
+        entry_point = ctx.entry_point,
+        pn = ctx.pn,
+        event_id = ctx.event_id,
+        order_count = ctx.order_count,
+        ?err,
+        "bee_dex chain call failed (unmapped)",
+    );
     DomainError::Unexpected
 }
 
@@ -543,58 +614,50 @@ mod tests {
         }
     }
 
+    fn ctx_single(entry_point: &'static str) -> ChainCallContext<'static> {
+        ChainCallContext { entry_point, pn: "0:test-pn", event_id: "0xevent", order_count: 1 }
+    }
+
+    fn ctx_batch(entry_point: &'static str, order_count: usize) -> ChainCallContext<'static> {
+        ChainCallContext { entry_point, pn: "0:test-pn", event_id: "0xevent", order_count }
+    }
+
     #[test]
     fn maps_known_pn_validation_codes() {
         // The full table from `map_tvm_exit_code` — locking each row
         // down so a future "small refactor" cannot silently remap a
         // known reject onto the wrong HTTP class. Codes come from
         // `contracts/modifiers/errors.sol`.
+        let single = ctx_single("place_order");
+        let batch = ctx_batch("place_batch", 3);
         assert_eq!(
-            map_bee_dex_error(&tvm_exit(102), "place_order"),
+            map_bee_dex_error(&tvm_exit(102), &single),
             DomainError::OrderValidationFailed
         );
-        assert_eq!(map_bee_dex_error(&tvm_exit(121), "place_order"), DomainError::OrderPnBusy);
-        assert_eq!(map_bee_dex_error(&tvm_exit(129), "place_batch"), DomainError::InvalidParameter);
+        assert_eq!(map_bee_dex_error(&tvm_exit(121), &single), DomainError::OrderPnBusy);
+        assert_eq!(map_bee_dex_error(&tvm_exit(129), &batch), DomainError::InvalidParameter);
+        assert_eq!(map_bee_dex_error(&tvm_exit(130), &single), DomainError::MarketInconsistent);
         assert_eq!(
-            map_bee_dex_error(&tvm_exit(130), "place_order"),
-            DomainError::MarketInconsistent
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(142), "place_order"),
-            DomainError::OrderValidationFailed
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(150), "place_order"),
+            map_bee_dex_error(&tvm_exit(142), &single),
             DomainError::OrderValidationFailed
         );
         assert_eq!(
-            map_bee_dex_error(&tvm_exit(151), "place_order"),
+            map_bee_dex_error(&tvm_exit(150), &single),
             DomainError::OrderValidationFailed
         );
         assert_eq!(
-            map_bee_dex_error(&tvm_exit(160), "place_order"),
+            map_bee_dex_error(&tvm_exit(151), &single),
             DomainError::OrderValidationFailed
         );
         assert_eq!(
-            map_bee_dex_error(&tvm_exit(161), "place_batch"),
-            DomainError::MarketInconsistent
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(162), "place_batch"),
-            DomainError::MarketInconsistent
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(163), "place_order"),
-            DomainError::PrecisionExceeded
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(164), "place_order"),
-            DomainError::PrecisionExceeded
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(168), "place_batch"),
+            map_bee_dex_error(&tvm_exit(160), &single),
             DomainError::OrderValidationFailed
         );
+        assert_eq!(map_bee_dex_error(&tvm_exit(161), &batch), DomainError::MarketInconsistent);
+        assert_eq!(map_bee_dex_error(&tvm_exit(162), &batch), DomainError::MarketInconsistent);
+        assert_eq!(map_bee_dex_error(&tvm_exit(163), &single), DomainError::PrecisionExceeded);
+        assert_eq!(map_bee_dex_error(&tvm_exit(164), &single), DomainError::PrecisionExceeded);
+        assert_eq!(map_bee_dex_error(&tvm_exit(168), &batch), DomainError::OrderValidationFailed);
     }
 
     #[test]
@@ -602,7 +665,10 @@ mod tests {
         // A chain code we haven't learned to handle MUST NOT degrade
         // to a misleading 400 — the operator needs to see it in logs
         // and decide whether to extend the mapping.
-        assert_eq!(map_bee_dex_error(&tvm_exit(9999), "place_order"), DomainError::Unexpected);
+        assert_eq!(
+            map_bee_dex_error(&tvm_exit(9999), &ctx_single("place_order")),
+            DomainError::Unexpected
+        );
     }
 
     #[test]
@@ -610,12 +676,13 @@ mod tests {
         // Transport / gateway / decode failures have a different
         // `kind` (or none). We must not interpret an `error_code` like
         // "404" outside the `tvm_exit` context as a TVM exit code.
+        let ctx = ctx_single("place_order");
         let mut err = tvm_exit(102);
         err.kind = Some("transport".into());
-        assert_eq!(map_bee_dex_error(&err, "place_order"), DomainError::Unexpected);
+        assert_eq!(map_bee_dex_error(&err, &ctx), DomainError::Unexpected);
 
         err.kind = None;
-        assert_eq!(map_bee_dex_error(&err, "place_order"), DomainError::Unexpected);
+        assert_eq!(map_bee_dex_error(&err, &ctx), DomainError::Unexpected);
     }
 
     #[test]
@@ -624,13 +691,16 @@ mod tests {
         // possible. Make sure we don't panic and fall through cleanly.
         let mut err = tvm_exit(0);
         err.error_code = Some("not-a-number".into());
-        assert_eq!(map_bee_dex_error(&err, "place_order"), DomainError::Unexpected);
+        assert_eq!(
+            map_bee_dex_error(&err, &ctx_single("place_order")),
+            DomainError::Unexpected
+        );
     }
 
     #[test]
     fn classify_chain_outcome_ok_passes_through() {
         let outcome: Result<Result<(), AppError>, tokio::time::error::Elapsed> = Ok(Ok(()));
-        assert!(classify_chain_outcome(outcome, 1_000, "place_order").is_ok());
+        assert!(classify_chain_outcome(outcome, 1_000, &ctx_single("place_order")).is_ok());
     }
 
     #[test]
@@ -650,10 +720,11 @@ mod tests {
             (163, DomainError::PrecisionExceeded),        // ERR_AMOUNT_NOT_LOT_MULTIPLE
             (168, DomainError::OrderValidationFailed),    // ERR_NOTIONAL_OVERFLOW
         ];
+        let ctx = ctx_single("place_order");
         for (code, expected) in cases {
             let outcome: Result<Result<(), AppError>, tokio::time::error::Elapsed> =
                 Ok(Err(tvm_exit(code)));
-            let result = classify_chain_outcome(outcome, 1_000, "place_order");
+            let result = classify_chain_outcome(outcome, 1_000, &ctx);
             assert_eq!(result, Err(expected), "tvm_exit({code}) mismapped");
         }
     }
@@ -672,7 +743,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            classify_chain_outcome(elapsed, 30_000, "place_order"),
+            classify_chain_outcome(elapsed, 30_000, &ctx_single("place_order")),
             Err(DomainError::RequestTimeout),
         );
     }

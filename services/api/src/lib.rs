@@ -711,9 +711,13 @@ struct BatchOrderResponseItem {
 /// Request body for `DELETE /api/v1/batchOrders`. One market+symbol per
 /// request, every id is cancelled on that single book — matches the
 /// chain ABI's `PrivateNote.cancelBatch(eventId, oracleListHash,
-/// tokenType, uint128[])`.
+/// tokenType, uint128[])`. `deny_unknown_fields` is strict on this
+/// destructive write surface: a typo like `orderIDs` would otherwise
+/// silently deserialise as `order_ids = None` and surface as
+/// MissingParameter, masking the real bug — better to 400 with
+/// `unknown field` and let the caller fix the key.
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CancelBatchOrdersRequest {
     market_address: Option<String>,
     symbol: Option<String>,
@@ -748,6 +752,45 @@ fn require_auth(depot: &Depot, permission: Permission) -> Result<&AuthContext, A
     Ok(ctx)
 }
 
+/// Read a strict-shape JSON body from `req`. Distinguishes (in the
+/// emitted `warn!`) between transport-level read failure, empty body,
+/// malformed JSON, truncated JSON, and serde shape mismatch — so ops
+/// can grep one reason tag per failure mode instead of inspecting
+/// debug-repr substrings. Every failure mode collapses to
+/// `InvalidParameter` (-1130) at the wire, matching the existing
+/// post-HMAC parse contract: a misbehaving caller is a 400, not a 500.
+///
+/// `route` flows into the log line so a multi-handler regression
+/// (e.g. an HMAC hoop that started double-consuming the body) shows
+/// up under one queryable tag per endpoint.
+async fn parse_strict_body<T: serde::de::DeserializeOwned>(
+    req: &mut Request,
+    route: &'static str,
+) -> Result<T, ApiError> {
+    let body_bytes = req.payload().await.map_err(|err| {
+        warn!(route, reason = "transport", ?err, "body read failed");
+        ApiError::from(DomainError::InvalidParameter)
+    })?;
+    if body_bytes.is_empty() {
+        warn!(route, reason = "empty", "body did not parse");
+        return Err(ApiError::from(DomainError::InvalidParameter));
+    }
+    serde_json::from_slice(body_bytes).map_err(|err| {
+        // `serde_json::Category` separates structural failures
+        // (`Syntax`) from prematurely truncated payloads (`Eof`) and
+        // unknown / wrong-typed fields (`Data`); `Io` is structurally
+        // unreachable for `from_slice` but enumerated for exhaustiveness.
+        let reason = match err.classify() {
+            serde_json::error::Category::Syntax => "malformed",
+            serde_json::error::Category::Eof => "truncated",
+            serde_json::error::Category::Data => "shape_mismatch",
+            serde_json::error::Category::Io => "serde_io",
+        };
+        warn!(route, reason, ?err, "body did not parse");
+        ApiError::from(DomainError::InvalidParameter)
+    })
+}
+
 /// `POST /api/v1/order`. Auth hoop has already verified the request;
 /// `require_auth(Trade)` enforces the spec permission. The handler
 /// translates the parsed request + `AuthContext` into a
@@ -771,16 +814,11 @@ async fn create_order(
         })?
         .clone();
 
-    let body: CreateOrderRequest = req.parse_json().await.map_err(|err| {
-        // Body has been HMAC-verified upstream, so a parse failure here
-        // is a client-shape bug (malformed JSON, wrong types) — surface
-        // as -1130 InvalidParameter rather than a generic 500. `warn`
-        // not `error`: a misbehaving caller is not an ops issue, just
-        // a debugging breadcrumb (mirrors `chain_sender.rs`'s `warn`
-        // for known-mapped chain rejects).
-        warn!(?err, "POST /api/v1/order body did not parse");
-        ApiError::from(DomainError::InvalidParameter)
-    })?;
+    // Body has been HMAC-verified upstream, so a parse failure here is
+    // a client-shape bug — surface as -1130 InvalidParameter, not 500.
+    // `parse_strict_body` distinguishes the failure mode in the warn so
+    // ops can grep `reason=malformed` vs `reason=empty` etc.
+    let body: CreateOrderRequest = parse_strict_body(req, "POST /api/v1/order").await?;
 
     let (now_seconds, now_ms) = now_pair();
     let input = build_new_order_input(body, ctx, now_seconds, now_ms)?;
@@ -914,12 +952,8 @@ async fn create_batch_orders(
         })?
         .clone();
 
-    let body: BatchOrdersRequest = req.parse_json().await.map_err(|err| {
-        // Body has been HMAC-verified upstream; a parse failure is a
-        // client-shape bug. Mirrors the warn in `create_order`.
-        warn!(?err, "POST /api/v1/batchOrders body did not parse");
-        ApiError::from(DomainError::InvalidParameter)
-    })?;
+    let body: BatchOrdersRequest =
+        parse_strict_body(req, "POST /api/v1/batchOrders").await?;
 
     let (now_seconds, now_ms) = now_pair();
     let input = build_batch_orders_input(body, ctx, now_seconds, now_ms)?;
@@ -1055,13 +1089,14 @@ async fn delete_batch_orders(
         })?
         .clone();
 
-    let body: CancelBatchOrdersRequest = req.parse_json().await.map_err(|err| {
-        warn!(?err, "DELETE /api/v1/batchOrders body did not parse");
-        ApiError::from(DomainError::InvalidParameter)
-    })?;
+    let body: CancelBatchOrdersRequest =
+        parse_strict_body(req, "DELETE /api/v1/batchOrders").await?;
 
     let (now_seconds, now_ms) = now_pair();
-    let input = build_cancel_batch_orders_input(body, ctx, now_seconds)?;
+    let input = build_cancel_batch_orders_input(body, ctx, now_seconds, now_ms)?;
+    // Use the `now_ms` the input carries so per-item `transactTime`
+    // matches the value the use case logged and dispatched against.
+    let response_now_ms = input.now_ms;
 
     let use_case = CancelBatchOrdersUseCase::new(state.repo, state.chain_sender);
     let cancelled = use_case.execute(input).await.map_err(ApiError::from)?;
@@ -1071,7 +1106,7 @@ async fn delete_batch_orders(
         .map(|item| CancelBatchOrderResponseItem {
             order_id: item.order_id.to_string(),
             client_order_id: item.client_order_id.unwrap_or_default(),
-            transact_time: now_ms,
+            transact_time: response_now_ms,
             status: OrderStatus::PendingCancel.as_str(),
         })
         .collect();
@@ -1087,6 +1122,7 @@ fn build_cancel_batch_orders_input(
     body: CancelBatchOrdersRequest,
     ctx: AuthContext,
     now_seconds: i64,
+    now_ms: i64,
 ) -> Result<CancelBatchOrdersInput, ApiError> {
     let market_address =
         non_empty(body.market_address).ok_or(ApiError::from(DomainError::MissingParameter))?;
@@ -1094,10 +1130,26 @@ fn build_cancel_batch_orders_input(
     let raw_ids = body.order_ids.ok_or(ApiError::from(DomainError::MissingParameter))?;
 
     let mut order_ids = Vec::with_capacity(raw_ids.len());
-    for raw in raw_ids {
-        let trimmed = non_empty(Some(raw)).ok_or(ApiError::from(DomainError::MissingParameter))?;
-        let id =
-            trimmed.parse::<u64>().map_err(|_| ApiError::from(DomainError::InvalidParameter))?;
+    // Symmetric with `build_batch_orders_input`: same `phase = "parse"`
+    // tag and `item_index` so ops can pinpoint which element of a
+    // long `orderIds[]` rejected, and the shared "cancelBatch rejected"
+    // substring spans parse + later shape gates.
+    for (item_index, raw) in raw_ids.into_iter().enumerate() {
+        let trimmed = non_empty(Some(raw)).ok_or_else(|| {
+            warn!(phase = "parse", item_index, field = "orderId", "cancelBatch rejected");
+            ApiError::from(DomainError::MissingParameter)
+        })?;
+        let id = trimmed.parse::<u64>().map_err(|err| {
+            warn!(
+                phase = "parse",
+                item_index,
+                field = "orderId",
+                value = %trimmed,
+                ?err,
+                "cancelBatch rejected",
+            );
+            ApiError::from(DomainError::InvalidParameter)
+        })?;
         order_ids.push(id);
     }
 
@@ -1107,6 +1159,7 @@ fn build_cancel_batch_orders_input(
         symbol: Symbol(symbol),
         order_ids,
         now_seconds,
+        now_ms,
     })
 }
 

@@ -950,6 +950,9 @@ chain:
         // must outlast cancel_batch_timeout, else an in-flight
         // cancelBatch gets dropped while still running on chain and the
         // client loses the orderIds of an op that eventually lands.
+        // `5000 == 5000` hits the `==` boundary specifically (not just
+        // `<`), so a future relaxation from `>` to `>=` in the validate
+        // arm would fail here, not slip through.
         let raw = format!(
             "{COMMON}
 server:
@@ -971,6 +974,34 @@ chain:
         let msg = err.to_string();
         assert!(msg.contains("request_timeout_ms"), "got: {msg}");
         assert!(msg.contains("cancel_batch_timeout_ms"), "got: {msg}");
+    }
+
+    #[test]
+    fn api_validate_accepts_request_timeout_just_above_cancel_batch_timeout() {
+        // Boundary peer of
+        // `api_validate_rejects_request_timeout_not_exceeding_cancel_batch_timeout`:
+        // `5001 > 5000` must pass. Without this, a regression that
+        // tightened the comparison to `>=` would silently break every
+        // deployment that ran with equal timeouts during a config
+        // migration.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5001
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 1000
+  cancel_order_timeout_ms: 1000
+  place_batch_timeout_ms: 1000
+  cancel_batch_timeout_ms: 5000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        cfg.validate().expect("1 ms above cancel_batch_timeout must validate");
     }
 
     #[test]

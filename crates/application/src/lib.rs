@@ -1,7 +1,6 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -204,19 +203,27 @@ pub trait MarketReadRepository: Send + Sync {
 
     /// Resolve multiple open orders owned by `owner_pn_address` on a
     /// single `(market_address, symbol)`. Mirrors `resolve_for_cancel`'s
-    /// join shape but with `lo.order_id = ANY(:order_ids)`. Rows come
-    /// back unordered; the use case re-orders by input. Misses are not
-    /// reported here — the implementation simply returns fewer rows than
-    /// requested, and the use case collapses any shortfall to
-    /// `DomainError::UnknownOrder`. Non-domain errors from the SELECT
-    /// surface through `anyhow`.
+    /// join shape but joins on the `order_ids` bind array expanded
+    /// `WITH ORDINALITY`, so the matched row's `order_id` never round-
+    /// trips through numeric/text — each returned order carries
+    /// `bind_idx` (its position in `order_ids`) and the use case
+    /// reconstructs the chain `orderId` from the input slice.
     ///
-    /// Each returned row carries `market_status` derived from the same
-    /// `markets` row the order is joined against and `now`. The use case
-    /// re-checks this status post-SELECT so a market that flipped out
-    /// of `Trading` between the placement-shape lookup and this bulk
-    /// resolution still rejects with `OrderValidationFailed` instead of
-    /// reaching the chain.
+    /// `None` means zero matches — the use case maps that to
+    /// `DomainError::UnknownOrder`. A partial shortfall (some matches,
+    /// some not) surfaces as `Some` with `orders.len() < order_ids.len()`;
+    /// the use case promotes that same shortfall to `UnknownOrder`.
+    /// Non-domain errors from the SELECT surface through `anyhow`.
+    ///
+    /// Market identity (`event_id`, `oracle_list_hash`, `token_type`)
+    /// and `market_status` are projected from the JOINed `markets` row
+    /// onto the wrapping `CancelBatchResolution`, evaluated at the
+    /// caller-provided `now`. Both are constant by SELECT construction
+    /// (filter pins one `(pmp_address, symbol)`). The use case
+    /// re-checks `market_status == Trading` post-SELECT so a market
+    /// that flipped out of `Trading` between the placement-shape
+    /// lookup and this bulk resolution still rejects with
+    /// `OrderValidationFailed` before chain dispatch.
     async fn resolve_for_cancel_batch(
         &self,
         market_address: &MarketAddress,
@@ -224,7 +231,7 @@ pub trait MarketReadRepository: Send + Sync {
         order_ids: &[u64],
         owner_pn_address: &str,
         now: i64,
-    ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error>;
+    ) -> Result<Option<CancelBatchResolution>, anyhow::Error>;
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error>;
 }
@@ -271,7 +278,7 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         order_ids: &[u64],
         owner_pn_address: &str,
         now: i64,
-    ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
+    ) -> Result<Option<CancelBatchResolution>, anyhow::Error> {
         (**self)
             .resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address, now)
             .await
@@ -788,7 +795,12 @@ pub struct CancelBatchOrdersInput {
     pub market_address: MarketAddress,
     pub symbol: Symbol,
     pub order_ids: Vec<u64>,
+    /// Unix seconds. Drives status derivation in the bulk SELECT.
     pub now_seconds: i64,
+    /// Unix milliseconds. Returned to the client as `transactTime` for
+    /// every item in the batch — symmetric with peer Input types so the
+    /// handler cannot drift by re-sampling per item.
+    pub now_ms: i64,
 }
 
 /// Chain-shaped payload handed to `ChainOrderSender::cancel_batch_order`.
@@ -804,26 +816,63 @@ pub struct CancelBatchOrderPayload {
     pub oracle_list_hash: String,
     pub token_type: u32,
     pub order_ids: Vec<u64>,
+    /// Resolved `live_orders.client_order_id` for each entry of
+    /// `order_ids`, same order. `None` for an order placed without a
+    /// caller-supplied coid. Not part of the chain payload — used only
+    /// for the audit log so ops can grep a cancel-batch incident by
+    /// `clientOrderId` instead of joining `order_id → client_order_id`
+    /// against `live_orders` after the fact.
+    pub client_order_ids: Vec<Option<String>>,
 }
 
-/// One row returned by `MarketReadRepository::resolve_for_cancel_batch`.
-/// `order_id` is the chain-assigned id (already validated through the
-/// SELECT predicates: open, owned by caller, on the right book);
-/// `client_order_id` echoes back into the response.
+/// One matched live order from
+/// `MarketReadRepository::resolve_for_cancel_batch`. Carries only
+/// per-row data — chain identity and market status are pulled up to
+/// [`CancelBatchResolution`] because they are constant across all
+/// rows of one resolution (the SELECT is filtered to a single
+/// `(pmp_address, symbol)` pair, so every row joins the same `markets`
+/// snapshot). `bind_idx` is the 0-based position of the matched id in
+/// the caller's `order_ids[]` slice — the SELECT joins against the
+/// bind array `WITH ORDINALITY`, so `order_id` never round-trips
+/// through numeric/text; the use case reconstructs it from the input.
 #[derive(Debug, Clone)]
 pub struct OrderForCancelBatch {
-    pub order_id: u64,
+    pub bind_idx: usize,
     /// `live_orders.client_order_id`. NULL surfaces as `None`; the
     /// handler renders that as the empty string per
     /// api-spec §Cancel Batch Orders.
     pub client_order_id: Option<String>,
-    /// `MarketStatus` derived from the same `markets` row the JOIN
-    /// matched, evaluated at the use-case-provided `now`. Constant
-    /// across rows in any one result set (the SELECT is filtered to
-    /// one `(pmp_address, symbol)` pair). The use case re-checks this
+}
+
+/// Result of `MarketReadRepository::resolve_for_cancel_batch`. Wraps
+/// the matched per-row data with the market-level identity and status
+/// that drive the chain payload, expressed once because they are
+/// constant by SELECT construction. `None` (at the trait level) means
+/// zero rows matched — the use case maps that to `UnknownOrder`.
+#[derive(Debug, Clone)]
+pub struct CancelBatchResolution {
+    /// Chain identity from the `markets` row the JOIN matched — feeds
+    /// `CancelBatchOrderPayload` directly, closing the race window
+    /// against `resolve_for_new_order`'s earlier MVCC view that could
+    /// have hashed a different market generation.
+    pub event_id: String,
+    /// `markets.oracle_list_hash`. NULL/blank surfaces as the empty
+    /// string with a warn at the infra layer (mirrors
+    /// `resolve_for_cancel`); the use case maps empty → MarketInconsistent.
+    pub oracle_list_hash: String,
+    /// `markets.token_type`. The use case applies `u32::try_from` so
+    /// an out-of-range read-model value collapses to MarketInconsistent
+    /// rather than panic.
+    pub token_type: i32,
+    /// `MarketStatus` derived from the JOINed `markets` row at the
+    /// use-case-provided `now`. The use case re-checks this
     /// post-SELECT to close the race window against the earlier
     /// `resolve_for_new_order` snapshot.
     pub market_status: MarketStatus,
+    /// One entry per matched live order. Ordering is unspecified
+    /// (Postgres returns rows in arbitrary order); the use case sorts
+    /// by `bind_idx` to reconstruct request order.
+    pub orders: Vec<OrderForCancelBatch>,
 }
 
 /// Output of `CancelBatchOrdersUseCase`. One entry per request item, in
@@ -875,8 +924,10 @@ pub trait ChainOrderSender: Send + Sync {
     /// (one external message, one `_busy` window) and forwards a single
     /// `OrderBook.executeBatch` for the per-order cancels. Chain-side
     /// rejects mapped here: `121 ERR_NOTE_BUSY` → `OrderPnBusy`, and the
-    /// defence-in-depth range guards `161 ERR_BATCH_TOO_LARGE` /
-    /// `162 ERR_EMPTY_BATCH` (the use case pre-checks both).
+    /// range guards `161 ERR_BATCH_TOO_LARGE` / `162 ERR_EMPTY_BATCH`
+    /// → `MarketInconsistent` (defence-in-depth — the use case
+    /// pre-checks both, so reaching either code means read-model drift
+    /// from the on-chain ceiling).
     /// Per-order OrderBook outcomes (silent no-op on owner-mismatch or
     /// already-closed, queue overflow) remain asynchronous and surface
     /// through the indexer.
@@ -1353,7 +1404,14 @@ where
             return Err(DomainError::InvalidParameter);
         }
 
-        let MarketForPlacement { event_id, oracle_list_hash, token_type, status, outcome } = self
+        // `resolve_for_new_order` here is the early-exit gate: only its
+        // `outcome.max_batch_size` and `status` feed the pre-bulk-SELECT
+        // checks. Chain identity (`event_id`, `oracle_list_hash`,
+        // `token_type`) is read later from `CancelBatchResolution` of
+        // the bulk SELECT — same MVCC snapshot as the order rows — so a
+        // reconciler commit between the two queries cannot leak a
+        // stale market generation into the chain payload.
+        let MarketForPlacement { status, outcome, .. } = self
             .repo
             .resolve_for_new_order(&input.market_address, &input.symbol, input.now_seconds)
             .await
@@ -1371,9 +1429,6 @@ where
 
         if status != MarketStatus::Trading {
             return Err(DomainError::OrderValidationFailed);
-        }
-        if oracle_list_hash.is_empty() {
-            return Err(DomainError::MarketInconsistent);
         }
         // Cap check runs BEFORE the dedup HashSet allocation and BEFORE
         // the bulk SELECT so an oversize input is rejected without paying
@@ -1404,9 +1459,7 @@ where
             }
         }
 
-        let token_type = u32::try_from(token_type).map_err(|_| DomainError::MarketInconsistent)?;
-
-        let rows = self
+        let resolution = self
             .repo
             .resolve_for_cancel_batch(
                 &input.market_address,
@@ -1426,55 +1479,84 @@ where
                     "resolve_for_cancel_batch failed (non-domain)",
                 );
                 DomainError::Unexpected
-            })?;
+            })?
+            // Zero rows matched — atomic validation collapses to the
+            // single ambiguous code per single-cancel's contract.
+            .ok_or(DomainError::UnknownOrder)?;
+
+        let CancelBatchResolution {
+            event_id,
+            oracle_list_hash,
+            token_type,
+            market_status,
+            mut orders,
+        } = resolution;
 
         // Atomic validation: the request is rejected as a whole on any
         // shortfall — unknown id, wrong owner, wrong book, already
         // closed. Single ambiguous code per single-cancel's contract.
-        if rows.len() != input.order_ids.len() {
+        if orders.len() != input.order_ids.len() {
             return Err(DomainError::UnknownOrder);
         }
 
         // Close the race between `resolve_for_new_order` and the bulk
         // SELECT: a reconciler commit between the two MVCC snapshots
-        // could flip the market out of `Trading`. `rows[0]` is safe —
-        // shortfall returned above, and one JOIN row supplies the
-        // status for all rows.
-        if rows[0].market_status != MarketStatus::Trading {
+        // could flip the market out of `Trading`.
+        if market_status != MarketStatus::Trading {
             return Err(DomainError::OrderValidationFailed);
         }
-
-        let rows_len = rows.len();
-        let mut by_id: HashMap<u64, Option<String>> = HashMap::with_capacity(rows_len);
-        for row in rows {
-            by_id.insert(row.order_id, row.client_order_id);
-        }
-        // `live_orders` is PK'd on `(orderbook_address, order_id)`, so
-        // two rows for one id are only possible under read-model
-        // corruption. HashMap last-insert-wins would collapse them
-        // silently; surface as MarketInconsistent instead so corruption
-        // is visible to ops, not masked as UnknownOrder by the
-        // input-ordered reassembly below.
-        if by_id.len() != rows_len {
-            warn!(
-                market_address = %input.market_address.0,
-                symbol = %input.symbol.0,
-                rows_len,
-                unique_ids = by_id.len(),
-                "resolve_for_cancel_batch returned duplicate order_ids (read-model corruption)",
-            );
+        if oracle_list_hash.is_empty() {
             return Err(DomainError::MarketInconsistent);
         }
+        let token_type = u32::try_from(token_type).map_err(|_| {
+            error!(
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                token_type,
+                "resolve_for_cancel_batch: token_type does not fit u32",
+            );
+            DomainError::MarketInconsistent
+        })?;
+
+        // `live_orders` is PK'd on `(orderbook_address, order_id)`, so
+        // two rows mapping to the same input position are only possible
+        // under read-model corruption (e.g. duplicate `live_orders`
+        // entries that both join through the same `lo.order_id`).
+        // After sort, identical neighbours surface that case as
+        // MarketInconsistent rather than letting the zip below silently
+        // pair the wrong row to the wrong input id.
+        orders.sort_by_key(|r| r.bind_idx);
+        for pair in orders.windows(2) {
+            if pair[0].bind_idx == pair[1].bind_idx {
+                warn!(
+                    market_address = %input.market_address.0,
+                    symbol = %input.symbol.0,
+                    rows_len = orders.len(),
+                    duplicate_bind_idx = pair[0].bind_idx,
+                    "resolve_for_cancel_batch returned duplicate rows (read-model corruption)",
+                );
+                return Err(DomainError::MarketInconsistent);
+            }
+        }
+        // After shortfall (orders.len() == n) and unique-bind_idx
+        // (windows check) gates, the n bind_idx values are a
+        // permutation of [0, n); sorted they are 0..n, so `orders[i]`
+        // pairs with `input.order_ids[i]`.
         let response: Vec<CancelledBatchOrder> = input
             .order_ids
             .iter()
-            .map(|&id| {
-                by_id
-                    .remove(&id)
-                    .map(|client_order_id| CancelledBatchOrder { order_id: id, client_order_id })
+            .zip(orders)
+            .map(|(&order_id, order)| CancelledBatchOrder {
+                order_id,
+                client_order_id: order.client_order_id,
             })
-            .collect::<Option<Vec<_>>>()
-            .ok_or(DomainError::UnknownOrder)?;
+            .collect();
+
+        // Mirror the response shape into the chain payload's audit
+        // field so the dispatcher can log clientOrderIds alongside
+        // orderIds — same correlation surface place_batch has.
+        let client_order_ids: Vec<Option<String>> =
+            response.iter().map(|r| r.client_order_id.clone()).collect();
 
         let payload = CancelBatchOrderPayload {
             pn_address: input.trading_pn.pn_address,
@@ -1484,6 +1566,7 @@ where
             oracle_list_hash,
             token_type,
             order_ids: input.order_ids,
+            client_order_ids,
         };
         self.sender.cancel_batch_order(payload).await?;
 
@@ -1787,26 +1870,28 @@ mod tests {
             order_ids: &[u64],
             owner_pn_address: &str,
             _: i64,
-        ) -> Result<Vec<OrderForCancelBatch>, anyhow::Error> {
+        ) -> Result<Option<CancelBatchResolution>, anyhow::Error> {
             // Mirror Postgres impl: any predicate miss simply yields
             // fewer rows than asked. The use case promotes a shortfall
-            // to `UnknownOrder` for the whole batch.
+            // to `UnknownOrder` for the whole batch; zero matches
+            // (no market, no symbol, no rows) surface as `None`.
             let Some(market) = self.market.clone() else {
-                return Ok(Vec::new());
+                return Ok(None);
             };
             if !market.outcomes.iter().any(|o| o.symbol == *symbol) {
-                return Ok(Vec::new());
+                return Ok(None);
             }
-            let market_status = self.cancel_batch_status_override.unwrap_or(market.status);
-            let mut rows: Vec<OrderForCancelBatch> = order_ids
+            let mut orders: Vec<OrderForCancelBatch> = order_ids
                 .iter()
-                .filter_map(|&id| {
+                .enumerate()
+                .filter_map(|(idx, &id)| {
                     self.live_orders
                         .iter()
                         .find(|o| o.order_id == id && o.owner_pn_address == owner_pn_address)
+                        .map(|o| (idx, o))
                 })
-                .map(|o| OrderForCancelBatch {
-                    order_id: o.order_id,
+                .map(|(idx, o)| OrderForCancelBatch {
+                    bind_idx: idx,
                     // Mirror Postgres: NULL or whitespace-only
                     // `client_order_id` demotes to `None` so the
                     // fake doesn't hide trim drift from unit tests.
@@ -1814,19 +1899,27 @@ mod tests {
                         let trimmed = raw.trim();
                         (!trimmed.is_empty()).then(|| trimmed.to_string())
                     }),
-                    market_status,
                 })
                 .collect();
-            if self.cancel_batch_duplicate_first_row && rows.len() >= 2 {
+            if orders.is_empty() {
+                return Ok(None);
+            }
+            if self.cancel_batch_duplicate_first_row && orders.len() >= 2 {
                 // Realistic shape of read-model corruption: a join
                 // pathology yields the first id twice while another id
-                // is silently dropped, so `rows.len() == input.len()`
-                // (shortfall check passes) but `by_id` collapses to
-                // fewer unique keys than the input — exactly the case
-                // the use case must catch as MarketInconsistent.
-                rows[1] = rows[0].clone();
+                // is silently dropped, so `orders.len() == input.len()`
+                // (shortfall check passes) but two rows share the same
+                // `bind_idx` — exactly the case the use case must
+                // catch as MarketInconsistent.
+                orders[1] = orders[0].clone();
             }
-            Ok(rows)
+            Ok(Some(CancelBatchResolution {
+                event_id: market.event.event_id,
+                oracle_list_hash: market.oracle_list_hash,
+                token_type: market.token_type,
+                market_status: self.cancel_batch_status_override.unwrap_or(market.status),
+                orders,
+            }))
         }
 
         async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
@@ -3128,6 +3221,7 @@ mod tests {
             symbol: Symbol(symbol.into()),
             order_ids,
             now_seconds: 1_000,
+            now_ms: 1_000_000,
         }
     }
 
@@ -3168,6 +3262,11 @@ mod tests {
         assert_eq!(p.oracle_list_hash, "0xdead");
         assert_eq!(p.token_type, 1);
         assert_eq!(p.order_ids, vec![123, 456]);
+        // Audit-only field: mirrors the response coids in input order so
+        // ops can grep the cancel-batch incident by clientOrderId. Pins
+        // both the alignment (position i ↔ order_ids[i]) and the
+        // None-on-NULL contract for orders placed without a coid.
+        assert_eq!(p.client_order_ids, vec![Some("42".to_string()), None]);
     }
 
     #[tokio::test]
@@ -3310,6 +3409,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_batch_orders_rejects_negative_token_type_as_market_inconsistent() {
+        // `markets.token_type` is `i32` in the schema but the chain ABI
+        // takes `uint32`. A negative read-model value is corruption and
+        // must collapse to `MarketInconsistent` (503 / -1500) via the
+        // `u32::try_from` arm — never panic, never reach chain dispatch.
+        let mut market = trading_market("PM-YES");
+        market.token_type = -1;
+        let sender = Arc::new(FakeSender::ok());
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
     async fn cancel_batch_orders_unknown_when_any_id_missing() {
         // Atomic validation: one shortfall rejects the whole batch.
         // No chain message is sent.
@@ -3352,9 +3468,8 @@ mod tests {
         // schema/JOIN regression that produces two rows for the same
         // id is read-model corruption — peer of the NULL-
         // oracle_list_hash case. Surface as MarketInconsistent (503)
-        // rather than letting the HashMap's last-insert-wins silently
-        // mask one client_order_id and the request fail downstream
-        // as UnknownOrder, which would mislead ops.
+        // rather than letting the post-sort zip silently pair one
+        // input id with the wrong row's client_order_id.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let repo =
