@@ -769,7 +769,7 @@ where
         );
         let (stake_opt, sums) = tokio::try_join!(stake_fut, sum_fut).map_err(|e| {
             tracing::warn!(error = ?e, "balances fan-out failed");
-            anyhow::Error::from(dodex_domain::DomainError::MarketInconsistent)
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
         })?;
 
         let n = res.num_outcomes as usize;
@@ -777,6 +777,17 @@ where
         // 4. Shape validation: arrays in PnStake must be either empty
         //    (absent key) OR exactly num_outcomes long.
         if let Some(ref s) = stake_opt {
+            let any_empty = s.amount.is_empty() || s.debt_amount.is_empty() || s.coupons_amount.is_empty();
+            let all_empty = s.amount.is_empty() && s.debt_amount.is_empty() && s.coupons_amount.is_empty();
+            if any_empty && !all_empty {
+                tracing::warn!(
+                    amount_len = s.amount.len(),
+                    debt_len = s.debt_amount.len(),
+                    coupons_len = s.coupons_amount.len(),
+                    "stake arrays mismatch: some empty, some populated"
+                );
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+            }
             for (label, arr) in
                 [("amount", &s.amount), ("debtAmount", &s.debt_amount), ("couponsAmount", &s.coupons_amount)]
             {
@@ -787,7 +798,7 @@ where
                         expected = n,
                         "stake array length mismatch"
                     );
-                    return Err(dodex_domain::DomainError::MarketInconsistent.into());
+                    return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
                 }
             }
         }
@@ -796,7 +807,17 @@ where
         for k in sums.keys() {
             if (*k as usize) >= n {
                 tracing::warn!(outcome_id = k, "aggregation returned out-of-range outcome_id");
-                return Err(dodex_domain::DomainError::MarketInconsistent.into());
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+            }
+        }
+        for outcome in &res.outcomes {
+            if (outcome.outcome_id as usize) >= n {
+                tracing::warn!(
+                    outcome_id = outcome.outcome_id,
+                    num_outcomes = res.num_outcomes,
+                    "outcome_id out of range for num_outcomes"
+                );
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
             }
         }
 
@@ -838,7 +859,7 @@ fn add_decimal_strs(a: &str, b: &str, c: &str) -> Result<String, anyhow::Error> 
         }
         BigUint::from_str(s).map_err(|e| {
             tracing::warn!(value = s, error = ?e, "decimal parse failed");
-            anyhow::Error::from(dodex_domain::DomainError::MarketInconsistent)
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
         })
     };
     let total = parse(a)? + parse(b)? + parse(c)?;
@@ -3539,6 +3560,31 @@ mod get_market_balances_use_case_tests {
             last_hash: Mutex::new(None),
             fail: true,
         };
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn mixed_empty_and_populated_stake_arrays_is_market_inconsistent() {
+        let stake = PnStake {
+            amount: vec!["10".into(), "5".into()],
+            debt_amount: vec![],
+            coupons_amount: vec![],
+        };
+        let pn = make_pn(Some(stake));
         let repo = StubRepo {
             resolution: Mutex::new(Ok(make_resolution(2))),
             sums: Mutex::new(std::collections::HashMap::new()),
