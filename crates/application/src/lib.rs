@@ -1492,10 +1492,9 @@ where
             mut orders,
         } = resolution;
 
-        // Atomic validation: the request is rejected as a whole on any
-        // shortfall — unknown id, wrong owner, wrong book, already
-        // closed. Single ambiguous code per single-cancel's contract.
-        if orders.len() != input.order_ids.len() {
+        // Shortfall collapses to the single ambiguous code, peer of
+        // single-cancel. Overage hits the windows sweep below.
+        if orders.len() < input.order_ids.len() {
             return Err(DomainError::UnknownOrder);
         }
 
