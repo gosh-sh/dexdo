@@ -3550,6 +3550,33 @@ mod get_market_balances_use_case_tests {
     }
 
     #[tokio::test]
+    async fn stake_array_longer_than_num_outcomes_is_market_inconsistent() {
+        // stake arrays have length 3, but num_outcomes = 2 — the
+        // invariant check must catch this and return MarketInconsistent.
+        let stake = PnStake {
+            amount: vec!["1".into(), "2".into(), "3".into()],
+            debt_amount: vec!["0".into(), "0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into(), "0".into()],
+        };
+        let pn = make_pn(Some(stake));
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
     async fn unknown_market_yields_invalid_market_or_symbol() {
         let pn = make_pn(None);
         let repo = StubRepo {

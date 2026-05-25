@@ -193,8 +193,12 @@ async fn no_stake_yields_zero_free_with_nonzero_locked() {
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_json::<BalancesBody>().await.expect("ok");
+    assert_eq!(body.balances.len(), 2);
     assert_eq!(body.balances[0].free, "0.00");
     assert_eq!(body.balances[0].locked_in_orders, "0.75");
+    assert_eq!(body.balances[1].outcome_id, 1);
+    assert_eq!(body.balances[1].free, "0.00");
+    assert_eq!(body.balances[1].locked_in_orders, "0.00");
 }
 
 #[tokio::test]
@@ -246,6 +250,65 @@ async fn stake_array_mismatch_returns_1500() {
         debt_amount: vec!["0".into(), "0".into()],
         coupons_amount: vec!["0".into(), "0".into()],
     }));
+    let ts = now_ms();
+    let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .query("marketAddress", &pmp)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
+    let body = resp.take_json::<ErrorBody>().await.expect("err");
+    assert_eq!(body.code, -1500);
+}
+
+#[tokio::test]
+async fn terminal_market_serves_balances() {
+    // The market lifecycle status is NOT a gate — terminal markets (RESOLVED,
+    // CANCELLED, EXPIRED) still serve balances so holders can see what they
+    // own until they claim or settle.
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pmp, _ob) = seed_market(&pool, "terminal-bal").await;
+    // Mark the market as resolved — simulates a terminal state.
+    sqlx::query(
+        "update markets set resolved_at = extract(epoch from now())::bigint, resolved_outcome_id = 1 where pmp_address = $1",
+    )
+    .bind(&pmp)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pn.set_stake(Some(PnStake {
+        amount: vec!["100".into(), "200".into()],
+        debt_amount: vec!["0".into(), "0".into()],
+        coupons_amount: vec!["0".into(), "0".into()],
+    }));
+    let ts = now_ms();
+    let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .query("marketAddress", &pmp)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body = resp.take_json::<BalancesBody>().await.expect("balances body");
+    assert_eq!(body.balances.len(), 2);
+    // outcome 0: free = 100 scaled by quantity_precision=2 → "1.00"
+    assert_eq!(body.balances[0].free, "1.00");
+    // outcome 1: free = 200 scaled → "2.00"
+    assert_eq!(body.balances[1].free, "2.00");
+}
+
+#[tokio::test]
+async fn stake_fetch_failure_collapses_to_1500() {
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pmp, _ob) = seed_market(&pool, "stakefail-bal").await;
+    pn.fail_stake("stake gateway down");
     let ts = now_ms();
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
