@@ -459,7 +459,7 @@ Three inputs feed one response:
 6. Build `balances[]` in `outcome_id` ASC order. For each outcome:
    - `free = scale(amount[outcome_id] + debtAmount[outcome_id] + couponsAmount[outcome_id], quantity_precision)`. The three pools are summed because the public surface is "what the user owns" — clean, debt-bound, and coupon-bound stakes are all the user's tokens; the distinction is internal accounting that the UI does not need at this layer.
    - `lockedInOrders = scale(coalesce(SUM, 0), quantity_precision)` from the aggregation map; outcomes without a row default to 0.
-7. Capture `now_ms` once at handler entry — surfaces as `updateTime`.
+7. Capture `now_ms` once in the handler before executing the use case — surfaces as `updateTime`.
 
 ### Locked source split
 
@@ -472,7 +472,7 @@ The split means the two numbers can drift while the indexer is replaying behind 
 
 ### Fail-closed validation
 
-The check runs after assembly, in `postgres_repo.rs::validate_balances_invariants`:
+Three fail-closed checks guard the pipeline at different stages:
 
 | Rule | Source |
 | --- | --- |
