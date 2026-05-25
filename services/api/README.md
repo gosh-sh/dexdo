@@ -29,6 +29,9 @@ Config sections:
   `cancel_order_timeout_ms`, and `place_batch_timeout_ms` bounding the
   per-call wait for each chain entry point. Local config defaults to
   `shellnet.ackinacki.org`; stage/prod ship their own.
+- `graphql`: gateway URL for on-demand PrivateNote BOC reads. `endpoint`
+  (HTTP URL), `page_size` (unused at API tier; mirrored from the indexer
+  schema), and `request_timeout_ms` (per-request budget for BOC fetch).
 
 The `auth.kek_hex` field is the 32-byte master key used to encrypt
 `api_secret` and `pn_seckey` at rest. `config/api.local.yaml` ships a
