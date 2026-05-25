@@ -9,6 +9,8 @@
 // per-row coverage for the error table in `docs/tech-specs/write-api.md
 // §Error mapping` lives here.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -290,7 +292,13 @@ fn trading_market() -> Market {
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    Service::new(build_router(AppState::new(repo, authenticator, sender)))
+    Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )))
 }
 
 fn valid_body() -> serde_json::Value {
@@ -895,8 +903,14 @@ async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
     let sender: SharedChainSender = Arc::new(SlowSender);
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    let state = AppState::new(repo, authenticator, sender)
-        .with_request_timeout(std::time::Duration::from_millis(50));
+    let state = AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )
+    .with_request_timeout(std::time::Duration::from_millis(50));
     let service = Service::new(build_router(state));
 
     let started = std::time::Instant::now();
@@ -920,8 +934,14 @@ async fn handler_within_request_timeout_succeeds() {
     let sender = Arc::new(RecordingSender::ok());
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    let state = AppState::new(repo, authenticator, sender.clone() as SharedChainSender)
-        .with_request_timeout(std::time::Duration::from_secs(5));
+    let state = AppState::new(
+        repo,
+        authenticator,
+        sender.clone() as SharedChainSender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )
+    .with_request_timeout(std::time::Duration::from_secs(5));
     let service = Service::new(build_router(state));
 
     let mut resp = post_order(&service, valid_body()).send(&service).await;
@@ -943,7 +963,13 @@ async fn user_data_only_key_returns_1002() {
     let sender = Arc::new(RecordingSender::ok());
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::UserData] });
-    let service = Service::new(build_router(AppState::new(repo, authenticator, sender.clone())));
+    let service = Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender.clone(),
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )));
 
     let mut resp = post_order(&service, valid_body()).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));

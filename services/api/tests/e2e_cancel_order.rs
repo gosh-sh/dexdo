@@ -112,7 +112,13 @@ async fn cancel_order_against_shellnet() {
     };
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
-    let service = Service::new(build_router(AppState::new(repo, authenticator, chain_sender)));
+    let service = Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        chain_sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )));
 
     let coid = fresh_coid(1).to_string();
     let place_body = serde_json::to_vec(&json!({

@@ -9,6 +9,8 @@
 // The matching per-row coverage for the cancel error-mapping table in
 // `docs/tech-specs/write-api.md §DELETE /api/v1/order` lives here.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -213,7 +215,13 @@ fn trading_order(client_order_id: Option<&str>) -> OrderForCancel {
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    Service::new(build_router(AppState::new(repo, authenticator, sender)))
+    Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )))
 }
 
 fn auth_envelope() -> Vec<(&'static str, String)> {
@@ -436,7 +444,13 @@ async fn caller_without_trade_permission_returns_401() {
     let sender: SharedChainSender = Arc::new(RecordingCancelSender::ok());
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::UserData] });
-    let service = Service::new(build_router(AppState::new(repo, authenticator, sender)));
+    let service = Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )));
 
     let mut resp = send_delete(&service, full_params(&ORDER_ID.to_string())).await;
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));

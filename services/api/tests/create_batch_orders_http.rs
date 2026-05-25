@@ -291,7 +291,13 @@ fn trading_market_with_no_outcome() -> Market {
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    Service::new(build_router(AppState::new(repo, authenticator, sender)))
+    Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )))
 }
 
 fn valid_item(client_order_id: &str) -> serde_json::Value {
@@ -914,7 +920,13 @@ async fn caller_without_trade_permission_returns_401() {
     let sender: SharedChainSender = Arc::new(RecordingBatchSender::ok());
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::UserData] });
-    let service = Service::new(build_router(AppState::new(repo, authenticator, sender)));
+    let service = Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )));
 
     let body = valid_body_with(vec![valid_item("11")]);
     let mut resp = post_batch(&service, body).send(&service).await;
@@ -992,8 +1004,14 @@ async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
     let sender_dyn: SharedChainSender = sender.clone();
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    let state = AppState::new(repo, authenticator, sender_dyn)
-        .with_request_timeout(std::time::Duration::from_millis(50));
+    let state = AppState::new(
+        repo,
+        authenticator,
+        sender_dyn,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )
+    .with_request_timeout(std::time::Duration::from_millis(50));
     let service = Service::new(build_router(state));
 
     let started = std::time::Instant::now();

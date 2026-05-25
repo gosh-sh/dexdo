@@ -14,8 +14,10 @@ pub mod deploy_market;
 pub mod e2e_setup;
 pub mod test_pns;
 
+use std::collections::HashMap as StdHashMap;
 use std::env;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -30,6 +32,11 @@ use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::NewBatchOrderPayload;
 use dodex_application::NewOrderPayload;
+use dodex_application::PnDetails;
+use dodex_application::PnStake;
+use dodex_application::PnStateReader;
+use dodex_application::RefToken;
+use dodex_application::ReferenceRepository;
 use dodex_domain::DomainError;
 use dodex_infrastructure::auth::PostgresAuthenticator;
 use dodex_infrastructure::config::AuthSection;
@@ -61,7 +68,7 @@ pub fn test_kek() -> Arc<Kek> {
 /// migrations, seed credentials, build a Salvo service around the same
 /// router production uses. Returns `None` (with a skip notice) when
 /// the env var is not set so `cargo test` without docker still passes.
-pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>)> {
+pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>, Arc<FakePnStateReader>)> {
     // Pick up a `.env` if one sits at the workspace root. CI and the
     // throwaway docker-compose Postgres still work without it; locally
     // it spares developers an explicit `export TEST_DATABASE_URL=...`.
@@ -92,9 +99,12 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>)> {
     // no-op fake is enough to satisfy `AppState::new`'s type bound;
     // tests that exercise the full submission path inject their own.
     let chain_sender: SharedChainSender = Arc::new(NoopChainSender);
-    let state = AppState::new(repo, authenticator, chain_sender);
+    let pn_reader_inner = Arc::new(FakePnStateReader::default());
+    let pn_reader: dodex_api::testkit::SharedPnReader = pn_reader_inner.clone();
+    let ref_repo: dodex_api::testkit::SharedRefRepo = Arc::new(FakeReferenceRepo::with_seeded());
+    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo);
     let service = Service::new(build_router(state));
-    Some((service, pool, kek))
+    Some((service, pool, kek, pn_reader_inner))
 }
 
 /// `ChainOrderSender` fake that succeeds on every call. The auth-layer
@@ -115,6 +125,80 @@ impl ChainOrderSender for NoopChainSender {
 
     async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
         Ok(())
+    }
+}
+
+/// In-memory PnStateReader for HTTP tests. Each handler test that
+/// needs PN reads creates a `FakePnStateReader::default()` and sets
+/// the desired state via `set_details` / `set_stake`. The fake is
+/// `Send + Sync` because `AppState` requires it.
+#[derive(Default)]
+pub struct FakePnStateReader {
+    details: Mutex<Option<Result<PnDetails, String>>>,
+    stake: Mutex<Option<Option<PnStake>>>,
+    stake_err: Mutex<Option<String>>,
+}
+
+impl FakePnStateReader {
+    pub fn set_details(&self, d: PnDetails) {
+        *self.details.lock().unwrap() = Some(Ok(d));
+    }
+    pub fn fail_details(&self, msg: &str) {
+        *self.details.lock().unwrap() = Some(Err(msg.into()));
+    }
+    pub fn set_stake(&self, s: Option<PnStake>) {
+        *self.stake.lock().unwrap() = Some(s);
+    }
+    pub fn fail_stake(&self, msg: &str) {
+        *self.stake_err.lock().unwrap() = Some(msg.into());
+    }
+}
+
+#[async_trait]
+impl PnStateReader for FakePnStateReader {
+    async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
+        match self.details.lock().unwrap().clone() {
+            Some(Ok(d)) => Ok(d),
+            Some(Err(msg)) => Err(anyhow::anyhow!(msg)),
+            None => Err(anyhow::anyhow!("FakePnStateReader: details not set")),
+        }
+    }
+    async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
+        if let Some(msg) = self.stake_err.lock().unwrap().clone() {
+            return Err(anyhow::anyhow!(msg));
+        }
+        Ok(self.stake.lock().unwrap().clone().unwrap_or(None))
+    }
+}
+
+/// Reference-token repo backed by an in-memory map. Pre-populated
+/// with the three seeded rows so tests don't have to repeat the
+/// fixture.
+#[derive(Default)]
+pub struct FakeReferenceRepo {
+    rows: Mutex<StdHashMap<i32, RefToken>>,
+}
+
+impl FakeReferenceRepo {
+    pub fn with_seeded() -> Self {
+        let mut m = StdHashMap::new();
+        m.insert(1, RefToken { token_type: 1, token_code: "NACKL".into(), decimals: 9 });
+        m.insert(2, RefToken { token_type: 2, token_code: "SHELL".into(), decimals: 9 });
+        m.insert(3, RefToken { token_type: 3, token_code: "USDC".into(), decimals: 6 });
+        Self { rows: Mutex::new(m) }
+    }
+    pub fn add(&self, token_type: i32, code: &str, decimals: u8) {
+        self.rows.lock().unwrap().insert(
+            token_type,
+            RefToken { token_type, token_code: code.into(), decimals },
+        );
+    }
+}
+
+#[async_trait]
+impl ReferenceRepository for FakeReferenceRepo {
+    async fn lookup_ref_token(&self, token_type: i32) -> anyhow::Result<Option<RefToken>> {
+        Ok(self.rows.lock().unwrap().get(&token_type).cloned())
     }
 }
 

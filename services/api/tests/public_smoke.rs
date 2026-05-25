@@ -19,7 +19,7 @@ use salvo::test::TestClient;
 
 #[tokio::test]
 async fn readiness_returns_200() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let mut resp = TestClient::get("http://test/readiness").send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_string().await.expect("readiness body");
@@ -32,7 +32,7 @@ async fn markets_not_intercepted_by_auth_hoop() {
     // to /api/v1/markets must reach the handler. The handler's choice
     // of status against an empty test DB is its own contract; we only
     // require that the hoop did not fire (i.e. the status is not 401).
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let resp = TestClient::get("http://test/api/v1/markets").send(&service).await;
     assert_ne!(
         resp.status_code,
@@ -46,7 +46,7 @@ async fn markets_with_bogus_apikey_header_not_intercepted() {
     // A client that mistakenly attaches HMAC headers to a public route
     // should still reach the handler — the hoop never runs here, so a
     // bogus `X-DODEX-APIKEY` is just an ignored extra header.
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let resp = TestClient::get("http://test/api/v1/markets")
         .add_header("X-DODEX-APIKEY", "obviously-not-a-real-key", true)
         .send(&service)

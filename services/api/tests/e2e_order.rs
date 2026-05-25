@@ -119,7 +119,13 @@ async fn buy_limit_gtc_against_shellnet() {
     };
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
-    let service = Service::new(build_router(AppState::new(repo, authenticator, chain_sender)));
+    let service = Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        chain_sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )));
 
     let coid = fresh_coid(1).to_string();
     // 30 NACKL of outcome at 5000 bps (= 0.5 probability). Notional =
