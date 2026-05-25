@@ -20,6 +20,11 @@ pub struct ApiConfig {
     /// (api.local.yaml, stage, prod) populate it.
     #[serde(default)]
     pub chain: ChainSection,
+    /// On-demand PrivateNote BOC reads for `/api/v1/account` and
+    /// `/api/v1/account/balances`. Production may point this at the same
+    /// gateway the indexer uses; we keep it as its own section so the
+    /// two can diverge (e.g. a read replica for the API).
+    pub graphql: GraphqlSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +211,12 @@ impl ApiConfig {
         );
         self.auth.validate()?;
         self.chain.validate()?;
+        anyhow::ensure!(!self.graphql.endpoint.is_empty(), "graphql.endpoint must not be empty");
+        anyhow::ensure!(self.graphql.page_size > 0, "graphql.page_size must be > 0");
+        anyhow::ensure!(
+            self.graphql.request_timeout_ms > 0,
+            "graphql.request_timeout_ms must be > 0",
+        );
         // The HTTP request_timeout hoop must outlast each chain
         // sender timeout; otherwise an in-flight chain call would be
         // dropped while still running on chain — the client would see
@@ -374,7 +385,7 @@ database:
 "#;
 
     #[test]
-    fn api_config_does_not_require_indexer_sections() {
+    fn api_config_requires_graphql_section() {
         let raw = format!(
             "{COMMON}
 server:
@@ -385,11 +396,8 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 "
         );
-
-        let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
-
-        assert_eq!(cfg.server.port, 8080);
-        assert_eq!(cfg.common.app.env, "local");
+        let err = serde_yaml::from_str::<ApiConfig>(&raw).unwrap_err();
+        assert!(err.to_string().contains("graphql"), "got: {err}");
     }
 
     #[test]
@@ -414,25 +422,52 @@ indexer:
     }
 
     #[test]
-    fn api_config_rejects_indexer_sections() {
+    fn api_config_now_accepts_graphql_section_for_balances() {
+        // NODE-3445 added on-demand PN BOC reads to the API. The API now
+        // owns its own `graphql` section (separate from the indexer's
+        // mainline; live configs may point to the same gateway).
         let raw = format!(
             "{COMMON}
 server:
   host: 0.0.0.0
   port: 8080
-  request_timeout_ms: 5000
+  request_timeout_ms: 35000
 auth:
   kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
 graphql:
   endpoint: https://graphql.example.invalid
   page_size: 100
   request_timeout_ms: 10000
 "
         );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        assert_eq!(cfg.graphql.endpoint, "https://graphql.example.invalid");
+        cfg.validate().expect("validate");
+    }
 
-        let err = serde_yaml::from_str::<ApiConfig>(&raw).unwrap_err();
-
-        assert!(err.to_string().contains("graphql"));
+    #[test]
+    fn api_validate_rejects_empty_graphql_endpoint() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 35000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: \"\"
+  page_size: 100
+  request_timeout_ms: 10000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("graphql.endpoint"), "got: {err}");
     }
 
     #[test]
@@ -522,6 +557,10 @@ auth:
   kek_hex: "{TEST_KEK_HEX}"
 chain:
   gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "#
         );
         serde_yaml::from_str(&raw).expect("parse")
@@ -624,6 +663,10 @@ auth:
   max_recv_window_ms: 30000
 chain:
   gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
@@ -644,6 +687,10 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 chain:
   gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
@@ -723,6 +770,10 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 chain:
   gateway_endpoint: \"\"
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -743,6 +794,10 @@ auth:
 chain:
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -766,6 +821,10 @@ chain:
   place_order_timeout_ms: 15000
   cancel_order_timeout_ms: 15000
   place_batch_timeout_ms: 15000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -788,6 +847,10 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 chain:
   gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -811,6 +874,10 @@ chain:
   place_order_timeout_ms: 4000
   cancel_order_timeout_ms: 4000
   place_batch_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -838,6 +905,10 @@ chain:
   place_order_timeout_ms: 1000
   cancel_order_timeout_ms: 1000
   place_batch_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -863,6 +934,10 @@ chain:
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 4000
   cancel_order_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -889,6 +964,10 @@ chain:
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 1000
   cancel_order_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");

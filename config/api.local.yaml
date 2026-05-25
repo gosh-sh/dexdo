@@ -33,3 +33,11 @@ chain:
   place_order_timeout_ms: 30000
   cancel_order_timeout_ms: 30000
   place_batch_timeout_ms: 30000
+
+graphql:
+  # On-demand PN BOC reads for /api/v1/account and /account/balances.
+  # Points at the same gateway the indexer uses by default; production
+  # may diverge.
+  endpoint: shellnet.ackinacki.org
+  page_size: 100
+  request_timeout_ms: 10000
