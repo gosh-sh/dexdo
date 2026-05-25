@@ -1158,11 +1158,15 @@ async fn get_account_balances(
     Ok(Json(MarketBalancesResponse::from_domain(out)))
 }
 
-/// Production adapter for `application::StakeHasher`. Wraps the
-/// infrastructure-side `tvm_hash::stake_hash` and surfaces any
-/// hash-side error as `MarketInconsistent` — a hash failure here
-/// means the inputs are not parseable as numeric, which is a read-
-/// model corruption, not a client error.
+/// Production adapter for `application::StakeHasher`. Fail-soft by
+/// design: a non-numeric `event_id` / `oracle_list_hash` (read-model
+/// corruption) collapses to `BigUint::default()`, and a hash failure
+/// collapses to `""`. Either case misses on `_stakes.get("")` and
+/// the caller observes all-zero outcome balances rather than a 5xx.
+/// The `StakeHasher` type alias returns `String` (not `Result`), so
+/// no domain error can be surfaced here — see Task 10 step 7 of the
+/// implementation plan for the rationale and the future-strengthening
+/// alternative.
 fn balances_stake_hash(event_id: &str, oracle_list_hash: &str, token_type: i32) -> String {
     use num_bigint::BigUint;
     use std::str::FromStr;
