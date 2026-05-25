@@ -855,6 +855,136 @@ async fn resolve_for_cancel_batch_other_symbol_on_same_market_invisible() {
 }
 
 #[tokio::test]
+async fn resolve_for_cancel_batch_null_oracle_list_hash_trims_to_empty_string() {
+    // SQL contract pin: `m.oracle_list_hash::text` projects NULL as
+    // `None`, which the infra layer collapses to `String::new()` after
+    // emitting the corruption-warn. The application-layer fake cannot
+    // exercise this branch (it constructs `CancelBatchResolution`
+    // directly); without a real-Postgres test a future SQL change that
+    // dropped the `::text` cast or pre-filtered NULL rows would slip
+    // past CI and surface only as an empty `oracleListHash` reaching
+    // the chain. The column is `numeric(78,0)` so a "blank" value is
+    // not structurally reachable today — the defence-in-depth
+    // `trim().is_empty()` guard is exercised by the NULL branch alone.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_null_olh_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_NULL_OLH_YES";
+    let pn = "0:resolve_cancel_batch_null_olh_pn";
+    purge(&pool, pmp, symbol).await;
+
+    // Inline insert: `seed_trading_market` always binds `oracle_list_hash
+    // = 1::numeric`. The reconciled `last_reconciled_at = now()` keeps
+    // the row past the visibility filter so it actually surfaces and the
+    // NULL branch in `resolve_for_cancel_batch` runs.
+    let market_id: i64 = sqlx::query_scalar(
+        r#"insert into markets
+               (pmp_address, market_id, name, token_type, token_code,
+                event_id, oracle_list_hash, orderbook_address,
+                stake_start, stake_end, result_start, result_end,
+                frozen_at,
+                last_reconciled_at)
+           values ($1, $1, $1, 3, 'USDC',
+                   42::numeric, NULL, $1,
+                   1700000100, 1700000200, 1700000300, 1700000400,
+                   1700000210,
+                   now())
+           returning id"#,
+    )
+    .bind(pmp)
+    .fetch_one(&pool)
+    .await
+    .expect("insert market with NULL oracle_list_hash");
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 7, 'YES', $3,
+                   2, 4, '0.01', '0.0001', '5.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(symbol)
+    .execute(&pool)
+    .await
+    .expect("insert market_outcomes");
+    seed_live_order(&pool, pmp, 7001, 7, pn, "OPEN", "1500000", Some("nolh")).await;
+
+    let resolution = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[7001],
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect("NULL oracle_list_hash must not turn into a typed error")
+        .expect("the matched row still yields a resolution");
+
+    // The trim-to-empty branch is the contract: a corrupted/missing
+    // `oracle_list_hash` does not crash, does not surface as a typed
+    // miss, and does not leak a placeholder string — it propagates as
+    // an empty string with a warn, leaving the use case + chain layer
+    // to fail loudly if they cannot accept it.
+    assert_eq!(resolution.oracle_list_hash, "");
+    assert_eq!(resolution.event_id, "42");
+    assert_eq!(resolution.token_type, 3);
+    assert_eq!(resolution.orders.len(), 1);
+    assert_eq!(resolution.orders[0].bind_idx, 0);
+    assert_eq!(resolution.orders[0].client_order_id.as_deref(), Some("nolh"));
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_duplicate_input_ids_yield_distinct_bind_idx() {
+    // SQL contract pin: the `unnest($3::text[]) WITH ORDINALITY`
+    // join-side preserves array position as `ord`, so passing the same
+    // `order_id` twice produces two output rows with distinct `bind_idx`
+    // both pointing at the same live_orders row. Production dedups in
+    // the use case before this call, but that dedup is one refactor
+    // away from being moved or dropped — without this pin, the SQL
+    // contract that backs it is implicit. The downstream `windows(2)`
+    // duplicate sweep in `CancelBatchOrdersUseCase` is what catches
+    // this shape; this test pins the input it actually sees from PG.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_dup_input_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_DUP_INPUT_YES";
+    let pn = "0:resolve_cancel_batch_dup_input_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+    seed_live_order(&pool, pmp, 8001, 7, pn, "OPEN", "1500000", Some("dup")).await;
+
+    let orders = into_orders(
+        repo.resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            // Same id at positions 0 and 1; position 2 is a distinct id
+            // that does NOT exist, so it contributes nothing — keeps the
+            // assertion focused on what the duplicate join produces.
+            &[8001, 8001, 8002],
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect("bulk resolve with duplicate input ids"),
+    );
+
+    // Two rows out, both with the same `client_order_id` (same
+    // live_orders row), but distinct `bind_idx` (0 and 1). The third
+    // input slot (id 8002, absent) is filtered out by the inner JOIN
+    // and does not contribute a row.
+    assert_eq!(orders.len(), 2);
+    assert_eq!(orders[0].bind_idx, 0);
+    assert_eq!(orders[1].bind_idx, 1);
+    assert_eq!(orders[0].client_order_id.as_deref(), Some("dup"));
+    assert_eq!(orders[1].client_order_id.as_deref(), Some("dup"));
+}
+
+#[tokio::test]
 async fn resolve_for_cancel_batch_u64_max_id_round_trips_via_with_ordinality() {
     // Pins the ceiling of the public-API id range. The SELECT binds
     // ids as text[] and casts to numeric[] inside `unnest WITH

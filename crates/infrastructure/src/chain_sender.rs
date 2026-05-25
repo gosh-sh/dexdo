@@ -788,4 +788,83 @@ mod tests {
         let err = sender.submit_order(payload).await.expect_err("decode must fail closed");
         assert_eq!(err, DomainError::MarketInconsistent);
     }
+
+    #[tokio::test]
+    async fn cancel_batch_malformed_pn_pubkey_surfaces_as_market_inconsistent() {
+        // Sibling of `malformed_pn_pubkey_surfaces_as_market_inconsistent`
+        // for the `cancel_batch_order` entry. Pin: `build_signer`
+        // failure surfaces as `MarketInconsistent`, same fail-closed
+        // shape as the other three entry points — protects against a
+        // future refactor that propagated the decode error as
+        // `Unexpected` and leaked into 500s. The audit-before-signer
+        // ordering is enforced by code review of `cancel_batch_order`
+        // itself, not by this test.
+        let sender = BeeDexChainSender::new(
+            vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+        )
+        .expect("BeeDexChainSender::new");
+
+        let payload = CancelBatchOrderPayload {
+            pn_address: "0:pn".into(),
+            pn_pubkey: "not-a-decimal".into(),
+            pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            event_id: "1".into(),
+            oracle_list_hash: "1".into(),
+            token_type: 3,
+            order_ids: vec![111, 222, 333],
+            client_order_ids: vec![Some("coid-1".into()), None, Some("coid-3".into())],
+        };
+
+        let err =
+            sender.cancel_batch_order(payload).await.expect_err("decode must fail closed");
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn encode_batch_item_amount_above_u128_surfaces_as_unexpected() {
+        // Defence-in-depth pin: `validate_and_encode_order_item` in the
+        // application crate caps `amount_raw` at `u64::MAX` today, so
+        // `encode_batch_item` only sees values that parse as u128
+        // trivially. If that upstream gate is ever relaxed, this guard
+        // is the last thing between a wider integer and a panic / wrong
+        // chain payload. Pin both the rejection (DomainError::Unexpected)
+        // and the field that trips it (amount_raw) so the test names
+        // the contract a future refactor would have to consciously
+        // change.
+        let item = BatchOrderPayloadItem {
+            outcome_id: 1,
+            is_buy: true,
+            price_raw: "615".into(),
+            // u128::MAX + 1 — the smallest value the u128 parse must reject.
+            amount_raw: "340282366920938463463374607431768211456".into(),
+            flags: 0,
+            client_order_id: "42".into(),
+        };
+        let err = encode_batch_item(item, 0).expect_err("amount > u128::MAX must fail closed");
+        assert_eq!(err, DomainError::Unexpected);
+    }
+
+    #[test]
+    fn encode_batch_item_client_order_id_above_u128_surfaces_as_unexpected() {
+        // Same defence as the amount test, on the `client_order_id`
+        // arm. Both arms are reachable independently; covering both
+        // means a future refactor that drops one of the two guards
+        // cannot regress silently.
+        let item = BatchOrderPayloadItem {
+            outcome_id: 1,
+            is_buy: true,
+            price_raw: "615".into(),
+            amount_raw: "1500000".into(),
+            // u128::MAX + 1.
+            client_order_id: "340282366920938463463374607431768211456".into(),
+            flags: 0,
+        };
+        let err =
+            encode_batch_item(item, 0).expect_err("client_order_id > u128::MAX must fail closed");
+        assert_eq!(err, DomainError::Unexpected);
+    }
 }

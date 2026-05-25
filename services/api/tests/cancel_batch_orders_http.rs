@@ -88,10 +88,10 @@ impl Authenticator for FakeAuthenticator {
 /// `resolve_for_cancel_batch` so the use case's reordering is genuinely
 /// exercised — Postgres has no `ORDER BY` on the underlying SELECT and
 /// production rows can come back in any order.
-/// Storage shape for one seeded row. `OrderForCancelBatch` no longer
-/// carries `order_id` (it carries `bind_idx`, derived from input
-/// position), so the fake stores the id explicitly alongside the
-/// prototype row and stamps `bind_idx` at lookup time.
+/// Storage shape for one seeded row. `OrderForCancelBatch` carries
+/// `bind_idx` (derived from input position) rather than `order_id`,
+/// so the fake stores the id explicitly alongside the prototype row
+/// and stamps `bind_idx` at lookup time.
 type StoredRow = (String, u64, OrderForCancelBatch);
 
 struct FakeRepo {
@@ -493,6 +493,12 @@ async fn happy_path_two_ids_returns_pending_cancel_array() {
     assert_eq!(payload.oracle_list_hash, "0xfeedface");
     assert_eq!(payload.token_type, 7);
     assert_eq!(payload.order_ids, vec![123u64, 456u64]);
+    // Audit trail: `client_order_ids` is not part of the chain ABI but is
+    // the only path by which ops can grep an incident by coid without
+    // joining `live_orders` back. A refactor that dropped the field from
+    // the payload would only show up at the unit layer otherwise — pin
+    // the wire-level promise here, parallel to `order_ids` above.
+    assert_eq!(payload.client_order_ids, vec![Some("client-42".to_string()), None]);
 }
 
 #[tokio::test]
@@ -998,11 +1004,12 @@ async fn pn_busy_returns_429_minus_2014() {
 async fn chain_request_timeout_returns_504_minus_1007() {
     // `classify_chain_outcome` maps the elapsed branch to
     // `DomainError::RequestTimeout` when `bee_dex::Dex::cancel_batch`
-    // doesn't return within `chain.cancel_batch_timeout_ms`. The
-    // `SlowCancelBatchSender` test below exercises the wall-clock hoop
-    // around the whole handler; this one pins the HTTP shape for the
-    // chain-leg timeout specifically, symmetric with the create-batch
-    // sibling `chain_timeout_returns_504_minus_1007`.
+    // doesn't return within `chain.cancel_batch_timeout_ms`.
+    // `handler_exceeding_request_timeout_returns_504_minus_1007`
+    // (driven by `SlowCancelBatchSender`) exercises the wall-clock
+    // hoop around the whole handler; this one pins the HTTP shape for
+    // the chain-leg timeout specifically, symmetric with the
+    // create-batch sibling `chain_timeout_returns_504_minus_1007`.
     let repo: SharedRepo =
         Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
     let sender: SharedChainSender =

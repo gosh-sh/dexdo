@@ -214,10 +214,11 @@ pub trait MarketReadRepository: Send + Sync {
     /// orders. The use case sorts by `bind_idx` and zips against
     /// `order_ids` positionally; an out-of-range value would silently
     /// mispair the response, and a duplicate would let two rows claim
-    /// the same input position. The Postgres impl rejects out-of-range
-    /// values as `Unexpected` (PG `WITH ORDINALITY` contract violated)
-    /// and relies on the `(orderbook_address, order_id)` primary key
-    /// to prevent duplicates; any new impl owes both guarantees.
+    /// the same input position. The Postgres impl raises `anyhow!` on
+    /// an out-of-range `bind_idx` (PG `WITH ORDINALITY` contract
+    /// violated); the use-case fallthrough maps that to `Unexpected`.
+    /// Duplicates are prevented by the `(orderbook_address, order_id)`
+    /// primary key. Any new impl owes both guarantees.
     /// Duplicates that slip past an impl are caught downstream by the
     /// use case as `MarketInconsistent`, never reaching the chain.
     ///
@@ -3555,9 +3556,10 @@ mod tests {
         // returns one row more than asked. The shortfall gate
         // (`orders.len() < input.order_ids.len()`) does not fire here,
         // so the windows(2) duplicate sweep is the only thing standing
-        // between read-model corruption and a wrong-coid response. The
-        // equal-length duplicate test above pins the same gate from
-        // the other side of the size relationship.
+        // between read-model corruption and a wrong-coid response.
+        // `cancel_batch_orders_rejects_duplicate_rows_as_market_inconsistent`
+        // pins the same gate from the other side of the size
+        // relationship.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let repo =

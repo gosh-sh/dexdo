@@ -759,9 +759,13 @@ fn require_auth(depot: &Depot, permission: Permission) -> Result<&AuthContext, A
 /// emitted `warn!`) between transport-level read failure, empty body,
 /// malformed JSON, truncated JSON, and serde shape mismatch — so ops
 /// can grep one reason tag per failure mode instead of inspecting
-/// debug-repr substrings. Every failure mode collapses to
-/// `InvalidParameter` (-1130) at the wire, matching the existing
-/// post-HMAC parse contract: a misbehaving caller is a 400, not a 500.
+/// debug-repr substrings. Body-level failures (empty / malformed /
+/// truncated / shape mismatch) collapse to `InvalidParameter` (-1130);
+/// the request reached us intact and is shape-wrong, which is a 400.
+/// Transport-level read failure (dropped TCP, truncated upload) maps
+/// to `Unexpected` (-1000 / 500): we never got a request to classify,
+/// matching the principle for chain-gateway transport failures in
+/// `docs/tech-specs/write-api.md`.
 ///
 /// `route` flows into the log line so a multi-handler regression
 /// (e.g. an HMAC hoop that started double-consuming the body) shows
@@ -772,7 +776,7 @@ async fn parse_strict_body<T: serde::de::DeserializeOwned>(
 ) -> Result<T, ApiError> {
     let body_bytes = req.payload().await.map_err(|err| {
         warn!(route, reason = "transport", ?err, "body read failed");
-        ApiError::from(DomainError::InvalidParameter)
+        ApiError::from(DomainError::Unexpected)
     })?;
     if body_bytes.is_empty() {
         warn!(route, reason = "empty", "body did not parse");
@@ -817,10 +821,9 @@ async fn create_order(
         })?
         .clone();
 
-    // Body has been HMAC-verified upstream, so a parse failure here is
-    // a client-shape bug — surface as -1130 InvalidParameter, not 500.
-    // `parse_strict_body` distinguishes the failure mode in the warn so
-    // ops can grep `reason=malformed` vs `reason=empty` etc.
+    // Body has been HMAC-verified upstream; `parse_strict_body` tags the
+    // failure mode in the warn so ops can grep `reason=malformed` vs
+    // `reason=transport` etc.
     let body: CreateOrderRequest = parse_strict_body(req, "POST /api/v1/order").await?;
 
     let (now_seconds, now_ms) = now_pair();
