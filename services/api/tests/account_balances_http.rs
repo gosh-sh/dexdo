@@ -323,3 +323,21 @@ async fn stake_fetch_failure_collapses_to_1500() {
     let body = resp.take_json::<ErrorBody>().await.expect("err");
     assert_eq!(body.code, -1500);
 }
+
+#[tokio::test]
+async fn missing_apikey_returns_1003() {
+    let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
+    let ts = now_ms();
+    let market = "0:any-market";
+    let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), market);
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .query("marketAddress", market)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
+    let body = resp.take_json::<ErrorBody>().await.expect("err");
+    assert_eq!(body.code, -1003);
+}

@@ -59,6 +59,11 @@ pub const SEED_API_KEY: &str = "dk_live_test_001";
 pub const SEED_API_SECRET: &str =
     "1de6fc5cf8899e7f1dacf449fe46c3c88854478b7fcd9dd26c664535ee589966";
 
+/// Second seeded api_key/secret pair, used for cross-tenant isolation tests.
+pub const SEED_API_KEY_2: &str = "dk_live_test_002";
+pub const SEED_API_SECRET_2: &str =
+    "0353c808ebdf3f4d5074bc9d9465093acc28cf7ce4ef24d413dd98c4bc4191ef";
+
 /// Fixed KEK for tests so seeded ciphertexts decrypt across runs.
 pub fn test_kek() -> Arc<Kek> {
     Arc::new(Kek::from_hex(&"ab".repeat(32)).expect("test kek"))

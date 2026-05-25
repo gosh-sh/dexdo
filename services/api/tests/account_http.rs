@@ -12,6 +12,8 @@ use common::now_ms;
 use common::sign;
 use common::SEED_API_KEY;
 use common::SEED_API_SECRET;
+use common::SEED_API_KEY_2;
+use common::SEED_API_SECRET_2;
 use dodex_application::PnDetails;
 use salvo::http::StatusCode;
 use salvo::test::ResponseExt;
@@ -136,4 +138,40 @@ async fn unknown_token_type_collapses_to_1500() {
     assert_eq!(resp.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
     let body = resp.take_json::<ErrorBody>().await.expect("err");
     assert_eq!(body.code, -1500);
+}
+
+#[tokio::test]
+async fn account_id_differs_per_credential() {
+    let Some((service, _pool, _kek, pn)) = common::setup().await else { return };
+    pn.set_details(PnDetails {
+        balance: vec![(1, "10000000000".to_string())],
+        locked_in_orders: vec![],
+    });
+
+    let ts1 = now_ms();
+    let sig1 = sign_get(SEED_API_SECRET, "5000", &ts1.to_string());
+    let mut resp1 = TestClient::get("http://test/api/v1/account")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts1.to_string())
+        .query("signature", sig1)
+        .send(&service)
+        .await;
+    assert_eq!(resp1.status_code, Some(StatusCode::OK));
+    let body1: AccountBody = resp1.take_json().await.expect("body1");
+
+    let ts2 = now_ms();
+    let sig2 = sign_get(SEED_API_SECRET_2, "5000", &ts2.to_string());
+    let mut resp2 = TestClient::get("http://test/api/v1/account")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY_2, true)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts2.to_string())
+        .query("signature", sig2)
+        .send(&service)
+        .await;
+    assert_eq!(resp2.status_code, Some(StatusCode::OK));
+    let body2: AccountBody = resp2.take_json().await.expect("body2");
+
+    assert_ne!(body1.account_id, body2.account_id,
+        "two distinct credentials must surface as distinct accountIds");
 }

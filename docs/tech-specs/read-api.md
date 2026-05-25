@@ -506,11 +506,11 @@ A future projection table would mirror PN stake state in Postgres so the API can
 
 ### Test coverage
 
-Three test suites, all gated on `TEST_DATABASE_URL`:
+Four test suites, all gated on `TEST_DATABASE_URL`:
 
 - Use-case unit (`crates/application/src/lib.rs`):
   - `get_account_use_case_tests` (5 tests): renders two assets sorted by asset code, locked defaults to zero when key absent, unknown token type → 503, PN reader failure → 503, `scale_decimal` pads zero to full precision.
   - `get_market_balances_use_case_tests` (9 tests): happy path sums three pools per outcome, absent stake key yields zero free, stake array shorter than `num_outcomes`, stake array longer than `num_outcomes`, unknown market, PN failure, mixed empty and populated stake arrays, hasher failure, out-of-range `outcome_id`.
 - Repo integration (`crates/infrastructure/tests/balances.rs`) (6 tests): `lookup_ref_token` returns seeded rows, `resolve_market_for_balances` happy path, unknown market, unreconciled market, `sum_open_sell_remaining` groups by outcome and filters, empty when no matching rows.
-- HTTP integration (`services/api/tests/account_http.rs`) (4 tests): happy path returns balances sorted by asset, missing API key → 401 / `-1003`, chain-getter failure → 503 / `-1500`, unknown token type → 503 / `-1500`.
-- HTTP integration (`services/api/tests/account_balances_http.rs`) (8 tests): happy path returns outcomes sorted by `outcomeId` ASC, absent stake key yields zero free with nonzero locked (both outcomes checked), missing `marketAddress` → 400 / `-1102`, unknown market → 404 / `-1121`, stake-array mismatch → 503 / `-1500`, terminal market still serves balances, stake gateway failure → 503 / `-1500`.
+- HTTP integration (`services/api/tests/account_http.rs`) (5 tests): happy path returns balances sorted by asset, missing API key → 401 / `-1003`, chain-getter failure → 503 / `-1500`, unknown token type → 503 / `-1500`, two distinct credentials produce distinct `accountId` values.
+- HTTP integration (`services/api/tests/account_balances_http.rs`) (8 tests): happy path returns outcomes sorted by `outcomeId` ASC, absent stake key yields zero free with nonzero locked (both outcomes checked), missing `marketAddress` → 400 / `-1102`, unknown market → 404 / `-1121`, stake-array mismatch → 503 / `-1500`, terminal market still serves balances, stake gateway failure → 503 / `-1500`, missing API key → 401 / `-1003`.
