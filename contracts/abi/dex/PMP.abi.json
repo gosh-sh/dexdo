@@ -58,6 +58,13 @@
 			]
 		},
 		{
+			"name": "freezeNow",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "splitFullSet",
 			"inputs": [
 				{"name":"collateral","type":"uint128"},
@@ -168,6 +175,14 @@
 			]
 		},
 		{
+			"name": "confirmRefundReceived",
+			"inputs": [
+				{"name":"depositIdentifierHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "onOrderBookShutdownComplete",
 			"inputs": [
 			],
@@ -258,7 +273,7 @@
 			]
 		},
 		{
-			"name": "PMPCancelled",
+			"name": "PMPRejected",
 			"inputs": [
 			],
 			"outputs": [
@@ -344,6 +359,7 @@
 		{"init":false,"name":"_cancelVoteCount","type":"uint128"},
 		{"init":false,"name":"_initialStakes","type":"uint128[]"},
 		{"init":false,"name":"_frozen","type":"bool"},
+		{"init":false,"name":"_normRefundPending","type":"bool"},
 		{"init":false,"name":"_baseTotalPool","type":"uint128"},
 		{"init":false,"name":"_frozenCleanPools","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_resolvedWinClean","type":"uint128"},
@@ -353,6 +369,7 @@
 		{"init":false,"name":"_frozenCleanUnitsPerQ","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_orderBookCode","type":"cell"},
 		{"init":false,"name":"_orderBookDone","type":"bool"},
+		{"init":false,"name":"_orderBookAddress","type":"address"},
 		{"init":false,"name":"_shutdownTriggered","type":"bool"},
 		{"init":false,"name":"_totalUnclaimedBalance","type":"uint128"}
 	]

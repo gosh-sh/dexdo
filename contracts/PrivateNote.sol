@@ -260,6 +260,23 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @notice Emitted when an order cancel callback is received from OrderBook
     event OrderCancelledConfirmed(address orderBook, uint128 orderId, uint32 outcomeId, bool isBuy, uint128 returnAmount);
 
+    /// @notice Emitted when a place callback comes back as a rejection (OB
+    ///         refused the placement — e.g. epoch mismatch, FOK pre-check
+    ///         failed, post-only crossed). PN has already unlocked the funds
+    ///         (`onOrderRejected` body); this event is for off-chain monitors
+    ///         to attribute the rejection back to the originating client_order_id.
+    event OrderPlaceRejected(
+        address orderBook,
+        uint256 eventId,
+        uint128 clientOrderId,
+        uint32  outcomeId,
+        bool    isBuy,
+        uint8   flags,
+        uint256 price,
+        uint128 amount,
+        uint64  opNonce
+    );
+
     /// @notice Emitted when an outbound transfer is initiated
     event TransferInitiated(address dest, uint32 tokenType, uint128 amount);
 
@@ -1637,6 +1654,11 @@ contract PrivateNote is Modifiers, ReplayProtection {
             }
             _stakes[hash] = stake;
         }
+
+        address addrExtern = address.makeAddrExtern(PRIVATENOTE_ORDER_REJECTED, bitCntAddress);
+        emit OrderPlaceRejected{dest: addrExtern}(
+            msg.sender, eventId, clientOrderId, outcomeId, isBuy, flags, price, amount, opNonce
+        );
     }
 
     /// @notice Cancels an existing order on the order book.

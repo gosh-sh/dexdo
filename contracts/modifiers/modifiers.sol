@@ -121,6 +121,8 @@ abstract contract Modifiers is Errors {
     uint128 constant PRIVATENOTE_ORDER_SUBMITTED = 151;
     /// @notice External event id for `PrivateNote.OrderCancelledConfirmed`.
     uint128 constant PRIVATENOTE_ORDER_CANCELLED = 152;
+    /// @notice External event id for `PrivateNote.OrderPlaceRejected`.
+    uint128 constant PRIVATENOTE_ORDER_REJECTED = 153;
 
     // Transfer events
     /// @notice External event id for `PrivateNote.TransferInitiated`.
