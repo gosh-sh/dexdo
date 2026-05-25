@@ -86,20 +86,11 @@ fn stake_from_value(v: &Value, stake_hash: &str) -> anyhow::Result<Option<PnStak
         .get("_stakes")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("_stakes reply has no `_stakes` object"))?;
-    // tvm_abi detokenizes uint256 map keys as decimal strings AND/OR
-    // 0x-prefixed hex strings depending on the encoder version. The
-    // hash we pass in is 0x-prefixed; try that first, fall back to a
-    // decimal-stringified BigUint conversion.
-    let entry = if let Some(e) = map.get(stake_hash) {
-        Some(e)
-    } else if let Some(stripped) = stake_hash.strip_prefix("0x") {
-        let as_decimal = num_bigint::BigUint::parse_bytes(stripped.as_bytes(), 16)
-            .map(|b| b.to_string());
-        as_decimal.as_deref().and_then(|k| map.get(k))
-    } else {
-        None
-    };
-    let Some(entry) = entry else { return Ok(None) };
+    // tvm_abi serializes uint256 map keys as `0x` + 64-char zero-padded
+    // lowercase hex (Detokenizer + serde, workspace tvm-sdk v2.24.20.an).
+    // `stake_hash` from infrastructure::tvm_hash always produces that exact
+    // shape, so a direct lookup is sufficient — no per-version fallback.
+    let Some(entry) = map.get(stake_hash) else { return Ok(None) };
     let amount = read_uint_array(entry, "amount")?;
     let debt = read_uint_array(entry, "debtAmount")?;
     let coupons = read_uint_array(entry, "couponsAmount")?;
@@ -166,11 +157,18 @@ mod tests {
     }
 
     #[test]
-    fn stake_from_value_finds_hex_keyed_entry() {
-        let v = json!({
+    fn stake_from_value_finds_entry_keyed_by_real_stake_hash() {
+        use crate::tvm_hash::stake_hash;
+        use num_bigint::BigUint;
+
+        // Compute the same 0x+64-hex shape tvm_abi produces for uint256 map
+        // keys via the production hasher. This pins the test JSON to whatever
+        // tvm_abi actually emits.
+        let key = stake_hash(&BigUint::from(0x42u32), &BigUint::from(0x24u32), 1).unwrap();
+        let v = serde_json::json!({
             "_stakes": {
-                "0xdeadbeef": {
-                    "amount": ["1", "2"],
+                key.clone(): {
+                    "amount": ["10", "5"],
                     "debtAmount": ["0", "0"],
                     "couponsAmount": ["0", "0"],
                     "candidateAmount": "0",
@@ -181,30 +179,9 @@ mod tests {
                 }
             }
         });
-        let s = stake_from_value(&v, "0xdeadbeef").unwrap().expect("present");
-        assert_eq!(s.amount, vec!["1", "2"]);
+        let s = stake_from_value(&v, &key).unwrap().expect("present");
+        assert_eq!(s.amount, vec!["10", "5"]);
         assert_eq!(s.debt_amount, vec!["0", "0"]);
         assert_eq!(s.coupons_amount, vec!["0", "0"]);
-    }
-
-    #[test]
-    fn stake_from_value_finds_decimal_keyed_entry() {
-        // 0xdeadbeef = 3735928559 in decimal — tvm_abi may emit either.
-        let v = json!({
-            "_stakes": {
-                "3735928559": {
-                    "amount": ["10"],
-                    "debtAmount": ["0"],
-                    "couponsAmount": ["0"],
-                    "candidateAmount": "0",
-                    "candidateOutcome": "0",
-                    "candidateBetType": "0",
-                    "tokenType": "1",
-                    "oracleListHash": "0"
-                }
-            }
-        });
-        let s = stake_from_value(&v, "0xdeadbeef").unwrap().expect("present");
-        assert_eq!(s.amount, vec!["10"]);
     }
 }
