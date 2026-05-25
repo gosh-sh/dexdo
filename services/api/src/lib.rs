@@ -75,6 +75,10 @@ pub type SharedRepo = Arc<dyn MarketReadRepository>;
 pub type SharedAuth = Arc<dyn Authenticator>;
 #[doc(hidden)]
 pub type SharedChainSender = Arc<dyn ChainOrderSender>;
+#[doc(hidden)]
+pub type SharedPnReader = Arc<dyn dodex_application::PnStateReader>;
+#[doc(hidden)]
+pub type SharedRefRepo = Arc<dyn dodex_application::ReferenceRepository>;
 
 #[doc(hidden)]
 #[derive(Clone)]
@@ -82,6 +86,8 @@ pub struct AppState {
     pub(crate) repo: SharedRepo,
     pub(crate) authenticator: SharedAuth,
     pub(crate) chain_sender: SharedChainSender,
+    pub(crate) pn_reader: SharedPnReader,
+    pub(crate) ref_repo: SharedRefRepo,
     /// Per-request wall-clock budget enforced by the `request_timeout`
     /// hoop on every route. `Duration::ZERO` disables the hoop, which
     /// is the implicit default `AppState::new` chooses so tests that
@@ -101,8 +107,10 @@ impl AppState {
         repo: SharedRepo,
         authenticator: SharedAuth,
         chain_sender: SharedChainSender,
+        pn_reader: SharedPnReader,
+        ref_repo: SharedRefRepo,
     ) -> Self {
-        Self { repo, authenticator, chain_sender, request_timeout: Duration::ZERO }
+        Self { repo, authenticator, chain_sender, pn_reader, ref_repo, request_timeout: Duration::ZERO }
     }
 
     #[doc(hidden)]
@@ -221,6 +229,72 @@ struct OrderResponse {
 struct OrdersPageResponse {
     orders: Vec<OrderResponse>,
     next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountResponse {
+    account_id: String,
+    update_time: i64,
+    balances: Vec<AccountBalanceItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountBalanceItem {
+    asset: String,
+    free: String,
+    locked: String,
+}
+
+impl AccountResponse {
+    fn from_domain(d: dodex_domain::AccountBalances) -> Self {
+        Self {
+            account_id: d.account_id.to_string(),
+            update_time: d.update_time_ms,
+            balances: d
+                .balances
+                .into_iter()
+                .map(|b| AccountBalanceItem { asset: b.asset, free: b.free, locked: b.locked })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketBalancesResponse {
+    market_address: String,
+    update_time: i64,
+    balances: Vec<OutcomeBalanceItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OutcomeBalanceItem {
+    outcome_id: u32,
+    symbol: String,
+    free: String,
+    locked_in_orders: String,
+}
+
+impl MarketBalancesResponse {
+    fn from_domain(d: dodex_domain::MarketBalances) -> Self {
+        Self {
+            market_address: d.market_address.0,
+            update_time: d.update_time_ms,
+            balances: d
+                .balances
+                .into_iter()
+                .map(|b| OutcomeBalanceItem {
+                    outcome_id: b.outcome_id,
+                    symbol: b.symbol.0,
+                    free: b.free,
+                    locked_in_orders: b.locked_in_orders,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1006,6 +1080,99 @@ fn build_batch_orders_input(
     })
 }
 
+#[handler]
+async fn get_account(
+    _req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<AccountResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::UserData)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let now_ms = now_pair().1;
+    let use_case = dodex_application::GetAccountUseCase::new(
+        state.pn_reader.clone(),
+        state.ref_repo.clone(),
+    );
+    let out = use_case
+        .execute(dodex_application::GetAccountInput {
+            account_id: ctx.account_id,
+            pn_address: ctx.trading_pn.pn_address.clone(),
+            now_ms,
+        })
+        .await
+        .map_err(|err| {
+            if let Some(domain) = err.downcast_ref::<DomainError>() {
+                return ApiError::from(*domain);
+            }
+            error!(?err, "get_account failed");
+            ApiError::from(DomainError::Unexpected)
+        })?;
+
+    Ok(Json(AccountResponse::from_domain(out)))
+}
+
+#[handler]
+async fn get_account_balances(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<MarketBalancesResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::UserData)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let market_address = non_blank_query(req, "marketAddress")?
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
+
+    let now_ms = now_pair().1;
+    let use_case = dodex_application::GetMarketBalancesUseCase::new(
+        state.pn_reader.clone(),
+        state.repo.clone(),
+        balances_stake_hash,
+    );
+    let out = use_case
+        .execute(dodex_application::GetMarketBalancesInput {
+            pn_address: ctx.trading_pn.pn_address.clone(),
+            market_address: MarketAddress(market_address),
+            now_ms,
+        })
+        .await
+        .map_err(|err| {
+            if let Some(domain) = err.downcast_ref::<DomainError>() {
+                return ApiError::from(*domain);
+            }
+            error!(?err, "get_account_balances failed");
+            ApiError::from(DomainError::Unexpected)
+        })?;
+
+    Ok(Json(MarketBalancesResponse::from_domain(out)))
+}
+
+/// Production adapter for `application::StakeHasher`. Wraps the
+/// infrastructure-side `tvm_hash::stake_hash` and surfaces any
+/// hash-side error as `MarketInconsistent` — a hash failure here
+/// means the inputs are not parseable as numeric, which is a read-
+/// model corruption, not a client error.
+fn balances_stake_hash(event_id: &str, oracle_list_hash: &str, token_type: i32) -> String {
+    use num_bigint::BigUint;
+    use std::str::FromStr;
+    let event = BigUint::from_str(event_id).unwrap_or_default();
+    let oracle = BigUint::from_str(oracle_list_hash).unwrap_or_default();
+    let token_type = token_type as u32;
+    dodex_infrastructure::tvm_hash::stake_hash(&event, &oracle, token_type)
+        .unwrap_or_else(|_| String::new())
+}
+
 /// Assemble the production router around `state`. Kept as a separate
 /// function so integration tests can drive the same router with a
 /// test-DB pool through Salvo's in-process `TestClient`; production
@@ -1035,7 +1202,9 @@ pub fn build_router(state: AppState) -> Router {
                         .delete(delete_order),
                 )
                 .push(Router::with_path("api/v1/orders").get(get_orders))
-                .push(Router::with_path("api/v1/batchOrders").post(create_batch_orders)),
+                .push(Router::with_path("api/v1/batchOrders").post(create_batch_orders))
+                .push(Router::with_path("api/v1/account").get(get_account))
+                .push(Router::with_path("api/v1/account/balances").get(get_account_balances)),
         )
 }
 
@@ -1071,14 +1240,24 @@ pub async fn run() -> anyhow::Result<()> {
 
     info!("api running with postgres read-model repository");
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
-    let authenticator: SharedAuth = Arc::new(PostgresAuthenticator::new(pool, kek, &config.auth));
+    let authenticator: SharedAuth = Arc::new(PostgresAuthenticator::new(pool.clone(), kek, &config.auth));
     let chain_sender: SharedChainSender = Arc::new(BeeDexChainSender::new(
         vec![config.chain.gateway_endpoint.clone()],
         Duration::from_millis(config.chain.place_order_timeout_ms),
         Duration::from_millis(config.chain.cancel_order_timeout_ms),
         Duration::from_millis(config.chain.place_batch_timeout_ms),
     )?);
-    let state = AppState::new(repo, authenticator, chain_sender)
+    let graphql = Arc::new(dodex_infrastructure::graphql::GraphqlClient::new(
+        config.graphql.endpoint.clone(),
+        Duration::from_millis(config.graphql.request_timeout_ms),
+    )?);
+    let pn_reader: SharedPnReader =
+        Arc::new(dodex_infrastructure::pn_state_reader::PostgresPnStateReader::new(graphql)?);
+    let ref_repo: SharedRefRepo =
+        Arc::new(dodex_infrastructure::postgres_repo::PostgresReferenceRepository::new(
+            pool.clone(),
+        ));
+    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
         .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms));
 
     // The API is intentionally restart-to-reconfigure. None of the live
@@ -1111,4 +1290,51 @@ fn now_seconds() -> i64 {
 fn now_pair() -> (i64, i64) {
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     (d.as_secs() as i64, d.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod dto_tests {
+    use super::*;
+    use dodex_domain::AssetBalance;
+    use dodex_domain::OutcomeBalance;
+
+    #[test]
+    fn account_response_uses_camel_case_and_string_amounts() {
+        let resp = AccountResponse::from_domain(dodex_domain::AccountBalances {
+            account_id: uuid::Uuid::nil(),
+            update_time_ms: 1710000000000,
+            balances: vec![AssetBalance {
+                asset: "NACKL".into(),
+                free: "10.000000000".into(),
+                locked: "1.500000000".into(),
+            }],
+        });
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["accountId"], "00000000-0000-0000-0000-000000000000");
+        assert_eq!(v["updateTime"], 1_710_000_000_000i64);
+        assert_eq!(v["balances"][0]["asset"], "NACKL");
+        assert_eq!(v["balances"][0]["free"], "10.000000000");
+        assert_eq!(v["balances"][0]["locked"], "1.500000000");
+    }
+
+    #[test]
+    fn market_balances_response_uses_camel_case() {
+        let resp = MarketBalancesResponse::from_domain(dodex_domain::MarketBalances {
+            market_address: dodex_domain::MarketAddress("0:m".into()),
+            update_time_ms: 1710000000000,
+            balances: vec![OutcomeBalance {
+                outcome_id: 1,
+                symbol: dodex_domain::Symbol("PM-X-YES".into()),
+                free: "5.50".into(),
+                locked_in_orders: "1000.00".into(),
+            }],
+        });
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["marketAddress"], "0:m");
+        assert_eq!(v["updateTime"], 1_710_000_000_000i64);
+        assert_eq!(v["balances"][0]["outcomeId"], 1);
+        assert_eq!(v["balances"][0]["symbol"], "PM-X-YES");
+        assert_eq!(v["balances"][0]["free"], "5.50");
+        assert_eq!(v["balances"][0]["lockedInOrders"], "1000.00");
+    }
 }
