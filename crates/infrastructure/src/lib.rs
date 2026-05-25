@@ -16,4 +16,5 @@ pub mod reconciler;
 pub mod rows;
 pub mod seed;
 pub mod signal;
+pub mod tvm_hash;
 pub mod tvm_runner;
