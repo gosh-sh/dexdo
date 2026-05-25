@@ -540,13 +540,13 @@ Response:
   "balances": [
     {
       "asset": "NACKL",
-      "free": "10.000000",
-      "locked": "1.500000"
+      "free": "10.000000000",
+      "locked": "1.500000000"
     },
     {
       "asset": "USDC",
-      "free": "25000.00",
-      "locked": "3750.00"
+      "free": "25000.000000",
+      "locked": "3750.000000"
     }
   ]
 }

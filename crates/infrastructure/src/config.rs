@@ -246,6 +246,19 @@ impl ApiConfig {
             self.server.request_timeout_ms,
             self.chain.place_batch_timeout_ms,
         );
+        // The HTTP request_timeout hoop must also outlast each GraphQL
+        // read — the PN BOC fetch for /account and /account/balances runs
+        // inside the request budget. A graphql.request_timeout_ms that
+        // equals or exceeds server.request_timeout_ms would cause the HTTP
+        // hoop to fire while the GraphQL client is still waiting, surfacing
+        // as a 504 with no useful breadcrumb instead of a clean 503 from the
+        // chain-read error path.
+        anyhow::ensure!(
+            self.server.request_timeout_ms > self.graphql.request_timeout_ms,
+            "server.request_timeout_ms ({}) must exceed graphql.request_timeout_ms ({})",
+            self.server.request_timeout_ms,
+            self.graphql.request_timeout_ms,
+        );
         Ok(())
     }
 }
@@ -981,6 +994,37 @@ graphql:
         let msg = err.to_string();
         assert!(msg.contains("request_timeout_ms"), "got: {msg}");
         assert!(msg.contains("cancel_order_timeout_ms"), "got: {msg}");
+    }
+
+    #[test]
+    fn api_validate_rejects_request_timeout_not_exceeding_graphql_timeout() {
+        // server.request_timeout_ms must exceed graphql.request_timeout_ms
+        // so the HTTP hoop does not fire while the PN BOC fetch for
+        // /account and /account/balances is still in flight.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 35000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 1000
+  cancel_order_timeout_ms: 1000
+  place_batch_timeout_ms: 1000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 35000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_ms"), "got: {msg}");
+        assert!(msg.contains("graphql.request_timeout_ms"), "got: {msg}");
     }
 
     #[test]
