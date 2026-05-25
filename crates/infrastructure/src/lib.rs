@@ -10,6 +10,7 @@ pub mod decoder;
 pub mod graphql;
 pub mod indexer_repo;
 pub mod oracle_event_list_reconciler;
+pub mod pn_state_reader;
 pub mod postgres_repo;
 pub mod projectors;
 pub mod reconciler;
