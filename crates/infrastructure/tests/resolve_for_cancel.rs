@@ -686,11 +686,11 @@ async fn resolve_for_cancel_batch_pre_reconcile_market_invisible() {
 
 #[tokio::test]
 async fn resolve_for_cancel_batch_carries_resolving_status_when_now_past_result_start() {
-    // Now that the use case re-checks market_status from the bulk
-    // SELECT to close the race against `resolve_for_new_order`'s
-    // earlier snapshot, the repo must derive status from the same row
-    // that produced the orders. Seed timings make the market RESOLVING
-    // at `NOW_RESOLVING`; rows still satisfy the order-level predicates
+    // Contract: the repo derives `market_status` from the same
+    // `markets` row that produced the matched orders, so the use
+    // case's post-SELECT `market_status == Trading` re-check sees a
+    // consistent snapshot. Seed timings make the market RESOLVING at
+    // `NOW_RESOLVING`; rows still satisfy the order-level predicates
     // (status='OPEN', amount_remaining>0) and surface, but with
     // `market_status = Resolving` so the use case rejects the batch
     // with `OrderValidationFailed` before chain dispatch.

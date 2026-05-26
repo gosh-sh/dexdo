@@ -51,17 +51,25 @@ use num_bigint::BigUint;
 
 use super::test_pns::TestPn;
 
-// ── On-chain constants (mirror mint_ob_pool.rs) ────────────────────
+// ── On-chain constants ─────────────────────────────────────────────
 //
 // All amounts are NACKL raw units (10^-9 scale): 1 NACKL = 1_000_000_000.
+//
+// Stake invariant required by `PMP._ensureFrozen`: for every outcome,
+// `cleanPool = DEPLOYER_SEED_AMOUNT + REGULAR_STAKE_AMOUNT` must be a
+// multiple of `min(initial_stakes)`. Otherwise the contract takes the
+// refund branch and aborts the `splitFullSet` compute with
+// `exit_code = 404`, so the OrderBook never spawns. Source of truth:
+// `acki-nacki/tests/dex/orderbook_test.py`.
 
 const TOKEN_TYPE_NACKL: u32 = 1;
 const ORACLE_FEE: u128 = 100;
 const ORACLE_FEE_DEADLINE: u64 = 2_000_000_000;
-/// Initial stake per outcome at `deployPMP`. 100 NACKL.
-const DEPLOYER_SEED_AMOUNT: u128 = 100_000_000_000;
-/// Regular stake per outcome inside the bidding window. 0.2 NACKL.
-const REGULAR_STAKE_AMOUNT: u128 = 200_000_000;
+/// Initial stake per outcome at `deployPMP`. 1 NACKL.
+const DEPLOYER_SEED_AMOUNT: u128 = 1_000_000_000;
+/// Regular stake per outcome inside the bidding window. 20 NACKL —
+/// chosen so `(SEED + STAKE) % SEED == 0` (see invariant above).
+const REGULAR_STAKE_AMOUNT: u128 = 20_000_000_000;
 /// Collateral split into outcome tokens after freeze. 100 NACKL — this
 /// is also what primes the deployer-PN's outcome-token balance for
 /// subsequent placeOrder / cancelOrder calls.

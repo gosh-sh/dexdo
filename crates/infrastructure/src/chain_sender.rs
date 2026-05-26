@@ -260,24 +260,27 @@ impl ChainOrderSender for BeeDexChainSender {
         // fallible step so a key-shape failure
         // (`accounts.pn_seckey_enc` rotation drift) surfacing inside
         // `build_signer` still leaves ops the ids the caller intended.
+        let order_ids: Vec<u64> = payload.items.iter().map(|i| i.order_id).collect();
+        let client_order_ids: Vec<Option<&str>> =
+            payload.items.iter().map(|i| i.client_order_id.as_deref()).collect();
         info!(
             entry_point = "cancel_batch",
             pn = %payload.pn_address,
             event_id = %payload.event_id,
             oracle_list_hash = %payload.oracle_list_hash,
             token_type = payload.token_type,
-            order_count = payload.order_ids.len(),
-            ?payload.order_ids,
-            ?payload.client_order_ids,
+            order_count = payload.items.len(),
+            ?order_ids,
+            ?client_order_ids,
             "submitting cancel_batch",
         );
 
         let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
 
-        // The chain ABI is uint128[]; `payload.order_ids` is `Vec<u64>`
-        // at the application boundary, upcast is loss-less.
-        let order_count = payload.order_ids.len();
-        let order_ids: Vec<u128> = payload.order_ids.iter().map(|&id| id as u128).collect();
+        // Chain ABI is uint128[]; `order_id` is `u64` at the application
+        // boundary, upcast is loss-less.
+        let order_count = order_ids.len();
+        let order_ids: Vec<u128> = order_ids.into_iter().map(|id| id as u128).collect();
         let pn_address = payload.pn_address;
         let event_id = payload.event_id;
 
@@ -359,11 +362,14 @@ fn build_signer(pn_pubkey: &str, pn_seckey: &SensitiveBytes) -> Result<Signer, D
         // (manual edit, partial restore, schema drift), so the right
         // surface is `MarketInconsistent` (503 / -1500): retrying
         // won't help, but it's a service-state issue, not the generic
-        // 500 the caller can do nothing about. Log without the
-        // decimal value — pn_pubkey is public per the ACK protocol,
-        // but the raw string is recoverable from the `accounts` row
-        // if ops actually needs it.
-        error!("trading PN pubkey is not a valid uint256 decimal");
+        // 500 the caller can do nothing about. The first 12 chars of
+        // the decimal string is enough to grep one PN's failures
+        // apart from broader infra noise (e.g. KEK rotation drift
+        // hitting one row) — pn_pubkey is public per the ACK
+        // protocol, and the prefix is too short to reconstruct the
+        // full key.
+        let pn_prefix: String = pn_pubkey.chars().take(12).collect();
+        error!(pn_pubkey_prefix = %pn_prefix, "trading PN pubkey is not a valid uint256 decimal");
         DomainError::MarketInconsistent
     })?;
     // Pass a fresh clone to `Signer` — the upstream `KeyPair.secret`
@@ -571,6 +577,8 @@ fn decimal_uint256_to_hex(dec: &str) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use dodex_application::CancelBatchPayloadItem;
+
     use super::*;
 
     #[test]
@@ -636,29 +644,14 @@ mod tests {
         // `contracts/modifiers/errors.sol`.
         let single = ctx_single("place_order");
         let batch = ctx_batch("place_batch", 3);
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(102), &single),
-            DomainError::OrderValidationFailed
-        );
+        assert_eq!(map_bee_dex_error(&tvm_exit(102), &single), DomainError::OrderValidationFailed);
         assert_eq!(map_bee_dex_error(&tvm_exit(121), &single), DomainError::OrderPnBusy);
         assert_eq!(map_bee_dex_error(&tvm_exit(129), &batch), DomainError::InvalidParameter);
         assert_eq!(map_bee_dex_error(&tvm_exit(130), &single), DomainError::MarketInconsistent);
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(142), &single),
-            DomainError::OrderValidationFailed
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(150), &single),
-            DomainError::OrderValidationFailed
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(151), &single),
-            DomainError::OrderValidationFailed
-        );
-        assert_eq!(
-            map_bee_dex_error(&tvm_exit(160), &single),
-            DomainError::OrderValidationFailed
-        );
+        assert_eq!(map_bee_dex_error(&tvm_exit(142), &single), DomainError::OrderValidationFailed);
+        assert_eq!(map_bee_dex_error(&tvm_exit(150), &single), DomainError::OrderValidationFailed);
+        assert_eq!(map_bee_dex_error(&tvm_exit(151), &single), DomainError::OrderValidationFailed);
+        assert_eq!(map_bee_dex_error(&tvm_exit(160), &single), DomainError::OrderValidationFailed);
         assert_eq!(map_bee_dex_error(&tvm_exit(161), &batch), DomainError::MarketInconsistent);
         assert_eq!(map_bee_dex_error(&tvm_exit(162), &batch), DomainError::MarketInconsistent);
         assert_eq!(map_bee_dex_error(&tvm_exit(163), &single), DomainError::PrecisionExceeded);
@@ -697,10 +690,7 @@ mod tests {
         // possible. Make sure we don't panic and fall through cleanly.
         let mut err = tvm_exit(0);
         err.error_code = Some("not-a-number".into());
-        assert_eq!(
-            map_bee_dex_error(&err, &ctx_single("place_order")),
-            DomainError::Unexpected
-        );
+        assert_eq!(map_bee_dex_error(&err, &ctx_single("place_order")), DomainError::Unexpected);
     }
 
     #[test]
@@ -815,12 +805,14 @@ mod tests {
             event_id: "1".into(),
             oracle_list_hash: "1".into(),
             token_type: 3,
-            order_ids: vec![111, 222, 333],
-            client_order_ids: vec![Some("coid-1".into()), None, Some("coid-3".into())],
+            items: vec![
+                CancelBatchPayloadItem { order_id: 111, client_order_id: Some("coid-1".into()) },
+                CancelBatchPayloadItem { order_id: 222, client_order_id: None },
+                CancelBatchPayloadItem { order_id: 333, client_order_id: Some("coid-3".into()) },
+            ],
         };
 
-        let err =
-            sender.cancel_batch_order(payload).await.expect_err("decode must fail closed");
+        let err = sender.cancel_batch_order(payload).await.expect_err("decode must fail closed");
         assert_eq!(err, DomainError::MarketInconsistent);
     }
 

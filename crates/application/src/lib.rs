@@ -202,41 +202,44 @@ pub trait MarketReadRepository: Send + Sync {
     ) -> Result<OrderForCancel, anyhow::Error>;
 
     /// Resolve multiple open orders owned by `owner_pn_address` on a
-    /// single `(market_address, symbol)`. Mirrors `resolve_for_cancel`'s
-    /// join shape but joins on the `order_ids` bind array expanded
-    /// `WITH ORDINALITY`, so the matched row's `order_id` never round-
-    /// trips through numeric/text — each returned order carries
-    /// `bind_idx` (its position in `order_ids`) and the use case
-    /// reconstructs the chain `orderId` from the input slice.
+    /// single `(market_address, symbol)`. Each returned order carries
+    /// `bind_idx` — its 0-based position in the input `order_ids`
+    /// slice — so the use case reconstructs the chain `orderId`
+    /// positionally without round-tripping it through numeric/text.
     ///
-    /// Impls MUST return `bind_idx` strictly in `[0, order_ids.len())`
-    /// AND each `bind_idx` value at most once across the returned
-    /// orders. The use case sorts by `bind_idx` and zips against
-    /// `order_ids` positionally; an out-of-range value would silently
-    /// mispair the response, and a duplicate would let two rows claim
-    /// the same input position. The Postgres impl raises `anyhow!` on
-    /// an out-of-range `bind_idx` (PG `WITH ORDINALITY` contract
-    /// violated); the use-case fallthrough maps that to `Unexpected`.
-    /// Duplicates are prevented by the `(orderbook_address, order_id)`
-    /// primary key. Any new impl owes both guarantees.
-    /// Duplicates that slip past an impl are caught downstream by the
-    /// use case as `MarketInconsistent`, never reaching the chain.
+    /// **Trait contract — every impl owes both guarantees:**
+    /// 1. `bind_idx` values are strictly in `[0, order_ids.len())`.
+    /// 2. Each `bind_idx` value appears at most once across the
+    ///    returned orders.
     ///
-    /// `None` means zero matches — the use case maps that to
-    /// `DomainError::UnknownOrder`. A partial shortfall (some matches,
-    /// some not) surfaces as `Some` with `orders.len() < order_ids.len()`;
-    /// the use case promotes that same shortfall to `UnknownOrder`.
-    /// Non-domain errors from the SELECT surface through `anyhow`.
+    /// The use case sorts by `bind_idx` and zips against `order_ids`
+    /// positionally — an out-of-range value would silently mispair
+    /// the response, and a duplicate would let two rows claim the
+    /// same input position. The Postgres impl satisfies (1) via
+    /// `WITH ORDINALITY` (raising `anyhow!` on violation, which the
+    /// use-case fallthrough maps to `Unexpected`) and (2) via the
+    /// `(orderbook_address, order_id)` primary key. A duplicate that
+    /// slips past an impl is caught defence-in-depth by the use case
+    /// as `MarketInconsistent`, never reaching the chain.
     ///
-    /// Market identity (`event_id`, `oracle_list_hash`, `token_type`)
-    /// and `market_status` are projected from the JOINed `markets` row
-    /// onto the wrapping `CancelBatchResolution`, evaluated at the
-    /// caller-provided `now`. Both are constant by SELECT construction
-    /// (filter pins one `(pmp_address, symbol)`). The use case
-    /// re-checks `market_status == Trading` post-SELECT so a market
-    /// that flipped out of `Trading` between the placement-shape
-    /// lookup and this bulk resolution still rejects with
-    /// `OrderValidationFailed` before chain dispatch.
+    /// **Result shape:**
+    /// - `Ok(None)` — zero matches. Use case maps to `UnknownOrder`.
+    /// - `Ok(Some(r))` with `r.orders.len() == order_ids.len()` —
+    ///   full match.
+    /// - `Ok(Some(r))` with `r.orders.len() < order_ids.len()` —
+    ///   partial shortfall. Use case maps to `UnknownOrder`.
+    /// - `Err(_)` — non-domain SELECT failure via `anyhow`.
+    ///
+    /// **Wrapping fields:** `event_id`, `oracle_list_hash`,
+    /// `token_type`, and `market_status` are projected from the
+    /// JOINed `markets` row onto `CancelBatchResolution`, evaluated
+    /// at the caller-provided `now`. All four are constant by SELECT
+    /// construction (filter pins one `(pmp_address, symbol)`). The
+    /// use case re-checks `market_status == Trading` post-SELECT to
+    /// close the race between `resolve_for_new_order`'s earlier
+    /// snapshot and this bulk one — a reconciler commit between the
+    /// two MVCC snapshots rejects with `OrderValidationFailed`
+    /// before chain dispatch.
     async fn resolve_for_cancel_batch(
         &self,
         market_address: &MarketAddress,
@@ -816,17 +819,25 @@ pub struct CancelBatchOrdersInput {
     pub now_ms: i64,
 }
 
+/// Per-item chain payload field for `cancel_batch_order`. Peer of
+/// [`BatchOrderPayloadItem`] on the place-batch path: the chain ABI
+/// carries `(eventId, oracleListHash, tokenType)` at batch level and
+/// only `(order_id, client_order_id)` per row. `client_order_id` is
+/// the resolved `live_orders.client_order_id` for this entry — `None`
+/// for an order placed without a caller-supplied coid. Not part of
+/// the chain ABI; used only for the audit log so ops can grep a
+/// cancel-batch incident by `clientOrderId` without joining
+/// `live_orders` back.
+#[derive(Debug, Clone)]
+pub struct CancelBatchPayloadItem {
+    pub order_id: u64,
+    pub client_order_id: Option<String>,
+}
+
 /// Chain-shaped payload handed to `ChainOrderSender::cancel_batch_order`.
 /// Mirrors `NewBatchOrderPayload` but the ABI is narrower —
 /// `PrivateNote.cancelBatch` takes only event/oracle/token coordinates
 /// plus the chain-assigned `orderId[]`. No price, amount, or flags.
-///
-/// `order_ids` and `client_order_ids` are parallel arrays by convention
-/// — same length, same order. The pair is constructed in one pass at
-/// `CancelBatchOrdersUseCase::execute` (the only construction site in
-/// production) and consumed in parallel by the chain sender (encodes
-/// `order_ids`) and the audit log (joins `client_order_ids`). The
-/// invariant is held by single-site construction, not by the type.
 #[derive(Debug, Clone)]
 pub struct CancelBatchOrderPayload {
     pub pn_address: String,
@@ -835,14 +846,7 @@ pub struct CancelBatchOrderPayload {
     pub event_id: String,
     pub oracle_list_hash: String,
     pub token_type: u32,
-    pub order_ids: Vec<u64>,
-    /// Resolved `live_orders.client_order_id` for each entry of
-    /// `order_ids`, same order. `None` for an order placed without a
-    /// caller-supplied coid. Not part of the chain payload — used only
-    /// for the audit log so ops can grep a cancel-batch incident by
-    /// `clientOrderId` instead of joining `order_id → client_order_id`
-    /// against `live_orders` after the fact.
-    pub client_order_ids: Vec<Option<String>>,
+    pub items: Vec<CancelBatchPayloadItem>,
 }
 
 /// One matched live order from
@@ -1523,10 +1527,24 @@ where
                     "resolve_for_cancel_batch failed (non-domain)",
                 );
                 DomainError::Unexpected
-            })?
-            // Zero rows matched — atomic validation collapses to the
-            // single ambiguous code per single-cancel's contract.
-            .ok_or(DomainError::UnknownOrder)?;
+            })?;
+
+        // Zero rows matched — atomic validation collapses to the
+        // single ambiguous code per single-cancel's contract. Log the
+        // discriminator so ops can tell "all 50 unknown" from "1 of
+        // 50 misowned" and detect probe-style abuse without leaking
+        // the distinction to the caller.
+        let Some(resolution) = resolution else {
+            warn!(
+                phase = "resolution-empty",
+                pn = %input.trading_pn.pn_address,
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                input_count = input.order_ids.len(),
+                "cancel_batch resolution returned no rows",
+            );
+            return Err(DomainError::UnknownOrder);
+        };
 
         let CancelBatchResolution {
             event_id,
@@ -1537,8 +1555,20 @@ where
         } = resolution;
 
         // Shortfall collapses to the single ambiguous code, peer of
-        // single-cancel. Overage hits the windows sweep below.
+        // single-cancel. Overage hits the windows sweep below. Peer
+        // log to `resolution-empty` so ops can distinguish a partial
+        // shortfall (e.g. mixed-ownership probe) from a wholesale
+        // miss.
         if orders.len() < input.order_ids.len() {
+            warn!(
+                phase = "resolution-shortfall",
+                pn = %input.trading_pn.pn_address,
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                resolved_count = orders.len(),
+                input_count = input.order_ids.len(),
+                "cancel_batch resolution returned fewer rows than requested",
+            );
             return Err(DomainError::UnknownOrder);
         }
 
@@ -1549,6 +1579,15 @@ where
             return Err(DomainError::OrderValidationFailed);
         }
         if oracle_list_hash.is_empty() {
+            // Peer of the other MarketInconsistent branches in this
+            // use case: log at use-case level so the symbol/order_ids
+            // context isn't lost in the infra-layer warn.
+            warn!(
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                input_count = input.order_ids.len(),
+                "cancel_batch resolution carries empty oracle_list_hash",
+            );
             return Err(DomainError::MarketInconsistent);
         }
         let token_type = u32::try_from(token_type).map_err(|_| {
@@ -1585,21 +1624,22 @@ where
         // (windows check) gates, the n bind_idx values are a
         // permutation of [0, n); sorted they are 0..n, so `orders[i]`
         // pairs with `input.order_ids[i]`.
-        let response: Vec<CancelledBatchOrder> = input
+        let items: Vec<CancelBatchPayloadItem> = input
             .order_ids
             .iter()
             .zip(orders)
-            .map(|(&order_id, order)| CancelledBatchOrder {
+            .map(|(&order_id, order)| CancelBatchPayloadItem {
                 order_id,
                 client_order_id: order.client_order_id,
             })
             .collect();
-
-        // Mirror the response shape into the chain payload's audit
-        // field so the dispatcher can log clientOrderIds alongside
-        // orderIds — same correlation surface place_batch has.
-        let client_order_ids: Vec<Option<String>> =
-            response.iter().map(|r| r.client_order_id.clone()).collect();
+        let response: Vec<CancelledBatchOrder> = items
+            .iter()
+            .map(|item| CancelledBatchOrder {
+                order_id: item.order_id,
+                client_order_id: item.client_order_id.clone(),
+            })
+            .collect();
 
         let payload = CancelBatchOrderPayload {
             pn_address: input.trading_pn.pn_address,
@@ -1608,8 +1648,7 @@ where
             event_id,
             oracle_list_hash,
             token_type,
-            order_ids: input.order_ids,
-            client_order_ids,
+            items,
         };
         self.sender.cancel_batch_order(payload).await?;
 
@@ -3327,12 +3366,15 @@ mod tests {
         assert_eq!(p.event_id, "0xevent");
         assert_eq!(p.oracle_list_hash, "0xdead");
         assert_eq!(p.token_type, 1);
-        assert_eq!(p.order_ids, vec![123, 456]);
+        let order_ids: Vec<u64> = p.items.iter().map(|i| i.order_id).collect();
+        assert_eq!(order_ids, vec![123, 456]);
         // Audit-only field: mirrors the response coids in input order so
         // ops can grep the cancel-batch incident by clientOrderId. Pins
-        // both the alignment (position i ↔ order_ids[i]) and the
+        // both the alignment (position i ↔ items[i].order_id) and the
         // None-on-NULL contract for orders placed without a coid.
-        assert_eq!(p.client_order_ids, vec![Some("42".to_string()), None]);
+        let coids: Vec<Option<String>> =
+            p.items.iter().map(|i| i.client_order_id.clone()).collect();
+        assert_eq!(coids, vec![Some("42".to_string()), None]);
     }
 
     #[tokio::test]
@@ -3356,7 +3398,9 @@ mod tests {
             vec![Some("c".into()), Some("a".into()), Some("b".into())],
         );
         // Chain payload must carry the input order verbatim.
-        assert_eq!(sender.cancel_batch_calls()[0].order_ids, vec![33, 11, 22]);
+        let p_ids: Vec<u64> =
+            sender.cancel_batch_calls()[0].items.iter().map(|i| i.order_id).collect();
+        assert_eq!(p_ids, vec![33, 11, 22]);
     }
 
     #[tokio::test]
@@ -3391,7 +3435,9 @@ mod tests {
             .await
             .expect("max size accepted");
         assert_eq!(out.len(), max);
-        assert_eq!(sender.cancel_batch_calls()[0].order_ids, ids);
+        let dispatched: Vec<u64> =
+            sender.cancel_batch_calls()[0].items.iter().map(|i| i.order_id).collect();
+        assert_eq!(dispatched, ids);
     }
 
     #[tokio::test]
@@ -3406,8 +3452,7 @@ mod tests {
         let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
 
         let ids: Vec<u64> = (0..=max).map(|i| 1 + i as u64).collect();
-        let err =
-            uc.execute(base_cancel_batch_input("PM-YES", ids)).await.unwrap_err();
+        let err = uc.execute(base_cancel_batch_input("PM-YES", ids)).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
         assert!(sender.cancel_batch_calls().is_empty());
     }

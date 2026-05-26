@@ -936,9 +936,16 @@ pub enum DomainError {
     /// The request exceeded the per-handler wall-clock budget enforced
     /// by the API's `request_timeout` hoop. Typically means a chain
     /// submission or downstream call hung past the configured slack.
-    /// Mirrors the Binance `-1007 / 504 TIMEOUT` shape; clients should
-    /// retry with the same `clientOrderId` so a successfully-landed
-    /// chain message is not duplicated.
+    /// Mirrors the Binance `-1007 / 504 TIMEOUT` shape.
+    ///
+    /// Idempotency on retry depends on the path:
+    /// - place / place-batch: retry with the same `clientOrderId` so a
+    ///   successfully-landed chain message is not duplicated — the
+    ///   chain dedupes by `(pn, coid)`.
+    /// - cancel / cancel-batch: retry with the same chain-assigned
+    ///   `orderId` (or `orderId[]`); cancelling an already-cancelled
+    ///   id is a no-op on the chain. `clientOrderId` is not a cancel
+    ///   key — the API resolves chain `orderId` upstream of dispatch.
     #[error("request timed out before completion")]
     RequestTimeout,
     #[error("unexpected domain error")]

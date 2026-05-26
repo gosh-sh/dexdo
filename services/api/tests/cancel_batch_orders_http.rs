@@ -402,10 +402,7 @@ fn trading_market() -> Market {
 /// Market identity flows from the fake's `Market` fixture, not from
 /// individual rows, so this helper only needs the per-row fields.
 fn row(order_id: u64, coid: Option<&str>) -> (u64, OrderForCancelBatch) {
-    (
-        order_id,
-        OrderForCancelBatch { bind_idx: 0, client_order_id: coid.map(|s| s.to_string()) },
-    )
+    (order_id, OrderForCancelBatch { bind_idx: 0, client_order_id: coid.map(|s| s.to_string()) })
 }
 
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
@@ -492,13 +489,17 @@ async fn happy_path_two_ids_returns_pending_cancel_array() {
     assert_eq!(payload.event_id, "0xevent");
     assert_eq!(payload.oracle_list_hash, "0xfeedface");
     assert_eq!(payload.token_type, 7);
-    assert_eq!(payload.order_ids, vec![123u64, 456u64]);
-    // Audit trail: `client_order_ids` is not part of the chain ABI but is
-    // the only path by which ops can grep an incident by coid without
-    // joining `live_orders` back. A refactor that dropped the field from
-    // the payload would only show up at the unit layer otherwise — pin
-    // the wire-level promise here, parallel to `order_ids` above.
-    assert_eq!(payload.client_order_ids, vec![Some("client-42".to_string()), None]);
+    let payload_order_ids: Vec<u64> = payload.items.iter().map(|i| i.order_id).collect();
+    assert_eq!(payload_order_ids, vec![123u64, 456u64]);
+    // Audit trail: per-item `client_order_id` is not part of the chain
+    // ABI but is the only path by which ops can grep an incident by
+    // coid without joining `live_orders` back. A refactor that dropped
+    // it from the payload would only show up at the unit layer
+    // otherwise — pin the wire-level promise here, parallel to
+    // `order_id` above.
+    let payload_coids: Vec<Option<String>> =
+        payload.items.iter().map(|i| i.client_order_id.clone()).collect();
+    assert_eq!(payload_coids, vec![Some("client-42".to_string()), None]);
 }
 
 #[tokio::test]
@@ -531,7 +532,8 @@ async fn response_preserves_input_order_when_repo_returns_scrambled_rows() {
 
     // Chain payload must also carry the input order verbatim — the
     // chain's _doCancel processes ids in batch order.
-    assert_eq!(sender.calls()[0].order_ids, vec![33u64, 11u64, 22u64]);
+    let dispatched_ids: Vec<u64> = sender.calls()[0].items.iter().map(|i| i.order_id).collect();
+    assert_eq!(dispatched_ids, vec![33u64, 11u64, 22u64]);
 }
 
 // ---- Body-shape failures -------------------------------------------------
@@ -690,6 +692,32 @@ async fn missing_order_ids_field_returns_400_minus_1102() {
 }
 
 #[tokio::test]
+async fn null_order_ids_returns_400_minus_1102() {
+    // `orderIds: null` and a missing `orderIds` field must collapse to
+    // the same MissingParameter surface. `CancelBatchOrdersRequest`
+    // uses `Option<Vec<String>>` so serde maps both to `None` today,
+    // but a deserializer-config drift (custom `Deserialize`,
+    // `#[serde(default)]` removed, etc.) could leak null through as
+    // an empty Vec or a different error code — pin the public
+    // contract here.
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
+    let sender = Arc::new(RecordingCancelBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let body = json!({
+        "marketAddress": MARKET_ADDRESS,
+        "symbol": SYMBOL,
+        "orderIds": serde_json::Value::Null,
+    });
+    let mut resp = delete_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+    assert!(sender.calls().is_empty());
+}
+
+#[tokio::test]
 async fn empty_order_ids_returns_400_minus_1130() {
     let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
     let sender = Arc::new(RecordingCancelBatchSender::ok());
@@ -731,7 +759,8 @@ async fn exactly_max_batch_size_returns_pending_cancel_array() {
     }
     let calls = sender.calls();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].order_ids, ids);
+    let dispatched: Vec<u64> = calls[0].items.iter().map(|i| i.order_id).collect();
+    assert_eq!(dispatched, ids);
 }
 
 #[tokio::test]
@@ -841,16 +870,25 @@ async fn unknown_market_returns_404_minus_1121() {
 
 #[tokio::test]
 async fn non_trading_market_returns_400_minus_2010() {
+    // Seed a matching row so the test pins the non-trading branch as
+    // the gate that fires, distinct from "market unknown" (-1121) or
+    // "order unknown" (-2011). Without the seeded row, an empty
+    // resolution would shortcut to -2011 if the early
+    // `resolve_for_new_order` status check were ever bypassed, and
+    // the assertion would fail for the wrong reason.
     let mut market = trading_market();
     market.status = MarketStatus::Resolving;
-    let repo: SharedRepo = Arc::new(FakeRepo::with_market(market));
-    let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
-    let service = setup_with(repo, sender);
+    let repo: SharedRepo =
+        Arc::new(FakeRepo::with_market_and_rows(market, vec![row(1, Some("c-1"))]));
+    let sender = Arc::new(RecordingCancelBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
 
     let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -2010);
+    assert!(sender.calls().is_empty());
 }
 
 #[tokio::test]
@@ -952,6 +990,36 @@ async fn wrong_owner_returns_404_minus_2011() {
     let service = setup_with(repo, chain_sender);
 
     let mut resp = delete_batch(&service, valid_body(vec!["1"])).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -2011);
+    assert!(sender.calls().is_empty());
+}
+
+#[tokio::test]
+async fn mixed_ownership_batch_returns_404_minus_2011() {
+    // Probe-style abuse vector: caller submits one of their own ids
+    // plus a foreigner's. The owner predicate must strip the foreign
+    // row at resolution time, collapsing to a shortfall the use case
+    // promotes to -2011 with the same opacity as a fully-unknown
+    // batch. Pins that NO row from the batch reaches the chain — a
+    // regression where partial ownership dispatched the caller's
+    // subset would expose the foreign id's existence via timing or
+    // chain failure surface.
+    let (mine_id, mine_proto) = row(1, Some("mine-coid"));
+    let (foreign_id, foreign_proto) = row(2, Some("attackers-coid"));
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market_and_owned_rows(
+        trading_market(),
+        vec![
+            (PN_ADDRESS.to_string(), mine_id, mine_proto),
+            ("0:someone-else".to_string(), foreign_id, foreign_proto),
+        ],
+    ));
+    let sender = Arc::new(RecordingCancelBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let mut resp = delete_batch(&service, valid_body(vec!["1", "2"])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -2011);

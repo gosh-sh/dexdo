@@ -958,8 +958,7 @@ async fn create_batch_orders(
         })?
         .clone();
 
-    let body: BatchOrdersRequest =
-        parse_strict_body(req, "POST /api/v1/batchOrders").await?;
+    let body: BatchOrdersRequest = parse_strict_body(req, "POST /api/v1/batchOrders").await?;
 
     let (now_seconds, now_ms) = now_pair();
     let input = build_batch_orders_input(body, ctx, now_seconds, now_ms)?;
@@ -1104,8 +1103,31 @@ async fn delete_batch_orders(
     // matches the value the use case logged and dispatched against.
     let response_now_ms = input.now_ms;
 
+    // Audit breadcrumb fields captured before move into `execute`.
+    // Without `order_ids` in the reject log a 50-id failure leaves ops
+    // with no handle to grep the user's claim against — the
+    // chain_sender `info!` only fires after resolution succeeds, so
+    // anything that aborts upstream (validation,
+    // resolve_for_cancel_batch shortfall, PnBusy, MarketInconsistent)
+    // is otherwise silent at the request level.
+    let audit_pn = input.trading_pn.pn_address.clone();
+    let audit_market = input.market_address.0.clone();
+    let audit_symbol = input.symbol.0.clone();
+    let audit_order_ids = input.order_ids.clone();
+
     let use_case = CancelBatchOrdersUseCase::new(state.repo, state.chain_sender);
-    let cancelled = use_case.execute(input).await.map_err(ApiError::from)?;
+    let cancelled = use_case.execute(input).await.map_err(|err| {
+        warn!(
+            pn = %audit_pn,
+            market_address = %audit_market,
+            symbol = %audit_symbol,
+            order_count = audit_order_ids.len(),
+            order_ids = ?audit_order_ids,
+            err = ?err,
+            "cancel_batch_orders rejected before dispatch",
+        );
+        ApiError::from(err)
+    })?;
 
     let response = cancelled
         .into_iter()
