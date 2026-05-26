@@ -4,6 +4,8 @@ These rules apply to any AI agent that makes changes in this repository.
 
 ## Avoid perfectionism
 
+Only P1/P2 issues.
+
 Match the scope of changes to what was actually requested. Do not, without explicit ask:
 
 - refactor code that already works for a hypothetical readability win;
