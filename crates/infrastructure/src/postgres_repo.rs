@@ -680,11 +680,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
             // `live_orders.order_id` is the chain-assigned uint128, but
             // the application boundary caps at u64 (SDK ceiling — see
             // `chain_sender.rs`). A row whose stored value exceeds
-            // u64 means a producer wrote a value above that cap —
-            // never expected from a real OrderBook, surface as
-            // `Unexpected` rather than panic.
+            // u64 means a producer wrote a value above that cap — same
+            // class of read-model-vs-chain drift as the negative
+            // token_type / NULL oracle_list_hash branches, so surface
+            // as MarketInconsistent (503) rather than Unexpected (500).
             let order_id = row.order_id.parse::<u64>().map_err(|err| {
-                anyhow!("resolve_for_cancel_batch: order_id `{}` is not u64: {err}", row.order_id)
+                anyhow::Error::from(DomainError::MarketInconsistent).context(format!(
+                    "resolve_for_cancel_batch: order_id `{}` is not u64: {err}",
+                    row.order_id
+                ))
             })?;
             let client_order_id = row.client_order_id.and_then(|raw| {
                 let trimmed = raw.trim();
@@ -705,9 +709,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
             // as MarketInconsistent rather than silently overwriting
             // the prior `client_order_id`.
             if orders.insert(order_id, OrderForCancelBatch { client_order_id }).is_some() {
-                return Err(anyhow!(
+                return Err(anyhow::Error::from(DomainError::MarketInconsistent).context(format!(
                     "resolve_for_cancel_batch: duplicate order_id `{order_id}` returned (live_orders PK violated)",
-                ));
+                )));
             }
         }
         Ok(Some(CancelBatchResolution {
