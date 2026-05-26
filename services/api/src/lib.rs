@@ -63,6 +63,18 @@ use salvo::http::StatusCode;
 use salvo::prelude::*;
 use salvo::writing::Json;
 use salvo_extra::affix_state::inject;
+use salvo_oapi::Components;
+use salvo_oapi::EndpointOutRegister;
+use salvo_oapi::Info;
+use salvo_oapi::OpenApi;
+use salvo_oapi::Operation;
+use salvo_oapi::Response as OapiResponse;
+use salvo_oapi::Server as OapiServer;
+use salvo_oapi::ToSchema;
+use salvo_oapi::endpoint;
+use salvo_oapi::security::ApiKey;
+use salvo_oapi::security::ApiKeyValue;
+use salvo_oapi::security::SecurityScheme;
 use serde::Deserialize;
 use serde::Serialize;
 use tracing::error;
@@ -127,7 +139,7 @@ impl AppState {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct MarketsResponse {
     server_time: i64,
@@ -136,7 +148,7 @@ struct MarketsResponse {
     markets: Vec<MarketDto>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct MarketDto {
     market_address: String,
@@ -152,7 +164,7 @@ struct MarketDto {
     outcomes: Vec<OutcomeDto>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct TimingsDto {
     stake_start: i64,
@@ -162,7 +174,7 @@ struct TimingsDto {
     frozen_at: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EventDto {
     event_id: String,
@@ -171,7 +183,7 @@ struct EventDto {
     oracles: Vec<OracleDto>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OracleDto {
     name: Option<String>,
@@ -179,7 +191,7 @@ struct OracleDto {
     fee: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct TerminalDto {
     kind: &'static str,
@@ -188,7 +200,7 @@ struct TerminalDto {
     cancel_reason: Option<&'static str>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OutcomeDto {
     outcome_id: u32,
@@ -202,7 +214,7 @@ struct OutcomeDto {
     max_batch_size: u16,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct DepthResponse {
     market_address: String,
@@ -212,7 +224,7 @@ struct DepthResponse {
     asks: Vec<[String; 2]>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OrderResponse {
     market_address: String,
@@ -231,14 +243,14 @@ struct OrderResponse {
     update_time: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OrdersPageResponse {
     orders: Vec<OrderResponse>,
     next_cursor: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct AccountResponse {
     account_id: String,
@@ -246,7 +258,7 @@ struct AccountResponse {
     balances: Vec<AccountBalanceItem>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct AccountBalanceItem {
     asset: String,
@@ -268,7 +280,7 @@ impl AccountResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct MarketBalancesResponse {
     market_address: String,
@@ -276,7 +288,7 @@ struct MarketBalancesResponse {
     balances: Vec<OutcomeBalanceItem>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OutcomeBalanceItem {
     outcome_id: u32,
@@ -304,7 +316,7 @@ impl MarketBalancesResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ErrorBody {
     code: i32,
     msg: &'static str,
@@ -403,7 +415,22 @@ fn map_domain_or_unexpected(err: anyhow::Error, context: &str) -> ApiError {
     ApiError::from(DomainError::Unexpected)
 }
 
-#[handler]
+// All error paths render an `ErrorBody` JSON. Status codes vary by `DomainError`
+// variant — see `ApiError::status`. Spec-wise we collapse the matrix into a
+// single `default` response so the OpenAPI consumer reads one error schema
+// rather than 7 nearly-identical entries.
+impl EndpointOutRegister for ApiError {
+    fn register(components: &mut Components, operation: &mut Operation) {
+        operation.responses.insert(
+            "default",
+            OapiResponse::new("Error response")
+                .add_content("application/json", <ErrorBody as ToSchema>::to_schema(components)),
+        );
+    }
+}
+
+/// Service readiness probe. Returns `ok` once the process is accepting traffic.
+#[endpoint(tags("system"), summary = "Readiness probe", security(()))]
 async fn readiness() -> &'static str {
     "ok"
 }
@@ -411,7 +438,22 @@ async fn readiness() -> &'static str {
 const DEFAULT_LIMIT: u16 = 50;
 const MAX_LIMIT: u16 = 200;
 
-#[handler]
+/// List markets or look up a single market by `marketAddress`.
+#[endpoint(
+    tags("market-data"),
+    summary = "List markets",
+    parameters(
+        ("marketAddress" = Option<String>, Query, description = "Single-market lookup. Mutually exclusive with listing filters and pagination."),
+        ("status" = Option<String>, Query, description = "Comma-separated MarketStatus filter."),
+        ("quoteAsset" = Option<String>, Query, description = "Filter by quote asset symbol."),
+        ("oracleName" = Option<String>, Query, description = "Filter by oracle name."),
+        ("closingBefore" = Option<i64>, Query, description = "Upper bound on resultStart, unix seconds."),
+        ("sort" = Option<String>, Query, description = "Sort order: resultStart (default) or createdAt."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor returned from a previous page."),
+        ("limit" = Option<i64>, Query, description = "Page size. Default 50, max 200."),
+    ),
+    security(()),
+)]
 async fn get_markets(
     req: &mut Request,
     depot: &mut Depot,
@@ -560,7 +602,17 @@ fn outcome_to_dto(o: dodex_domain::Outcome) -> OutcomeDto {
     }
 }
 
-#[handler]
+/// Order book depth snapshot for a (marketAddress, symbol).
+#[endpoint(
+    tags("market-data"),
+    summary = "Order book depth",
+    parameters(
+        ("marketAddress" = String, Query, description = "Market address."),
+        ("symbol" = String, Query, description = "Outcome-token symbol."),
+        ("limit" = Option<i64>, Query, description = "Levels per side. Default 100, max 1000."),
+    ),
+    security(()),
+)]
 async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthResponse>, ApiError> {
     let state = depot
         .obtain::<AppState>()
@@ -598,7 +650,23 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
     }))
 }
 
-#[handler]
+/// List orders for the authenticated trading PN, with optional filters.
+#[endpoint(
+    tags("trading"),
+    summary = "List orders",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key issued by the Dodex backend."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
+        ("marketAddress" = Option<String>, Query, description = "Market filter. Must pair with symbol when set."),
+        ("symbol" = Option<String>, Query, description = "Symbol filter. Must pair with marketAddress."),
+        ("status" = Option<String>, Query, description = "Comma-separated OrderStatus filter. Default: all statuses."),
+        ("limit" = Option<i64>, Query, description = "Page size, 1..=500."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor."),
+    ),
+    security(("apiKey" = [])),
+)]
 async fn get_orders(
     req: &mut Request,
     depot: &mut Depot,
@@ -727,11 +795,10 @@ fn optional_typed_query<T: std::str::FromStr>(
     trimmed.parse::<T>().map(Some).map_err(|_| ApiError::from(DomainError::InvalidParameter))
 }
 
-/// Request body for `POST /api/v1/order`. Field names match
-/// [api-spec §New Order](../../docs/api-spec.md#new-order) verbatim;
-/// `type` is the reserved keyword we rename for serde and rebind to
-/// `order_type` internally.
-#[derive(Deserialize)]
+// Request body for `POST /api/v1/order`. Field names match
+// docs/api-spec.md §New Order verbatim; `type` is the reserved keyword
+// we rename for serde and rebind to `order_type` internally.
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateOrderRequest {
     market_address: Option<String>,
@@ -745,16 +812,13 @@ struct CreateOrderRequest {
     time_in_force: Option<String>,
 }
 
-/// Response shape for `POST /api/v1/order`. Minimal by design — we
-/// only return facts the caller does not already have:
-/// `clientOrderId` (which the backend may have generated),
-/// `transactTime` (the moment we accepted), and `status` (always
-/// `PENDING_NEW` for a successful submission — the order is in the
-/// chain queue, not yet on the book). The full order shape with
-/// chain-assigned `orderId` becomes available through
-/// `GET /api/v1/orders` once `OrderBook.OrderPlaced` projects.
-/// See `docs/tech-specs/write-api.md §Response` for the rationale.
-#[derive(Serialize)]
+// Minimal by design — only facts the caller does not already have.
+// `clientOrderId` may have been generated by the backend, `transactTime`
+// is the moment we accepted, `status` is always `PENDING_NEW` because the
+// order has only entered the chain queue at this point. The full order
+// shape with chain-assigned `orderId` arrives later via `GET /api/v1/orders`
+// once `OrderBook.OrderPlaced` projects.
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateOrderResponse {
     client_order_id: String,
@@ -762,16 +826,11 @@ struct CreateOrderResponse {
     status: &'static str,
 }
 
-/// Response shape for `DELETE /api/v1/order`. Minimal by design,
-/// parallel to [`CreateOrderResponse`]: we only return facts the
-/// caller does not already have. `clientOrderId` is the value
-/// recorded on placement (`live_orders.client_order_id`) — useful
-/// for correlation with the prior POST. The final state —
-/// `CANCELED`, or `FILLED` if matching raced the cancel — becomes
-/// visible through `GET /api/v1/orders` once `OrderBook.OrderCancelled`
-/// projects. See `docs/tech-specs/write-api.md §Response` for
-/// `DELETE /api/v1/order`.
-#[derive(Serialize)]
+// Minimal by design, parallel to CreateOrderResponse. `clientOrderId` is
+// the value recorded on placement, useful for correlating with the prior
+// POST. Final state — CANCELED, or FILLED if matching raced the cancel —
+// becomes visible later via `GET /api/v1/orders`.
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CancelOrderResponse {
     order_id: String,
@@ -780,13 +839,12 @@ struct CancelOrderResponse {
     status: &'static str,
 }
 
-/// Request body for `POST /api/v1/batchOrders`. One market+symbol per
-/// request, every item is placed on that single book — matches the
-/// chain ABI's `PrivateNote.placeBatch(eventId, oracleListHash,
-/// tokenType, OrderBookOrder[])`. Per-item field names mirror
-/// `POST /api/v1/order` so a marshalling client can reuse the same
-/// type for both endpoints.
-#[derive(Deserialize)]
+// One market+symbol per request; every item is placed on that single
+// book — matches the chain ABI's `PrivateNote.placeBatch(eventId,
+// oracleListHash, tokenType, OrderBookOrder[])`. Per-item field names
+// mirror `POST /api/v1/order` so a client can reuse the same type for
+// both endpoints.
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchOrdersRequest {
     market_address: Option<String>,
@@ -794,7 +852,7 @@ struct BatchOrdersRequest {
     orders: Option<Vec<BatchOrdersRequestItem>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchOrdersRequestItem {
     new_order_client_id: Option<String>,
@@ -806,11 +864,10 @@ struct BatchOrdersRequestItem {
     time_in_force: Option<String>,
 }
 
-/// Response item for `POST /api/v1/batchOrders`. Same `PENDING_NEW`
-/// envelope as the single-order endpoint — see
-/// [`CreateOrderResponse`] for the rationale. Returned in request
-/// order; the array has one element per accepted item.
-#[derive(Serialize)]
+// Same `PENDING_NEW` envelope as the single-order endpoint — see
+// CreateOrderResponse for the rationale. Returned in request order;
+// one element per accepted item.
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchOrderResponseItem {
     client_order_id: String,
@@ -833,16 +890,24 @@ fn require_auth(depot: &Depot, permission: Permission) -> Result<&AuthContext, A
     Ok(ctx)
 }
 
-/// `POST /api/v1/order`. Auth hoop has already verified the request;
-/// `require_auth(Trade)` enforces the spec permission. The handler
-/// translates the parsed request + `AuthContext` into a
-/// `NewOrderInput`, hands the use case off, and shapes the
-/// three-field response (clientOrderId / transactTime / status) per
-/// [write-api.md §Response]. The chain-assigned `orderId` is not in
-/// this response by design — it arrives later through
-/// `GET /api/v1/orders` once the indexer projects
-/// `OrderBook.OrderPlaced`.
-#[handler]
+// Auth hoop has already verified the request; `require_auth(Trade)`
+// enforces the spec permission. The handler translates the parsed
+// request + `AuthContext` into a `NewOrderInput`, hands the use case
+// off, and shapes the three-field response. The chain-assigned
+// `orderId` is not in this response by design — it arrives later via
+// `GET /api/v1/orders` once the indexer projects `OrderBook.OrderPlaced`.
+#[endpoint(
+    tags("trading"),
+    summary = "Submit a new order",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
+    ),
+    request_body = CreateOrderRequest,
+    security(("apiKey" = [])),
+)]
 async fn create_order(
     req: &mut Request,
     depot: &mut Depot,
@@ -926,11 +991,23 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// `DELETE /api/v1/order`. Auth hoop verified the request; this
-/// handler enforces `TRADE`, parses query params, hands off to the use
-/// case, and shapes the four-field `PENDING_CANCEL` response per
-/// `docs/tech-specs/write-api.md §Response` (DELETE).
-#[handler]
+// Auth hoop verified the request; this handler enforces `TRADE`,
+// parses query params, hands off to the use case, and shapes the
+// four-field `PENDING_CANCEL` response.
+#[endpoint(
+    tags("trading"),
+    summary = "Cancel an order by orderId",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString."),
+        ("marketAddress" = String, Query, description = "Market address."),
+        ("symbol" = String, Query, description = "Outcome-token symbol."),
+        ("orderId" = String, Query, description = "Chain-assigned order id, u64."),
+    ),
+    security(("apiKey" = [])),
+)]
 async fn delete_order(
     req: &mut Request,
     depot: &mut Depot,
@@ -979,13 +1056,22 @@ async fn delete_order(
     }))
 }
 
-/// `POST /api/v1/batchOrders`. Parses one `(marketAddress, symbol)`
-/// plus `orders[]`, hands off to `CreateBatchOrdersUseCase`, and shapes
-/// a flat array of `PENDING_NEW` envelopes per
-/// [api-spec §New Batch Orders](../../docs/api-spec.md#new-batch-orders).
-/// The use case enforces non-empty `orders[]` and the
-/// `outcome.max_batch_size` cap; the chain enforces atomic placement.
-#[handler]
+// Parses one (marketAddress, symbol) plus `orders[]`, hands off to
+// the batch-create use case, and shapes a flat array of `PENDING_NEW`
+// envelopes. The use case enforces non-empty `orders[]` and the
+// `outcome.max_batch_size` cap; the chain enforces atomic placement.
+#[endpoint(
+    tags("trading"),
+    summary = "Submit a batch of orders atomically",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
+    ),
+    request_body = BatchOrdersRequest,
+    security(("apiKey" = [])),
+)]
 async fn create_batch_orders(
     req: &mut Request,
     depot: &mut Depot,
@@ -1118,7 +1204,18 @@ fn build_batch_orders_input(
     })
 }
 
-#[handler]
+/// Account balances aggregated across all markets the authenticated PN holds.
+#[endpoint(
+    tags("account"),
+    summary = "Account balances",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key issued by the Dodex backend."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
+    ),
+    security(("apiKey" = [])),
+)]
 async fn get_account(
     _req: &mut Request,
     depot: &mut Depot,
@@ -1147,7 +1244,19 @@ async fn get_account(
     Ok(Json(AccountResponse::from_domain(out)))
 }
 
-#[handler]
+/// Per-outcome balances on a single market for the authenticated PN.
+#[endpoint(
+    tags("account"),
+    summary = "Market balances",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString."),
+        ("marketAddress" = String, Query, description = "Market address."),
+    ),
+    security(("apiKey" = [])),
+)]
 async fn get_account_balances(
     req: &mut Request,
     depot: &mut Depot,
@@ -1254,6 +1363,48 @@ pub fn build_router(state: AppState) -> Router {
                 .push(Router::with_path("api/v1/account").get(get_account))
                 .push(Router::with_path("api/v1/account/balances").get(get_account_balances)),
         )
+}
+
+/// Build the OpenAPI document by walking the route tree and collecting
+/// metadata registered by each `#[endpoint]` attribute. Stateless: no
+/// repo, no chain sender, no authenticator. The `gen-openapi` binary is
+/// the only intended caller; tests may also use it as a golden-file
+/// snapshot source.
+pub fn openapi_doc() -> OpenApi {
+    // Strip the `dodex_api.` crate prefix from schema names. `set_namer` is
+    // process-global; gen-openapi is the only caller and runs single-threaded,
+    // so the race window doesn't exist in practice.
+    salvo_oapi::naming::set_namer(salvo_oapi::naming::FlexNamer::new().short_mode(true));
+
+    let router = Router::new()
+        .push(Router::with_path("readiness").get(readiness))
+        .push(Router::with_path("api/v1/markets").get(get_markets))
+        .push(Router::with_path("api/v1/depth").get(get_depth))
+        .push(
+            Router::with_path("api/v1/order")
+                .post(create_order)
+                .delete(delete_order),
+        )
+        .push(Router::with_path("api/v1/orders").get(get_orders))
+        .push(Router::with_path("api/v1/batchOrders").post(create_batch_orders))
+        .push(Router::with_path("api/v1/account").get(get_account))
+        .push(Router::with_path("api/v1/account/balances").get(get_account_balances));
+
+    OpenApi::new("Dodex REST API", env!("CARGO_PKG_VERSION"))
+        .info(
+            Info::new("Dodex REST API", env!("CARGO_PKG_VERSION")).description(
+                "Public REST API for the Dodex prediction-market exchange. See docs/api-spec.md for the long-form contract.",
+            ),
+        )
+        .add_server(OapiServer::new("https://api.dodex.example.com"))
+        .add_security_scheme(
+            "apiKey",
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
+                "X-DODEX-APIKEY",
+                "API key issued by the Dodex backend. Signed requests also carry `timestamp`, `signature`, and an optional `recvWindow` as query parameters.",
+            ))),
+        )
+        .merge_router(&router)
 }
 
 /// Production bootstrap. `main` defers to this so the executable shim

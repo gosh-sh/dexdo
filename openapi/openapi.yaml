@@ -1,0 +1,1006 @@
+openapi: 3.1.0
+info:
+  title: Dodex REST API
+  description: Public REST API for the Dodex prediction-market exchange. See docs/api-spec.md for the long-form contract.
+  version: 0.1.0
+servers:
+- url: https://api.dodex.example.com
+paths:
+  /api/v1/account:
+    get:
+      tags:
+      - account
+      summary: Account balances
+      operationId: get_account
+      parameters:
+      - name: X-DODEX-APIKEY
+        in: header
+        description: API key issued by the Dodex backend.
+        required: true
+        schema:
+          type: string
+      - name: timestamp
+        in: query
+        description: Unix milliseconds. Included in the signed payload.
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: recvWindow
+        in: query
+        description: Request validity window in milliseconds. Default 5000, max 60000.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: signature
+        in: query
+        description: Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody.
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - apiKey: []
+  /api/v1/account/balances:
+    get:
+      tags:
+      - account
+      summary: Market balances
+      operationId: get_account_balances
+      parameters:
+      - name: X-DODEX-APIKEY
+        in: header
+        description: API key.
+        required: true
+        schema:
+          type: string
+      - name: timestamp
+        in: query
+        description: Unix milliseconds. Signed.
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: recvWindow
+        in: query
+        description: Request validity window in milliseconds.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: signature
+        in: query
+        description: Hex HMAC SHA-256 of canonicalQueryString.
+        required: true
+        schema:
+          type: string
+      - name: marketAddress
+        in: query
+        description: Market address.
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarketBalancesResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - apiKey: []
+  /api/v1/batchOrders:
+    post:
+      tags:
+      - trading
+      summary: Submit a batch of orders atomically
+      operationId: create_batch_orders
+      parameters:
+      - name: X-DODEX-APIKEY
+        in: header
+        description: API key.
+        required: true
+        schema:
+          type: string
+      - name: timestamp
+        in: query
+        description: Unix milliseconds. Signed.
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: recvWindow
+        in: query
+        description: Request validity window in milliseconds.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: signature
+        in: query
+        description: Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody.
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchOrdersRequest'
+        required: true
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BatchOrderResponseItem'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - apiKey: []
+  /api/v1/depth:
+    get:
+      tags:
+      - market-data
+      summary: Order book depth
+      operationId: get_depth
+      parameters:
+      - name: marketAddress
+        in: query
+        description: Market address.
+        required: true
+        schema:
+          type: string
+      - name: symbol
+        in: query
+        description: Outcome-token symbol.
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Levels per side. Default 100, max 1000.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DepthResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
+  /api/v1/markets:
+    get:
+      tags:
+      - market-data
+      summary: List markets
+      operationId: get_markets
+      parameters:
+      - name: marketAddress
+        in: query
+        description: Single-market lookup. Mutually exclusive with listing filters and pagination.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: status
+        in: query
+        description: Comma-separated MarketStatus filter.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: quoteAsset
+        in: query
+        description: Filter by quote asset symbol.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: oracleName
+        in: query
+        description: Filter by oracle name.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: closingBefore
+        in: query
+        description: Upper bound on resultStart, unix seconds.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: sort
+        in: query
+        description: 'Sort order: resultStart (default) or createdAt.'
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: cursor
+        in: query
+        description: Opaque pagination cursor returned from a previous page.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: limit
+        in: query
+        description: Page size. Default 50, max 200.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarketsResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
+  /api/v1/order:
+    post:
+      tags:
+      - trading
+      summary: Submit a new order
+      operationId: create_order
+      parameters:
+      - name: X-DODEX-APIKEY
+        in: header
+        description: API key.
+        required: true
+        schema:
+          type: string
+      - name: timestamp
+        in: query
+        description: Unix milliseconds. Signed.
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: recvWindow
+        in: query
+        description: Request validity window in milliseconds. Default 5000, max 60000.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: signature
+        in: query
+        description: Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody.
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+        required: true
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateOrderResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - apiKey: []
+    delete:
+      tags:
+      - trading
+      summary: Cancel an order by orderId
+      operationId: delete_order
+      parameters:
+      - name: X-DODEX-APIKEY
+        in: header
+        description: API key.
+        required: true
+        schema:
+          type: string
+      - name: timestamp
+        in: query
+        description: Unix milliseconds. Signed.
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: recvWindow
+        in: query
+        description: Request validity window in milliseconds.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: signature
+        in: query
+        description: Hex HMAC SHA-256 of canonicalQueryString.
+        required: true
+        schema:
+          type: string
+      - name: marketAddress
+        in: query
+        description: Market address.
+        required: true
+        schema:
+          type: string
+      - name: symbol
+        in: query
+        description: Outcome-token symbol.
+        required: true
+        schema:
+          type: string
+      - name: orderId
+        in: query
+        description: Chain-assigned order id, u64.
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelOrderResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - apiKey: []
+  /api/v1/orders:
+    get:
+      tags:
+      - trading
+      summary: List orders
+      operationId: get_orders
+      parameters:
+      - name: X-DODEX-APIKEY
+        in: header
+        description: API key issued by the Dodex backend.
+        required: true
+        schema:
+          type: string
+      - name: timestamp
+        in: query
+        description: Unix milliseconds. Included in the signed payload.
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: recvWindow
+        in: query
+        description: Request validity window in milliseconds. Default 5000, max 60000.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: signature
+        in: query
+        description: Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody.
+        required: true
+        schema:
+          type: string
+      - name: marketAddress
+        in: query
+        description: Market filter. Must pair with symbol when set.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: symbol
+        in: query
+        description: Symbol filter. Must pair with marketAddress.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: status
+        in: query
+        description: 'Comma-separated OrderStatus filter. Default: all statuses.'
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: limit
+        in: query
+        description: Page size, 1..=500.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: cursor
+        in: query
+        description: Opaque pagination cursor.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersPageResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - apiKey: []
+  /readiness:
+    get:
+      tags:
+      - system
+      summary: Readiness probe
+      operationId: readiness
+      responses:
+        '200':
+          description: Ok
+          content:
+            text/plain:
+              schema:
+                type: string
+      security:
+      - {}
+components:
+  schemas:
+    AccountBalanceItem:
+      type: object
+      required:
+      - asset
+      - free
+      - locked
+      properties:
+        asset:
+          type: string
+        free:
+          type: string
+        locked:
+          type: string
+    AccountResponse:
+      type: object
+      required:
+      - accountId
+      - updateTime
+      - balances
+      properties:
+        accountId:
+          type: string
+        balances:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccountBalanceItem'
+        updateTime:
+          type: integer
+          format: int64
+    BatchOrderResponseItem:
+      type: object
+      required:
+      - clientOrderId
+      - transactTime
+      - status
+      properties:
+        clientOrderId:
+          type: string
+        status:
+          type: string
+        transactTime:
+          type: integer
+          format: int64
+    BatchOrdersRequest:
+      type: object
+      properties:
+        marketAddress:
+          type:
+          - string
+          - 'null'
+        orders:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/BatchOrdersRequestItem'
+        symbol:
+          type:
+          - string
+          - 'null'
+    BatchOrdersRequestItem:
+      type: object
+      properties:
+        newOrderClientId:
+          type:
+          - string
+          - 'null'
+        price:
+          type:
+          - string
+          - 'null'
+        quantity:
+          type:
+          - string
+          - 'null'
+        side:
+          type:
+          - string
+          - 'null'
+        timeInForce:
+          type:
+          - string
+          - 'null'
+        type:
+          type:
+          - string
+          - 'null'
+    CancelOrderResponse:
+      type: object
+      required:
+      - orderId
+      - clientOrderId
+      - transactTime
+      - status
+      properties:
+        clientOrderId:
+          type: string
+        orderId:
+          type: string
+        status:
+          type: string
+        transactTime:
+          type: integer
+          format: int64
+    CreateOrderRequest:
+      type: object
+      properties:
+        marketAddress:
+          type:
+          - string
+          - 'null'
+        newOrderClientId:
+          type:
+          - string
+          - 'null'
+        price:
+          type:
+          - string
+          - 'null'
+        quantity:
+          type:
+          - string
+          - 'null'
+        side:
+          type:
+          - string
+          - 'null'
+        symbol:
+          type:
+          - string
+          - 'null'
+        timeInForce:
+          type:
+          - string
+          - 'null'
+        type:
+          type:
+          - string
+          - 'null'
+    CreateOrderResponse:
+      type: object
+      required:
+      - clientOrderId
+      - transactTime
+      - status
+      properties:
+        clientOrderId:
+          type: string
+        status:
+          type: string
+        transactTime:
+          type: integer
+          format: int64
+    DepthResponse:
+      type: object
+      required:
+      - marketAddress
+      - symbol
+      - lastUpdateId
+      - bids
+      - asks
+      properties:
+        asks:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+        bids:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+        lastUpdateId:
+          type: string
+        marketAddress:
+          type: string
+        symbol:
+          type: string
+    ErrorBody:
+      type: object
+      required:
+      - code
+      - msg
+      properties:
+        code:
+          type: integer
+          format: int32
+        msg:
+          type: string
+    EventDto:
+      type: object
+      required:
+      - eventId
+      - oracles
+      properties:
+        description:
+          type:
+          - string
+          - 'null'
+        eventId:
+          type: string
+        eventName:
+          type:
+          - string
+          - 'null'
+        oracles:
+          type: array
+          items:
+            $ref: '#/components/schemas/OracleDto'
+    MarketBalancesResponse:
+      type: object
+      required:
+      - marketAddress
+      - updateTime
+      - balances
+      properties:
+        balances:
+          type: array
+          items:
+            $ref: '#/components/schemas/OutcomeBalanceItem'
+        marketAddress:
+          type: string
+        updateTime:
+          type: integer
+          format: int64
+    MarketDto:
+      type: object
+      required:
+      - marketAddress
+      - orderBookAddress
+      - marketName
+      - status
+      - quoteAsset
+      - tokenType
+      - createdAt
+      - event
+      - outcomes
+      properties:
+        createdAt:
+          type: integer
+          format: int64
+        event:
+          $ref: '#/components/schemas/EventDto'
+        marketAddress:
+          type: string
+        marketName:
+          type: string
+        orderBookAddress:
+          type: string
+        outcomes:
+          type: array
+          items:
+            $ref: '#/components/schemas/OutcomeDto'
+        quoteAsset:
+          type: string
+        status:
+          type: string
+        terminal:
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/TerminalDto'
+        timings:
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/TimingsDto'
+        tokenType:
+          type: integer
+          format: int32
+    MarketsResponse:
+      type: object
+      required:
+      - serverTime
+      - hasMore
+      - markets
+      properties:
+        hasMore:
+          type: boolean
+        markets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MarketDto'
+        nextCursor:
+          type:
+          - string
+          - 'null'
+        serverTime:
+          type: integer
+          format: int64
+    OracleDto:
+      type: object
+      properties:
+        address:
+          type:
+          - string
+          - 'null'
+        fee:
+          type:
+          - string
+          - 'null'
+        name:
+          type:
+          - string
+          - 'null'
+    OrderResponse:
+      type: object
+      required:
+      - marketAddress
+      - symbol
+      - orderId
+      - clientOrderId
+      - price
+      - origQty
+      - executedQty
+      - status
+      - timeInForce
+      - type
+      - side
+      - time
+      - updateTime
+      properties:
+        clientOrderId:
+          type: string
+        executedQty:
+          type: string
+        marketAddress:
+          type: string
+        orderId:
+          type: string
+        origQty:
+          type: string
+        price:
+          type: string
+        side:
+          type: string
+        status:
+          type: string
+        symbol:
+          type: string
+        time:
+          type: integer
+          format: int64
+        timeInForce:
+          type: string
+        type:
+          type: string
+        updateTime:
+          type: integer
+          format: int64
+    OrdersPageResponse:
+      type: object
+      required:
+      - orders
+      properties:
+        nextCursor:
+          type:
+          - string
+          - 'null'
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderResponse'
+    OutcomeBalanceItem:
+      type: object
+      required:
+      - outcomeId
+      - symbol
+      - free
+      - lockedInOrders
+      properties:
+        free:
+          type: string
+        lockedInOrders:
+          type: string
+        outcomeId:
+          type: integer
+          format: int32
+          minimum: 0.0
+        symbol:
+          type: string
+    OutcomeDto:
+      type: object
+      required:
+      - outcomeId
+      - outcomeName
+      - symbol
+      - pricePrecision
+      - quantityPrecision
+      - tickSize
+      - stepSize
+      - minNotional
+      - maxBatchSize
+      properties:
+        maxBatchSize:
+          type: integer
+          format: int32
+          minimum: 0.0
+        minNotional:
+          type: string
+        outcomeId:
+          type: integer
+          format: int32
+          minimum: 0.0
+        outcomeName:
+          type: string
+        pricePrecision:
+          type: integer
+          format: int32
+          minimum: 0.0
+        quantityPrecision:
+          type: integer
+          format: int32
+          minimum: 0.0
+        stepSize:
+          type: string
+        symbol:
+          type: string
+        tickSize:
+          type: string
+    TerminalDto:
+      type: object
+      required:
+      - kind
+      - at
+      properties:
+        at:
+          type: integer
+          format: int64
+        cancelReason:
+          type:
+          - string
+          - 'null'
+        kind:
+          type: string
+        resolvedOutcomeId:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0.0
+    TimingsDto:
+      type: object
+      required:
+      - stakeStart
+      - stakeEnd
+      - resultStart
+      - resultEnd
+      properties:
+        frozenAt:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        resultEnd:
+          type: integer
+          format: int64
+        resultStart:
+          type: integer
+          format: int64
+        stakeEnd:
+          type: integer
+          format: int64
+        stakeStart:
+          type: integer
+          format: int64
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-DODEX-APIKEY
+      description: API key issued by the Dodex backend. Signed requests also carry `timestamp`, `signature`, and an optional `recvWindow` as query parameters.

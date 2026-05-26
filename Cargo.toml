@@ -26,6 +26,7 @@ tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "signal", "
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 salvo = { version = "0.74", features = ["logging"] }
+salvo-oapi = { version = "0.74", features = ["yaml"] }
 salvo_extra = "0.74"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 base64 = "0.22"

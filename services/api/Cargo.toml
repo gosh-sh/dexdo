@@ -13,6 +13,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 salvo.workspace = true
+salvo-oapi.workspace = true
 salvo_extra.workspace = true
 uuid.workspace = true
 dodex-application = { path = "../../crates/application" }
