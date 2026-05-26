@@ -90,9 +90,9 @@ mod tests {
         let e = BigUint::from(0x42u32);
         let o = BigUint::from(0x24u32);
         let h = stake_hash(&e, &o, 1).unwrap();
-        // Recorded against tvm-sdk v2.24.20.an. Regenerate if tvm_abi
-        // packing rules change — and re-verify against a real PN's _stakes
-        // map keys before updating (see read-api.md §Stake projection).
+        // Regenerate if tvm_abi packing rules change — and re-verify against
+        // a real PN's _stakes map keys before updating (see read-api.md
+        // §Stake projection).
         let pinned = "0xb9165587c603af7c59d0fc5db123a8cab4d08ece1419f2049c3cdbd9b3a0f6d8";
         assert_eq!(h, pinned);
     }

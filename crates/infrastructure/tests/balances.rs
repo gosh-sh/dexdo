@@ -48,19 +48,23 @@ async fn lookup_ref_token_returns_seeded_rows() {
 }
 
 #[tokio::test]
-async fn lookup_ref_token_above_i32_max_short_circuits_to_none() {
-    // The `ref_tokens.token_type` column is `integer` (signed i32), so a
-    // u32 above `i32::MAX` cannot exist in the table. The repo short-circuits
-    // to `None` instead of widening the bind to bigint, sparing a round-trip.
+async fn lookup_ref_token_above_i32_max_fails_closed() {
+    // The `ref_tokens.token_type` column is `integer` (signed i32). A u32
+    // above `i32::MAX` is structurally impossible — chain ABI is uint32 but
+    // the DB column cannot hold it. The repo lifts to MarketInconsistent so
+    // the caller's log line for genuine-unknown does not blur with this
+    // distinct corruption case.
     let Some(pool) = setup().await else { return };
     let refs = PostgresReferenceRepository::new(pool.clone());
 
-    let out = refs.lookup_ref_token(u32::MAX).await.expect("ok");
-    assert!(out.is_none());
-    // i32::MAX + 1 — the smallest value that triggers the short-circuit.
+    let err = refs.lookup_ref_token(u32::MAX).await.unwrap_err();
+    let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
+    assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
+    // i32::MAX + 1 — the smallest value that triggers the branch.
     let just_above = (i32::MAX as u32) + 1;
-    let out = refs.lookup_ref_token(just_above).await.expect("ok");
-    assert!(out.is_none());
+    let err = refs.lookup_ref_token(just_above).await.unwrap_err();
+    let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
+    assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
 }
 
 #[tokio::test]
@@ -83,7 +87,9 @@ async fn lookup_ref_token_decimals_above_u8_max_fails_closed() {
            on conflict (token_type) do update set decimals = excluded.decimals"#,
     )
     .bind(oversize_tt)
-    .execute(&pool).await.unwrap();
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let refs = PostgresReferenceRepository::new(pool.clone());
     let err = refs.lookup_ref_token(oversize_tt as u32).await.unwrap_err();
@@ -111,7 +117,8 @@ async fn insert_market(pool: &PgPool, name: &str) -> (String, String, i64) {
         .fetch_one(pool)
         .await
         .unwrap();
-    for (oid, sym, name) in [(0i32, format!("{name}-NO"), "NO"), (1, format!("{name}-YES"), "YES")] {
+    for (oid, sym, name) in [(0i32, format!("{name}-NO"), "NO"), (1, format!("{name}-YES"), "YES")]
+    {
         sqlx::query(
             r#"insert into market_outcomes (
                   market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
@@ -135,14 +142,13 @@ async fn insert_market(pool: &PgPool, name: &str) -> (String, String, i64) {
 async fn resolve_market_for_balances_returns_reconciled_row() {
     let Some(pool) = setup().await else { return };
     sqlx::query("delete from markets where pmp_address like '0:resolve-bal-%'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     let (pmp, ob, _) = insert_market(&pool, "resolve-bal-1").await;
     let repo = PostgresReadModelRepository::new(pool.clone());
 
-    let res = repo
-        .resolve_market_for_balances(&MarketAddress(pmp.clone()))
-        .await
-        .expect("ok");
+    let res = repo.resolve_market_for_balances(&MarketAddress(pmp.clone())).await.expect("ok");
     assert_eq!(res.event_id, "42");
     assert_eq!(res.oracle_list_hash, "24");
     assert_eq!(res.token_type, 1);
@@ -170,7 +176,9 @@ async fn resolve_market_for_balances_unknown_returns_invalid_market() {
 async fn resolve_market_for_balances_unreconciled_returns_invalid_market() {
     let Some(pool) = setup().await else { return };
     sqlx::query("delete from markets where pmp_address = '0:unrec-bal-pmp'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"insert into markets (
               pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
@@ -178,7 +186,9 @@ async fn resolve_market_for_balances_unreconciled_returns_invalid_market() {
            values ('0:unrec-bal-pmp', 'x', 1, 'NACKL', 1::numeric, 1::numeric,
                    '0:unrec-bal-ob', 2, null)"#,
     )
-    .execute(&pool).await.unwrap();
+    .execute(&pool)
+    .await
+    .unwrap();
     let repo = PostgresReadModelRepository::new(pool.clone());
 
     let err = repo
@@ -223,7 +233,9 @@ async fn insert_live_order(
 async fn sum_open_sell_remaining_groups_by_outcome_and_filters() {
     let Some(pool) = setup().await else { return };
     sqlx::query("delete from live_orders where orderbook_address = '0:sum-sell-ob'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let ob = "0:sum-sell-ob";
     let me = "0:my-pn";
@@ -255,10 +267,7 @@ async fn sum_open_sell_remaining_groups_by_outcome_and_filters() {
 async fn sum_open_sell_remaining_empty_when_no_match() {
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
-    let sums = repo
-        .sum_open_sell_remaining("0:no-such-ob", "0:no-such-pn")
-        .await
-        .expect("ok");
+    let sums = repo.sum_open_sell_remaining("0:no-such-ob", "0:no-such-pn").await.expect("ok");
     assert!(sums.is_empty());
 }
 
@@ -272,19 +281,31 @@ async fn resolve_market_for_balances_outcome_count_mismatch_fails_closed() {
     let pmp = "0:mismatch-bal-pmp";
     let ob = "0:mismatch-bal-ob";
     sqlx::query("delete from live_orders where orderbook_address = $1")
-        .bind(ob).execute(&pool).await.unwrap();
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("delete from markets where pmp_address = $1")
-        .bind(pmp).execute(&pool).await.unwrap();
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"insert into markets (
               pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
               orderbook_address, num_outcomes, last_reconciled_at)
            values ($1, 'mismatch-test', 1, 'NACKL', 42::numeric, 24::numeric, $2, 3, now())"#,
     )
-    .bind(pmp).bind(ob)
-    .execute(&pool).await.unwrap();
+    .bind(pmp)
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
     let id: i64 = sqlx::query_scalar("select id from markets where pmp_address = $1")
-        .bind(pmp).fetch_one(&pool).await.unwrap();
+        .bind(pmp)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     // Insert only 2 rows despite num_outcomes = 3.
     for (oid, sym, name) in [(0i32, "mismatch-NO", "NO"), (1, "mismatch-YES", "YES")] {
         sqlx::query(
@@ -294,15 +315,18 @@ async fn resolve_market_for_balances_outcome_count_mismatch_fails_closed() {
                   min_notional, max_batch_size)
                values ($1, $2, $3, $4, $5, 3, 2, '0.001', '0.01', '1', 5)"#,
         )
-        .bind(id).bind(pmp).bind(oid).bind(name).bind(sym)
-        .execute(&pool).await.unwrap();
+        .bind(id)
+        .bind(pmp)
+        .bind(oid)
+        .bind(name)
+        .bind(sym)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     let repo = PostgresReadModelRepository::new(pool.clone());
-    let err = repo
-        .resolve_market_for_balances(&MarketAddress(pmp.to_string()))
-        .await
-        .unwrap_err();
+    let err = repo.resolve_market_for_balances(&MarketAddress(pmp.to_string())).await.unwrap_err();
     let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
     assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
 }
@@ -317,7 +341,10 @@ async fn resolve_market_for_balances_null_oracle_list_hash_fails_closed() {
     let pmp = "0:null-orahash-bal-pmp";
     let ob = "0:null-orahash-bal-ob";
     sqlx::query("delete from markets where pmp_address = $1")
-        .bind(pmp).execute(&pool).await.unwrap();
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"insert into markets (
               pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
@@ -325,14 +352,14 @@ async fn resolve_market_for_balances_null_oracle_list_hash_fails_closed() {
            values ($1, 'null-orahash', 1, 'NACKL', 42::numeric, null,
                    $2, 1, now())"#,
     )
-    .bind(pmp).bind(ob)
-    .execute(&pool).await.unwrap();
+    .bind(pmp)
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let repo = PostgresReadModelRepository::new(pool.clone());
-    let err = repo
-        .resolve_market_for_balances(&MarketAddress(pmp.to_string()))
-        .await
-        .unwrap_err();
+    let err = repo.resolve_market_for_balances(&MarketAddress(pmp.to_string())).await.unwrap_err();
     let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
     assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
 }
@@ -349,7 +376,10 @@ async fn resolve_market_for_balances_blank_orderbook_address_fails_closed() {
     // UNIQUE index on `markets.orderbook_address` would otherwise reject
     // re-running this test if a prior panic skipped teardown.
     sqlx::query("delete from markets where pmp_address = $1 or orderbook_address = '   '")
-        .bind(pmp).execute(&pool).await.unwrap();
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"insert into markets (
               pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
@@ -358,13 +388,12 @@ async fn resolve_market_for_balances_blank_orderbook_address_fails_closed() {
                    '   ', 1, now())"#,
     )
     .bind(pmp)
-    .execute(&pool).await.unwrap();
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let repo = PostgresReadModelRepository::new(pool.clone());
-    let err = repo
-        .resolve_market_for_balances(&MarketAddress(pmp.to_string()))
-        .await
-        .unwrap_err();
+    let err = repo.resolve_market_for_balances(&MarketAddress(pmp.to_string())).await.unwrap_err();
     let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
     assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
 }
@@ -379,7 +408,10 @@ async fn resolve_market_for_balances_negative_token_type_fails_closed() {
     let pmp = "0:neg-tt-bal-pmp";
     let ob = "0:neg-tt-bal-ob";
     sqlx::query("delete from markets where pmp_address = $1")
-        .bind(pmp).execute(&pool).await.unwrap();
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
     // markets.token_type has an FK to ref_tokens; idempotently seed a
     // sentinel -1 row so the markets insert below doesn't violate the FK.
     // All `not null` columns must be filled — the values themselves are
@@ -393,7 +425,9 @@ async fn resolve_market_for_balances_negative_token_type_fails_closed() {
                         0::numeric, 0::numeric, 0::numeric, 0, 0)
            on conflict (token_type) do nothing"#,
     )
-    .execute(&pool).await.unwrap();
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         r#"insert into markets (
               pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
@@ -401,14 +435,14 @@ async fn resolve_market_for_balances_negative_token_type_fails_closed() {
            values ($1, 'neg-tt', -1, '__NEG_TT__', 42::numeric, 24::numeric,
                    $2, 1, now())"#,
     )
-    .bind(pmp).bind(ob)
-    .execute(&pool).await.unwrap();
+    .bind(pmp)
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let repo = PostgresReadModelRepository::new(pool.clone());
-    let err = repo
-        .resolve_market_for_balances(&MarketAddress(pmp.to_string()))
-        .await
-        .unwrap_err();
+    let err = repo.resolve_market_for_balances(&MarketAddress(pmp.to_string())).await.unwrap_err();
     let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
     assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
 }
@@ -423,19 +457,31 @@ async fn resolve_for_new_order_negative_outcome_id_fails_closed() {
     let pmp = "0:neg-outcome-id-placement-pmp";
     let ob = "0:neg-outcome-id-placement-ob";
     sqlx::query("delete from live_orders where orderbook_address = $1")
-        .bind(ob).execute(&pool).await.unwrap();
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("delete from markets where pmp_address = $1")
-        .bind(pmp).execute(&pool).await.unwrap();
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"insert into markets (
               pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
               orderbook_address, num_outcomes, last_reconciled_at)
            values ($1, 'neg-oid-test', 1, 'NACKL', 42::numeric, 24::numeric, $2, 1, now())"#,
     )
-    .bind(pmp).bind(ob)
-    .execute(&pool).await.unwrap();
+    .bind(pmp)
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
     let id: i64 = sqlx::query_scalar("select id from markets where pmp_address = $1")
-        .bind(pmp).fetch_one(&pool).await.unwrap();
+        .bind(pmp)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     // Insert outcome with outcome_id = -1 — negative value the DB accepts but
     // the domain guard must reject.
     sqlx::query(
@@ -445,20 +491,18 @@ async fn resolve_for_new_order_negative_outcome_id_fails_closed() {
               min_notional, max_batch_size)
            values ($1, $2, -1, 'NO', $3, 3, 2, '0.001', '0.01', '1', 5)"#,
     )
-    .bind(id).bind(pmp).bind(format!("{}-NO", pmp))
-    .execute(&pool).await.unwrap();
+    .bind(id)
+    .bind(pmp)
+    .bind(format!("{}-NO", pmp))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let repo = PostgresReadModelRepository::new(pool.clone());
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+        as i64;
     let err = repo
-        .resolve_for_new_order(
-            &MarketAddress(pmp.to_string()),
-            &Symbol(format!("{}-NO", pmp)),
-            now,
-        )
+        .resolve_for_new_order(&MarketAddress(pmp.to_string()), &Symbol(format!("{}-NO", pmp)), now)
         .await
         .unwrap_err();
     let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");

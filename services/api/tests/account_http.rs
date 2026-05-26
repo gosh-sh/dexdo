@@ -11,8 +11,8 @@ use common::canonical_query;
 use common::now_ms;
 use common::sign;
 use common::SEED_API_KEY;
-use common::SEED_API_SECRET;
 use common::SEED_API_KEY_2;
+use common::SEED_API_SECRET;
 use common::SEED_API_SECRET_2;
 use dodex_application::PnDetails;
 use salvo::http::StatusCode;
@@ -53,13 +53,10 @@ async fn happy_path_returns_balances_sorted_by_asset() {
     let Some((service, _pool, _kek, pn)) = common::setup().await else { return };
     pn.set_details(PnDetails {
         balance: vec![
-            (3, "25000000000".to_string()),  // 25_000 USDC at 6 decimals
-            (1, "10000000000".to_string()),  // 10 NACKL at 9 decimals
+            (3, "25000000000".to_string()), // 25_000 USDC at 6 decimals
+            (1, "10000000000".to_string()), // 10 NACKL at 9 decimals
         ],
-        locked_in_orders: vec![
-            (3, "3750000000".to_string()),
-            (1, "1500000000".to_string()),
-        ],
+        locked_in_orders: vec![(3, "3750000000".to_string()), (1, "1500000000".to_string())],
     });
 
     let ts = now_ms();
@@ -72,7 +69,8 @@ async fn happy_path_returns_balances_sorted_by_asset() {
         .send(&service)
         .await;
     let status = resp.status_code;
-    let body: AccountBody = resp.take_json().await.unwrap_or_else(|e| panic!("expected account body, got: {e}"));
+    let body: AccountBody =
+        resp.take_json().await.unwrap_or_else(|e| panic!("expected account body, got: {e}"));
     assert_eq!(status, Some(StatusCode::OK));
     assert!(!body.account_id.is_empty());
     assert_eq!(body.update_time > 0, true);
@@ -148,14 +146,20 @@ async fn account_id_differs_per_credential() {
     let pn2 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY_2).await;
 
     // Different free values so we can assert the right PN was queried.
-    pn.set_details_for(&pn1, PnDetails {
-        balance: vec![(1, "10000000000".to_string())], // 10 NACKL
-        locked_in_orders: vec![],
-    });
-    pn.set_details_for(&pn2, PnDetails {
-        balance: vec![(1, "20000000000".to_string())], // 20 NACKL
-        locked_in_orders: vec![],
-    });
+    pn.set_details_for(
+        &pn1,
+        PnDetails {
+            balance: vec![(1, "10000000000".to_string())], // 10 NACKL
+            locked_in_orders: vec![],
+        },
+    );
+    pn.set_details_for(
+        &pn2,
+        PnDetails {
+            balance: vec![(1, "20000000000".to_string())], // 20 NACKL
+            locked_in_orders: vec![],
+        },
+    );
 
     let ts1 = now_ms();
     let sig1 = sign_get(SEED_API_SECRET, "5000", &ts1.to_string());
@@ -181,14 +185,20 @@ async fn account_id_differs_per_credential() {
     assert_eq!(resp2.status_code, Some(StatusCode::OK));
     let body2: AccountBody = resp2.take_json().await.expect("body2");
 
-    assert_ne!(body1.account_id, body2.account_id,
-        "two distinct credentials must surface as distinct accountIds");
+    assert_ne!(
+        body1.account_id, body2.account_id,
+        "two distinct credentials must surface as distinct accountIds"
+    );
     // Each response must reflect its own PN's balance, proving the handler
     // routed to the correct PN address.
-    assert_eq!(body1.balances[0].free, "10.000000000",
-        "SEED_API_KEY's balance must reflect pn1's preloaded value");
-    assert_eq!(body2.balances[0].free, "20.000000000",
-        "SEED_API_KEY_2's balance must reflect pn2's preloaded value");
+    assert_eq!(
+        body1.balances[0].free, "10.000000000",
+        "SEED_API_KEY's balance must reflect pn1's preloaded value"
+    );
+    assert_eq!(
+        body2.balances[0].free, "20.000000000",
+        "SEED_API_KEY_2's balance must reflect pn2's preloaded value"
+    );
 }
 
 #[tokio::test]

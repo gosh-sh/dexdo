@@ -170,12 +170,15 @@ impl FakePnStateReader {
     pub fn set_details(&self, d: PnDetails) {
         *self.details.lock().unwrap() = Some(Ok(d));
     }
+
     pub fn fail_details(&self, msg: &str) {
         *self.details.lock().unwrap() = Some(Err(msg.into()));
     }
+
     pub fn set_stake(&self, s: Option<PnStake>) {
         *self.stake.lock().unwrap() = Some(s);
     }
+
     pub fn fail_stake(&self, msg: &str) {
         *self.stake_err.lock().unwrap() = Some(msg.into());
     }
@@ -183,9 +186,11 @@ impl FakePnStateReader {
     pub fn set_details_for(&self, pn_address: &str, d: PnDetails) {
         self.details_by_pn.lock().unwrap().insert(pn_address.to_string(), Ok(d));
     }
+
     pub fn set_stake_for(&self, pn_address: &str, s: Option<PnStake>) {
         self.stake_by_pn.lock().unwrap().insert(pn_address.to_string(), s);
     }
+
     pub fn set_stake_for_hash(&self, stake_hash: &str, s: Option<PnStake>) {
         self.stake_by_hash.lock().unwrap().insert(stake_hash.to_string(), s);
     }
@@ -206,7 +211,12 @@ impl PnStateReader for FakePnStateReader {
             None => Err(anyhow::anyhow!("FakePnStateReader: details not set")),
         }
     }
-    async fn get_stake(&self, pn_address: &str, stake_hash: &str) -> anyhow::Result<Option<PnStake>> {
+
+    async fn get_stake(
+        &self,
+        pn_address: &str,
+        stake_hash: &str,
+    ) -> anyhow::Result<Option<PnStake>> {
         if let Some(msg) = self.stake_err.lock().unwrap().clone() {
             return Err(anyhow::anyhow!(msg));
         }
@@ -239,11 +249,12 @@ impl FakeReferenceRepo {
         m.insert(3, RefToken { token_type: 3, token_code: "USDC".into(), decimals: 6 });
         Self { rows: Mutex::new(m) }
     }
+
     pub fn add(&self, token_type: u32, code: &str, decimals: u8) {
-        self.rows.lock().unwrap().insert(
-            token_type,
-            RefToken { token_type, token_code: code.into(), decimals },
-        );
+        self.rows
+            .lock()
+            .unwrap()
+            .insert(token_type, RefToken { token_type, token_code: code.into(), decimals });
     }
 }
 

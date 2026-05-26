@@ -45,7 +45,13 @@ impl GraphqlPnStateReader {
             .fetch_account_boc(pn_address)
             .await
             .with_context(|| format!("fetch BOC for {pn_address}"))?
-            .ok_or_else(|| anyhow!("account is None — PN not deployed at {pn_address}"))
+            // Distinct typed variant so the use case can preserve it
+            // through its map_err chain and the API surface as 404
+            // instead of conflating with gateway/parse failures (503).
+            .ok_or_else(|| {
+                anyhow::Error::from(dodex_domain::DomainError::AccountNotDeployed)
+                    .context(format!("PN not deployed at {pn_address}"))
+            })
     }
 }
 
@@ -87,9 +93,9 @@ fn stake_from_value(v: &Value, stake_hash: &str) -> anyhow::Result<Option<PnStak
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("_stakes reply has no `_stakes` object"))?;
     // tvm_abi serializes uint256 map keys as `0x` + 64-char zero-padded
-    // lowercase hex (Detokenizer + serde, workspace tvm-sdk v2.24.20.an).
-    // `stake_hash` from infrastructure::tvm_hash always produces that exact
-    // shape, so a direct lookup is sufficient — no per-version fallback.
+    // lowercase hex. `stake_hash` from infrastructure::tvm_hash always
+    // produces that exact shape, so a direct lookup is sufficient — no
+    // per-version fallback.
     let Some(entry) = map.get(stake_hash) else { return Ok(None) };
     let amount = read_uint_array(entry, "amount")?;
     let debt = read_uint_array(entry, "debtAmount")?;
@@ -108,11 +114,18 @@ fn read_uint_map(v: &Value, key: &str) -> anyhow::Result<Vec<(u32, String)>> {
         // negative or out-of-range value fails closed at the boundary
         // rather than poisoning the rest of the read path.
         let token_type: u32 = k.parse().with_context(|| format!("parse `{key}` key: {k}"))?;
-        let amount = val
-            .as_str()
-            .ok_or_else(|| anyhow!("`{key}[{k}]` is not a string"))?
-            .to_string();
-        out.push((token_type, amount));
+        let amount = val.as_str().ok_or_else(|| anyhow!("`{key}[{k}]` is not a string"))?;
+        // Same posture as `read_uint_array`: chain ABI emits `uint128`
+        // amounts as a non-empty decimal literal ("0" at minimum).
+        // Validate at the boundary so a corrupt value cannot survive
+        // into `scale_decimal`'s BigUint::from_str two layers later.
+        if amount.is_empty() {
+            return Err(anyhow!("`{key}[{k}]` is empty"));
+        }
+        if amount.bytes().any(|b| !b.is_ascii_digit()) {
+            return Err(anyhow!("`{key}[{k}]` is not a non-negative integer literal: {amount}"));
+        }
+        out.push((token_type, amount.to_string()));
     }
     Ok(out)
 }
@@ -125,9 +138,7 @@ fn read_uint_array(v: &Value, key: &str) -> anyhow::Result<Vec<String>> {
     arr.iter()
         .enumerate()
         .map(|(i, x)| {
-            let s = x
-                .as_str()
-                .ok_or_else(|| anyhow!("`{key}[{i}]` is not a string"))?;
+            let s = x.as_str().ok_or_else(|| anyhow!("`{key}[{i}]` is not a string"))?;
             // Chain ABI emits uint256 as a non-empty decimal literal ("0" at
             // minimum). An empty string would otherwise survive into
             // add_decimal_strs and coerce silently to 0, hiding read-model
@@ -142,8 +153,9 @@ fn read_uint_array(v: &Value, key: &str) -> anyhow::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn details_from_value_parses_two_token_types() {
@@ -156,16 +168,37 @@ mod tests {
         let bal: std::collections::HashMap<_, _> = d.balance.into_iter().collect();
         assert_eq!(bal.get(&1), Some(&"10000000000".to_string()));
         assert_eq!(bal.get(&3), Some(&"25000000000".to_string()));
-        let lock: std::collections::HashMap<_, _> =
-            d.locked_in_orders.into_iter().collect();
+        let lock: std::collections::HashMap<_, _> = d.locked_in_orders.into_iter().collect();
         assert_eq!(lock.get(&1), Some(&"1500000000".to_string()));
         assert_eq!(lock.get(&3), None);
     }
 
     #[test]
+    fn details_from_value_rejects_empty_balance_amount() {
+        let v = json!({
+            "balance": { "1": "" },
+            "lockedInOrders": {}
+        });
+        let err = details_from_value(&v).unwrap_err().to_string();
+        assert!(err.contains("balance[1]"), "got: {err}");
+    }
+
+    #[test]
+    fn details_from_value_rejects_non_digit_balance_amount() {
+        let v = json!({
+            "balance": { "2": "10abc" },
+            "lockedInOrders": {}
+        });
+        let err = details_from_value(&v).unwrap_err().to_string();
+        assert!(err.contains("balance[2]"), "got: {err}");
+        assert!(err.contains("non-negative integer"), "got: {err}");
+    }
+
+    #[test]
     fn stake_from_value_rejects_empty_amount_element() {
-        use crate::tvm_hash::stake_hash;
         use num_bigint::BigUint;
+
+        use crate::tvm_hash::stake_hash;
 
         let key = stake_hash(&BigUint::from(0x42u32), &BigUint::from(0x24u32), 1).unwrap();
         let v = serde_json::json!({
@@ -194,8 +227,9 @@ mod tests {
 
     #[test]
     fn stake_from_value_finds_entry_keyed_by_real_stake_hash() {
-        use crate::tvm_hash::stake_hash;
         use num_bigint::BigUint;
+
+        use crate::tvm_hash::stake_hash;
 
         // Compute the same 0x+64-hex shape tvm_abi produces for uint256 map
         // keys via the production hasher. This pins the test JSON to whatever

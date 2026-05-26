@@ -155,10 +155,12 @@ impl MarketReadRepository for FakeRepo {
             .find(|o| o.symbol == *symbol)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(DomainError::InvalidMarketOrSymbol))?;
+        let token_type = u32::try_from(market.token_type)
+            .map_err(|_| anyhow::anyhow!(DomainError::MarketInconsistent))?;
         Ok(MarketForPlacement {
             event_id: market.event.event_id,
             oracle_list_hash: market.oracle_list_hash,
-            token_type: market.token_type,
+            token_type,
             status: market.status,
             outcome,
         })

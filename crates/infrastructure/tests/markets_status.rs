@@ -499,7 +499,11 @@ async fn negative_resolved_outcome_id_fails_closed() {
     // Insert via raw SQL; markets table accepts the value, build_terminal's
     // try_into guard MUST surface it as MarketInconsistent.
     let pmp = "0:negative-resolved-outcome";
-    sqlx::query("delete from markets where pmp_address = $1").bind(pmp).execute(&pool).await.unwrap();
+    sqlx::query("delete from markets where pmp_address = $1")
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"insert into markets (
               pmp_address, market_id, name, token_type, token_code, event_id, oracle_list_hash,
@@ -511,13 +515,14 @@ async fn negative_resolved_outcome_id_fails_closed() {
                    extract(epoch from now())::bigint,
                    -1)"#,
     )
-    .bind(pmp).execute(&pool).await.unwrap();
+    .bind(pmp)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let repo = PostgresReadModelRepository::new(pool.clone());
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+        as i64;
     let err = repo
         .list_markets(&dodex_application::MarketsRequest::One {
             market_address: MarketAddress(pmp.to_string()),
@@ -558,7 +563,8 @@ async fn resolved_outcome_id_set_to_one_succeeds() {
 
     let request =
         MarketsRequest::One { market_address: MarketAddress(pmp.clone()), now: 1_700_000_400 };
-    let page = repo.list_markets(&request).await.expect("positive resolved_outcome_id must succeed");
+    let page =
+        repo.list_markets(&request).await.expect("positive resolved_outcome_id must succeed");
     let market = page.markets.first().expect("market row returned");
     assert_eq!(market.status, MarketStatus::Resolved);
     let terminal = market.terminal.as_ref().expect("terminal populated");
@@ -695,12 +701,11 @@ async fn negative_price_precision_fails_closed() {
 
     purge_market(&pool, &pmp).await;
     insert_market(&pool, &pmp, &market_name, &orderbook, false, None).await;
-    let market_id: i64 =
-        sqlx::query_scalar("select id from markets where pmp_address = $1")
-            .bind(&pmp)
-            .fetch_one(&pool)
-            .await
-            .expect("market id");
+    let market_id: i64 = sqlx::query_scalar("select id from markets where pmp_address = $1")
+        .bind(&pmp)
+        .fetch_one(&pool)
+        .await
+        .expect("market id");
     sqlx::query(
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
@@ -717,7 +722,8 @@ async fn negative_price_precision_fails_closed() {
 
     let request =
         MarketsRequest::One { market_address: MarketAddress(pmp.clone()), now: 1_700_000_150 };
-    let err = repo.list_markets(&request).await.expect_err("negative price_precision must fail closed");
+    let err =
+        repo.list_markets(&request).await.expect_err("negative price_precision must fail closed");
     let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
     assert_eq!(*domain, DomainError::MarketInconsistent);
 }

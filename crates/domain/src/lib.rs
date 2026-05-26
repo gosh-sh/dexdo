@@ -925,6 +925,13 @@ pub enum DomainError {
     OrderPnBusy,
     #[error("unknown order")]
     UnknownOrder,
+    /// The caller's PrivateNote contract is not deployed yet at the
+    /// resolved address. Operationally distinct from gateway flap or PN
+    /// state parsing failure — the address is well-formed and the
+    /// account is reachable, the BOC just isn't there. Surfaces as 404
+    /// so clients can offer "deploy your account" rather than retry.
+    #[error("account not deployed")]
+    AccountNotDeployed,
     /// The read-model row violates a tech-spec invariant (e.g. RESOLVED with
     /// `frozenAt = null`, CANCELLED with `cancelReason = null`). Per the
     /// invariant-checking contract in `docs/tech-specs/read-api.md`
@@ -962,6 +969,7 @@ impl DomainError {
             Self::MarketInconsistent => -1500,
             Self::OrderValidationFailed => -2010,
             Self::UnknownOrder => -2011,
+            Self::AccountNotDeployed => -2013,
             Self::OrderPnBusy => -2014,
         }
     }
@@ -982,6 +990,7 @@ impl DomainError {
             Self::MarketInconsistent => "Market data is temporarily inconsistent.",
             Self::OrderValidationFailed => "Order would immediately fail validation.",
             Self::UnknownOrder => "Unknown order.",
+            Self::AccountNotDeployed => "Account not deployed.",
             Self::OrderPnBusy => "Trading note busy with a previous order; retry shortly.",
         }
     }

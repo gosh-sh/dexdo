@@ -229,25 +229,66 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // each side explicitly: bids descending by price, asks ascending. The
         // raw `price` column is a non-negative integer string, so BigUint
         // gives an exact numeric compare without depending on string length.
-        let mut bids: Vec<PriceLevel> = Vec::new();
-        let mut asks: Vec<PriceLevel> = Vec::new();
+        // A non-numeric price is read-model corruption — fail closed rather
+        // than collapse silently to 0 and reorder the book.
+        let mut bids: Vec<(BigUint, PriceLevel)> = Vec::new();
+        let mut asks: Vec<(BigUint, PriceLevel)> = Vec::new();
         for row in rows {
-            let level = PriceLevel { price: row.price, quantity: row.quantity };
+            let key = BigUint::parse_bytes(row.price.as_bytes(), 10).ok_or_else(|| {
+                tracing::warn!(
+                    orderbook = %orderbook_address,
+                    outcome_id,
+                    raw = %row.price,
+                    "live_orders.price is not a non-negative integer",
+                );
+                anyhow!(DomainError::MarketInconsistent)
+            })?;
+            let level = (key, PriceLevel { price: row.price, quantity: row.quantity });
             if row.is_buy {
                 bids.push(level);
             } else {
                 asks.push(level);
             }
         }
-        bids.sort_by_cached_key(|l| {
-            std::cmp::Reverse(BigUint::parse_bytes(l.price.as_bytes(), 10).unwrap_or_default())
-        });
-        asks.sort_by_cached_key(|l| {
-            BigUint::parse_bytes(l.price.as_bytes(), 10).unwrap_or_default()
-        });
+        bids.sort_by(|a, b| b.0.cmp(&a.0));
+        asks.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut bids: Vec<PriceLevel> = bids.into_iter().map(|(_, l)| l).collect();
+        let mut asks: Vec<PriceLevel> = asks.into_iter().map(|(_, l)| l).collect();
 
-        let price_scale = u32::try_from(price_precision.max(0)).unwrap_or(0);
-        let quantity_scale = u32::try_from(quantity_precision.max(0)).unwrap_or(0);
+        // `market_outcomes.(price|quantity)_precision` is `integer` (signed)
+        // but bounded by domain contract: non-negative AND <=
+        // MAX_DECIMAL_PRECISION (= NUMERIC(38, …)). A negative value is
+        // structural corruption; a value above the cap would let
+        // scale_uint_to_decimal's "0".repeat(scale) detonate the allocator
+        // on the first scaled level. Both modes lift to MarketInconsistent.
+        let price_scale = validate_decimal_scale(price_precision).map_err(|reason| {
+            tracing::warn!(
+                orderbook = %orderbook_address,
+                outcome_id,
+                raw = price_precision,
+                max = MAX_DECIMAL_PRECISION,
+                reason = match reason {
+                    InvalidScale::Negative => "negative",
+                    InvalidScale::AboveMax => "above MAX_DECIMAL_PRECISION",
+                },
+                "market_outcomes.price_precision out of range",
+            );
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
+        let quantity_scale = validate_decimal_scale(quantity_precision).map_err(|reason| {
+            tracing::warn!(
+                orderbook = %orderbook_address,
+                outcome_id,
+                raw = quantity_precision,
+                max = MAX_DECIMAL_PRECISION,
+                reason = match reason {
+                    InvalidScale::Negative => "negative",
+                    InvalidScale::AboveMax => "above MAX_DECIMAL_PRECISION",
+                },
+                "market_outcomes.quantity_precision out of range",
+            );
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
         for level in bids.iter_mut().chain(asks.iter_mut()) {
             level.price = scale_uint_to_decimal(&level.price, price_scale);
             level.quantity = scale_uint_to_decimal(&level.quantity, quantity_scale);
@@ -342,8 +383,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
             now,
         );
 
-        // Log so ops can triage reconciler partial-writes; the empty
-        // string then feeds the use case's `is_empty` invariant check.
+        // A reconciled row is supposed to carry a non-blank oracle_list_hash —
+        // the chain ABI requires it for placeOrder, and the use case would
+        // immediately reject a blank value. Lift to MarketInconsistent at the
+        // boundary so the caller sees a typed error instead of a sentinel
+        // empty string.
         let oracle_list_hash = match row.oracle_list_hash {
             Some(raw) if !raw.trim().is_empty() => raw,
             other => {
@@ -352,10 +396,19 @@ impl MarketReadRepository for PostgresReadModelRepository {
                     null = other.is_none(),
                     "resolve_for_new_order: oracle_list_hash NULL/blank on reconciled row",
                 );
-                String::new()
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
             }
         };
 
+        let token_type: u32 = row.token_type.try_into().map_err(|_| {
+            tracing::warn!(
+                market_address = %market_address.0,
+                symbol = %symbol.0,
+                raw = row.token_type,
+                "placement_row token_type is negative",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
         let outcome_id: u32 = row.outcome_id.try_into().map_err(|_| {
             tracing::warn!(
                 market_address = %market_address.0,
@@ -396,7 +449,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         Ok(MarketForPlacement {
             event_id: row.event_id,
             oracle_list_hash,
-            token_type: row.token_type,
+            token_type,
             status,
             outcome: Outcome {
                 outcome_id,
@@ -483,6 +536,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
             now,
         );
 
+        // See resolve_for_new_order: a blank oracle_list_hash on a reconciled
+        // row is read-model corruption. Fail closed at the repo boundary.
         let oracle_list_hash = match row.oracle_list_hash {
             Some(raw) if !raw.trim().is_empty() => raw,
             other => {
@@ -491,9 +546,19 @@ impl MarketReadRepository for PostgresReadModelRepository {
                     null = other.is_none(),
                     "resolve_for_cancel: oracle_list_hash NULL/blank on reconciled row",
                 );
-                String::new()
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
             }
         };
+
+        let token_type: u32 = row.token_type.try_into().map_err(|_| {
+            tracing::warn!(
+                market_address = %market_address.0,
+                symbol = %symbol.0,
+                raw = row.token_type,
+                "cancel_row token_type is negative",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
 
         let client_order_id = row.client_order_id.and_then(|raw| {
             let trimmed = raw.trim();
@@ -507,7 +572,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         Ok(OrderForCancel {
             event_id: row.event_id,
             oracle_list_hash,
-            token_type: row.token_type,
+            token_type,
             market_status: status,
             client_order_id,
         })
@@ -727,13 +792,20 @@ impl MarketReadRepository for PostgresReadModelRepository {
         )
         .bind(&market_address.0)
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .context("resolve_market_for_balances: select markets")?;
 
-        let (event_id, oracle_list_hash, token_type_raw, orderbook_address, num_outcomes, market_id) =
-            match market {
-                Some(m) => m,
-                None => return Err(anyhow::anyhow!(dodex_domain::DomainError::InvalidMarketOrSymbol)),
-            };
+        let (
+            event_id,
+            oracle_list_hash,
+            token_type_raw,
+            orderbook_address,
+            num_outcomes,
+            market_id,
+        ) = match market {
+            Some(m) => m,
+            None => return Err(anyhow::anyhow!(dodex_domain::DomainError::InvalidMarketOrSymbol)),
+        };
 
         // `oracle_list_hash` is nullable at the schema level (pre-reconcile),
         // but we already gated on last_reconciled_at IS NOT NULL — a NULL here
@@ -770,7 +842,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
         )
         .bind(market_id)
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .context("resolve_market_for_balances: select market_outcomes")?;
 
         // `num_outcomes` is `integer` (signed) in Postgres but non-negative
         // by contract. Treat a negative value as read-model corruption.
@@ -841,7 +914,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .bind(orderbook_address)
         .bind(owner_pn_address)
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .context("sum_open_sell_remaining: aggregate live_orders")?;
         rows.into_iter()
             .map(|(oid, sum)| {
                 let oid = u32::try_from(oid).map_err(|_| {
@@ -954,8 +1028,9 @@ fn build_status_predicate(filter: &OrderStatusFilter) -> Option<String> {
     const PARTIALLY_FILLED: &str = "(lo.status = 'OPEN' AND lo.amount_remaining < lo.amount_initial AND lo.amount_remaining > 0)";
     const FILLED: &str = "lo.status = 'FILLED'";
     const CANCELED: &str = "lo.status = 'CANCELLED'";
-    // Public status token, but structurally empty until the contracts-side
-    // follow-up extends the live_orders.status CHECK to admit REJECTED rows.
+    // Public status token. The disjunct selects no rows while the
+    // `live_orders.status` CHECK constraint forbids `'REJECTED'`; the
+    // query plan stays valid either way.
     const REJECTED: &str = "lo.status = 'REJECTED'";
 
     let disjuncts: Vec<&'static str> = statuses
@@ -1064,8 +1139,9 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
         }
         "FILLED" => OrderStatus::Filled,
         "CANCELLED" => OrderStatus::Canceled,
-        // Awaiting the contracts-side follow-up that extends the CHECK
-        // constraint; current migrated rows cannot legally reach this arm.
+        // Reachable only when the `live_orders.status` CHECK constraint
+        // admits `'REJECTED'`; the current schema forbids it, so this arm
+        // is structurally unreachable until that migration ships.
         "REJECTED" => {
             if row.order_id != "0" {
                 error!(
@@ -1139,10 +1215,27 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
 /// is the read-side defence.
 const MAX_DECIMAL_PRECISION: u32 = 38;
 
+/// Reason a `(price|quantity)_precision` value is unusable. Distinguishes
+/// the two corruption modes so callers can log them with the same field
+/// names while keeping their own surrounding context (skip-row vs
+/// MarketInconsistent).
+enum InvalidScale {
+    Negative,
+    AboveMax,
+}
+
+fn validate_decimal_scale(raw: i32) -> Result<u32, InvalidScale> {
+    let scale = u32::try_from(raw).map_err(|_| InvalidScale::Negative)?;
+    if scale > MAX_DECIMAL_PRECISION {
+        return Err(InvalidScale::AboveMax);
+    }
+    Ok(scale)
+}
+
 fn precision_to_scale(raw: i32, field: &str, row: &OrderRow) -> Option<u32> {
-    let scale = match u32::try_from(raw) {
-        Ok(scale) => scale,
-        Err(_) => {
+    match validate_decimal_scale(raw) {
+        Ok(scale) => Some(scale),
+        Err(InvalidScale::Negative) => {
             error!(
                 order_id = %row.order_id,
                 market = %row.market_address,
@@ -1150,21 +1243,20 @@ fn precision_to_scale(raw: i32, field: &str, row: &OrderRow) -> Option<u32> {
                 precision = raw,
                 "live_orders row has negative decimal precision; skipping"
             );
-            return None;
+            None
         }
-    };
-    if scale > MAX_DECIMAL_PRECISION {
-        error!(
-            order_id = %row.order_id,
-            market = %row.market_address,
-            precision_field = field,
-            precision = raw,
-            max = MAX_DECIMAL_PRECISION,
-            "live_orders row has decimal precision above MAX_DECIMAL_PRECISION; skipping to prevent unbounded allocation in scale_uint_to_decimal"
-        );
-        return None;
+        Err(InvalidScale::AboveMax) => {
+            error!(
+                order_id = %row.order_id,
+                market = %row.market_address,
+                precision_field = field,
+                precision = raw,
+                max = MAX_DECIMAL_PRECISION,
+                "live_orders row has decimal precision above MAX_DECIMAL_PRECISION; skipping to prevent unbounded allocation in scale_uint_to_decimal"
+            );
+            None
+        }
     }
-    Some(scale)
 }
 
 impl PostgresReadModelRepository {
@@ -1589,15 +1681,15 @@ fn assemble_market(
     // NULL/blank value here must NOT fail-close the read endpoints —
     // `/api/v1/markets` and `/api/v1/depth` do not surface this field
     // and would silently hide an otherwise-valid market. Paths that
-    // DO depend on the value enforce the constraint themselves and
-    // emit `MarketInconsistent` only when the field is actually
-    // needed:
-    //   - trading: `CreateOrderUseCase::execute`'s `is_empty` check
-    //     on the `MarketForPlacement` projection produced by
-    //     `resolve_for_new_order`;
-    //   - balances: `resolve_market_for_balances` rejects NULL /
-    //     blank outright (the value feeds the off-chain `stake_hash`,
-    //     so a missing one cannot be papered over).
+    // DO depend on the value reject NULL/blank at their own repo
+    // boundary, emitting `MarketInconsistent` only when the field is
+    // actually needed:
+    //   - trading: `resolve_for_new_order` and `resolve_for_cancel`
+    //     lift the blank to `MarketInconsistent` before the use case
+    //     ever sees the projection;
+    //   - balances: `resolve_market_for_balances` rejects NULL/blank
+    //     outright (the value feeds the off-chain `stake_hash`, so a
+    //     missing one cannot be papered over).
     // So we render NULL as the empty string here and let those
     // strict consumers fail closed on demand instead of pre-emptively
     // hiding the listing.
@@ -1808,17 +1900,11 @@ fn build_timings(row: &MarketRow, status: MarketStatus) -> Option<Timings> {
     Some(Timings { stake_start, stake_end, result_start, result_end, frozen_at: row.frozen_at })
 }
 
-fn build_terminal(
-    row: &MarketRow,
-    status: MarketStatus,
-) -> Result<Option<Terminal>, DomainError> {
+fn build_terminal(row: &MarketRow, status: MarketStatus) -> Result<Option<Terminal>, DomainError> {
     match status {
         MarketStatus::Resolved => {
-            let resolved_outcome_id = row
-                .resolved_outcome_id
-                .map(u32::try_from)
-                .transpose()
-                .map_err(|_| {
+            let resolved_outcome_id =
+                row.resolved_outcome_id.map(u32::try_from).transpose().map_err(|_| {
                     tracing::warn!(
                         raw = ?row.resolved_outcome_id,
                         "resolved_outcome_id is negative"
@@ -2561,20 +2647,17 @@ impl dodex_application::ReferenceRepository for PostgresReferenceRepository {
         token_type: u32,
     ) -> Result<Option<dodex_application::RefToken>, anyhow::Error> {
         // The DB column is `integer` (i32 range). A u32 above i32::MAX
-        // therefore cannot exist in the table, so short-circuit to `None`
-        // instead of widening the bind to bigint. Warn here so operators
-        // see the real cause — "structurally impossible value" — instead
-        // of the caller's generic "unknown token_type" log.
-        let bind = match i32::try_from(token_type) {
-            Ok(v) => v,
-            Err(_) => {
-                tracing::warn!(
-                    token_type,
-                    "ref_tokens lookup: token_type exceeds i32::MAX; column is signed integer, value cannot exist on chain or in DB",
-                );
-                return Ok(None);
-            }
-        };
+        // cannot exist in the table — chain ABI is uint32 but the DB column
+        // is signed, so such a value is structurally impossible read-model
+        // corruption. Lift to MarketInconsistent instead of collapsing to
+        // `None` (which would be indistinguishable from an unknown row).
+        let bind = i32::try_from(token_type).map_err(|_| {
+            tracing::warn!(
+                token_type,
+                "ref_tokens lookup: token_type exceeds i32::MAX; structurally impossible value",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
         let row: Option<(String, i32)> = sqlx::query_as(
             r#"select token_code, decimals
                  from ref_tokens
@@ -2582,7 +2665,8 @@ impl dodex_application::ReferenceRepository for PostgresReferenceRepository {
         )
         .bind(bind)
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .context("lookup_ref_token: select ref_tokens")?;
         row.map(|(token_code, decimals)| -> Result<_, anyhow::Error> {
             let decimals = u8::try_from(decimals).map_err(|_| {
                 tracing::warn!(token_type, raw = decimals, "decimals is out of range for u8");

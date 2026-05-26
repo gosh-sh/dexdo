@@ -249,3 +249,89 @@ async fn resolve_for_new_order_derives_cancelled_status() {
         .expect("resolve cancelled");
     assert_eq!(resolved.status, MarketStatus::Cancelled);
 }
+
+#[tokio::test]
+async fn resolve_for_new_order_blank_oracle_list_hash_fails_closed() {
+    // A reconciled market is supposed to carry a non-blank oracle_list_hash.
+    // A NULL slipping through (reconciler partial-write) must surface as
+    // MarketInconsistent at the repo boundary so the chain submission path
+    // never sees a sentinel empty string.
+    let Some(pool) = setup().await else { return };
+    let pmp = "0:rfno_blank_ohash_pmp";
+    let symbol = "RFNO_BLANK_OHASH_YES";
+    purge_market(&pool, pmp, symbol).await;
+
+    let market_id: i64 = sqlx::query_scalar(
+        r#"insert into markets
+               (pmp_address, market_id, name, token_type, token_code,
+                event_id, oracle_list_hash, orderbook_address,
+                stake_start, stake_end, result_start, result_end,
+                frozen_at, last_reconciled_at)
+           values ($1, $1, $1, 3, 'USDC',
+                   42::numeric, NULL, $1,
+                   1700000100, 1700000200, 1700000300, 1700000400,
+                   1700000210, now())
+           returning id"#,
+    )
+    .bind(pmp)
+    .fetch_one(&pool)
+    .await
+    .expect("insert market with NULL hash");
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 7, 'YES', $3,
+                   2, 4, '0.01', '0.0001', '5.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(symbol)
+    .execute(&pool)
+    .await
+    .expect("insert outcome");
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo
+        .resolve_for_new_order(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 1_700_000_250)
+        .await
+        .expect_err("NULL oracle_list_hash must fail closed");
+    let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+    assert!(matches!(dom, DomainError::MarketInconsistent));
+}
+
+#[tokio::test]
+async fn resolve_for_new_order_negative_token_type_fails_closed() {
+    // The DB column `markets.token_type` is `integer` (signed) but the chain
+    // ABI is uint32. A negative value is read-model corruption. The repo
+    // lifts it to MarketInconsistent at the boundary with a warn carrying
+    // (market_address, raw) so the trading path never sees a sign-flipped
+    // value.
+    let Some(pool) = setup().await else { return };
+    let pmp = "0:rfno_neg_tt_pmp";
+    let symbol = "RFNO_NEG_TT_YES";
+    purge_market(&pool, pmp, symbol).await;
+    // FK to ref_tokens — seed a sentinel -1 row idempotently.
+    sqlx::query(
+        r#"insert into ref_tokens (
+              token_type, token_code, decimals,
+              min_notional, lot_size, tick_size_bps,
+              price_precision, quantity_precision)
+                values (-1, '__NEG_TT_RFNO__', 0,
+                        0::numeric, 0::numeric, 0::numeric, 0, 0)
+           on conflict (token_type) do nothing"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_trading_market(&pool, pmp, symbol, -1, "1").await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo
+        .resolve_for_new_order(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 1_700_000_250)
+        .await
+        .expect_err("negative token_type must fail closed");
+    let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+    assert!(matches!(dom, DomainError::MarketInconsistent));
+}

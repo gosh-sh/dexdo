@@ -167,9 +167,12 @@ Recommended common error codes:
 | `-1500` | Market data is temporarily inconsistent. | 503 |
 | `-2010` | Order would immediately fail validation. | 400 |
 | `-2011` | Unknown order. | 404 |
+| `-2013` | Account not deployed. | 404 |
 | `-2014` | Trading note busy with a previous order; retry shortly. | 429 |
 
 `-1007` means the request did not complete in time. The order may still have been accepted by the exchange. Retry `POST /api/v1/order` with the same `newOrderClientId` — the server will deduplicate so the same order is not placed twice.
+
+`-2013` means the caller's authenticated account has no PrivateNote contract deployed at its resolved address. The credential is valid but the on-chain contract is missing; the client should offer "deploy your account" instead of retrying.
 
 `-2014` means another order from the same account is still being processed. Retry after a short delay; the in-flight order will appear in `/api/v1/orders` shortly.
 

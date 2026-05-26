@@ -110,7 +110,14 @@ impl AppState {
         pn_reader: SharedPnReader,
         ref_repo: SharedRefRepo,
     ) -> Self {
-        Self { repo, authenticator, chain_sender, pn_reader, ref_repo, request_timeout: Duration::ZERO }
+        Self {
+            repo,
+            authenticator,
+            chain_sender,
+            pn_reader,
+            ref_repo,
+            request_timeout: Duration::ZERO,
+        }
     }
 
     #[doc(hidden)]
@@ -319,7 +326,9 @@ impl ApiError {
             | DomainError::TimestampOutsideRecvWindow
             | DomainError::InvalidSignature => StatusCode::UNAUTHORIZED,
             DomainError::RequestTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            DomainError::UnknownOrder | DomainError::InvalidMarketOrSymbol => StatusCode::NOT_FOUND,
+            DomainError::UnknownOrder
+            | DomainError::InvalidMarketOrSymbol
+            | DomainError::AccountNotDeployed => StatusCode::NOT_FOUND,
             // Transient indexer state — fail closed, client retries when
             // the indexer catches up.
             DomainError::MarketInconsistent => StatusCode::SERVICE_UNAVAILABLE,
@@ -369,6 +378,7 @@ fn map_domain_or_unexpected(err: anyhow::Error, context: &str) -> ApiError {
             | DomainError::InvalidParameter
             | DomainError::InvalidMarketOrSymbol
             | DomainError::UnknownOrder
+            | DomainError::AccountNotDeployed
             | DomainError::AuthRequired
             | DomainError::AuthEnvelopeIncomplete
             | DomainError::TimestampOutsideRecvWindow
@@ -380,7 +390,11 @@ fn map_domain_or_unexpected(err: anyhow::Error, context: &str) -> ApiError {
             DomainError::MarketInconsistent
             | DomainError::RequestTimeout
             | DomainError::Unexpected => {
-                tracing::warn!(?domain, context, "handler surfacing 5xx domain error")
+                // Log the full anyhow chain (including any `.context()`
+                // breadcrumbs from the use case / repo) — `?domain` alone
+                // collapses to the variant name and drops upstream
+                // diagnostics that ops need to triage 5xx.
+                tracing::warn!(?err, ?domain, context, "handler surfacing 5xx domain error")
             }
         }
         return ApiError::from(*domain);
@@ -1119,10 +1133,8 @@ async fn get_account(
         .clone();
 
     let now_ms = now_pair().1;
-    let use_case = dodex_application::GetAccountUseCase::new(
-        state.pn_reader.clone(),
-        state.ref_repo.clone(),
-    );
+    let use_case =
+        dodex_application::GetAccountUseCase::new(state.pn_reader.clone(), state.ref_repo.clone());
     let out = use_case
         .execute(dodex_application::GetAccountInput {
             account_id: ctx.account_id,
@@ -1188,8 +1200,9 @@ fn balances_stake_hash(
     oracle_list_hash: &str,
     token_type: u32,
 ) -> Result<String, dodex_domain::DomainError> {
-    use num_bigint::BigUint;
     use std::str::FromStr;
+
+    use num_bigint::BigUint;
     let event = BigUint::from_str(event_id).map_err(|err| {
         tracing::warn!(event_id, error = %err, "event_id is not a numeric string");
         dodex_domain::DomainError::MarketInconsistent
@@ -1275,7 +1288,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     info!("api running with postgres read-model repository");
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
-    let authenticator: SharedAuth = Arc::new(PostgresAuthenticator::new(pool.clone(), kek, &config.auth));
+    let authenticator: SharedAuth =
+        Arc::new(PostgresAuthenticator::new(pool.clone(), kek, &config.auth));
     let chain_sender: SharedChainSender = Arc::new(BeeDexChainSender::new(
         vec![config.chain.gateway_endpoint.clone()],
         Duration::from_millis(config.chain.place_order_timeout_ms),
@@ -1288,10 +1302,9 @@ pub async fn run() -> anyhow::Result<()> {
     )?);
     let pn_reader: SharedPnReader =
         Arc::new(dodex_infrastructure::pn_state_reader::GraphqlPnStateReader::new(graphql)?);
-    let ref_repo: SharedRefRepo =
-        Arc::new(dodex_infrastructure::postgres_repo::PostgresReferenceRepository::new(
-            pool.clone(),
-        ));
+    let ref_repo: SharedRefRepo = Arc::new(
+        dodex_infrastructure::postgres_repo::PostgresReferenceRepository::new(pool.clone()),
+    );
     let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
         .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms));
 
@@ -1329,8 +1342,9 @@ fn now_pair() -> (i64, i64) {
 
 #[cfg(test)]
 mod balances_hasher_tests {
-    use super::*;
     use dodex_domain::DomainError;
+
+    use super::*;
 
     #[test]
     fn non_numeric_event_id_returns_market_inconsistent() {
@@ -1368,9 +1382,10 @@ mod balances_hasher_tests {
 
 #[cfg(test)]
 mod dto_tests {
-    use super::*;
     use dodex_domain::AssetBalance;
     use dodex_domain::OutcomeBalance;
+
+    use super::*;
 
     #[test]
     fn account_response_uses_camel_case_and_string_amounts() {

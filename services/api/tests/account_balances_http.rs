@@ -10,8 +10,8 @@ use common::canonical_query;
 use common::now_ms;
 use common::sign;
 use common::SEED_API_KEY;
-use common::SEED_API_SECRET;
 use common::SEED_API_KEY_2;
+use common::SEED_API_SECRET;
 use common::SEED_API_SECRET_2;
 use dodex_application::PnStake;
 use salvo::http::StatusCode;
@@ -67,11 +67,8 @@ fn pct_encode(value: &str) -> String {
 
 fn sign_get(api_secret: &str, recv: &str, ts: &str, market: &str) -> String {
     let market_enc = pct_encode(market);
-    let canonical = canonical_query(&[
-        ("marketAddress", &market_enc),
-        ("recvWindow", recv),
-        ("timestamp", ts),
-    ]);
+    let canonical =
+        canonical_query(&[("marketAddress", &market_enc), ("recvWindow", recv), ("timestamp", ts)]);
     sign(api_secret, &canonical, b"")
 }
 
@@ -80,19 +77,32 @@ async fn seed_market(pool: &PgPool, tag: &str) -> (String, String) {
     let ob = format!("0:{tag}-ob");
     // Clean slate.
     sqlx::query("delete from live_orders where orderbook_address = $1")
-        .bind(&ob).execute(pool).await.unwrap();
+        .bind(&ob)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query("delete from markets where pmp_address = $1")
-        .bind(&pmp).execute(pool).await.unwrap();
+        .bind(&pmp)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"insert into markets (
               pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
               orderbook_address, num_outcomes, last_reconciled_at)
            values ($1, $2, 1, 'NACKL', 42::numeric, 24::numeric, $3, 2, now())"#,
     )
-    .bind(&pmp).bind(tag).bind(&ob)
-    .execute(pool).await.unwrap();
+    .bind(&pmp)
+    .bind(tag)
+    .bind(&ob)
+    .execute(pool)
+    .await
+    .unwrap();
     let id: i64 = sqlx::query_scalar("select id from markets where pmp_address = $1")
-        .bind(&pmp).fetch_one(pool).await.unwrap();
+        .bind(&pmp)
+        .fetch_one(pool)
+        .await
+        .unwrap();
     for (oid, sym, name) in [(0i32, format!("{tag}-NO"), "NO"), (1, format!("{tag}-YES"), "YES")] {
         sqlx::query(
             r#"insert into market_outcomes (
@@ -101,13 +111,26 @@ async fn seed_market(pool: &PgPool, tag: &str) -> (String, String) {
                   min_notional, max_batch_size)
                values ($1, $2, $3, $4, $5, 3, 2, '0.001', '0.01', '1', 5)"#,
         )
-        .bind(id).bind(&pmp).bind(oid).bind(name).bind(&sym)
-        .execute(pool).await.unwrap();
+        .bind(id)
+        .bind(&pmp)
+        .bind(oid)
+        .bind(name)
+        .bind(&sym)
+        .execute(pool)
+        .await
+        .unwrap();
     }
     (pmp, ob)
 }
 
-async fn seed_open_sell(pool: &PgPool, ob: &str, order_id: i64, outcome: i32, owner: &str, amt: &str) {
+async fn seed_open_sell(
+    pool: &PgPool,
+    ob: &str,
+    order_id: i64,
+    outcome: i32,
+    owner: &str,
+    amt: &str,
+) {
     sqlx::query(
         r#"insert into live_orders (
               orderbook_address, order_id, outcome_id, is_buy, price,
@@ -116,8 +139,14 @@ async fn seed_open_sell(pool: &PgPool, ob: &str, order_id: i64, outcome: i32, ow
            values ($1, $2::numeric, $3, false, '500'::numeric, $4::numeric, $4::numeric,
                    'OPEN', '0', '0', $5)"#,
     )
-    .bind(ob).bind(order_id).bind(outcome).bind(amt).bind(owner)
-    .execute(pool).await.unwrap();
+    .bind(ob)
+    .bind(order_id)
+    .bind(outcome)
+    .bind(amt)
+    .bind(owner)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn seeded_pn_address(pool: &PgPool) -> String {
@@ -132,7 +161,9 @@ async fn seeded_pn_address(pool: &PgPool) -> String {
          where k.api_key = $1 limit 1",
     )
     .bind(SEED_API_KEY)
-    .fetch_one(pool).await.unwrap()
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -141,10 +172,10 @@ async fn happy_path_returns_outcomes_sorted_by_id() {
     let (pmp, ob) = seed_market(&pool, "happy-bal").await;
     let pn_addr = seeded_pn_address(&pool).await;
     seed_open_sell(&pool, &ob, 1001, 1, &pn_addr, "100").await; // outcome 1: 1.00 locked
-    seed_open_sell(&pool, &ob, 1002, 1, &pn_addr, "50").await;  // outcome 1: +0.50 = 1.50 total
+    seed_open_sell(&pool, &ob, 1002, 1, &pn_addr, "50").await; // outcome 1: +0.50 = 1.50 total
 
     pn.set_stake(Some(PnStake {
-        amount: vec!["1000".into(), "500".into()],          // outcome 0=10.00, 1=5.00
+        amount: vec!["1000".into(), "500".into()], // outcome 0=10.00, 1=5.00
         debt_amount: vec!["0".into(), "0".into()],
         coupons_amount: vec!["0".into(), "0".into()],
     }));
@@ -358,11 +389,14 @@ async fn cross_tenant_isolation_excludes_other_owner_orders() {
     seed_open_sell(&pool, &ob, 9901, 0, &pn1, "100").await;
     seed_open_sell(&pool, &ob, 9902, 0, &pn2, "999").await;
 
-    pn.set_stake_for(&pn1, Some(PnStake {
-        amount: vec!["0".into(), "0".into()],
-        debt_amount: vec!["0".into(), "0".into()],
-        coupons_amount: vec!["0".into(), "0".into()],
-    }));
+    pn.set_stake_for(
+        &pn1,
+        Some(PnStake {
+            amount: vec!["0".into(), "0".into()],
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        }),
+    );
 
     let ts = now_ms();
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
@@ -395,11 +429,14 @@ async fn cross_tenant_isolation_symmetric_from_second_account() {
     seed_open_sell(&pool, &ob, 9911, 0, &pn1, "100").await;
     seed_open_sell(&pool, &ob, 9912, 0, &pn2, "999").await;
 
-    pn.set_stake_for(&pn2, Some(PnStake {
-        amount: vec!["0".into(), "0".into()],
-        debt_amount: vec!["0".into(), "0".into()],
-        coupons_amount: vec!["0".into(), "0".into()],
-    }));
+    pn.set_stake_for(
+        &pn2,
+        Some(PnStake {
+            amount: vec!["0".into(), "0".into()],
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        }),
+    );
 
     let ts = now_ms();
     let sig = sign_get(SEED_API_SECRET_2, "5000", &ts.to_string(), &pmp);
@@ -432,11 +469,14 @@ async fn cross_tenant_isolation_free_side_does_not_leak_other_pn_stake() {
 
     let pn1 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY).await;
 
-    pn.set_stake_for(&pn1, Some(PnStake {
-        amount: vec!["700".into(), "300".into()],
-        debt_amount: vec!["0".into(), "0".into()],
-        coupons_amount: vec!["0".into(), "0".into()],
-    }));
+    pn.set_stake_for(
+        &pn1,
+        Some(PnStake {
+            amount: vec!["700".into(), "300".into()],
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        }),
+    );
 
     let ts = now_ms();
     let sig = sign_get(SEED_API_SECRET_2, "5000", &ts.to_string(), &pmp);
@@ -473,12 +513,9 @@ async fn production_hasher_is_wired_to_stake_lookup() {
     let (pmp, _ob) = seed_market(&pool, "hashwire-bal").await;
 
     // Mirror seed_market's row: event_id=42, oracle_list_hash=24, token_type=1.
-    let expected_hash = dodex_infrastructure::tvm_hash::stake_hash(
-        &BigUint::from(42u32),
-        &BigUint::from(24u32),
-        1,
-    )
-    .expect("compute expected stake hash");
+    let expected_hash =
+        dodex_infrastructure::tvm_hash::stake_hash(&BigUint::from(42u32), &BigUint::from(24u32), 1)
+            .expect("compute expected stake hash");
     pn.set_stake_for_hash(
         &expected_hash,
         Some(PnStake {

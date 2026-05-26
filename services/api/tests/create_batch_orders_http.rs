@@ -36,9 +36,9 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsRequest;
 use dodex_application::NewBatchOrderPayload;
 use dodex_application::NewOrderPayload;
+use dodex_application::OrderForCancel;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
-use dodex_application::OrderForCancel;
 use dodex_application::TradingPn;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -146,10 +146,12 @@ impl MarketReadRepository for FakeRepo {
             .find(|o| o.symbol == *symbol)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(DomainError::InvalidMarketOrSymbol))?;
+        let token_type = u32::try_from(market.token_type)
+            .map_err(|_| anyhow::anyhow!(DomainError::MarketInconsistent))?;
         Ok(MarketForPlacement {
             event_id: market.event.event_id,
             oracle_list_hash: market.oracle_list_hash,
-            token_type: market.token_type,
+            token_type,
             status: market.status,
             outcome,
         })
@@ -174,7 +176,9 @@ impl MarketReadRepository for FakeRepo {
         &self,
         _: &MarketAddress,
     ) -> Result<MarketBalancesResolution, anyhow::Error> {
-        unimplemented!("resolve_market_for_balances is not exercised by create_batch_orders_http tests")
+        unimplemented!(
+            "resolve_market_for_balances is not exercised by create_batch_orders_http tests"
+        )
     }
 
     async fn sum_open_sell_remaining(
