@@ -170,6 +170,83 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - apiKey: []
+    delete:
+      tags:
+      - trading
+      summary: Cancel a batch of orders atomically
+      description: |-
+        to `CancelBatchOrdersUseCase`, and shapes a flat array of
+
+        `PENDING_CANCEL` envelopes. The use case enforces non-empty
+
+        `orderIds[]`, intra-batch dedup, the `outcome.max_batch_size` cap,
+
+        and bulk order resolution. The chain (`PrivateNote.cancelBatch`)
+
+        accepts the list atomically under one `_busy` window.
+      operationId: delete_batch_orders
+      parameters:
+      - name: X-DODEX-APIKEY
+        in: header
+        description: API key.
+        required: true
+        schema:
+          type: string
+      - name: timestamp
+        in: query
+        description: Unix milliseconds. Signed.
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: recvWindow
+        in: query
+        description: Request validity window in milliseconds.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: signature
+        in: query
+        description: Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody.
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                marketAddress:
+                  type: string
+                orderIds:
+                  type: array
+                  items:
+                    type: string
+                symbol:
+                  type: string
+              additionalProperties: false
+        required: true
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CancelBatchOrderResponseItem'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - apiKey: []
   /api/v1/depth:
     get:
       tags:
@@ -619,6 +696,28 @@ components:
           type:
           - string
           - 'null'
+    CancelBatchOrderResponseItem:
+      type: object
+      description: |-
+        Response item for `DELETE /api/v1/batchOrders`. Same `PENDING_CANCEL`
+        envelope as the single-order DELETE — see [`CancelOrderResponse`]
+        for the rationale. Returned in request order; the array has one
+        element per accepted id.
+      required:
+      - orderId
+      - clientOrderId
+      - transactTime
+      - status
+      properties:
+        clientOrderId:
+          type: string
+        orderId:
+          type: string
+        status:
+          type: string
+        transactTime:
+          type: integer
+          format: int64
     CancelOrderResponse:
       type: object
       required:
