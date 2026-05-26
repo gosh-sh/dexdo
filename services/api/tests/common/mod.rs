@@ -166,6 +166,13 @@ impl ChainOrderSender for NoopChainSender {
     async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
         Ok(())
     }
+
+    async fn cancel_batch_order(
+        &self,
+        _: dodex_application::CancelBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
 }
 
 /// In-memory PnStateReader for HTTP tests. Each handler test that

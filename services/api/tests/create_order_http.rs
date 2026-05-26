@@ -177,6 +177,17 @@ impl MarketReadRepository for FakeRepo {
         unimplemented!("resolve_for_cancel is not exercised by create_order_http tests")
     }
 
+    async fn resolve_for_cancel_batch(
+        &self,
+        _: &MarketAddress,
+        _: &Symbol,
+        _: &[u64],
+        _: &str,
+        _: i64,
+    ) -> Result<Option<dodex_application::CancelBatchResolution>, anyhow::Error> {
+        unimplemented!("resolve_for_cancel_batch is not exercised by create_order_http tests")
+    }
+
     async fn list_orders(
         &self,
         _: &dodex_application::OrdersQuery,
@@ -248,6 +259,13 @@ impl ChainOrderSender for RecordingSender {
     ) -> Result<(), DomainError> {
         // POST /order tests never reach the batch path.
         unreachable!("RecordingSender::submit_batch_order called from POST /order test")
+    }
+
+    async fn cancel_batch_order(
+        &self,
+        _: dodex_application::CancelBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("RecordingSender::cancel_batch_order called from POST /order test")
     }
 }
 
@@ -891,6 +909,13 @@ impl ChainOrderSender for SlowSender {
         _: dodex_application::NewBatchOrderPayload,
     ) -> Result<(), DomainError> {
         unreachable!("SlowSender::submit_batch_order called from POST /order test")
+    }
+
+    async fn cancel_batch_order(
+        &self,
+        _: dodex_application::CancelBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("SlowSender::cancel_batch_order called from POST /order test")
     }
 }
 

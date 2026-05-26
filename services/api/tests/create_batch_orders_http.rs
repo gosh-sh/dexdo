@@ -168,6 +168,19 @@ impl MarketReadRepository for FakeRepo {
         unimplemented!("resolve_for_cancel is not exercised by create_batch_orders_http tests")
     }
 
+    async fn resolve_for_cancel_batch(
+        &self,
+        _: &MarketAddress,
+        _: &Symbol,
+        _: &[u64],
+        _: &str,
+        _: i64,
+    ) -> Result<Option<dodex_application::CancelBatchResolution>, anyhow::Error> {
+        unimplemented!(
+            "resolve_for_cancel_batch is not exercised by create_batch_orders_http tests"
+        )
+    }
+
     async fn list_orders(&self, _: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         unimplemented!("list_orders is not exercised by create_batch_orders_http tests")
     }
@@ -230,6 +243,13 @@ impl ChainOrderSender for RecordingBatchSender {
         }
         self.recorded.lock().unwrap().push(payload);
         Ok(())
+    }
+
+    async fn cancel_batch_order(
+        &self,
+        _: dodex_application::CancelBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("RecordingBatchSender::cancel_batch_order called from POST /batchOrders test")
     }
 }
 
@@ -994,6 +1014,13 @@ impl ChainOrderSender for SlowBatchSender {
         // test caps it at 50 ms so wall-clock stays in the tens of ms.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         Ok(())
+    }
+
+    async fn cancel_batch_order(
+        &self,
+        _: dodex_application::CancelBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("SlowBatchSender::cancel_batch_order called from POST /batchOrders test")
     }
 }
 

@@ -16,12 +16,12 @@ slot for the duration of its run. Each chain op (`deployPMP`, `setStake`,
 `_busy` lock, so two tests sharing the same slot would race each other
 to `ERR_NOTE_BUSY`. Assignments:
 
-| slot | purpose             |
-| ---- | ------------------- |
-| 0    | POST `/order`       |
-| 1    | DELETE `/order`     |
-| 2    | POST `/batchOrders` |
-| 3    | unclaimed           |
+| slot | purpose               |
+| ---- | --------------------- |
+| 0    | POST `/order`         |
+| 1    | DELETE `/order`       |
+| 2    | POST `/batchOrders`   |
+| 3    | DELETE `/batchOrders` |
 
 A new e2e test that needs its own deployer-PN takes the next free slot
 and adds the row here; top up the pool via `mint_pn_pool` when adding

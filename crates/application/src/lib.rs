@@ -1,6 +1,8 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -234,6 +236,46 @@ pub trait MarketReadRepository: Send + Sync {
         now: i64,
     ) -> Result<OrderForCancel, anyhow::Error>;
 
+    /// Resolve multiple open orders owned by `owner_pn_address` on a
+    /// single `(market_address, symbol)`. Returns matched rows in a
+    /// `HashMap<u64, OrderForCancelBatch>` keyed by chain `order_id`.
+    ///
+    /// **Trait contract — every impl owes:** every key in
+    /// `orders` is an element of the caller's `order_ids[]` slice.
+    /// The Postgres impl enforces this with
+    /// `WHERE lo.order_id = ANY($3)`; the natural HashMap uniqueness
+    /// plus the `(orderbook_address, order_id)` primary key
+    /// guarantees no key collisions.
+    ///
+    /// **Result shape:**
+    /// - `Ok(None)` — zero matches. Use case maps to `UnknownOrder`.
+    /// - `Ok(Some(r))` with `r.orders.len() == order_ids.len()` —
+    ///   full match (by contract every key is in input; pigeonhole
+    ///   gives an exact set match).
+    /// - `Ok(Some(r))` with `r.orders.len() < order_ids.len()` —
+    ///   partial shortfall (one or more input ids did not match).
+    ///   Use case maps to `UnknownOrder`.
+    /// - `Err(_)` — non-domain SELECT failure via `anyhow`.
+    ///
+    /// **Wrapping fields:** `event_id`, `oracle_list_hash`,
+    /// `token_type`, and `market_status` are projected from the
+    /// JOINed `markets` row onto `CancelBatchResolution`, evaluated
+    /// at the caller-provided `now`. All four are constant by SELECT
+    /// construction (filter pins one `(pmp_address, symbol)`). The
+    /// use case re-checks `market_status == Trading` post-SELECT to
+    /// close the race between `resolve_for_new_order`'s earlier
+    /// snapshot and this bulk one — a reconciler commit between the
+    /// two MVCC snapshots rejects with `OrderValidationFailed`
+    /// before chain dispatch.
+    async fn resolve_for_cancel_batch(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        order_ids: &[u64],
+        owner_pn_address: &str,
+        now: i64,
+    ) -> Result<Option<CancelBatchResolution>, anyhow::Error>;
+
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error>;
 
     /// Resolve a market for the balances path: returns chain-side
@@ -291,6 +333,19 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         now: i64,
     ) -> Result<OrderForCancel, anyhow::Error> {
         (**self).resolve_for_cancel(market_address, symbol, order_id, owner_pn_address, now).await
+    }
+
+    async fn resolve_for_cancel_batch(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        order_ids: &[u64],
+        owner_pn_address: &str,
+        now: i64,
+    ) -> Result<Option<CancelBatchResolution>, anyhow::Error> {
+        (**self)
+            .resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address, now)
+            .await
     }
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
@@ -1165,6 +1220,120 @@ pub struct SubmittedBatchOrders {
     pub items: Vec<SubmittedOrder>,
 }
 
+/// Input shape for `CancelBatchOrdersUseCase`. Mirrors the body of
+/// `DELETE /api/v1/batchOrders` — one trading PN, one `(marketAddress,
+/// symbol)`, plus the per-item id list. The chain ABI takes one
+/// `(eventId, oracleListHash, tokenType)` per batch, so all items share
+/// the same market resolution.
+#[derive(Debug, Clone)]
+pub struct CancelBatchOrdersInput {
+    pub trading_pn: TradingPn,
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
+    pub order_ids: Vec<u64>,
+    /// Unix seconds. Drives status derivation in the bulk SELECT.
+    pub now_seconds: i64,
+    /// Unix milliseconds. Returned to the client as `transactTime` for
+    /// every item in the batch — symmetric with peer Input types so the
+    /// handler cannot drift by re-sampling per item.
+    pub now_ms: i64,
+}
+
+/// Per-item chain payload field for `cancel_batch_order`. Peer of
+/// [`BatchOrderPayloadItem`] on the place-batch path: the chain ABI
+/// carries `(eventId, oracleListHash, tokenType)` at batch level and
+/// only `(order_id, client_order_id)` per row. `client_order_id` is
+/// the resolved `live_orders.client_order_id` for this entry — `None`
+/// for an order placed without a caller-supplied coid. Not part of
+/// the chain ABI; used only for the audit log so ops can grep a
+/// cancel-batch incident by `clientOrderId` without joining
+/// `live_orders` back.
+#[derive(Debug, Clone)]
+pub struct CancelBatchPayloadItem {
+    pub order_id: u64,
+    pub client_order_id: Option<String>,
+}
+
+/// Chain-shaped payload handed to `ChainOrderSender::cancel_batch_order`.
+/// Mirrors `NewBatchOrderPayload` but the ABI is narrower —
+/// `PrivateNote.cancelBatch` takes only event/oracle/token coordinates
+/// plus the chain-assigned `orderId[]`. No price, amount, or flags.
+#[derive(Debug, Clone)]
+pub struct CancelBatchOrderPayload {
+    pub pn_address: String,
+    pub pn_pubkey: String,
+    pub pn_seckey: SensitiveBytes,
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    pub token_type: u32,
+    pub items: Vec<CancelBatchPayloadItem>,
+}
+
+/// One matched live order from
+/// `MarketReadRepository::resolve_for_cancel_batch`. Carries only
+/// per-row data — chain identity and market status are pulled up to
+/// [`CancelBatchResolution`] because they are constant across all
+/// rows of one resolution (the SELECT is filtered to a single
+/// `(pmp_address, symbol)` pair, so every row joins the same `markets`
+/// snapshot). The chain `order_id` lives in the wrapping map's key,
+/// not on the row.
+#[derive(Debug, Clone)]
+pub struct OrderForCancelBatch {
+    /// `live_orders.client_order_id`. NULL surfaces as `None`; the
+    /// handler renders that as the empty string per
+    /// api-spec §Cancel Batch Orders.
+    pub client_order_id: Option<String>,
+}
+
+/// Result of `MarketReadRepository::resolve_for_cancel_batch`. Wraps
+/// the matched per-row data with the market-level identity and status
+/// that drive the chain payload, expressed once because they are
+/// constant by SELECT construction. `None` (at the trait level) means
+/// zero rows matched — the use case maps that to `UnknownOrder`.
+#[derive(Debug, Clone)]
+pub struct CancelBatchResolution {
+    /// Chain identity from the `markets` row the JOIN matched — feeds
+    /// `CancelBatchOrderPayload` directly, closing the race window
+    /// against `resolve_for_new_order`'s earlier MVCC view that could
+    /// have hashed a different market generation.
+    pub event_id: String,
+    /// `markets.oracle_list_hash`. NULL/blank surfaces as the empty
+    /// string with a warn at the infra layer (mirrors
+    /// `resolve_for_cancel`); the use case maps empty → MarketInconsistent.
+    pub oracle_list_hash: String,
+    /// `markets.token_type`. The use case applies `u32::try_from` so
+    /// an out-of-range read-model value collapses to MarketInconsistent
+    /// rather than panic.
+    pub token_type: i32,
+    /// `MarketStatus` derived from the JOINed `markets` row at the
+    /// use-case-provided `now`. The use case re-checks this
+    /// post-SELECT to close the race window against the earlier
+    /// `resolve_for_new_order` snapshot.
+    pub market_status: MarketStatus,
+    /// Matched live orders keyed by chain `order_id`. Trait contract
+    /// requires every key to be a member of the caller's
+    /// `order_ids[]` slice (Postgres enforces with
+    /// `lo.order_id = ANY($3::text[]::numeric[])`), and the natural
+    /// HashMap uniqueness on `(orderbook_address, order_id)` PK
+    /// guarantees no key collisions can surface here. The use case
+    /// rejects `orders.len() < order_ids.len()` as `UnknownOrder`
+    /// (shortfall) and then looks each input id up directly via
+    /// `orders.remove(&id)`. By trait contract `orders.len() <=
+    /// order_ids.len()` after the SELECT, so the shortfall gate plus
+    /// the per-id lookup together cover the full keyset-mismatch
+    /// space.
+    pub orders: HashMap<u64, OrderForCancelBatch>,
+}
+
+/// Output of `CancelBatchOrdersUseCase`. One entry per request item, in
+/// request order — the HTTP layer maps these into the `PENDING_CANCEL`
+/// array response per [api-spec §Cancel Batch Orders](../../docs/api-spec.md#cancel-batch-orders).
+#[derive(Debug, Clone)]
+pub struct CancelledBatchOrder {
+    pub order_id: u64,
+    pub client_order_id: Option<String>,
+}
+
 /// Dispatch a `PrivateNote.placeOrder` external message to chain.
 /// Returns once `bee_dex` has observed the chain's execution of
 /// `PrivateNote.placeOrder` — so PrivateNote-side `require(...)`
@@ -1199,6 +1368,21 @@ pub trait ChainOrderSender: Send + Sync {
     /// defence-in-depth — the use case pre-checks these), and
     /// `168 ERR_NOTIONAL_OVERFLOW`.
     async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError>;
+
+    /// Dispatch a `PrivateNote.cancelBatch` external message to chain.
+    /// `cancelBatch` accepts the orderId list atomically at the PN
+    /// (one external message, one `_busy` window) and forwards a single
+    /// `OrderBook.executeBatch` for the per-order cancels. Chain-side
+    /// rejects mapped here: `121 ERR_NOTE_BUSY` → `OrderPnBusy`, and the
+    /// range guards `161 ERR_BATCH_TOO_LARGE` / `162 ERR_EMPTY_BATCH`
+    /// → `MarketInconsistent` (defence-in-depth — the use case
+    /// pre-checks both, so reaching either code means read-model drift
+    /// from the on-chain ceiling).
+    /// Per-order OrderBook outcomes (silent no-op on owner-mismatch or
+    /// already-closed, queue overflow) remain asynchronous and surface
+    /// through the indexer.
+    async fn cancel_batch_order(&self, payload: CancelBatchOrderPayload)
+        -> Result<(), DomainError>;
 }
 
 #[async_trait]
@@ -1213,6 +1397,13 @@ impl<T: ?Sized + ChainOrderSender> ChainOrderSender for Arc<T> {
 
     async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError> {
         (**self).submit_batch_order(payload).await
+    }
+
+    async fn cancel_batch_order(
+        &self,
+        payload: CancelBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        (**self).cancel_batch_order(payload).await
     }
 }
 
@@ -1713,6 +1904,250 @@ where
     }
 }
 
+/// Orchestrates `DELETE /api/v1/batchOrders`: resolves market+outcome
+/// once, validates the request shape (non-empty,
+/// `len ≤ outcome.max_batch_size`, no intra-batch duplicates), resolves
+/// every order via one bulk SELECT, then dispatches a single
+/// `PrivateNote.cancelBatch` call. Any shortfall in the resolved set
+/// collapses to `UnknownOrder` for the whole batch — same opacity as
+/// single-cancel.
+pub struct CancelBatchOrdersUseCase<R, S> {
+    repo: R,
+    sender: S,
+}
+
+impl<R, S> CancelBatchOrdersUseCase<R, S> {
+    pub fn new(repo: R, sender: S) -> Self {
+        Self { repo, sender }
+    }
+}
+
+impl<R, S> CancelBatchOrdersUseCase<R, S>
+where
+    R: MarketReadRepository,
+    S: ChainOrderSender,
+{
+    pub async fn execute(
+        &self,
+        input: CancelBatchOrdersInput,
+    ) -> Result<Vec<CancelledBatchOrder>, DomainError> {
+        // `phase = "shape"` lets ops query the substring
+        // `cancelBatch rejected` and disambiguate empty/duplicate/oversize
+        // — symmetric with `CreateBatchOrdersUseCase`.
+        if input.order_ids.is_empty() {
+            warn!(phase = "shape", order_ids_len = 0, "cancelBatch rejected");
+            return Err(DomainError::InvalidParameter);
+        }
+
+        // `resolve_for_new_order` here is the early-exit gate: only its
+        // `outcome.max_batch_size` and `status` feed the pre-bulk-SELECT
+        // checks. Chain identity (`event_id`, `oracle_list_hash`,
+        // `token_type`) is read later from `CancelBatchResolution` of
+        // the bulk SELECT — same MVCC snapshot as the order rows — so a
+        // reconciler commit between the two queries cannot leak a
+        // stale market generation into the chain payload.
+        let MarketForPlacement { status, outcome, .. } = self
+            .repo
+            .resolve_for_new_order(&input.market_address, &input.symbol, input.now_seconds)
+            .await
+            .map_err(|err| {
+                if let Some(domain) = err.downcast_ref::<DomainError>() {
+                    return *domain;
+                }
+                error!(
+                    ?err,
+                    market_address = %input.market_address.0,
+                    "resolve_for_new_order failed (non-domain)",
+                );
+                DomainError::Unexpected
+            })?;
+
+        if status != MarketStatus::Trading {
+            return Err(DomainError::OrderValidationFailed);
+        }
+        // Cap check runs BEFORE the dedup HashSet allocation and BEFORE
+        // the bulk SELECT so an oversize input is rejected without paying
+        // O(N) memory or a second DB round trip.
+        if input.order_ids.len() > outcome.max_batch_size as usize {
+            warn!(
+                phase = "shape",
+                order_ids_len = input.order_ids.len(),
+                max_batch_size = outcome.max_batch_size,
+                "cancelBatch rejected",
+            );
+            return Err(DomainError::InvalidParameter);
+        }
+
+        // Intra-batch duplicates would produce two PENDING_CANCEL
+        // receipts for the same id and waste one slot in the chain's
+        // MAX_BATCH_SIZE window. Bounded by max_batch_size above.
+        let mut seen: HashSet<u64> = HashSet::with_capacity(input.order_ids.len());
+        for &id in &input.order_ids {
+            if !seen.insert(id) {
+                warn!(
+                    phase = "shape",
+                    order_ids_len = input.order_ids.len(),
+                    duplicate_id = id,
+                    "cancelBatch rejected",
+                );
+                return Err(DomainError::InvalidParameter);
+            }
+        }
+
+        let resolution = self
+            .repo
+            .resolve_for_cancel_batch(
+                &input.market_address,
+                &input.symbol,
+                &input.order_ids,
+                &input.trading_pn.pn_address,
+                input.now_seconds,
+            )
+            .await
+            .map_err(|err| {
+                if let Some(domain) = err.downcast_ref::<DomainError>() {
+                    return *domain;
+                }
+                error!(
+                    ?err,
+                    market_address = %input.market_address.0,
+                    "resolve_for_cancel_batch failed (non-domain)",
+                );
+                DomainError::Unexpected
+            })?;
+
+        // Zero rows matched — atomic validation collapses to the
+        // single ambiguous code per single-cancel's contract. Log the
+        // discriminator so ops can tell "all 50 unknown" from "1 of
+        // 50 misowned" and detect probe-style abuse without leaking
+        // the distinction to the caller.
+        let Some(resolution) = resolution else {
+            warn!(
+                phase = "resolution-empty",
+                pn = %input.trading_pn.pn_address,
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                input_count = input.order_ids.len(),
+                "cancel_batch resolution returned no rows",
+            );
+            return Err(DomainError::UnknownOrder);
+        };
+
+        let CancelBatchResolution {
+            event_id,
+            oracle_list_hash,
+            token_type,
+            market_status,
+            mut orders,
+        } = resolution;
+
+        // Shortfall collapses to the single ambiguous code, peer of
+        // single-cancel. Trait contract guarantees every key in
+        // `orders` is a member of `input.order_ids`, so by pigeonhole
+        // `len == input.len()` implies the keys are exactly the input
+        // set (no overage possible — HashMap dedups on PK). Peer log
+        // to `resolution-empty` so ops can distinguish a partial
+        // shortfall (e.g. mixed-ownership probe) from a wholesale
+        // miss.
+        if orders.len() < input.order_ids.len() {
+            warn!(
+                phase = "resolution-shortfall",
+                pn = %input.trading_pn.pn_address,
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                resolved_count = orders.len(),
+                input_count = input.order_ids.len(),
+                "cancel_batch resolution returned fewer rows than requested",
+            );
+            return Err(DomainError::UnknownOrder);
+        }
+
+        // Close the race between `resolve_for_new_order` and the bulk
+        // SELECT: a reconciler commit between the two MVCC snapshots
+        // could flip the market out of `Trading`.
+        if market_status != MarketStatus::Trading {
+            return Err(DomainError::OrderValidationFailed);
+        }
+        if oracle_list_hash.is_empty() {
+            // Peer of the other MarketInconsistent branches in this
+            // use case: log at use-case level so the symbol/order_ids
+            // context isn't lost in the infra-layer warn.
+            warn!(
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                input_count = input.order_ids.len(),
+                "cancel_batch resolution carries empty oracle_list_hash",
+            );
+            return Err(DomainError::MarketInconsistent);
+        }
+        let token_type = u32::try_from(token_type).map_err(|_| {
+            error!(
+                market_address = %input.market_address.0,
+                symbol = %input.symbol.0,
+                token_type,
+                "resolve_for_cancel_batch: token_type does not fit u32",
+            );
+            DomainError::MarketInconsistent
+        })?;
+
+        // Look each input id up against the resolution map. Trait
+        // contract + shortfall gate above mean every id MUST be
+        // present; a `None` here is a contract violation
+        // (MarketInconsistent rather than panic). Lookup preserves
+        // `input.order_ids` ordering for the response — no positional
+        // pairing on a separate index lives anywhere on the wire.
+        //
+        // Capture the resolution size BEFORE the lookup loop so the
+        // contract-violation warn reports the size the impl actually
+        // returned, not the count remaining after earlier `.remove`
+        // calls have drained the map.
+        let original_rows_len = orders.len();
+        let items: Vec<CancelBatchPayloadItem> = input
+            .order_ids
+            .iter()
+            .map(|&order_id| {
+                orders
+                    .remove(&order_id)
+                    .map(|order| CancelBatchPayloadItem {
+                        order_id,
+                        client_order_id: order.client_order_id,
+                    })
+                    .ok_or_else(|| {
+                        warn!(
+                            market_address = %input.market_address.0,
+                            symbol = %input.symbol.0,
+                            rows_len = original_rows_len,
+                            input_count = input.order_ids.len(),
+                            missing_order_id = order_id,
+                            "resolve_for_cancel_batch missing input order_id (trait contract violated)",
+                        );
+                        DomainError::MarketInconsistent
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        let response: Vec<CancelledBatchOrder> = items
+            .iter()
+            .map(|item| CancelledBatchOrder {
+                order_id: item.order_id,
+                client_order_id: item.client_order_id.clone(),
+            })
+            .collect();
+
+        let payload = CancelBatchOrderPayload {
+            pn_address: input.trading_pn.pn_address,
+            pn_pubkey: input.trading_pn.pn_pubkey,
+            pn_seckey: input.trading_pn.pn_seckey,
+            event_id,
+            oracle_list_hash,
+            token_type,
+            items,
+        };
+        self.sender.cancel_batch_order(payload).await?;
+
+        Ok(response)
+    }
+}
+
 /// Inputs to `GetOrdersUseCase::execute`, mirroring the shape of
 /// [`NewOrderInput`] for symmetry across read/write use cases. The
 /// HTTP handler is the only intended constructor: it owns the
@@ -1837,6 +2272,20 @@ mod tests {
     struct FakeRepo {
         market: Option<Market>,
         cancelable_order: Option<FakeCancelableOrder>,
+        live_orders: Vec<FakeCancelableOrder>,
+        /// Lets a test simulate a race between `resolve_for_new_order`
+        /// and `resolve_for_cancel_batch`: `self.market.status` answers
+        /// the first call (placement-shape snapshot), this override
+        /// answers the second (order-resolution snapshot). `None`
+        /// means "same status as the market" — the no-race default.
+        cancel_batch_status_override: Option<MarketStatus>,
+        /// When `Some(rogue_id)`, `resolve_for_cancel_batch` replaces
+        /// the first matched key with `rogue_id`. Models the
+        /// trait-contract violation where an impl returns a key not
+        /// present in `input.order_ids` despite the documented
+        /// `WHERE lo.order_id = ANY($3)` guarantee. The use case must
+        /// raise MarketInconsistent before any chain dispatch.
+        cancel_batch_rogue_key: Option<u64>,
         orders_response: OrdersPage,
         recorded_orders_queries: Mutex<Vec<OrdersQuery>>,
     }
@@ -1850,6 +2299,9 @@ mod tests {
             Self {
                 market: Some(market),
                 cancelable_order: None,
+                live_orders: Vec::new(),
+                cancel_batch_status_override: None,
+                cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1859,6 +2311,9 @@ mod tests {
             Self {
                 market: None,
                 cancelable_order: None,
+                live_orders: Vec::new(),
+                cancel_batch_status_override: None,
+                cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1868,9 +2323,37 @@ mod tests {
             Self {
                 market: Some(market),
                 cancelable_order: Some(order),
+                live_orders: Vec::new(),
+                cancel_batch_status_override: None,
+                cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
+        }
+
+        fn with_live_orders(market: Market, orders: Vec<FakeCancelableOrder>) -> Self {
+            Self {
+                market: Some(market),
+                cancelable_order: None,
+                live_orders: orders,
+                cancel_batch_status_override: None,
+                cancel_batch_rogue_key: None,
+                orders_response: empty_orders_page(),
+                recorded_orders_queries: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Builder that ONLY affects the bulk-cancel SELECT's status,
+        /// leaving `resolve_for_new_order` to answer with the market's
+        /// declared status. Models the inter-SELECT race directly.
+        fn with_cancel_batch_status(mut self, status: MarketStatus) -> Self {
+            self.cancel_batch_status_override = Some(status);
+            self
+        }
+
+        fn with_cancel_batch_rogue_key(mut self, rogue_id: u64) -> Self {
+            self.cancel_batch_rogue_key = Some(rogue_id);
+            self
         }
 
         fn recorded_orders_queries(&self) -> Vec<OrdersQuery> {
@@ -1960,6 +2443,88 @@ mod tests {
             })
         }
 
+        async fn resolve_for_cancel_batch(
+            &self,
+            _: &MarketAddress,
+            symbol: &Symbol,
+            order_ids: &[u64],
+            owner_pn_address: &str,
+            _: i64,
+        ) -> Result<Option<CancelBatchResolution>, anyhow::Error> {
+            // Mirror Postgres impl: any predicate miss simply yields
+            // fewer rows than asked. The use case promotes a shortfall
+            // to `UnknownOrder` for the whole batch; zero matches
+            // (no market, no symbol, no rows) surface as `None`.
+            let Some(market) = self.market.clone() else {
+                return Ok(None);
+            };
+            if !market.outcomes.iter().any(|o| o.symbol == *symbol) {
+                return Ok(None);
+            }
+            let mut orders: HashMap<u64, OrderForCancelBatch> = order_ids
+                .iter()
+                .filter_map(|&id| {
+                    self.live_orders
+                        .iter()
+                        .find(|o| o.order_id == id && o.owner_pn_address == owner_pn_address)
+                        .map(|o| {
+                            (
+                                id,
+                                OrderForCancelBatch {
+                                    // Mirror Postgres: NULL or whitespace-only
+                                    // `client_order_id` demotes to `None` so the
+                                    // fake doesn't hide trim drift from unit tests.
+                                    client_order_id: o.client_order_id.as_ref().and_then(|raw| {
+                                        let trimmed = raw.trim();
+                                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                                    }),
+                                },
+                            )
+                        })
+                })
+                .collect();
+            if orders.is_empty() {
+                return Ok(None);
+            }
+            if let Some(rogue_id) = self.cancel_batch_rogue_key {
+                // Two preconditions the test fixture must hold for
+                // the rogue swap to actually exercise the use-case's
+                // contract-violation gate (instead of silently
+                // collapsing into a shortfall):
+                //   1. `order_ids[0]` matched a live_orders row, so
+                //      there is something to swap out.
+                //   2. `rogue_id` is NOT itself in `input.order_ids`
+                //      — otherwise `insert(rogue_id, row)` would
+                //      overwrite a legitimate match, shrinking
+                //      orders.len() and tripping the shortfall gate
+                //      first.
+                // Both are easy to get wrong by parameterising over
+                // ids; panic here so a misconfigured test surfaces
+                // loudly instead of passing for the wrong reason.
+                let first_id = *order_ids
+                    .first()
+                    .expect("with_cancel_batch_rogue_key requires non-empty order_ids");
+                let row = orders.remove(&first_id).expect(
+                    "with_cancel_batch_rogue_key requires order_ids[0] to match a live_order",
+                );
+                assert!(
+                    !order_ids.contains(&rogue_id),
+                    "with_cancel_batch_rogue_key requires rogue_id ({rogue_id}) to be \
+                     distinct from every entry in order_ids — otherwise the swap collides \
+                     with a real match and the test exercises the shortfall gate instead \
+                     of the contract-violation gate",
+                );
+                orders.insert(rogue_id, row);
+            }
+            Ok(Some(CancelBatchResolution {
+                event_id: market.event.event_id,
+                oracle_list_hash: market.oracle_list_hash,
+                token_type: market.token_type,
+                market_status: self.cancel_batch_status_override.unwrap_or(market.status),
+                orders,
+            }))
+        }
+
         async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
             self.recorded_orders_queries.lock().unwrap().push(query.clone());
             Ok(self.orders_response.clone())
@@ -1985,6 +2550,7 @@ mod tests {
         recorded: Mutex<Vec<NewOrderPayload>>,
         recorded_cancels: Mutex<Vec<CancelOrderPayload>>,
         recorded_batches: Mutex<Vec<NewBatchOrderPayload>>,
+        recorded_cancel_batches: Mutex<Vec<CancelBatchOrderPayload>>,
         fail_with: Option<DomainError>,
     }
 
@@ -1994,6 +2560,7 @@ mod tests {
                 recorded: Mutex::new(Vec::new()),
                 recorded_cancels: Mutex::new(Vec::new()),
                 recorded_batches: Mutex::new(Vec::new()),
+                recorded_cancel_batches: Mutex::new(Vec::new()),
                 fail_with: None,
             }
         }
@@ -2003,6 +2570,7 @@ mod tests {
                 recorded: Mutex::new(Vec::new()),
                 recorded_cancels: Mutex::new(Vec::new()),
                 recorded_batches: Mutex::new(Vec::new()),
+                recorded_cancel_batches: Mutex::new(Vec::new()),
                 fail_with: Some(err),
             }
         }
@@ -2017,6 +2585,10 @@ mod tests {
 
         fn batch_calls(&self) -> Vec<NewBatchOrderPayload> {
             self.recorded_batches.lock().unwrap().clone()
+        }
+
+        fn cancel_batch_calls(&self) -> Vec<CancelBatchOrderPayload> {
+            self.recorded_cancel_batches.lock().unwrap().clone()
         }
     }
 
@@ -2046,6 +2618,17 @@ mod tests {
                 return Err(err);
             }
             self.recorded_batches.lock().unwrap().push(payload);
+            Ok(())
+        }
+
+        async fn cancel_batch_order(
+            &self,
+            payload: CancelBatchOrderPayload,
+        ) -> Result<(), DomainError> {
+            if let Some(err) = self.fail_with {
+                return Err(err);
+            }
+            self.recorded_cancel_batches.lock().unwrap().push(payload);
             Ok(())
         }
     }
@@ -3241,6 +3824,328 @@ mod tests {
         assert_eq!(err, DomainError::InvalidParameter);
         assert!(sender.batch_calls().is_empty());
     }
+
+    // ---- CancelBatchOrdersUseCase ----
+
+    fn base_cancel_batch_input(symbol: &str, order_ids: Vec<u64>) -> CancelBatchOrdersInput {
+        CancelBatchOrdersInput {
+            trading_pn: TradingPn {
+                pn_address: "0:pn".into(),
+                pn_pubkey: "1".into(),
+                pn_dih: "2".into(),
+                pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            },
+            market_address: MarketAddress("0:market".into()),
+            symbol: Symbol(symbol.into()),
+            order_ids,
+            now_seconds: 1_000,
+            now_ms: 1_000_000,
+        }
+    }
+
+    fn live_order(order_id: u64, coid: Option<&str>) -> FakeCancelableOrder {
+        FakeCancelableOrder {
+            order_id,
+            owner_pn_address: "0:pn".into(),
+            client_order_id: coid.map(|s| s.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_happy_path_two_items() {
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let repo = FakeRepo::with_live_orders(
+            market,
+            vec![live_order(123, Some("42")), live_order(456, None)],
+        );
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let out = uc
+            .execute(base_cancel_batch_input("PM-YES", vec![123, 456]))
+            .await
+            .expect("happy path");
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].order_id, 123);
+        assert_eq!(out[0].client_order_id.as_deref(), Some("42"));
+        assert_eq!(out[1].order_id, 456);
+        assert_eq!(out[1].client_order_id, None);
+
+        let calls = sender.cancel_batch_calls();
+        assert_eq!(calls.len(), 1);
+        let p = &calls[0];
+        assert_eq!(p.pn_address, "0:pn");
+        assert_eq!(p.event_id, "0xevent");
+        assert_eq!(p.oracle_list_hash, "0xdead");
+        assert_eq!(p.token_type, 1);
+        let order_ids: Vec<u64> = p.items.iter().map(|i| i.order_id).collect();
+        assert_eq!(order_ids, vec![123, 456]);
+        // Audit-only field: mirrors the response coids in input order so
+        // ops can grep the cancel-batch incident by clientOrderId. Pins
+        // both the alignment (position i ↔ items[i].order_id) and the
+        // None-on-NULL contract for orders placed without a coid.
+        let coids: Vec<Option<String>> =
+            p.items.iter().map(|i| i.client_order_id.clone()).collect();
+        assert_eq!(coids, vec![Some("42".to_string()), None]);
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_preserves_input_order_in_response() {
+        // SQL has no ordering guarantee — the use case must reorder rows
+        // by the input id sequence so callers can correlate positionally.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let repo = FakeRepo::with_live_orders(
+            market,
+            vec![live_order(11, Some("a")), live_order(22, Some("b")), live_order(33, Some("c"))],
+        );
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        // Input: 33, 11, 22 (deliberately scrambled).
+        let out = uc.execute(base_cancel_batch_input("PM-YES", vec![33, 11, 22])).await.unwrap();
+
+        assert_eq!(out.iter().map(|o| o.order_id).collect::<Vec<_>>(), vec![33, 11, 22]);
+        assert_eq!(
+            out.iter().map(|o| o.client_order_id.clone()).collect::<Vec<_>>(),
+            vec![Some("c".into()), Some("a".into()), Some("b".into())],
+        );
+        // Chain payload must carry the input order verbatim.
+        let p_ids: Vec<u64> =
+            sender.cancel_batch_calls()[0].items.iter().map(|i| i.order_id).collect();
+        assert_eq!(p_ids, vec![33, 11, 22]);
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_empty_batch() {
+        // Pre-flight: an empty `orderIds[]` would reach the chain as
+        // ERR_EMPTY_BATCH (162); failing here saves the round-trip.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![])).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_accepts_exactly_max_batch_size() {
+        // Boundary pin: `outcome.max_batch_size` ids must succeed.
+        // Catches a future off-by-one (e.g. `>=` instead of `>`) at the
+        // cap check that would reject the boundary value.
+        let market = trading_market("PM-YES");
+        let max = test_outcome("PM-YES").max_batch_size as usize;
+        let sender = Arc::new(FakeSender::ok());
+        let live: Vec<FakeCancelableOrder> =
+            (0..max).map(|i| live_order(1000 + i as u64, None)).collect();
+        let repo = FakeRepo::with_live_orders(market, live);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let ids: Vec<u64> = (0..max).map(|i| 1000 + i as u64).collect();
+        let out = uc
+            .execute(base_cancel_batch_input("PM-YES", ids.clone()))
+            .await
+            .expect("max size accepted");
+        assert_eq!(out.len(), max);
+        let dispatched: Vec<u64> =
+            sender.cancel_batch_calls()[0].items.iter().map(|i| i.order_id).collect();
+        assert_eq!(dispatched, ids);
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_above_max_batch_size() {
+        // Boundary pin from the other side: `max + 1` ids must fail
+        // locally with -1130 instead of paying a chain
+        // ERR_BATCH_TOO_LARGE round-trip. Pairs with
+        // `cancel_batch_orders_accepts_exactly_max_batch_size`.
+        let market = trading_market("PM-YES");
+        let max = test_outcome("PM-YES").max_batch_size as usize;
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let ids: Vec<u64> = (0..=max).map(|i| 1 + i as u64).collect();
+        let err = uc.execute(base_cancel_batch_input("PM-YES", ids)).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_intra_batch_duplicates() {
+        // Two PENDING_CANCEL receipts for the same id would be useless
+        // and would also waste a MAX_BATCH_SIZE slot — reject before
+        // chain submission.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+
+        let err =
+            uc.execute(base_cancel_batch_input("PM-YES", vec![10, 20, 10])).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_when_market_not_trading() {
+        let mut market = trading_market("PM-YES");
+        market.status = MarketStatus::Resolving;
+        let sender = Arc::new(FakeSender::ok());
+        let repo =
+            FakeRepo::with_live_orders(market, vec![live_order(1, None), live_order(2, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_when_market_flips_between_selects() {
+        // `resolve_for_new_order` sees `Trading` (the placement-shape
+        // snapshot); `resolve_for_cancel_batch` then returns rows
+        // tagged `Resolving` (the order-resolution snapshot). Without
+        // the post-SELECT status re-check the request would dispatch
+        // `cancelBatch` against a market that single-cancel would
+        // reject — single-cancel does both reads in one atomic JOIN
+        // and naturally sees the later state. Pins the race-window
+        // closure.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let repo =
+            FakeRepo::with_live_orders(market, vec![live_order(1, None), live_order(2, None)])
+                .with_cancel_batch_status(MarketStatus::Resolving);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_when_market_missing_oracle_list_hash() {
+        let mut market = trading_market("PM-YES");
+        market.oracle_list_hash = String::new();
+        let sender = Arc::new(FakeSender::ok());
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_negative_token_type_as_market_inconsistent() {
+        // `markets.token_type` is `i32` in the schema but the chain ABI
+        // takes `uint32`. A negative read-model value is corruption and
+        // must collapse to `MarketInconsistent` (503 / -1500) via the
+        // `u32::try_from` arm — never panic, never reach chain dispatch.
+        let mut market = trading_market("PM-YES");
+        market.token_type = -1;
+        let sender = Arc::new(FakeSender::ok());
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_unknown_when_any_id_missing() {
+        // Atomic validation: one shortfall rejects the whole batch.
+        // No chain message is sent.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
+        assert_eq!(err, DomainError::UnknownOrder);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_unknown_when_owner_mismatch() {
+        // Wrong-owner case MUST NOT differ from "no such order" — the
+        // existence of another account's order would otherwise leak
+        // through the error code.
+        let market = trading_market("PM-YES");
+        let foreign = FakeCancelableOrder {
+            order_id: 1,
+            owner_pn_address: "0:someone-else".into(),
+            client_order_id: None,
+        };
+        let sender = Arc::new(FakeSender::ok());
+        let uc = CancelBatchOrdersUseCase::new(
+            FakeRepo::with_live_orders(market, vec![foreign]),
+            sender.clone(),
+        );
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::UnknownOrder);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_rejects_rogue_key_as_market_inconsistent() {
+        // Trait contract: every key in the returned map MUST be in
+        // `input.order_ids`. Postgres enforces this with the
+        // `WHERE lo.order_id = ANY($3)` predicate, but an impl that
+        // bypasses it would silently feed an unrelated order_id into
+        // the chain payload. The use case's per-id lookup raises
+        // MarketInconsistent before any chain dispatch.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::ok());
+        let repo =
+            FakeRepo::with_live_orders(market, vec![live_order(1, Some("a")), live_order(2, None)])
+                .with_cancel_batch_rogue_key(999);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+        assert!(sender.cancel_batch_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_propagates_sender_pn_busy() {
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::failing(DomainError::OrderPnBusy));
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderPnBusy);
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_propagates_sender_request_timeout() {
+        // Mirrors the elapsed branch of `classify_chain_outcome`: the
+        // chain leg outran `cancel_batch_timeout_ms`. The use case must
+        // pass it through unchanged so the HTTP layer can render the
+        // documented 504 / -1007.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::failing(DomainError::RequestTimeout));
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::RequestTimeout);
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_orders_propagates_sender_unexpected() {
+        // Unmapped chain `tvm_exit` codes and gateway transport failures
+        // surface as `Unexpected` from `classify_chain_outcome`; same
+        // pass-through contract as the other two sender errors.
+        let market = trading_market("PM-YES");
+        let sender = Arc::new(FakeSender::failing(DomainError::Unexpected));
+        let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+
+        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
+        assert_eq!(err, DomainError::Unexpected);
+    }
 }
 
 #[cfg(test)]
@@ -3667,6 +4572,17 @@ mod get_market_balances_use_case_tests {
             _: &str,
             _: i64,
         ) -> anyhow::Result<OrderForCancel> {
+            unreachable!()
+        }
+
+        async fn resolve_for_cancel_batch(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: &[u64],
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<Option<CancelBatchResolution>> {
             unreachable!()
         }
 

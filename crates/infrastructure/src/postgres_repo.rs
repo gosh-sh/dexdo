@@ -8,12 +8,14 @@ use anyhow::Context;
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use dodex_application::CancelBatchResolution;
 use dodex_application::MarketForPlacement;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
 use dodex_application::OrderForCancel;
+use dodex_application::OrderForCancelBatch;
 use dodex_application::OrderStatusFilter;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersPage;
@@ -578,6 +580,149 @@ impl MarketReadRepository for PostgresReadModelRepository {
         })
     }
 
+    async fn resolve_for_cancel_batch(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        order_ids: &[u64],
+        owner_pn_address: &str,
+        now: i64,
+    ) -> Result<Option<CancelBatchResolution>, anyhow::Error> {
+        // Mirror `resolve_for_cancel`'s join shape (live_orders ⨝
+        // markets ⨝ market_outcomes), filtered by the bind array via
+        // `lo.order_id = ANY($3::text[]::numeric[])`. The cast lives
+        // on the bind side, not on the indexed column — that
+        // preserves the planner's ability to use the
+        // `(orderbook_address, order_id)` primary key for the
+        // per-id lookup. Project `lo.order_id::text` so the
+        // application layer can reassemble a
+        // `HashMap<u64, OrderForCancelBatch>` keyed on the natural
+        // chain identity — the SELECT predicate guarantees every
+        // returned `order_id` is a member of the caller's slice
+        // (trait contract). Market identity + timing columns project
+        // in the same statement so chain payload and `compute_status`
+        // both run against the snapshot that matched the orders.
+        let order_ids_decimal: Vec<String> = order_ids.iter().map(|id| id.to_string()).collect();
+        let rows: Vec<CancelBatchRow> = sqlx::query_as(
+            r#"select lo.order_id::text            as order_id,
+                      lo.client_order_id           as client_order_id,
+                      m.event_id::text             as event_id,
+                      m.oracle_list_hash::text     as oracle_list_hash,
+                      m.token_type                 as token_type,
+                      m.stake_start                as stake_start,
+                      m.stake_end                  as stake_end,
+                      m.result_start               as result_start,
+                      m.result_end                 as result_end,
+                      m.frozen_at                  as frozen_at,
+                      m.resolved_at                as resolved_at,
+                      m.cancelled_at               as cancelled_at,
+                      m.is_cancelled               as is_cancelled
+                 from markets m
+                 join market_outcomes mo
+                   on mo.market_id_fk = m.id
+                  and mo.symbol = $2
+                 join live_orders lo
+                   on lo.orderbook_address = m.orderbook_address
+                  and lo.outcome_id        = mo.outcome_id
+                  and lo.owner_pn_address  = $4
+                  and lo.status            = 'OPEN'
+                  and lo.amount_remaining  > 0
+                  and lo.order_id          = ANY($3::text[]::numeric[])
+                where m.pmp_address = $1
+                  and m.last_reconciled_at is not null"#,
+        )
+        .bind(market_address.0.as_str())
+        .bind(symbol.0.as_str())
+        .bind(&order_ids_decimal)
+        .bind(owner_pn_address)
+        .fetch_all(&self.pool)
+        .await
+        .context("resolve_for_cancel_batch: select live_orders + market")?;
+
+        // Zero matches: no `(pmp_address, symbol)` row joined any
+        // input id, so there's no `markets` snapshot to anchor
+        // identity to. The use case maps `None` to `UnknownOrder`.
+        let Some(head) = rows.first() else {
+            return Ok(None);
+        };
+
+        // Identity comes from the JOINed `markets` row; by the SELECT
+        // filter (`m.pmp_address = $1 AND mo.symbol = $2`) every row
+        // shares the same `(event_id, oracle_list_hash, token_type)`
+        // and `market_status`. Project from `head` once.
+        let event_id = head.event_id.clone();
+        let token_type = head.token_type;
+        let oracle_list_hash = match &head.oracle_list_hash {
+            Some(raw) if !raw.trim().is_empty() => raw.clone(),
+            other => {
+                warn!(
+                    pmp_address = %market_address.0,
+                    null = other.is_none(),
+                    "resolve_for_cancel_batch: oracle_list_hash NULL/blank on reconciled row",
+                );
+                String::new()
+            }
+        };
+        let market_status = compute_status(
+            head.cancelled_at,
+            head.is_cancelled,
+            head.resolved_at,
+            head.stake_start,
+            head.stake_end,
+            head.result_start,
+            head.result_end,
+            head.frozen_at,
+            now,
+        );
+
+        let mut orders: HashMap<u64, OrderForCancelBatch> = HashMap::with_capacity(rows.len());
+        for row in rows {
+            // `live_orders.order_id` is the chain-assigned uint128, but
+            // the application boundary caps at u64 (SDK ceiling — see
+            // `chain_sender.rs`). A row whose stored value exceeds
+            // u64 means a producer wrote a value above that cap — same
+            // class of read-model-vs-chain drift as the negative
+            // token_type / NULL oracle_list_hash branches, so surface
+            // as MarketInconsistent (503) rather than Unexpected (500).
+            let order_id = row.order_id.parse::<u64>().map_err(|err| {
+                anyhow::Error::from(DomainError::MarketInconsistent).context(format!(
+                    "resolve_for_cancel_batch: order_id `{}` is not u64: {err}",
+                    row.order_id
+                ))
+            })?;
+            let client_order_id = row.client_order_id.and_then(|raw| {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+            // Unreachable today: `markets.pmp_address` UNIQUE plus
+            // the `(orderbook_address, order_id)` PK on `live_orders`
+            // guarantee at most one row per chain `order_id` from
+            // this SELECT — no schema state reachable from migration
+            // 0001 can produce duplicates. Kept as defence-in-depth
+            // against future schema relaxation (e.g. if a multi-
+            // generation pmp_address or a UNION-ALL refactor ever
+            // changed the JOIN cardinality) so a duplicate surfaces
+            // as MarketInconsistent rather than silently overwriting
+            // the prior `client_order_id`.
+            if orders.insert(order_id, OrderForCancelBatch { client_order_id }).is_some() {
+                return Err(anyhow::Error::from(DomainError::MarketInconsistent).context(format!(
+                    "resolve_for_cancel_batch: duplicate order_id `{order_id}` returned (live_orders PK violated)",
+                )));
+            }
+        }
+        Ok(Some(CancelBatchResolution {
+            event_id,
+            oracle_list_hash,
+            token_type,
+            market_status,
+            orders,
+        }))
+    }
+
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         let target = match &query.market {
             Some(filter) => {
@@ -981,6 +1126,34 @@ struct CancelRow {
     cancelled_at: Option<i64>,
     is_cancelled: bool,
     client_order_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct CancelBatchRow {
+    // Chain `order_id` projected as text (numeric → text cast in the
+    // SELECT) so the application boundary doesn't round-trip a
+    // `numeric(78,0)` directly through `i64`. Parsed to u64 at
+    // assembly time — values above u64 surface as anyhow rather than
+    // truncation. The chain ABI is uint128 but the SDK ceiling caps
+    // us at u64 (see `chain_sender.rs`).
+    order_id: String,
+    client_order_id: Option<String>,
+    // Market identity + timing columns join in the same statement as
+    // the order row, so chain identity (`event_id`, `oracle_list_hash`,
+    // `token_type`) and `compute_status` both run against the snapshot
+    // that produced this `live_orders` row — closing the race against
+    // `resolve_for_new_order`'s separate MVCC view.
+    event_id: String,
+    oracle_list_hash: Option<String>,
+    token_type: i32,
+    stake_start: Option<i64>,
+    stake_end: Option<i64>,
+    result_start: Option<i64>,
+    result_end: Option<i64>,
+    frozen_at: Option<i64>,
+    resolved_at: Option<i64>,
+    cancelled_at: Option<i64>,
+    is_cancelled: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]

@@ -855,7 +855,7 @@ Body parameters:
 | --- | --- | --- | --- |
 | `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `orderIds` | ARRAY | YES | List of order IDs to cancel. Max: `5`. |
+| `orderIds` | ARRAY | YES | List of order IDs to cancel on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/markets`. The backend rejects an empty array before submission with `-1130 / 400`. Duplicate `orderId` values within the array are rejected with `-1130 / 400` — each id consumes one slot in the chain's batch window, and a duplicate receipt carries no extra signal. |
 
 Signed query parameters:
 
@@ -880,35 +880,30 @@ Response:
 ```json
 [
   {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
     "orderId": "123456789",
-    "price": "0.615",
-    "origQty": "1.500000",
-    "executedQty": "0.000000",
-    "status": "CANCELED",
-    "timeInForce": "GTC",
-    "type": "LIMIT",
-    "side": "BUY",
-    "time": 1710000000000,
-    "updateTime": 1710000010000
+    "clientOrderId": "mm-order-0001",
+    "transactTime": 1710000000000,
+    "status": "PENDING_CANCEL"
   },
   {
-    "marketAddress": "0:market-address",
-    "symbol": "PM-2026-ELECTION-YES",
     "orderId": "123456790",
-    "price": "0.620",
-    "origQty": "0.750000",
-    "executedQty": "0.000000",
-    "status": "CANCELED",
-    "timeInForce": "POST_ONLY",
-    "type": "LIMIT",
-    "side": "SELL",
-    "time": 1710000000000,
-    "updateTime": 1710000010000
+    "clientOrderId": "mm-order-0002",
+    "transactTime": 1710000000000,
+    "status": "PENDING_CANCEL"
   }
 ]
 ```
+
+Response fields (one element per requested `orderId`, in request order):
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `orderId` | STRING | The `orderId` from the request, echoed for correlation. |
+| `clientOrderId` | STRING | The order's `clientOrderId` as recorded on placement. Empty string if the order was placed without one. |
+| `transactTime` | LONG | Server timestamp (Unix ms) when the cancel batch was accepted. Identical across every item — one chain submission, one moment of acceptance. |
+| `status` | ENUM | Always [`PENDING_CANCEL`](#order-status) on success. |
+
+The response confirms acceptance only. The final outcome per id — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/orders`](#orders) shortly after.
 
 ### Cancel All Open Orders On Symbol
 

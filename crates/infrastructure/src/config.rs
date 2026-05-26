@@ -119,6 +119,8 @@ pub struct ChainSection {
     pub cancel_order_timeout_ms: u64,
     #[serde(default = "default_place_batch_timeout_ms")]
     pub place_batch_timeout_ms: u64,
+    #[serde(default = "default_cancel_batch_timeout_ms")]
+    pub cancel_batch_timeout_ms: u64,
 }
 
 /// 30 s — comfortable budget given typical chain round-trip is 1-3 s.
@@ -144,6 +146,14 @@ fn default_cancel_order_timeout_ms() -> u64 {
 /// latency measurements for batches at `max_batch_size`, this default
 /// should be revisited rather than carrying the assumption forward.
 fn default_place_batch_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Same 30 s budget as the other chain entry points.
+/// `PrivateNote.cancelBatch` shares the placeBatch busy-window profile
+/// (one external message, `_pendingBatchActive` held until
+/// `onBatchComplete` returns), so the synchronous wait is comparable.
+fn default_cancel_batch_timeout_ms() -> u64 {
     30_000
 }
 
@@ -246,6 +256,12 @@ impl ApiConfig {
             self.server.request_timeout_ms,
             self.chain.place_batch_timeout_ms,
         );
+        anyhow::ensure!(
+            self.server.request_timeout_ms > self.chain.cancel_batch_timeout_ms,
+            "server.request_timeout_ms ({}) must exceed chain.cancel_batch_timeout_ms ({})",
+            self.server.request_timeout_ms,
+            self.chain.cancel_batch_timeout_ms,
+        );
         // The HTTP request_timeout hoop must also outlast each GraphQL
         // read — the PN BOC fetch for /account and /account/balances runs
         // inside the request budget. A graphql.request_timeout_ms that
@@ -280,6 +296,10 @@ impl ChainSection {
         anyhow::ensure!(
             self.place_batch_timeout_ms > 0,
             "chain.place_batch_timeout_ms must be > 0"
+        );
+        anyhow::ensure!(
+            self.cancel_batch_timeout_ms > 0,
+            "chain.cancel_batch_timeout_ms must be > 0"
         );
         Ok(())
     }
@@ -840,6 +860,7 @@ chain:
   place_order_timeout_ms: 15000
   cancel_order_timeout_ms: 15000
   place_batch_timeout_ms: 15000
+  cancel_batch_timeout_ms: 15000
 graphql:
   endpoint: https://graphql.example.invalid
   page_size: 100
@@ -851,6 +872,7 @@ graphql:
         assert_eq!(cfg.chain.place_order_timeout_ms, 15_000);
         assert_eq!(cfg.chain.cancel_order_timeout_ms, 15_000);
         assert_eq!(cfg.chain.place_batch_timeout_ms, 15_000);
+        assert_eq!(cfg.chain.cancel_batch_timeout_ms, 15_000);
         cfg.validate().unwrap();
     }
 
@@ -876,6 +898,7 @@ graphql:
         assert_eq!(cfg.chain.place_order_timeout_ms, 30_000);
         assert_eq!(cfg.chain.cancel_order_timeout_ms, 30_000);
         assert_eq!(cfg.chain.place_batch_timeout_ms, 30_000);
+        assert_eq!(cfg.chain.cancel_batch_timeout_ms, 30_000);
     }
 
     #[test]
@@ -997,6 +1020,101 @@ graphql:
     }
 
     #[test]
+    fn api_validate_rejects_zero_cancel_batch_timeout() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 4000
+  cancel_order_timeout_ms: 4000
+  place_batch_timeout_ms: 4000
+  cancel_batch_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 4000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("cancel_batch_timeout_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn api_validate_rejects_request_timeout_not_exceeding_cancel_batch_timeout() {
+        // Same invariant as the other chain timeouts — request_timeout
+        // must outlast cancel_batch_timeout, else an in-flight
+        // cancelBatch gets dropped while still running on chain and the
+        // client loses the orderIds of an op that eventually lands.
+        // `5000 == 5000` hits the `==` boundary specifically (not just
+        // `<`), so a future relaxation from `>` to `>=` in the validate
+        // arm would fail here, not slip through.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 1000
+  cancel_order_timeout_ms: 1000
+  place_batch_timeout_ms: 1000
+  cancel_batch_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 4000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_ms"), "got: {msg}");
+        assert!(msg.contains("cancel_batch_timeout_ms"), "got: {msg}");
+    }
+
+    #[test]
+    fn api_validate_accepts_request_timeout_just_above_cancel_batch_timeout() {
+        // Boundary peer of
+        // `api_validate_rejects_request_timeout_not_exceeding_cancel_batch_timeout`:
+        // `5001 > 5000` must pass. Without this, a regression that
+        // tightened the comparison to `>=` would silently break every
+        // deployment that ran with equal timeouts during a config
+        // migration.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5001
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 1000
+  cancel_order_timeout_ms: 1000
+  place_batch_timeout_ms: 1000
+  cancel_batch_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 4000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        cfg.validate().expect("1 ms above cancel_batch_timeout must validate");
+    }
+
+    #[test]
     fn api_validate_rejects_request_timeout_not_exceeding_graphql_timeout() {
         // server.request_timeout_ms must exceed graphql.request_timeout_ms
         // so the HTTP hoop does not fire while the PN BOC fetch for
@@ -1014,6 +1132,7 @@ chain:
   place_order_timeout_ms: 1000
   cancel_order_timeout_ms: 1000
   place_batch_timeout_ms: 1000
+  cancel_batch_timeout_ms: 1000
 graphql:
   endpoint: https://graphql.example.invalid
   page_size: 100

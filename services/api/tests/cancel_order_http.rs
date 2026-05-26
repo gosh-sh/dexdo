@@ -131,6 +131,17 @@ impl MarketReadRepository for FakeRepo {
         Ok(order)
     }
 
+    async fn resolve_for_cancel_batch(
+        &self,
+        _: &MarketAddress,
+        _: &Symbol,
+        _: &[u64],
+        _: &str,
+        _: i64,
+    ) -> Result<Option<dodex_application::CancelBatchResolution>, anyhow::Error> {
+        unimplemented!("resolve_for_cancel_batch is not exercised by cancel_order_http tests")
+    }
+
     async fn list_orders(&self, _: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         unimplemented!("list_orders is not exercised by cancel_order_http tests")
     }
@@ -192,6 +203,13 @@ impl ChainOrderSender for RecordingCancelSender {
         _: dodex_application::NewBatchOrderPayload,
     ) -> Result<(), DomainError> {
         unreachable!("RecordingCancelSender::submit_batch_order called from DELETE /order test")
+    }
+
+    async fn cancel_batch_order(
+        &self,
+        _: dodex_application::CancelBatchOrderPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("RecordingCancelSender::cancel_batch_order called from DELETE /order test")
     }
 }
 
