@@ -447,35 +447,31 @@ async fn resolve_for_cancel_derives_non_trading_status_for_caller_check() {
 //
 // Bulk variant for DELETE /api/v1/batchOrders. The SQL mirrors
 // `resolve_for_cancel`'s predicate set (status='OPEN', amount_remaining>0,
-// owner_pn_address match, m.last_reconciled_at IS NOT NULL) but joins
-// `live_orders.order_id` against `unnest($3::text[]) WITH ORDINALITY` and
-// projects `bind_idx` (the input array position) so the use case can
-// reconstruct `order_id` without parsing the row back. Identity and
-// market_status are lifted to `CancelBatchResolution` once — every row
-// joins the same (markets, market_outcomes) snapshot, so per-row
-// projection would be redundant. The single-cancel suite above already
-// pins the predicate semantics; these tests focus on what is
-// bulk-specific: the WITH-ORDINALITY position mapping, partial
+// owner_pn_address match, m.last_reconciled_at IS NOT NULL) but filters
+// `live_orders.order_id` with `= ANY($3::text[])` and returns matched
+// rows in a `HashMap<u64, OrderForCancelBatch>` keyed by chain
+// `order_id`. The trait contract — every key is in
+// `input.order_ids[]` — is enforced by the WHERE clause; the natural
+// HashMap dedup plus the `(orderbook_address, order_id)` PK guarantees
+// no key collisions. Identity and market_status are lifted to
+// `CancelBatchResolution` once — every row joins the same (markets,
+// market_outcomes) snapshot, so per-row projection would be redundant.
+// The single-cancel suite above already pins the predicate semantics;
+// these tests focus on what is bulk-specific: per-id presence,
 // shortfall, and per-row owner filtering inside one request.
 
-fn sort_orders(mut orders: Vec<OrderForCancelBatch>) -> Vec<OrderForCancelBatch> {
-    // `bind_idx` is the input-position contract: PG returns matched
-    // rows in arbitrary order; sorting by bind_idx restores
-    // request-array order regardless of Postgres' execution choices.
-    orders.sort_by_key(|r| r.bind_idx);
-    orders
-}
-
-fn into_orders(resolution: Option<CancelBatchResolution>) -> Vec<OrderForCancelBatch> {
-    resolution.map(|r| sort_orders(r.orders)).unwrap_or_default()
+fn into_orders(
+    resolution: Option<CancelBatchResolution>,
+) -> std::collections::HashMap<u64, OrderForCancelBatch> {
+    resolution.map(|r| r.orders).unwrap_or_default()
 }
 
 #[tokio::test]
 async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
     // Three ids requested, all three resolve. Exercises the
-    // `unnest($3::text[]) WITH ORDINALITY` join on a non-trivial input
-    // set — `bind_idx` must come back as the request position (0, 1, 2)
-    // regardless of the order PG actually returns the rows in.
+    // `lo.order_id::text = ANY($3::text[])` filter on a non-trivial
+    // input set — every input id must surface as a key in the
+    // returned HashMap, regardless of the order PG returns rows in.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -508,15 +504,11 @@ async fn resolve_for_cancel_batch_happy_path_multiple_rows() {
     assert_eq!(resolution.event_id, "42");
     assert_eq!(resolution.oracle_list_hash, "1");
 
-    let orders = sort_orders(resolution.orders);
+    let orders = resolution.orders;
     assert_eq!(orders.len(), 3);
-    // Input was [1001, 1002, 1003]; bind_idx encodes the position.
-    assert_eq!(orders[0].bind_idx, 0);
-    assert_eq!(orders[0].client_order_id.as_deref(), Some("a"));
-    assert_eq!(orders[1].bind_idx, 1);
-    assert_eq!(orders[1].client_order_id.as_deref(), Some("b"));
-    assert_eq!(orders[2].bind_idx, 2);
-    assert!(orders[2].client_order_id.is_none());
+    assert_eq!(orders[&1001].client_order_id.as_deref(), Some("a"));
+    assert_eq!(orders[&1002].client_order_id.as_deref(), Some("b"));
+    assert!(orders[&1003].client_order_id.is_none());
 }
 
 #[tokio::test]
@@ -549,8 +541,7 @@ async fn resolve_for_cancel_batch_whitespace_only_client_order_id_surfaces_as_no
         .expect("bulk resolve with whitespace-only client_order_id"),
     );
     assert_eq!(orders.len(), 1);
-    assert_eq!(orders[0].bind_idx, 0);
-    assert!(orders[0].client_order_id.is_none());
+    assert!(orders[&9001].client_order_id.is_none());
 }
 
 #[tokio::test]
@@ -582,9 +573,10 @@ async fn resolve_for_cancel_batch_partial_shortfall_returns_only_matching() {
         .expect("bulk resolve partial shortfall"),
     );
     assert_eq!(orders.len(), 2);
-    // Input [2001, 2002, 2003]; bind_idx 1 (id 2002) is absent.
-    assert_eq!(orders[0].bind_idx, 0);
-    assert_eq!(orders[1].bind_idx, 2);
+    // Input [2001, 2002, 2003]; 2002 is absent in live_orders.
+    assert!(orders.contains_key(&2001));
+    assert!(!orders.contains_key(&2002));
+    assert!(orders.contains_key(&2003));
 }
 
 #[tokio::test]
@@ -618,10 +610,10 @@ async fn resolve_for_cancel_batch_wrong_owner_filtered_out() {
         .expect("bulk resolve with wrong owner mixed in"),
     );
     assert_eq!(orders.len(), 2);
-    // Input [3001, 3002, 3099]; bind_idx 2 (attacker's id) is absent.
-    assert_eq!(orders[0].bind_idx, 0);
-    assert_eq!(orders[1].bind_idx, 1);
-    assert!(orders.iter().all(|r| r.bind_idx != 2));
+    // Input [3001, 3002, 3099]; attacker's 3099 must be absent.
+    assert!(orders.contains_key(&3001));
+    assert!(orders.contains_key(&3002));
+    assert!(!orders.contains_key(&3099));
 }
 
 #[tokio::test]
@@ -723,7 +715,7 @@ async fn resolve_for_cancel_batch_carries_resolving_status_when_now_past_result_
 
     assert_eq!(resolution.market_status, MarketStatus::Resolving);
     assert_eq!(resolution.orders.len(), 1);
-    assert_eq!(resolution.orders[0].bind_idx, 0);
+    assert!(resolution.orders.contains_key(&5001));
 }
 
 #[tokio::test]
@@ -756,8 +748,9 @@ async fn resolve_for_cancel_batch_closed_status_row_invisible() {
         .expect("bulk resolve filters closed rows out"),
     );
     assert_eq!(orders.len(), 1);
-    // Input [6001, 6002]; only bind_idx 0 survives (6002 is CANCELLED).
-    assert_eq!(orders[0].bind_idx, 0);
+    // Input [6001, 6002]; only 6001 survives (6002 is CANCELLED).
+    assert!(orders.contains_key(&6001));
+    assert!(!orders.contains_key(&6002));
 }
 
 #[tokio::test]
@@ -791,8 +784,9 @@ async fn resolve_for_cancel_batch_zero_remaining_open_row_invisible() {
         .expect("bulk resolve filters zero-remaining rows out"),
     );
     assert_eq!(orders.len(), 1);
-    // Input [7001, 7002]; only bind_idx 0 survives (7002 has amount_remaining=0).
-    assert_eq!(orders[0].bind_idx, 0);
+    // Input [7001, 7002]; only 7001 survives (7002 has amount_remaining=0).
+    assert!(orders.contains_key(&7001));
+    assert!(!orders.contains_key(&7002));
 }
 
 #[tokio::test]
@@ -850,8 +844,9 @@ async fn resolve_for_cancel_batch_other_symbol_on_same_market_invisible() {
         .expect("bulk resolve filters other-outcome rows out"),
     );
     assert_eq!(orders.len(), 1);
-    // Input [8001, 8002]; only bind_idx 0 survives (8002 is on the NO book).
-    assert_eq!(orders[0].bind_idx, 0);
+    // Input [8001, 8002]; only 8001 survives (8002 is on the NO book).
+    assert!(orders.contains_key(&8001));
+    assert!(!orders.contains_key(&8002));
 }
 
 #[tokio::test]
@@ -933,21 +928,19 @@ async fn resolve_for_cancel_batch_null_oracle_list_hash_trims_to_empty_string() 
     assert_eq!(resolution.event_id, "42");
     assert_eq!(resolution.token_type, 3);
     assert_eq!(resolution.orders.len(), 1);
-    assert_eq!(resolution.orders[0].bind_idx, 0);
-    assert_eq!(resolution.orders[0].client_order_id.as_deref(), Some("nolh"));
+    assert_eq!(resolution.orders[&7001].client_order_id.as_deref(), Some("nolh"));
 }
 
 #[tokio::test]
-async fn resolve_for_cancel_batch_duplicate_input_ids_yield_distinct_bind_idx() {
-    // SQL contract pin: the `unnest($3::text[]) WITH ORDINALITY`
-    // join-side preserves array position as `ord`, so passing the same
-    // `order_id` twice produces two output rows with distinct `bind_idx`
-    // both pointing at the same live_orders row. Production dedups in
-    // the use case before this call, but that dedup is one refactor
-    // away from being moved or dropped — without this pin, the SQL
-    // contract that backs it is implicit. The downstream `windows(2)`
-    // duplicate sweep in `CancelBatchOrdersUseCase` is what catches
-    // this shape; this test pins the input it actually sees from PG.
+async fn resolve_for_cancel_batch_duplicate_input_ids_dedup_to_one_key() {
+    // SQL contract pin: `lo.order_id::text = ANY($3::text[])` matches
+    // each live row at most once regardless of how many times the
+    // caller repeats the same id in the bind array. The HashMap key
+    // is the natural identity, so the duplicate is structurally
+    // collapsed. The use case rejects intra-batch dups upstream with
+    // -1130 today, but that gate is one refactor away from being
+    // moved or dropped — without this pin, the SQL contract that
+    // would otherwise catch the dup is implicit.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -963,8 +956,8 @@ async fn resolve_for_cancel_batch_duplicate_input_ids_yield_distinct_bind_idx() 
             &MarketAddress(pmp.into()),
             &Symbol(symbol.into()),
             // Same id at positions 0 and 1; position 2 is a distinct id
-            // that does NOT exist, so it contributes nothing — keeps the
-            // assertion focused on what the duplicate join produces.
+            // that does NOT exist. The HashMap return type collapses
+            // the dup to one entry; the absent id contributes nothing.
             &[8001, 8001, 8002],
             pn,
             NOW_TRADING,
@@ -973,28 +966,21 @@ async fn resolve_for_cancel_batch_duplicate_input_ids_yield_distinct_bind_idx() 
         .expect("bulk resolve with duplicate input ids"),
     );
 
-    // Two rows out, both with the same `client_order_id` (same
-    // live_orders row), but distinct `bind_idx` (0 and 1). The third
-    // input slot (id 8002, absent) is filtered out by the inner JOIN
-    // and does not contribute a row.
-    assert_eq!(orders.len(), 2);
-    assert_eq!(orders[0].bind_idx, 0);
-    assert_eq!(orders[1].bind_idx, 1);
-    assert_eq!(orders[0].client_order_id.as_deref(), Some("dup"));
-    assert_eq!(orders[1].client_order_id.as_deref(), Some("dup"));
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[&8001].client_order_id.as_deref(), Some("dup"));
+    assert!(!orders.contains_key(&8002));
 }
 
 #[tokio::test]
-async fn resolve_for_cancel_batch_u64_max_id_round_trips_via_with_ordinality() {
+async fn resolve_for_cancel_batch_u64_max_id_round_trips_via_text() {
     // Pins the ceiling of the public-API id range. The SELECT binds
-    // ids as text[] and casts to numeric[] inside `unnest WITH
-    // ORDINALITY`; the projection then carries `bind_idx`, not the
-    // numeric value, so values up to `u64::MAX` never round-trip
-    // through `i64`/`u64::parse` and the application reconstructs
-    // `order_id` from `input.order_ids[bind_idx]`. Without this test a
-    // regression that re-introduced a `numeric::text::parse::<u64>`
-    // round-trip on the matched ids would compile fine but silently
-    // truncate or panic at the boundary.
+    // ids as text[] and casts both sides to text in
+    // `lo.order_id::text = ANY($3::text[])`. The projection carries
+    // `order_id::text`, parsed back into u64 at the application
+    // boundary; values at `u64::MAX` must round-trip without
+    // truncation. A regression that re-introduced `::numeric` /
+    // `::int8` somewhere on the path would compile fine but
+    // silently truncate above `i64::MAX`.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -1018,10 +1004,75 @@ async fn resolve_for_cancel_batch_u64_max_id_round_trips_via_with_ordinality() {
         .expect("u64::MAX-class ids match")
         .expect("matched rows yield a resolution");
 
-    let orders = sort_orders(resolution.orders);
+    let orders = resolution.orders;
     assert_eq!(orders.len(), 2);
-    assert_eq!(orders[0].bind_idx, 0);
-    assert_eq!(orders[0].client_order_id.as_deref(), Some("ceil"));
-    assert_eq!(orders[1].bind_idx, 1);
-    assert_eq!(orders[1].client_order_id.as_deref(), Some("ceil-1"));
+    assert_eq!(orders[&u64::MAX].client_order_id.as_deref(), Some("ceil"));
+    assert_eq!(orders[&(u64::MAX - 1)].client_order_id.as_deref(), Some("ceil-1"));
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_batch_above_u64_stored_value_is_invisible() {
+    // `live_orders.order_id` is `numeric(78, 0)` — the column can
+    // legitimately store values above u64::MAX (chain ABI is uint128).
+    // The application boundary caps at u64, so the bulk SELECT bind
+    // cannot reference values above u64::MAX. This test pins that an
+    // out-of-u64 stored row is silently filtered (no match) rather
+    // than tripping the `parse::<u64>()` anyhow path in the result
+    // assembler — that path is unreachable today because the
+    // `lo.order_id = ANY($3::text[]::numeric[])` predicate requires
+    // bind = stored numerically, and a u64 bind can never equal an
+    // out-of-u64 stored value. Test exists so a future regression
+    // that broadened the boundary (e.g. `&[u64]` → `&[String]`
+    // without revisiting the parse path) would surface here.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:resolve_cancel_batch_above_u64_pmp";
+    let symbol = "RESOLVE_CANCEL_BATCH_ABOVE_U64_YES";
+    let pn = "0:resolve_cancel_batch_above_u64_pn";
+    purge(&pool, pmp, symbol).await;
+    seed_trading_market(&pool, pmp, symbol, 3, 7).await;
+
+    // Seed an in-u64 row so the JOIN scope is non-empty and we can
+    // tell "no rows joined" from "no rows matched the bind".
+    seed_live_order(&pool, pmp, u64::MAX, 7, pn, "OPEN", "1500000", Some("in-range")).await;
+    // Raw SQL: bind a `numeric` value above u64::MAX directly. The
+    // typed `seed_live_order` helper takes `u64` and so cannot
+    // express this; bypass it for the over-u64 row only.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy,
+                price, amount_remaining, amount_initial, client_order_id,
+                status, last_chain_order, owner_pn_address,
+                placed_chain_order)
+           values ($1, 18446744073709551616::numeric, 7, true,
+                   615::numeric, 1500000::numeric, 1500000::numeric, $2,
+                   'OPEN', '0001', $3,
+                   '0001')"#,
+    )
+    .bind(pmp)
+    .bind("over-range")
+    .bind(pn)
+    .execute(&pool)
+    .await
+    .expect("insert over-u64 live_orders row");
+
+    // Caller can only bind u64-valued ids. Ask for the in-range one;
+    // the over-range row is invisible to the SELECT and so cannot
+    // reach the result-assembly parse path.
+    let resolution = repo
+        .resolve_for_cancel_batch(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            &[u64::MAX],
+            pn,
+            NOW_TRADING,
+        )
+        .await
+        .expect("over-u64 stored row must not surface as a typed error")
+        .expect("the in-range matched row still yields a resolution");
+
+    let orders = resolution.orders;
+    assert_eq!(orders.len(), 1);
+    assert!(orders.contains_key(&u64::MAX));
 }

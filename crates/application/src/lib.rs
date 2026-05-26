@@ -1,6 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -202,32 +203,24 @@ pub trait MarketReadRepository: Send + Sync {
     ) -> Result<OrderForCancel, anyhow::Error>;
 
     /// Resolve multiple open orders owned by `owner_pn_address` on a
-    /// single `(market_address, symbol)`. Each returned order carries
-    /// `bind_idx` — its 0-based position in the input `order_ids`
-    /// slice — so the use case reconstructs the chain `orderId`
-    /// positionally without round-tripping it through numeric/text.
+    /// single `(market_address, symbol)`. Returns matched rows in a
+    /// `HashMap<u64, OrderForCancelBatch>` keyed by chain `order_id`.
     ///
-    /// **Trait contract — every impl owes both guarantees:**
-    /// 1. `bind_idx` values are strictly in `[0, order_ids.len())`.
-    /// 2. Each `bind_idx` value appears at most once across the
-    ///    returned orders.
-    ///
-    /// The use case sorts by `bind_idx` and zips against `order_ids`
-    /// positionally — an out-of-range value would silently mispair
-    /// the response, and a duplicate would let two rows claim the
-    /// same input position. The Postgres impl satisfies (1) via
-    /// `WITH ORDINALITY` (raising `anyhow!` on violation, which the
-    /// use-case fallthrough maps to `Unexpected`) and (2) via the
-    /// `(orderbook_address, order_id)` primary key. A duplicate that
-    /// slips past an impl is caught defence-in-depth by the use case
-    /// as `MarketInconsistent`, never reaching the chain.
+    /// **Trait contract — every impl owes:** every key in
+    /// `orders` is an element of the caller's `order_ids[]` slice.
+    /// The Postgres impl enforces this with
+    /// `WHERE lo.order_id = ANY($3)`; the natural HashMap uniqueness
+    /// plus the `(orderbook_address, order_id)` primary key
+    /// guarantees no key collisions.
     ///
     /// **Result shape:**
     /// - `Ok(None)` — zero matches. Use case maps to `UnknownOrder`.
     /// - `Ok(Some(r))` with `r.orders.len() == order_ids.len()` —
-    ///   full match.
+    ///   full match (by contract every key is in input; pigeonhole
+    ///   gives an exact set match).
     /// - `Ok(Some(r))` with `r.orders.len() < order_ids.len()` —
-    ///   partial shortfall. Use case maps to `UnknownOrder`.
+    ///   partial shortfall (one or more input ids did not match).
+    ///   Use case maps to `UnknownOrder`.
     /// - `Err(_)` — non-domain SELECT failure via `anyhow`.
     ///
     /// **Wrapping fields:** `event_id`, `oracle_list_hash`,
@@ -855,13 +848,10 @@ pub struct CancelBatchOrderPayload {
 /// [`CancelBatchResolution`] because they are constant across all
 /// rows of one resolution (the SELECT is filtered to a single
 /// `(pmp_address, symbol)` pair, so every row joins the same `markets`
-/// snapshot). `bind_idx` is the 0-based position of the matched id in
-/// the caller's `order_ids[]` slice — the SELECT joins against the
-/// bind array `WITH ORDINALITY`, so `order_id` never round-trips
-/// through numeric/text; the use case reconstructs it from the input.
+/// snapshot). The chain `order_id` lives in the wrapping map's key,
+/// not on the row.
 #[derive(Debug, Clone)]
 pub struct OrderForCancelBatch {
-    pub bind_idx: usize,
     /// `live_orders.client_order_id`. NULL surfaces as `None`; the
     /// handler renders that as the empty string per
     /// api-spec §Cancel Batch Orders.
@@ -893,10 +883,19 @@ pub struct CancelBatchResolution {
     /// post-SELECT to close the race window against the earlier
     /// `resolve_for_new_order` snapshot.
     pub market_status: MarketStatus,
-    /// One entry per matched live order. Ordering is unspecified
-    /// (Postgres returns rows in arbitrary order); the use case sorts
-    /// by `bind_idx` to reconstruct request order.
-    pub orders: Vec<OrderForCancelBatch>,
+    /// Matched live orders keyed by chain `order_id`. Trait contract
+    /// requires every key to be a member of the caller's
+    /// `order_ids[]` slice (Postgres enforces with
+    /// `lo.order_id = ANY($3::text[]::numeric[])`), and the natural
+    /// HashMap uniqueness on `(orderbook_address, order_id)` PK
+    /// guarantees no key collisions can surface here. The use case
+    /// rejects `orders.len() < order_ids.len()` as `UnknownOrder`
+    /// (shortfall) and then looks each input id up directly via
+    /// `orders.remove(&id)`. By trait contract `orders.len() <=
+    /// order_ids.len()` after the SELECT, so the shortfall gate plus
+    /// the per-id lookup together cover the full keyset-mismatch
+    /// space.
+    pub orders: HashMap<u64, OrderForCancelBatch>,
 }
 
 /// Output of `CancelBatchOrdersUseCase`. One entry per request item, in
@@ -1555,8 +1554,11 @@ where
         } = resolution;
 
         // Shortfall collapses to the single ambiguous code, peer of
-        // single-cancel. Overage hits the windows sweep below. Peer
-        // log to `resolution-empty` so ops can distinguish a partial
+        // single-cancel. Trait contract guarantees every key in
+        // `orders` is a member of `input.order_ids`, so by pigeonhole
+        // `len == input.len()` implies the keys are exactly the input
+        // set (no overage possible — HashMap dedups on PK). Peer log
+        // to `resolution-empty` so ops can distinguish a partial
         // shortfall (e.g. mixed-ownership probe) from a wholesale
         // miss.
         if orders.len() < input.order_ids.len() {
@@ -1600,39 +1602,41 @@ where
             DomainError::MarketInconsistent
         })?;
 
-        // `live_orders` is PK'd on `(orderbook_address, order_id)`, so
-        // two rows mapping to the same input position are only possible
-        // under read-model corruption (e.g. duplicate `live_orders`
-        // entries that both join through the same `lo.order_id`).
-        // After sort, identical neighbours surface that case as
-        // MarketInconsistent rather than letting the zip below silently
-        // pair the wrong row to the wrong input id.
-        orders.sort_by_key(|r| r.bind_idx);
-        for pair in orders.windows(2) {
-            if pair[0].bind_idx == pair[1].bind_idx {
-                warn!(
-                    market_address = %input.market_address.0,
-                    symbol = %input.symbol.0,
-                    rows_len = orders.len(),
-                    duplicate_bind_idx = pair[0].bind_idx,
-                    "resolve_for_cancel_batch returned duplicate rows (read-model corruption)",
-                );
-                return Err(DomainError::MarketInconsistent);
-            }
-        }
-        // After shortfall (orders.len() == n) and unique-bind_idx
-        // (windows check) gates, the n bind_idx values are a
-        // permutation of [0, n); sorted they are 0..n, so `orders[i]`
-        // pairs with `input.order_ids[i]`.
+        // Look each input id up against the resolution map. Trait
+        // contract + shortfall gate above mean every id MUST be
+        // present; a `None` here is a contract violation
+        // (MarketInconsistent rather than panic). Lookup preserves
+        // `input.order_ids` ordering for the response — no positional
+        // pairing on a separate index lives anywhere on the wire.
+        //
+        // Capture the resolution size BEFORE the lookup loop so the
+        // contract-violation warn reports the size the impl actually
+        // returned, not the count remaining after earlier `.remove`
+        // calls have drained the map.
+        let original_rows_len = orders.len();
         let items: Vec<CancelBatchPayloadItem> = input
             .order_ids
             .iter()
-            .zip(orders)
-            .map(|(&order_id, order)| CancelBatchPayloadItem {
-                order_id,
-                client_order_id: order.client_order_id,
+            .map(|&order_id| {
+                orders
+                    .remove(&order_id)
+                    .map(|order| CancelBatchPayloadItem {
+                        order_id,
+                        client_order_id: order.client_order_id,
+                    })
+                    .ok_or_else(|| {
+                        warn!(
+                            market_address = %input.market_address.0,
+                            symbol = %input.symbol.0,
+                            rows_len = original_rows_len,
+                            input_count = input.order_ids.len(),
+                            missing_order_id = order_id,
+                            "resolve_for_cancel_batch missing input order_id (trait contract violated)",
+                        );
+                        DomainError::MarketInconsistent
+                    })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         let response: Vec<CancelledBatchOrder> = items
             .iter()
             .map(|item| CancelledBatchOrder {
@@ -1787,18 +1791,13 @@ mod tests {
         /// answers the second (order-resolution snapshot). `None`
         /// means "same status as the market" — the no-race default.
         cancel_batch_status_override: Option<MarketStatus>,
-        /// When true, `resolve_for_cancel_batch` emits the first
-        /// matched row twice. Models the read-model corruption case
-        /// where the bulk SELECT yields duplicate `order_id` values
-        /// despite the (orderbook_address, order_id) PK.
-        cancel_batch_duplicate_first_row: bool,
-        /// When true, `resolve_for_cancel_batch` appends an extra row
-        /// duplicating the first match, so `orders.len() ==
-        /// input.order_ids.len() + 1`. Models the overage variant of
-        /// the same corruption: the shortfall gate (`orders.len() <
-        /// input.order_ids.len()`) does not fire, so the windows(2)
-        /// duplicate sweep is what must catch it.
-        cancel_batch_extra_duplicate_row: bool,
+        /// When `Some(rogue_id)`, `resolve_for_cancel_batch` replaces
+        /// the first matched key with `rogue_id`. Models the
+        /// trait-contract violation where an impl returns a key not
+        /// present in `input.order_ids` despite the documented
+        /// `WHERE lo.order_id = ANY($3)` guarantee. The use case must
+        /// raise MarketInconsistent before any chain dispatch.
+        cancel_batch_rogue_key: Option<u64>,
         orders_response: OrdersPage,
         recorded_orders_queries: Mutex<Vec<OrdersQuery>>,
     }
@@ -1814,8 +1813,7 @@ mod tests {
                 cancelable_order: None,
                 live_orders: Vec::new(),
                 cancel_batch_status_override: None,
-                cancel_batch_duplicate_first_row: false,
-                cancel_batch_extra_duplicate_row: false,
+                cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1827,8 +1825,7 @@ mod tests {
                 cancelable_order: None,
                 live_orders: Vec::new(),
                 cancel_batch_status_override: None,
-                cancel_batch_duplicate_first_row: false,
-                cancel_batch_extra_duplicate_row: false,
+                cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1840,8 +1837,7 @@ mod tests {
                 cancelable_order: Some(order),
                 live_orders: Vec::new(),
                 cancel_batch_status_override: None,
-                cancel_batch_duplicate_first_row: false,
-                cancel_batch_extra_duplicate_row: false,
+                cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1853,8 +1849,7 @@ mod tests {
                 cancelable_order: None,
                 live_orders: orders,
                 cancel_batch_status_override: None,
-                cancel_batch_duplicate_first_row: false,
-                cancel_batch_extra_duplicate_row: false,
+                cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
             }
@@ -1868,13 +1863,8 @@ mod tests {
             self
         }
 
-        fn with_cancel_batch_duplicate_first_row(mut self) -> Self {
-            self.cancel_batch_duplicate_first_row = true;
-            self
-        }
-
-        fn with_cancel_batch_extra_duplicate_row(mut self) -> Self {
-            self.cancel_batch_extra_duplicate_row = true;
+        fn with_cancel_batch_rogue_key(mut self, rogue_id: u64) -> Self {
+            self.cancel_batch_rogue_key = Some(rogue_id);
             self
         }
 
@@ -1979,44 +1969,60 @@ mod tests {
             if !market.outcomes.iter().any(|o| o.symbol == *symbol) {
                 return Ok(None);
             }
-            let mut orders: Vec<OrderForCancelBatch> = order_ids
+            let mut orders: HashMap<u64, OrderForCancelBatch> = order_ids
                 .iter()
-                .enumerate()
-                .filter_map(|(idx, &id)| {
+                .filter_map(|&id| {
                     self.live_orders
                         .iter()
                         .find(|o| o.order_id == id && o.owner_pn_address == owner_pn_address)
-                        .map(|o| (idx, o))
-                })
-                .map(|(idx, o)| OrderForCancelBatch {
-                    bind_idx: idx,
-                    // Mirror Postgres: NULL or whitespace-only
-                    // `client_order_id` demotes to `None` so the
-                    // fake doesn't hide trim drift from unit tests.
-                    client_order_id: o.client_order_id.as_ref().and_then(|raw| {
-                        let trimmed = raw.trim();
-                        (!trimmed.is_empty()).then(|| trimmed.to_string())
-                    }),
+                        .map(|o| {
+                            (
+                                id,
+                                OrderForCancelBatch {
+                                    // Mirror Postgres: NULL or whitespace-only
+                                    // `client_order_id` demotes to `None` so the
+                                    // fake doesn't hide trim drift from unit tests.
+                                    client_order_id: o.client_order_id.as_ref().and_then(|raw| {
+                                        let trimmed = raw.trim();
+                                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                                    }),
+                                },
+                            )
+                        })
                 })
                 .collect();
             if orders.is_empty() {
                 return Ok(None);
             }
-            if self.cancel_batch_duplicate_first_row && orders.len() >= 2 {
-                // Realistic shape of read-model corruption: a join
-                // pathology yields the first id twice while another id
-                // is silently dropped, so `orders.len() == input.len()`
-                // (shortfall check passes) but two rows share the same
-                // `bind_idx` — exactly the case the use case must
-                // catch as MarketInconsistent.
-                orders[1] = orders[0].clone();
-            }
-            if self.cancel_batch_extra_duplicate_row && !orders.is_empty() {
-                // Overage variant: an extra row appended, no input
-                // row dropped, so `orders.len() == input.len() + 1`.
-                // The shortfall gate does not fire on overage, so the
-                // windows(2) duplicate sweep is what must catch this.
-                orders.push(orders[0].clone());
+            if let Some(rogue_id) = self.cancel_batch_rogue_key {
+                // Two preconditions the test fixture must hold for
+                // the rogue swap to actually exercise the use-case's
+                // contract-violation gate (instead of silently
+                // collapsing into a shortfall):
+                //   1. `order_ids[0]` matched a live_orders row, so
+                //      there is something to swap out.
+                //   2. `rogue_id` is NOT itself in `input.order_ids`
+                //      — otherwise `insert(rogue_id, row)` would
+                //      overwrite a legitimate match, shrinking
+                //      orders.len() and tripping the shortfall gate
+                //      first.
+                // Both are easy to get wrong by parameterising over
+                // ids; panic here so a misconfigured test surfaces
+                // loudly instead of passing for the wrong reason.
+                let first_id = *order_ids
+                    .first()
+                    .expect("with_cancel_batch_rogue_key requires non-empty order_ids");
+                let row = orders.remove(&first_id).expect(
+                    "with_cancel_batch_rogue_key requires order_ids[0] to match a live_order",
+                );
+                assert!(
+                    !order_ids.contains(&rogue_id),
+                    "with_cancel_batch_rogue_key requires rogue_id ({rogue_id}) to be \
+                     distinct from every entry in order_ids — otherwise the swap collides \
+                     with a real match and the test exercises the shortfall gate instead \
+                     of the contract-violation gate",
+                );
+                orders.insert(rogue_id, row);
             }
             Ok(Some(CancelBatchResolution {
                 event_id: market.event.event_id,
@@ -3575,41 +3581,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_batch_orders_rejects_duplicate_rows_as_market_inconsistent() {
-        // `live_orders` is PK'd on (orderbook_address, order_id), so
-        // the bulk SELECT MUST return at most one row per id. A
-        // schema/JOIN regression that produces two rows for the same
-        // id is read-model corruption — peer of the NULL-
-        // oracle_list_hash case. Surface as MarketInconsistent (503)
-        // rather than letting the post-sort zip silently pair one
-        // input id with the wrong row's client_order_id.
+    async fn cancel_batch_orders_rejects_rogue_key_as_market_inconsistent() {
+        // Trait contract: every key in the returned map MUST be in
+        // `input.order_ids`. Postgres enforces this with the
+        // `WHERE lo.order_id = ANY($3)` predicate, but an impl that
+        // bypasses it would silently feed an unrelated order_id into
+        // the chain payload. The use case's per-id lookup raises
+        // MarketInconsistent before any chain dispatch.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let repo =
             FakeRepo::with_live_orders(market, vec![live_order(1, Some("a")), live_order(2, None)])
-                .with_cancel_batch_duplicate_first_row();
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
-
-        let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
-        assert_eq!(err, DomainError::MarketInconsistent);
-        assert!(sender.cancel_batch_calls().is_empty());
-    }
-
-    #[tokio::test]
-    async fn cancel_batch_orders_rejects_overage_extra_row_as_market_inconsistent() {
-        // Overage variant of the duplicate-rows case: the bulk SELECT
-        // returns one row more than asked. The shortfall gate
-        // (`orders.len() < input.order_ids.len()`) does not fire here,
-        // so the windows(2) duplicate sweep is the only thing standing
-        // between read-model corruption and a wrong-coid response.
-        // `cancel_batch_orders_rejects_duplicate_rows_as_market_inconsistent`
-        // pins the same gate from the other side of the size
-        // relationship.
-        let market = trading_market("PM-YES");
-        let sender = Arc::new(FakeSender::ok());
-        let repo =
-            FakeRepo::with_live_orders(market, vec![live_order(1, Some("a")), live_order(2, None)])
-                .with_cancel_batch_extra_duplicate_row();
+                .with_cancel_batch_rogue_key(999);
         let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();

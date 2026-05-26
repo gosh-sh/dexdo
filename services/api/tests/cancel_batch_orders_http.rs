@@ -80,18 +80,13 @@ impl Authenticator for FakeAuthenticator {
 }
 
 /// `MarketReadRepository` that resolves a configurable `Market` and a
-/// set of `(order_id, client_order_id)` rows for the batch resolution
-/// path. Both arms can be set independently, so tests can isolate
-/// market-side failures from order-side failures.
-///
-/// `scrambled_rows` flips the row order returned by
-/// `resolve_for_cancel_batch` so the use case's reordering is genuinely
-/// exercised — Postgres has no `ORDER BY` on the underlying SELECT and
-/// production rows can come back in any order.
-/// Storage shape for one seeded row. `OrderForCancelBatch` carries
-/// `bind_idx` (derived from input position) rather than `order_id`,
-/// so the fake stores the id explicitly alongside the prototype row
-/// and stamps `bind_idx` at lookup time.
+/// set of `(owner_pn_address, order_id, OrderForCancelBatch)` rows for
+/// the batch resolution path. Both arms can be set independently, so
+/// tests can isolate market-side failures from order-side failures.
+/// The fake's `resolve_for_cancel_batch` returns a `HashMap` whose
+/// iteration order is unspecified — that's deliberate, so a test
+/// exercising the handler's input-position reorder cannot accidentally
+/// pass by virtue of the fake handing rows back in input order.
 type StoredRow = (String, u64, OrderForCancelBatch);
 
 struct FakeRepo {
@@ -103,17 +98,16 @@ struct FakeRepo {
     /// `lo.owner_pn_address = $4` predicate stays modelled at the HTTP
     /// boundary.
     rows: Mutex<Vec<StoredRow>>,
-    scrambled_rows: bool,
     /// Raw anyhow (no `DomainError` cause) to return from the named
     /// resolver method — exercises the non-domain downcast fallback in
     /// `CancelBatchOrdersUseCase::execute` that maps the failure to
     /// `Unexpected` → 500 / -1000.
     resolve_for_new_order_raw_anyhow: Option<String>,
     resolve_for_cancel_batch_raw_anyhow: Option<String>,
-    /// Overrides `market_status` on every row returned by
-    /// `resolve_for_cancel_batch` while leaving `resolve_for_new_order`
-    /// untouched — simulates a reconciler commit between the two
-    /// independent MVCC snapshots.
+    /// Overrides `market_status` on the `CancelBatchResolution`
+    /// wrapper returned by `resolve_for_cancel_batch` while leaving
+    /// `resolve_for_new_order` untouched — simulates a reconciler
+    /// commit between the two independent MVCC snapshots.
     cancel_batch_status_override: Option<MarketStatus>,
 }
 
@@ -124,7 +118,6 @@ impl FakeRepo {
         Self {
             market: Mutex::new(Some(market)),
             rows: Mutex::new(owned),
-            scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: None,
             cancel_batch_status_override: None,
@@ -135,7 +128,6 @@ impl FakeRepo {
         Self {
             market: Mutex::new(Some(market)),
             rows: Mutex::new(rows),
-            scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: None,
             cancel_batch_status_override: None,
@@ -146,16 +138,10 @@ impl FakeRepo {
         Self {
             market: Mutex::new(Some(market)),
             rows: Mutex::new(Vec::new()),
-            scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: None,
             cancel_batch_status_override: None,
         }
-    }
-
-    fn scrambled(mut self) -> Self {
-        self.scrambled_rows = true;
-        self
     }
 
     fn with_cancel_batch_status(mut self, status: MarketStatus) -> Self {
@@ -167,7 +153,6 @@ impl FakeRepo {
         Self {
             market: Mutex::new(None),
             rows: Mutex::new(Vec::new()),
-            scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: None,
             cancel_batch_status_override: None,
@@ -178,7 +163,6 @@ impl FakeRepo {
         Self {
             market: Mutex::new(Some(market)),
             rows: Mutex::new(Vec::new()),
-            scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: Some(msg.to_string()),
             resolve_for_cancel_batch_raw_anyhow: None,
             cancel_batch_status_override: None,
@@ -189,7 +173,6 @@ impl FakeRepo {
         Self {
             market: Mutex::new(Some(market)),
             rows: Mutex::new(Vec::new()),
-            scrambled_rows: false,
             resolve_for_new_order_raw_anyhow: None,
             resolve_for_cancel_batch_raw_anyhow: Some(msg.to_string()),
             cancel_batch_status_override: None,
@@ -253,7 +236,7 @@ impl MarketReadRepository for FakeRepo {
     async fn resolve_for_cancel_batch(
         &self,
         _: &MarketAddress,
-        _: &Symbol,
+        symbol: &Symbol,
         order_ids: &[u64],
         owner_pn_address: &str,
         _: i64,
@@ -261,33 +244,37 @@ impl MarketReadRepository for FakeRepo {
         if let Some(msg) = &self.resolve_for_cancel_batch_raw_anyhow {
             return Err(anyhow::anyhow!("{msg}"));
         }
-        // Production Postgres returns matching rows in arbitrary order;
-        // when `scrambled_rows` is set we reverse to verify the use
-        // case reorders by `bind_idx`. Owner and id filters mirror the
-        // production predicate set so a regression that drops
-        // `lo.owner_pn_address = $4` would actually fail an HTTP test,
-        // not slip through silently. `bind_idx` is stamped at lookup
-        // time as the position of the matched id in `order_ids` — same
-        // contract as `WITH ORDINALITY` in the real SELECT.
+        // Owner, symbol, and id filters mirror the production
+        // predicate set so a regression that drops `lo.owner_pn_address
+        // = $4` or `mo.symbol = $2` would actually fail an HTTP test,
+        // not slip through silently. The HashMap return type keys by
+        // chain order_id (natural identity); HashMap iteration order
+        // is unspecified so the use case can't accidentally depend on
+        // a fake-imposed order.
         let Some(market) = self.market.lock().unwrap().clone() else {
             return Ok(None);
         };
+        // Production SQL joins on `mo.symbol = $2`; if the symbol
+        // doesn't exist on this market, no rows can join. Without
+        // this gate the fake would silently match rows by id alone
+        // and an early-resolve-for-new-order refactor would let
+        // `unknown_symbol_on_known_market_returns_404_minus_1121`
+        // pass via the wrong code path.
+        if !market.outcomes.iter().any(|o| o.symbol == *symbol) {
+            return Ok(None);
+        }
         let stored = self.rows.lock().unwrap().clone();
-        let mut orders: Vec<OrderForCancelBatch> = order_ids
+        let orders: std::collections::HashMap<u64, OrderForCancelBatch> = order_ids
             .iter()
-            .enumerate()
-            .filter_map(|(bind_idx, &id)| {
+            .filter_map(|&id| {
                 stored
                     .iter()
                     .find(|(owner, stored_id, _)| owner == owner_pn_address && *stored_id == id)
-                    .map(|(_, _, proto)| OrderForCancelBatch { bind_idx, ..proto.clone() })
+                    .map(|(_, _, proto)| (id, proto.clone()))
             })
             .collect();
         if orders.is_empty() {
             return Ok(None);
-        }
-        if self.scrambled_rows {
-            orders.reverse();
         }
         Ok(Some(CancelBatchResolution {
             event_id: market.event.event_id,
@@ -396,13 +383,13 @@ fn trading_market() -> Market {
     }
 }
 
-/// Build a seedable (id, prototype) pair. `bind_idx` is a placeholder
-/// — the fake stamps the real position when `resolve_for_cancel_batch`
-/// runs, mirroring how `WITH ORDINALITY` derives it in production.
-/// Market identity flows from the fake's `Market` fixture, not from
-/// individual rows, so this helper only needs the per-row fields.
+/// Build a seedable (id, prototype) pair. Market identity flows from
+/// the fake's `Market` fixture, not from individual rows, so this
+/// helper only needs the per-row fields. The chain `order_id` is the
+/// natural key the fake's `resolve_for_cancel_batch` uses when it
+/// assembles the resolution HashMap.
 fn row(order_id: u64, coid: Option<&str>) -> (u64, OrderForCancelBatch) {
-    (order_id, OrderForCancelBatch { bind_idx: 0, client_order_id: coid.map(|s| s.to_string()) })
+    (order_id, OrderForCancelBatch { client_order_id: coid.map(|s| s.to_string()) })
 }
 
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
@@ -503,37 +490,56 @@ async fn happy_path_two_ids_returns_pending_cancel_array() {
 }
 
 #[tokio::test]
-async fn response_preserves_input_order_when_repo_returns_scrambled_rows() {
+async fn response_preserves_input_order_when_repo_returns_unordered_rows() {
     // Production Postgres has no ORDER BY on the bulk SELECT — the
-    // handler must reorder by request sequence so callers can correlate
-    // positionally. Inject scrambled rows to verify.
-    let repo: SharedRepo = Arc::new(
-        FakeRepo::with_market_and_rows(
-            trading_market(),
-            vec![row(11, Some("a")), row(22, Some("b")), row(33, Some("c"))],
-        )
-        .scrambled(),
-    );
+    // handler MUST reorder by request sequence so callers can
+    // correlate positionally. The fake's `HashMap` return type
+    // inherits Rust's `RandomState` hasher, so iteration order is
+    // randomised per-process AND independent of insertion order. The
+    // use case must therefore walk `input.order_ids` (not iterate
+    // the HashMap) for the response to come back in input order —
+    // this test pins that walk.
+    //
+    // Caveat: a regression that did `orders.into_iter().collect()`
+    // would yield response in HashMap iteration order. With N input
+    // ids, the probability of HashMap iter happening to coincide
+    // with input order on any one process is 1/N!. With N = 5 below
+    // that's 1/120 per run — better than 1/6 with 3 ids but still
+    // probabilistic. Code-review enforcement that the use case walks
+    // `input.order_ids` is the structural backstop; this test is the
+    // bug-catcher with the highest catch rate we can express without
+    // controlling the HashMap seed.
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market_and_rows(
+        trading_market(),
+        vec![
+            row(11, Some("a")),
+            row(22, Some("b")),
+            row(33, Some("c")),
+            row(44, Some("d")),
+            row(55, Some("e")),
+        ],
+    ));
     let sender = Arc::new(RecordingCancelBatchSender::ok());
     let chain_sender: SharedChainSender = sender.clone();
     let service = setup_with(repo, chain_sender);
 
-    // Input: 33, 11, 22 (deliberately scrambled). The repo above also
-    // reverses what it returns, so the only way the response can come
-    // back in [33, 11, 22] order is the handler's reorder step.
-    let mut resp = delete_batch(&service, valid_body(vec!["33", "11", "22"])).send(&service).await;
+    // Deliberately scrambled request order so the response cannot
+    // come back sorted by id (matches input order) or by insertion
+    // order in the fake (would be [11, 22, 33, 44, 55]).
+    let mut resp =
+        delete_batch(&service, valid_body(vec!["44", "11", "55", "22", "33"])).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
 
     let items = resp.take_json::<Vec<CancelBatchItem>>().await.expect("cancel batch body");
     let ids: Vec<&str> = items.iter().map(|i| i.order_id.as_str()).collect();
-    assert_eq!(ids, vec!["33", "11", "22"]);
+    assert_eq!(ids, vec!["44", "11", "55", "22", "33"]);
     let coids: Vec<&str> = items.iter().map(|i| i.client_order_id.as_str()).collect();
-    assert_eq!(coids, vec!["c", "a", "b"]);
+    assert_eq!(coids, vec!["d", "a", "e", "b", "c"]);
 
     // Chain payload must also carry the input order verbatim — the
     // chain's _doCancel processes ids in batch order.
     let dispatched_ids: Vec<u64> = sender.calls()[0].items.iter().map(|i| i.order_id).collect();
-    assert_eq!(dispatched_ids, vec![33u64, 11u64, 22u64]);
+    assert_eq!(dispatched_ids, vec![44u64, 11u64, 55u64, 22u64, 33u64]);
 }
 
 // ---- Body-shape failures -------------------------------------------------
@@ -866,6 +872,31 @@ async fn unknown_market_returns_404_minus_1121() {
     assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -1121);
+}
+
+#[tokio::test]
+async fn unknown_symbol_on_known_market_returns_404_minus_1121() {
+    // `marketAddress` exists but `symbol` is not one of its outcomes
+    // — the placement-shape lookup (`resolve_for_new_order`) rejects
+    // before the bulk SELECT runs, surfacing the same -1121 as a
+    // wholly-unknown market. Pins which of the two read calls
+    // distinguishes "wrong market" from "wrong symbol for this
+    // market".
+    let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
+    let sender = Arc::new(RecordingCancelBatchSender::ok());
+    let chain_sender: SharedChainSender = sender.clone();
+    let service = setup_with(repo, chain_sender);
+
+    let body = json!({
+        "marketAddress": MARKET_ADDRESS,
+        "symbol": "PM-NOT-AN-OUTCOME",
+        "orderIds": vec!["1"],
+    });
+    let mut resp = delete_batch(&service, body).send(&service).await;
+    assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1121);
+    assert!(sender.calls().is_empty());
 }
 
 #[tokio::test]

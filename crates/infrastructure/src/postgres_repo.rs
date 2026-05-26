@@ -487,48 +487,47 @@ impl MarketReadRepository for PostgresReadModelRepository {
         now: i64,
     ) -> Result<Option<CancelBatchResolution>, anyhow::Error> {
         // Mirror `resolve_for_cancel`'s join shape (live_orders ⨝
-        // markets ⨝ market_outcomes), but join on the bind array
-        // expanded `WITH ORDINALITY`. Projecting `bind_idx` instead of
-        // `lo.order_id::text` lets the application layer reconstruct
-        // `order_id` from `input.order_ids[bind_idx]` — the SELECT
-        // never round-trips u64 through numeric/text, so there's no
-        // place for a parse-back panic to hide. Market identity +
-        // timing columns project in the same statement so the chain
-        // payload and `compute_status` both run against the snapshot
-        // that matched the orders, not an earlier one.
+        // markets ⨝ market_outcomes), filtered by the bind array via
+        // `lo.order_id = ANY($3::text[]::numeric[])`. The cast lives
+        // on the bind side, not on the indexed column — that
+        // preserves the planner's ability to use the
+        // `(orderbook_address, order_id)` primary key for the
+        // per-id lookup. Project `lo.order_id::text` so the
+        // application layer can reassemble a
+        // `HashMap<u64, OrderForCancelBatch>` keyed on the natural
+        // chain identity — the SELECT predicate guarantees every
+        // returned `order_id` is a member of the caller's slice
+        // (trait contract). Market identity + timing columns project
+        // in the same statement so chain payload and `compute_status`
+        // both run against the snapshot that matched the orders.
         let order_ids_decimal: Vec<String> = order_ids.iter().map(|id| id.to_string()).collect();
         let rows: Vec<CancelBatchRow> = sqlx::query_as(
-            r#"with wanted as (
-                   select val::numeric  as order_id,
-                          idx::bigint   as ord
-                     from unnest($3::text[]) with ordinality as u(val, idx)
-               )
-               select (w.ord - 1)::bigint         as bind_idx,
-                      lo.client_order_id          as client_order_id,
-                      m.event_id::text            as event_id,
-                      m.oracle_list_hash::text    as oracle_list_hash,
-                      m.token_type                as token_type,
-                      m.stake_start               as stake_start,
-                      m.stake_end                 as stake_end,
-                      m.result_start              as result_start,
-                      m.result_end                as result_end,
-                      m.frozen_at                 as frozen_at,
-                      m.resolved_at               as resolved_at,
-                      m.cancelled_at              as cancelled_at,
-                      m.is_cancelled              as is_cancelled
-                 from wanted w
-                 join markets m on m.pmp_address = $1
+            r#"select lo.order_id::text            as order_id,
+                      lo.client_order_id           as client_order_id,
+                      m.event_id::text             as event_id,
+                      m.oracle_list_hash::text     as oracle_list_hash,
+                      m.token_type                 as token_type,
+                      m.stake_start                as stake_start,
+                      m.stake_end                  as stake_end,
+                      m.result_start               as result_start,
+                      m.result_end                 as result_end,
+                      m.frozen_at                  as frozen_at,
+                      m.resolved_at                as resolved_at,
+                      m.cancelled_at               as cancelled_at,
+                      m.is_cancelled               as is_cancelled
+                 from markets m
                  join market_outcomes mo
                    on mo.market_id_fk = m.id
                   and mo.symbol = $2
                  join live_orders lo
                    on lo.orderbook_address = m.orderbook_address
                   and lo.outcome_id        = mo.outcome_id
-                  and lo.order_id          = w.order_id
                   and lo.owner_pn_address  = $4
                   and lo.status            = 'OPEN'
                   and lo.amount_remaining  > 0
-                where m.last_reconciled_at is not null"#,
+                  and lo.order_id          = ANY($3::text[]::numeric[])
+                where m.pmp_address = $1
+                  and m.last_reconciled_at is not null"#,
         )
         .bind(market_address.0.as_str())
         .bind(symbol.0.as_str())
@@ -574,25 +573,17 @@ impl MarketReadRepository for PostgresReadModelRepository {
             now,
         );
 
-        let n = order_ids.len();
-        let mut orders = Vec::with_capacity(rows.len());
+        let mut orders: HashMap<u64, OrderForCancelBatch> = HashMap::with_capacity(rows.len());
         for row in rows {
-            // `bind_idx` comes from `unnest WITH ORDINALITY` minus 1,
-            // so the domain is structurally `[0, n)`. Negative or
-            // out-of-range means PG broke its ordinality contract —
-            // surface as `Unexpected` (500) rather than ever indexing
-            // out of bounds.
-            let bind_idx = usize::try_from(row.bind_idx).map_err(|_| {
-                anyhow!(
-                    "resolve_for_cancel_batch: bind_idx {} is negative (PG ordinality contract violated)",
-                    row.bind_idx,
-                )
+            // `live_orders.order_id` is the chain-assigned uint128, but
+            // the application boundary caps at u64 (SDK ceiling — see
+            // `chain_sender.rs`). A row whose stored value exceeds
+            // u64 means a producer wrote a value above that cap —
+            // never expected from a real OrderBook, surface as
+            // `Unexpected` rather than panic.
+            let order_id = row.order_id.parse::<u64>().map_err(|err| {
+                anyhow!("resolve_for_cancel_batch: order_id `{}` is not u64: {err}", row.order_id)
             })?;
-            if bind_idx >= n {
-                return Err(anyhow!(
-                    "resolve_for_cancel_batch: bind_idx {bind_idx} exceeds input len {n} (PG ordinality contract violated)",
-                ));
-            }
             let client_order_id = row.client_order_id.and_then(|raw| {
                 let trimmed = raw.trim();
                 if trimmed.is_empty() {
@@ -601,7 +592,21 @@ impl MarketReadRepository for PostgresReadModelRepository {
                     Some(trimmed.to_string())
                 }
             });
-            orders.push(OrderForCancelBatch { bind_idx, client_order_id });
+            // Unreachable today: `markets.pmp_address` UNIQUE plus
+            // the `(orderbook_address, order_id)` PK on `live_orders`
+            // guarantee at most one row per chain `order_id` from
+            // this SELECT — no schema state reachable from migration
+            // 0001 can produce duplicates. Kept as defence-in-depth
+            // against future schema relaxation (e.g. if a multi-
+            // generation pmp_address or a UNION-ALL refactor ever
+            // changed the JOIN cardinality) so a duplicate surfaces
+            // as MarketInconsistent rather than silently overwriting
+            // the prior `client_order_id`.
+            if orders.insert(order_id, OrderForCancelBatch { client_order_id }).is_some() {
+                return Err(anyhow!(
+                    "resolve_for_cancel_batch: duplicate order_id `{order_id}` returned (live_orders PK violated)",
+                ));
+            }
         }
         Ok(Some(CancelBatchResolution {
             event_id,
@@ -841,11 +846,13 @@ struct CancelRow {
 
 #[derive(Debug, sqlx::FromRow)]
 struct CancelBatchRow {
-    // 0-based position of the matching id in the caller's `order_ids[]`
-    // slice. Derived from `unnest WITH ORDINALITY` against the bind
-    // array, so `order_id` never round-trips through text — the use
-    // case reconstructs it from `input.order_ids[bind_idx]`.
-    bind_idx: i64,
+    // Chain `order_id` projected as text (numeric → text cast in the
+    // SELECT) so the application boundary doesn't round-trip a
+    // `numeric(78,0)` directly through `i64`. Parsed to u64 at
+    // assembly time — values above u64 surface as anyhow rather than
+    // truncation. The chain ABI is uint128 but the SDK ceiling caps
+    // us at u64 (see `chain_sender.rs`).
+    order_id: String,
     client_order_id: Option<String>,
     // Market identity + timing columns join in the same statement as
     // the order row, so chain identity (`event_id`, `oracle_list_hash`,
