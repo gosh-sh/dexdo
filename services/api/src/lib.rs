@@ -1124,7 +1124,7 @@ async fn delete_batch_orders(
             order_count = audit_order_ids.len(),
             order_ids = ?audit_order_ids,
             err = ?err,
-            "cancel_batch_orders rejected before dispatch",
+            "cancel_batch_orders failed",
         );
         ApiError::from(err)
     })?;
