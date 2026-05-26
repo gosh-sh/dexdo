@@ -202,6 +202,47 @@ async fn account_id_differs_per_credential() {
 }
 
 #[tokio::test]
+async fn empty_balance_amount_via_real_parser_collapses_to_1500() {
+    // Production reads PnDetails through `GraphqlPnStateReader`, whose
+    // `read_uint_map` fails closed on empty or non-digit amount strings
+    // (see pn_state_reader.rs). FakePnStateReader bypasses that boundary
+    // because callers hand it a ready-made `PnDetails`, so a relaxation
+    // of `read_uint_map` would slip through the rest of the suite green.
+    // This test wires the use case to `RawJsonPnStateReader`, which
+    // routes the raw getter-shaped payload through the production parser,
+    // and feeds it a `balance` map with an empty amount. The expectation
+    // is the closed-failure path: 503 + -1500.
+    use std::sync::Arc;
+    let reader = Arc::new(common::RawJsonPnStateReader::default());
+    let Some((service, pool, _kek)) =
+        common::setup_with_pn_reader(reader.clone() as dodex_api::testkit::SharedPnReader).await
+    else {
+        return;
+    };
+    let pn = common::seeded_pn_address_for_key(&pool, SEED_API_KEY).await;
+    reader.set_details_raw(
+        &pn,
+        serde_json::json!({
+            "balance": { "1": "" },
+            "lockedInOrders": {}
+        }),
+    );
+
+    let ts = now_ms();
+    let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string());
+    let mut resp = TestClient::get("http://test/api/v1/account")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
+    let body = resp.take_json::<ErrorBody>().await.expect("err");
+    assert_eq!(body.code, -1500);
+}
+
+#[tokio::test]
 async fn trade_only_key_returns_1002_on_account_route() {
     // A key with TRADE-only permission must be rejected with -1002 on
     // USER_DATA-gated endpoints like /api/v1/account.

@@ -18,6 +18,7 @@ use serde_json::Value;
 use tvm_abi::token::Detokenizer;
 use tvm_abi::token::Tokenizer;
 use tvm_abi::Contract;
+use tvm_abi::TokenValue;
 use tvm_block::Account;
 use tvm_block::CommonMsgInfo;
 use tvm_block::Deserializable;
@@ -72,8 +73,19 @@ pub fn run_getter(
     let input_tokens = Tokenizer::tokenize_all_params(function.input_params(), input)
         .map_err(|err| anyhow!("tokenize input for {function_name}: {err}"))?;
 
+    // Replay-protection (`afterSignatureCheck` in modifiers/replayprotection.sol)
+    // rejects external messages whose `expireAt` is more than 5 minutes ahead of
+    // `block.timestamp`. The default header `Expire` produced by tvm_abi is
+    // `u32::MAX` (token/mod.rs::get_default_value_for_header), which trips that
+    // guard on any real-account BOC and surfaces as TVM throw 401
+    // (ERR_MESSAGE_WITH_HUGE_EXPIREAT). Pin `expire` to `now + 60s` so the read
+    // path is accepted; we don't sign and don't persist state, so any value
+    // inside the 5-minute window is fine.
+    let now = now_unixtime();
+    let mut header = HashMap::new();
+    header.insert("expire".to_string(), TokenValue::Expire(now.saturating_add(60)));
     let body_builder = function
-        .encode_input(&HashMap::new(), &input_tokens, false, None, Some(address.clone()))
+        .encode_input(&header, &input_tokens, false, None, Some(address.clone()))
         .map_err(|err| anyhow!("encode_input for {function_name}: {err}"))?;
     let body_cell = body_builder.into_cell().map_err(|err| anyhow!("body to cell: {err}"))?;
     let body_slice = SliceData::load_cell(body_cell).map_err(|err| anyhow!("body slice: {err}"))?;

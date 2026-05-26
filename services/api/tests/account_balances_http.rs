@@ -506,8 +506,9 @@ async fn production_hasher_is_wired_to_stake_lookup() {
     // If a refactor swaps the hasher's argument order, drops a field, or changes
     // the cast, the computed hash will no longer match the registered key and
     // the response will report `free = "0.00"` instead of the seeded amount.
-    // Tvm_abi packing drift is still invisible (both sides use the same code),
-    // but call-site drift is now caught.
+    // Byte-level tvm_abi packing drift against on-chain `_stakes` keys is covered
+    // by `crates/infrastructure/tests/stake_hash_onchain_xcheck.rs` (fixture-gated);
+    // this test pins call-site drift.
     use num_bigint::BigUint;
     let Some((service, pool, _kek, pn)) = common::setup().await else { return };
     let (pmp, _ob) = seed_market(&pool, "hashwire-bal").await;

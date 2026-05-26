@@ -112,6 +112,41 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>, Arc<FakePnStateReader
     Some((service, pool, kek, pn_reader_inner))
 }
 
+/// Variant of [`setup`] that lets a test plug in its own `PnStateReader`
+/// (for example [`RawJsonPnStateReader`] to drive payloads through real
+/// boundary validation). All other wiring matches `setup`.
+pub async fn setup_with_pn_reader(
+    pn_reader: dodex_api::testkit::SharedPnReader,
+) -> Option<(Service, PgPool, Arc<Kek>)> {
+    let _ = dotenvy::dotenv();
+    let url = env::var("TEST_DATABASE_URL").ok().filter(|s| !s.is_empty())?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .expect("connect to TEST_DATABASE_URL");
+    database::run_migrations(&pool).await.expect("run migrations");
+
+    let kek = test_kek();
+    seed::seed_accounts(&pool, &kek).await.expect("seed credentials");
+
+    let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
+    let auth_config = AuthSection {
+        kek_hex: "ab".repeat(32),
+        default_recv_window_ms: 5_000,
+        max_recv_window_ms: 60_000,
+        seed_accounts: false,
+    };
+    let authenticator: SharedAuth =
+        Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
+    let chain_sender: SharedChainSender = Arc::new(NoopChainSender);
+    let ref_repo: dodex_api::testkit::SharedRefRepo = Arc::new(FakeReferenceRepo::with_seeded());
+    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo);
+    let service = Service::new(build_router(state));
+    Some((service, pool, kek))
+}
+
 /// `ChainOrderSender` fake that succeeds on every call. The auth-layer
 /// tests under this module never reach the sender (no markets seeded,
 /// so the use case 404s first), but `AppState` needs *some* concrete
@@ -230,6 +265,62 @@ impl PnStateReader for FakePnStateReader {
             return Ok(s);
         }
         Ok(self.stake.lock().unwrap().clone().unwrap_or(None))
+    }
+}
+
+/// `PnStateReader` that routes the test-supplied payload through the
+/// real `details_from_value` / `stake_from_value` parsers used by
+/// `GraphqlPnStateReader`. Lets HTTP-level tests exercise the
+/// boundary validation that production applies after `run_getter`
+/// detokenises the chain reply — i.e. relaxing rules like
+/// "balance amount must be a non-empty ASCII digit string" cannot
+/// pass through the HTTP suite green just because [`FakePnStateReader`]
+/// skips the GraphQL layer.
+///
+/// Payload shape mirrors what `run_getter` produces for the matching
+/// getter:
+/// * `set_details_raw(pn, value)` accepts the `getDetails()` reply:
+///   `{ "balance": {"<token_type>": "<uint128>"},
+///      "lockedInOrders": {...}, ... }`.
+/// * `set_stakes_raw(pn, value)` accepts the `_stakes` reply:
+///   `{ "_stakes": { "<hash>": { "amount": [...], "debtAmount": [...],
+///                                "couponsAmount": [...] } } }`.
+#[derive(Default)]
+pub struct RawJsonPnStateReader {
+    details_by_pn: Mutex<StdHashMap<String, serde_json::Value>>,
+    stakes_by_pn: Mutex<StdHashMap<String, serde_json::Value>>,
+}
+
+impl RawJsonPnStateReader {
+    pub fn set_details_raw(&self, pn_address: &str, v: serde_json::Value) {
+        self.details_by_pn.lock().unwrap().insert(pn_address.to_string(), v);
+    }
+
+    pub fn set_stakes_raw(&self, pn_address: &str, v: serde_json::Value) {
+        self.stakes_by_pn.lock().unwrap().insert(pn_address.to_string(), v);
+    }
+}
+
+#[async_trait]
+impl PnStateReader for RawJsonPnStateReader {
+    async fn get_details(&self, pn_address: &str) -> anyhow::Result<PnDetails> {
+        let v =
+            self.details_by_pn.lock().unwrap().get(pn_address).cloned().ok_or_else(|| {
+                anyhow::anyhow!("RawJsonPnStateReader: no details for {pn_address}")
+            })?;
+        dodex_infrastructure::pn_state_reader::details_from_value(&v)
+    }
+
+    async fn get_stake(
+        &self,
+        pn_address: &str,
+        stake_hash: &str,
+    ) -> anyhow::Result<Option<PnStake>> {
+        let v =
+            self.stakes_by_pn.lock().unwrap().get(pn_address).cloned().ok_or_else(|| {
+                anyhow::anyhow!("RawJsonPnStateReader: no stakes for {pn_address}")
+            })?;
+        dodex_infrastructure::pn_state_reader::stake_from_value(&v, stake_hash)
     }
 }
 

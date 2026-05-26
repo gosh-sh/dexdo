@@ -774,13 +774,27 @@ fn scale_decimal(raw: &str, decimals: u8) -> Result<String, DomainError> {
         return Err(DomainError::MarketInconsistent);
     }
     let raw = if raw.is_empty() { "0" } else { raw };
-    BigUint::from_str(raw).map_err(|err| {
-        tracing::warn!(raw, error = %err, "scale_decimal: input is not a non-negative integer");
-        DomainError::MarketInconsistent
-    })?;
+    // Parse and re-emit so the slicing path below operates on a
+    // canonical decimal string. `BigUint::from_str` accepts leading
+    // zeros ("00012345"), so without canonicalisation a padded input
+    // would survive into the `>` branch and slice to "00012.345"
+    // instead of "12.345". Triggers: a future tvm_abi version that
+    // emits zero-padded uint128 literals, or a corrupt repo row.
+    let canonical = BigUint::from_str(raw)
+        .map_err(|err| {
+            tracing::warn!(raw, error = %err, "scale_decimal: input is not a non-negative integer");
+            DomainError::MarketInconsistent
+        })?
+        .to_string();
+    let raw = canonical.as_str();
     let d = decimals as usize;
     if d == 0 {
-        return Ok(raw.to_string());
+        // Keep the response format invariant: every scaled value has a decimal
+        // point. A strict client parser (`^[0-9]+\.[0-9]+$`) would otherwise
+        // reject the bare integer. `decimals=0` is reachable today because the
+        // schema does not CHECK `> 0` on `ref_tokens.decimals` /
+        // `market_outcomes.quantity_precision`.
+        return Ok(format!("{raw}.0"));
     }
     if raw.len() <= d {
         let padded = "0".repeat(d - raw.len()) + raw;
@@ -3474,8 +3488,11 @@ mod get_account_use_case_tests {
         assert_eq!(scale_decimal("0", 9).unwrap(), "0.000000000");
         assert_eq!(scale_decimal("", 9).unwrap(), "0.000000000");
         assert_eq!(scale_decimal("25000000000", 6).unwrap(), "25000.000000");
-        assert_eq!(scale_decimal("42", 0).unwrap(), "42");
-        assert_eq!(scale_decimal("0", 0).unwrap(), "0");
+        // decimals=0 still emits a decimal point so the wire format stays
+        // `^[0-9]+\.[0-9]+$` regardless of the token's precision.
+        assert_eq!(scale_decimal("42", 0).unwrap(), "42.0");
+        assert_eq!(scale_decimal("0", 0).unwrap(), "0.0");
+        assert_eq!(scale_decimal("", 0).unwrap(), "0.0");
     }
 
     #[test]
@@ -3510,6 +3527,19 @@ mod get_account_use_case_tests {
         assert!(matches!(err, DomainError::MarketInconsistent));
         let err = scale_decimal("-1", 9).unwrap_err();
         assert!(matches!(err, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn scale_decimal_strips_leading_zeros() {
+        // BigUint::from_str accepts zero-padded literals, so a future
+        // tvm_abi version that emits fixed-width uint128 amounts would
+        // reach the slicing branch with leading zeros and emit a
+        // non-canonical decimal. Canonicalisation must strip them on
+        // every branch.
+        assert_eq!(scale_decimal("00012345", 3).unwrap(), "12.345");
+        assert_eq!(scale_decimal("000", 9).unwrap(), "0.000000000");
+        assert_eq!(scale_decimal("0001500000000", 9).unwrap(), "1.500000000");
+        assert_eq!(scale_decimal("00", 0).unwrap(), "0.0");
     }
 }
 

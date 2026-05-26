@@ -79,7 +79,12 @@ impl PnStateReader for GraphqlPnStateReader {
 /// Parse the detokenized `getDetails()` reply into `PnDetails`. The
 /// ABI shape (see contracts/abi/dex/PrivateNote.abi.json) emits
 /// `map(uint32,uint128)` as a JSON object keyed by uint32 strings.
-fn details_from_value(v: &Value) -> anyhow::Result<PnDetails> {
+///
+/// Exposed so HTTP integration tests can push raw `getDetails`-shaped
+/// payloads through the same boundary validation the production reader
+/// applies — otherwise a relaxation of `read_uint_map` would slip
+/// through the test suite green.
+pub fn details_from_value(v: &Value) -> anyhow::Result<PnDetails> {
     let balance = read_uint_map(v, "balance")?;
     let locked = read_uint_map(v, "lockedInOrders")?;
     Ok(PnDetails { balance, locked_in_orders: locked })
@@ -87,7 +92,10 @@ fn details_from_value(v: &Value) -> anyhow::Result<PnDetails> {
 
 /// Locate `stake_hash` inside the detokenized `_stakes` map and parse
 /// it into `PnStake`. Returns `Ok(None)` when the key is absent.
-fn stake_from_value(v: &Value, stake_hash: &str) -> anyhow::Result<Option<PnStake>> {
+///
+/// Exposed alongside [`details_from_value`] for the same reason — see
+/// that doc.
+pub fn stake_from_value(v: &Value, stake_hash: &str) -> anyhow::Result<Option<PnStake>> {
     let map = v
         .get("_stakes")
         .and_then(Value::as_object)

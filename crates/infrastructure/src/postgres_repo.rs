@@ -769,6 +769,20 @@ impl MarketReadRepository for PostgresReadModelRepository {
         &self,
         market_address: &dodex_domain::MarketAddress,
     ) -> Result<dodex_application::MarketBalancesResolution, anyhow::Error> {
+        // Read markets + market_outcomes inside a REPEATABLE READ transaction
+        // so both queries see the same snapshot. Without it a reconciler
+        // reseed (UPDATE markets.num_outcomes paired with DELETE/INSERT in
+        // market_outcomes) interleaved between the two SELECTs can produce a
+        // num_outcomes/raw_outcomes.len() mismatch and trip
+        // `MarketInconsistent` (503) on an otherwise valid market. Plain
+        // `pool.begin()` opens READ COMMITTED in Postgres; bump the isolation
+        // immediately after BEGIN, before the first read.
+        let mut tx = self.pool.begin().await.context("resolve_market_for_balances: tx begin")?;
+        sqlx::query("set transaction isolation level repeatable read")
+            .execute(&mut *tx)
+            .await
+            .context("resolve_market_for_balances: set repeatable read")?;
+
         // Resolve the market row + outcomes in two SELECTs to keep types
         // simple. The visibility gate `last_reconciled_at IS NOT NULL`
         // matches /api/v1/markets — pre-reconcile markets are invisible.
@@ -791,7 +805,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                   and last_reconciled_at is not null"#,
         )
         .bind(&market_address.0)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .context("resolve_market_for_balances: select markets")?;
 
@@ -841,9 +855,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 order by outcome_id asc"#,
         )
         .bind(market_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .context("resolve_market_for_balances: select market_outcomes")?;
+
+        tx.commit().await.context("resolve_market_for_balances: tx commit")?;
 
         // `num_outcomes` is `integer` (signed) in Postgres but non-negative
         // by contract. Treat a negative value as read-model corruption.

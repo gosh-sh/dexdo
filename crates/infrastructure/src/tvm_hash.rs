@@ -81,18 +81,18 @@ mod tests {
     }
 
     /// Recorded vector — must not change unless `tvm_abi` semantics
-    /// intentionally shift. No automated suite cross-checks this
-    /// vector against a live PN's `_stakes` keys today, so a failure
-    /// here after a dependency bump must be re-verified manually
-    /// against a real PN BOC before updating the expected hash.
+    /// intentionally shift. Byte-level packing against on-chain
+    /// `_stakes` keys is cross-checked by
+    /// `crates/infrastructure/tests/stake_hash_onchain_xcheck.rs` when
+    /// a captured PN fixture is present (the test is skipped without
+    /// one). On a failure here after a dependency bump, refresh that
+    /// fixture and rerun the cross-check before updating this expected
+    /// hash.
     #[test]
     fn pinned_vector_does_not_drift() {
         let e = BigUint::from(0x42u32);
         let o = BigUint::from(0x24u32);
         let h = stake_hash(&e, &o, 1).unwrap();
-        // Regenerate if tvm_abi packing rules change — and re-verify against
-        // a real PN's _stakes map keys before updating (see read-api.md
-        // §Stake projection).
         let pinned = "0xb9165587c603af7c59d0fc5db123a8cab4d08ece1419f2049c3cdbd9b3a0f6d8";
         assert_eq!(h, pinned);
     }

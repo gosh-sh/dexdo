@@ -566,6 +566,13 @@ Response fields:
 | `balances[].free` | DECIMAL | Spendable balance, scaled by the token's on-chain `decimals`. |
 | `balances[].locked` | DECIMAL | Collateral locked in open buy orders, same scaling. |
 
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
+| Backend could not read the trading PrivateNote state (gateway timeout, malformed reply, unknown `tokenType`, decimals out of range) | `-1500` | 503 |
+
 ### Market Outcome Balances
 
 ```http
@@ -633,6 +640,7 @@ Errors:
 | --- | --- | --- |
 | `marketAddress` missing or blank | `-1102` | 400 |
 | `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
 | Backend could not read the trading PrivateNote state (gateway timeout, malformed reply, unknown token type) | `-1500` | 503 |
 
 ## Trading Endpoints
