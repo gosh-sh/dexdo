@@ -896,11 +896,37 @@ struct CancelBatchOrdersRequest {
     order_ids: Option<Vec<String>>,
 }
 
+// Manual `ToSchema` impl: `#[derive(ToSchema)]` is incompatible with
+// `#[serde(deny_unknown_fields)]` in salvo-oapi-macros 0.74.3 — the
+// macro emits `additional_properties(Some(...))` where the builder
+// expects `Into<AdditionalProperties<Schema>>`, so the derive fails
+// to compile. We keep `deny_unknown_fields` (a strict-input contract
+// pinned by `unknown_field_in_body_returns_400_minus_1130`) and
+// reproduce here what the derive would have generated for the other
+// batch DTOs: camelCase property names, Optional fields → no
+// `required(...)`, and an explicit `additionalProperties: false` so
+// the OpenAPI consumer sees the same strict signal as the runtime.
+impl ToSchema for CancelBatchOrdersRequest {
+    fn to_schema(_components: &mut Components) -> salvo_oapi::RefOr<salvo_oapi::schema::Schema> {
+        use salvo_oapi::schema::AdditionalProperties;
+        use salvo_oapi::{Array, BasicType, Object};
+        Object::new()
+            .property("marketAddress", Object::new().schema_type(BasicType::String))
+            .property("symbol", Object::new().schema_type(BasicType::String))
+            .property(
+                "orderIds",
+                Array::new().items(Object::new().schema_type(BasicType::String)),
+            )
+            .additional_properties(AdditionalProperties::FreeForm(false))
+            .into()
+    }
+}
+
 /// Response item for `DELETE /api/v1/batchOrders`. Same `PENDING_CANCEL`
 /// envelope as the single-order DELETE — see [`CancelOrderResponse`]
 /// for the rationale. Returned in request order; the array has one
 /// element per accepted id.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CancelBatchOrderResponseItem {
     order_id: String,
@@ -1270,15 +1296,24 @@ fn build_batch_orders_input(
     })
 }
 
-/// `DELETE /api/v1/batchOrders`. Parses one `(marketAddress, symbol)`
-/// plus `orderIds[]`, hands off to `CancelBatchOrdersUseCase`, and
-/// shapes a flat array of `PENDING_CANCEL` envelopes per
-/// [api-spec §Cancel Batch Orders](../../docs/api-spec.md#cancel-batch-orders).
-/// The use case enforces non-empty `orderIds[]`, intra-batch dedup, the
-/// `outcome.max_batch_size` cap, and bulk order resolution. The chain
-/// (`PrivateNote.cancelBatch`) accepts the list atomically under one
-/// `_busy` window.
-#[handler]
+/// Parses one `(marketAddress, symbol)` plus `orderIds[]`, hands off
+/// to `CancelBatchOrdersUseCase`, and shapes a flat array of
+/// `PENDING_CANCEL` envelopes. The use case enforces non-empty
+/// `orderIds[]`, intra-batch dedup, the `outcome.max_batch_size` cap,
+/// and bulk order resolution. The chain (`PrivateNote.cancelBatch`)
+/// accepts the list atomically under one `_busy` window.
+#[endpoint(
+    tags("trading"),
+    summary = "Cancel a batch of orders atomically",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
+    ),
+    request_body = CancelBatchOrdersRequest,
+    security(("apiKey" = [])),
+)]
 async fn delete_batch_orders(
     req: &mut Request,
     depot: &mut Depot,
@@ -1575,7 +1610,11 @@ pub fn openapi_doc() -> OpenApi {
                 .delete(delete_order),
         )
         .push(Router::with_path("api/v1/orders").get(get_orders))
-        .push(Router::with_path("api/v1/batchOrders").post(create_batch_orders))
+        .push(
+            Router::with_path("api/v1/batchOrders")
+                .post(create_batch_orders)
+                .delete(delete_batch_orders),
+        )
         .push(Router::with_path("api/v1/account").get(get_account))
         .push(Router::with_path("api/v1/account/balances").get(get_account_balances));
 
