@@ -306,7 +306,14 @@
 				{"name":"tokenType","type":"uint32"},
 				{"name":"orderId","type":"uint128"},
 				{"name":"feeReserve","type":"uint128"},
-				{"name":"lock","type":"uint128"}
+				{"name":"lock","type":"uint128"},
+				{"name":"clientOrderId","type":"uint128"},
+				{"name":"outcomeId","type":"uint32"},
+				{"name":"isBuy","type":"bool"},
+				{"name":"flags","type":"uint8"},
+				{"name":"price","type":"uint256"},
+				{"name":"amount","type":"uint128"},
+				{"name":"opNonce","type":"uint64"}
 			],
 			"outputs": [
 			]
@@ -322,7 +329,9 @@
 				{"name":"flags","type":"uint8"},
 				{"name":"price","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"numOutcomes","type":"uint32"}
+				{"name":"numOutcomes","type":"uint32"},
+				{"name":"clientOrderId","type":"uint128"},
+				{"name":"opNonce","type":"uint64"}
 			],
 			"outputs": [
 			]
@@ -358,7 +367,9 @@
 				{"name":"orderId","type":"uint128"},
 				{"name":"outcomeId","type":"uint32"},
 				{"name":"isBuy","type":"bool"},
-				{"name":"amount","type":"uint128"}
+				{"name":"amount","type":"uint128"},
+				{"name":"clientOrderId","type":"uint128"},
+				{"name":"opNonce","type":"uint64"}
 			],
 			"outputs": [
 			]
@@ -375,9 +386,11 @@
 				{"name":"isBuy","type":"bool"},
 				{"name":"refundAmount","type":"uint128"},
 				{"name":"feeAmount","type":"uint128"},
+				{"name":"isRebate","type":"bool"},
 				{"name":"orderId","type":"uint128"},
 				{"name":"isFinal","type":"bool"},
-				{"name":"numOutcomes","type":"uint32"}
+				{"name":"numOutcomes","type":"uint32"},
+				{"name":"clientOrderId","type":"uint128"}
 			],
 			"outputs": [
 			]
@@ -419,7 +432,8 @@
 			"inputs": [
 				{"name":"eventId","type":"uint256"},
 				{"name":"oracleListHash","type":"uint256"},
-				{"name":"tokenType","type":"uint32"}
+				{"name":"tokenType","type":"uint32"},
+				{"name":"opNonce","type":"uint64"}
 			],
 			"outputs": [
 			]
@@ -580,7 +594,13 @@
 			"name": "OrderPlacedConfirmed",
 			"inputs": [
 				{"name":"orderBook","type":"address"},
-				{"name":"orderId","type":"uint128"}
+				{"name":"orderId","type":"uint128"},
+				{"name":"clientOrderId","type":"uint128"},
+				{"name":"outcomeId","type":"uint32"},
+				{"name":"isBuy","type":"bool"},
+				{"name":"flags","type":"uint8"},
+				{"name":"price","type":"uint256"},
+				{"name":"amount","type":"uint128"}
 			],
 			"outputs": [
 			]
@@ -595,6 +615,7 @@
 				{"name":"clearingPrice","type":"uint256"},
 				{"name":"isBuy","type":"bool"},
 				{"name":"feeAmount","type":"uint128"},
+				{"name":"isRebate","type":"bool"},
 				{"name":"isFinal","type":"bool"}
 			],
 			"outputs": [
@@ -608,6 +629,22 @@
 				{"name":"outcomeId","type":"uint32"},
 				{"name":"isBuy","type":"bool"},
 				{"name":"returnAmount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "OrderPlaceRejected",
+			"inputs": [
+				{"name":"orderBook","type":"address"},
+				{"name":"eventId","type":"uint256"},
+				{"name":"clientOrderId","type":"uint128"},
+				{"name":"outcomeId","type":"uint32"},
+				{"name":"isBuy","type":"bool"},
+				{"name":"flags","type":"uint8"},
+				{"name":"price","type":"uint256"},
+				{"name":"amount","type":"uint128"},
+				{"name":"opNonce","type":"uint64"}
 			],
 			"outputs": [
 			]
@@ -654,10 +691,16 @@
 		{"init":false,"name":"_pendingTransferTokenType","type":"uint32"},
 		{"init":false,"name":"_pendingPlaceBuyLock","type":"uint128"},
 		{"init":false,"name":"_pendingPlaceBuyTokenType","type":"uint32"},
+		{"init":false,"name":"_pendingPlaceClientOrderId","type":"uint128"},
+		{"init":false,"name":"_pendingBatchClientOrderIds","type":"uint128[]"},
 		{"init":false,"name":"_orderFeeReserves","type":"map(address,map(uint128,uint128))"},
 		{"init":false,"name":"_orderLocks","type":"map(address,map(uint128,uint128))"},
 		{"init":false,"name":"_lockedInOrders","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_openOrderCount","type":"uint32"},
+		{"init":false,"name":"_openOrdersByEvent","type":"map(uint256,uint32)"},
+		{"init":false,"name":"_clientOrderIds","type":"map(uint128,uint128)"},
+		{"init":false,"name":"_opNonce","type":"uint64"},
+		{"init":false,"name":"_busyOpNonce","type":"uint64"},
 		{"init":false,"name":"_pendingBatchActive","type":"bool"},
 		{"init":false,"name":"_pendingBatchBuyLock","type":"uint128"},
 		{"init":false,"name":"_pendingBatchTokenType","type":"uint32"},

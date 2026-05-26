@@ -2,6 +2,7 @@
 .temp/
 internal-docs/
 target/
+worktrees/
 .claude/roles/
 .claude/commands.txt
 .claude/skills/reviewer-core/

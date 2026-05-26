@@ -140,7 +140,10 @@ pub enum MarketsRequest {
 pub struct OrderForCancel {
     pub event_id: String,
     pub oracle_list_hash: String,
-    pub token_type: i32,
+    /// Validated as non-negative at the repo boundary (the DB column is
+    /// `integer` but the chain ABI is `uint32`); callers can use it
+    /// directly as `u32` without a secondary cast.
+    pub token_type: u32,
     pub market_status: MarketStatus,
     /// `live_orders.client_order_id`. NULL in the DB surfaces as `None`
     /// here; the handler renders it as the empty string per
@@ -158,9 +161,40 @@ pub struct OrderForCancel {
 pub struct MarketForPlacement {
     pub event_id: String,
     pub oracle_list_hash: String,
-    pub token_type: i32,
+    /// Validated as non-negative at the repo boundary (the DB column is
+    /// `integer` but the chain ABI is `uint32`); callers can use it
+    /// directly as `u32` without a secondary cast.
+    pub token_type: u32,
     pub status: MarketStatus,
     pub outcome: Outcome,
+}
+
+/// Per-outcome metadata needed to render a market-balances row.
+#[derive(Debug, Clone)]
+pub struct BalanceOutcome {
+    pub outcome_id: u32,
+    pub symbol: Symbol,
+    pub quantity_precision: u8,
+}
+
+/// Result of resolving `marketAddress` for a balances request. Contains
+/// every chain-side field (`event_id`, `oracle_list_hash`, `token_type`)
+/// needed to compute `stake_hash` plus the outcome list used to render
+/// the response.
+#[derive(Debug, Clone)]
+pub struct MarketBalancesResolution {
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    /// Already validated as non-negative at the repo boundary
+    /// (`try_into().map_err(MarketInconsistent)`); callers can use it
+    /// directly as `u32` without a secondary cast.
+    pub token_type: u32,
+    pub orderbook_address: String,
+    /// Number of outcomes for this market. `u32` because outcome counts
+    /// are non-negative; the Postgres `integer` column is cast at the
+    /// repo boundary (negative DB values → `MarketInconsistent`).
+    pub num_outcomes: u32,
+    pub outcomes: Vec<BalanceOutcome>,
 }
 
 #[async_trait]
@@ -243,6 +277,27 @@ pub trait MarketReadRepository: Send + Sync {
     ) -> Result<Option<CancelBatchResolution>, anyhow::Error>;
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error>;
+
+    /// Resolve a market for the balances path: returns chain-side
+    /// fields needed to compute `stake_hash` plus the outcome list
+    /// used to render the response. Gated by
+    /// `last_reconciled_at IS NOT NULL`. Misses collapse to
+    /// `DomainError::InvalidMarketOrSymbol`.
+    async fn resolve_market_for_balances(
+        &self,
+        market_address: &MarketAddress,
+    ) -> Result<MarketBalancesResolution, anyhow::Error>;
+
+    /// Sum `amount_remaining` over OPEN SELL rows owned by `owner_pn`
+    /// on `orderbook_address`, grouped by `outcome_id`. Returns a map
+    /// keyed by `outcome_id` with raw uint128 values as decimal strings
+    /// (scaled by the API). Missing outcomes default to "0" on the
+    /// caller side.
+    async fn sum_open_sell_remaining(
+        &self,
+        orderbook_address: &str,
+        owner_pn_address: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error>;
 }
 
 #[async_trait]
@@ -295,6 +350,21 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
 
     async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         (**self).list_orders(query).await
+    }
+
+    async fn resolve_market_for_balances(
+        &self,
+        market_address: &MarketAddress,
+    ) -> Result<MarketBalancesResolution, anyhow::Error> {
+        (**self).resolve_market_for_balances(market_address).await
+    }
+
+    async fn sum_open_sell_remaining(
+        &self,
+        orderbook_address: &str,
+        owner_pn_address: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+        (**self).sum_open_sell_remaining(orderbook_address, owner_pn_address).await
     }
 }
 
@@ -612,6 +682,363 @@ where
     pub async fn execute(&self, query: GetDepthQuery) -> Result<DepthSnapshot, anyhow::Error> {
         self.repo.get_depth(&query.market_address, &query.symbol, query.limit).await
     }
+}
+
+/// Input for `GetAccountUseCase`. Built by the HTTP layer from the
+/// resolved auth context plus the request-entry timestamp.
+#[derive(Debug, Clone)]
+pub struct GetAccountInput {
+    pub account_id: uuid::Uuid,
+    pub pn_address: String,
+    /// Unix milliseconds. Echoed as `updateTime` in the response.
+    pub now_ms: i64,
+}
+
+pub struct GetAccountUseCase<P, R> {
+    pn: P,
+    refs: R,
+}
+
+impl<P, R> GetAccountUseCase<P, R> {
+    pub fn new(pn: P, refs: R) -> Self {
+        Self { pn, refs }
+    }
+}
+
+impl<P, R> GetAccountUseCase<P, R>
+where
+    P: PnStateReader,
+    R: ReferenceRepository,
+{
+    pub async fn execute(
+        &self,
+        input: GetAccountInput,
+    ) -> Result<dodex_domain::AccountBalances, anyhow::Error> {
+        let details = self.pn.get_details(&input.pn_address).await.map_err(|e| {
+            // Render the full `with_context` chain on one line so ops can
+            // distinguish gateway flap from ABI parse failure — Debug
+            // formatting (`?e`) folds the chain into a multi-line block
+            // that's awkward to grep in fmt layers. Preserve a typed
+            // `DomainError` from the reader (in particular
+            // `AccountNotDeployed`) so the API surfaces 404 rather than
+            // collapsing every read-side failure to 503.
+            warn!(
+                error = %format_args!("{e:#}"),
+                pn = %input.pn_address,
+                "get_details failed",
+            );
+            if let Some(domain) = e.downcast_ref::<dodex_domain::DomainError>() {
+                return anyhow::anyhow!(*domain);
+            }
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+
+        // Build the per-token_type aggregate from the union of `_balance`
+        // and `_lockedInOrders` keys. A token_type that appears only on the
+        // locked side — the textbook case is a LIMIT SELL that consumed the
+        // caller's entire free balance, leaving `_balance[X]` absent (or
+        // pruned to 0) while `_lockedInOrders[X] > 0` — must still surface
+        // in the response with `free = "0"`. Iterating `_balance` alone
+        // would silently drop it.
+        //
+        // Each map is keyed by token_type and must be unique; the chain
+        // emits `map(uint32 → uint128)` so a duplicate key is read-model
+        // corruption. `HashMap::insert` returning `Some` fails closed
+        // rather than silently letting the last write win.
+        let mut free_by_tt: std::collections::HashMap<u32, String> =
+            std::collections::HashMap::with_capacity(details.balance.len());
+        for (tt, raw_free) in &details.balance {
+            if free_by_tt.insert(*tt, raw_free.clone()).is_some() {
+                warn!(token_type = *tt, "duplicate token_type in PN _balance");
+                return Err(anyhow::Error::from(dodex_domain::DomainError::MarketInconsistent)
+                    .context(format!("duplicate token_type {tt} in PN _balance")));
+            }
+        }
+        let mut locked_by_tt: std::collections::HashMap<u32, String> =
+            std::collections::HashMap::with_capacity(details.locked_in_orders.len());
+        for (tt, raw_locked) in &details.locked_in_orders {
+            if locked_by_tt.insert(*tt, raw_locked.clone()).is_some() {
+                warn!(token_type = *tt, "duplicate token_type in PN _lockedInOrders");
+                return Err(anyhow::Error::from(dodex_domain::DomainError::MarketInconsistent)
+                    .context(format!("duplicate token_type {tt} in PN _lockedInOrders")));
+            }
+        }
+        let mut by_tt: std::collections::HashMap<u32, (String, String)> =
+            std::collections::HashMap::with_capacity(free_by_tt.len() + locked_by_tt.len());
+        for (tt, raw_free) in free_by_tt {
+            by_tt.entry(tt).or_insert_with(|| ("0".to_string(), "0".to_string())).0 = raw_free;
+        }
+        for (tt, raw_locked) in locked_by_tt {
+            by_tt.entry(tt).or_insert_with(|| ("0".to_string(), "0".to_string())).1 = raw_locked;
+        }
+
+        let mut rows: Vec<dodex_domain::AssetBalance> = Vec::with_capacity(by_tt.len());
+        for (tt, (raw_free, raw_locked)) in &by_tt {
+            let token = self.refs.lookup_ref_token(*tt).await?.ok_or_else(|| {
+                warn!(token_type = tt, "PN state carries unknown token_type");
+                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+            })?;
+            rows.push(dodex_domain::AssetBalance {
+                asset: token.token_code.clone(),
+                free: scale_decimal(raw_free, token.decimals)?,
+                locked: scale_decimal(raw_locked, token.decimals)?,
+            });
+        }
+        rows.sort_by(|a, b| a.asset.cmp(&b.asset));
+
+        Ok(dodex_domain::AccountBalances {
+            account_id: input.account_id,
+            update_time_ms: input.now_ms,
+            balances: rows,
+        })
+    }
+}
+
+/// Scale a non-negative integer-decimal string `raw` (the smallest-unit
+/// uint representation) to a fixed-point decimal with `decimals` digits
+/// to the right of the point.
+///
+/// All inputs — including `"0"` and the empty string — are padded to
+/// exactly `decimals` fractional digits (e.g. `"10000000000"` with
+/// `decimals=9` → `"10.000000000"`, `"1"` → `"0.000000001"`,
+/// `"0"` → `"0.000000000"`). The empty string is normalised to `"0"`
+/// before scaling. `decimals == 0` returns `raw` unchanged (or `"0"`
+/// for an empty input).
+///
+/// `raw` is validated as a non-negative integer literal before any
+/// byte-level slicing — non-digit or multibyte input would otherwise
+/// either produce garbage output or panic at the UTF-8 split when
+/// `raw.len() > decimals` and the split falls inside a multibyte char.
+/// Invalid input surfaces as `DomainError::MarketInconsistent` (503).
+/// Upper bound on `decimals` accepted by `scale_decimal`. Mirrors
+/// `crates/infrastructure/src/postgres_repo.rs::MAX_DECIMAL_PRECISION`:
+/// the SQL NUMERIC(38, …) cap, far beyond any real asset's precision.
+/// `scale_decimal` allocates `O(decimals)` bytes via `"0".repeat(...)`,
+/// so an unbounded value on a corrupt `ref_tokens` row would OOM the
+/// API process on the first scaled balance.
+const MAX_DECIMALS: u8 = 38;
+
+fn scale_decimal(raw: &str, decimals: u8) -> Result<String, DomainError> {
+    use std::str::FromStr;
+    if decimals > MAX_DECIMALS {
+        tracing::warn!(
+            decimals,
+            max = MAX_DECIMALS,
+            "scale_decimal: decimals exceed MAX_DECIMALS — refusing to allocate",
+        );
+        return Err(DomainError::MarketInconsistent);
+    }
+    let raw = if raw.is_empty() { "0" } else { raw };
+    // Parse and re-emit so the slicing path below operates on a
+    // canonical decimal string. `BigUint::from_str` accepts leading
+    // zeros ("00012345"), so without canonicalisation a padded input
+    // would survive into the `>` branch and slice to "00012.345"
+    // instead of "12.345". Triggers: a future tvm_abi version that
+    // emits zero-padded uint128 literals, or a corrupt repo row.
+    let canonical = BigUint::from_str(raw)
+        .map_err(|err| {
+            tracing::warn!(raw, error = %err, "scale_decimal: input is not a non-negative integer");
+            DomainError::MarketInconsistent
+        })?
+        .to_string();
+    let raw = canonical.as_str();
+    let d = decimals as usize;
+    if d == 0 {
+        // Keep the response format invariant: every scaled value has a decimal
+        // point. A strict client parser (`^[0-9]+\.[0-9]+$`) would otherwise
+        // reject the bare integer. `decimals=0` is reachable today because the
+        // schema does not CHECK `> 0` on `ref_tokens.decimals` /
+        // `market_outcomes.quantity_precision`.
+        return Ok(format!("{raw}.0"));
+    }
+    if raw.len() <= d {
+        let padded = "0".repeat(d - raw.len()) + raw;
+        Ok(format!("0.{padded}"))
+    } else {
+        let split = raw.len() - d;
+        Ok(format!("{}.{}", &raw[..split], &raw[split..]))
+    }
+}
+
+/// Input for `GetMarketBalancesUseCase`. The HTTP layer assembles it
+/// from the validated query plus the resolved auth context.
+#[derive(Debug, Clone)]
+pub struct GetMarketBalancesInput {
+    pub pn_address: String,
+    pub market_address: MarketAddress,
+    /// Unix milliseconds. Echoed as `updateTime` in the response.
+    pub now_ms: i64,
+}
+
+/// Signature for the off-chain hash function — the use case holds it
+/// as a function pointer so unit tests can plug a stub hasher without
+/// pulling in the real `tvm_abi` machinery. Returns
+/// `Err(DomainError::MarketInconsistent)` on parse or hash failure so
+/// read-model corruption surfaces as a 503 instead of silently
+/// producing all-zero outcome balances.
+///
+/// `token_type` is `u32` because the repo boundary already validates
+/// that the DB value is non-negative; callers never need to cast.
+pub type StakeHasher =
+    fn(event_id: &str, oracle_list_hash: &str, token_type: u32) -> Result<String, DomainError>;
+
+pub struct GetMarketBalancesUseCase<P, R> {
+    pn: P,
+    repo: R,
+    hasher: StakeHasher,
+}
+
+impl<P, R> GetMarketBalancesUseCase<P, R> {
+    pub fn new(pn: P, repo: R, hasher: StakeHasher) -> Self {
+        Self { pn, repo, hasher }
+    }
+}
+
+impl<P, R> GetMarketBalancesUseCase<P, R>
+where
+    P: PnStateReader,
+    R: MarketReadRepository,
+{
+    pub async fn execute(
+        &self,
+        input: GetMarketBalancesInput,
+    ) -> Result<dodex_domain::MarketBalances, anyhow::Error> {
+        // Resolve the market. The repo lifts unknown / unreconciled
+        // pairs to InvalidMarketOrSymbol; pass that error through verbatim.
+        let res = self.repo.resolve_market_for_balances(&input.market_address).await?;
+
+        // Compute the stake hash off chain. The hasher returns Err on
+        // parse / hash failure (read-model corruption) — propagate as
+        // MarketInconsistent so the caller receives a 503.
+        // `res.token_type` is already `u32` (validated at the repo boundary).
+        let stake_hash = (self.hasher)(&res.event_id, &res.oracle_list_hash, res.token_type)
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        // Fan out: chain-side stake lookup + DB-side sell aggregation.
+        // The two are independent, so we issue them in parallel.
+        let pn_address = input.pn_address.clone();
+        let stake_fut = self.pn.get_stake(&pn_address, &stake_hash);
+        let sum_fut = self.repo.sum_open_sell_remaining(&res.orderbook_address, &input.pn_address);
+        let (stake_opt, sums) = tokio::try_join!(stake_fut, sum_fut).map_err(|e| {
+            // Preserve a typed `DomainError` from either branch (e.g. the
+            // repo lifts negative `outcome_id` to MarketInconsistent and
+            // the reader can produce `AccountNotDeployed`). Without this
+            // downcast, the outer wrap would replace the inner
+            // classification and the handler would see only the
+            // freshly-minted MarketInconsistent. Log either way so a
+            // second simultaneous failure isn't silently dropped by
+            // try_join!'s "first error wins" behaviour.
+            if let Some(domain) = e.downcast_ref::<dodex_domain::DomainError>() {
+                tracing::warn!(
+                    ?domain,
+                    market_address = %input.market_address.0,
+                    pn = %input.pn_address,
+                    error = %format_args!("{e:#}"),
+                    "balances fan-out failed (typed domain error)",
+                );
+                return anyhow::anyhow!(*domain);
+            }
+            tracing::warn!(error = %format_args!("{e:#}"), "balances fan-out failed");
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+
+        let n = res.num_outcomes as usize;
+
+        // Shape validation: arrays in PnStake must be either empty
+        // (absent key) OR exactly num_outcomes long.
+        if let Some(ref s) = stake_opt {
+            let any_empty =
+                s.amount.is_empty() || s.debt_amount.is_empty() || s.coupons_amount.is_empty();
+            let all_empty =
+                s.amount.is_empty() && s.debt_amount.is_empty() && s.coupons_amount.is_empty();
+            if any_empty && !all_empty {
+                tracing::warn!(
+                    amount_len = s.amount.len(),
+                    debt_len = s.debt_amount.len(),
+                    coupons_len = s.coupons_amount.len(),
+                    "stake arrays mismatch: some empty, some populated"
+                );
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+            }
+            for (label, arr) in [
+                ("amount", &s.amount),
+                ("debtAmount", &s.debt_amount),
+                ("couponsAmount", &s.coupons_amount),
+            ] {
+                if !arr.is_empty() && arr.len() != n {
+                    tracing::warn!(
+                        field = label,
+                        got = arr.len(),
+                        expected = n,
+                        "stake array length mismatch"
+                    );
+                    return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+                }
+            }
+        }
+
+        // Sanity: every aggregated outcome_id must fall within [0, n).
+        for k in sums.keys() {
+            if (*k as usize) >= n {
+                tracing::warn!(outcome_id = k, "aggregation returned out-of-range outcome_id");
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+            }
+        }
+        for outcome in &res.outcomes {
+            if (outcome.outcome_id as usize) >= n {
+                tracing::warn!(
+                    outcome_id = outcome.outcome_id,
+                    num_outcomes = res.num_outcomes,
+                    "outcome_id out of range for num_outcomes"
+                );
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+            }
+        }
+
+        // Compose response, sorted by outcome_id ASC (resolution is
+        // already in ascending order by construction in the repo).
+        let mut rows: Vec<dodex_domain::OutcomeBalance> = Vec::with_capacity(n);
+        for outcome in &res.outcomes {
+            let i = outcome.outcome_id as usize;
+            let raw_free: String = match stake_opt {
+                Some(ref s) if !s.amount.is_empty() => {
+                    add_decimal_strs(&s.amount[i], &s.debt_amount[i], &s.coupons_amount[i])?
+                }
+                _ => "0".to_string(),
+            };
+            let raw_locked =
+                sums.get(&outcome.outcome_id).cloned().unwrap_or_else(|| "0".to_string());
+            rows.push(dodex_domain::OutcomeBalance {
+                outcome_id: outcome.outcome_id,
+                symbol: outcome.symbol.clone(),
+                free: scale_decimal(&raw_free, outcome.quantity_precision)?,
+                locked_in_orders: scale_decimal(&raw_locked, outcome.quantity_precision)?,
+            });
+        }
+
+        Ok(dodex_domain::MarketBalances {
+            market_address: input.market_address,
+            update_time_ms: input.now_ms,
+            balances: rows,
+        })
+    }
+}
+
+/// Sum three non-negative integer decimal strings. Uses
+/// `num_bigint::BigUint` so 128-bit-ish values cannot overflow.
+fn add_decimal_strs(a: &str, b: &str, c: &str) -> Result<String, anyhow::Error> {
+    use std::str::FromStr;
+    let parse = |s: &str| -> Result<BigUint, anyhow::Error> {
+        if s.is_empty() {
+            return Ok(BigUint::from(0u32));
+        }
+        BigUint::from_str(s).map_err(|e| {
+            tracing::warn!(value = s, error = ?e, "decimal parse failed");
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })
+    };
+    let total = parse(a)? + parse(b)? + parse(c)?;
+    Ok(total.to_string())
 }
 
 /// Input shape for `CreateOrderUseCase`. The HTTP layer parses
@@ -980,6 +1407,103 @@ impl<T: ?Sized + ChainOrderSender> ChainOrderSender for Arc<T> {
     }
 }
 
+/// One row of `ref_tokens` exposed to the application layer.
+///
+/// `token_type` is `u32` because the chain ABI emits a `uint32`. The DB
+/// column is `integer` (i32 range), so a value above `i32::MAX` cannot
+/// exist in the table and the repo lifts it to
+/// `DomainError::MarketInconsistent` at the boundary. Carrying it as
+/// `u32` above the repo lets the rest of the path skip defensive sign
+/// checks.
+#[derive(Debug, Clone)]
+pub struct RefToken {
+    pub token_type: u32,
+    pub token_code: String,
+    pub decimals: u8,
+}
+
+/// Source of `ref_tokens` lookups. Kept as a separate port from
+/// `MarketReadRepository` because callers (use cases) need only
+/// `lookup_ref_token` and dragging in the heavy MarketRead surface
+/// would unnecessarily couple this trait's consumers to the wider
+/// market-read API.
+#[async_trait]
+pub trait ReferenceRepository: Send + Sync {
+    /// Returns `None` for an unknown `token_type` (no matching row in
+    /// `ref_tokens`). The repo additionally lifts structurally
+    /// impossible values — a `u32` above the DB column's `i32` range,
+    /// or a row whose `decimals` does not fit in `u8` — to
+    /// `DomainError::MarketInconsistent`. Use cases turn the genuine
+    /// `None` into `MarketInconsistent` too (the indexer ships with the
+    /// canonical set; an unknown type is read-model corruption).
+    async fn lookup_ref_token(&self, token_type: u32) -> Result<Option<RefToken>, anyhow::Error>;
+}
+
+#[async_trait]
+impl<T: ?Sized + ReferenceRepository> ReferenceRepository for Arc<T> {
+    async fn lookup_ref_token(&self, token_type: u32) -> Result<Option<RefToken>, anyhow::Error> {
+        (**self).lookup_ref_token(token_type).await
+    }
+}
+
+/// Detokenized `PrivateNote.getDetails()` output (only the fields the
+/// account-balance path needs). `balance` and `locked_in_orders` mirror
+/// the on-chain `map(uint32 → uint128)` shape as `(token_type, raw_uint128_decimal_string)`
+/// pairs — the use case scales them with `RefToken.decimals` before
+/// returning to the API. The raw amounts stay as strings because
+/// `serde_json` cannot round-trip `u128` safely.
+#[derive(Debug, Clone)]
+pub struct PnDetails {
+    pub balance: Vec<(u32, String)>,
+    pub locked_in_orders: Vec<(u32, String)>,
+}
+
+/// Detokenized `PrivateNote._stakes(hash)` value object — only the three
+/// outcome-amount arrays. Arrays are indexed by `outcome_id`. Empty
+/// arrays mean "no stake key for this market" (TVM auto-getter returns
+/// a zero-default struct).
+#[derive(Debug, Clone, Default)]
+pub struct PnStake {
+    pub amount: Vec<String>,
+    pub debt_amount: Vec<String>,
+    pub coupons_amount: Vec<String>,
+}
+
+/// On-demand reader for `PrivateNote` chain state. Implementations
+/// fetch the PN BOC from the GraphQL gateway and run the requested
+/// off-chain getter; failures (gateway down, account absent, ABI
+/// mismatch) bubble up as `anyhow::Error` which the use case lifts
+/// to `DomainError::MarketInconsistent`.
+#[async_trait]
+pub trait PnStateReader: Send + Sync {
+    /// Run `getDetails()` against the PN at `pn_address`.
+    async fn get_details(&self, pn_address: &str) -> Result<PnDetails, anyhow::Error>;
+
+    /// Run `_stakes` (no args — TVM Solidity public-mapping auto-getter
+    /// returns the whole map). Implementation locates the matching key
+    /// by `stake_hash`; returns `None` when the key is absent.
+    async fn get_stake(
+        &self,
+        pn_address: &str,
+        stake_hash: &str,
+    ) -> Result<Option<PnStake>, anyhow::Error>;
+}
+
+#[async_trait]
+impl<T: ?Sized + PnStateReader> PnStateReader for Arc<T> {
+    async fn get_details(&self, pn_address: &str) -> Result<PnDetails, anyhow::Error> {
+        (**self).get_details(pn_address).await
+    }
+
+    async fn get_stake(
+        &self,
+        pn_address: &str,
+        stake_hash: &str,
+    ) -> Result<Option<PnStake>, anyhow::Error> {
+        (**self).get_stake(pn_address, stake_hash).await
+    }
+}
+
 /// Orchestrates `POST /api/v1/order`: resolves market, derives status,
 /// validates input per spec §Input validation, encodes flags, builds the
 /// chain payload, dispatches through `ChainOrderSender`, and returns
@@ -1026,11 +1550,11 @@ where
             return Err(DomainError::OrderValidationFailed);
         }
 
-        // Read-side `assemble_market` deliberately renders a NULL
-        // `oracle_list_hash` as the empty string so that read endpoints
-        // (which do not surface the field) stay available for an
-        // otherwise-valid market. The trading path is where it actually
-        // matters — fail closed with 503 here, mirroring the
+        // Defence-in-depth: `resolve_for_new_order` already lifts a
+        // NULL/blank `oracle_list_hash` to `MarketInconsistent` at the
+        // repo boundary, so the projection should never reach here with
+        // an empty value. Keep the check as a second-line guard in case
+        // a future repo implementation regresses; mirrors the
         // `orderbook_address` invariant.
         if oracle_list_hash.is_empty() {
             return Err(DomainError::MarketInconsistent);
@@ -1045,22 +1569,6 @@ where
             input.client_order_id.as_deref(),
             &outcome,
         )?;
-
-        // `markets.token_type` is `integer` in Postgres (signed), but the
-        // on-chain `PrivateNote.placeOrder` ABI is `uint32`. The
-        // reconciler only ever writes values pulled from
-        // `PMP.getDetails()`, so a negative here would mean the DB row
-        // was corrupted post-reconcile — fail closed with 503 instead
-        // of pushing a sign-folded value to chain.
-        let token_type = u32::try_from(token_type).map_err(|_| {
-            error!(
-                market_address = %input.market_address.0,
-                symbol = %input.symbol.0,
-                token_type,
-                "resolve_for_new_order: token_type does not fit u32",
-            );
-            DomainError::MarketInconsistent
-        })?;
 
         let payload = NewOrderPayload {
             pn_address: input.trading_pn.pn_address,
@@ -1254,24 +1762,14 @@ where
             return Err(DomainError::OrderValidationFailed);
         }
 
-        // Same fail-closed invariant as POST: a reconciled market is
-        // expected to carry `oracle_list_hash`; the chain ABI requires
-        // it. Blank means the read-model is internally inconsistent —
-        // 503 lets the indexer catch up rather than pushing a
-        // zero-hash submission.
+        // Defence-in-depth: `resolve_for_cancel` already lifts a
+        // NULL/blank `oracle_list_hash` to `MarketInconsistent` at the
+        // repo boundary. Keep this guard as a second-line check so a
+        // future repo regression cannot push a zero-hash submission
+        // to chain.
         if oracle_list_hash.is_empty() {
             return Err(DomainError::MarketInconsistent);
         }
-
-        let token_type = u32::try_from(token_type).map_err(|_| {
-            error!(
-                market_address = %input.market_address.0,
-                symbol = %input.symbol.0,
-                token_type,
-                "resolve_for_cancel: token_type does not fit u32",
-            );
-            DomainError::MarketInconsistent
-        })?;
 
         let payload = CancelOrderPayload {
             pn_address: input.trading_pn.pn_address,
@@ -1363,16 +1861,6 @@ where
             );
             return Err(DomainError::InvalidParameter);
         }
-
-        let token_type = u32::try_from(token_type).map_err(|_| {
-            error!(
-                market_address = %input.market_address.0,
-                symbol = %input.symbol.0,
-                token_type,
-                "resolve_for_new_order: token_type does not fit u32",
-            );
-            DomainError::MarketInconsistent
-        })?;
 
         let mut encoded_orders = Vec::with_capacity(input.orders.len());
         let mut submitted_items = Vec::with_capacity(input.orders.len());
@@ -1912,10 +2400,12 @@ mod tests {
                 .find(|o| o.symbol == *symbol)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!(DomainError::InvalidMarketOrSymbol))?;
+            let token_type = u32::try_from(market.token_type)
+                .map_err(|_| anyhow::anyhow!(DomainError::MarketInconsistent))?;
             Ok(MarketForPlacement {
                 event_id: market.event.event_id,
                 oracle_list_hash: market.oracle_list_hash,
-                token_type: market.token_type,
+                token_type,
                 status: market.status,
                 outcome,
             })
@@ -1942,10 +2432,12 @@ mod tests {
             if order.order_id != order_id || order.owner_pn_address != owner_pn_address {
                 return Err(unknown());
             }
+            let token_type = u32::try_from(market.token_type)
+                .map_err(|_| anyhow::anyhow!(DomainError::MarketInconsistent))?;
             Ok(OrderForCancel {
                 event_id: market.event.event_id,
                 oracle_list_hash: market.oracle_list_hash,
-                token_type: market.token_type,
+                token_type,
                 market_status: market.status,
                 client_order_id: order.client_order_id,
             })
@@ -2036,6 +2528,21 @@ mod tests {
         async fn list_orders(&self, query: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
             self.recorded_orders_queries.lock().unwrap().push(query.clone());
             Ok(self.orders_response.clone())
+        }
+
+        async fn resolve_market_for_balances(
+            &self,
+            _: &MarketAddress,
+        ) -> Result<MarketBalancesResolution, anyhow::Error> {
+            unimplemented!("resolve_market_for_balances not exercised by FakeRepo")
+        }
+
+        async fn sum_open_sell_remaining(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+            unimplemented!("sum_open_sell_remaining not exercised by FakeRepo")
         }
     }
 
@@ -3638,5 +4145,711 @@ mod tests {
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::Unexpected);
+    }
+}
+
+#[cfg(test)]
+mod get_account_use_case_tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    struct StubPn {
+        details: Result<PnDetails, String>,
+    }
+
+    #[async_trait]
+    impl PnStateReader for StubPn {
+        async fn get_details(&self, _pn_address: &str) -> anyhow::Result<PnDetails> {
+            self.details.clone().map_err(|e| anyhow::anyhow!(e))
+        }
+
+        async fn get_stake(&self, _pn: &str, _hash: &str) -> anyhow::Result<Option<PnStake>> {
+            unreachable!("get_account never calls get_stake")
+        }
+    }
+
+    struct StubRefs {
+        rows: Mutex<std::collections::HashMap<u32, RefToken>>,
+    }
+
+    #[async_trait]
+    impl ReferenceRepository for StubRefs {
+        async fn lookup_ref_token(&self, t: u32) -> anyhow::Result<Option<RefToken>> {
+            Ok(self.rows.lock().unwrap().get(&t).cloned())
+        }
+    }
+
+    fn make_refs() -> StubRefs {
+        let mut m = std::collections::HashMap::new();
+        m.insert(1, RefToken { token_type: 1, token_code: "NACKL".into(), decimals: 9 });
+        m.insert(3, RefToken { token_type: 3, token_code: "USDC".into(), decimals: 6 });
+        StubRefs { rows: Mutex::new(m) }
+    }
+
+    #[tokio::test]
+    async fn renders_two_assets_sorted_by_code_asc() {
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![
+                    (3, "25000000000".to_string()), // 25_000 USDC at 6 decimals
+                    (1, "10000000000".to_string()), // 10 NACKL at 9 decimals
+                ],
+                locked_in_orders: vec![
+                    (3, "3750000000".to_string()), // 3_750 USDC locked
+                    (1, "1500000000".to_string()), // 1.5 NACKL locked
+                ],
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let out = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 1710000000000,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances.len(), 2);
+        assert_eq!(out.balances[0].asset, "NACKL");
+        assert_eq!(out.balances[0].free, "10.000000000");
+        assert_eq!(out.balances[0].locked, "1.500000000");
+        assert_eq!(out.balances[1].asset, "USDC");
+        assert_eq!(out.balances[1].free, "25000.000000");
+        assert_eq!(out.balances[1].locked, "3750.000000");
+        assert_eq!(out.update_time_ms, 1710000000000);
+    }
+
+    #[tokio::test]
+    async fn locked_defaults_to_zero_when_key_absent_in_locked_map() {
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![(1, "5000000000".to_string())], // 5 NACKL
+                locked_in_orders: vec![],                     // empty
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let out = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances[0].free, "5.000000000");
+        assert_eq!(out.balances[0].locked, "0.000000000");
+    }
+
+    #[tokio::test]
+    async fn free_defaults_to_zero_when_key_appears_only_in_locked_map() {
+        // A LIMIT SELL has consumed the entire free balance: the chain map
+        // `_balance` no longer carries the tokenType (or carries it as 0
+        // but pruned by the contract), yet `_lockedInOrders[tokenType] > 0`.
+        // The response must still include the asset with free="0" so the
+        // user sees what they still own — iterating `_balance` alone would
+        // silently drop it.
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![],
+                locked_in_orders: vec![(1, "2500000000".to_string())], // 2.5 NACKL
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let out = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances.len(), 1);
+        assert_eq!(out.balances[0].asset, "NACKL");
+        assert_eq!(out.balances[0].free, "0.000000000");
+        assert_eq!(out.balances[0].locked, "2.500000000");
+    }
+
+    #[tokio::test]
+    async fn unknown_token_type_yields_market_inconsistent() {
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![(99, "1".to_string())],
+                locked_in_orders: vec![],
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let err = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn duplicate_token_type_in_balance_yields_market_inconsistent() {
+        // Chain emits `_balance` as map(uint32 → uint128), so a duplicate key
+        // cannot occur in a healthy reply. If a parser bug produces one, the
+        // use case must fail closed rather than silently letting the last
+        // write win and corrupting `free`.
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![(1, "10000000000".to_string()), (1, "999999999".to_string())],
+                locked_in_orders: vec![],
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let err = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn duplicate_token_type_in_locked_yields_market_inconsistent() {
+        let pn = StubPn {
+            details: Ok(PnDetails {
+                balance: vec![(1, "10000000000".to_string())],
+                locked_in_orders: vec![(1, "1500000000".to_string()), (1, "999999999".to_string())],
+            }),
+        };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let err = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn pn_reader_failure_yields_market_inconsistent() {
+        let pn = StubPn { details: Err("gateway down".into()) };
+        let uc = GetAccountUseCase::new(pn, make_refs());
+        let err = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn pn_reader_account_not_deployed_preserves_typed_variant() {
+        // The reader signals "Account::is_none" with a typed
+        // DomainError::AccountNotDeployed; the use case must preserve
+        // the variant through its map_err chain so the API surface
+        // serves a 404 instead of collapsing to 503 / MarketInconsistent.
+        struct TypedStubPn;
+        #[async_trait]
+        impl PnStateReader for TypedStubPn {
+            async fn get_details(&self, _pn_address: &str) -> anyhow::Result<PnDetails> {
+                Err(anyhow::Error::from(DomainError::AccountNotDeployed))
+            }
+
+            async fn get_stake(&self, _pn: &str, _hash: &str) -> anyhow::Result<Option<PnStake>> {
+                unreachable!()
+            }
+        }
+        let uc = GetAccountUseCase::new(TypedStubPn, make_refs());
+        let err = uc
+            .execute(GetAccountInput {
+                account_id: uuid::Uuid::nil(),
+                pn_address: "0:pn".into(),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::AccountNotDeployed));
+    }
+
+    #[test]
+    fn scale_decimal_pads_to_full_precision() {
+        assert_eq!(scale_decimal("10000000000", 9).unwrap(), "10.000000000");
+        assert_eq!(scale_decimal("1500000000", 9).unwrap(), "1.500000000");
+        assert_eq!(scale_decimal("1", 9).unwrap(), "0.000000001");
+        assert_eq!(scale_decimal("0", 9).unwrap(), "0.000000000");
+        assert_eq!(scale_decimal("", 9).unwrap(), "0.000000000");
+        assert_eq!(scale_decimal("25000000000", 6).unwrap(), "25000.000000");
+        // decimals=0 still emits a decimal point so the wire format stays
+        // `^[0-9]+\.[0-9]+$` regardless of the token's precision.
+        assert_eq!(scale_decimal("42", 0).unwrap(), "42.0");
+        assert_eq!(scale_decimal("0", 0).unwrap(), "0.0");
+        assert_eq!(scale_decimal("", 0).unwrap(), "0.0");
+    }
+
+    #[test]
+    fn scale_decimal_handles_branch_boundary() {
+        // raw.len() == decimals is the seam between the two branches:
+        // the `<=` branch produces "0.<raw>" with zero leading-zero padding.
+        assert_eq!(scale_decimal("123456789", 9).unwrap(), "0.123456789");
+    }
+
+    #[test]
+    fn scale_decimal_rejects_decimals_above_max() {
+        // Mirrors infra's MAX_DECIMAL_PRECISION cap: a corrupt
+        // `ref_tokens` row with decimals beyond NUMERIC(38, …) would
+        // make `scale_decimal` allocate hundreds of bytes per balance.
+        // Cap kicks in before the allocation; values exactly at the
+        // limit still pass.
+        assert_eq!(scale_decimal("1", 38).unwrap(), format!("0.{}1", "0".repeat(37)));
+        let err = scale_decimal("1", 39).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+        let err = scale_decimal("1", 200).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn scale_decimal_rejects_non_digit_input() {
+        // Without entry validation, byte-level slicing in the `>` branch
+        // would either return garbage or panic on a UTF-8 split inside a
+        // multibyte char (e.g. raw="1é", decimals=2 splits "é" in half).
+        let err = scale_decimal("abc", 9).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+        let err = scale_decimal("1é", 2).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+        let err = scale_decimal("-1", 9).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn scale_decimal_strips_leading_zeros() {
+        // BigUint::from_str accepts zero-padded literals, so a future
+        // tvm_abi version that emits fixed-width uint128 amounts would
+        // reach the slicing branch with leading zeros and emit a
+        // non-canonical decimal. Canonicalisation must strip them on
+        // every branch.
+        assert_eq!(scale_decimal("00012345", 3).unwrap(), "12.345");
+        assert_eq!(scale_decimal("000", 9).unwrap(), "0.000000000");
+        assert_eq!(scale_decimal("0001500000000", 9).unwrap(), "1.500000000");
+        assert_eq!(scale_decimal("00", 0).unwrap(), "0.0");
+    }
+}
+
+#[cfg(test)]
+mod balances_port_tests {
+    use super::*;
+
+    // Compile-time guard: passes iff the trait is dyn-compatible and the
+    // value-object fields have the expected names and types. Behavioural
+    // coverage lives in get_market_balances_use_case_tests.
+    #[test]
+    fn pn_state_reader_is_dyn_compatible() {
+        fn _accepts_dyn(_: &dyn PnStateReader) {}
+    }
+
+    #[test]
+    fn reference_repository_is_dyn_compatible() {
+        fn _accepts_dyn(_: &dyn ReferenceRepository) {}
+    }
+
+    #[test]
+    fn pn_details_constructs_with_named_fields() {
+        let _ = PnDetails {
+            balance: vec![(1, "100".to_string())],
+            locked_in_orders: vec![(1, "10".to_string())],
+        };
+    }
+
+    #[test]
+    fn pn_stake_constructs_with_arrays() {
+        let _ = PnStake {
+            amount: vec!["1".to_string(), "2".to_string()],
+            debt_amount: vec!["0".to_string(), "0".to_string()],
+            coupons_amount: vec!["0".to_string(), "0".to_string()],
+        };
+    }
+
+    #[test]
+    fn market_balances_resolution_constructs() {
+        let _ = MarketBalancesResolution {
+            event_id: "12345".to_string(),
+            oracle_list_hash: "67890".to_string(),
+            token_type: 1,
+            orderbook_address: "0:orderbook".to_string(),
+            num_outcomes: 2,
+            outcomes: vec![
+                BalanceOutcome {
+                    outcome_id: 0,
+                    symbol: Symbol("X-NO".to_string()),
+                    quantity_precision: 2,
+                },
+                BalanceOutcome {
+                    outcome_id: 1,
+                    symbol: Symbol("X-YES".to_string()),
+                    quantity_precision: 2,
+                },
+            ],
+        };
+    }
+}
+
+#[cfg(test)]
+mod get_market_balances_use_case_tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    struct StubPn {
+        stake: Mutex<Option<PnStake>>,
+        last_hash: Mutex<Option<String>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl PnStateReader for StubPn {
+        async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
+            unreachable!("balances use case never calls get_details")
+        }
+
+        async fn get_stake(&self, _pn: &str, hash: &str) -> anyhow::Result<Option<PnStake>> {
+            if self.fail {
+                anyhow::bail!("gateway down")
+            }
+            *self.last_hash.lock().unwrap() = Some(hash.to_string());
+            Ok(self.stake.lock().unwrap().clone())
+        }
+    }
+
+    struct StubRepo {
+        resolution: Mutex<Result<MarketBalancesResolution, dodex_domain::DomainError>>,
+        sums: Mutex<std::collections::HashMap<u32, String>>,
+    }
+
+    #[async_trait]
+    impl MarketReadRepository for StubRepo {
+        async fn list_markets(&self, _: &MarketsRequest) -> anyhow::Result<MarketsPage> {
+            unreachable!()
+        }
+
+        async fn get_depth(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u16,
+        ) -> anyhow::Result<DepthSnapshot> {
+            unreachable!()
+        }
+
+        async fn resolve_for_new_order(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: i64,
+        ) -> anyhow::Result<MarketForPlacement> {
+            unreachable!()
+        }
+
+        async fn resolve_for_cancel(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u64,
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<OrderForCancel> {
+            unreachable!()
+        }
+
+        async fn resolve_for_cancel_batch(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: &[u64],
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<Option<CancelBatchResolution>> {
+            unreachable!()
+        }
+
+        async fn list_orders(&self, _: &OrdersQuery) -> anyhow::Result<OrdersPage> {
+            unreachable!()
+        }
+
+        async fn resolve_market_for_balances(
+            &self,
+            _: &MarketAddress,
+        ) -> anyhow::Result<MarketBalancesResolution> {
+            self.resolution.lock().unwrap().clone().map_err(anyhow::Error::from)
+        }
+
+        async fn sum_open_sell_remaining(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<std::collections::HashMap<u32, String>> {
+            Ok(self.sums.lock().unwrap().clone())
+        }
+    }
+
+    fn make_resolution(num_outcomes: u32) -> MarketBalancesResolution {
+        let outcomes: Vec<_> = (0..num_outcomes)
+            .map(|i| BalanceOutcome {
+                outcome_id: i,
+                symbol: Symbol(format!("X-{i}")),
+                quantity_precision: 2,
+            })
+            .collect();
+        MarketBalancesResolution {
+            event_id: "1".into(),
+            oracle_list_hash: "2".into(),
+            token_type: 1,
+            orderbook_address: "0:ob".into(),
+            num_outcomes,
+            outcomes,
+        }
+    }
+
+    fn make_pn(stake: Option<PnStake>) -> StubPn {
+        StubPn { stake: Mutex::new(stake), last_hash: Mutex::new(None), fail: false }
+    }
+
+    // Concrete stake_hash impl plugged in via the use case constructor —
+    // the use case doesn't depend on the real hash, only that the same
+    // input produces the same string.
+    fn stub_hasher(_e: &str, _o: &str, _t: u32) -> Result<String, DomainError> {
+        Ok("deadbeef".to_string())
+    }
+
+    fn failing_hasher(_e: &str, _o: &str, _t: u32) -> Result<String, DomainError> {
+        Err(DomainError::MarketInconsistent)
+    }
+
+    #[tokio::test]
+    async fn happy_path_sums_three_pools_per_outcome() {
+        let stake = PnStake {
+            amount: vec!["10".into(), "5".into()],     // outcome 0=10, 1=5
+            debt_amount: vec!["0".into(), "1".into()], //         0=0, 1=1
+            coupons_amount: vec!["2".into(), "0".into()], //         0=2, 1=0
+        };
+        let pn = make_pn(Some(stake));
+        let mut sums = std::collections::HashMap::new();
+        sums.insert(1u32, "100".into()); // outcome 1 has 100 locked
+        let repo =
+            StubRepo { resolution: Mutex::new(Ok(make_resolution(2))), sums: Mutex::new(sums) };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let out = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances.len(), 2);
+        // outcome 0: free = 10+0+2 = 12, scale=2 → "0.12"; locked=0 → "0.00"
+        assert_eq!(out.balances[0].outcome_id, 0);
+        assert_eq!(out.balances[0].free, "0.12");
+        assert_eq!(out.balances[0].locked_in_orders, "0.00");
+        // outcome 1: free = 5+1+0 = 6, scale=2 → "0.06"; locked=100 → "1.00"
+        assert_eq!(out.balances[1].outcome_id, 1);
+        assert_eq!(out.balances[1].free, "0.06");
+        assert_eq!(out.balances[1].locked_in_orders, "1.00");
+    }
+
+    #[tokio::test]
+    async fn missing_stake_key_yields_zero_free() {
+        let pn = make_pn(None); // simulates absent key
+        let mut sums = std::collections::HashMap::new();
+        sums.insert(0u32, "500".into());
+        let repo =
+            StubRepo { resolution: Mutex::new(Ok(make_resolution(2))), sums: Mutex::new(sums) };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let out = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances.len(), 2);
+        assert_eq!(out.balances[0].free, "0.00");
+        assert_eq!(out.balances[0].locked_in_orders, "5.00");
+        assert_eq!(out.balances[1].free, "0.00");
+        assert_eq!(out.balances[1].locked_in_orders, "0.00");
+    }
+
+    #[tokio::test]
+    async fn stake_array_shorter_than_num_outcomes_is_market_inconsistent() {
+        let stake = PnStake {
+            amount: vec!["1".into()], // only one entry for two outcomes
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        };
+        let pn = make_pn(Some(stake));
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn stake_array_longer_than_num_outcomes_is_market_inconsistent() {
+        // stake arrays have length 3, but num_outcomes = 2 — the
+        // invariant check must catch this and return MarketInconsistent.
+        let stake = PnStake {
+            amount: vec!["1".into(), "2".into(), "3".into()],
+            debt_amount: vec!["0".into(), "0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into(), "0".into()],
+        };
+        let pn = make_pn(Some(stake));
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn unknown_market_yields_invalid_market_or_symbol() {
+        let pn = make_pn(None);
+        let repo = StubRepo {
+            resolution: Mutex::new(Err(DomainError::InvalidMarketOrSymbol)),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:unknown".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::InvalidMarketOrSymbol));
+    }
+
+    #[tokio::test]
+    async fn pn_failure_yields_market_inconsistent() {
+        let pn = StubPn { stake: Mutex::new(None), last_hash: Mutex::new(None), fail: true };
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn mixed_empty_and_populated_stake_arrays_is_market_inconsistent() {
+        let stake = PnStake {
+            amount: vec!["10".into(), "5".into()],
+            debt_amount: vec![],
+            coupons_amount: vec![],
+        };
+        let pn = make_pn(Some(stake));
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn hasher_failure_yields_market_inconsistent() {
+        let pn = make_pn(None);
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, failing_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[tokio::test]
+    async fn out_of_range_outcome_id_yields_market_inconsistent() {
+        // sum_open_sell_remaining returns outcome_id=99 which is >= num_outcomes=2.
+        // The bounds-check loop must catch this and return MarketInconsistent.
+        let pn = make_pn(None);
+        let mut sums = std::collections::HashMap::new();
+        sums.insert(99u32, "5".into()); // outcome 99 is out of range for a 2-outcome market
+        let repo =
+            StubRepo { resolution: Mutex::new(Ok(make_resolution(2))), sums: Mutex::new(sums) };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let err = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
     }
 }

@@ -138,21 +138,21 @@ pub enum TerminalKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CancelReason {
-    PmpCancelled,
+    PmpRejectedByOracle,
     EventCancelled,
 }
 
 impl CancelReason {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::PmpCancelled => "PMP_CANCELLED",
+            Self::PmpRejectedByOracle => "PMP_REJECTED_BY_ORACLE",
             Self::EventCancelled => "EVENT_CANCELLED",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "PMP_CANCELLED" => Some(Self::PmpCancelled),
+            "PMP_REJECTED_BY_ORACLE" => Some(Self::PmpRejectedByOracle),
             "EVENT_CANCELLED" => Some(Self::EventCancelled),
             _ => None,
         }
@@ -925,6 +925,13 @@ pub enum DomainError {
     OrderPnBusy,
     #[error("unknown order")]
     UnknownOrder,
+    /// The caller's PrivateNote contract is not deployed yet at the
+    /// resolved address. Operationally distinct from gateway flap or PN
+    /// state parsing failure — the address is well-formed and the
+    /// account is reachable, the BOC just isn't there. Surfaces as 404
+    /// so clients can offer "deploy your account" rather than retry.
+    #[error("account not deployed")]
+    AccountNotDeployed,
     /// The read-model row violates a tech-spec invariant (e.g. RESOLVED with
     /// `frozenAt = null`, CANCELLED with `cancelReason = null`). Per the
     /// invariant-checking contract in `docs/tech-specs/read-api.md`
@@ -969,6 +976,7 @@ impl DomainError {
             Self::MarketInconsistent => -1500,
             Self::OrderValidationFailed => -2010,
             Self::UnknownOrder => -2011,
+            Self::AccountNotDeployed => -2013,
             Self::OrderPnBusy => -2014,
         }
     }
@@ -989,9 +997,50 @@ impl DomainError {
             Self::MarketInconsistent => "Market data is temporarily inconsistent.",
             Self::OrderValidationFailed => "Order would immediately fail validation.",
             Self::UnknownOrder => "Unknown order.",
+            Self::AccountNotDeployed => "Account not deployed.",
             Self::OrderPnBusy => "Trading note busy with a previous order; retry shortly.",
         }
     }
+}
+
+/// One collateral-asset row in `GET /api/v1/account` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetBalance {
+    pub asset: String,
+    pub free: String,
+    pub locked: String,
+}
+
+/// Full response shape for `GET /api/v1/account`. The HTTP layer maps
+/// this into the wire envelope; this type lives in `domain` so the
+/// use case can return a typed value rather than untyped json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountBalances {
+    pub account_id: uuid::Uuid,
+    pub update_time_ms: i64,
+    pub balances: Vec<AssetBalance>,
+}
+
+/// One outcome row in `GET /api/v1/account/balances` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeBalance {
+    pub outcome_id: u32,
+    pub symbol: Symbol,
+    pub free: String,
+    pub locked_in_orders: String,
+}
+
+/// Full response shape for `GET /api/v1/account/balances`. Sorted by
+/// `outcome_id` ASC; length equals the market's outcome count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketBalances {
+    pub market_address: MarketAddress,
+    pub update_time_ms: i64,
+    pub balances: Vec<OutcomeBalance>,
 }
 
 #[cfg(test)]
@@ -1577,5 +1626,33 @@ mod tests {
                 tif.as_str(),
             );
         }
+    }
+
+    #[test]
+    fn asset_balance_json_uses_camel_case() {
+        let b = AssetBalance {
+            asset: "USDC".to_string(),
+            free: "25000.00".to_string(),
+            locked: "3750.00".to_string(),
+        };
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["asset"], "USDC");
+        assert_eq!(v["free"], "25000.00");
+        assert_eq!(v["locked"], "3750.00");
+    }
+
+    #[test]
+    fn outcome_balance_json_uses_camel_case() {
+        let b = OutcomeBalance {
+            outcome_id: 1,
+            symbol: Symbol("PM-X-YES".to_string()),
+            free: "5.50".to_string(),
+            locked_in_orders: "1000.00".to_string(),
+        };
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["outcomeId"], 1);
+        assert_eq!(v["symbol"], "PM-X-YES");
+        assert_eq!(v["free"], "5.50");
+        assert_eq!(v["lockedInOrders"], "1000.00");
     }
 }

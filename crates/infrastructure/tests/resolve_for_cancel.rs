@@ -410,6 +410,105 @@ async fn resolve_for_cancel_pre_reconcile_market_is_invisible() {
 }
 
 #[tokio::test]
+async fn resolve_for_cancel_blank_oracle_list_hash_fails_closed() {
+    // Same invariant as resolve_for_new_order: a reconciled market must
+    // carry a non-blank oracle_list_hash. The cancel path also lifts a
+    // NULL value to MarketInconsistent at the repo boundary.
+    let Some(pool) = setup().await else { return };
+    let pmp = "0:rfc_blank_ohash_pmp";
+    let symbol = "RFC_BLANK_OHASH_YES";
+    let owner = "0:rfc_blank_ohash_owner";
+    purge(&pool, pmp, symbol).await;
+
+    let market_id: i64 = sqlx::query_scalar(
+        r#"insert into markets
+               (pmp_address, market_id, name, token_type, token_code,
+                event_id, oracle_list_hash, orderbook_address,
+                stake_start, stake_end, result_start, result_end,
+                frozen_at, last_reconciled_at)
+           values ($1, $1, $1, 3, 'USDC',
+                   42::numeric, NULL, $1,
+                   1700000100, 1700000200, 1700000300, 1700000400,
+                   1700000210, now())
+           returning id"#,
+    )
+    .bind(pmp)
+    .fetch_one(&pool)
+    .await
+    .expect("insert market with NULL hash");
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 7, 'YES', $3,
+                   2, 4, '0.01', '0.0001', '5.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(symbol)
+    .execute(&pool)
+    .await
+    .expect("insert outcome");
+    seed_live_order(&pool, pmp, 999, 7, owner, "OPEN", "1500000", None).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo
+        .resolve_for_cancel(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            999,
+            owner,
+            NOW_TRADING,
+        )
+        .await
+        .expect_err("NULL oracle_list_hash must fail closed");
+    let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+    assert!(matches!(dom, DomainError::MarketInconsistent));
+}
+
+#[tokio::test]
+async fn resolve_for_cancel_negative_token_type_fails_closed() {
+    // Same invariant as resolve_for_new_order: `markets.token_type` is
+    // `integer` (signed) but the chain ABI is uint32. A negative value
+    // surfaces as MarketInconsistent at the repo boundary with a warn
+    // (market_address, raw).
+    let Some(pool) = setup().await else { return };
+    let pmp = "0:rfc_neg_tt_pmp";
+    let symbol = "RFC_NEG_TT_YES";
+    let owner = "0:rfc_neg_tt_owner";
+    purge(&pool, pmp, symbol).await;
+    sqlx::query(
+        r#"insert into ref_tokens (
+              token_type, token_code, decimals,
+              min_notional, lot_size, tick_size_bps,
+              price_precision, quantity_precision)
+                values (-1, '__NEG_TT_RFC__', 0,
+                        0::numeric, 0::numeric, 0::numeric, 0, 0)
+           on conflict (token_type) do nothing"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_trading_market(&pool, pmp, symbol, -1, 7).await;
+    seed_live_order(&pool, pmp, 999, 7, owner, "OPEN", "1500000", None).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo
+        .resolve_for_cancel(
+            &MarketAddress(pmp.into()),
+            &Symbol(symbol.into()),
+            999,
+            owner,
+            NOW_TRADING,
+        )
+        .await
+        .expect_err("negative token_type must fail closed");
+    let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+    assert!(matches!(dom, DomainError::MarketInconsistent));
+}
+
+#[tokio::test]
 async fn resolve_for_cancel_derives_non_trading_status_for_caller_check() {
     // The repo MUST surface the actual derived status — the use case is
     // what rejects everything other than Trading. A cancelled-market

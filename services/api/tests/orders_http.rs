@@ -240,7 +240,7 @@ async fn insert_order(
 
 #[tokio::test]
 async fn readonly_user_data_key_can_fetch_orders() {
-    let Some((service, pool, kek)) = common::setup().await else { return };
+    let Some((service, pool, kek, _pn_reader)) = common::setup().await else { return };
     let scope = Scope::new();
     scope.cleanup(&pool).await;
     seed_readonly_key(&pool, &kek, &scope).await;
@@ -333,7 +333,7 @@ async fn readonly_user_data_key_can_fetch_orders() {
 
 #[tokio::test]
 async fn status_filter_narrows_orders_through_http() {
-    let Some((service, pool, kek)) = common::setup().await else { return };
+    let Some((service, pool, kek, _pn_reader)) = common::setup().await else { return };
     let scope = Scope::new();
     scope.cleanup(&pool).await;
     seed_readonly_key(&pool, &kek, &scope).await;
@@ -384,7 +384,7 @@ async fn status_filter_narrows_orders_through_http() {
 /// returning unfilled NEW rows — would surface here.
 #[tokio::test]
 async fn partially_filled_status_filter_narrows_orders_through_http() {
-    let Some((service, pool, kek)) = common::setup().await else { return };
+    let Some((service, pool, kek, _pn_reader)) = common::setup().await else { return };
     let scope = Scope::new();
     scope.cleanup(&pool).await;
     seed_readonly_key(&pool, &kek, &scope).await;
@@ -439,7 +439,7 @@ async fn partially_filled_status_filter_narrows_orders_through_http() {
 /// rest of this suite covers.
 #[tokio::test]
 async fn multi_token_status_csv_narrows_orders_through_http() {
-    let Some((service, pool, kek)) = common::setup().await else { return };
+    let Some((service, pool, kek, _pn_reader)) = common::setup().await else { return };
     let scope = Scope::new();
     scope.cleanup(&pool).await;
     seed_readonly_key(&pool, &kek, &scope).await;
@@ -497,7 +497,7 @@ async fn multi_token_status_csv_narrows_orders_through_http() {
 /// context field, or stops binding `$1` would surface end-to-end.
 #[tokio::test]
 async fn foreign_owner_rows_are_filtered_out() {
-    let Some((service, pool, kek)) = common::setup().await else { return };
+    let Some((service, pool, kek, _pn_reader)) = common::setup().await else { return };
     let scope = Scope::new();
     scope.cleanup(&pool).await;
     seed_readonly_key(&pool, &kek, &scope).await;
@@ -546,7 +546,7 @@ async fn foreign_owner_rows_are_filtered_out() {
 
 #[tokio::test]
 async fn market_address_without_symbol_returns_minus_1102() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let market = "0:orders_one_sided";
     let canonical_market = canonical_market_address(market);
@@ -573,7 +573,7 @@ async fn market_address_without_symbol_returns_minus_1102() {
 
 #[tokio::test]
 async fn symbol_without_market_address_returns_minus_1102() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let symbol = "ORDERS_ONE_SIDED_SYMBOL";
     let canonical = canonical_query(&[
@@ -606,7 +606,7 @@ async fn symbol_without_market_address_returns_minus_1102() {
 
 #[tokio::test]
 async fn blank_market_address_with_symbol_returns_minus_1102() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let symbol = "ORDERS_BLANK_MA";
     let canonical = canonical_query(&[
@@ -632,7 +632,7 @@ async fn blank_market_address_with_symbol_returns_minus_1102() {
 
 #[tokio::test]
 async fn blank_symbol_with_market_address_returns_minus_1102() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let market = "0:orders_blank_symbol";
     let canonical_market = canonical_market_address(market);
@@ -659,7 +659,7 @@ async fn blank_symbol_with_market_address_returns_minus_1102() {
 
 #[tokio::test]
 async fn both_blank_market_pair_returns_minus_1102() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[
         ("marketAddress", ""),
@@ -686,7 +686,7 @@ async fn both_blank_market_pair_returns_minus_1102() {
 
 #[tokio::test]
 async fn unknown_market_pair_returns_minus_1121() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let market = "0:orders_unknown_pair";
     let symbol = "ORDERS_UNKNOWN_PAIR";
@@ -718,7 +718,7 @@ async fn unknown_market_pair_returns_minus_1121() {
 
 #[tokio::test]
 async fn unknown_status_token_returns_minus_1130() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     // Commas in status must be percent-encoded (%2C) so the client-side
     // canonical matches the server-side canonical (which preserves raw
@@ -747,7 +747,7 @@ async fn unknown_status_token_returns_minus_1130() {
 
 #[tokio::test]
 async fn pending_new_status_token_returns_minus_1130() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     // PENDING_NEW has no comma, so no encoding issues — use the normal helper.
     let canonical = canonical_query(&[
@@ -775,7 +775,7 @@ async fn pending_new_status_token_returns_minus_1130() {
 
 #[tokio::test]
 async fn pending_cancel_status_token_returns_minus_1130() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[
         ("recvWindow", "5000"),
@@ -802,7 +802,7 @@ async fn pending_cancel_status_token_returns_minus_1130() {
 
 #[tokio::test]
 async fn empty_cursor_returns_minus_1102() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     // URL-encoded space (%20) sends a whitespace-only cursor. We build
     // the URL manually because `TestClient::query("cursor", " ")` lets
@@ -833,7 +833,7 @@ async fn empty_cursor_returns_minus_1102() {
 
 #[tokio::test]
 async fn limit_out_of_range_returns_minus_1102() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
 
     // limit=501 (above ORDERS_MAX_LIMIT).
     {
@@ -933,7 +933,7 @@ async fn limit_out_of_range_returns_minus_1102() {
 
 #[tokio::test]
 async fn non_numeric_limit_returns_minus_1130() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
 
     let ts = now_ms();
     let canonical = canonical_query(&[
@@ -1010,7 +1010,7 @@ async fn get_orders_page(
 
 #[tokio::test]
 async fn pagination_roundtrip_returns_descending_order() {
-    let Some((service, pool, kek)) = common::setup().await else { return };
+    let Some((service, pool, kek, _pn_reader)) = common::setup().await else { return };
     let scope = Scope::new();
     scope.cleanup(&pool).await;
     seed_readonly_key(&pool, &kek, &scope).await;
@@ -1053,7 +1053,7 @@ async fn pagination_roundtrip_returns_descending_order() {
 
 #[tokio::test]
 async fn missing_auth_returns_minus_1003() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
 
     let mut resp = TestClient::get("http://test/api/v1/orders")
@@ -1072,7 +1072,7 @@ async fn missing_auth_returns_minus_1003() {
 
 #[tokio::test]
 async fn trade_only_key_returns_minus_1002() {
-    let Some((service, pool, kek)) = common::setup().await else { return };
+    let Some((service, pool, kek, _pn_reader)) = common::setup().await else { return };
 
     let id = uuid::Uuid::new_v4().simple().to_string();
     let trade_key = format!("dk_orders_trade_only_{id}");

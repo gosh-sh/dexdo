@@ -84,7 +84,7 @@ After building the DTO, the API checks the assembled shape against spec invarian
 | `timings` is null exactly when status is PENDING | [api-spec Timings](../api-spec.md#timings): "`timings` itself is `null` only for `PENDING`." |
 | `terminal` is non-null exactly when status is RESOLVED, CANCELLED, or EXPIRED | [api-spec Terminal](../api-spec.md#terminal) |
 | RESOLVED requires `frozen_at`, kind=RESOLVED, **`resolvedOutcomeId`** set | [api-spec Terminal](../api-spec.md#terminal) ("without it the client cannot know which side won") |
-| CANCELLED requires kind=CANCELLED and a **valid** `cancelReason` (PMP_CANCELLED or EVENT_CANCELLED) | [api-spec Terminal](../api-spec.md#terminal): cancelReason must distinguish source |
+| CANCELLED requires kind=CANCELLED and a **valid** `cancelReason` (PMP_REJECTED_BY_ORACLE or EVENT_CANCELLED) | [api-spec Terminal](../api-spec.md#terminal): cancelReason must distinguish source |
 | EXPIRED requires kind=EXPIRED | spec consistency |
 | TRADING / RESOLVING require `frozen_at` | spec consistency with `frozenAt != null` for post-freeze statuses |
 | `event.eventName` / `event.description` agree across every confirming oracle for one market | Hash invariant `eventId = hash(eventName, description, deadline, outcomeNames)` on chain. Enforced by `aggregate_oracle_events` in `postgres_repo.rs`. |
@@ -195,7 +195,7 @@ The public `status` enum is partly derived from row state (OPEN-side `NEW` vs `P
 | `PARTIALLY_FILLED` | `status = 'OPEN' AND amount_remaining < amount_initial AND amount_remaining > 0` |
 | `FILLED` | `status = 'FILLED'` |
 | `CANCELED` | `status = 'CANCELLED'` (the DB stores the British spelling; the public enum uses the American one — see [api-spec §Order Status](../api-spec.md#order-status)) |
-| `REJECTED` | `status = 'REJECTED'` — produced by the future projector documented in [§ REJECTED — future work](#rejected--future-work). Until that projector ships, no row matches and the filter returns empty. |
+| `REJECTED` | `status = 'REJECTED'` — projector unimplemented; no row currently matches and the filter returns empty. See [§ REJECTED status](#rejected-status) for the projector contract. |
 
 For OPEN rows the projection layer derives the response-side public status with the same `executed_qty == 0 ? 'NEW' : 'PARTIALLY_FILLED'` split (see [§ Field projection](#field-projection)). The OPEN-side `amount_remaining > 0` guard is kept inside the `PARTIALLY_FILLED` predicate (rather than as a global filter) — a stale `OPEN` row with `amount_remaining = 0` would be a projector bug and we don't want to silently surface it as `NEW`.
 
@@ -227,7 +227,7 @@ Public `status` per row:
 Cursor-based on `live_orders.placed_chain_order` with a strict `<` comparison (DESC sort).
 `msg_chain_order` is globally unique and lexicographically monotonic by GraphQL gateway
 design, so no tie-breakers are needed. The column is set once by the
-`OrderPlaced` projector (and by the future REJECTED projector — see below) via
+`OrderPlaced` projector (the REJECTED projector, when present, writes it identically — see below) via
 `coalesce` (first-write-wins) and never changes on replay or subsequent
 events, which preserves cursor stability across reprojects and fills.
 
@@ -303,7 +303,7 @@ Between `OrderBook.OrderPlaced` and `PrivateNote.OrderPlacedConfirmed`, the row 
 
 The confirmation event projector attaches the owner; if the confirmation event arrives first, it is deferred and replayed once the OrderBook row exists (via the existing `Deferred → Applied` reprojection mechanism). This window is exposed to clients as an eventual-consistency note in `api-spec.md`; no additional mitigation is provided in v1.
 
-REJECTED rows, once the future projector ships, are created with `owner_pn_address` already set (the source event lives on the PN itself), so there is no equivalent two-stage attribution window for that lifecycle.
+REJECTED rows (when a projector for them is wired in) carry `owner_pn_address` from the start — the source event lives on the PN itself — so the lifecycle has no equivalent two-stage attribution window.
 
 ### Contract event consumption
 
@@ -318,31 +318,17 @@ This endpoint is downstream of the indexer; it consumes only what the projectors
 
 PrivateNote may emit additional confirmation events for account accounting (for example fee or balance updates), but those are routed to the `/api/v1/account` code path, not to `/orders`. The outward shape of the three OrderBook events above and of `OrderPlacedConfirmed` is the only chain-side surface this endpoint depends on.
 
-### REJECTED — future work
+### REJECTED status
 
-This scope depends on a contracts + indexer change outside the current read-model implementation.
+The `REJECTED` status surfaces orders that the OrderBook refused to place. The chain-side carrier is `PrivateNote.OrderPlaceRejected` (declared in `contracts/PrivateNote.sol`, emitted from `onOrderRejected`, modifier id `PRIVATENOTE_ORDER_REJECTED = 153`); the decoder's event count test in `crates/infrastructure/src/decoder.rs` is pinned to the new total. The indexer projector that writes `live_orders` rows for these events is not yet shipped — `status=REJECTED` queries currently return empty.
 
-**Chain-side gap.** `OrderBook._notifyRejectedPlace` already calls `PrivateNote.onOrderRejected(...)` with the full original `PlaceParams` (outcomeId, isBuy, flags, price, amount, clientOrderId, opNonce). `onOrderRejected` restores the held balance but emits no public event. The external `OrderBook.Rejected(entryType, depositHash)` event has too little payload — no order parameters, no owner attribution — to reconstruct a `live_orders` row.
-
-**Contract change.** Add a PN-side event emitted at the end of `onOrderRejected`:
-
-```solidity
-event OrderPlaceRejected(
-    address orderBook,
-    uint256 eventId,
-    uint128 clientOrderId,
-    uint32  outcomeId,
-    bool    isBuy,
-    uint8   flags,
-    uint256 price,
-    uint128 amount,
-    uint64  opNonce
-);
+```
+event OrderPlaceRejected(address orderBook, uint256 eventId, uint128 clientOrderId, uint32 outcomeId, bool isBuy, uint8 flags, uint256 price, uint128 amount, uint64 opNonce);
 ```
 
-Destination tag: `address.makeAddrExtern(PRIVATENOTE_ORDER_REJECTED, bitCntAddress)`, by analogy with `PRIVATENOTE_ORDER_PLACED`. Source address of the event (the PN itself) provides owner attribution.
+`OrderBook._notifyRejectedPlace` calls `PrivateNote.onOrderRejected(...)` with the full original `PlaceParams` (outcomeId, isBuy, flags, price, amount, clientOrderId, opNonce). The external `OrderBook.Rejected(entryType, depositHash)` event has too little payload — no order parameters, no owner attribution — to reconstruct a `live_orders` row, so the projector reads `OrderPlaceRejected` directly.
 
-**Projector.** A new `OrderPlaceRejectedProjector` in `crates/infrastructure/src/projectors.rs` writes one row to `live_orders` per event:
+**Projector contract** — `OrderPlaceRejectedProjector` in `crates/infrastructure/src/projectors.rs` is not implemented; the design below pins the contract any implementation must satisfy. It writes one row to `live_orders` per event:
 
 - `orderbook_address = event.orderBook`.
 - `order_id = 0` (sentinel — no chain id is assigned; the API renders it as `""`).
@@ -350,30 +336,172 @@ Destination tag: `address.makeAddrExtern(PRIVATENOTE_ORDER_REJECTED, bitCntAddre
 - `owner_pn_address = event.source_address` (the PN that emitted the event).
 - `status = 'REJECTED'`.
 - `chain_created_at = chain_updated_at = event.created_at`, `placed_chain_order = last_chain_order = event.msg_chain_order`.
+- Replays use `INSERT ... ON CONFLICT DO NOTHING` against the resulting PK to stay idempotent.
 
-**Open question — primary-key collision.** `live_orders` PK is `(orderbook_address, order_id)`. Multiple rejected placements against the same OB would collide on `order_id = 0`. Two viable options:
+**Primary-key collision** — `live_orders` PK is `(orderbook_address, order_id)`. Multiple rejected placements against the same OB would collide on `order_id = 0`. Two viable schema options:
 
 1. Add a `synthetic_id numeric(78,0) NOT NULL DEFAULT 0` column and extend the PK to `(orderbook_address, order_id, synthetic_id)`. REJECTED rows fill `synthetic_id` from a deterministic hash of `msg_chain_order`; all other lifecycles keep the default `0`.
 2. For REJECTED rows, store the hashed `msg_chain_order` directly in `order_id`, partitioning the id space ("real" chain ids are bounded by uint128; we can carve the high half for synthetic ids). Cheaper schema-wise but couples the column's meaning to its high bit.
 
-Decide this with the contracts change; the choice should not perturb the `/orders` query plan (both options leave `(owner_pn_address, placed_chain_order)` as the seek key).
+The choice should not perturb the `/orders` query plan (both options leave `(owner_pn_address, placed_chain_order)` as the seek key). The migration also extends the `live_orders.status` CHECK to `IN ('OPEN', 'FILLED', 'CANCELLED', 'REJECTED')` and updates [`data-schema.md`](data-schema.md#live_orders).
 
-**Schema impact.** Extend the `live_orders.status` CHECK to `IN ('OPEN', 'FILLED', 'CANCELLED', 'REJECTED')`. Either add `synthetic_id` (option 1) or document the high-bit reservation on `order_id` (option 2). Update [`data-schema.md`](data-schema.md#live_orders) with the migration.
-
-**Idempotency.** `INSERT ... ON CONFLICT DO NOTHING` on the resulting PK. Replays of the same PN event must not double-write.
-
-**Test coverage** for the contracts/indexer change: scenarios in `crates/infrastructure/tests/orders.rs` exercising the projector with synthetic gateway fixtures, plus a `services/api/tests/orders_http.rs` case asserting that `status=REJECTED` switches from empty before projector support to populated after projector support on the same fixture row.
+**Test coverage** for the projector: scenarios in `crates/infrastructure/tests/orders.rs` exercise the projector against synthetic gateway fixtures, and `services/api/tests/orders_http.rs` pins the `status=REJECTED` query shape — empty when the `live_orders.status` CHECK does not yet admit `'REJECTED'`, populated once it does, against the same fixture row.
 
 ### Test coverage
 
 Three integration suites, all gated on `TEST_DATABASE_URL`:
 
-- `crates/infrastructure/tests/orders.rs` — owner scoping, DESC sort, scaling, the three market-filter shapes, `status` CSV across all five tokens (REJECTED returns empty before contracts/indexer support), cursor advance, cursor stability under concurrent fills and cancellations (closed rows retain their position), `limit` defaults and bounds, invalid `status` tokens, invalid cursor, `executedQty > 0` for `CANCELED` partial-then-cancel rows.
+- `crates/infrastructure/tests/orders.rs` — owner scoping, DESC sort, scaling, the three market-filter shapes, `status` CSV across all five tokens (REJECTED returns empty while the `live_orders.status` CHECK forbids `'REJECTED'`), cursor advance, cursor stability under concurrent fills and cancellations (closed rows retain their position), `limit` defaults and bounds, invalid `status` tokens, invalid cursor, `executedQty > 0` for `CANCELED` partial-then-cancel rows.
 - `crates/infrastructure/tests/reprojection.rs` — `OrderPlacedConfirmed` deferred-replay and idempotency-on-already-attributed paths pin owner attribution, and full place/fill/cancel pipeline scenarios pin terminal-state precedence: cancel-after-full-fill stays `FILLED`, cancel-before-fill stays `CANCELED` with the unfilled remainder, partial-fill-then-cancel reports a non-zero `executedQty`.
 - `services/api/tests/orders_http.rs` — happy path through the production router with the wrapped response, the four error codes (`-1102`, `-1121`, `-1130`, auth), and the pagination round-trip across mixed-status pages.
 
 ## `/api/v1/account`
 
-See [api-spec §Account Balance](../api-spec.md#account-balance) for the public contract. Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
+Public contract: [api-spec §Account Balance](../api-spec.md#account-balance). Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
 
-_Implementation tech spec to be filled in._
+The endpoint reads collateral balances directly from chain state — every request runs one off-chain getter call against the caller's trading PrivateNote. Outcome-token holdings live behind [`/api/v1/account/balances`](#apiv1accountbalances) instead, because outcome ownership is scoped per market and the chain-side accessor (`PrivateNote._stakes`) is a per-market mapping lookup.
+
+### Source data
+
+Two inputs feed one response:
+
+1. **Trading PN state.** The auth context resolves the caller to a `pn_address` (from [`accounts.pn_address`](data-schema.md#accounts)). The handler fetches that PN's BOC through the GraphQL gateway (`blockchain { account(address: $pn_address) { info { boc } } }`) and executes the `getDetails()` getter against it via `tvm_runner::run_getter` (the same off-chain TVM executor the market reconciler uses — see [indexer.md §Reconciler](indexer.md)). The getter returns `balance: map[uint32 → uint128]` and `lockedInOrders: map[uint32 → uint128]`, both keyed by `tokenType`. (The underlying contract storage vars are `_balance` / `_lockedInOrders` per Solidity convention; TVM's auto-generated getter strips the leading underscore in the ABI's `outputs` declaration — see `contracts/abi/dex/PrivateNote.abi.json`.)
+2. **Token reference.** [`ref_tokens`](data-schema.md#ref_tokens) maps each `tokenType` to its public `token_code` and `decimals`. The lookup is a per-`tokenType` SELECT; cardinality is small (three tokens today) and the JOIN happens on the API side, not in SQL.
+
+### Pipeline
+
+1. `require_auth(Permission::UserData)` resolves `(account_id, pn_address)`.
+2. Capture `now_ms` once at handler entry — surfaces as `updateTime`.
+3. Fetch the PN BOC. A missing account (`Account::is_none`) surfaces as `DomainError::AccountNotDeployed` → 404 so clients can offer "deploy your account" rather than retry. HTTP / decode failures stay on `MarketInconsistent` → 503 (transient: gateway hiccup or indexer lag clears on its own). Step 5 also surfaces 503, but for a different reason: unknown `tokenType` is read-model drift.
+4. Run `getDetails()` through `tvm_runner`. ABI decode errors → `MarketInconsistent`.
+5. For each key in the **union** of `balance` and `lockedInOrders`, look up the matching `ref_tokens` row. A key absent from `ref_tokens` → `MarketInconsistent` (the indexer ships with the canonical set; an unknown token type means data drift the API cannot resolve safely). Iterating `balance` alone would skip a locked-only token and leak past the ref-token check; the union closes that gap.
+6. Build `balances[]`: one entry per `tokenType` in that same union, with `free` from `balance[tokenType]` and `locked` from `lockedInOrders[tokenType]` (each side defaults to `0` when the key is missing in its own map). The textbook locked-only case is a LIMIT SELL that has consumed the caller's entire free balance — `balance[X]` is gone but `lockedInOrders[X] > 0`. Scale both with `ref_tokens.decimals`. Sort by `asset` ASC for deterministic output.
+
+### Fail-closed validation
+
+After assembly, the API checks:
+
+| Rule | Source |
+| --- | --- |
+| Every `tokenType` returned by `getDetails()` — in either `balance` or `lockedInOrders` — resolves to a `ref_tokens` row | `ref_tokens` is authoritative for token codes/decimals; a locked-only `tokenType` cannot get a free pass since the API still needs `decimals` to render it |
+| `accountId` is non-nil (UUID) | Auth context guarantee; sanity check before serializing |
+
+Violations surface as `MarketInconsistent` → 503.
+
+### Eventual consistency
+
+The endpoint never reads `live_orders`, so it does not inherit any indexer-backlog window. The single chain-side read is atomic with the PN state at the time the gateway captured the account snapshot.
+
+### Error mapping
+
+| Condition | DomainError | API code | HTTP |
+| --- | --- | --- | --- |
+| Missing / invalid auth envelope | upstream | `-1003` | 401 |
+| Unknown / disabled key, or key lacks `USER_DATA` | upstream | `-1002` | 401 |
+| Authenticated PN address has no deployed contract on chain | `AccountNotDeployed` | `-2013` | 404 |
+| Chain getter / BOC decode failure / unknown token type | `MarketInconsistent` | `-1500` | 503 |
+| Request budget elapsed | `RequestTimeout` | `-1007` | 504 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+## `/api/v1/account/balances`
+
+Public contract: [api-spec §Market Outcome Balances](../api-spec.md#market-outcome-balances). Balance sourcing rules: [auth.md §Balance Source](auth.md#balance-source).
+
+Returns the caller's outcome-token holdings for one market. `free` comes from a chain-side mapping lookup on the trading PrivateNote; `lockedInOrders` comes from the indexed `live_orders` read-model. The two sources differ on purpose — see [Locked source split](#locked-source-split) below.
+
+### Source data
+
+Three inputs feed one response:
+
+1. **Market resolution.** Two SELECTs (one on [`markets`](data-schema.md#markets), one on [`market_outcomes`](data-schema.md#market_outcomes)) return `(event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, [(outcome_id, symbol, quantity_precision) …])`. The first is gated on `last_reconciled_at IS NOT NULL`; pre-reconcile markets are hidden symmetrically with `/api/v1/markets`. The market lifecycle status is NOT a gate — terminal markets still serve balances so holders can see what they own until they claim or settle. Splitting into two SELECTs keeps the row types simple at the cost of one extra round trip; the per-request volume is low enough that the JOIN form is not worth the type-erasure pain.
+2. **PN stake state.** The chain-side accessor is the auto-generated getter for the public mapping `PrivateNote._stakes`. TVM Solidity auto-getters for public mappings take no arguments and return the entire `map(uint256 → StakeInfo)` — see the PN ABI under `contracts/abi/dex/PrivateNote.abi.json`. The API computes the per-market key `stake_hash = tvm.hash(abi.encode(event_id, oracle_list_hash, token_type))` — the same hash the PN itself uses internally — and looks it up on the returned map. The hash is built off-chain in Rust via a thin wrapper around `tvm_types`. Each `StakeInfo` value carries three parallel `uint128[]` arrays (`amount`, `debtAmount`, `couponsAmount`) indexed by `outcome_id`, plus housekeeping fields the API ignores. A missing key on the returned map (caller never staked on this market) is treated as "all outcomes at zero", not as an error.
+
+   Returning the whole mapping in one call costs the same as one keyed lookup would on EVM (the ABI shape is fixed by TVM Solidity), so this is an opportunity, not a tax: a future "all my outcomes" view across markets needs no additional chain calls.
+3. **`live_orders` aggregation.** One SQL groups OPEN sell orders by outcome:
+
+   ```sql
+   SELECT outcome_id, SUM(amount_remaining) AS locked
+     FROM live_orders
+    WHERE orderbook_address = $1
+      AND owner_pn_address  = $2
+      AND status = 'OPEN'
+      AND is_buy = false
+    GROUP BY outcome_id;
+   ```
+
+   The partial index `live_orders_owner_idx` (`owner_pn_address IS NOT NULL`) backs this scan; the `(orderbook_address, status, is_buy)` predicates fall on the heap, but per-owner cardinality is small enough that adding a wider composite index is not worth it.
+
+### Pipeline
+
+1. `require_auth(Permission::UserData)` resolves `(account_id, pn_address)`.
+2. Parse `marketAddress` — blank or missing → `MissingParameter` → 400 / `-1102`.
+3. Run the market-resolution SELECT. Unknown market or `last_reconciled_at IS NULL` → `InvalidMarketOrSymbol` → 404 / `-1121`.
+4. Compute `stake_hash = tvm.hash(abi.encode(event_id, oracle_list_hash, token_type))`.
+5. In parallel (`tokio::try_join!` — the first error short-circuits, but a typed `DomainError` from either branch is preserved so the handler still maps it correctly):
+   - Fetch the PN BOC and run the `_stakes` getter through `tvm_runner` (returns the full `map(uint256 → StakeInfo)`); the API then looks up `map[stake_hash]`.
+   - Run the `live_orders` aggregation SELECT.
+6. Build `balances[]` in `outcome_id` ASC order. For each outcome:
+   - `free = scale(amount[outcome_id] + debtAmount[outcome_id] + couponsAmount[outcome_id], quantity_precision)`. The three pools are summed because the public surface is "what the user owns" — clean, debt-bound, and coupon-bound stakes are all the user's tokens; the distinction is internal accounting that the UI does not need at this layer.
+   - `lockedInOrders = scale(coalesce(SUM, 0), quantity_precision)` from the aggregation map; outcomes without a row default to 0.
+7. Capture `now_ms` once in the handler before executing the use case — surfaces as `updateTime`.
+
+### Locked source split
+
+Why `free` reads chain and `lockedInOrders` reads `live_orders`:
+
+- `free` comes from `PrivateNote._stakes(hash)`, which the contract mutates atomically with every stake / claim / split / merge / cancel-callback. There is no equivalent indexer projection today, and building one would require projectors for the five stake-mutation events listed in the [stake-projection follow-up](#stake-projection--future-work).
+- `lockedInOrders` is the sum of resting sell orders against this outcome. The indexer already tracks these in `live_orders`, with a partial index already sized for per-owner queries. The chain-side analogue would require iterating the OrderBook's internal red-black tree of orders — there is no public per-outcome getter for it.
+
+The split means the two numbers can drift while the indexer is replaying behind chain head: a sell that just landed on chain shows up in `_stakes.amount` (because the OB has not yet acknowledged the lock) AND in `live_orders` (because `OrderPlaced` was projected) — appearing as if both `free` and `lockedInOrders` count it. The window is small (seconds) and self-resolves once `OrderPlacedConfirmed` advances PN state; it surfaces to clients as the same eventual-consistency note that already applies to `/api/v1/orders`.
+
+### Fail-closed validation
+
+Three fail-closed checks guard the pipeline at different stages:
+
+| Rule | Source |
+| --- | --- |
+| Resolved market has a non-blank `orderbook_address` | DB schema CHECK (`last_reconciled_at IS NULL OR orderbook_address IS NOT NULL`) plus a whitespace re-check, matching `/api/v1/depth`'s contract |
+| `_stakes.amount.len() == num_outcomes` (and same for `debtAmount`, `couponsAmount`) when any array is non-empty | The contract initializes all three arrays to `num_outcomes` length on first stake; a mismatch means the indexer's view of `num_outcomes` diverged from chain state |
+| Every `live_orders.outcome_id` returned by the aggregation is within `[0, num_outcomes)` | Sanity: a row outside this range is indexer corruption (`OrderBook.OrderPlaced` projector wrote an unknown `outcome_id`) |
+
+Violations surface as `MarketInconsistent` → 503.
+
+### Eventual consistency
+
+`lockedInOrders` inherits the same indexer-backlog window as `/api/v1/orders`: a sell order whose `OrderBook.OrderPlaced` event has not been projected yet is invisible here. Once projected (typically seconds later), the next response shows it. `free` is read live from chain state and does not inherit this window.
+
+### Error mapping
+
+| Condition | DomainError | API code | HTTP |
+| --- | --- | --- | --- |
+| Missing / invalid auth envelope | upstream | `-1003` | 401 |
+| Unknown / disabled key, or key lacks `USER_DATA` | upstream | `-1002` | 401 |
+| `marketAddress` missing or blank | `MissingParameter` | `-1102` | 400 |
+| `marketAddress` not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
+| Authenticated PN address has no deployed contract on chain | `AccountNotDeployed` | `-2013` | 404 |
+| Chain getter / BOC fetch / decode failure, or invariant violation on assembled DTO | `MarketInconsistent` | `-1500` | 503 |
+| Request budget elapsed | `RequestTimeout` | `-1007` | 504 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+### Stake projection — future work
+
+The current design reads `_stakes` from chain on every request. Each request costs one GraphQL `accounts(...) { boc }` fetch plus one local TVM execution. For low call rates (one frontend session per user) this is acceptable; for power users polling rapidly or for shared dashboards this becomes the bottleneck.
+
+A future projection table would mirror PN stake state in Postgres so the API can serve `free` from a DB read. The projection requires handling the full PN-side stake-mutation event surface — `StakeConfirmed`, `StakeCancelled`, `FullSetStakeConfirmed`, `FullSetStakeCancelled`, and `ClaimAccepted` (per `contracts/abi/dex/PrivateNote.abi.json`) — and a reproject path that drains all of them in chain order before responses become trustworthy. The on-demand getter shipping in v1 lets the endpoint be useful immediately and gives us evidence about real-world call patterns before we commit to projector complexity.
+
+### PnStake shape — future work
+
+`PnStake` carries three parallel `Vec<String>` arrays (`amount`, `debt_amount`, `coupons_amount`) indexed by `outcome_id`. The all-or-nothing length invariant ("every array is either empty OR exactly `num_outcomes`") is enforced at runtime by guards in `GetMarketBalancesUseCase::execute` — an illegal value such as `PnStake { amount: vec!["1"], debt_amount: vec![], coupons_amount: vec![] }` returns 503, not silently-wrong per-outcome balances. The mirror concern of a duplicate `outcome_id` in `res.outcomes` is ruled out by the schema `UNIQUE (pmp_address, outcome_id)` on `market_outcomes` (see [data-schema.md](data-schema.md#market_outcomes)), so the runtime length check is the only guarantee needed.
+
+A future refactor could promote the invariant into the type system — for example, a single `Vec<StakeRow { amount, debt_amount, coupons_amount }>` shape that makes the parallel structure unrepresentable. That is purely a maintainability improvement: today the runtime guard already fails closed, so the change is not load-bearing.
+
+### Test coverage
+
+Four test suites, all gated on `TEST_DATABASE_URL`:
+
+- Use-case unit (`crates/application/src/lib.rs`):
+  - `get_account_use_case_tests`: renders multiple assets sorted by asset code; `locked` defaults to zero when the `_balance` key is absent on the locked side; `free` defaults to zero when only `_lockedInOrders` carries a `tokenType`; unknown token type → 503; PN reader failure → 503; `scale_decimal` zero-padding.
+  - `get_market_balances_use_case_tests`: happy path sums the three stake pools per outcome; absent stake key yields zero free; stake arrays shorter / longer than `num_outcomes`; mixed empty / populated stake arrays; unknown market; PN failure; hasher failure; out-of-range `outcome_id`.
+- Repo integration (`crates/infrastructure/tests/balances.rs`): `lookup_ref_token` happy path; `resolve_market_for_balances` happy path / unknown market / unreconciled market / num_outcomes mismatch; the three fail-closed guards (NULL `oracle_list_hash`, blank `orderbook_address`, negative `token_type`); `sum_open_sell_remaining` groups by outcome and filters; empty when no rows match.
+- HTTP integration (`services/api/tests/account_http.rs`): happy path; missing API key → 401 / `-1003`; chain-getter failure → 503 / `-1500`; unknown token type → 503 / `-1500`; two credentials produce distinct `accountId`.
+- HTTP integration (`services/api/tests/account_balances_http.rs`): happy path sorted by `outcomeId`; absent stake key yields zero free with nonzero locked; missing `marketAddress` → 400 / `-1102`; unknown market → 404 / `-1121`; stake-array mismatch → 503 / `-1500`; terminal market still serves; stake gateway failure → 503 / `-1500`; missing API key → 401 / `-1003`; cross-tenant isolation; production hasher wiring; stake registered at wrong hash yields zero; trade-only key → `-1002` on the user-data route.

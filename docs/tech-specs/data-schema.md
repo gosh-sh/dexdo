@@ -154,7 +154,7 @@ Indices:
 
 ### `markets`
 
-One row per PMP (Prediction Market Pool) contract observed on chain. Discovered by the `PMPDeployed` event, completed by the market reconciler reading `PMP.getDetails()`, and transitioned by the `TimingsSet` event, the `PoolsFrozen` event, the `Resolved` event, the `PMPCancelled` event, and the `EventCancelled` event. Hidden from the public API until `last_reconciled_at` is non-null.
+One row per PMP (Prediction Market Pool) contract observed on chain. Discovered by the `PMPDeployed` event, completed by the market reconciler reading `PMP.getDetails()`, and transitioned by the `TimingsSet` event, the `PoolsFrozen` event, the `Resolved` event, the `PMPRejected` event, and the `EventCancelled` event. Hidden from the public API until `last_reconciled_at` is non-null.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -177,8 +177,8 @@ One row per PMP (Prediction Market Pool) contract observed on chain. Discovered 
 | `frozen_at` | `bigint` | Block timestamp of the `PoolsFrozen` event. Required for any post-freeze status (TRADING / RESOLVING / EXPIRED / RESOLVED). |
 | `resolved_at` | `bigint` | Block timestamp of the `PMP.Resolved` event. |
 | `resolved_outcome_id` | `integer` | Winning outcome id. |
-| `cancelled_at` | `bigint` | Block timestamp of the `PMP.PMPCancelled` or `PMP.EventCancelled` event. May also be back-filled to `now()` by the reconciler if the chain flag flipped before the event was replayed. |
-| `cancel_reason` | `text` | `'PMP_CANCELLED'` or `'EVENT_CANCELLED'`. Required when `cancelled_at` is set; the API fails closed (HTTP 503) when CANCELLED is derived without a valid reason. |
+| `cancelled_at` | `bigint` | Block timestamp of the `PMP.PMPRejected` or `PMP.EventCancelled` event. May also be back-filled to `now()` by the reconciler if the chain flag flipped before the event was replayed. |
+| `cancel_reason` | `text` | `'PMP_REJECTED_BY_ORACLE'` or `'EVENT_CANCELLED'`. Required when `cancelled_at` is set; the API fails closed (HTTP 503) when CANCELLED is derived without a valid reason. |
 | `last_reconcile_failed_at` | `timestamptz` | Backoff bookkeeping for the market reconciler. |
 | `reconcile_attempts` | `integer` default `0` | Diagnostic counter. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
@@ -287,7 +287,7 @@ One row per logical user. Holds the custodied trading PrivateNote inline; multip
 | --- | --- | --- |
 | `id` | `uuid` PK default `gen_random_uuid()` | Stable `accountId` surfaced to clients. The only identifier that crosses the API boundary. |
 | `label` | `text` (nullable) | Operator-facing label. Not exposed by the API. |
-| `pn_address` | `text` UNIQUE | Address of the trading PrivateNote bound to this account. Source of balances for `GET /api/v1/account`. |
+| `pn_address` | `text` UNIQUE | Address of the trading PrivateNote bound to this account. Source of balances for `GET /api/v1/account` and `GET /api/v1/account/balances`. |
 | `pn_pubkey` | `numeric(78, 0)` | PN signing pubkey. |
 | `pn_seckey_enc` | `bytea` | PN signing seckey, encrypted at rest under the backend master key (`crates/infrastructure/src/crypto.rs`). Never read by the API; used by the trading path to submit transactions. |
 | `pn_dih` | `numeric(78, 0)` UNIQUE | Deploy-init hash of the PN. Disambiguates PNs that may share an address across redeploys. |

@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 num-bigint.workspace = true
+tokio = { workspace = true, features = ["macros"] }
 tracing.workspace = true
 uuid.workspace = true
 dodex-domain = { path = "../domain" }

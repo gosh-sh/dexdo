@@ -9,6 +9,8 @@
 // per-row coverage for the error table in `docs/tech-specs/write-api.md
 // §Error mapping` lives here.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -22,6 +24,7 @@ use dodex_application::AuthContext;
 use dodex_application::AuthenticateRequest;
 use dodex_application::Authenticator;
 use dodex_application::ChainOrderSender;
+use dodex_application::MarketBalancesResolution;
 use dodex_application::MarketForPlacement;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsRequest;
@@ -152,10 +155,12 @@ impl MarketReadRepository for FakeRepo {
             .find(|o| o.symbol == *symbol)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(DomainError::InvalidMarketOrSymbol))?;
+        let token_type = u32::try_from(market.token_type)
+            .map_err(|_| anyhow::anyhow!(DomainError::MarketInconsistent))?;
         Ok(MarketForPlacement {
             event_id: market.event.event_id,
             oracle_list_hash: market.oracle_list_hash,
-            token_type: market.token_type,
+            token_type,
             status: market.status,
             outcome,
         })
@@ -188,6 +193,21 @@ impl MarketReadRepository for FakeRepo {
         _: &dodex_application::OrdersQuery,
     ) -> Result<dodex_application::OrdersPage, anyhow::Error> {
         unimplemented!("list_orders is not exercised by create_order_http tests")
+    }
+
+    async fn resolve_market_for_balances(
+        &self,
+        _: &MarketAddress,
+    ) -> Result<MarketBalancesResolution, anyhow::Error> {
+        unimplemented!("resolve_market_for_balances is not exercised by create_order_http tests")
+    }
+
+    async fn sum_open_sell_remaining(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+        unimplemented!("sum_open_sell_remaining is not exercised by create_order_http tests")
     }
 }
 
@@ -292,7 +312,13 @@ fn trading_market() -> Market {
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    Service::new(build_router(AppState::new(repo, authenticator, sender)))
+    Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )))
 }
 
 fn valid_body() -> serde_json::Value {
@@ -904,8 +930,14 @@ async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
     let sender: SharedChainSender = Arc::new(SlowSender);
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    let state = AppState::new(repo, authenticator, sender)
-        .with_request_timeout(std::time::Duration::from_millis(50));
+    let state = AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )
+    .with_request_timeout(std::time::Duration::from_millis(50));
     let service = Service::new(build_router(state));
 
     let started = std::time::Instant::now();
@@ -929,8 +961,14 @@ async fn handler_within_request_timeout_succeeds() {
     let sender = Arc::new(RecordingSender::ok());
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    let state = AppState::new(repo, authenticator, sender.clone() as SharedChainSender)
-        .with_request_timeout(std::time::Duration::from_secs(5));
+    let state = AppState::new(
+        repo,
+        authenticator,
+        sender.clone() as SharedChainSender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )
+    .with_request_timeout(std::time::Duration::from_secs(5));
     let service = Service::new(build_router(state));
 
     let mut resp = post_order(&service, valid_body()).send(&service).await;
@@ -952,7 +990,13 @@ async fn user_data_only_key_returns_1002() {
     let sender = Arc::new(RecordingSender::ok());
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::UserData] });
-    let service = Service::new(build_router(AppState::new(repo, authenticator, sender.clone())));
+    let service = Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender.clone(),
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )));
 
     let mut resp = post_order(&service, valid_body()).send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));

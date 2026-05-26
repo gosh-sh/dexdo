@@ -20,6 +20,11 @@ pub struct ApiConfig {
     /// (api.local.yaml, stage, prod) populate it.
     #[serde(default)]
     pub chain: ChainSection,
+    /// On-demand PrivateNote BOC reads for `/api/v1/account` and
+    /// `/api/v1/account/balances`. Production may point this at the same
+    /// gateway the indexer uses; we keep it as its own section so the
+    /// two can diverge (e.g. a read replica for the API).
+    pub graphql: GraphqlSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,8 +160,15 @@ fn default_cancel_batch_timeout_ms() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphqlSection {
     pub endpoint: String,
+    /// Batch page size for paginated GraphQL queries (indexer path).
+    /// Optional at the API tier, which does not paginate; defaults to 100.
+    #[serde(default = "default_graphql_page_size")]
     pub page_size: u32,
     pub request_timeout_ms: u64,
+}
+
+fn default_graphql_page_size() -> u32 {
+    100
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +228,11 @@ impl ApiConfig {
         );
         self.auth.validate()?;
         self.chain.validate()?;
+        anyhow::ensure!(!self.graphql.endpoint.is_empty(), "graphql.endpoint must not be empty");
+        anyhow::ensure!(
+            self.graphql.request_timeout_ms > 0,
+            "graphql.request_timeout_ms must be > 0",
+        );
         // The HTTP request_timeout hoop must outlast each chain
         // sender timeout; otherwise an in-flight chain call would be
         // dropped while still running on chain — the client would see
@@ -244,6 +261,19 @@ impl ApiConfig {
             "server.request_timeout_ms ({}) must exceed chain.cancel_batch_timeout_ms ({})",
             self.server.request_timeout_ms,
             self.chain.cancel_batch_timeout_ms,
+        );
+        // The HTTP request_timeout hoop must also outlast each GraphQL
+        // read — the PN BOC fetch for /account and /account/balances runs
+        // inside the request budget. A graphql.request_timeout_ms that
+        // equals or exceeds server.request_timeout_ms would cause the HTTP
+        // hoop to fire while the GraphQL client is still waiting, surfacing
+        // as a 504 with no useful breadcrumb instead of a clean 503 from the
+        // chain-read error path.
+        anyhow::ensure!(
+            self.server.request_timeout_ms > self.graphql.request_timeout_ms,
+            "server.request_timeout_ms ({}) must exceed graphql.request_timeout_ms ({})",
+            self.server.request_timeout_ms,
+            self.graphql.request_timeout_ms,
         );
         Ok(())
     }
@@ -394,7 +424,7 @@ database:
 "#;
 
     #[test]
-    fn api_config_does_not_require_indexer_sections() {
+    fn api_config_requires_graphql_section() {
         let raw = format!(
             "{COMMON}
 server:
@@ -405,11 +435,8 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 "
         );
-
-        let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
-
-        assert_eq!(cfg.server.port, 8080);
-        assert_eq!(cfg.common.app.env, "local");
+        let err = serde_yaml::from_str::<ApiConfig>(&raw).unwrap_err();
+        assert!(err.to_string().contains("graphql"), "got: {err}");
     }
 
     #[test]
@@ -434,25 +461,52 @@ indexer:
     }
 
     #[test]
-    fn api_config_rejects_indexer_sections() {
+    fn api_config_accepts_graphql_section() {
+        // The API owns its own `graphql` section for on-demand PN BOC reads.
+        // page_size is optional at the API tier (defaults to 100) and may be
+        // omitted — this verifies the default kicks in.
         let raw = format!(
             "{COMMON}
 server:
   host: 0.0.0.0
   port: 8080
-  request_timeout_ms: 5000
+  request_timeout_ms: 35000
 auth:
   kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
 graphql:
   endpoint: https://graphql.example.invalid
+  request_timeout_ms: 10000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        assert_eq!(cfg.graphql.endpoint, "https://graphql.example.invalid");
+        assert_eq!(cfg.graphql.page_size, 100);
+        cfg.validate().expect("validate");
+    }
+
+    #[test]
+    fn api_validate_rejects_empty_graphql_endpoint() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 35000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: \"\"
   page_size: 100
   request_timeout_ms: 10000
 "
         );
-
-        let err = serde_yaml::from_str::<ApiConfig>(&raw).unwrap_err();
-
-        assert!(err.to_string().contains("graphql"));
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("graphql.endpoint"), "got: {err}");
     }
 
     #[test]
@@ -542,6 +596,10 @@ auth:
   kek_hex: "{TEST_KEK_HEX}"
 chain:
   gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "#
         );
         serde_yaml::from_str(&raw).expect("parse")
@@ -644,6 +702,10 @@ auth:
   max_recv_window_ms: 30000
 chain:
   gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
@@ -664,6 +726,10 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 chain:
   gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).unwrap();
@@ -743,6 +809,10 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 chain:
   gateway_endpoint: \"\"
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -763,6 +833,10 @@ auth:
 chain:
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -787,6 +861,10 @@ chain:
   cancel_order_timeout_ms: 15000
   place_batch_timeout_ms: 15000
   cancel_batch_timeout_ms: 15000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -810,6 +888,10 @@ auth:
   kek_hex: \"{TEST_KEK_HEX}\"
 chain:
   gateway_endpoint: shellnet.ackinacki.org
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -834,6 +916,10 @@ chain:
   place_order_timeout_ms: 4000
   cancel_order_timeout_ms: 4000
   place_batch_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -861,6 +947,10 @@ chain:
   place_order_timeout_ms: 1000
   cancel_order_timeout_ms: 1000
   place_batch_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -886,6 +976,10 @@ chain:
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 4000
   cancel_order_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -912,6 +1006,10 @@ chain:
   gateway_endpoint: shellnet.ackinacki.org
   place_order_timeout_ms: 1000
   cancel_order_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -937,6 +1035,10 @@ chain:
   cancel_order_timeout_ms: 4000
   place_batch_timeout_ms: 4000
   cancel_batch_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 4000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -967,6 +1069,10 @@ chain:
   cancel_order_timeout_ms: 1000
   place_batch_timeout_ms: 1000
   cancel_batch_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 4000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
@@ -998,10 +1104,46 @@ chain:
   cancel_order_timeout_ms: 1000
   place_batch_timeout_ms: 1000
   cancel_batch_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 4000
 "
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
         cfg.validate().expect("1 ms above cancel_batch_timeout must validate");
+    }
+
+    #[test]
+    fn api_validate_rejects_request_timeout_not_exceeding_graphql_timeout() {
+        // server.request_timeout_ms must exceed graphql.request_timeout_ms
+        // so the HTTP hoop does not fire while the PN BOC fetch for
+        // /account and /account/balances is still in flight.
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 35000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 1000
+  cancel_order_timeout_ms: 1000
+  place_batch_timeout_ms: 1000
+  cancel_batch_timeout_ms: 1000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 35000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_ms"), "got: {msg}");
+        assert!(msg.contains("graphql.request_timeout_ms"), "got: {msg}");
     }
 
     #[test]

@@ -112,7 +112,13 @@ async fn cancel_batch_orders_against_shellnet() {
     };
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
-    let service = Service::new(build_router(AppState::new(repo, authenticator, chain_sender)));
+    let service = Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        chain_sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )));
 
     // ---- Phase 1: place two BUY LIMIT GTC orders so DELETE has real
     // ---- chain-assigned orderIds to cancel. Non-crossing prices keep

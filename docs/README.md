@@ -8,7 +8,7 @@
 
 | File | Scope | Owner |
 | --- | --- | --- |
-| [tech-specs/read-api.md](tech-specs/read-api.md) | All read endpoints: `GET /markets`, `/depth`, `/account`, `/orders` | Dev2 |
+| [tech-specs/read-api.md](tech-specs/read-api.md) | All read endpoints: `GET /markets`, `/depth`, `/account`, `/account/balances`, `/orders` | Dev2 |
 | [tech-specs/write-api.md](tech-specs/write-api.md) | All write endpoints: `POST/DELETE /order`, `POST/DELETE /batchOrders`, `DELETE /openOrders` | Dev1 |
 | [tech-specs/indexer.md](tech-specs/indexer.md) | Chain-event ingestion, projectors, reconcilers (`services/indexer`) | Dev2 |
 | [tech-specs/auth.md](tech-specs/auth.md) | Authentication, authorization, account/api-key lifecycle | shared |

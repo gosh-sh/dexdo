@@ -9,6 +9,8 @@
 // The matching per-row coverage for the cancel error-mapping table in
 // `docs/tech-specs/write-api.md §DELETE /api/v1/order` lives here.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -23,6 +25,7 @@ use dodex_application::AuthenticateRequest;
 use dodex_application::Authenticator;
 use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
+use dodex_application::MarketBalancesResolution;
 use dodex_application::MarketForPlacement;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsRequest;
@@ -142,6 +145,21 @@ impl MarketReadRepository for FakeRepo {
     async fn list_orders(&self, _: &OrdersQuery) -> Result<OrdersPage, anyhow::Error> {
         unimplemented!("list_orders is not exercised by cancel_order_http tests")
     }
+
+    async fn resolve_market_for_balances(
+        &self,
+        _: &MarketAddress,
+    ) -> Result<MarketBalancesResolution, anyhow::Error> {
+        unimplemented!("resolve_market_for_balances is not exercised by cancel_order_http tests")
+    }
+
+    async fn sum_open_sell_remaining(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+        unimplemented!("sum_open_sell_remaining is not exercised by cancel_order_http tests")
+    }
 }
 
 /// `ChainOrderSender` that records every cancel payload it sees, or
@@ -215,7 +233,13 @@ fn trading_order(client_order_id: Option<&str>) -> OrderForCancel {
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    Service::new(build_router(AppState::new(repo, authenticator, sender)))
+    Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )))
 }
 
 fn auth_envelope() -> Vec<(&'static str, String)> {
@@ -438,7 +462,13 @@ async fn caller_without_trade_permission_returns_401() {
     let sender: SharedChainSender = Arc::new(RecordingCancelSender::ok());
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::UserData] });
-    let service = Service::new(build_router(AppState::new(repo, authenticator, sender)));
+    let service = Service::new(build_router(AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )));
 
     let mut resp = send_delete(&service, full_params(&ORDER_ID.to_string())).await;
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));

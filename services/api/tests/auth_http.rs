@@ -51,7 +51,7 @@ const HANDLER_REACHABLE_BODY: &str = concat!(
 
 #[tokio::test]
 async fn missing_apikey_header_returns_1003() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
@@ -70,7 +70,7 @@ async fn missing_apikey_header_returns_1003() {
 
 #[tokio::test]
 async fn missing_signature_returns_1003() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
 
     let mut resp = TestClient::post("http://test/api/v1/order")
@@ -87,7 +87,7 @@ async fn missing_signature_returns_1003() {
 
 #[tokio::test]
 async fn missing_timestamp_returns_1003() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
 
     let mut resp = TestClient::post("http://test/api/v1/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
@@ -105,7 +105,7 @@ async fn missing_timestamp_returns_1003() {
 
 #[tokio::test]
 async fn unknown_apikey_returns_1002() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     // Sign with the legitimate secret — but route under an unknown key.
@@ -129,7 +129,7 @@ async fn unknown_apikey_returns_1002() {
 
 #[tokio::test]
 async fn stale_timestamp_returns_1021() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     // Two minutes in the past — well outside the 5s default recvWindow.
     let ts = now_ms() - 120_000;
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
@@ -150,7 +150,7 @@ async fn stale_timestamp_returns_1021() {
 
 #[tokio::test]
 async fn wrong_signature_returns_1022() {
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     // Build a valid-shaped but wrong signature: HMAC over a different
     // canonical string. Spec verification must reject it.
@@ -177,7 +177,7 @@ async fn recv_window_overshoot_silently_clamps() {
     // valid signature the request must reach the handler, which then
     // 404s on the fictitious market (the canonical "auth passed"
     // signal in this suite).
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[("recvWindow", "999999"), ("timestamp", &ts.to_string())]);
     let body = HANDLER_REACHABLE_BODY.as_bytes();
@@ -206,7 +206,7 @@ async fn malformed_recv_window_returns_1003() {
     // confusing -1021 errors. The signature is correctly built over
     // the same canonical string the client sent, so the only thing
     // that can reject the request is the envelope parse.
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[("recvWindow", "abc"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
@@ -230,7 +230,7 @@ async fn body_exceeding_cap_returns_1009() {
     // attacker can't tie up the pool with arbitrary uploads. A signed
     // request whose body breaches the cap must be rejected with
     // -1009 / HTTP 413 instead of a generic 500.
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let body = vec![b'x'; 128 * 1024];
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
@@ -260,7 +260,7 @@ async fn valid_signature_reaches_handler() {
     // seeded, the handler then returns `InvalidMarketOrSymbol` -1121.
     // Receiving that error code (not a 401 family code) proves the
     // entire auth pipeline accepted the request.
-    let Some((service, _pool, _kek)) = common::setup().await else { return };
+    let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let body = HANDLER_REACHABLE_BODY.as_bytes();
@@ -289,7 +289,7 @@ async fn user_data_only_key_returns_1002_on_trade_route() {
     // permission gate without mutating shared seed data, we insert a
     // one-off api_key with USER_DATA only against an arbitrary seeded
     // account and tear it down at the end.
-    let Some((service, pool, kek)) = common::setup().await else { return };
+    let Some((service, pool, kek, _pn_reader)) = common::setup().await else { return };
 
     // Uuid-suffix the readonly key so parallel runs (and any future
     // re-entrancy of this test) never share the row.

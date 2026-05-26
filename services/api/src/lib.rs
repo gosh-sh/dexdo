@@ -77,6 +77,10 @@ pub type SharedRepo = Arc<dyn MarketReadRepository>;
 pub type SharedAuth = Arc<dyn Authenticator>;
 #[doc(hidden)]
 pub type SharedChainSender = Arc<dyn ChainOrderSender>;
+#[doc(hidden)]
+pub type SharedPnReader = Arc<dyn dodex_application::PnStateReader>;
+#[doc(hidden)]
+pub type SharedRefRepo = Arc<dyn dodex_application::ReferenceRepository>;
 
 #[doc(hidden)]
 #[derive(Clone)]
@@ -84,6 +88,8 @@ pub struct AppState {
     pub(crate) repo: SharedRepo,
     pub(crate) authenticator: SharedAuth,
     pub(crate) chain_sender: SharedChainSender,
+    pub(crate) pn_reader: SharedPnReader,
+    pub(crate) ref_repo: SharedRefRepo,
     /// Per-request wall-clock budget enforced by the `request_timeout`
     /// hoop on every route. `Duration::ZERO` disables the hoop, which
     /// is the implicit default `AppState::new` chooses so tests that
@@ -103,8 +109,17 @@ impl AppState {
         repo: SharedRepo,
         authenticator: SharedAuth,
         chain_sender: SharedChainSender,
+        pn_reader: SharedPnReader,
+        ref_repo: SharedRefRepo,
     ) -> Self {
-        Self { repo, authenticator, chain_sender, request_timeout: Duration::ZERO }
+        Self {
+            repo,
+            authenticator,
+            chain_sender,
+            pn_reader,
+            ref_repo,
+            request_timeout: Duration::ZERO,
+        }
     }
 
     #[doc(hidden)]
@@ -226,6 +241,72 @@ struct OrdersPageResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountResponse {
+    account_id: String,
+    update_time: i64,
+    balances: Vec<AccountBalanceItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountBalanceItem {
+    asset: String,
+    free: String,
+    locked: String,
+}
+
+impl AccountResponse {
+    fn from_domain(d: dodex_domain::AccountBalances) -> Self {
+        Self {
+            account_id: d.account_id.to_string(),
+            update_time: d.update_time_ms,
+            balances: d
+                .balances
+                .into_iter()
+                .map(|b| AccountBalanceItem { asset: b.asset, free: b.free, locked: b.locked })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketBalancesResponse {
+    market_address: String,
+    update_time: i64,
+    balances: Vec<OutcomeBalanceItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OutcomeBalanceItem {
+    outcome_id: u32,
+    symbol: String,
+    free: String,
+    locked_in_orders: String,
+}
+
+impl MarketBalancesResponse {
+    fn from_domain(d: dodex_domain::MarketBalances) -> Self {
+        Self {
+            market_address: d.market_address.0,
+            update_time: d.update_time_ms,
+            balances: d
+                .balances
+                .into_iter()
+                .map(|b| OutcomeBalanceItem {
+                    outcome_id: b.outcome_id,
+                    symbol: b.symbol.0,
+                    free: b.free,
+                    locked_in_orders: b.locked_in_orders,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct ErrorBody {
     code: i32,
     msg: &'static str,
@@ -236,13 +317,20 @@ pub(crate) struct ApiError(DomainError);
 
 impl ApiError {
     pub(crate) fn status(&self) -> StatusCode {
+        // Matches are intentionally exhaustive (no `_`): when a new
+        // `DomainError` variant lands, the compiler forces an update
+        // here AND in `map_domain_or_unexpected` below — so the two
+        // sites cannot disagree about whether a new variant is 4xx
+        // or 5xx.
         match self.0 {
             DomainError::AuthRequired
             | DomainError::AuthEnvelopeIncomplete
             | DomainError::TimestampOutsideRecvWindow
             | DomainError::InvalidSignature => StatusCode::UNAUTHORIZED,
             DomainError::RequestTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            DomainError::UnknownOrder | DomainError::InvalidMarketOrSymbol => StatusCode::NOT_FOUND,
+            DomainError::UnknownOrder
+            | DomainError::InvalidMarketOrSymbol
+            | DomainError::AccountNotDeployed => StatusCode::NOT_FOUND,
             // Transient indexer state — fail closed, client retries when
             // the indexer catches up.
             DomainError::MarketInconsistent => StatusCode::SERVICE_UNAVAILABLE,
@@ -257,7 +345,10 @@ impl ApiError {
             // or 400 (bad order).
             DomainError::OrderPnBusy => StatusCode::TOO_MANY_REQUESTS,
             DomainError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
-            _ => StatusCode::BAD_REQUEST,
+            DomainError::MissingParameter
+            | DomainError::InvalidParameter
+            | DomainError::PrecisionExceeded
+            | DomainError::OrderValidationFailed => StatusCode::BAD_REQUEST,
         }
     }
 }
@@ -273,6 +364,45 @@ impl Scribe for ApiError {
         res.status_code(self.status());
         res.render(Json(ErrorBody { code: self.0.code(), msg: self.0.msg() }));
     }
+}
+
+/// Map an `anyhow::Error` to `ApiError`: if the error is a typed `DomainError`,
+/// return the matching `ApiError` and emit a `warn!` for non-client variants so
+/// 5xx responses surface in ops dashboards. Unknown errors fall through to
+/// `DomainError::Unexpected` with an `error!` log.
+fn map_domain_or_unexpected(err: anyhow::Error, context: &str) -> ApiError {
+    if let Some(domain) = err.downcast_ref::<DomainError>() {
+        // Tap: log non-client domain errors at warn level. Match is
+        // exhaustive (no `_`) so a new variant lands in the classifier
+        // alongside the status-code site above.
+        match domain {
+            DomainError::MissingParameter
+            | DomainError::InvalidParameter
+            | DomainError::InvalidMarketOrSymbol
+            | DomainError::UnknownOrder
+            | DomainError::AccountNotDeployed
+            | DomainError::AuthRequired
+            | DomainError::AuthEnvelopeIncomplete
+            | DomainError::TimestampOutsideRecvWindow
+            | DomainError::InvalidSignature
+            | DomainError::RequestTooLarge
+            | DomainError::OrderValidationFailed
+            | DomainError::PrecisionExceeded
+            | DomainError::OrderPnBusy => {} // client error, no log
+            DomainError::MarketInconsistent
+            | DomainError::RequestTimeout
+            | DomainError::Unexpected => {
+                // Log the full anyhow chain (including any `.context()`
+                // breadcrumbs from the use case / repo) — `?domain` alone
+                // collapses to the variant name and drops upstream
+                // diagnostics that ops need to triage 5xx.
+                tracing::warn!(?err, ?domain, context, "handler surfacing 5xx domain error")
+            }
+        }
+        return ApiError::from(*domain);
+    }
+    error!(?err, context, "handler failed with non-domain error");
+    ApiError::from(DomainError::Unexpected)
 }
 
 #[handler]
@@ -300,16 +430,10 @@ async fn get_markets(
     let request = build_markets_request(req, now)?;
 
     let use_case = GetMarketsUseCase::new(state.repo);
-    let page = use_case.execute(request).await.map_err(|err| {
-        // Repo emits typed DomainError variants for client-input failures
-        // (e.g. cursor decode failure → InvalidParameter). Surface those as
-        // their proper HTTP status; everything else is a real 500.
-        if let Some(domain) = err.downcast_ref::<DomainError>() {
-            return ApiError::from(*domain);
-        }
-        error!(?err, "list_markets failed");
-        ApiError::from(DomainError::Unexpected)
-    })?;
+    let page = use_case
+        .execute(request)
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "list_markets"))?;
 
     let payload = MarketsResponse {
         server_time: now,
@@ -465,13 +589,7 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
             limit,
         })
         .await
-        .map_err(|err| {
-            if let Some(domain) = err.downcast_ref::<DomainError>() {
-                return ApiError::from(*domain);
-            }
-            error!(?err, "get_depth failed");
-            ApiError::from(DomainError::Unexpected)
-        })?;
+        .map_err(|err| map_domain_or_unexpected(err, "get_depth"))?;
 
     Ok(Json(DepthResponse {
         market_address: snapshot.market_address.0,
@@ -529,13 +647,7 @@ async fn get_orders(
             cursor,
         })
         .await
-        .map_err(|err| {
-            if let Some(domain) = err.downcast_ref::<DomainError>() {
-                return ApiError::from(*domain);
-            }
-            error!(?err, "get_orders failed");
-            ApiError::from(DomainError::Unexpected)
-        })?;
+        .map_err(|err| map_domain_or_unexpected(err, "get_orders"))?;
 
     Ok(Json(OrdersPageResponse {
         orders: page.orders.into_iter().map(order_to_dto).collect(),
@@ -1191,6 +1303,109 @@ fn build_cancel_batch_orders_input(
     })
 }
 
+#[handler]
+async fn get_account(
+    _req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<AccountResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::UserData)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let now_ms = now_pair().1;
+    let use_case =
+        dodex_application::GetAccountUseCase::new(state.pn_reader.clone(), state.ref_repo.clone());
+    let out = use_case
+        .execute(dodex_application::GetAccountInput {
+            account_id: ctx.account_id,
+            pn_address: ctx.trading_pn.pn_address.clone(),
+            now_ms,
+        })
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "get_account"))?;
+
+    Ok(Json(AccountResponse::from_domain(out)))
+}
+
+#[handler]
+async fn get_account_balances(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<MarketBalancesResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::UserData)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let market_address = non_blank_query(req, "marketAddress")?
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
+
+    let now_ms = now_pair().1;
+    let use_case = dodex_application::GetMarketBalancesUseCase::new(
+        state.pn_reader.clone(),
+        state.repo.clone(),
+        balances_stake_hash,
+    );
+    let out = use_case
+        .execute(dodex_application::GetMarketBalancesInput {
+            pn_address: ctx.trading_pn.pn_address.clone(),
+            market_address: MarketAddress(market_address),
+            now_ms,
+        })
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "get_account_balances"))?;
+
+    Ok(Json(MarketBalancesResponse::from_domain(out)))
+}
+
+/// Production adapter for `application::StakeHasher`. All failure modes
+/// surface as `MarketInconsistent` (503):
+///
+/// - Non-numeric `event_id` / `oracle_list_hash`: read-model corruption
+///   (the indexer writes only valid numerics).
+/// - `tvm_hash::stake_hash` failure: most plausibly an oversized BigUint
+///   that does not fit `uint256` — also read-model corruption, since the
+///   chain enforces `uint256` and the indexer ingests directly from
+///   chain events. A genuine `tvm_abi` packing bug would surface the
+///   same way; both warrant a 503 + ops triage rather than 500.
+///
+/// `token_type` is `u32` because the repo boundary already validates
+/// that the DB value is non-negative — no secondary cast is needed here.
+fn balances_stake_hash(
+    event_id: &str,
+    oracle_list_hash: &str,
+    token_type: u32,
+) -> Result<String, dodex_domain::DomainError> {
+    use std::str::FromStr;
+
+    use num_bigint::BigUint;
+    let event = BigUint::from_str(event_id).map_err(|err| {
+        tracing::warn!(event_id, error = %err, "event_id is not a numeric string");
+        dodex_domain::DomainError::MarketInconsistent
+    })?;
+    let oracle = BigUint::from_str(oracle_list_hash).map_err(|err| {
+        tracing::warn!(oracle_list_hash, error = %err, "oracle_list_hash is not a numeric string");
+        dodex_domain::DomainError::MarketInconsistent
+    })?;
+    dodex_infrastructure::tvm_hash::stake_hash(&event, &oracle, token_type).map_err(|err| {
+        tracing::warn!(
+            event_id, oracle_list_hash, token_type,
+            error = ?err,
+            "stake_hash computation failed — oversized uint256 (read-model corruption) or tvm_abi packing bug",
+        );
+        dodex_domain::DomainError::MarketInconsistent
+    })
+}
+
 /// Assemble the production router around `state`. Kept as a separate
 /// function so integration tests can drive the same router with a
 /// test-DB pool through Salvo's in-process `TestClient`; production
@@ -1224,7 +1439,9 @@ pub fn build_router(state: AppState) -> Router {
                     Router::with_path("api/v1/batchOrders")
                         .post(create_batch_orders)
                         .delete(delete_batch_orders),
-                ),
+                )
+                .push(Router::with_path("api/v1/account").get(get_account))
+                .push(Router::with_path("api/v1/account/balances").get(get_account_balances)),
         )
 }
 
@@ -1260,7 +1477,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     info!("api running with postgres read-model repository");
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
-    let authenticator: SharedAuth = Arc::new(PostgresAuthenticator::new(pool, kek, &config.auth));
+    let authenticator: SharedAuth =
+        Arc::new(PostgresAuthenticator::new(pool.clone(), kek, &config.auth));
     let chain_sender: SharedChainSender = Arc::new(BeeDexChainSender::new(
         vec![config.chain.gateway_endpoint.clone()],
         Duration::from_millis(config.chain.place_order_timeout_ms),
@@ -1268,7 +1486,16 @@ pub async fn run() -> anyhow::Result<()> {
         Duration::from_millis(config.chain.place_batch_timeout_ms),
         Duration::from_millis(config.chain.cancel_batch_timeout_ms),
     )?);
-    let state = AppState::new(repo, authenticator, chain_sender)
+    let graphql = Arc::new(dodex_infrastructure::graphql::GraphqlClient::new(
+        config.graphql.endpoint.clone(),
+        Duration::from_millis(config.graphql.request_timeout_ms),
+    )?);
+    let pn_reader: SharedPnReader =
+        Arc::new(dodex_infrastructure::pn_state_reader::GraphqlPnStateReader::new(graphql)?);
+    let ref_repo: SharedRefRepo = Arc::new(
+        dodex_infrastructure::postgres_repo::PostgresReferenceRepository::new(pool.clone()),
+    );
+    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
         .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms));
 
     // The API is intentionally restart-to-reconfigure. None of the live
@@ -1301,4 +1528,92 @@ fn now_seconds() -> i64 {
 fn now_pair() -> (i64, i64) {
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     (d.as_secs() as i64, d.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod balances_hasher_tests {
+    use dodex_domain::DomainError;
+
+    use super::*;
+
+    #[test]
+    fn non_numeric_event_id_returns_market_inconsistent() {
+        let err = balances_stake_hash("not-a-number", "42", 1).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn non_numeric_oracle_list_hash_returns_market_inconsistent() {
+        let err = balances_stake_hash("42", "garbage", 1).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn happy_path_produces_64_hex_chars() {
+        let h = balances_stake_hash("42", "24", 1).expect("ok");
+        assert!(h.starts_with("0x"));
+        assert_eq!(h.len(), 2 + 64);
+    }
+
+    #[test]
+    fn oversized_event_id_returns_market_inconsistent() {
+        use dodex_domain::DomainError;
+        // An `event_id` that exceeds `uint256::MAX` cannot be packed into the
+        // ABI tuple `tvm_hash::stake_hash` builds. Since the chain enforces
+        // `uint256` at write time, an oversized BigUint reaching this code path
+        // is read-model corruption — surface as MarketInconsistent (503) so
+        // operators get the same triage signal as other DB-shape failures.
+        // 2^256 ≈ 1.16 × 10^77; 10^78 is comfortably above that ceiling.
+        let huge = "1".to_string() + &"0".repeat(78);
+        let err = balances_stake_hash(&huge, "1", 1).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent), "got {err:?}");
+    }
+}
+
+#[cfg(test)]
+mod dto_tests {
+    use dodex_domain::AssetBalance;
+    use dodex_domain::OutcomeBalance;
+
+    use super::*;
+
+    #[test]
+    fn account_response_uses_camel_case_and_string_amounts() {
+        let resp = AccountResponse::from_domain(dodex_domain::AccountBalances {
+            account_id: uuid::Uuid::nil(),
+            update_time_ms: 1710000000000,
+            balances: vec![AssetBalance {
+                asset: "NACKL".into(),
+                free: "10.000000000".into(),
+                locked: "1.500000000".into(),
+            }],
+        });
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["accountId"], "00000000-0000-0000-0000-000000000000");
+        assert_eq!(v["updateTime"], 1_710_000_000_000i64);
+        assert_eq!(v["balances"][0]["asset"], "NACKL");
+        assert_eq!(v["balances"][0]["free"], "10.000000000");
+        assert_eq!(v["balances"][0]["locked"], "1.500000000");
+    }
+
+    #[test]
+    fn market_balances_response_uses_camel_case() {
+        let resp = MarketBalancesResponse::from_domain(dodex_domain::MarketBalances {
+            market_address: dodex_domain::MarketAddress("0:m".into()),
+            update_time_ms: 1710000000000,
+            balances: vec![OutcomeBalance {
+                outcome_id: 1,
+                symbol: dodex_domain::Symbol("PM-X-YES".into()),
+                free: "5.50".into(),
+                locked_in_orders: "1000.00".into(),
+            }],
+        });
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["marketAddress"], "0:m");
+        assert_eq!(v["updateTime"], 1_710_000_000_000i64);
+        assert_eq!(v["balances"][0]["outcomeId"], 1);
+        assert_eq!(v["balances"][0]["symbol"], "PM-X-YES");
+        assert_eq!(v["balances"][0]["free"], "5.50");
+        assert_eq!(v["balances"][0]["lockedInOrders"], "1000.00");
+    }
 }

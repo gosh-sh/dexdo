@@ -387,3 +387,158 @@ async fn depth_aggregates_across_owners_into_single_level() {
     );
     assert!(depth.asks.is_empty());
 }
+
+#[tokio::test]
+async fn negative_price_precision_fails_closed() {
+    // `market_outcomes.price_precision` is `integer` (signed) with no CHECK
+    // constraint. A negative value coming through the depth path is
+    // read-model corruption — the response must surface as
+    // MarketInconsistent rather than silently coerce the scale to zero
+    // and serve raw integer prices to the client.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_neg_price_precision_pmp";
+    let symbol = "DEPTH_NEG_PRICE_PRECISION_YES";
+    let orderbook = "0:depth_neg_price_precision_book";
+    purge_market(&pool, pmp, symbol).await;
+    sqlx::query("delete from live_orders where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge live_orders");
+
+    let market_id: i64 = sqlx::query_scalar(
+        r#"insert into markets
+               (pmp_address, market_id, name, token_type, token_code,
+                event_id, oracle_list_hash, orderbook_address,
+                stake_start, stake_end, result_start, result_end,
+                last_reconciled_at)
+           values ($1, $1, $1, 3, 'USDC',
+                   1::numeric, 0::numeric, $2,
+                   1700000100, 1700000200, 1700000300, 1700000400,
+                   now())
+           returning id"#,
+    )
+    .bind(pmp)
+    .bind(orderbook)
+    .fetch_one(&pool)
+    .await
+    .expect("insert market");
+
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 1, 'YES', $3,
+                   -1, 2, '0.01', '0.01',
+                   '1.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(symbol)
+    .execute(&pool)
+    .await
+    .expect("insert outcome with negative precision");
+
+    // Need at least one live_orders row so the precision branch runs;
+    // an empty book short-circuits before scaling.
+    sqlx::query(
+        r#"insert into live_orders (
+              orderbook_address, order_id, outcome_id, is_buy, price,
+              amount_initial, amount_remaining, status, last_chain_order,
+              placed_chain_order, owner_pn_address)
+           values ($1, 1::numeric, 1, true, '100'::numeric, '1'::numeric, '1'::numeric,
+                   'OPEN', '0', '0', '0:owner')"#,
+    )
+    .bind(orderbook)
+    .execute(&pool)
+    .await
+    .expect("insert live_orders");
+
+    let err = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect_err("negative precision must fail closed");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::MarketInconsistent);
+}
+
+#[tokio::test]
+async fn oversized_price_precision_fails_closed() {
+    // The scale itself feeds scale_uint_to_decimal's "0".repeat(scale),
+    // so an unbounded positive value would OOM the API process on the
+    // first scaled level. The depth path mirrors precision_to_scale's
+    // MAX_DECIMAL_PRECISION cap (= NUMERIC(38, …)): values above the
+    // cap lift to MarketInconsistent.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_oversize_price_precision_pmp";
+    let symbol = "DEPTH_OVERSIZE_PRICE_PRECISION_YES";
+    let orderbook = "0:depth_oversize_price_precision_book";
+    purge_market(&pool, pmp, symbol).await;
+    sqlx::query("delete from live_orders where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge live_orders");
+
+    let market_id: i64 = sqlx::query_scalar(
+        r#"insert into markets
+               (pmp_address, market_id, name, token_type, token_code,
+                event_id, oracle_list_hash, orderbook_address,
+                stake_start, stake_end, result_start, result_end,
+                last_reconciled_at)
+           values ($1, $1, $1, 3, 'USDC',
+                   1::numeric, 0::numeric, $2,
+                   1700000100, 1700000200, 1700000300, 1700000400,
+                   now())
+           returning id"#,
+    )
+    .bind(pmp)
+    .bind(orderbook)
+    .fetch_one(&pool)
+    .await
+    .expect("insert market");
+
+    // 100_000_000 fits in i32 and would survive a try_from-only guard, but
+    // would expand `"0".repeat(100_000_000)` per level — must reject before
+    // touching scale_uint_to_decimal.
+    sqlx::query(
+        r#"insert into market_outcomes
+               (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
+                price_precision, quantity_precision, tick_size, step_size,
+                min_notional, max_batch_size)
+           values ($1, $2, 1, 'YES', $3,
+                   100000000, 2, '0.01', '0.01',
+                   '1.00', 100)"#,
+    )
+    .bind(market_id)
+    .bind(pmp)
+    .bind(symbol)
+    .execute(&pool)
+    .await
+    .expect("insert outcome with oversized precision");
+
+    sqlx::query(
+        r#"insert into live_orders (
+              orderbook_address, order_id, outcome_id, is_buy, price,
+              amount_initial, amount_remaining, status, last_chain_order,
+              placed_chain_order, owner_pn_address)
+           values ($1, 1::numeric, 1, true, '100'::numeric, '1'::numeric, '1'::numeric,
+                   'OPEN', '0', '0', '0:owner')"#,
+    )
+    .bind(orderbook)
+    .execute(&pool)
+    .await
+    .expect("insert live_orders");
+
+    let err = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect_err("precision above MAX_DECIMAL_PRECISION must fail closed");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::MarketInconsistent);
+}
