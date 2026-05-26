@@ -230,8 +230,8 @@ async fn write_market_state(
     // intentionally NOT read from `getDetails()` here. On a pre-`TimingsSet`
     // PMP the getter returns contract defaults (zeros), which used to land in
     // the row and make `derive_status` flip straight to AWAITING_FREEZE —
-    // violating tech-spec.md invariant #3 ("status == PENDING implies
-    // timings == null") and the PENDING definition at tech-spec.md:73
+    // violating docs/tech-specs/read-api.md §Status derivation ("status ==
+    // PENDING implies timings == null") and the PENDING definition
     // ("EventConfirmed received; no TimingsSet yet"). The `apply_timings_set`
     // projector (projectors.rs:332-363) is the sole writer of those columns;
     // until it fires, the row stays NULL-timings → PENDING.

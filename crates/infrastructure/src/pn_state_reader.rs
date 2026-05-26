@@ -97,14 +97,17 @@ fn stake_from_value(v: &Value, stake_hash: &str) -> anyhow::Result<Option<PnStak
     Ok(Some(PnStake { amount, debt_amount: debt, coupons_amount: coupons }))
 }
 
-fn read_uint_map(v: &Value, key: &str) -> anyhow::Result<Vec<(i32, String)>> {
+fn read_uint_map(v: &Value, key: &str) -> anyhow::Result<Vec<(u32, String)>> {
     let obj = v
         .get(key)
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("missing `{key}` in getDetails reply"))?;
     let mut out = Vec::with_capacity(obj.len());
     for (k, val) in obj {
-        let token_type: i32 = k.parse().with_context(|| format!("parse `{key}` key: {k}"))?;
+        // Chain ABI emits `uint32` keys; parse straight into u32 so a
+        // negative or out-of-range value fails closed at the boundary
+        // rather than poisoning the rest of the read path.
+        let token_type: u32 = k.parse().with_context(|| format!("parse `{key}` key: {k}"))?;
         let amount = val
             .as_str()
             .ok_or_else(|| anyhow!("`{key}[{k}]` is not a string"))?
@@ -120,10 +123,19 @@ fn read_uint_array(v: &Value, key: &str) -> anyhow::Result<Vec<String>> {
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("missing array `{key}` in stake reply"))?;
     arr.iter()
-        .map(|x| {
-            x.as_str()
-                .ok_or_else(|| anyhow!("`{key}` element is not a string"))
-                .map(str::to_string)
+        .enumerate()
+        .map(|(i, x)| {
+            let s = x
+                .as_str()
+                .ok_or_else(|| anyhow!("`{key}[{i}]` is not a string"))?;
+            // Chain ABI emits uint256 as a non-empty decimal literal ("0" at
+            // minimum). An empty string would otherwise survive into
+            // add_decimal_strs and coerce silently to 0, hiding read-model
+            // corruption.
+            if s.is_empty() {
+                return Err(anyhow!("`{key}[{i}]` is empty"));
+            }
+            Ok(s.to_string())
         })
         .collect()
 }
@@ -148,6 +160,30 @@ mod tests {
             d.locked_in_orders.into_iter().collect();
         assert_eq!(lock.get(&1), Some(&"1500000000".to_string()));
         assert_eq!(lock.get(&3), None);
+    }
+
+    #[test]
+    fn stake_from_value_rejects_empty_amount_element() {
+        use crate::tvm_hash::stake_hash;
+        use num_bigint::BigUint;
+
+        let key = stake_hash(&BigUint::from(0x42u32), &BigUint::from(0x24u32), 1).unwrap();
+        let v = serde_json::json!({
+            "_stakes": {
+                key.clone(): {
+                    "amount": ["10", ""],
+                    "debtAmount": ["0", "0"],
+                    "couponsAmount": ["0", "0"],
+                    "candidateAmount": "0",
+                    "candidateOutcome": "0",
+                    "candidateBetType": "0",
+                    "tokenType": "1",
+                    "oracleListHash": "0"
+                }
+            }
+        });
+        let err = stake_from_value(&v, &key).unwrap_err().to_string();
+        assert!(err.contains("amount[1]"), "got: {err}");
     }
 
     #[test]

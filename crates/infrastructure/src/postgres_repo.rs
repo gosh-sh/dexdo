@@ -356,21 +356,58 @@ impl MarketReadRepository for PostgresReadModelRepository {
             }
         };
 
+        let outcome_id: u32 = row.outcome_id.try_into().map_err(|_| {
+            tracing::warn!(
+                market_address = %market_address.0,
+                symbol = %symbol.0,
+                raw = row.outcome_id,
+                "placement_row outcome_id is negative",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+        let price_precision: u8 = row.price_precision.try_into().map_err(|_| {
+            tracing::warn!(
+                market_address = %market_address.0,
+                symbol = %symbol.0,
+                raw = row.price_precision,
+                "placement_row price_precision out of range",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+        let quantity_precision: u8 = row.quantity_precision.try_into().map_err(|_| {
+            tracing::warn!(
+                market_address = %market_address.0,
+                symbol = %symbol.0,
+                raw = row.quantity_precision,
+                "placement_row quantity_precision out of range",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+        let max_batch_size: u16 = row.max_batch_size.try_into().map_err(|_| {
+            tracing::warn!(
+                market_address = %market_address.0,
+                symbol = %symbol.0,
+                raw = row.max_batch_size,
+                "placement_row max_batch_size out of range",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+
         Ok(MarketForPlacement {
             event_id: row.event_id,
             oracle_list_hash,
             token_type: row.token_type,
             status,
             outcome: Outcome {
-                outcome_id: row.outcome_id as u32,
+                outcome_id,
                 outcome_name: row.outcome_name,
                 symbol: symbol.clone(),
-                price_precision: row.price_precision as u8,
-                quantity_precision: row.quantity_precision as u8,
+                price_precision,
+                quantity_precision,
                 tick_size: row.tick_size,
                 step_size: row.step_size,
                 min_notional: row.min_notional,
-                max_batch_size: row.max_batch_size as u16,
+                max_batch_size,
             },
         })
     }
@@ -725,7 +762,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
         })?;
 
-        let outcomes: Vec<(i32, String, i32)> = sqlx::query_as(
+        let raw_outcomes: Vec<(i32, String, i32)> = sqlx::query_as(
             r#"select outcome_id, symbol, quantity_precision
                  from market_outcomes
                 where market_id_fk = $1
@@ -735,7 +772,30 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let outcomes: Vec<dodex_application::BalanceOutcome> = outcomes
+        // `num_outcomes` is `integer` (signed) in Postgres but non-negative
+        // by contract. Treat a negative value as read-model corruption.
+        let num_outcomes: u32 = num_outcomes.try_into().map_err(|_| {
+            tracing::warn!(
+                pmp = %market_address.0,
+                raw = num_outcomes,
+                "num_outcomes is negative — read-model corruption"
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
+
+        // Check count before per-row conversions so a count mismatch (the more
+        // actionable signal) is not masked by a bad-value error on the first row.
+        if raw_outcomes.len() != num_outcomes as usize {
+            tracing::warn!(
+                pmp = %market_address.0,
+                outcomes_len = raw_outcomes.len(),
+                num_outcomes,
+                "market_outcomes row count does not match markets.num_outcomes"
+            );
+            return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+        }
+
+        let outcomes: Vec<dodex_application::BalanceOutcome> = raw_outcomes
             .into_iter()
             .map(|(outcome_id, symbol, qp)| -> Result<_, anyhow::Error> {
                 let outcome_id = u32::try_from(outcome_id).map_err(|_| {
@@ -753,17 +813,6 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 })
             })
             .collect::<Result<_, _>>()?;
-
-        // `num_outcomes` is `integer` (signed) in Postgres but non-negative
-        // by contract. Treat a negative value as read-model corruption.
-        let num_outcomes: u32 = num_outcomes.try_into().map_err(|_| {
-            tracing::warn!(
-                pmp = %market_address.0,
-                raw = num_outcomes,
-                "num_outcomes is negative — read-model corruption"
-            );
-            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
-        })?;
 
         Ok(dodex_application::MarketBalancesResolution {
             event_id,
@@ -1225,16 +1274,48 @@ impl PostgresReadModelRepository {
 
         let mut by_market: HashMap<i64, Vec<Outcome>> = HashMap::new();
         for r in rows {
+            let outcome_id: u32 = r.outcome_id.try_into().map_err(|_| {
+                tracing::warn!(
+                    market_id_fk = r.market_id_fk,
+                    raw = r.outcome_id,
+                    "fetch_outcomes outcome_id is negative",
+                );
+                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+            })?;
+            let price_precision: u8 = r.price_precision.try_into().map_err(|_| {
+                tracing::warn!(
+                    market_id_fk = r.market_id_fk,
+                    raw = r.price_precision,
+                    "fetch_outcomes price_precision out of range",
+                );
+                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+            })?;
+            let quantity_precision: u8 = r.quantity_precision.try_into().map_err(|_| {
+                tracing::warn!(
+                    market_id_fk = r.market_id_fk,
+                    raw = r.quantity_precision,
+                    "fetch_outcomes quantity_precision out of range",
+                );
+                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+            })?;
+            let max_batch_size: u16 = r.max_batch_size.try_into().map_err(|_| {
+                tracing::warn!(
+                    market_id_fk = r.market_id_fk,
+                    raw = r.max_batch_size,
+                    "fetch_outcomes max_batch_size out of range",
+                );
+                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+            })?;
             by_market.entry(r.market_id_fk).or_default().push(Outcome {
-                outcome_id: r.outcome_id as u32,
+                outcome_id,
                 outcome_name: r.outcome_name,
                 symbol: Symbol(r.symbol),
-                price_precision: r.price_precision as u8,
-                quantity_precision: r.quantity_precision as u8,
+                price_precision,
+                quantity_precision,
                 tick_size: r.tick_size,
                 step_size: r.step_size,
                 min_notional: r.min_notional,
-                max_batch_size: r.max_batch_size as u16,
+                max_batch_size,
             });
         }
         Ok(by_market)
@@ -1338,12 +1419,11 @@ fn unify_optional(
 // cancellation event was missed or has not been replayed yet — surfacing
 // either signal keeps the API consistent with the on-chain terminal state
 // the spec requires for CANCELLED markets.
-// PoolsFrozen gates the post-freeze branch. Per docs/tech-spec.md invariant
-// #2 ("status == RESOLVING implies frozenAt != null"), RESOLVING and EXPIRED
-// must not be reachable while frozen_at is null — that scenario is
-// AWAITING_FREEZE indefinitely (tech-spec.md:76). Without this gate the SQL
-// `?status=RESOLVING` filter would match rows whose Rust-derived `frozenAt`
-// is still null, exposing a state the spec forbids.
+// PoolsFrozen gates the post-freeze branch. Per docs/tech-specs/read-api.md
+// §Status derivation, RESOLVING and EXPIRED must not be reachable while
+// frozen_at is null — that scenario is AWAITING_FREEZE indefinitely. Without
+// this gate the SQL `?status=RESOLVING` filter would match rows whose
+// Rust-derived `frozenAt` is still null, exposing a state the spec forbids.
 const STATUS_CASE: &str = r#"case
         when m.cancelled_at is not null or m.is_cancelled then 'CANCELLED'
         when m.resolved_at is not null then 'RESOLVED'
@@ -1508,13 +1588,19 @@ fn assemble_market(
     // pinning it post-reconcile (unlike `orderbook_address`). A
     // NULL/blank value here must NOT fail-close the read endpoints —
     // `/api/v1/markets` and `/api/v1/depth` do not surface this field
-    // and would silently hide an otherwise-valid market. The trading
-    // path needs the value populated and enforces that itself in the
-    // application layer (`CreateOrderUseCase::execute`'s `is_empty`
-    // check on the `MarketForPlacement` projection produced by
-    // `resolve_for_new_order`), so we render NULL as the empty string
-    // here and let the trading-side check emit `MarketInconsistent`
-    // only when an order is being placed.
+    // and would silently hide an otherwise-valid market. Paths that
+    // DO depend on the value enforce the constraint themselves and
+    // emit `MarketInconsistent` only when the field is actually
+    // needed:
+    //   - trading: `CreateOrderUseCase::execute`'s `is_empty` check
+    //     on the `MarketForPlacement` projection produced by
+    //     `resolve_for_new_order`;
+    //   - balances: `resolve_market_for_balances` rejects NULL /
+    //     blank outright (the value feeds the off-chain `stake_hash`,
+    //     so a missing one cannot be papered over).
+    // So we render NULL as the empty string here and let those
+    // strict consumers fail closed on demand instead of pre-emptively
+    // hiding the listing.
     let oracle_list_hash = row
         .oracle_list_hash
         .as_deref()
@@ -1526,14 +1612,13 @@ fn assemble_market(
 
     let status = derive_status(&row, now);
     let timings = build_timings(&row, status);
-    let terminal = build_terminal(&row, status, now);
-    // tech-spec.md:113 — invariant violations MUST fail the request closed.
-    // Validate the *built* DTO rather than the raw row: `build_terminal` can
-    // silently swallow a bad `cancel_reason` string via
-    // `and_then(CancelReason::parse)` (turning it into `cancelReason: null`),
-    // and a non-PENDING status with one NULL timing column lands as
-    // `timings: null` after `build_timings` returns `None`. Both shapes
-    // violate the API contract.
+    let terminal = build_terminal(&row, status)?;
+    // docs/tech-specs/read-api.md §Fail-closed validation — inconsistent rows
+    // MUST fail the request closed. Validate the *built* DTO rather than the
+    // raw row: a bad `cancel_reason` string would silently become
+    // `cancelReason: null` via `CancelReason::parse`, and a non-PENDING status
+    // with a NULL timing column becomes `timings: null` after `build_timings`
+    // returns `None`. Both shapes violate the API contract.
     validate_invariants(status, &timings, &terminal).map_err(|err| anyhow!(err))?;
     let event = MarketEvent {
         event_id: numeric_to_hex(&row.event_id)?,
@@ -1603,14 +1688,14 @@ fn compute_status(
     let result_start = result_start.unwrap_or(stake_end);
     let result_end = result_end.unwrap_or(result_start);
 
-    // PoolsFrozen gate: tech-spec.md invariant #2 ties RESOLVING (and by
-    // extension the post-result_end EXPIRED) to `frozenAt != null`, and
-    // tech-spec.md:76 keeps unfrozen markets in AWAITING_FREEZE regardless
-    // of how far past `stakeEnd` server time is. If freeze was never
-    // observed we stay in the pre-freeze branch indefinitely; otherwise the
-    // listing endpoint would return a market whose Rust-derived status
-    // disagrees with its `frozenAt = null` timings and trips the API spec's
-    // status⇄timings consistency contract.
+    // PoolsFrozen gate: docs/tech-specs/read-api.md §Status derivation ties
+    // RESOLVING (and by extension the post-result_end EXPIRED) to
+    // `frozenAt != null`; unfrozen markets stay in AWAITING_FREEZE regardless
+    // of how far past `stakeEnd` server time is. If freeze was never observed
+    // we stay in the pre-freeze branch indefinitely; otherwise the listing
+    // endpoint would return a market whose Rust-derived status disagrees with
+    // its `frozenAt = null` timings and trips the API spec's status⇄timings
+    // consistency contract.
     if frozen_at.is_none() {
         if now >= stake_end {
             return MarketStatus::AwaitingFreeze;
@@ -1634,21 +1719,21 @@ fn compute_status(
     }
 }
 
-/// Cross-checks the assembled DTO against the API/tech-spec invariants. Per
-/// `docs/tech-spec.md:113`, an inconsistent row MUST be rejected rather than
-/// serialized. Called from `assemble_market` after `derive_status`,
-/// `build_timings`, and `build_terminal` have run; it validates the shapes
-/// they produce, not the raw `MarketRow`, because the build helpers can
-/// silently elide invalid fields (e.g. `CancelReason::parse` collapses an
-/// unknown string into `None`, and `build_timings` returns `None` if any of
-/// the four timing columns is NULL).
+/// Cross-checks the assembled DTO against the API/tech-specs invariants. Per
+/// `docs/tech-specs/read-api.md §Fail-closed validation`, an inconsistent row
+/// MUST be rejected rather than serialized. Called from `assemble_market`
+/// after `derive_status`, `build_timings`, and `build_terminal` have run;
+/// it validates the shapes they produce, not the raw `MarketRow`, because the
+/// build helpers can silently elide invalid fields (e.g. `CancelReason::parse`
+/// collapses an unknown string into `None`, and `build_timings` returns `None`
+/// if any of the four timing columns is NULL).
 fn validate_invariants(
     status: MarketStatus,
     timings: &Option<Timings>,
     terminal: &Option<Terminal>,
 ) -> Result<(), DomainError> {
-    // api-spec.md:328: "timings itself is null only for PENDING."
-    // tech-spec.md:109 invariant #3: PENDING ⇒ timings == null.
+    // api-spec.md §Market Status: "timings itself is null only for PENDING."
+    // docs/tech-specs/read-api.md §Status derivation invariant: PENDING ⇒ timings == null.
     if matches!(status, MarketStatus::Pending) != timings.is_none() {
         return Err(DomainError::MarketInconsistent);
     }
@@ -1662,9 +1747,9 @@ fn validate_invariants(
 
     match status {
         MarketStatus::Resolved => {
-            // tech-spec.md:110 invariant #4: RESOLVED ⇒ frozenAt != null.
-            // api-spec.md:391: `resolvedOutcomeId` is the whole point of the
-            // terminal block — without it the client cannot know which side won.
+            // docs/tech-specs/read-api.md §Status derivation: RESOLVED ⇒ frozenAt != null.
+            // api-spec.md §Terminal: `resolvedOutcomeId` is the whole
+            // point of the terminal block — without it the client cannot know which side won.
             let t = timings.as_ref().expect("timings checked non-null above");
             let term = terminal.as_ref().expect("terminal checked non-null above");
             if t.frozen_at.is_none()
@@ -1675,10 +1760,10 @@ fn validate_invariants(
             }
         }
         MarketStatus::Cancelled => {
-            // tech-spec.md:103: cancelReason MUST distinguish PMP_REJECTED_BY_ORACLE vs
-            // EVENT_CANCELLED. A NULL on the row OR an unknown string on the
-            // row both manifest here as `cancel_reason.is_none()` after
-            // `build_terminal`'s `CancelReason::parse` filter.
+            // docs/tech-specs/read-api.md §Fail-closed validation: cancelReason
+            // MUST distinguish PMP_REJECTED_BY_ORACLE vs EVENT_CANCELLED. A NULL
+            // on the row OR an unknown string both manifest here as
+            // `cancel_reason.is_none()` after `build_terminal`'s `CancelReason::parse`.
             let term = terminal.as_ref().expect("terminal checked non-null above");
             if !matches!(term.kind, TerminalKind::Cancelled) || term.cancel_reason.is_none() {
                 return Err(DomainError::MarketInconsistent);
@@ -1694,11 +1779,10 @@ fn validate_invariants(
             }
         }
         MarketStatus::Trading | MarketStatus::Resolving => {
-            // tech-spec.md invariants #1, #2: these statuses imply
-            // frozenAt != null. `derive_status` already gates on this (see
+            // docs/tech-specs/read-api.md §Status derivation: TRADING and RESOLVING
+            // imply frozenAt != null. `derive_status` already gates on this (see
             // the `row.frozen_at.is_none()` branch), but assert here so the
-            // contract holds even if a future refactor of derive_status
-            // forgets the gate.
+            // contract holds even if a future refactor of derive_status forgets the gate.
             let t = timings.as_ref().expect("timings checked non-null above");
             if t.frozen_at.is_none() {
                 return Err(DomainError::MarketInconsistent);
@@ -1724,27 +1808,81 @@ fn build_timings(row: &MarketRow, status: MarketStatus) -> Option<Timings> {
     Some(Timings { stake_start, stake_end, result_start, result_end, frozen_at: row.frozen_at })
 }
 
-fn build_terminal(row: &MarketRow, status: MarketStatus, now: i64) -> Option<Terminal> {
+fn build_terminal(
+    row: &MarketRow,
+    status: MarketStatus,
+) -> Result<Option<Terminal>, DomainError> {
     match status {
-        MarketStatus::Resolved => Some(Terminal {
-            kind: TerminalKind::Resolved,
-            at: row.resolved_at.unwrap_or(now),
-            resolved_outcome_id: row.resolved_outcome_id.map(|v| v as u32),
-            cancel_reason: None,
-        }),
-        MarketStatus::Cancelled => Some(Terminal {
-            kind: TerminalKind::Cancelled,
-            at: row.cancelled_at.unwrap_or(now),
-            resolved_outcome_id: None,
-            cancel_reason: row.cancel_reason.as_deref().and_then(CancelReason::parse),
-        }),
-        MarketStatus::Expired => Some(Terminal {
-            kind: TerminalKind::Expired,
-            at: row.result_end.unwrap_or(now),
-            resolved_outcome_id: None,
-            cancel_reason: None,
-        }),
-        _ => None,
+        MarketStatus::Resolved => {
+            let resolved_outcome_id = row
+                .resolved_outcome_id
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| {
+                    tracing::warn!(
+                        raw = ?row.resolved_outcome_id,
+                        "resolved_outcome_id is negative"
+                    );
+                    DomainError::MarketInconsistent
+                })?;
+            let at = match row.resolved_at {
+                Some(at) => at,
+                None => {
+                    tracing::warn!(
+                        pmp = %row.pmp_address,
+                        kind = "RESOLVED",
+                        "resolved_at is NULL on a RESOLVED row — read-model corruption",
+                    );
+                    return Err(DomainError::MarketInconsistent);
+                }
+            };
+            Ok(Some(Terminal {
+                kind: TerminalKind::Resolved,
+                at,
+                resolved_outcome_id,
+                cancel_reason: None,
+            }))
+        }
+        MarketStatus::Cancelled => {
+            let cancel_reason = row.cancel_reason.as_deref().and_then(CancelReason::parse);
+            let at = match row.cancelled_at {
+                Some(at) => at,
+                None => {
+                    tracing::warn!(
+                        pmp = %row.pmp_address,
+                        kind = "CANCELLED",
+                        "cancelled_at is NULL on a CANCELLED row — read-model corruption",
+                    );
+                    return Err(DomainError::MarketInconsistent);
+                }
+            };
+            Ok(Some(Terminal {
+                kind: TerminalKind::Cancelled,
+                at,
+                resolved_outcome_id: None,
+                cancel_reason,
+            }))
+        }
+        MarketStatus::Expired => {
+            let at = match row.result_end {
+                Some(at) => at,
+                None => {
+                    tracing::warn!(
+                        pmp = %row.pmp_address,
+                        kind = "EXPIRED",
+                        "result_end is NULL on an EXPIRED row — read-model corruption",
+                    );
+                    return Err(DomainError::MarketInconsistent);
+                }
+            };
+            Ok(Some(Terminal {
+                kind: TerminalKind::Expired,
+                at,
+                resolved_outcome_id: None,
+                cancel_reason: None,
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -1887,9 +2025,9 @@ mod tests {
 
     #[test]
     fn awaiting_freeze_holds_past_result_start_without_freeze() {
-        // tech-spec.md invariant #2: RESOLVING implies frozenAt != null. With
-        // PoolsFrozen still unobserved the market must stay AWAITING_FREEZE
-        // regardless of how far past result_start/result_end we are.
+        // docs/tech-specs/read-api.md §Status derivation: RESOLVING implies
+        // frozenAt != null. With PoolsFrozen still unobserved the market must
+        // stay AWAITING_FREEZE regardless of how far past result_start/result_end we are.
         let r = row(Some(200), Some(300), Some(400), Some(500));
         assert_eq!(derive_status(&r, 450), MarketStatus::AwaitingFreeze);
         assert_eq!(derive_status(&r, 600), MarketStatus::AwaitingFreeze);
@@ -1933,7 +2071,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // validate_invariants — pins the fail-closed contract from
-    // docs/tech-spec.md:113 against the built DTO shape.
+    // docs/tech-specs/read-api.md §Fail-closed validation against the built DTO shape.
     // ------------------------------------------------------------------
 
     fn timings_full(frozen: Option<i64>) -> Timings {
@@ -2402,7 +2540,7 @@ mod tests {
 }
 
 /// Postgres-backed repository for `ref_tokens` lookups. Kept as a
-/// separate type from `PostgresMarketReadRepository` because callers
+/// separate type from `PostgresReadModelRepository` because callers
 /// on the balance path need only `lookup_ref_token` and pulling in
 /// the full market-read surface would widen coupling unnecessarily.
 #[derive(Clone)]
@@ -2420,14 +2558,29 @@ impl PostgresReferenceRepository {
 impl dodex_application::ReferenceRepository for PostgresReferenceRepository {
     async fn lookup_ref_token(
         &self,
-        token_type: i32,
+        token_type: u32,
     ) -> Result<Option<dodex_application::RefToken>, anyhow::Error> {
+        // The DB column is `integer` (i32 range). A u32 above i32::MAX
+        // therefore cannot exist in the table, so short-circuit to `None`
+        // instead of widening the bind to bigint. Warn here so operators
+        // see the real cause — "structurally impossible value" — instead
+        // of the caller's generic "unknown token_type" log.
+        let bind = match i32::try_from(token_type) {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!(
+                    token_type,
+                    "ref_tokens lookup: token_type exceeds i32::MAX; column is signed integer, value cannot exist on chain or in DB",
+                );
+                return Ok(None);
+            }
+        };
         let row: Option<(String, i32)> = sqlx::query_as(
             r#"select token_code, decimals
                  from ref_tokens
                 where token_type = $1"#,
         )
-        .bind(token_type)
+        .bind(bind)
         .fetch_optional(&self.pool)
         .await?;
         row.map(|(token_code, decimals)| -> Result<_, anyhow::Error> {

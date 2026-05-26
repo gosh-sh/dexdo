@@ -308,6 +308,11 @@ pub(crate) struct ApiError(DomainError);
 
 impl ApiError {
     pub(crate) fn status(&self) -> StatusCode {
+        // Matches are intentionally exhaustive (no `_`): when a new
+        // `DomainError` variant lands, the compiler forces an update
+        // here AND in `map_domain_or_unexpected` below — so the two
+        // sites cannot disagree about whether a new variant is 4xx
+        // or 5xx.
         match self.0 {
             DomainError::AuthRequired
             | DomainError::AuthEnvelopeIncomplete
@@ -329,7 +334,10 @@ impl ApiError {
             // or 400 (bad order).
             DomainError::OrderPnBusy => StatusCode::TOO_MANY_REQUESTS,
             DomainError::Unexpected => StatusCode::INTERNAL_SERVER_ERROR,
-            _ => StatusCode::BAD_REQUEST,
+            DomainError::MissingParameter
+            | DomainError::InvalidParameter
+            | DomainError::PrecisionExceeded
+            | DomainError::OrderValidationFailed => StatusCode::BAD_REQUEST,
         }
     }
 }
@@ -345,6 +353,40 @@ impl Scribe for ApiError {
         res.status_code(self.status());
         res.render(Json(ErrorBody { code: self.0.code(), msg: self.0.msg() }));
     }
+}
+
+/// Map an `anyhow::Error` to `ApiError`: if the error is a typed `DomainError`,
+/// return the matching `ApiError` and emit a `warn!` for non-client variants so
+/// 5xx responses surface in ops dashboards. Unknown errors fall through to
+/// `DomainError::Unexpected` with an `error!` log.
+fn map_domain_or_unexpected(err: anyhow::Error, context: &str) -> ApiError {
+    if let Some(domain) = err.downcast_ref::<DomainError>() {
+        // Tap: log non-client domain errors at warn level. Match is
+        // exhaustive (no `_`) so a new variant lands in the classifier
+        // alongside the status-code site above.
+        match domain {
+            DomainError::MissingParameter
+            | DomainError::InvalidParameter
+            | DomainError::InvalidMarketOrSymbol
+            | DomainError::UnknownOrder
+            | DomainError::AuthRequired
+            | DomainError::AuthEnvelopeIncomplete
+            | DomainError::TimestampOutsideRecvWindow
+            | DomainError::InvalidSignature
+            | DomainError::RequestTooLarge
+            | DomainError::OrderValidationFailed
+            | DomainError::PrecisionExceeded
+            | DomainError::OrderPnBusy => {} // client error, no log
+            DomainError::MarketInconsistent
+            | DomainError::RequestTimeout
+            | DomainError::Unexpected => {
+                tracing::warn!(?domain, context, "handler surfacing 5xx domain error")
+            }
+        }
+        return ApiError::from(*domain);
+    }
+    error!(?err, context, "handler failed with non-domain error");
+    ApiError::from(DomainError::Unexpected)
 }
 
 #[handler]
@@ -372,16 +414,10 @@ async fn get_markets(
     let request = build_markets_request(req, now)?;
 
     let use_case = GetMarketsUseCase::new(state.repo);
-    let page = use_case.execute(request).await.map_err(|err| {
-        // Repo emits typed DomainError variants for client-input failures
-        // (e.g. cursor decode failure → InvalidParameter). Surface those as
-        // their proper HTTP status; everything else is a real 500.
-        if let Some(domain) = err.downcast_ref::<DomainError>() {
-            return ApiError::from(*domain);
-        }
-        error!(?err, "list_markets failed");
-        ApiError::from(DomainError::Unexpected)
-    })?;
+    let page = use_case
+        .execute(request)
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "list_markets"))?;
 
     let payload = MarketsResponse {
         server_time: now,
@@ -537,13 +573,7 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
             limit,
         })
         .await
-        .map_err(|err| {
-            if let Some(domain) = err.downcast_ref::<DomainError>() {
-                return ApiError::from(*domain);
-            }
-            error!(?err, "get_depth failed");
-            ApiError::from(DomainError::Unexpected)
-        })?;
+        .map_err(|err| map_domain_or_unexpected(err, "get_depth"))?;
 
     Ok(Json(DepthResponse {
         market_address: snapshot.market_address.0,
@@ -601,13 +631,7 @@ async fn get_orders(
             cursor,
         })
         .await
-        .map_err(|err| {
-            if let Some(domain) = err.downcast_ref::<DomainError>() {
-                return ApiError::from(*domain);
-            }
-            error!(?err, "get_orders failed");
-            ApiError::from(DomainError::Unexpected)
-        })?;
+        .map_err(|err| map_domain_or_unexpected(err, "get_orders"))?;
 
     Ok(Json(OrdersPageResponse {
         orders: page.orders.into_iter().map(order_to_dto).collect(),
@@ -1106,13 +1130,7 @@ async fn get_account(
             now_ms,
         })
         .await
-        .map_err(|err| {
-            if let Some(domain) = err.downcast_ref::<DomainError>() {
-                return ApiError::from(*domain);
-            }
-            error!(?err, "get_account failed");
-            ApiError::from(DomainError::Unexpected)
-        })?;
+        .map_err(|err| map_domain_or_unexpected(err, "get_account"))?;
 
     Ok(Json(AccountResponse::from_domain(out)))
 }
@@ -1147,22 +1165,21 @@ async fn get_account_balances(
             now_ms,
         })
         .await
-        .map_err(|err| {
-            if let Some(domain) = err.downcast_ref::<DomainError>() {
-                return ApiError::from(*domain);
-            }
-            error!(?err, "get_account_balances failed");
-            ApiError::from(DomainError::Unexpected)
-        })?;
+        .map_err(|err| map_domain_or_unexpected(err, "get_account_balances"))?;
 
     Ok(Json(MarketBalancesResponse::from_domain(out)))
 }
 
-/// Production adapter for `application::StakeHasher`. Fails closed:
-/// a non-numeric `event_id` or `oracle_list_hash` (read-model corruption)
-/// returns `Err(DomainError::MarketInconsistent)`, as does any failure
-/// from the underlying `tvm_hash::stake_hash` call. The caller propagates
-/// this as a 503 rather than silently producing all-zero outcome balances.
+/// Production adapter for `application::StakeHasher`. All failure modes
+/// surface as `MarketInconsistent` (503):
+///
+/// - Non-numeric `event_id` / `oracle_list_hash`: read-model corruption
+///   (the indexer writes only valid numerics).
+/// - `tvm_hash::stake_hash` failure: most plausibly an oversized BigUint
+///   that does not fit `uint256` — also read-model corruption, since the
+///   chain enforces `uint256` and the indexer ingests directly from
+///   chain events. A genuine `tvm_abi` packing bug would surface the
+///   same way; both warrant a 503 + ops triage rather than 500.
 ///
 /// `token_type` is `u32` because the repo boundary already validates
 /// that the DB value is non-negative — no secondary cast is needed here.
@@ -1173,12 +1190,22 @@ fn balances_stake_hash(
 ) -> Result<String, dodex_domain::DomainError> {
     use num_bigint::BigUint;
     use std::str::FromStr;
-    let event = BigUint::from_str(event_id)
-        .map_err(|_| dodex_domain::DomainError::MarketInconsistent)?;
-    let oracle = BigUint::from_str(oracle_list_hash)
-        .map_err(|_| dodex_domain::DomainError::MarketInconsistent)?;
-    dodex_infrastructure::tvm_hash::stake_hash(&event, &oracle, token_type)
-        .map_err(|_| dodex_domain::DomainError::MarketInconsistent)
+    let event = BigUint::from_str(event_id).map_err(|err| {
+        tracing::warn!(event_id, error = %err, "event_id is not a numeric string");
+        dodex_domain::DomainError::MarketInconsistent
+    })?;
+    let oracle = BigUint::from_str(oracle_list_hash).map_err(|err| {
+        tracing::warn!(oracle_list_hash, error = %err, "oracle_list_hash is not a numeric string");
+        dodex_domain::DomainError::MarketInconsistent
+    })?;
+    dodex_infrastructure::tvm_hash::stake_hash(&event, &oracle, token_type).map_err(|err| {
+        tracing::warn!(
+            event_id, oracle_list_hash, token_type,
+            error = ?err,
+            "stake_hash computation failed — oversized uint256 (read-model corruption) or tvm_abi packing bug",
+        );
+        dodex_domain::DomainError::MarketInconsistent
+    })
 }
 
 /// Assemble the production router around `state`. Kept as a separate
@@ -1298,6 +1325,45 @@ fn now_seconds() -> i64 {
 fn now_pair() -> (i64, i64) {
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     (d.as_secs() as i64, d.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod balances_hasher_tests {
+    use super::*;
+    use dodex_domain::DomainError;
+
+    #[test]
+    fn non_numeric_event_id_returns_market_inconsistent() {
+        let err = balances_stake_hash("not-a-number", "42", 1).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn non_numeric_oracle_list_hash_returns_market_inconsistent() {
+        let err = balances_stake_hash("42", "garbage", 1).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn happy_path_produces_64_hex_chars() {
+        let h = balances_stake_hash("42", "24", 1).expect("ok");
+        assert!(h.starts_with("0x"));
+        assert_eq!(h.len(), 2 + 64);
+    }
+
+    #[test]
+    fn oversized_event_id_returns_market_inconsistent() {
+        use dodex_domain::DomainError;
+        // An `event_id` that exceeds `uint256::MAX` cannot be packed into the
+        // ABI tuple `tvm_hash::stake_hash` builds. Since the chain enforces
+        // `uint256` at write time, an oversized BigUint reaching this code path
+        // is read-model corruption — surface as MarketInconsistent (503) so
+        // operators get the same triage signal as other DB-shape failures.
+        // 2^256 ≈ 1.16 × 10^77; 10^78 is comfortably above that ceiling.
+        let huge = "1".to_string() + &"0".repeat(78);
+        let err = balances_stake_hash(&huge, "1", 1).unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent), "got {err:?}");
+    }
 }
 
 #[cfg(test)]

@@ -142,9 +142,18 @@ async fn unknown_token_type_collapses_to_1500() {
 
 #[tokio::test]
 async fn account_id_differs_per_credential() {
-    let Some((service, _pool, _kek, pn)) = common::setup().await else { return };
-    pn.set_details(PnDetails {
-        balance: vec![(1, "10000000000".to_string())],
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+
+    let pn1 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY).await;
+    let pn2 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY_2).await;
+
+    // Different free values so we can assert the right PN was queried.
+    pn.set_details_for(&pn1, PnDetails {
+        balance: vec![(1, "10000000000".to_string())], // 10 NACKL
+        locked_in_orders: vec![],
+    });
+    pn.set_details_for(&pn2, PnDetails {
+        balance: vec![(1, "20000000000".to_string())], // 20 NACKL
         locked_in_orders: vec![],
     });
 
@@ -174,4 +183,43 @@ async fn account_id_differs_per_credential() {
 
     assert_ne!(body1.account_id, body2.account_id,
         "two distinct credentials must surface as distinct accountIds");
+    // Each response must reflect its own PN's balance, proving the handler
+    // routed to the correct PN address.
+    assert_eq!(body1.balances[0].free, "10.000000000",
+        "SEED_API_KEY's balance must reflect pn1's preloaded value");
+    assert_eq!(body2.balances[0].free, "20.000000000",
+        "SEED_API_KEY_2's balance must reflect pn2's preloaded value");
+}
+
+#[tokio::test]
+async fn trade_only_key_returns_1002_on_account_route() {
+    // A key with TRADE-only permission must be rejected with -1002 on
+    // USER_DATA-gated endpoints like /api/v1/account.
+    let Some((service, pool, kek, _pn)) = common::setup().await else { return };
+
+    let scope = uuid::Uuid::new_v4().simple().to_string();
+    let trade_only_secret_hex = "ccddee0011223344556677889900aabbccddee0011223344556677889900aabb";
+    let trade_only_key = format!("dk_test_tradeonly_acct_{scope}");
+
+    common::insert_trade_only_key(&pool, &kek, &trade_only_key, trade_only_secret_hex).await;
+
+    let ts = now_ms();
+    let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
+    let sig = sign(trade_only_secret_hex, &canonical, b"");
+
+    let mut resp = TestClient::get("http://test/api/v1/account")
+        .add_header("X-DODEX-APIKEY", trade_only_key.as_str(), true)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    let status = resp.status_code;
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+
+    common::cleanup_trade_only_key(&pool, &trade_only_key).await;
+
+    assert_eq!(status, Some(StatusCode::UNAUTHORIZED));
+    assert_eq!(body.code, -1002);
 }

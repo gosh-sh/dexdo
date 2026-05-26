@@ -535,7 +535,7 @@ Response:
 
 ```json
 {
-  "accountId": "account-1",
+  "accountId": "0c2d1da4-3f60-4a7e-9a6d-1a3b1ec5e3d2",
   "updateTime": 1710000000000,
   "balances": [
     {

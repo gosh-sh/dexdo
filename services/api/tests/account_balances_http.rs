@@ -11,6 +11,8 @@ use common::now_ms;
 use common::sign;
 use common::SEED_API_KEY;
 use common::SEED_API_SECRET;
+use common::SEED_API_KEY_2;
+use common::SEED_API_SECRET_2;
 use dodex_application::PnStake;
 use salvo::http::StatusCode;
 use salvo::test::ResponseExt;
@@ -340,4 +342,236 @@ async fn missing_apikey_returns_1003() {
     assert_eq!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
     let body = resp.take_json::<ErrorBody>().await.expect("err");
     assert_eq!(body.code, -1003);
+}
+
+#[tokio::test]
+async fn cross_tenant_isolation_excludes_other_owner_orders() {
+    // Seed two open SELL orders on the same orderbook — one for pn1 (SEED_API_KEY)
+    // and one for pn2 (SEED_API_KEY_2). The response signed as SEED_API_KEY must
+    // include only pn1's locked amount; pn2's 999 must not appear.
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pmp, ob) = seed_market(&pool, "xten-bal").await;
+
+    let pn1 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY).await;
+    let pn2 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY_2).await;
+
+    seed_open_sell(&pool, &ob, 9901, 0, &pn1, "100").await;
+    seed_open_sell(&pool, &ob, 9902, 0, &pn2, "999").await;
+
+    pn.set_stake_for(&pn1, Some(PnStake {
+        amount: vec!["0".into(), "0".into()],
+        debt_amount: vec!["0".into(), "0".into()],
+        coupons_amount: vec!["0".into(), "0".into()],
+    }));
+
+    let ts = now_ms();
+    let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .query("marketAddress", &pmp)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body = resp.take_json::<BalancesBody>().await.expect("ok");
+    // outcome 0: pn1 locked 100 / quantity_precision=2 → "1.00"
+    // pn2's 999 must NOT contribute.
+    assert_eq!(body.balances[0].locked_in_orders, "1.00");
+}
+
+#[tokio::test]
+async fn cross_tenant_isolation_symmetric_from_second_account() {
+    // Symmetric counterpart to cross_tenant_isolation_excludes_other_owner_orders:
+    // signs as SEED_API_KEY_2 (pn2) and asserts pn2 sees its own 999/precision=2
+    // → "9.99", not pn1's "1.00" and not the sum.
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pmp, ob) = seed_market(&pool, "xten2-bal").await;
+
+    let pn1 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY).await;
+    let pn2 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY_2).await;
+
+    seed_open_sell(&pool, &ob, 9911, 0, &pn1, "100").await;
+    seed_open_sell(&pool, &ob, 9912, 0, &pn2, "999").await;
+
+    pn.set_stake_for(&pn2, Some(PnStake {
+        amount: vec!["0".into(), "0".into()],
+        debt_amount: vec!["0".into(), "0".into()],
+        coupons_amount: vec!["0".into(), "0".into()],
+    }));
+
+    let ts = now_ms();
+    let sig = sign_get(SEED_API_SECRET_2, "5000", &ts.to_string(), &pmp);
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY_2, true)
+        .query("marketAddress", &pmp)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body = resp.take_json::<BalancesBody>().await.expect("ok");
+    // outcome 0: pn2 locked 999 / quantity_precision=2 → "9.99"
+    // pn1's "1.00" must NOT appear; the value must be exactly "9.99".
+    assert_eq!(body.balances[0].locked_in_orders, "9.99");
+}
+
+#[tokio::test]
+async fn cross_tenant_isolation_free_side_does_not_leak_other_pn_stake() {
+    // The free side flows through `PnStateReader::get_stake(pn_address, hash)`,
+    // which the handler must call with the CALLER's pn_address (resolved from
+    // the API key), not any other tenant's. A bug that swapped the resolution
+    // would let pn2 read pn1's `_stakes` amounts. The FakePnStateReader keys
+    // overrides by pn_address, so registering a non-zero stake for pn1 only
+    // and signing as pn2 proves the handler queried pn2's contract: pn2's
+    // lookup falls through to the default `None`, producing free = "0.00".
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pmp, _ob) = seed_market(&pool, "xten-free-bal").await;
+
+    let pn1 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY).await;
+
+    pn.set_stake_for(&pn1, Some(PnStake {
+        amount: vec!["700".into(), "300".into()],
+        debt_amount: vec!["0".into(), "0".into()],
+        coupons_amount: vec!["0".into(), "0".into()],
+    }));
+
+    let ts = now_ms();
+    let sig = sign_get(SEED_API_SECRET_2, "5000", &ts.to_string(), &pmp);
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY_2, true)
+        .query("marketAddress", &pmp)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body = resp.take_json::<BalancesBody>().await.expect("ok");
+    // pn2 has no stake registered; pn1's "700"/"300" must NOT appear.
+    assert_eq!(body.balances[0].free, "0.00");
+    assert_eq!(body.balances[1].free, "0.00");
+}
+
+#[tokio::test]
+async fn production_hasher_is_wired_to_stake_lookup() {
+    // Pins the call-site contract between `balances_stake_hash` (the production
+    // hasher in services/api/src/lib.rs) and the `_stakes` map key the handler
+    // uses to look up balances. The fake is configured with a stake registered
+    // ONLY at the hash that `tvm_hash::stake_hash(event_id=42, oracle_list_hash=24,
+    // token_type=1)` produces — the same triple `seed_market` writes to the row.
+    //
+    // If a refactor swaps the hasher's argument order, drops a field, or changes
+    // the cast, the computed hash will no longer match the registered key and
+    // the response will report `free = "0.00"` instead of the seeded amount.
+    // Tvm_abi packing drift is still invisible (both sides use the same code),
+    // but call-site drift is now caught.
+    use num_bigint::BigUint;
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pmp, _ob) = seed_market(&pool, "hashwire-bal").await;
+
+    // Mirror seed_market's row: event_id=42, oracle_list_hash=24, token_type=1.
+    let expected_hash = dodex_infrastructure::tvm_hash::stake_hash(
+        &BigUint::from(42u32),
+        &BigUint::from(24u32),
+        1,
+    )
+    .expect("compute expected stake hash");
+    pn.set_stake_for_hash(
+        &expected_hash,
+        Some(PnStake {
+            amount: vec!["700".into(), "300".into()],
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        }),
+    );
+
+    let ts = now_ms();
+    let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .query("marketAddress", &pmp)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body = resp.take_json::<BalancesBody>().await.expect("balances body");
+    // Non-zero free => the production hasher emitted exactly `expected_hash`
+    // and the handler looked up `_stakes` with that key.
+    assert_eq!(body.balances[0].free, "7.00");
+    assert_eq!(body.balances[1].free, "3.00");
+}
+
+#[tokio::test]
+async fn stake_registered_at_wrong_hash_yields_zero_free() {
+    // Negative control for production_hasher_is_wired_to_stake_lookup: the same
+    // test setup but with the stake registered at an arbitrary hash that the
+    // production hasher cannot produce for the seeded row. The handler's lookup
+    // misses, so free reports "0.00" — confirming the positive test passes
+    // because the hash MATCHED, not because the fake returns a global default.
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pmp, _ob) = seed_market(&pool, "hashwire-neg-bal").await;
+
+    let wrong_hash = format!("0x{}", "ab".repeat(32));
+    pn.set_stake_for_hash(
+        &wrong_hash,
+        Some(PnStake {
+            amount: vec!["999".into(), "999".into()],
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        }),
+    );
+
+    let ts = now_ms();
+    let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
+        .query("marketAddress", &pmp)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK));
+    let body = resp.take_json::<BalancesBody>().await.expect("balances body");
+    assert_eq!(body.balances[0].free, "0.00");
+    assert_eq!(body.balances[1].free, "0.00");
+}
+
+#[tokio::test]
+async fn trade_only_key_returns_1002_on_account_balances_route() {
+    // A key with TRADE-only permission must be rejected with -1002 on
+    // USER_DATA-gated endpoints like /api/v1/account/balances.
+    let Some((service, pool, kek, _pn)) = common::setup().await else { return };
+
+    let scope = uuid::Uuid::new_v4().simple().to_string();
+    let trade_only_secret_hex = "aabbccddeeff00112233445566778899aabbccddeeff001122334455667788aa";
+    let trade_only_key = format!("dk_test_tradeonly_bal_{scope}");
+
+    common::insert_trade_only_key(&pool, &kek, &trade_only_key, trade_only_secret_hex).await;
+
+    let market = "0:any-market";
+    let ts = now_ms();
+    let sig = sign_get(trade_only_secret_hex, "5000", &ts.to_string(), market);
+
+    let mut resp = TestClient::get("http://test/api/v1/account/balances")
+        .add_header("X-DODEX-APIKEY", trade_only_key.as_str(), true)
+        .query("marketAddress", market)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    let status = resp.status_code;
+    let body = resp.take_json::<ErrorBody>().await.expect("error body");
+
+    common::cleanup_trade_only_key(&pool, &trade_only_key).await;
+
+    assert_eq!(status, Some(StatusCode::UNAUTHORIZED));
+    assert_eq!(body.code, -1002);
 }

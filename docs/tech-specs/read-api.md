@@ -318,31 +318,19 @@ This endpoint is downstream of the indexer; it consumes only what the projectors
 
 PrivateNote may emit additional confirmation events for account accounting (for example fee or balance updates), but those are routed to the `/api/v1/account` code path, not to `/orders`. The outward shape of the three OrderBook events above and of `OrderPlacedConfirmed` is the only chain-side surface this endpoint depends on.
 
-### REJECTED — future work
+### REJECTED — partial implementation
 
-This scope depends on a contracts + indexer change outside the current read-model implementation.
+The chain-side surface is in place; the indexer projection and schema migration remain.
 
-**Chain-side gap.** `OrderBook._notifyRejectedPlace` already calls `PrivateNote.onOrderRejected(...)` with the full original `PlaceParams` (outcomeId, isBuy, flags, price, amount, clientOrderId, opNonce). `onOrderRejected` restores the held balance but emits no public event. The external `OrderBook.Rejected(entryType, depositHash)` event has too little payload — no order parameters, no owner attribution — to reconstruct a `live_orders` row.
+**Done:** `PrivateNote.OrderPlaceRejected` event ships in `contracts/PrivateNote.sol` (event declaration, emit at the end of `onOrderRejected`, modifier id `PRIVATENOTE_ORDER_REJECTED = 153`). The PN ABI artifact includes the `OrderPlaceRejected` event entry; the decoder's event count test in `crates/infrastructure/src/decoder.rs` is pinned to the new total.
 
-**Contract change.** Add a PN-side event emitted at the end of `onOrderRejected`:
-
-```solidity
-event OrderPlaceRejected(
-    address orderBook,
-    uint256 eventId,
-    uint128 clientOrderId,
-    uint32  outcomeId,
-    bool    isBuy,
-    uint8   flags,
-    uint256 price,
-    uint128 amount,
-    uint64  opNonce
-);
+```
+event OrderPlaceRejected(address orderBook, uint256 eventId, uint128 clientOrderId, uint32 outcomeId, bool isBuy, uint8 flags, uint256 price, uint128 amount, uint64 opNonce);
 ```
 
-Destination tag: `address.makeAddrExtern(PRIVATENOTE_ORDER_REJECTED, bitCntAddress)`, by analogy with `PRIVATENOTE_ORDER_PLACED`. Source address of the event (the PN itself) provides owner attribution.
+**Remaining — chain-side context.** `OrderBook._notifyRejectedPlace` calls `PrivateNote.onOrderRejected(...)` with the full original `PlaceParams` (outcomeId, isBuy, flags, price, amount, clientOrderId, opNonce). The external `OrderBook.Rejected(entryType, depositHash)` event has too little payload — no order parameters, no owner attribution — to reconstruct a `live_orders` row without the PN-side event now in place.
 
-**Projector.** A new `OrderPlaceRejectedProjector` in `crates/infrastructure/src/projectors.rs` writes one row to `live_orders` per event:
+**Remaining — indexer projector.** A new `OrderPlaceRejectedProjector` in `crates/infrastructure/src/projectors.rs` writes one row to `live_orders` per event:
 
 - `orderbook_address = event.orderBook`.
 - `order_id = 0` (sentinel — no chain id is assigned; the API renders it as `""`).
@@ -351,18 +339,16 @@ Destination tag: `address.makeAddrExtern(PRIVATENOTE_ORDER_REJECTED, bitCntAddre
 - `status = 'REJECTED'`.
 - `chain_created_at = chain_updated_at = event.created_at`, `placed_chain_order = last_chain_order = event.msg_chain_order`.
 
-**Open question — primary-key collision.** `live_orders` PK is `(orderbook_address, order_id)`. Multiple rejected placements against the same OB would collide on `order_id = 0`. Two viable options:
+**Remaining — schema impact / primary-key collision.** `live_orders` PK is `(orderbook_address, order_id)`. Multiple rejected placements against the same OB would collide on `order_id = 0`. Two viable options:
 
 1. Add a `synthetic_id numeric(78,0) NOT NULL DEFAULT 0` column and extend the PK to `(orderbook_address, order_id, synthetic_id)`. REJECTED rows fill `synthetic_id` from a deterministic hash of `msg_chain_order`; all other lifecycles keep the default `0`.
 2. For REJECTED rows, store the hashed `msg_chain_order` directly in `order_id`, partitioning the id space ("real" chain ids are bounded by uint128; we can carve the high half for synthetic ids). Cheaper schema-wise but couples the column's meaning to its high bit.
 
-Decide this with the contracts change; the choice should not perturb the `/orders` query plan (both options leave `(owner_pn_address, placed_chain_order)` as the seek key).
+Decide this with the indexer work; the choice should not perturb the `/orders` query plan (both options leave `(owner_pn_address, placed_chain_order)` as the seek key). Also extend the `live_orders.status` CHECK to `IN ('OPEN', 'FILLED', 'CANCELLED', 'REJECTED')` and update [`data-schema.md`](data-schema.md#live_orders) with the migration.
 
-**Schema impact.** Extend the `live_orders.status` CHECK to `IN ('OPEN', 'FILLED', 'CANCELLED', 'REJECTED')`. Either add `synthetic_id` (option 1) or document the high-bit reservation on `order_id` (option 2). Update [`data-schema.md`](data-schema.md#live_orders) with the migration.
+**Remaining — idempotency.** `INSERT ... ON CONFLICT DO NOTHING` on the resulting PK. Replays of the same PN event must not double-write.
 
-**Idempotency.** `INSERT ... ON CONFLICT DO NOTHING` on the resulting PK. Replays of the same PN event must not double-write.
-
-**Test coverage** for the contracts/indexer change: scenarios in `crates/infrastructure/tests/orders.rs` exercising the projector with synthetic gateway fixtures, plus a `services/api/tests/orders_http.rs` case asserting that `status=REJECTED` switches from empty before projector support to populated after projector support on the same fixture row.
+**Remaining — test coverage** for the indexer change: scenarios in `crates/infrastructure/tests/orders.rs` exercising the projector with synthetic gateway fixtures, plus a `services/api/tests/orders_http.rs` case asserting that `status=REJECTED` switches from empty before projector support to populated after projector support on the same fixture row.
 
 ### Test coverage
 
@@ -382,17 +368,17 @@ The endpoint reads collateral balances directly from chain state — every reque
 
 Two inputs feed one response:
 
-1. **Trading PN state.** The auth context resolves the caller to a `pn_address` (from [`accounts.pn_address`](data-schema.md#accounts)). The handler fetches that PN's BOC through the GraphQL gateway (`accounts(address: $pn_address) { boc }`) and executes the `getDetails()` getter against it via `tvm_runner::run_getter` (the same off-chain TVM executor the market reconciler uses — see [indexer.md §Reconciler](indexer.md)). The getter returns `_balance: map[uint32 → uint128]` and `_lockedInOrders: map[uint32 → uint128]`, both keyed by `tokenType`.
+1. **Trading PN state.** The auth context resolves the caller to a `pn_address` (from [`accounts.pn_address`](data-schema.md#accounts)). The handler fetches that PN's BOC through the GraphQL gateway (`blockchain { account(address: $pn_address) { info { boc } } }`) and executes the `getDetails()` getter against it via `tvm_runner::run_getter` (the same off-chain TVM executor the market reconciler uses — see [indexer.md §Reconciler](indexer.md)). The getter returns `balance: map[uint32 → uint128]` and `lockedInOrders: map[uint32 → uint128]`, both keyed by `tokenType`. (The underlying contract storage vars are `_balance` / `_lockedInOrders` per Solidity convention; TVM's auto-generated getter strips the leading underscore in the ABI's `outputs` declaration — see `contracts/abi/dex/PrivateNote.abi.json`.)
 2. **Token reference.** [`ref_tokens`](data-schema.md#ref_tokens) maps each `tokenType` to its public `token_code` and `decimals`. The lookup is a per-`tokenType` SELECT; cardinality is small (three tokens today) and the JOIN happens on the API side, not in SQL.
 
 ### Pipeline
 
 1. `require_auth(Permission::UserData)` resolves `(account_id, pn_address)`.
 2. Capture `now_ms` once at handler entry — surfaces as `updateTime`.
-3. Fetch the PN BOC. A missing account (`Account::is_none`), an HTTP failure, or a decode error all collapse to `DomainError::MarketInconsistent` → 503. The 503 is deliberate: every failure mode here is transient (gateway hiccup, indexer behind chain head) — clients should retry rather than treat the account as broken.
+3. Fetch the PN BOC. A missing account (`Account::is_none`), an HTTP failure, or a decode error all collapse to `DomainError::MarketInconsistent` → 503. The 503 is deliberate: gateway hiccups, indexer lag, and the PN-not-deployed-yet state of a freshly-onboarded account all clear on their own — clients should retry rather than treat the account as broken. (Step 5 also surfaces 503, but for a different reason: unknown `tokenType` is read-model drift, not a transient.)
 4. Run `getDetails()` through `tvm_runner`. ABI decode errors → `MarketInconsistent`.
-5. For each key in `_balance`, look up the matching `ref_tokens` row. A key absent from `ref_tokens` → `MarketInconsistent` (the indexer ships with the canonical set; an unknown token type means data drift the API cannot resolve safely).
-6. Build `balances[]`: one entry per `tokenType` in `_balance`, with `free` from `_balance[tokenType]` and `locked` from `_lockedInOrders[tokenType]` (defaulting to `0` when the key is missing on the locked side). Scale both with `ref_tokens.decimals`. Sort by `asset` ASC for deterministic output.
+5. For each key in the **union** of `balance` and `lockedInOrders`, look up the matching `ref_tokens` row. A key absent from `ref_tokens` → `MarketInconsistent` (the indexer ships with the canonical set; an unknown token type means data drift the API cannot resolve safely). Iterating `balance` alone would skip a locked-only token and leak past the ref-token check; the union closes that gap.
+6. Build `balances[]`: one entry per `tokenType` in that same union, with `free` from `balance[tokenType]` and `locked` from `lockedInOrders[tokenType]` (each side defaults to `0` when the key is missing in its own map). The textbook locked-only case is a LIMIT SELL that has consumed the caller's entire free balance — `balance[X]` is gone but `lockedInOrders[X] > 0`. Scale both with `ref_tokens.decimals`. Sort by `asset` ASC for deterministic output.
 
 ### Fail-closed validation
 
@@ -400,7 +386,7 @@ After assembly, the API checks:
 
 | Rule | Source |
 | --- | --- |
-| Every `tokenType` returned by `getDetails()._balance` resolves to a `ref_tokens` row | `ref_tokens` is authoritative for token codes/decimals |
+| Every `tokenType` returned by `getDetails()` — in either `balance` or `lockedInOrders` — resolves to a `ref_tokens` row | `ref_tokens` is authoritative for token codes/decimals; a locked-only `tokenType` cannot get a free pass since the API still needs `decimals` to render it |
 | `accountId` is non-nil (UUID) | Auth context guarantee; sanity check before serializing |
 
 Violations surface as `MarketInconsistent` → 503.
@@ -429,7 +415,7 @@ Returns the caller's outcome-token holdings for one market. `free` comes from a 
 
 Three inputs feed one response:
 
-1. **Market resolution.** A SELECT against [`markets`](data-schema.md#markets) joined with [`market_outcomes`](data-schema.md#market_outcomes) returns `(event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, [(outcome_id, symbol, quantity_precision) …])`. The query is gated on `last_reconciled_at IS NOT NULL`; pre-reconcile markets are hidden symmetrically with `/api/v1/markets`. The market lifecycle status is NOT a gate — terminal markets still serve balances so holders can see what they own until they claim or settle.
+1. **Market resolution.** Two SELECTs (one on [`markets`](data-schema.md#markets), one on [`market_outcomes`](data-schema.md#market_outcomes)) return `(event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, [(outcome_id, symbol, quantity_precision) …])`. The first is gated on `last_reconciled_at IS NOT NULL`; pre-reconcile markets are hidden symmetrically with `/api/v1/markets`. The market lifecycle status is NOT a gate — terminal markets still serve balances so holders can see what they own until they claim or settle. Splitting into two SELECTs keeps the row types simple at the cost of one extra round trip; the per-request volume is low enough that the JOIN form is not worth the type-erasure pain.
 2. **PN stake state.** The chain-side accessor is the auto-generated getter for the public mapping `PrivateNote._stakes`. TVM Solidity auto-getters for public mappings take no arguments and return the entire `map(uint256 → StakeInfo)` — see the PN ABI under `contracts/abi/dex/PrivateNote.abi.json`. The API computes the per-market key `stake_hash = tvm.hash(abi.encode(event_id, oracle_list_hash, token_type))` — the same hash the PN itself uses internally — and looks it up on the returned map. The hash is built off-chain in Rust via a thin wrapper around `tvm_types`. Each `StakeInfo` value carries three parallel `uint128[]` arrays (`amount`, `debtAmount`, `couponsAmount`) indexed by `outcome_id`, plus housekeeping fields the API ignores. A missing key on the returned map (caller never staked on this market) is treated as "all outcomes at zero", not as an error.
 
    Returning the whole mapping in one call costs the same as one keyed lookup would on EVM (the ABI shape is fixed by TVM Solidity), so this is an opportunity, not a tax: a future "all my outcomes" view across markets needs no additional chain calls.
@@ -453,7 +439,7 @@ Three inputs feed one response:
 2. Parse `marketAddress` — blank or missing → `MissingParameter` → 400 / `-1102`.
 3. Run the market-resolution SELECT. Unknown market or `last_reconciled_at IS NULL` → `InvalidMarketOrSymbol` → 404 / `-1121`.
 4. Compute `stake_hash = tvm.hash(abi.encode(event_id, oracle_list_hash, token_type))`.
-5. In parallel (`tokio::join!`):
+5. In parallel (`tokio::try_join!` — the first error short-circuits, but a typed `DomainError` from either branch is preserved so the handler still maps it correctly):
    - Fetch the PN BOC and run the `_stakes` getter through `tvm_runner` (returns the full `map(uint256 → StakeInfo)`); the API then looks up `map[stake_hash]`.
    - Run the `live_orders` aggregation SELECT.
 6. Build `balances[]` in `outcome_id` ASC order. For each outcome:
@@ -504,13 +490,19 @@ The current design reads `_stakes` from chain on every request. Each request cos
 
 A future projection table would mirror PN stake state in Postgres so the API can serve `free` from a DB read. The projection requires handling the full PN-side stake-mutation surface — at least `StakeAccepted`, `StakeConfirmed`, `StakeCancelled`, `ClaimAccepted`, `SplitAccepted`, `MergeAccepted`, and the batch variants — and a reproject path that drains all of them in chain order before responses become trustworthy. The on-demand getter shipping in v1 lets the endpoint be useful immediately and gives us evidence about real-world call patterns before we commit to projector complexity.
 
+### PnStake shape — future work
+
+`PnStake` carries three parallel `Vec<String>` arrays (`amount`, `debt_amount`, `coupons_amount`) indexed by `outcome_id`. The all-or-nothing length invariant ("every array is either empty OR exactly `num_outcomes`") is enforced at runtime by guards in `GetMarketBalancesUseCase::execute` — an illegal value such as `PnStake { amount: vec!["1"], debt_amount: vec![], coupons_amount: vec![] }` returns 503, not silently-wrong per-outcome balances. The mirror concern of a duplicate `outcome_id` in `res.outcomes` is ruled out by the schema `UNIQUE (pmp_address, outcome_id)` on `market_outcomes` (see [data-schema.md](data-schema.md#market_outcomes)), so the runtime length check is the only guarantee needed.
+
+A future refactor could promote the invariant into the type system — for example, a single `Vec<StakeRow { amount, debt_amount, coupons_amount }>` shape that makes the parallel structure unrepresentable. That is purely a maintainability improvement: today the runtime guard already fails closed, so the change is not load-bearing.
+
 ### Test coverage
 
 Four test suites, all gated on `TEST_DATABASE_URL`:
 
 - Use-case unit (`crates/application/src/lib.rs`):
-  - `get_account_use_case_tests` (5 tests): renders two assets sorted by asset code, locked defaults to zero when key absent, unknown token type → 503, PN reader failure → 503, `scale_decimal` pads zero to full precision.
-  - `get_market_balances_use_case_tests` (9 tests): happy path sums three pools per outcome, absent stake key yields zero free, stake array shorter than `num_outcomes`, stake array longer than `num_outcomes`, unknown market, PN failure, mixed empty and populated stake arrays, hasher failure, out-of-range `outcome_id`.
-- Repo integration (`crates/infrastructure/tests/balances.rs`) (6 tests): `lookup_ref_token` returns seeded rows, `resolve_market_for_balances` happy path, unknown market, unreconciled market, `sum_open_sell_remaining` groups by outcome and filters, empty when no matching rows.
-- HTTP integration (`services/api/tests/account_http.rs`) (5 tests): happy path returns balances sorted by asset, missing API key → 401 / `-1003`, chain-getter failure → 503 / `-1500`, unknown token type → 503 / `-1500`, two distinct credentials produce distinct `accountId` values.
-- HTTP integration (`services/api/tests/account_balances_http.rs`) (8 tests): happy path returns outcomes sorted by `outcomeId` ASC, absent stake key yields zero free with nonzero locked (both outcomes checked), missing `marketAddress` → 400 / `-1102`, unknown market → 404 / `-1121`, stake-array mismatch → 503 / `-1500`, terminal market still serves balances, stake gateway failure → 503 / `-1500`, missing API key → 401 / `-1003`.
+  - `get_account_use_case_tests`: renders multiple assets sorted by asset code; `locked` defaults to zero when the `_balance` key is absent on the locked side; `free` defaults to zero when only `_lockedInOrders` carries a `tokenType`; unknown token type → 503; PN reader failure → 503; `scale_decimal` zero-padding.
+  - `get_market_balances_use_case_tests`: happy path sums the three stake pools per outcome; absent stake key yields zero free; stake arrays shorter / longer than `num_outcomes`; mixed empty / populated stake arrays; unknown market; PN failure; hasher failure; out-of-range `outcome_id`.
+- Repo integration (`crates/infrastructure/tests/balances.rs`): `lookup_ref_token` happy path; `resolve_market_for_balances` happy path / unknown market / unreconciled market / num_outcomes mismatch; the three fail-closed guards (NULL `oracle_list_hash`, blank `orderbook_address`, negative `token_type`); `sum_open_sell_remaining` groups by outcome and filters; empty when no rows match.
+- HTTP integration (`services/api/tests/account_http.rs`): happy path; missing API key → 401 / `-1003`; chain-getter failure → 503 / `-1500`; unknown token type → 503 / `-1500`; two credentials produce distinct `accountId`.
+- HTTP integration (`services/api/tests/account_balances_http.rs`): happy path sorted by `outcomeId`; absent stake key yields zero free with nonzero locked; missing `marketAddress` → 400 / `-1102`; unknown market → 404 / `-1121`; stake-array mismatch → 503 / `-1500`; terminal market still serves; stake gateway failure → 503 / `-1500`; missing API key → 401 / `-1003`; cross-tenant isolation; production hasher wiring; stake registered at wrong hash yields zero; trade-only key → `-1002` on the user-data route.
