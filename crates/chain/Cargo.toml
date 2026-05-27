@@ -1,8 +1,8 @@
 [package]
 name = "dodex-chain"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Acki-Nacki-Node-License"
 
 [features]
 default = []
@@ -13,7 +13,11 @@ default = []
 # not reachable from request handlers and stay out of the binary.
 test-helpers = []
 
+# Inline rather than `.workspace = true` so this crate can be consumed
+# from `services/market-manager` (its own Cargo workspace) and from
+# inside the market-manager Docker build, neither of which can reach
+# the parent workspace's `[workspace.package]` / `[workspace.dependencies]`.
 [dependencies]
-ackinacki-kit.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+ackinacki-kit = { git = "https://github.com/gosh-sh/ackinacki-kit.git", branch = "feature/update_dex", default-features = false, features = ["contracts", "default"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
