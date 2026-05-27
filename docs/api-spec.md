@@ -193,6 +193,9 @@ envelope field failed or why a credential was rejected.
 | Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
+| Buy a full set of outcome tokens with collateral | `POST` | `/api/v1/buyFullSet` | `TRADE` |
+| Sell a full set of outcome tokens back into collateral | `POST` | `/api/v1/sellFullSet` | `TRADE` |
+| Claim payout after market resolution | `POST` | `/api/v1/claim` | `TRADE` |
 | Create single order | `POST` | `/api/v1/order` | `TRADE` |
 | Cancel single order by ID | `DELETE` | `/api/v1/order` | `TRADE` |
 | Create batch orders | `POST` | `/api/v1/batchOrders` | `TRADE` |
@@ -647,6 +650,177 @@ Errors:
 | `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
 | Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
 | Backend could not read the trading PrivateNote state (gateway timeout, malformed reply, unknown token type) | `-1500` | 503 |
+
+## Position Endpoints
+
+### Buy Full Set
+
+```http
+POST /api/v1/buyFullSet
+```
+
+Security: `TRADE`
+
+Buys a full set of outcome tokens for one market — one outcome token of every outcome the market has — spending `collateral` from the caller's free quote-asset balance. The exact per-outcome amounts depend on the market's current pricing and are computed when the chain processes the request; any amount that does not divide evenly is refunded back to free balance. The resulting outcome-token holdings are readable from [`GET /api/v1/account/balances`](#market-outcome-balances) once the chain confirms.
+
+Holding a full set is economically equivalent to holding the collateral: sell it back before resolution and the collateral comes back; hold it through resolution and one outcome pays out 1:1 while the others go to zero. Buying a full set is also the only way to obtain outcome tokens that can later be placed as `SELL` orders on the order book — a `SELL` on a market where the caller has never bought a set is rejected with `-2010`.
+
+Available while the market is in `AWAITING_FREEZE` or `TRADING`. On a market sitting in `AWAITING_FREEZE`, the first successful call also activates the order book for everyone else; from the caller's side the request and response look identical to any later call.
+
+Body parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `collateral` | DECIMAL | YES | Amount of the market's `quoteAsset` to allocate. Scaled by the quote-asset on-chain `decimals`. |
+
+Signed query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+Response:
+
+```json
+{
+  "marketAddress": "0:market-address",
+  "transactTime": 1710000000000
+}
+```
+
+Response fields:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `marketAddress` | STRING | Echoed from the request. |
+| `transactTime` | LONG | Server timestamp (Unix ms) when the operation was accepted. |
+
+The response confirms acceptance only. The resulting collateral debit and outcome-token credits become visible through [`GET /api/v1/account`](#account-balance) and [`GET /api/v1/account/balances`](#market-outcome-balances) once the chain confirms.
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `marketAddress` or `collateral` missing | `-1102` | 400 |
+| `collateral` not positive, exceeds quote-asset precision, or other body shape violation | `-1130` | 400 |
+| `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| Market status is not `AWAITING_FREEZE` or `TRADING`; free quote-asset balance is below `collateral`; the chain rejected the request | `-2010` | 400 |
+| Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
+| Trading note is busy with another operation; retry shortly | `-2014` | 429 |
+| Backend could not submit the transaction (gateway timeout, malformed reply) | `-1500` | 503 |
+
+### Sell Full Set
+
+```http
+POST /api/v1/sellFullSet
+```
+
+Security: `TRADE`
+
+Sells outcome tokens back to the market in exchange for `quoteAsset` credited to free collateral. The caller submits how many of each outcome they want to sell back; the market accepts the largest matching full set it can form from those amounts and refunds the leftover of every outcome.
+
+Available while the market is in `TRADING` or `RESOLVING`.
+
+Body parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `amounts` | ARRAY of DECIMAL | YES | Per-outcome amounts to sell back. Length MUST equal the market's `outcomes[]` length in `/api/v1/markets`. Element `i` corresponds to `outcomes[i].outcomeId` and is scaled by `outcomes[i].quantityPrecision`. Elements MAY be zero; at least one element MUST be non-zero. |
+
+Signed query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+Response:
+
+```json
+{
+  "marketAddress": "0:market-address",
+  "transactTime": 1710000000000
+}
+```
+
+Response fields:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `marketAddress` | STRING | Echoed from the request. |
+| `transactTime` | LONG | Server timestamp (Unix ms) when the operation was accepted. |
+
+The response confirms acceptance only. The credited collateral and the burned outcome-token amounts become visible through [`GET /api/v1/account`](#account-balance) and [`GET /api/v1/account/balances`](#market-outcome-balances) once the chain confirms.
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `marketAddress` or `amounts` missing | `-1102` | 400 |
+| `amounts` length does not equal the market's outcome count, any element negative or beyond precision, all elements zero | `-1130` | 400 |
+| `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| Market status is not `TRADING` or `RESOLVING`; caller does not hold enough of some outcome to cover the requested amount; the chain rejected the request | `-2010` | 400 |
+| Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
+| Trading note is busy with another operation; retry shortly | `-2014` | 429 |
+| Backend could not submit the transaction (gateway timeout, malformed reply) | `-1500` | 503 |
+
+### Claim
+
+```http
+POST /api/v1/claim
+```
+
+Security: `TRADE`
+
+Settles the caller's position in a terminal market — `RESOLVED` or `CANCELLED`. For a `RESOLVED` market, exchanges the winning-outcome tokens for the payout in `quoteAsset`. For a `CANCELLED` market, returns the staked collateral. The call is idempotent: repeating it on an already-settled position succeeds without changing balances.
+
+Body parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+
+Signed query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
+| `recvWindow` | LONG | NO | Request validity window in milliseconds. |
+| `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
+
+Response:
+
+```json
+{
+  "marketAddress": "0:market-address",
+  "transactTime": 1710000000000
+}
+```
+
+Response fields:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `marketAddress` | STRING | Echoed from the request. |
+| `transactTime` | LONG | Server timestamp (Unix ms) when the operation was accepted. |
+
+The response confirms acceptance only. The credited collateral becomes visible through [`GET /api/v1/account`](#account-balance) once the chain confirms.
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `marketAddress` missing | `-1102` | 400 |
+| `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| Market status is not `RESOLVED` or `CANCELLED` | `-2010` | 400 |
+| Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
+| Trading note is busy with another operation; retry shortly | `-2014` | 429 |
+| Backend could not submit the transaction (gateway timeout, malformed reply) | `-1500` | 503 |
 
 ## Trading Endpoints
 
