@@ -1916,6 +1916,8 @@ fn assemble_market(
         status,
         quote_asset: row.token_code,
         token_type: row.token_type,
+        maker_commission: dodex_domain::MAKER_COMMISSION.to_string(),
+        taker_commission: dodex_domain::TAKER_COMMISSION.to_string(),
         created_at: row.created_at_unix,
         timings,
         event,

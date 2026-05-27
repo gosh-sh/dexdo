@@ -269,6 +269,8 @@ fn trading_market() -> Market {
         status: MarketStatus::Trading,
         quote_asset: "NACKL".into(),
         token_type: 1,
+        maker_commission: dodex_domain::MAKER_COMMISSION.to_string(),
+        taker_commission: dodex_domain::TAKER_COMMISSION.to_string(),
         created_at: 0,
         timings: None,
         event: MarketEvent {

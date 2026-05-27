@@ -167,6 +167,15 @@ pub struct Terminal {
     pub cancel_reason: Option<CancelReason>,
 }
 
+/// Maker fee rate, global on-chain (no per-market lookup).
+/// Negative = maker rebate funded from the taker fee.
+pub const MAKER_COMMISSION: &str = "-0.0003375";
+
+/// Taker fee rate applied to trades, mirroring `TAKER_FEE_RATE` /
+/// `FEE_DENOMINATOR` from `contracts/modifiers/modifiers.sol`. Always
+/// non-negative.
+pub const TAKER_COMMISSION: &str = "0.0004500";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Market {
     pub market_address: MarketAddress,
@@ -188,6 +197,8 @@ pub struct Market {
     pub status: MarketStatus,
     pub quote_asset: String,
     pub token_type: i32,
+    pub maker_commission: String,
+    pub taker_commission: String,
     pub created_at: i64,
     pub timings: Option<Timings>,
     pub event: MarketEvent,
