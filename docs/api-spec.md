@@ -303,8 +303,8 @@ Response fields:
 | `status` | ENUM | Market phase. See [Market Status](#market-status). |
 | `quoteAsset` | STRING | Quote-asset symbol for display. |
 | `tokenType` | INT | Numeric quote-asset token type. |
-| `makerCommission` | DECIMAL | Maker fee rate applied to trades on this market, as a signed decimal string. The maker is never charged; a negative value (e.g. `"-0.00010"`) is a **maker rebate** — the amount is **credited** to the maker, paying makers for providing liquidity. |
-| `takerCommission` | DECIMAL | Taker fee rate applied to trades on this market, as a decimal string. Always non-negative (e.g. `"0.00045"` = 0.045%) and **charged** to the taker. |
+| `makerCommission` | DECIMAL | Maker fee rate applied to trades on this market, as a signed decimal string. The maker is never charged; a negative value (e.g. `"-0.0003375"`) is a **maker rebate** — the amount is **credited** to the maker, paying makers for providing liquidity. |
+| `takerCommission` | DECIMAL | Taker fee rate applied to trades on this market, as a decimal string. Always non-negative (e.g. `"0.0004500"` = 0.045%) and **charged** to the taker. |
 | `createdAt` | LONG | Unix seconds. Market creation timestamp. Used for sorting by recency. |
 | `timings` | OBJECT \| null | See [Timings](#timings). `null` when `status == "PENDING"`. |
 | `event` | OBJECT | See [Event](#event). |
