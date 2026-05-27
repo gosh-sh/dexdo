@@ -211,9 +211,11 @@ impl EventsFile {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct State {
-    /// Monotonic cursor. `cursor % events.len()` selects the event;
-    /// the cursor value is suffixed to the on-chain event name so the
-    /// second pass cannot collide with the first.
+    /// Monotonic cursor — selects which event from the cyclic list to use
+    /// next via `cursor % events.len()`. Uniqueness of the on-chain event
+    /// name is handled separately by a unix-timestamp suffix at deploy
+    /// time (see `Ctx::next_event`), so a state-loss reboot doesn't
+    /// collide with historical EventList entries.
     next_event_cursor: u64,
     markets: Vec<MarketRecord>,
 }
@@ -309,8 +311,12 @@ impl Ctx {
 
     fn next_event(&self, cursor: u64) -> (String, &EventDef) {
         let event = &self.events.events[(cursor as usize) % self.events.events.len()];
-        // Cursor suffix prevents OracleEventList collisions on cycle wrap.
-        let on_chain_name = format!("{}#{}", event.name, cursor);
+        // Suffix is deploy-time unix-seconds. Tick cadence is 60s and we
+        // deploy at most one market per tick, so seconds resolution is
+        // plenty unique. Crucially: a state-loss reboot picks a fresh
+        // timestamp instead of restarting cursor from 0 — so we never
+        // collide with the OracleEventList entries from prior runs.
+        let on_chain_name = format!("{}#{}", event.name, now_unix());
         (on_chain_name, event)
     }
 }
