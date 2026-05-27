@@ -12,11 +12,11 @@ tick_interval_secs: 60
 target_active_markets: 1
 
 # Per-market lifetime is a random integer in [min..=max] hours. Bidding
-# window = lifetime / 10 (contract-fixed). Temporarily set to 1h for
-# end-to-end smoke (~6min bidding, ~54min active, then resolve). Bump
-# back to 24..=72 for normal staging operation.
-lifetime_hours_min: 1
-lifetime_hours_max: 1
+# window = lifetime / 10 (contract-fixed) — at 24..=72 the bidding
+# window is 2.4..=7.2h, after which splitFullSet runs and the market
+# stays Active until `result_end`.
+lifetime_hours_min: 24
+lifetime_hours_max: 72
 
 # JSON state — picks up where we left off across restarts. Mounted as a
 # named volume in docker-compose.yml.

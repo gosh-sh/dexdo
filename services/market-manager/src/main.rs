@@ -19,6 +19,7 @@ use std::time::Duration;
 use ackinacki_kit::contracts::account::Account;
 use ackinacki_kit::contracts::account::AccountStatus;
 use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
+use ackinacki_kit::contracts::dex::oracle::ParamsOfGetEventListAddress;
 use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfAddEvent;
 use ackinacki_kit::contracts::dex::order_book::OrderBook;
 use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
@@ -635,7 +636,7 @@ async fn deploy_one_market(ctx: &Ctx, state: &mut State, state_path: &Path) -> R
         .context("get_pmp_address")?;
 
     // 5. Wait for oracle quorum to land on the PMP.
-    let quorum = wait_pmp_quorum(ctx, &pmp_address).await?;
+    let quorum = wait_pmp_quorum(ctx, &pmp_address, &deployer_address).await?;
     let oracle_list_hash = quorum.oracle_list_hash.clone();
 
     // 6. submitSetTimings(resultStart = now + lifetime).
@@ -765,9 +766,26 @@ async fn poll_for_event_id(ctx: &Ctx, event_name: &str) -> Result<String> {
     anyhow::bail!("event `{event_name}` did not appear in EventList within 60s")
 }
 
-async fn wait_pmp_quorum(ctx: &Ctx, pmp_address: &str) -> Result<PmpDetails> {
+async fn wait_pmp_quorum(
+    ctx: &Ctx,
+    pmp_address: &str,
+    expected_deployer: &str,
+) -> Result<PmpDetails> {
     for _ in 0..40 {
         let d = ctx.dex.get_pmp_details(pmp_address).await.context("get_pmp_details")?;
+        // Belt-and-braces over the bootstrap identity check: confirm the
+        // PMP we are waiting on was actually deployed by the PN we just
+        // called `deployPmp` on. Catches mid-flight oracle/RootPn drift
+        // (PMP address derivation collision under a different oracle
+        // owning the same name) before we record a foreign PMP in our
+        // state file.
+        if !addr_eq(&d.deployer, expected_deployer) {
+            anyhow::bail!(
+                "PMP {pmp_address} reports deployer={} but we expected {expected_deployer}; \
+                 refusing to operate on a PMP we did not deploy",
+                d.deployer,
+            );
+        }
         if d.number_of_oracle_events > 0 && d.approved_oracle_events >= d.number_of_oracle_events {
             // Settle a beat — quorum-applied state needs a moment before
             // subsequent setTimings is accepted.
@@ -777,6 +795,48 @@ async fn wait_pmp_quorum(ctx: &Ctx, pmp_address: &str) -> Result<PmpDetails> {
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
     anyhow::bail!("PMP {pmp_address} did not reach oracle quorum within 120s")
+}
+
+/// Pre-flight: ensure the on-chain oracle identity matches what `secrets`
+/// pins. Without this, a stale secrets file (someone redeployed the
+/// oracle under the same name and got a new address / EventList) lets
+/// `addEvent` succeed against an orphaned EventList while `deployPmp`
+/// resolves to the CURRENT oracle's PMP — quorum never lands and the
+/// tick loop burns gas retrying every minute.
+async fn assert_chain_identity(ctx: &Ctx) -> Result<()> {
+    let resolved_oracle = ctx
+        .dex
+        .get_oracle_address(ctx.secrets.oracle.name.clone())
+        .await
+        .context("RootOracle.getOracleAddress (bootstrap identity check)")?;
+    if !addr_eq(&resolved_oracle, &ctx.secrets.oracle.address) {
+        anyhow::bail!(
+            "oracle identity mismatch: RootOracle resolves name={} to {} but secrets pin {}. \
+             Refusing to deploy markets against a stale oracle.",
+            ctx.secrets.oracle.name,
+            resolved_oracle,
+            ctx.secrets.oracle.address,
+        );
+    }
+
+    let resolved_event_list = ctx
+        .dex
+        .get_event_list_address(
+            &ctx.secrets.oracle.address,
+            ParamsOfGetEventListAddress { index: 0 },
+        )
+        .await
+        .context("Oracle.getEventListAddress (bootstrap identity check)")?;
+    if !addr_eq(&resolved_event_list, &ctx.secrets.oracle.event_list_address) {
+        anyhow::bail!(
+            "event list mismatch: Oracle({}).getEventListAddress(0) returns {} but secrets pin {}. \
+             Refusing to deploy markets against a stale EventList.",
+            ctx.secrets.oracle.address,
+            resolved_event_list,
+            ctx.secrets.oracle.event_list_address,
+        );
+    }
+    Ok(())
 }
 
 async fn wait_pmp_timings(ctx: &Ctx, pmp_address: &str) -> Result<PmpDetails> {
@@ -809,6 +869,13 @@ fn big_to_u64(b: &BigInt) -> u64 {
 
 fn pn_keys_for<'a>(ctx: &'a Ctx, address: &str) -> Option<&'a KeyPair> {
     ctx.secrets.private_notes.iter().position(|pn| pn.address == address).map(|i| &ctx.pn_keys[i])
+}
+
+/// TVM addresses are hex strings; case carries no meaning. Compare with
+/// case-insensitive equality so a `0:Abc…` vs `0:abc…` round-trip
+/// through getter output does not trip our identity asserts.
+fn addr_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 fn build_client_context(endpoint: &str) -> Result<Arc<ClientContext>> {
@@ -865,6 +932,8 @@ async fn main() -> Result<()> {
     );
 
     let ctx = Ctx { cfg, secrets, events, context, dex, oracle_keys, pn_keys };
+    assert_chain_identity(&ctx).await?;
+    info!("on-chain oracle identity matches secrets");
     let mut state = State::load_or_init(&state_path)?;
 
     let mut ticker = tokio::time::interval(tick_interval);
