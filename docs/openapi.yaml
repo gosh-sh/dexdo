@@ -852,6 +852,8 @@ components:
       - status
       - quoteAsset
       - tokenType
+      - makerCommission
+      - takerCommission
       - createdAt
       - event
       - outcomes
@@ -861,6 +863,8 @@ components:
           format: int64
         event:
           $ref: '#/components/schemas/EventDto'
+        makerCommission:
+          type: string
         marketAddress:
           type: string
         marketName:
@@ -874,6 +878,8 @@ components:
         quoteAsset:
           type: string
         status:
+          type: string
+        takerCommission:
           type: string
         terminal:
           allOf:
