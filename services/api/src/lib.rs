@@ -147,6 +147,8 @@ struct MarketDto {
     status: &'static str,
     quote_asset: String,
     token_type: i32,
+    maker_commission: String,
+    taker_commission: String,
     created_at: i64,
     timings: Option<TimingsDto>,
     event: EventDto,
@@ -504,6 +506,8 @@ fn market_to_dto(market: Market) -> MarketDto {
         status: market.status.as_str(),
         quote_asset: market.quote_asset,
         token_type: market.token_type,
+        maker_commission: market.maker_commission,
+        taker_commission: market.taker_commission,
         created_at: market.created_at,
         timings: market.timings.map(timings_to_dto),
         event: event_to_dto(market.event),
@@ -1615,5 +1619,44 @@ mod dto_tests {
         assert_eq!(v["balances"][0]["symbol"], "PM-X-YES");
         assert_eq!(v["balances"][0]["free"], "5.50");
         assert_eq!(v["balances"][0]["lockedInOrders"], "1000.00");
+    }
+
+    #[test]
+    fn market_to_dto_includes_camel_case_commission_fields() {
+        use dodex_domain::{
+            Market, MarketAddress, MarketEvent, MarketName, MarketStatus, MAKER_COMMISSION,
+            TAKER_COMMISSION,
+        };
+        let market = Market {
+            market_address: MarketAddress("0:m".into()),
+            order_book_address: "0:ob".into(),
+            oracle_list_hash: "0xdead".into(),
+            market_name: MarketName("PM".into()),
+            status: MarketStatus::Trading,
+            quote_asset: "USDC".into(),
+            token_type: 1,
+            maker_commission: MAKER_COMMISSION.to_string(),
+            taker_commission: TAKER_COMMISSION.to_string(),
+            created_at: 0,
+            timings: None,
+            event: MarketEvent {
+                event_id: "0x0".into(),
+                event_name: None,
+                description: None,
+                oracles: vec![],
+            },
+            terminal: None,
+            outcomes: vec![],
+        };
+        let dto = market_to_dto(market);
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["makerCommission"], "-0.0003375");
+        assert_eq!(v["takerCommission"], "0.0004500");
+        // tokenType must still precede the new fields per spec order.
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        let pos = |k: &str| keys.iter().position(|x| *x == k).expect(k);
+        assert!(pos("tokenType") < pos("makerCommission"));
+        assert!(pos("makerCommission") < pos("takerCommission"));
+        assert!(pos("takerCommission") < pos("createdAt"));
     }
 }
