@@ -1623,10 +1623,13 @@ mod dto_tests {
 
     #[test]
     fn market_to_dto_includes_camel_case_commission_fields() {
-        use dodex_domain::{
-            Market, MarketAddress, MarketEvent, MarketName, MarketStatus, MAKER_COMMISSION,
-            TAKER_COMMISSION,
-        };
+        use dodex_domain::Market;
+        use dodex_domain::MarketAddress;
+        use dodex_domain::MarketEvent;
+        use dodex_domain::MarketName;
+        use dodex_domain::MarketStatus;
+        use dodex_domain::MAKER_COMMISSION;
+        use dodex_domain::TAKER_COMMISSION;
         let market = Market {
             market_address: MarketAddress("0:m".into()),
             order_book_address: "0:ob".into(),
