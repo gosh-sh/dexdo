@@ -3,8 +3,8 @@
 // upsert it into the read-model, provision an HMAC api_key for the
 // deployer-PN, then drive the production router. The split out of
 // `mod.rs` keeps the unit-test helpers (`canonical_query`, `sign`,
-// etc.) free of the heavy `bee_dex` / `ackinacki_kit` chain
-// dependencies — every test compiles only what it actually needs.
+// etc.) free of the heavy `ackinacki_kit` chain dependencies — every
+// test compiles only what it actually needs.
 
 #![allow(dead_code)]
 

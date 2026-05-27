@@ -1,5 +1,5 @@
 // Deploy an ephemeral PMP + OrderBook on shellnet for one e2e test
-// run. Mirrors the orchestration in `bee_dex/src/bin/mint_ob_pool.rs`
+// run. Mirrors the orchestration in the kit's `mint_ob_pool` reference
 // (steps 1, 3–8) but strips the halo2 voucher path used to fund a
 // fresh deployer-PN — we take a PN out of `tests/fixtures/test_pns.json`
 // which is already on chain with enough NACKL for the stakes + split
@@ -46,7 +46,7 @@ use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
 use anyhow::Context;
-use bee_dex::Dex;
+use dodex_chain::Dex;
 use num_bigint::BigUint;
 
 use super::test_pns::TestPn;
@@ -123,7 +123,7 @@ pub struct EphemeralMarket {
 /// signed under the deployer-PN keys. Returns once the OrderBook
 /// account is Active on chain and ready to accept `placeOrder`.
 ///
-/// `endpoints` is the same shape `BeeDexChainSender::new` takes; pass
+/// `endpoints` is the same shape `DexChainSender::new` takes; pass
 /// the same shellnet endpoint the test handler uses so both calls hit
 /// the same network.
 pub async fn deploy_ephemeral_market(
@@ -131,7 +131,8 @@ pub async fn deploy_ephemeral_market(
     deployer: &TestPn,
     options: DeployOptions,
 ) -> anyhow::Result<EphemeralMarket> {
-    let dex = Dex::new(endpoints.clone()).map_err(|e| anyhow!("Dex::new: {e:?}"))?;
+    let dex = Dex::from_endpoints(endpoints.clone())
+        .map_err(|e| anyhow!("Dex::from_endpoints: {e:?}"))?;
     let context = build_context(endpoints).context("ClientContext::new")?;
 
     // 1. Oracle + EventList[0] + add 2-outcome event.
@@ -453,9 +454,7 @@ fn now_unix() -> u64 {
 }
 
 /// Convert a `0x…` hex pubkey (the `KeyPair.public` format) into the
-/// decimal uint256 string the contracts expect. `mint_ob_pool` uses
-/// `bee_dex::proof::pubkey_to_dec`; we reproduce its behaviour here
-/// without taking on `bee_dex::proof` as a test-side dependency.
+/// decimal uint256 string the contracts expect.
 fn pubkey_hex_to_decimal(hex: &str) -> String {
     let stripped = hex.strip_prefix("0x").unwrap_or(hex);
     BigUint::parse_bytes(stripped.as_bytes(), 16)

@@ -75,7 +75,7 @@ impl PostgresAuthenticator {
         // The enum array is cast to text[] in SQL so we can decode it as
         // Vec<String> without pulling sqlx::Type into the domain crate;
         // numeric(78,0) fields likewise come back as decimal strings,
-        // which is exactly the format bee-dex expects later.
+        // which is exactly the format the chain ABI expects later.
         sqlx::query_as::<_, CredentialRow>(
             r#"select
                    ak.id                  as api_key_id,
@@ -173,7 +173,7 @@ impl Authenticator for PostgresAuthenticator {
         //    enforces the 32-byte ed25519 invariant at the construction
         //    boundary — a wrong-sized plaintext (corrupted row or schema
         //    drift) fails closed here rather than smuggling a short key
-        //    into `BeeDexChainSender` where it would surface as an
+        //    into `DexChainSender` where it would surface as an
         //    unmappable chain reject.
         let pn_seckey_plain = crypto::open(&self.kek, &row.pn_seckey_enc).map_err(|e| {
             tracing::error!(

@@ -1,0 +1,19 @@
+[package]
+name = "dodex-chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enables PMP/RootOracle/OracleEventList deploy + setup entry points
+# used by the api e2e tests (under [dev-dependencies]) and by the
+# `market-manager` staging tool to spawn ephemeral markets. The prod
+# api/infrastructure build does not enable this — these methods are
+# not reachable from request handlers and stay out of the binary.
+test-helpers = []
+
+[dependencies]
+ackinacki-kit.workspace = true
+serde.workspace = true
+serde_json.workspace = true

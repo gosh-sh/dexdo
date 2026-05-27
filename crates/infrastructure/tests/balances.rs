@@ -199,6 +199,7 @@ async fn resolve_market_for_balances_unreconciled_returns_invalid_market() {
     assert!(matches!(dom, dodex_domain::DomainError::InvalidMarketOrSymbol));
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_live_order(
     pool: &PgPool,
     orderbook: &str,

@@ -1,10 +1,10 @@
 // End-to-end smoke test for `POST /api/v1/batchOrders` against a real
 // shellnet OrderBook. Deploys a fresh PMP + OrderBook, provisions an
-// HMAC api_key, drives the production router with `BeeDexChainSender`
+// HMAC api_key, drives the production router with `DexChainSender`
 // / `PostgresAuthenticator` / `PostgresReadModelRepository`, then
 // submits a two-item batch of BUY LIMIT GTC orders, polls
 // `OrderBook.getOrdersByOwner` until **both** `clientOrderId`s
-// surface, and cleans up each by `bee_dex::Dex::cancel_order_by_client`
+// surface, and cleans up each by `dodex_chain::Dex::cancel_order_by_client`
 // so collateral does not remain locked.
 //
 // Marked `#[ignore]` because it needs:
@@ -49,7 +49,7 @@ use dodex_api::testkit::SharedAuth;
 use dodex_api::testkit::SharedChainSender;
 use dodex_api::testkit::SharedRepo;
 use dodex_infrastructure::auth::PostgresAuthenticator;
-use dodex_infrastructure::chain_sender::BeeDexChainSender;
+use dodex_infrastructure::chain_sender::DexChainSender;
 use dodex_infrastructure::config::AuthSection;
 use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
 use salvo::http::StatusCode;
@@ -64,7 +64,7 @@ use serde_json::json;
 async fn batch_orders_buy_limit_gtc_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_env_filter("info,bee_dex=debug,dodex_infrastructure::chain_sender=debug")
+        .with_env_filter("info,ackinacki_kit=debug,dodex_infrastructure::chain_sender=debug")
         .try_init();
 
     let Some((pool, kek)) = db_pool().await else {
@@ -93,14 +93,14 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
     upsert_market(&pool, &market, &market_name, &symbol).await;
 
     let chain_sender: SharedChainSender = Arc::new(
-        BeeDexChainSender::new(
+        DexChainSender::new(
             vec![SHELLNET_ENDPOINT.to_string()],
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
         )
-        .expect("BeeDexChainSender::new"),
+        .expect("DexChainSender::new"),
     );
 
     let (api_key, secret_hex) = provision_account(&pool, &kek, &trader).await;
@@ -193,8 +193,9 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
 
     let coid_a_u128: u128 = coid_a.parse().expect("coid_a u128");
     let coid_b_u128: u128 = coid_b.parse().expect("coid_b u128");
-    use bee_dex::Dex as RawDex;
-    let raw_dex = RawDex::new(vec![SHELLNET_ENDPOINT.to_string()]).expect("RawDex::new");
+    use dodex_chain::Dex as RawDex;
+    let raw_dex = RawDex::from_endpoints(vec![SHELLNET_ENDPOINT.to_string()])
+        .expect("RawDex::from_endpoints");
 
     if post_ok {
         match serde_json::from_str::<Vec<BatchItem>>(&resp_body) {

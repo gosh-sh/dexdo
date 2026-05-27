@@ -441,7 +441,7 @@ async fn blank_oracle_list_hash_returns_503_minus_1500() {
 #[tokio::test]
 async fn pn_busy_returns_429_minus_2014() {
     // Sender raising `OrderPnBusy` simulates a real `ERR_NOTE_BUSY`
-    // (121) coming back from `bee_dex::Dex::cancel_order` while another
+    // (121) coming back from `dodex_chain::Dex::cancel_order` while another
     // op from the same PN is still in flight.
     let repo: SharedRepo = Arc::new(FakeRepo::with(trading_order(None)));
     let sender: SharedChainSender =

@@ -103,7 +103,7 @@ fn default_max_recv_window_ms() -> u64 {
     MAX_RECV_WINDOW_MS
 }
 
-/// Chain gateway settings used by `BeeDexChainSender`. `gateway_endpoint`
+/// Chain gateway settings used by `DexChainSender`. `gateway_endpoint`
 /// is the Acki Nacki node URL the trading path POSTs external messages
 /// to; the `*_timeout_ms` fields bound the per-request wait so a hung
 /// gateway cannot indefinitely stall an HTTP caller. See

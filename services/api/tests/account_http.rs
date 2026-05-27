@@ -73,7 +73,7 @@ async fn happy_path_returns_balances_sorted_by_asset() {
         resp.take_json().await.unwrap_or_else(|e| panic!("expected account body, got: {e}"));
     assert_eq!(status, Some(StatusCode::OK));
     assert!(!body.account_id.is_empty());
-    assert_eq!(body.update_time > 0, true);
+    assert!(body.update_time > 0);
     assert_eq!(body.balances.len(), 2);
     assert_eq!(body.balances[0].asset, "NACKL");
     assert_eq!(body.balances[0].free, "10.000000000");

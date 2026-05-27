@@ -15,8 +15,8 @@ use std::time::Duration;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
-use bee_dex::Dex;
-use bee_dex::OwnedOrder;
+use dodex_chain::Dex;
+use dodex_chain::OwnedOrder;
 
 use super::deploy_market::EphemeralMarket;
 use super::test_pns::TestPn;
@@ -29,7 +29,7 @@ const CANCEL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 const CANCEL_MAX_ATTEMPTS: u32 = 5;
 
 /// Total polling budget = `POLL_TICKS * POLL_TICK` = 60 s. Same shape
-/// as the `bee_dex` integration tests' chain-state polls.
+/// as the kit integration tests' chain-state polls.
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 30;
 

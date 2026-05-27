@@ -308,9 +308,7 @@ impl MarketReadRepository for FakeRepo {
         _: &str,
         _: &str,
     ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
-        unimplemented!(
-            "sum_open_sell_remaining is not exercised by cancel_batch_orders_http tests"
-        )
+        unimplemented!("sum_open_sell_remaining is not exercised by cancel_batch_orders_http tests")
     }
 }
 
@@ -1115,7 +1113,7 @@ async fn chain_batch_size_drift_returns_503_minus_1500() {
 #[tokio::test]
 async fn pn_busy_returns_429_minus_2014() {
     // Sender raising `OrderPnBusy` simulates a real `ERR_NOTE_BUSY`
-    // (121) coming back from `bee_dex::Dex::cancel_batch` while another
+    // (121) coming back from `dodex_chain::Dex::cancel_batch` while another
     // op from the same PN is still in flight.
     let repo: SharedRepo =
         Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
@@ -1132,7 +1130,7 @@ async fn pn_busy_returns_429_minus_2014() {
 #[tokio::test]
 async fn chain_request_timeout_returns_504_minus_1007() {
     // `classify_chain_outcome` maps the elapsed branch to
-    // `DomainError::RequestTimeout` when `bee_dex::Dex::cancel_batch`
+    // `DomainError::RequestTimeout` when `dodex_chain::Dex::cancel_batch`
     // doesn't return within `chain.cancel_batch_timeout_ms`.
     // `handler_exceeding_request_timeout_returns_504_minus_1007`
     // (driven by `SlowCancelBatchSender`) exercises the wall-clock

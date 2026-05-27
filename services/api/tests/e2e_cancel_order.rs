@@ -4,7 +4,7 @@
 // until the chain accepts it, then drives the **HTTP cancel path**
 // through the production router and verifies that the order
 // disappears from `getOrdersByOwner` — proving the `DELETE /order`
-// handler → use case → `BeeDexChainSender::cancel_order` → chain →
+// handler → use case → `DexChainSender::cancel_order` → chain →
 // `OrderBook.OrderCancelled` round-trip end to end.
 //
 // Marked `#[ignore]` because it needs:
@@ -44,7 +44,7 @@ use dodex_api::testkit::SharedAuth;
 use dodex_api::testkit::SharedChainSender;
 use dodex_api::testkit::SharedRepo;
 use dodex_infrastructure::auth::PostgresAuthenticator;
-use dodex_infrastructure::chain_sender::BeeDexChainSender;
+use dodex_infrastructure::chain_sender::DexChainSender;
 use dodex_infrastructure::config::AuthSection;
 use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
 use salvo::http::StatusCode;
@@ -59,7 +59,7 @@ use serde_json::json;
 async fn cancel_order_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_env_filter("info,bee_dex=debug,dodex_infrastructure::chain_sender=debug")
+        .with_env_filter("info,ackinacki_kit=debug,dodex_infrastructure::chain_sender=debug")
         .try_init();
 
     let Some((pool, kek)) = db_pool().await else {
@@ -92,14 +92,14 @@ async fn cancel_order_against_shellnet() {
     upsert_market(&pool, &market, &market_name, &symbol).await;
 
     let chain_sender: SharedChainSender = Arc::new(
-        BeeDexChainSender::new(
+        DexChainSender::new(
             vec![SHELLNET_ENDPOINT.to_string()],
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
         )
-        .expect("BeeDexChainSender::new"),
+        .expect("DexChainSender::new"),
     );
 
     let (api_key, secret_hex) = provision_account(&pool, &kek, &trader).await;
@@ -163,8 +163,9 @@ async fn cancel_order_against_shellnet() {
 
     // Wait until the chain assigns an orderId. The handler does not
     // return it — we look it up by clientOrderId in getOrdersByOwner.
-    use bee_dex::Dex as RawDex;
-    let raw_dex = RawDex::new(vec![SHELLNET_ENDPOINT.to_string()]).expect("RawDex::new");
+    use dodex_chain::Dex as RawDex;
+    let raw_dex = RawDex::from_endpoints(vec![SHELLNET_ENDPOINT.to_string()])
+        .expect("RawDex::from_endpoints");
     let coid_u128: u128 = coid.parse().expect("coid u128");
     use common::cleanup::PollOutcome;
     let order_id = match common::cleanup::poll_orders_find(

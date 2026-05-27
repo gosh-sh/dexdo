@@ -6,8 +6,8 @@
 // a recording `ChainOrderSender` captures the batch payload the
 // handler would dispatch.
 //
-// The chain-side `AppError → DomainError` mapping is exercised
-// against real `bee_dex::AppError` values in `chain_sender::tests`.
+// The chain-side `ChainError → DomainError` mapping is exercised
+// against real `ChainError` values in `chain_sender::tests`.
 // The tests here fake the sender at the `DomainError` boundary and
 // pin the HTTP shape contract: response envelopes, status codes,
 // error code numbers, and which inputs short-circuit before the
@@ -902,7 +902,7 @@ async fn chain_timeout_returns_504_minus_1007() {
 #[tokio::test]
 async fn pn_busy_returns_429_minus_2014() {
     // Sender raising `OrderPnBusy` simulates a real `ERR_NOTE_BUSY`
-    // (121) coming back from `bee_dex::Dex::place_batch` while another
+    // (121) coming back from `dodex_chain::Dex::place_batch` while another
     // op from the same PN is still in flight.
     let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
     let sender: SharedChainSender =

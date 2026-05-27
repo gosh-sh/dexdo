@@ -34,6 +34,8 @@ use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::Context as _;
 use anyhow::Result;
+use dodex_chain::Dex;
+use dodex_chain::PmpDetails;
 use num_bigint::BigInt;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -42,10 +44,6 @@ use serde::Serialize;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
-
-mod dex;
-use dex::Dex;
-use dex::PmpDetails;
 
 // =========================================================================
 // ECC currency ids — match the chain's `tokenType` enum.
@@ -348,10 +346,10 @@ async fn tick(ctx: &Ctx, state: &mut State, state_path: &Path) -> Result<()> {
     }
 
     // 5. Top off the active pool — at most ONE new market per tick.
-    if state.active_or_pending_freeze_count() < ctx.cfg.target_active_markets {
-        if let Err(e) = deploy_one_market(ctx, state, state_path).await {
-            warn!(error = ?e, "deploy_one_market failed; will retry next tick");
-        }
+    if state.active_or_pending_freeze_count() < ctx.cfg.target_active_markets
+        && let Err(e) = deploy_one_market(ctx, state, state_path).await
+    {
+        warn!(error = ?e, "deploy_one_market failed; will retry next tick");
     }
 
     // 6. Background trader activity — random setStake in the bidding window.
@@ -757,9 +755,7 @@ async fn poll_for_event_id(ctx: &Ctx, event_name: &str) -> Result<String> {
             .await
             .context("get_events")?;
         if let Some((id, _)) = events.events.iter().find(|(_, e)| {
-            e.get("eventName")
-                .or_else(|| e.get("event_name"))
-                .and_then(|v| v.as_str())
+            e.get("eventName").or_else(|| e.get("event_name")).and_then(|v| v.as_str())
                 == Some(event_name)
         }) {
             return Ok(id.clone());
@@ -812,11 +808,7 @@ fn big_to_u64(b: &BigInt) -> u64 {
 }
 
 fn pn_keys_for<'a>(ctx: &'a Ctx, address: &str) -> Option<&'a KeyPair> {
-    ctx.secrets
-        .private_notes
-        .iter()
-        .position(|pn| pn.address == address)
-        .map(|i| &ctx.pn_keys[i])
+    ctx.secrets.private_notes.iter().position(|pn| pn.address == address).map(|i| &ctx.pn_keys[i])
 }
 
 fn build_client_context(endpoint: &str) -> Result<Arc<ClientContext>> {
@@ -846,8 +838,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let config_path = env::var("APP_CONFIG")
-        .unwrap_or_else(|_| "config/market-manager.stage.yaml".to_string());
+    let config_path =
+        env::var("APP_CONFIG").unwrap_or_else(|_| "config/market-manager.stage.yaml".to_string());
     let cfg = Config::load(Path::new(&config_path))?;
     let events = EventsFile::load(&cfg.events_file)?;
     let secrets = Secrets::load(&cfg.secrets_file)?;
@@ -857,11 +849,8 @@ async fn main() -> Result<()> {
     let context = build_client_context(&cfg.endpoint)?;
     let dex = Dex::new(context.clone());
     let oracle_keys = keypair_of(&secrets.oracle.pubkey_hex, &secrets.oracle.secret_hex);
-    let pn_keys: Vec<KeyPair> = secrets
-        .private_notes
-        .iter()
-        .map(|pn| keypair_of(&pn.pubkey_hex, &pn.secret_hex))
-        .collect();
+    let pn_keys: Vec<KeyPair> =
+        secrets.private_notes.iter().map(|pn| keypair_of(&pn.pubkey_hex, &pn.secret_hex)).collect();
 
     info!(
         endpoint = %cfg.endpoint,

@@ -1448,11 +1448,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dodex-chain"
+version = "0.1.0"
+dependencies = [
+ "ackinacki-kit",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dodex-market-manager"
 version = "0.1.0"
 dependencies = [
  "ackinacki-kit",
  "anyhow",
+ "dodex-chain",
  "num-bigint 0.4.6",
  "rand 0.8.6",
  "serde",

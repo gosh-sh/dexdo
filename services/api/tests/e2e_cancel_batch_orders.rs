@@ -5,7 +5,7 @@
 // **HTTP cancel-batch path** through the production router with both
 // chain-assigned `orderId`s, and verifies that both orders disappear —
 // proving the `DELETE /batchOrders` handler → use case →
-// `BeeDexChainSender::cancel_batch_order` → chain →
+// `DexChainSender::cancel_batch_order` → chain →
 // `OrderBook.OrderCancelled` × N round-trip end to end.
 //
 // Marked `#[ignore]` because it needs:
@@ -47,7 +47,7 @@ use dodex_api::testkit::SharedAuth;
 use dodex_api::testkit::SharedChainSender;
 use dodex_api::testkit::SharedRepo;
 use dodex_infrastructure::auth::PostgresAuthenticator;
-use dodex_infrastructure::chain_sender::BeeDexChainSender;
+use dodex_infrastructure::chain_sender::DexChainSender;
 use dodex_infrastructure::config::AuthSection;
 use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
 use salvo::http::StatusCode;
@@ -62,7 +62,7 @@ use serde_json::json;
 async fn cancel_batch_orders_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_env_filter("info,bee_dex=debug,dodex_infrastructure::chain_sender=debug")
+        .with_env_filter("info,ackinacki_kit=debug,dodex_infrastructure::chain_sender=debug")
         .try_init();
 
     let Some((pool, kek)) = db_pool().await else {
@@ -91,14 +91,14 @@ async fn cancel_batch_orders_against_shellnet() {
     upsert_market(&pool, &market, &market_name, &symbol).await;
 
     let chain_sender: SharedChainSender = Arc::new(
-        BeeDexChainSender::new(
+        DexChainSender::new(
             vec![SHELLNET_ENDPOINT.to_string()],
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
         )
-        .expect("BeeDexChainSender::new"),
+        .expect("DexChainSender::new"),
     );
 
     let (api_key, secret_hex) = provision_account(&pool, &kek, &trader).await;
@@ -174,8 +174,9 @@ async fn cancel_batch_orders_against_shellnet() {
 
     let coid_a_u128: u128 = coid_a.parse().expect("coid_a u128");
     let coid_b_u128: u128 = coid_b.parse().expect("coid_b u128");
-    use bee_dex::Dex as RawDex;
-    let raw_dex = RawDex::new(vec![SHELLNET_ENDPOINT.to_string()]).expect("RawDex::new");
+    use dodex_chain::Dex as RawDex;
+    let raw_dex = RawDex::from_endpoints(vec![SHELLNET_ENDPOINT.to_string()])
+        .expect("RawDex::from_endpoints");
 
     // From this point on we have live orders on the chain. Failures
     // accumulate; cleanup runs unconditionally; a single combined panic

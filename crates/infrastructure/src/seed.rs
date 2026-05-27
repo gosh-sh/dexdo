@@ -1,13 +1,11 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Idempotent bootstrap-time insert of a fixed set of test credentials.
-// Triggered by `auth.seed_accounts` in the API config; off by default.
-// The credentials below come from `bee-engine-private/bee_dex/pn_pool_1.json`
-// — the same PNs the bee-dex integration tests use. The whole thing is
-// scoped to test/dev environments by config (devops controls the flag
-// per environment); when the route is no longer needed the entire
-// module and the `seed_accounts` config field can be removed without
-// touching the rest of the auth pipeline.
+// Triggered by `auth.seed_accounts` in the API config; off by default
+// and only flipped on in dev/test environments by devops. When the
+// route is no longer needed the entire module and the `seed_accounts`
+// config field can be removed without touching the rest of the auth
+// pipeline.
 
 use anyhow::bail;
 use anyhow::Context;
@@ -26,12 +24,10 @@ use uuid::Uuid;
 use crate::crypto;
 use crate::crypto::Kek;
 
-/// Hard-coded test credentials baked into the binary. Each account
-/// references one PN from `bee_dex/pn_pool_1.json`; the `pn_seckey_hex`
-/// values mirror that file. The `api_key`/`api_secret_hex` pairs were
-/// generated once and listed in the implementation handover — the
-/// secret cannot be recovered from the DB after seeding, so this
-/// literal is the only place to look them up.
+/// Hard-coded test credentials baked into the binary. The
+/// `api_secret_hex` cannot be recovered from the DB after seeding
+/// (only the HMAC of it is stored), so this literal is the only place
+/// to look the secrets up.
 const SEED_DATA: &str = r#"{
   "accounts": [
     {

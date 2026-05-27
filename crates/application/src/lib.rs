@@ -43,7 +43,7 @@ pub struct AuthContext {
 }
 
 /// The custodied trading PN bound to an account. `pn_pubkey` and `pn_dih`
-/// are decimal-encoded uint256 strings — the format `bee-dex` accepts
+/// are decimal-encoded uint256 strings — the format the chain ABI accepts
 /// for chain-side calls.
 #[derive(Debug, Clone)]
 pub struct TradingPn {
@@ -1087,7 +1087,7 @@ pub struct NewOrderInput {
 pub struct NewOrderPayload {
     pub pn_address: String,
     /// Decimal-encoded `uint256` public half of the trading-PN keypair.
-    /// `BeeDexChainSender` re-encodes it as hex for `KeyPair.public`.
+    /// `DexChainSender` re-encodes it as hex for `KeyPair.public`.
     pub pn_pubkey: String,
     pub pn_seckey: SensitiveBytes,
     pub event_id: String,
@@ -1335,7 +1335,7 @@ pub struct CancelledBatchOrder {
 }
 
 /// Dispatch a `PrivateNote.placeOrder` external message to chain.
-/// Returns once `bee_dex` has observed the chain's execution of
+/// Returns once the chain submission path has observed execution of
 /// `PrivateNote.placeOrder` — so PrivateNote-side `require(...)`
 /// failures (`ERR_NOTE_BUSY`, `ERR_LOW_VALUE`, `ERR_INVALID_OUTCOME_ID`,
 /// etc.) come back as typed `DomainError`s here. Only
@@ -1349,7 +1349,7 @@ pub trait ChainOrderSender: Send + Sync {
     async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError>;
 
     /// Dispatch a `PrivateNote.cancelOrder` external message to chain.
-    /// Returns once `bee_dex` has observed PN's execution of
+    /// Returns once the chain submission path has observed PN's execution of
     /// `cancelOrder` — the only PN-side reject mapped here is
     /// `ERR_NOTE_BUSY` → `OrderPnBusy`. OrderBook-side outcomes (silent
     /// no-op on owner mismatch / already-closed, queue overflow
@@ -1655,7 +1655,7 @@ fn validate_and_encode_order_item(
     }
     // SDK serialization ceiling. `PrivateNote.placeOrder.amount` and
     // `placeBatch.orders[i].amount` are `uint128` at the chain ABI,
-    // but the upstream `bee_dex` → `ackinacki-kit` → `serde_json::json!`
+    // but the upstream `ackinacki-kit` → `serde_json::json!`
     // path panics on `u128 > u64::MAX` for the same reason
     // `clientOrderId` is capped — see
     // `docs/tech-specs/write-api.md §clientOrderId generation`.
@@ -2865,7 +2865,7 @@ mod tests {
     #[tokio::test]
     async fn create_order_rejects_client_order_id_overflowing_u64() {
         // The chain ABI is `uint128`, but the serialization path
-        // (`bee_dex` → `ackinacki-kit` → `serde_json::json!` without
+        // (`ackinacki-kit` → `serde_json::json!` without
         // arbitrary_precision) rejects `u128 > u64::MAX` with a panic.
         // Until the SDK supports arbitrary precision, the public
         // surface is bounded at u64. A caller who supplies
@@ -3164,7 +3164,7 @@ mod tests {
 
     #[test]
     fn generated_client_order_id_fits_in_u64() {
-        // The generator MUST stay inside u64: `bee_dex` / `serde_json`
+        // The generator MUST stay inside u64: kit / `serde_json`
         // panic on serialize for values above u64::MAX, so a
         // `Uuid::new_v4().as_u128()` regression would crash the worker
         // ~50 % of the time. 256 samples is more than enough to
@@ -3173,7 +3173,7 @@ mod tests {
             let coid = generate_client_order_id();
             assert!(
                 coid.parse::<u64>().is_ok(),
-                "generated coid {coid:?} does not fit in u64 — would panic in bee_dex::Dex::place_order",
+                "generated coid {coid:?} does not fit in u64 — would panic in dodex_chain::Dex::place_order",
             );
         }
     }

@@ -622,7 +622,7 @@ impl TimeInForce {
 ///
 /// `PendingNew` is the transitional state between the moment
 /// `PrivateNote.placeOrder` accepts (synchronous return of
-/// `bee_dex::Dex::place_order`) and the moment `OrderBook.OrderPlaced`
+/// `dodex_chain::Dex::place_order`) and the moment `OrderBook.OrderPlaced`
 /// projects into `live_orders` with a chain-assigned `orderId`. The
 /// HTTP response to a successful `POST /api/v1/order` always carries
 /// `PendingNew`; the indexer-projected row in `live_orders` then
@@ -707,7 +707,7 @@ pub fn encode_order_flags(
 /// not impose its own u64 ceiling on the lifted value, but the
 /// downstream chain submission path eventually serializes
 /// `amount: u128` and `client_order_id: u128` through
-/// `serde_json::json!` (in `bee_dex` / `ackinacki-kit`) without the
+/// `serde_json::json!` (in `ackinacki-kit`) without the
 /// `arbitrary_precision` feature. Values above `u64::MAX` panic
 /// there. For realistic `(quantity_precision, quantity)` pairs the
 /// lifted amount stays well within u64 (NACKL: precision=9, max
@@ -856,7 +856,7 @@ impl SensitiveBytes {
     /// Wrap a freshly-decrypted ed25519 PN secret key. Enforces
     /// exactly `PN_SECKEY_BYTE_LEN` bytes; a wrong-sized buffer
     /// surfaces as `DomainError::Unexpected` so the auth pipeline
-    /// fails closed before the bytes reach `BeeDexChainSender`,
+    /// fails closed before the bytes reach `DexChainSender`,
     /// where a `hex::encode` of a short key would silently produce
     /// a key that the chain rejects with an unmappable error.
     pub fn seckey(bytes: Vec<u8>) -> Result<Self, DomainError> {
@@ -1107,7 +1107,7 @@ mod tests {
         // drifted from 32 is a service-state bug, not a user error.
         // Any deviation must surface as `Unexpected` (-1000/500) so
         // the auth pipeline fails closed before the bytes reach
-        // `BeeDexChainSender::submit_order`.
+        // `DexChainSender::submit_order`.
         for bad_len in [0usize, 1, 16, 31, 33, 64] {
             let err = SensitiveBytes::seckey(vec![0u8; bad_len])
                 .expect_err("wrong-length seckey must be rejected at construction");

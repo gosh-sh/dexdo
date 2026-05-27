@@ -213,7 +213,7 @@ impl MarketReadRepository for FakeRepo {
 
 /// `ChainOrderSender` that records every payload it sees, or fails
 /// with a configured `DomainError`. The recorded payloads are what the
-/// handler would dispatch to `bee_dex::Dex::place_order` in production.
+/// handler would dispatch to `dodex_chain::Dex::place_order` in production.
 struct RecordingSender {
     recorded: Mutex<Vec<NewOrderPayload>>,
     fail_with: Option<DomainError>,
@@ -690,7 +690,7 @@ async fn sender_transport_failure_returns_1000() {
 async fn pn_busy_chain_reject_returns_2014_429() {
     // The chain serialises `placeOrder` per PN via `_busy`; a second
     // in-flight call from the same PN raises `ERR_NOTE_BUSY` (chain
-    // exit 121) which `BeeDexChainSender` maps to `OrderPnBusy`.
+    // exit 121) which `DexChainSender` maps to `OrderPnBusy`.
     // Surfaces synchronously as 429 with -2014 so MM clients can
     // back off and retry instead of polling `/orders` for absence.
     let service = setup_with(
@@ -828,7 +828,7 @@ async fn quantity_not_step_multiple_returns_1111() {
 #[tokio::test]
 async fn client_order_id_overflowing_u64_returns_1130() {
     // Chain ABI is `uint128`, but the serialization path through
-    // `bee_dex` → `ackinacki-kit` → `serde_json::json!` panics on
+    // `ackinacki-kit` → `serde_json::json!` panics on
     // `u128 > u64::MAX` (no `arbitrary_precision` feature upstream).
     // Until the SDK supports arbitrary precision, callers MUST stay
     // inside u64. A value past `u64::MAX` would otherwise crash

@@ -23,7 +23,11 @@ dodex-infrastructure = { path = "../../crates/infrastructure" }
 [dev-dependencies]
 ackinacki-kit.workspace = true
 async-trait.workspace = true
-bee-dex.workspace = true
+# e2e tests deploy an ephemeral PMP + OrderBook before exercising the
+# trader path; that needs `test-helpers` to expose deploy methods on
+# `dodex_chain::Dex`. The prod api binary depends on dodex-chain
+# transitively through dodex-infrastructure without the feature.
+dodex-chain = { workspace = true, features = ["test-helpers"] }
 hex = "0.4"
 hmac = "0.12"
 num-bigint.workspace = true

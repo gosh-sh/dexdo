@@ -1,11 +1,11 @@
 // End-to-end smoke test for `POST /api/v1/order` against a real
 // shellnet OrderBook. Deploys a fresh PMP + OrderBook per run, drives
-// the production router (real `BeeDexChainSender`, real
+// the production router (real `DexChainSender`, real
 // `PostgresAuthenticator`, real `PostgresReadModelRepository`), places
 // a BUY LIMIT GTC order, then polls `OrderBook.getOrdersByOwner`
 // until the chain assigns an `orderId` to the `clientOrderId` we
 // sent. Two-pass cleanup at the end cancels the placed order via
-// `bee_dex::Dex::cancel_order_by_client` so collateral does not
+// `dodex_chain::Dex::cancel_order_by_client` so collateral does not
 // remain locked on the trading PN.
 //
 // Marked `#[ignore]` because it needs:
@@ -48,7 +48,7 @@ use dodex_api::testkit::SharedAuth;
 use dodex_api::testkit::SharedChainSender;
 use dodex_api::testkit::SharedRepo;
 use dodex_infrastructure::auth::PostgresAuthenticator;
-use dodex_infrastructure::chain_sender::BeeDexChainSender;
+use dodex_infrastructure::chain_sender::DexChainSender;
 use dodex_infrastructure::config::AuthSection;
 use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
 use salvo::http::StatusCode;
@@ -61,13 +61,13 @@ use serde_json::json;
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL + shellnet + tests/fixtures/test_pns.json"]
 async fn buy_limit_gtc_against_shellnet() {
-    // Surface the `BeeDexChainSender` / `bee_dex` error stream into
-    // the test output so a transport failure does not collapse into
-    // an opaque `-1000` body. `with_test_writer` routes lines through
-    // `print!`, which `--nocapture` then exposes.
+    // Surface the `DexChainSender` chain error stream into the test
+    // output so a transport failure does not collapse into an opaque
+    // `-1000` body. `with_test_writer` routes lines through `print!`,
+    // which `--nocapture` then exposes.
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_env_filter("info,bee_dex=debug,dodex_infrastructure::chain_sender=debug")
+        .with_env_filter("info,ackinacki_kit=debug,dodex_infrastructure::chain_sender=debug")
         .try_init();
 
     let Some((pool, kek)) = db_pool().await else {
@@ -99,14 +99,14 @@ async fn buy_limit_gtc_against_shellnet() {
     upsert_market(&pool, &market, &market_name, &symbol).await;
 
     let chain_sender: SharedChainSender = Arc::new(
-        BeeDexChainSender::new(
+        DexChainSender::new(
             vec![SHELLNET_ENDPOINT.to_string()],
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
         )
-        .expect("BeeDexChainSender::new"),
+        .expect("DexChainSender::new"),
     );
 
     let (api_key, secret_hex) = provision_account(&pool, &kek, &trader).await;
@@ -182,8 +182,9 @@ async fn buy_limit_gtc_against_shellnet() {
     }
 
     let coid_u128: u128 = coid.parse().expect("coid u128");
-    use bee_dex::Dex as RawDex;
-    let raw_dex = RawDex::new(vec![SHELLNET_ENDPOINT.to_string()]).expect("RawDex::new");
+    use dodex_chain::Dex as RawDex;
+    let raw_dex = RawDex::from_endpoints(vec![SHELLNET_ENDPOINT.to_string()])
+        .expect("RawDex::from_endpoints");
 
     if post_ok {
         match serde_json::from_str::<OkBody>(&body) {
@@ -206,7 +207,7 @@ async fn buy_limit_gtc_against_shellnet() {
         }
 
         // Poll OrderBook until the chain reflects placement (60s
-        // budget, 2s ticks — same as bee_dex integration tests).
+        // budget, 2s ticks — same as kit integration tests).
         use common::cleanup::PollOutcome;
         match common::cleanup::poll_orders(&raw_dex, &market, &trader, "e2e_order", |orders| {
             orders.iter().any(|o| o.client_order_id == coid_u128)

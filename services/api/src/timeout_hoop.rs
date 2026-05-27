@@ -5,7 +5,7 @@
 // handler that hangs past the budget surfaces a 504 / -1007 instead of
 // stalling the worker indefinitely.
 //
-// Why this exists: `bee_dex::Dex::place_order` carries its own
+// Why this exists: `dodex_chain::Dex::place_order` carries its own
 // `place_order_timeout_ms` (chain-side budget). The HTTP hoop is the
 // safety net for everything else — gateway hangs, lock contention, a
 // future deadlock in the read-model adapter — and the comment on
