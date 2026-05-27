@@ -8,3 +8,24 @@ services:
     environment:
       APP_CONFIG: /app/config/indexer.stage.supabase.yaml
       RUST_LOG: info
+
+  # Staging-only. Standalone crate under ./services/market-manager with
+  # its own Cargo.lock — root workspace is intentionally NOT touched.
+  # Build context narrows to the crate dir so prod build pipelines for
+  # api/indexer cannot accidentally depend on this service.
+  market-manager:
+    build:
+      context: ./services/market-manager
+      dockerfile: Dockerfile
+    environment:
+      APP_CONFIG: /app/config/market-manager.stage.yaml
+      RUST_LOG: info
+    volumes:
+      # Mount config dir read-only so YAML / events / secrets edits take
+      # effect on container restart without rebuilding the image.
+      - ./services/market-manager/config:/app/config:ro
+      - market-manager-state:/state
+    restart: unless-stopped
+
+volumes:
+  market-manager-state:
