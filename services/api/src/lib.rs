@@ -922,10 +922,10 @@ impl ToSchema for CancelBatchOrdersRequest {
     }
 }
 
-/// Response item for `DELETE /api/v1/batchOrders`. Same `PENDING_CANCEL`
-/// envelope as the single-order DELETE — see [`CancelOrderResponse`]
-/// for the rationale. Returned in request order; the array has one
-/// element per accepted id.
+// Response item for `DELETE /api/v1/batchOrders`. Same `PENDING_CANCEL`
+// envelope as the single-order DELETE — see `CancelOrderResponse`
+// for the rationale. Returned in request order; the array has one
+// element per accepted id.
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CancelBatchOrderResponseItem {
@@ -1296,12 +1296,12 @@ fn build_batch_orders_input(
     })
 }
 
-/// Parses one `(marketAddress, symbol)` plus `orderIds[]`, hands off
-/// to `CancelBatchOrdersUseCase`, and shapes a flat array of
-/// `PENDING_CANCEL` envelopes. The use case enforces non-empty
-/// `orderIds[]`, intra-batch dedup, the `outcome.max_batch_size` cap,
-/// and bulk order resolution. The chain (`PrivateNote.cancelBatch`)
-/// accepts the list atomically under one `_busy` window.
+// Parses one `(marketAddress, symbol)` plus `orderIds[]`, hands off
+// to `CancelBatchOrdersUseCase`, and shapes a flat array of
+// `PENDING_CANCEL` envelopes. The use case enforces non-empty
+// `orderIds[]`, intra-batch dedup, the `outcome.max_batch_size` cap,
+// and bulk order resolution. The chain (`PrivateNote.cancelBatch`)
+// accepts the list atomically under one `_busy` window.
 #[endpoint(
     tags("trading"),
     summary = "Cancel a batch of orders atomically",

@@ -5,7 +5,7 @@ on:
     branches:
       - dev
     paths:
-      - 'openapi/**'
+      - 'docs/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -32,6 +32,6 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: openapi
+          path: docs
       - id: deployment
         uses: actions/deploy-pages@v4

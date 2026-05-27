@@ -1,0 +1,25 @@
+name: OpenAPI drift guard
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate openapi.yaml from Rust source
+        run: cargo run --quiet -p dodex-api --bin gen-openapi -- --out /tmp/openapi.yaml
+      - name: Diff against committed docs/openapi.yaml
+        run: |
+          if ! diff -u docs/openapi.yaml /tmp/openapi.yaml; then
+            echo
+            echo "docs/openapi.yaml is out of sync with services/api."
+            echo "Run openapi/generate.sh and commit the result."
+            exit 1
+          fi

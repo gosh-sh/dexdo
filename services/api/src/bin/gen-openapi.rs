@@ -3,7 +3,7 @@
 
 // Dumps the OpenAPI document built by `dodex_api::openapi_doc()` to disk
 // as YAML. Stateless: no DB, no auth, no network. Intended to run from
-// CI or `openapi/generate.sh` to refresh `openapi/openapi.yaml` after
+// CI or `openapi/generate.sh` to refresh `docs/openapi.yaml` after
 // any change to the api handlers or DTOs.
 
 use std::env;
@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const DEFAULT_OUT: &str = "openapi/openapi.yaml";
+const DEFAULT_OUT: &str = "docs/openapi.yaml";
 
 fn main() -> ExitCode {
     let out = match parse_args() {

@@ -10,7 +10,7 @@ On-chain DODEX contracts live under `contracts/`.
 ## Documentation
 
 - [docs/api-spec.md](docs/api-spec.md) — public REST API contract.
-- [openapi/openapi.yaml](openapi/openapi.yaml) — OpenAPI 3.1 contract, generated from the Rust handlers. See [openapi/README.md](openapi/README.md) for the regen workflow and the GitHub Pages deployment.
+- [docs/openapi.yaml](docs/openapi.yaml) — OpenAPI 3.1 contract, generated from the Rust handlers. See [openapi/README.md](openapi/README.md) for the regen workflow and the GitHub Pages deployment.
 - [docs/README.md](docs/README.md) — documentation map and file ownership.
 - [AGENT_REQUIREMENTS.md](AGENT_REQUIREMENTS.md) — rules for any agent making repository changes.
 
