@@ -2002,10 +2002,6 @@ async fn orderplaced_confirmed_rejects_empty_src() {
     .expect("insert raw event with empty src");
 
     let stats = repo.reproject_pending(1000).await.expect("reproject");
-    assert_eq!(
-        stats.failed, 1,
-        "empty-src OrderPlacedConfirmed must be reported as a failed projection",
-    );
 
     let owner: Option<String> = sqlx::query_scalar(
         r#"select owner_pn_address from live_orders
@@ -2016,6 +2012,24 @@ async fn orderplaced_confirmed_rejects_empty_src() {
     .fetch_one(&pool)
     .await
     .expect("read row owner");
+
+    // Purge BEFORE asserts so an assertion panic still leaves the DB
+    // clean. Failed events stay `processed_at IS NULL`, and any leftover
+    // here would surface as a phantom `stats.failed` count in the next
+    // sibling test.
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_confirm.as_str()),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        stats.failed, 1,
+        "empty-src OrderPlacedConfirmed must be reported as a failed projection",
+    );
     assert!(
         owner.is_none(),
         "owner_pn_address must remain NULL — empty string is not a legal attribution",
@@ -2062,7 +2076,6 @@ async fn orderplaced_rejects_non_string_client_order_id() {
     .await;
 
     let stats = repo.reproject_pending(1000).await.expect("reproject");
-    assert_eq!(stats.failed, 1, "non-string clientOrderId must be reported as a failed projection");
 
     let row_count: i64 = sqlx::query_scalar(
         r#"select count(*) from live_orders
@@ -2073,5 +2086,20 @@ async fn orderplaced_rejects_non_string_client_order_id() {
     .fetch_one(&pool)
     .await
     .expect("count live_orders");
+
+    // Purge BEFORE asserts so an assertion panic still leaves the DB
+    // clean. Failed events stay `processed_at IS NULL`, and any leftover
+    // here would surface as a phantom `stats.failed` count in the next
+    // sibling test.
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook_addr.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id_place.as_str()),
+        ],
+    )
+    .await;
+
+    assert_eq!(stats.failed, 1, "non-string clientOrderId must be reported as a failed projection");
     assert_eq!(row_count, 0, "no live_orders row may materialise when clientOrderId is non-string",);
 }

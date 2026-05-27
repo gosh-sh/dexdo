@@ -454,16 +454,40 @@ fn map_chain_error(err: &ChainError, ctx: &ChainCallContext<'_>) -> DomainError 
         && let Ok(code) = u16::try_from(exit)
         && let Some(mapped) = map_tvm_exit_code(code)
     {
-        warn!(
-            entry_point = ctx.entry_point,
-            pn = ctx.pn,
-            event_id = ctx.event_id,
-            order_count = ctx.order_count,
-            exit_code = code,
-            ?err,
-            domain_error = ?mapped,
-            "chain rejected request",
-        );
+        // Destructure to re-emit the `KitError` / `ClientError` payload
+        // as separate keyed fields rather than one Debug blob — ops
+        // queries that filter on `err_module` / `err_kit_code` keep
+        // working across the enum boundary. `ChainError::Decode` cannot
+        // reach here: `tvm_exit_code` returns `None` for it.
+        match err {
+            ChainError::Kit(k) => warn!(
+                entry_point = ctx.entry_point,
+                pn = ctx.pn,
+                event_id = ctx.event_id,
+                order_count = ctx.order_count,
+                exit_code = code,
+                err_module = ?k.module,
+                err_kit_code = ?k.code,
+                err_message = %k.message,
+                tvm_err = ?k.tvm_error,
+                domain_error = ?mapped,
+                "chain rejected request",
+            ),
+            ChainError::Client(c) => warn!(
+                entry_point = ctx.entry_point,
+                pn = ctx.pn,
+                event_id = ctx.event_id,
+                order_count = ctx.order_count,
+                exit_code = code,
+                err_client_code = c.code(),
+                err_message = c.message(),
+                domain_error = ?mapped,
+                "chain rejected request",
+            ),
+            ChainError::Decode(_) => {
+                unreachable!("ChainError::Decode has no tvm_exit_code; mapped branch unreachable",)
+            }
+        }
         return mapped;
     }
     // Unmapped path: full diagnostic at error level since this is

@@ -87,3 +87,115 @@ fn parse_u32(s: &str, field: &str) -> ChainResult<u32> {
         ChainError::Decode(format!("OrderBook.getOrdersByOwner: parse {field}=`{s}` as u32: {e}"))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kit_two_orders() -> KitOrdersByOwner {
+        KitOrdersByOwner {
+            order_ids: vec!["1".into(), "2".into()],
+            outcome_ids: vec!["10".into(), "11".into()],
+            is_buys: vec![true, false],
+            prices: vec!["1000".into(), "2000".into()],
+            amounts: vec!["500".into(), "600".into()],
+            epoch_ids: vec!["7".into(), "8".into()],
+            client_order_ids: vec!["1001".into(), "1002".into()],
+        }
+    }
+
+    #[test]
+    fn try_from_happy_path_round_trip() {
+        let owned: OwnedOrders = kit_two_orders().try_into().expect("decode ok");
+        assert_eq!(owned.orders.len(), 2);
+
+        let o0 = &owned.orders[0];
+        assert_eq!(o0.order_id, 1);
+        assert_eq!(o0.outcome_id, 10);
+        assert!(o0.is_buy);
+        assert_eq!(o0.price, "1000");
+        assert_eq!(o0.amount, 500);
+        assert_eq!(o0.epoch_id, 7);
+        assert_eq!(o0.client_order_id, 1001);
+
+        let o1 = &owned.orders[1];
+        assert_eq!(o1.order_id, 2);
+        assert_eq!(o1.outcome_id, 11);
+        assert!(!o1.is_buy);
+        assert_eq!(o1.price, "2000");
+        assert_eq!(o1.amount, 600);
+        assert_eq!(o1.epoch_id, 8);
+        assert_eq!(o1.client_order_id, 1002);
+    }
+
+    #[test]
+    fn try_from_empty_input_yields_empty_orders() {
+        let kit = KitOrdersByOwner {
+            order_ids: vec![],
+            outcome_ids: vec![],
+            is_buys: vec![],
+            prices: vec![],
+            amounts: vec![],
+            epoch_ids: vec![],
+            client_order_ids: vec![],
+        };
+        let owned: OwnedOrders = kit.try_into().expect("decode ok");
+        assert!(owned.orders.is_empty());
+    }
+
+    #[test]
+    fn try_from_length_mismatch_returns_decode_error() {
+        let mut kit = kit_two_orders();
+        kit.outcome_ids.pop();
+        let err = OwnedOrders::try_from(kit).expect_err("should reject mismatched arrays");
+        match err {
+            ChainError::Decode(msg) => assert!(
+                msg.contains("mismatched parallel arrays"),
+                "unexpected decode message: {msg}",
+            ),
+            other => panic!("expected ChainError::Decode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_from_invalid_u128_field_returns_decode_error() {
+        let mut kit = kit_two_orders();
+        kit.order_ids[1] = "not-a-number".into();
+        let err = OwnedOrders::try_from(kit).expect_err("should reject bad u128");
+        match err {
+            ChainError::Decode(msg) => assert!(
+                msg.contains("order_id") && msg.contains("u128"),
+                "unexpected decode message: {msg}",
+            ),
+            other => panic!("expected ChainError::Decode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_from_invalid_u32_field_returns_decode_error() {
+        let mut kit = kit_two_orders();
+        kit.outcome_ids[0] = "99999999999".into();
+        let err = OwnedOrders::try_from(kit).expect_err("should reject bad u32");
+        match err {
+            ChainError::Decode(msg) => assert!(
+                msg.contains("outcome_id") && msg.contains("u32"),
+                "unexpected decode message: {msg}",
+            ),
+            other => panic!("expected ChainError::Decode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_from_invalid_u64_field_returns_decode_error() {
+        let mut kit = kit_two_orders();
+        kit.epoch_ids[0] = "abc".into();
+        let err = OwnedOrders::try_from(kit).expect_err("should reject bad u64");
+        match err {
+            ChainError::Decode(msg) => assert!(
+                msg.contains("epoch_id") && msg.contains("u64"),
+                "unexpected decode message: {msg}",
+            ),
+            other => panic!("expected ChainError::Decode, got {other:?}"),
+        }
+    }
+}

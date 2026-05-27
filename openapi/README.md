@@ -23,7 +23,7 @@ cargo run -p dodex-api --bin gen-openapi -- --out docs/openapi.yaml
 npx -y @redocly/cli@latest lint docs/openapi.yaml
 ```
 
-Commit the updated `docs/openapi.yaml` together with the handler or DTO change. CI re-runs the generator and fails if the committed spec drifted from the Rust source — see `.github/workflows/openapi.yml`.
+Commit the updated `docs/openapi.yaml` together with the handler or DTO change. CI re-runs the generator and fails if the committed spec drifted from the Rust source — see the `openapi-drift` job in `.github/workflows/pr-tests.yml`.
 
 ## Preview locally
 

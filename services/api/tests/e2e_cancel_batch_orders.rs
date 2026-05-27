@@ -381,7 +381,9 @@ async fn cancel_batch_orders_against_shellnet() {
 
     // Defence-in-depth cleanup: if anything above tripped after the
     // POST landed, `cancel_order_by_client` is a no-op on already-gone
-    // orders and frees collateral on any leftover.
+    // orders and frees collateral on any leftover. No absence-poll
+    // follows — the cancelBatch path above already verified removal
+    // (see the `cleanup.rs` module doc's carve-out).
     common::cleanup::cancel_coids_best_effort(
         &raw_dex,
         &trader,

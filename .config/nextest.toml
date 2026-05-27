@@ -1,0 +1,16 @@
+# nextest profile config. Loaded automatically from `.config/nextest.toml`
+# on every `cargo nextest run`.
+
+# Tests in `crates/infrastructure/tests/reprojection.rs` serialize through
+# a process-local `static REPROJECTION_LOCK: Mutex<()>` (see the file
+# header). `cargo test` runs them in the same process so the lock works;
+# nextest spawns one process per test, so the lock is invisible cross-
+# process and shared `raw_events` / `oracles` / `live_orders` fixture
+# rows collide. Pin the whole binary to one test at a time — restores
+# the same serialization the in-process mutex was designed to give.
+[[profile.default.overrides]]
+filter = 'binary(reprojection)'
+test-group = 'serial-reprojection'
+
+[test-groups]
+serial-reprojection = { max-threads = 1 }

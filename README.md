@@ -59,8 +59,10 @@ cargo build --workspace
 
 ```sh
 cargo +nightly fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --no-deps -- -D warnings
 ```
+
+`rustfmt.toml` uses unstable features, so `fmt` needs nightly. `clippy` runs on the default toolchain.
 
 ## Test Postgres
 
@@ -90,6 +92,12 @@ DB-backed integration tests (test Postgres up first, see above):
 
 ```sh
 cargo test --workspace --tests
+```
+
+Or with [cargo-nextest](https://nexte.st) (faster — runs integration test binaries in parallel, matches what CI uses):
+
+```sh
+cargo nextest run --workspace
 ```
 
 Per-service narrower runs are described in [services/api/README.md](services/api/README.md) and [services/indexer/README.md](services/indexer/README.md).

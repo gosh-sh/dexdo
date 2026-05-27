@@ -475,6 +475,19 @@ async fn owner_with_no_orders_returns_empty_page() {
 async fn list_orders_query_uses_owner_index() {
     let Some(pool) = setup().await else { return };
 
+    // `set local` disables seq scan only for this transaction so the
+    // planner cannot fall back on `live_orders` being near-empty in CI.
+    // `live_orders_owner_idx` is the only index that matches the
+    // `owner_pn_address` equality (PK and `open_book_idx` do not), so
+    // a query rewrite that no longer matches the partial-index
+    // predicate would still leave it out of the plan and fail this
+    // assertion — coverage preserved.
+    let mut tx = pool.begin().await.expect("begin tx for EXPLAIN");
+    sqlx::query("set local enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable seq scan for this tx");
+
     let plan_lines: Vec<String> = sqlx::query_scalar(
         r#"explain
              select 1
@@ -485,11 +498,12 @@ async fn list_orders_query_uses_owner_index() {
               order by placed_chain_order desc
               limit 100"#,
     )
-    .fetch_all(&pool)
+    .fetch_all(&mut *tx)
     .await
     .expect("EXPLAIN on /orders query shape");
-    let plan = plan_lines.join("\n");
+    tx.rollback().await.expect("rollback EXPLAIN tx");
 
+    let plan = plan_lines.join("\n");
     assert!(
         plan.contains("live_orders_owner_idx"),
         "expected live_orders_owner_idx in plan:\n{plan}",

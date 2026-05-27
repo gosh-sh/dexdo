@@ -1,0 +1,145 @@
+name: PR Tests
+
+# Runs on every PR and on push to dev. Three parallel jobs — wall-clock
+# is the slowest one (usually `tests`). A new push to the same ref
+# cancels the previous run.
+on:
+  pull_request:
+  push:
+    branches: [dev]
+
+concurrency:
+  group: pr-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# `CARGO_*_DEBUG=0` strips debuginfo so test binaries stay within runner
+# memory — the full debug profile on nightly + tvm-sdk has hit rust-lld
+# Bus errors. `CARGO_INCREMENTAL=0` — incremental compile only bloats
+# the cache in CI without payoff (every runner is fresh).
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt-clippy:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # nightly is required because `rustfmt.toml` sets
+      # `unstable_features = true`.
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      # `shared-key` drops the job name from the cache key → all 3 jobs
+      # in this workflow read/write the same cache. Parallel jobs in the
+      # same run still build independently (cache save happens at end of
+      # job, not during). The win is on subsequent runs: after the first
+      # green PR, all 3 jobs hit cache. Cold ~12-15 min (tvm-sdk),
+      # warm ~30-60 s per job.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr-tests
+          cache-on-failure: true
+
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+      # `--no-deps` skips crates.io deps (we don't control their
+      # warnings); `--all-targets` covers tests + examples + bins.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
+
+  tests:
+    name: tests (Postgres + nextest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Tests read TEST_DATABASE_URL from env, see README.md#test-postgres.
+      # Locally the port is 55432 (via docker-compose.test.yml); in CI
+      # it's 5432 (the conventional default — runner has nothing else
+      # bound to it).
+      TEST_DATABASE_URL: postgres://dodex:dodex@localhost:5432/dodex_test
+    services:
+      # Matches docker-compose.test.yml on image / creds / settings;
+      # only the port differs (5432 in CI vs 55432 locally). The schema
+      # is created in tests via `sqlx::migrate!`, so the container only
+      # needs to bring up an empty database.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dodex
+          POSTGRES_PASSWORD: dodex
+          POSTGRES_DB: dodex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dodex -d dodex_test"
+          --health-interval 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr-tests
+          cache-on-failure: true
+
+      # Pre-built binary, ~10 s install. The `cargo install
+      # cargo-nextest` alternative compiles for ~3 min from scratch.
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      # nextest runs integration test binaries in parallel (cargo test
+      # runs them sequentially). With 25+ integration crates this is a
+      # noticeable runtime win. `#[ignore]`-marked shellnet e2e_* tests
+      # are skipped by default (`--run-ignored=all` includes them).
+      - name: cargo nextest run
+        run: cargo nextest run --workspace --no-fail-fast
+
+      # nextest does not run doctests — separate step.
+      - name: cargo test --doc
+        run: cargo test --workspace --doc
+
+  openapi-drift:
+    name: openapi drift guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr-tests
+          cache-on-failure: true
+
+      - name: Regenerate openapi.yaml from Rust source
+        run: cargo run --quiet -p dodex-api --bin gen-openapi -- --out /tmp/openapi.yaml
+
+      - name: Diff against committed docs/openapi.yaml
+        run: |
+          if ! diff -u docs/openapi.yaml /tmp/openapi.yaml; then
+            echo
+            echo "docs/openapi.yaml is out of sync with services/api."
+            echo "Run: cargo run -p dodex-api --bin gen-openapi"
+            echo "and commit the result."
+            exit 1
+          fi

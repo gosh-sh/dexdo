@@ -2,11 +2,17 @@
 // poll helpers the e2e tests use to verify chain-side state. The
 // cancel helper never panics and never reports upward — per-attempt
 // errors go to `eprintln!`, which `cargo test` captures and replays
-// only on FAIL, so a green run swallows them silently. **Callers
-// MUST follow each `cancel_coids_best_effort` call with an
-// absence-poll** (`poll_orders` returning `PollOutcome::Found`
-// against the not-present predicate), otherwise a leaked order shows
-// up only as locked collateral on the trading PN.
+// only on FAIL, so a green run swallows them silently.
+//
+// Callers MUST follow `cancel_coids_best_effort` with an absence-poll
+// (`poll_orders` returning `PollOutcome::Found` against the not-present
+// predicate) when the call is the **canonical** cancel path under test
+// — otherwise a leaked order shows up only as locked collateral on the
+// trading PN. The one carve-out is a trailing **defence-in-depth**
+// cleanup that runs after the test has already verified the orders are
+// gone (e.g. a `cancelBatch` HTTP call followed by its own absence-poll
+// upstream): there the helper is a no-op on the happy path and any
+// leftover after a recorded failure is best-effort by design.
 
 #![allow(dead_code)]
 
@@ -15,6 +21,7 @@ use std::time::Duration;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
+use dodex_chain::ChainError;
 use dodex_chain::Dex;
 use dodex_chain::OwnedOrder;
 
@@ -147,7 +154,15 @@ where
         {
             Ok(o) => o,
             Err(err) => {
-                eprintln!("[{label}] get_orders_by_owner errored (retry): {err:?}");
+                // `Decode` means our DTO disagrees with the contract's
+                // ABI shape — retrying the same call for 60s cannot
+                // recover, so flag it distinctly from a transport/chain
+                // error to keep debug sessions pointed at the schema.
+                let kind = match &err {
+                    ChainError::Decode(_) => "decode — server-state suspect",
+                    ChainError::Kit(_) | ChainError::Client(_) => "transport/chain",
+                };
+                eprintln!("[{label}] get_orders_by_owner errored ({kind}, retry): {err:?}");
                 continue;
             }
         };
