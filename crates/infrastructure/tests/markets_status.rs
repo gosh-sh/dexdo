@@ -172,7 +172,7 @@ async fn cancelled_with_reason_is_served() {
     assert!(matches!(terminal.kind, TerminalKind::Cancelled));
     assert_eq!(terminal.at, 1_700_000_050);
     assert!(terminal.cancel_reason.is_some());
-    // Commission fields are stamped unconditionally from the domain constants.
+    // Snapshot: literals catch silent drift in the domain constants.
     assert_eq!(market.maker_commission, "-0.0003375");
     assert_eq!(market.taker_commission, "0.0004500");
 }

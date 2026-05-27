@@ -167,13 +167,8 @@ pub struct Terminal {
     pub cancel_reason: Option<CancelReason>,
 }
 
-/// Maker fee rate applied to trades. Today every market shares the same
-/// rate because the smart-contract fees are global constants
-/// (`TAKER_FEE_RATE`, `MAKER_REBATE_NUM`, `MAKER_REBATE_DEN`,
-/// `FEE_DENOMINATOR`) defined in `contracts/modifiers/modifiers.sol`.
-/// A negative value means the maker is paid a rebate funded from the
-/// taker fee. If the contract constants ever change, update this string
-/// in lockstep.
+/// Maker fee rate, global on-chain (no per-market lookup).
+/// Negative = maker rebate funded from the taker fee.
 pub const MAKER_COMMISSION: &str = "-0.0003375";
 
 /// Taker fee rate applied to trades, mirroring `TAKER_FEE_RATE` /

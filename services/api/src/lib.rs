@@ -1653,6 +1653,7 @@ mod dto_tests {
         };
         let dto = market_to_dto(market);
         let v = serde_json::to_value(&dto).unwrap();
+        // Snapshot: literals catch silent drift in the domain constants.
         assert_eq!(v["makerCommission"], "-0.0003375");
         assert_eq!(v["takerCommission"], "0.0004500");
         // tokenType must still precede the new fields per spec order.
