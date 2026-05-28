@@ -1294,11 +1294,10 @@ Unsubscribe:
 
 Connection lifecycle:
 
-- Heartbeat is application-level JSON. The server sends `{"e":"ping","E":<server_ts_ms>}` every 30s; the client MUST reply with `{"method":"pong","E":<server_ts_ms>}` (echoing the ping's `E`) within 60s, otherwise the server closes the socket.
-- If 90s elapse without a server ping, the client MUST send `{"method":"ping","E":<client_ts_ms>}` as a liveness probe. The server replies with `{"e":"pong","E":<client_ts_ms>}` within 60s; if no pong arrives in that window, the client SHOULD treat the socket as dead and reconnect.
+- Frame envelope convention: server→client frames use `e:` (both data `orderUpdate` and control `ping` / `pong`); client→server frames use `method:` (subscriptions and `ping` / `pong`).
+- Heartbeat is application-level JSON. The server sends `{"e":"ping","E":<server_ts_ms>}` every 30s; the client MUST reply with `{"method":"pong","E":<server_ts_ms>}` (echoing the ping's `E`) within 60s, otherwise the server closes the socket with WebSocket close code `4001` ("heartbeat timeout"). `E` is set by the side issuing the ping and echoed verbatim by the responder, so the pinger can measure round-trip time against its own clock — this differs from `E` in `orderUpdate`, where `E` is the server's emission time.
+- If 45s elapse without **any** frame from the server (ping, pong, or `orderUpdate`), the client MUST send `{"method":"ping","E":<client_ts_ms>}` as a liveness probe. The client SHOULD treat the socket as dead and reconnect if it does not receive `{"e":"pong","E":<client_ts_ms>}` within 60s.
 - The server closes the connection after 24 hours of uptime. Clients MUST reconnect and resubscribe.
-
-In ping/pong frames `E` is the timestamp set by the side issuing the ping, and the matching pong echoes it verbatim — so the pinger can measure round-trip time against its own clock. This differs from `E` in `orderUpdate`, where `E` is the server's emission time.
 
 ### Splice and Gap Detection
 
