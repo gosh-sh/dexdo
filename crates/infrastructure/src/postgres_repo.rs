@@ -1224,12 +1224,7 @@ fn project_buy_full_set_row(
         anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
     })?;
 
-    Ok(dodex_application::MarketForBuyFullSet {
-        event_id,
-        oracle_list_hash,
-        token_type,
-        status,
-    })
+    Ok(dodex_application::MarketForBuyFullSet { event_id, oracle_list_hash, token_type, status })
 }
 
 #[derive(Debug, sqlx::FromRow)]
