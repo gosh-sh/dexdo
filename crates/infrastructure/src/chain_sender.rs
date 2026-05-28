@@ -478,7 +478,8 @@ fn classify_chain_outcome<T>(
             // (`chain.place_order_timeout_ms`,
             // `chain.cancel_order_timeout_ms`,
             // `chain.place_batch_timeout_ms`,
-            // `chain.cancel_batch_timeout_ms`). Most often a
+            // `chain.cancel_batch_timeout_ms`,
+            // `chain.split_full_set_timeout_ms`). Most often a
             // network partition or a gateway-side deadlock. Surface as
             // `RequestTimeout` (504 / -1007) so the client receives the
             // same "retry with the same id" contract as the HTTP
@@ -567,9 +568,9 @@ fn map_chain_error(err: &ChainError, ctx: &ChainCallContext<'_>) -> DomainError 
 }
 
 /// `PrivateNote` exit codes from `contracts/modifiers/errors.sol`,
-/// shared across the four entry points (`placeOrder`, `cancelOrder`,
-/// `placeBatch`, `cancelBatch`) the wrapper dispatches — the
-/// originating entry point is carried in `ChainCallContext.entry_point`
+/// shared across the five entry points (`placeOrder`, `cancelOrder`,
+/// `placeBatch`, `cancelBatch`, `splitFullSet`) the wrapper dispatches —
+/// the originating entry point is carried in `ChainCallContext.entry_point`
 /// for the unmapped-code log site. Only codes the trading path can
 /// plausibly raise are mapped; everything else returns `None` so
 /// `map_chain_error` can fall through to `Unexpected` (and log the

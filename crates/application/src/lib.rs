@@ -2348,13 +2348,14 @@ where
                 DomainError::MarketInconsistent
             })?;
 
-        // Three remaps below all surface as -1130 per
+        // Three gates below all surface as -1130 per
         // `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet
         // §Input validation`. The spec doc is the single source of
         // truth for why; comments here only name the gate they enforce.
         //
-        // 1. quote-asset precision → -1130 (not -1111: it is not part
-        //    of api-spec Validation Rules);
+        // 1. quote-asset precision → remap PrecisionExceeded to
+        //    InvalidParameter (-1130, not -1111: it is not part of
+        //    api-spec Validation Rules);
         // 2. strictly positive (zero parses cleanly through
         //    `lift_decimal`);
         // 3. fits in u64 (upstream `serde_json::json!` ceiling — see
