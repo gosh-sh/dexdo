@@ -5139,6 +5139,7 @@ mod buy_full_set_use_case_tests {
         async fn list_markets(&self, _: &MarketsRequest) -> anyhow::Result<MarketsPage> {
             unreachable!()
         }
+
         async fn get_depth(
             &self,
             _: &MarketAddress,
@@ -5147,6 +5148,7 @@ mod buy_full_set_use_case_tests {
         ) -> anyhow::Result<DepthSnapshot> {
             unreachable!()
         }
+
         async fn resolve_for_new_order(
             &self,
             _: &MarketAddress,
@@ -5155,6 +5157,7 @@ mod buy_full_set_use_case_tests {
         ) -> anyhow::Result<MarketForPlacement> {
             unreachable!()
         }
+
         async fn resolve_for_cancel(
             &self,
             _: &MarketAddress,
@@ -5165,6 +5168,7 @@ mod buy_full_set_use_case_tests {
         ) -> anyhow::Result<OrderForCancel> {
             unreachable!()
         }
+
         async fn resolve_for_cancel_batch(
             &self,
             _: &MarketAddress,
@@ -5175,15 +5179,18 @@ mod buy_full_set_use_case_tests {
         ) -> anyhow::Result<Option<CancelBatchResolution>> {
             unreachable!()
         }
+
         async fn list_orders(&self, _: &OrdersQuery) -> anyhow::Result<OrdersPage> {
             unreachable!()
         }
+
         async fn resolve_market_for_balances(
             &self,
             _: &MarketAddress,
         ) -> anyhow::Result<MarketBalancesResolution> {
             unreachable!()
         }
+
         async fn resolve_for_buy_full_set(
             &self,
             _: &MarketAddress,
@@ -5191,6 +5198,7 @@ mod buy_full_set_use_case_tests {
         ) -> anyhow::Result<MarketForBuyFullSet> {
             self.resolution.clone().map_err(anyhow::Error::from)
         }
+
         async fn sum_open_sell_remaining(
             &self,
             _: &str,
@@ -5224,9 +5232,11 @@ mod buy_full_set_use_case_tests {
         fn ok() -> Self {
             Self { recorded: Mutex::new(Vec::new()), fail_with: None }
         }
+
         fn failing(err: DomainError) -> Self {
             Self { recorded: Mutex::new(Vec::new()), fail_with: Some(err) }
         }
+
         fn calls(&self) -> Vec<SplitFullSetPayload> {
             self.recorded.lock().unwrap().clone()
         }
@@ -5237,18 +5247,19 @@ mod buy_full_set_use_case_tests {
         async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
             unreachable!()
         }
+
         async fn cancel_order(&self, _: CancelOrderPayload) -> Result<(), DomainError> {
             unreachable!()
         }
+
         async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
             unreachable!()
         }
-        async fn cancel_batch_order(
-            &self,
-            _: CancelBatchOrderPayload,
-        ) -> Result<(), DomainError> {
+
+        async fn cancel_batch_order(&self, _: CancelBatchOrderPayload) -> Result<(), DomainError> {
             unreachable!()
         }
+
         async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError> {
             if let Some(err) = self.fail_with {
                 return Err(err);

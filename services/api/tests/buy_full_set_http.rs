@@ -213,10 +213,7 @@ impl ChainOrderSender for RecordingSplitFullSetSender {
         unreachable!("RecordingSplitFullSetSender::submit_batch_order called from buyFullSet test")
     }
 
-    async fn cancel_batch_order(
-        &self,
-        _: CancelBatchOrderPayload,
-    ) -> Result<(), DomainError> {
+    async fn cancel_batch_order(&self, _: CancelBatchOrderPayload) -> Result<(), DomainError> {
         unreachable!("RecordingSplitFullSetSender::cancel_batch_order called from buyFullSet test")
     }
 
@@ -264,8 +261,11 @@ fn auth_envelope() -> Vec<(&'static str, String)> {
 }
 
 async fn send_post(service: &Service, body: serde_json::Value) -> salvo::Response {
-    let mut req = TestClient::post("http://test/api/v1/buyFullSet")
-        .add_header("X-DODEX-APIKEY", "fake", true);
+    let mut req = TestClient::post("http://test/api/v1/buyFullSet").add_header(
+        "X-DODEX-APIKEY",
+        "fake",
+        true,
+    );
     for (k, v) in auth_envelope() {
         req = req.query(k, v);
     }
@@ -398,8 +398,7 @@ async fn non_numeric_collateral_returns_400_minus_1130() {
 
 #[tokio::test]
 async fn unknown_market_returns_404_minus_1121() {
-    let repo: SharedRepo =
-        Arc::new(FakeRepo::failing_resolver(DomainError::InvalidMarketOrSymbol));
+    let repo: SharedRepo = Arc::new(FakeRepo::failing_resolver(DomainError::InvalidMarketOrSymbol));
     let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
     let service = setup_with(repo, sender);
 
@@ -477,9 +476,8 @@ async fn chain_validation_failure_returns_400_minus_2010() {
     // Sender raising `OrderValidationFailed` simulates `ERR_LOW_VALUE`
     // (102) — caller's free quote-asset balance is below `collateral`.
     let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Trading)));
-    let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::failing(
-        DomainError::OrderValidationFailed,
-    ));
+    let sender: SharedChainSender =
+        Arc::new(RecordingSplitFullSetSender::failing(DomainError::OrderValidationFailed));
     let service = setup_with(repo, sender);
 
     let mut resp = send_post(&service, full_body("10")).await;

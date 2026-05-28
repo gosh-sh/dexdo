@@ -308,7 +308,9 @@ impl MarketReadRepository for FakeRepo {
         _: &MarketAddress,
         _: i64,
     ) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
-        unimplemented!("resolve_for_buy_full_set is not exercised by cancel_batch_orders_http tests")
+        unimplemented!(
+            "resolve_for_buy_full_set is not exercised by cancel_batch_orders_http tests"
+        )
     }
 
     async fn sum_open_sell_remaining(

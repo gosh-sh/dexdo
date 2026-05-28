@@ -157,10 +157,7 @@ async fn buy_full_set_against_shellnet() {
     wait_pn_not_busy(&raw_dex, &trader.address, "pre-balance").await;
 
     let pre_balance = read_nackl_free_balance(&raw_dex, &trader.address, market.token_type).await;
-    eprintln!(
-        "[e2e_buy_full_set] pre-balance _balance[{}] = {pre_balance}",
-        market.token_type,
-    );
+    eprintln!("[e2e_buy_full_set] pre-balance _balance[{}] = {pre_balance}", market.token_type,);
 
     let body = serde_json::to_vec(&json!({
         "marketAddress": market.pmp_address,
@@ -218,10 +215,7 @@ async fn buy_full_set_against_shellnet() {
     wait_pn_not_busy(&raw_dex, &trader.address, "post-balance").await;
 
     let post_balance = read_nackl_free_balance(&raw_dex, &trader.address, market.token_type).await;
-    eprintln!(
-        "[e2e_buy_full_set] post-balance _balance[{}] = {post_balance}",
-        market.token_type,
-    );
+    eprintln!("[e2e_buy_full_set] post-balance _balance[{}] = {post_balance}", market.token_type,);
 
     // Bounded assertion: SOME collateral was consumed, AT MOST the
     // requested `COLLATERAL_RAW`. The exact debit equals
@@ -313,10 +307,8 @@ async fn wait_pn_not_busy(dex: &RawDex, pn_address: &str, phase: &str) {
 /// when a PN has never received the asset. The deploy primes the
 /// trader-PN with NACKL, so the pre-balance read finds the entry.
 async fn read_nackl_free_balance(dex: &RawDex, pn_address: &str, token_type: u32) -> u128 {
-    let details = dex
-        .get_private_note_details(pn_address)
-        .await
-        .expect("getDetails for balance probe");
+    let details =
+        dex.get_private_note_details(pn_address).await.expect("getDetails for balance probe");
     let key = token_type.to_string();
     details.balance.get(&key).copied().unwrap_or(0)
 }
