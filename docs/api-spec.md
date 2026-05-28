@@ -36,6 +36,11 @@
       - [Order Type](#order-type)
       - [Time In Force](#time-in-force)
       - [Order Status](#order-status)
+  - [WebSocket Streams](#websocket-streams)
+    - [Connection](#connection)
+    - [Order Update Event](#order-update-event)
+      - [Common Enums](#common-enums-2)
+        - [Execution Type](#execution-type)
   - [Validation Rules](#validation-rules)
 
 # Dodex REST API Specification
@@ -206,6 +211,7 @@ envelope field failed or why a credential was rejected.
 | Cancel batch orders by IDs | `DELETE` | `/api/v1/batchOrders` | `TRADE` |
 | Cancel all open orders on one symbol | `DELETE` | `/api/v1/openOrders` | `TRADE` |
 | Fetch orders | `GET` | `/api/v1/orders` | `USER_DATA` |
+| Subscribe to user order updates | `WS` | `/ws/v1/user` | `USER_DATA` |
 
 ## Market Data Endpoints
 
@@ -1250,6 +1256,185 @@ Order fields:
 | `FILLED` | Order is completely filled. |
 | `CANCELED` | Order was canceled by the user or system. |
 | `REJECTED` | Order was rejected and was not opened. |
+
+## WebSocket Streams
+
+### Connection
+
+Real-time stream of order lifecycle updates for the authenticated account. Delta-only — no snapshot is sent on subscribe. Clients reconcile current state via [`GET /api/v1/orders`](#orders) after (re)connect.
+
+Base URL:
+
+```text
+wss://api.dodex.example.com/ws/v1/user
+```
+
+Security: `USER_DATA`. Subscription requires the same signed envelope as private REST endpoints — `X-DODEX-APIKEY`, `timestamp`, `signature`, optional `recvWindow` — see [Signature Formation](#signature-formation). The signature payload is the canonical query string of the subscription parameters (sorted by key, excluding `signature`), HMAC-SHA256 with the API secret.
+
+Subscription request (one frame after socket open):
+
+```json
+{
+  "method": "orders.subscribe",
+  "apiKey": "...",
+  "timestamp": 1710000000000,
+  "recvWindow": 5000,
+  "signature": "..."
+}
+```
+
+Unsubscribe:
+
+```json
+{ "method": "orders.unsubscribe" }
+```
+
+Connection lifecycle:
+
+- The server sends a WebSocket ping every 20 seconds. Clients MUST reply with pong within 60 seconds or the server closes the socket.
+- The server closes the connection after 24 hours of uptime. Clients MUST reconnect and resubscribe.
+
+### Order Update Event
+
+A single event type, `orderUpdate`, covers the full order lifecycle: acceptance, partial fill, full fill, cancel, reject, expire. Clients dispatch on the pair `x` (what just happened) × `X` (where the order is now).
+
+Field keys are intentionally aligned with Binance Spot `executionReport` semantics where the field exists in both APIs — same letter, same meaning, same string-vs-number convention. The single Dodex-specific addition is `a` (market address), which has no Binance analog because Binance identifies a market by `symbol` alone.
+
+Partial vs. full fill is signaled by `X`: `PARTIALLY_FILLED` while `z < q`, `FILLED` once `z == q`. Both carry `x: "TRADE"`.
+
+Example — order accepted into the book:
+
+```json
+{
+  "e": "orderUpdate",
+  "E": 1710000000123,
+  "a": "0:market-address",
+  "s": "PM-2026-ELECTION-YES",
+  "i": "123456789",
+  "c": "mm-order-0001",
+  "S": "BUY",
+  "o": "LIMIT",
+  "f": "GTC",
+  "p": "0.615",
+  "q": "1.50",
+  "x": "NEW",
+  "X": "NEW",
+  "l": "0",
+  "L": "0",
+  "z": "0",
+  "n": "0",
+  "N": null,
+  "t": null,
+  "m": null,
+  "O": 1710000000100,
+  "T": 1710000000100,
+  "r": null
+}
+```
+
+Example — partial fill:
+
+```json
+{
+  "e": "orderUpdate",
+  "E": 1710000005000,
+  "a": "0:market-address",
+  "s": "PM-2026-ELECTION-YES",
+  "i": "123456789",
+  "c": "mm-order-0001",
+  "S": "BUY",
+  "o": "LIMIT",
+  "f": "GTC",
+  "p": "0.615",
+  "q": "1.50",
+  "x": "TRADE",
+  "X": "PARTIALLY_FILLED",
+  "l": "0.50",
+  "L": "0.615",
+  "z": "0.50",
+  "n": "0.000138",
+  "N": "USDC",
+  "t": "t-99001",
+  "m": true,
+  "O": 1710000000100,
+  "T": 1710000004980,
+  "r": null
+}
+```
+
+Example — full fill:
+
+```json
+{
+  "e": "orderUpdate",
+  "E": 1710000009000,
+  "a": "0:market-address",
+  "s": "PM-2026-ELECTION-YES",
+  "i": "123456789",
+  "c": "mm-order-0001",
+  "S": "BUY",
+  "o": "LIMIT",
+  "f": "GTC",
+  "p": "0.615",
+  "q": "1.50",
+  "x": "TRADE",
+  "X": "FILLED",
+  "l": "1.00",
+  "L": "0.615",
+  "z": "1.50",
+  "n": "0.000276",
+  "N": "USDC",
+  "t": "t-99002",
+  "m": true,
+  "O": 1710000000100,
+  "T": 1710000008980,
+  "r": null
+}
+```
+
+Field reference:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `e` | STRING | Event name. Always `"orderUpdate"`. |
+| `E` | LONG | Event time. Server timestamp when the frame was emitted, Unix ms. |
+| `a` | STRING | Market address. Dodex-specific; no Binance analog. |
+| `s` | STRING | Outcome-token symbol. |
+| `i` | STRING | Server-assigned `orderId`. Empty string for `x: "REJECTED"` events (the chain never assigns an id to a rejected placement). |
+| `c` | STRING | `clientOrderId`. Either the `newOrderClientId` from the request or the server-generated value. Empty string if the order was placed without one. |
+| `S` | ENUM | Order side. See [Order Side](#order-side). |
+| `o` | ENUM | Order type. See [Order Type](#order-type). |
+| `f` | ENUM | Time in force. See [Time In Force](#time-in-force). |
+| `p` | DECIMAL | Order limit price, scaled by the outcome price precision. |
+| `q` | DECIMAL | Original order quantity, scaled by the outcome quantity precision. |
+| `x` | ENUM | Execution type — what just happened. See [Execution Type](#execution-type). |
+| `X` | ENUM | Order status after this event. See [Order Status](#order-status). Reuses the REST enum. |
+| `l` | DECIMAL | Last fill quantity. `"0"` on non-trade events. |
+| `L` | DECIMAL | Last fill price. `"0"` on non-trade events. |
+| `z` | DECIMAL | Cumulative filled quantity over the life of the order. |
+| `n` | DECIMAL | Commission for the last fill, as a signed decimal string. Negative values are rebates **credited** to the account (see `makerComission` on [`/api/v1/markets`](#markets)). `"0"` on non-trade events. |
+| `N` | STRING \| null | Commission asset symbol. `null` on non-trade events. |
+| `t` | STRING \| null | Trade id for the last fill. `null` on non-trade events. |
+| `m` | BOOLEAN \| null | `true` if this fill was on the maker side, `false` for taker, `null` on non-trade events. |
+| `O` | LONG | Order creation time, Unix ms. Stable across all events for the same order. |
+| `T` | LONG | Transaction time — when this specific event was produced on-chain, Unix ms. |
+| `r` | ENUM \| null | Rejection reason. Set when `x == "REJECTED"`; `null` otherwise. |
+
+#### Common Enums
+
+##### Execution Type
+
+`x` values:
+
+| Value | Description |
+| --- | --- |
+| `NEW` | Order accepted into the book. `X` transitions to `NEW`. |
+| `TRADE` | Order matched. `X` is `PARTIALLY_FILLED` while `z < q`, `FILLED` once `z == q`. |
+| `CANCELED` | Order was canceled. `X` transitions to `CANCELED`. |
+| `REJECTED` | Order was rejected and never opened. `X` transitions to `REJECTED`; `i` is empty. |
+| `EXPIRED` | Order ran out under its `timeInForce` (e.g. `IOC` / `FOK` could not fill). `X` transitions to `CANCELED`. |
+
+`X` reuses [Order Status](#order-status) — the same enum returned by `GET /api/v1/orders`.
 
 ## Validation Rules
 
