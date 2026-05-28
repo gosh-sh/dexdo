@@ -24,6 +24,8 @@ use ackinacki_kit::contracts::dex::pmp::ResultOfGetDetails as PmpKitDetails;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
 use ackinacki_kit::contracts::dex::private_note::PrivateNote;
+use ackinacki_kit::contracts::dex::private_note::ResultOfGetDetails as PnDetails;
+use ackinacki_kit::contracts::dex::private_note::ResultOfGetStakes as PnStakesRaw;
 use ackinacki_kit::contracts::dex::root_oracle::ParamsOfDeployOracle;
 use ackinacki_kit::contracts::dex::root_oracle::ParamsOfGetOracleAddress;
 use ackinacki_kit::contracts::dex::root_oracle::RootOracle;
@@ -68,6 +70,28 @@ impl Dex {
             .set_stake(params, signer)
             .await
             .map_err(Into::into)
+    }
+
+    /// Read-only `PrivateNote.getDetails` accessor. Surfaces
+    /// `_balance[tokenType]`, `_busy.busyAddress`, and a handful of
+    /// other public PN fields without touching the read-model. The
+    /// production API reads PN state via the GraphQL-backed
+    /// `pn_state_reader`; this direct accessor exists so e2e tests can
+    /// verify on-chain balance moves after `splitFullSet` and poll the
+    /// `_busy` window between submission and the `onSplitAccepted`
+    /// callback without standing up the GraphQL gateway.
+    pub async fn get_private_note_details(&self, pn_address: &str) -> ChainResult<PnDetails> {
+        PrivateNote::new(self.ctx.clone(), pn_address).get_details().await.map_err(Into::into)
+    }
+
+    /// Read-only `PrivateNote._stakes` accessor. Returns the raw
+    /// `HashMap<String, Value>` keyed by `tvm.hash(eventId,
+    /// oracleListHash, tokenType)` (0x-prefixed lowercase hex). Each
+    /// value carries the StakeInfo tuple — `amount`, `debtAmount`,
+    /// `couponsAmount` plus bookkeeping fields. Sibling of
+    /// `get_private_note_details`, scoped to the same e2e niche.
+    pub async fn get_private_note_stakes(&self, pn_address: &str) -> ChainResult<PnStakesRaw> {
+        PrivateNote::new(self.ctx.clone(), pn_address).get_stakes().await.map_err(Into::into)
     }
 
     // ── PMP (oracle-signed ops + getters) ────────────────────────────

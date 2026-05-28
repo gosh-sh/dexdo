@@ -300,8 +300,7 @@ async fn buy_full_set_against_shellnet() {
 ///
 /// If phase 1 never observes `Some`, the operation might have landed
 /// and completed inside one polling tick — sleep an extra 3 s before
-/// returning so subsequent reads see settled state. Mirrors the
-/// bee_dex integration suite's `wait_not_busy` pattern verbatim.
+/// returning so subsequent reads see settled state.
 async fn wait_pn_not_busy(dex: &RawDex, pn_address: &str, phase: &str) {
     let mut saw_busy = false;
     for _ in 0..30 {
