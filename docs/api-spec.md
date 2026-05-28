@@ -39,7 +39,7 @@
   - [WebSocket Streams](#websocket-streams)
     - [Connection](#connection)
     - [Splice and Gap Detection](#splice-and-gap-detection)
-    - [Order Update Event](#order-update-event)
+    - [Order Updates](#order-updates)
       - [Common Enums](#common-enums-2)
         - [Execution Type](#execution-type)
   - [Validation Rules](#validation-rules)
@@ -1201,7 +1201,7 @@ Top-level response fields:
 | --- | --- | --- |
 | `orders` | ARRAY | Orders matching the filter, in stable chain-order descending. Empty when there are no matches. |
 | `nextCursor` | STRING \| null | Opaque lex-comparable pagination cursor. Pass back verbatim to fetch the next page; do not parse or generate. `null` when the last page has been returned. |
-| `lastSq` | LONG | Largest event sequence number the server has emitted on the user-stream for the caller's account at the moment this response was assembled. Used to splice into the [`orderUpdate`](#order-update-event) WebSocket stream — see [Splice and Gap Detection](#splice-and-gap-detection). `0` for an account that has never had any order events. |
+| `lastSq` | LONG | Largest event sequence number the server has emitted on the user-stream for the caller's account at the moment this response was assembled. Used to splice into the [`orderUpdate`](#order-updates) WebSocket stream — see [Splice and Gap Detection](#splice-and-gap-detection). `0` for an account that has never had any order events. |
 
 Order fields:
 
@@ -1320,7 +1320,7 @@ on every live event:
 
 `sq` is monotonic over the life of the account, not the life of the subscription — a reconnect does not reset the counter. The snapshot watermark `lastSq` from `GET /api/v1/orders` is therefore directly comparable with any `sq` the client has previously stored.
 
-### Order Update Event
+### Order Updates
 
 A single event type, `orderUpdate`, covers the full order lifecycle: acceptance, partial fill, full fill, cancel, reject, expire. Clients dispatch on the pair `x` (what just happened) × `X` (where the order is now).
 
