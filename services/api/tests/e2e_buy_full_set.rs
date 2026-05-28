@@ -9,15 +9,16 @@
 // The test verifies the public surface end to end:
 //   - POST returns 200 with the two-field acceptance envelope;
 //   - the chain debits `_balance[tokenType]` synchronously inside
-//     `PrivateNote.splitFullSet` (line 633 of `contracts/PrivateNote.sol`);
+//     `PrivateNote.splitFullSet` (see the function body in
+//     `contracts/PrivateNote.sol`);
 //   - the asynchronous `onSplitAccepted` callback clears the PN's
 //     `_busy` flag (polled directly via `Dex::get_private_note_details`).
 //
 // What is NOT covered here: the AWAITING_FREEZE branch (where the
 // first split also activates the OrderBook). `deploy_ephemeral_market`
 // already runs the activating split during setup; covering
-// AWAITING_FREEZE would need a deploy variant that stops before
-// step 6/8 — out of scope for this test.
+// AWAITING_FREEZE would need a deploy variant that stops before its
+// internal splitFullSet — out of scope for this test.
 //
 // Marked `#[ignore]` because it needs:
 //   - TEST_DATABASE_URL (test Postgres up — see README.md#test-postgres)
@@ -59,6 +60,8 @@ use dodex_infrastructure::auth::PostgresAuthenticator;
 use dodex_infrastructure::chain_sender::DexChainSender;
 use dodex_infrastructure::config::AuthSection;
 use dodex_infrastructure::postgres_repo::PostgresReadModelRepository;
+use dodex_infrastructure::tvm_hash::stake_hash;
+use num_bigint::BigUint;
 use salvo::http::StatusCode;
 use salvo::test::ResponseExt;
 use salvo::test::TestClient;
@@ -94,11 +97,11 @@ async fn buy_full_set_against_shellnet() {
     let pn_pool = TestPnPool::load();
     let trader = pn_pool.slot(BUY_FULL_SET_SLOT).clone();
 
-    // Deploy includes step 6/8 splitFullSet, so by the time this
-    // returns the market is in TRADING and the trader-PN already
-    // holds some outcome tokens. The buyFullSet we send below is a
-    // SECOND split that accumulates onto the existing stake — see
-    // `contracts/PrivateNote.sol::onSplitAccepted` lines 678-685.
+    // `deploy_ephemeral_market` ends with its own splitFullSet, so by
+    // the time this returns the market is in TRADING and the trader-PN
+    // already holds some outcome tokens. The buyFullSet we send below
+    // is a SECOND split that accumulates onto the existing stake — see
+    // `PrivateNote.onSplitAccepted` in `contracts/PrivateNote.sol`.
     let market = deploy_ephemeral_market(
         vec![SHELLNET_ENDPOINT.to_string()],
         &trader,
@@ -159,6 +162,24 @@ async fn buy_full_set_against_shellnet() {
     let pre_balance = read_nackl_free_balance(&raw_dex, &trader.address, market.token_type).await;
     eprintln!("[e2e_buy_full_set] pre-balance _balance[{}] = {pre_balance}", market.token_type,);
 
+    // Snapshot the per-outcome `_stakes[hash].amount` array before our
+    // POST. The deploy's own splitFullSet already filled it with some
+    // non-zero amounts; the post-snapshot must be strictly greater on
+    // every outcome. `EphemeralMarket` carries `event_id` and
+    // `oracle_list_hash` as `0x`-prefixed hex strings (the format
+    // `OracleEventList.getEvents` and `Pmp.getDetails` emit for
+    // `uint256` map keys), so the parse is base-16 after the prefix.
+    let stake_key = stake_hash(
+        &parse_uint256_hex(&market.event_id),
+        &parse_uint256_hex(&market.oracle_list_hash),
+        market.token_type,
+    )
+    .expect("compute stake_hash");
+    let pre_stake = read_stake_amounts(&raw_dex, &trader.address, &stake_key)
+        .await
+        .expect("pre-snapshot _stakes[hash].amount must exist after deploy's split");
+    eprintln!("[e2e_buy_full_set] pre-stake amounts = {pre_stake:?}");
+
     let body = serde_json::to_vec(&json!({
         "marketAddress": market.pmp_address,
         "collateral": COLLATERAL_HUMAN,
@@ -205,13 +226,12 @@ async fn buy_full_set_against_shellnet() {
     assert_eq!(parsed.market_address, market.pmp_address);
     assert!(parsed.transact_time > 0, "transactTime={}, want > 0", parsed.transact_time);
 
-    // PrivateNote.splitFullSet decrements `_balance[tokenType]` SYNCHRONOUSLY
-    // (line 633 of contracts/PrivateNote.sol), before forwarding to PMP. So
-    // the synchronous HTTP-200 already implies the debit landed. The
-    // `_busy` flag is what we wait on — clearing it signals
-    // `onSplitAccepted` ran and any leftover collateral was refunded
-    // back into `_balance` (line 688). Reading after that gives the
-    // final post-refund balance.
+    // PrivateNote.splitFullSet decrements `_balance[tokenType]`
+    // synchronously, before forwarding to PMP. So the synchronous
+    // HTTP-200 already implies the debit landed. The `_busy` flag is
+    // what we wait on — clearing it signals `onSplitAccepted` ran and
+    // any leftover collateral was refunded back into `_balance`.
+    // Reading after that gives the final post-refund balance.
     wait_pn_not_busy(&raw_dex, &trader.address, "post-balance").await;
 
     let post_balance = read_nackl_free_balance(&raw_dex, &trader.address, market.token_type).await;
@@ -238,6 +258,31 @@ async fn buy_full_set_against_shellnet() {
         "debited {debited} > requested {COLLATERAL_RAW} — chain charged more than the \
          caller authorised (pre={pre_balance}, post={post_balance})",
     );
+
+    // Outcome-token credit probe: balance debit alone proves the chain
+    // ACCEPTED the splitFullSet, but the user-visible effect is the
+    // outcome tokens credited via `onSplitAccepted` (line 688-style
+    // path in `contracts/PrivateNote.sol`). Read `_stakes[hash].amount`
+    // post-callback and assert each outcome's amount is strictly
+    // greater than its pre-snapshot — closes the gap where a chain bug
+    // could debit collateral without crediting outcome tokens.
+    let post_stake = read_stake_amounts(&raw_dex, &trader.address, &stake_key)
+        .await
+        .expect("post-snapshot _stakes[hash].amount must exist");
+    eprintln!("[e2e_buy_full_set] post-stake amounts = {post_stake:?}");
+
+    assert_eq!(
+        post_stake.len(),
+        pre_stake.len(),
+        "outcome count changed mid-test (pre={pre_stake:?}, post={post_stake:?})",
+    );
+    for (i, (pre_i, post_i)) in pre_stake.iter().zip(post_stake.iter()).enumerate() {
+        assert!(
+            post_i > pre_i,
+            "outcome {i} amount did not increase: pre={pre_i}, post={post_i} \
+             (full pre={pre_stake:?}, post={post_stake:?})",
+        );
+    }
 }
 
 /// Two-phase poll on `PrivateNote.getDetails().busyAddress`:
@@ -250,7 +295,7 @@ async fn buy_full_set_against_shellnet() {
 ///      the chain is still mid-callback.
 ///   2. Up to 90 s waiting for `busy_address` to flip back to `None`,
 ///      signalling `onSplitAccepted` ran and any leftover collateral
-///      was refunded into `_balance` (line 688 of
+///      was refunded into `_balance` (see `onSplitAccepted` in
 ///      `contracts/PrivateNote.sol`).
 ///
 /// If phase 1 never observes `Some`, the operation might have landed
@@ -311,4 +356,43 @@ async fn read_nackl_free_balance(dex: &RawDex, pn_address: &str, token_type: u32
         dex.get_private_note_details(pn_address).await.expect("getDetails for balance probe");
     let key = token_type.to_string();
     details.balance.get(&key).copied().unwrap_or(0)
+}
+
+/// Parse an `EphemeralMarket`-style `0x`-prefixed lowercase hex string
+/// into a `BigUint`. Panics on malformed input — the deploy_market
+/// helper is responsible for emitting these, so a non-hex value means
+/// the helper itself broke.
+fn parse_uint256_hex(s: &str) -> BigUint {
+    let stripped = s.strip_prefix("0x").unwrap_or_else(|| {
+        panic!("expected 0x-prefixed hex uint256, got {s:?}");
+    });
+    BigUint::parse_bytes(stripped.as_bytes(), 16)
+        .unwrap_or_else(|| panic!("parse hex uint256 {s:?}"))
+}
+
+/// Read `PrivateNote._stakes[stake_key].amount` as the per-outcome
+/// `Vec<u128>`. Returns `None` if no entry exists for `stake_key` —
+/// the deploy's own splitFullSet should have created one, so the
+/// pre-snapshot returning `None` means setup did not actually land.
+///
+/// `stake_key` must be the same `0x`-prefixed lowercase 64-char hex
+/// `dodex_infrastructure::tvm_hash::stake_hash` emits — that's the
+/// shape the on-chain tvm_abi serializer uses for `uint256` map keys.
+async fn read_stake_amounts(dex: &RawDex, pn_address: &str, stake_key: &str) -> Option<Vec<u128>> {
+    let raw = dex.get_private_note_stakes(pn_address).await.expect("getStakes for amount probe");
+    let entry = raw.stakes.get(stake_key)?;
+    let arr = entry
+        .get("amount")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("`_stakes[{stake_key}].amount` is not an array: {entry:?}"));
+    let amounts: Vec<u128> = arr
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .unwrap_or_else(|| panic!("amount element is not a string: {v:?}"))
+                .parse::<u128>()
+                .unwrap_or_else(|err| panic!("amount parse failed: {err:?}"))
+        })
+        .collect();
+    Some(amounts)
 }

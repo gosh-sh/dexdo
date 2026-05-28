@@ -719,10 +719,15 @@ The same row supplies every value the chain submission requires:
 | api-spec rule | Failure |
 | --- | --- |
 | `collateral` digits-only, non-negative | `InvalidParameter` |
-| `collateral` decimals ≤ quote-asset `decimals` | `InvalidParameter` (api-spec maps this to -1130, not -1111 — quote-asset precision is **not** part of [api-spec §Validation Rules]) |
+| `collateral` decimals ≤ quote-asset `decimals` | `InvalidParameter` |
 | `collateral` strictly positive after lift (`> 0`) | `InvalidParameter` |
-| Lifted value fits in `u64` (chain ABI is `uint128`; the upstream `ackinacki-kit` → `serde_json::json!` path panics on values above `u64::MAX` — same constraint documented in [§clientOrderId generation](#clientorderid-generation)) | `InvalidParameter` |
-| Resolved `token_type` exists in `ref_tokens` | `MarketInconsistent` (the indexer ships with the canonical set; a missing row is read-model corruption) |
+| Lifted value fits in `u64` (see [§clientOrderId generation](#clientorderid-generation) for the upstream `serde_json::json!` ceiling) | `InvalidParameter` |
+| Resolved `token_type` exists in `ref_tokens` | `MarketInconsistent` |
+
+Two remap notes:
+
+- Quote-asset precision violations surface as `-1130 InvalidParameter`, not `-1111 PrecisionExceeded`. Quote-asset precision is **not** part of [api-spec §Validation Rules]; the spec lumps it with "other body shape violation" in the [api-spec §Buy Full Set error table](../api-spec.md#buy-full-set).
+- `token_type` missing from `ref_tokens` is read-model corruption — the indexer ships with the canonical set, so a miss means the read-model fell out of sync with the on-chain registry.
 
 Free-balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_LOW_VALUE` at `contracts/PrivateNote.sol`) and the synchronous chain return maps that to `OrderValidationFailed` → 400 / -2010, same shape as placement.
 
@@ -743,11 +748,11 @@ splitFullSet(
 )
 ```
 
-Sender boundary: extends the `ChainOrderSender` trait in `crates/application/src/lib.rs` with `async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError>`. The production `DexChainSender` impl wraps `dodex_chain::Dex::split_full_set`; the call shares `classify_chain_outcome` and `map_tvm_exit_code` with the other write-path entry points, so the exit-code mapping table in [§Failure surface](#failure-surface) applies verbatim — every PN-side `require(...)` the splitFullSet path can raise (`ERR_LOW_VALUE`, `ERR_NOTE_BUSY`, `ERR_DEBT_NON_ZERO`, `ERR_INVALID_STATE`) is already mapped.
+Sender boundary: the `ChainOrderSender` trait in `crates/application/src/lib.rs` carries `async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError>`. The production `DexChainSender` impl wraps `dodex_chain::Dex::split_full_set`; the call shares `classify_chain_outcome` and `map_tvm_exit_code` with the other write-path entry points. The full PN-side reject surface for splitFullSet is enumerated in [§Failure surface](#failure-surface) below.
 
-`dodex_chain::Dex::split_full_set` lives in `crates/chain/src/client.rs` alongside the other trader-path methods; the prior staging-only `test-helpers` placement was promoted so the prod API build links it without enabling that feature.
+`dodex_chain::Dex::split_full_set` lives in `crates/chain/src/client.rs` alongside the other trader-path methods, available without the `test-helpers` feature so the prod API build links it directly.
 
-`split_full_set_timeout_ms` is added to `ChainSection` (`config/api.<env>.yaml`) and pinned at boot by `ApiConfig::validate` to satisfy `request_timeout_ms > split_full_set_timeout_ms`, same invariant the other chain timeouts carry. Elapsed surfaces as `RequestTimeout` → 504 / -1007 with the same "retry with the same id" contract as placement.
+`chain.split_full_set_timeout_ms` in `config/api.<env>.yaml` bounds the per-call wait. `ApiConfig::validate` pins `server.request_timeout_ms > chain.split_full_set_timeout_ms` at boot — same invariant the other chain timeouts carry. Elapsed surfaces as `RequestTimeout` → 504 / -1007 with the same "retry with the same id" contract as placement.
 
 ### Response
 
@@ -794,9 +799,9 @@ Transport-level failures collapse to `Unexpected` → 500 / -1000 with the raw `
 | Layer | Responsibility |
 | --- | --- |
 | `crates/domain` | Reuses `parse_positive_decimal` / `lift_decimal`. No new primitives. |
-| `crates/application` | `BuyFullSetInput` (HTTP-shaped), `SplitFullSetPayload` (chain-shaped), `MarketForBuyFullSet` (repo-shaped), `BuyFullSetUseCase`. Extends `ChainOrderSender` with `split_full_set` and `MarketReadRepository` with `resolve_for_buy_full_set`. Quote-asset `decimals` come from `ReferenceRepository::lookup_ref_token`, reused from the `/account` path. |
-| `crates/infrastructure` | `DexChainSender::split_full_set` wraps `dodex_chain::Dex::split_full_set` (pubkey/seckey re-encode reused, classify_chain_outcome reused). `PostgresReadModelRepository::resolve_for_buy_full_set` runs a single-row `SELECT` against `markets` with the `last_reconciled_at IS NOT NULL` visibility gate. A NULL/blank `oracle_list_hash` is logged as a `warn` and surfaces as `MarketInconsistent`. |
-| `services/api` | `buy_full_set` handler attached as `Router::with_path("api/v1/buyFullSet").post(buy_full_set)` on the auth subrouter. HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` extends the existing `DexChainSender` construction with `chain.split_full_set_timeout_ms`. |
+| `crates/application` | `BuyFullSetInput` (HTTP-shaped), `SplitFullSetPayload` (chain-shaped), `MarketForBuyFullSet` (repo-shaped), `BuyFullSetUseCase`. `ChainOrderSender::split_full_set` and `MarketReadRepository::resolve_for_buy_full_set` carry the trait surface. Quote-asset `decimals` come from `ReferenceRepository::lookup_ref_token`, the same source the `/account` path uses. |
+| `crates/infrastructure` | `DexChainSender::split_full_set` wraps `dodex_chain::Dex::split_full_set` (pubkey/seckey re-encode and `classify_chain_outcome` are shared across every entry point). `PostgresReadModelRepository::resolve_for_buy_full_set` runs a single-row `SELECT` against `markets` with the `last_reconciled_at IS NOT NULL` visibility gate. A NULL/blank `oracle_list_hash` is logged as a `warn` and surfaces as `MarketInconsistent`. |
+| `services/api` | `buy_full_set` handler attached as `Router::with_path("api/v1/buyFullSet").post(buy_full_set)` on the auth subrouter. HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. The `DexChainSender` construction in `run()` carries `chain.split_full_set_timeout_ms`. |
 
 The use case constructor takes trait objects; `services/api/tests/buy_full_set_http.rs` injects `FakeRepo` + `FakeAuthenticator` + `RecordingSplitFullSetSender` against the full router, matching the triad established by `create_order_http.rs` and `cancel_order_http.rs`.
 

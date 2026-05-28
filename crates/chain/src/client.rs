@@ -17,6 +17,7 @@ use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
 use ackinacki_kit::contracts::dex::private_note::PrivateNote;
 use ackinacki_kit::contracts::dex::private_note::ResultOfGetDetails as PnDetails;
+use ackinacki_kit::contracts::dex::private_note::ResultOfGetStakes as PnStakesRaw;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 use ackinacki_kit::tvm_client::ClientConfig;
@@ -144,6 +145,17 @@ impl Dex {
     /// fallback for tests and tooling.
     pub async fn get_private_note_details(&self, pn_address: &str) -> ChainResult<PnDetails> {
         PrivateNote::new(self.ctx.clone(), pn_address).get_details().await.map_err(Into::into)
+    }
+
+    /// Read-only `PrivateNote._stakes` accessor. Returns the raw
+    /// `HashMap<String, Value>` keyed by `tvm.hash(eventId,
+    /// oracleListHash, tokenType)` (0x-prefixed lowercase hex). Each
+    /// value carries the StakeInfo tuple — `amount`, `debtAmount`,
+    /// `couponsAmount` plus bookkeeping fields. Sibling of
+    /// `get_private_note_details`, intended for the same e2e/tooling
+    /// niche; the production read path goes through GraphQL.
+    pub async fn get_private_note_stakes(&self, pn_address: &str) -> ChainResult<PnStakesRaw> {
+        PrivateNote::new(self.ctx.clone(), pn_address).get_stakes().await.map_err(Into::into)
     }
 
     // ── OrderBook (read-only, test cleanup polling) ──────────────────

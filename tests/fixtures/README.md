@@ -57,11 +57,10 @@ deploy ephemeral market: deploy_oracle: Kit(KitError { tvm_error: …
   exit_code: Number(52), … address: "0:1515151515151515151515151515151515151515151515151515151515151515" })
 ```
 
-`--test-threads 1` makes the suite run sequentially. End-to-end wall
-clock for all five tests is ≈ 10 min on shellnet today (each test
-spends ~50 s blocked on `stake_end` plus ~30 s round-tripping its
-write path); the per-test budget itself is fine, only the
-across-tests parallelism is poisoned by shared chain state.
+`--test-threads 1` makes the suite run sequentially. Each test spends
+~50 s blocked on `stake_end` plus ~30 s round-tripping its write
+path; per-test budget itself is fine, only across-tests parallelism
+is poisoned by shared chain state.
 
 CI does not run `--ignored` tests, so this constraint only affects
 manual runs.

@@ -940,13 +940,34 @@ struct CancelBatchOrderResponseItem {
     status: &'static str,
 }
 
-// Request body for `POST /api/v1/buyFullSet`. Field names match
-// docs/api-spec.md §Buy Full Set verbatim.
-#[derive(Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+/// Request body for `POST /api/v1/buyFullSet`. Field names match
+/// docs/api-spec.md §Buy Full Set verbatim. `deny_unknown_fields` is
+/// strict on this destructive write surface — same rationale as
+/// `CancelBatchOrdersRequest`: a typo like `marketAddres` would
+/// otherwise silently deserialise as `market_address = None` and
+/// surface as MissingParameter, masking the real bug; -1130 with
+/// `unknown field` is the actionable signal.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BuyFullSetRequest {
     market_address: Option<String>,
     collateral: Option<String>,
+}
+
+// Manual `ToSchema` impl: `#[derive(ToSchema)]` is incompatible with
+// `#[serde(deny_unknown_fields)]` in salvo-oapi-macros 0.74.3 — see
+// the symmetric comment on `CancelBatchOrdersRequest` above.
+impl ToSchema for BuyFullSetRequest {
+    fn to_schema(_components: &mut Components) -> salvo_oapi::RefOr<salvo_oapi::schema::Schema> {
+        use salvo_oapi::schema::AdditionalProperties;
+        use salvo_oapi::BasicType;
+        use salvo_oapi::Object;
+        Object::new()
+            .property("marketAddress", Object::new().schema_type(BasicType::String))
+            .property("collateral", Object::new().schema_type(BasicType::String))
+            .additional_properties(AdditionalProperties::FreeForm(false))
+            .into()
+    }
 }
 
 // Minimal acceptance envelope per docs/api-spec.md §Buy Full Set: the
@@ -1493,7 +1514,6 @@ async fn buy_full_set(
         market_address: MarketAddress(market_address.clone()),
         collateral,
         now_seconds,
-        now_ms,
     };
 
     let use_case = BuyFullSetUseCase::new(state.repo, state.ref_repo, state.chain_sender);

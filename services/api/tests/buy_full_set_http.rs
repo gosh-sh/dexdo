@@ -85,15 +85,28 @@ impl Authenticator for FakeAuthenticator {
 struct FakeRepo {
     market: Mutex<Option<MarketForBuyFullSet>>,
     resolver_error: Option<DomainError>,
+    /// Plain-string error for the "anyhow with no `DomainError` cause"
+    /// branch — exercises the use-case fallback that maps non-domain
+    /// errors to `Unexpected`. Mirrors `FakeRepo::failing_resolver_raw`
+    /// in `create_order_http.rs`.
+    resolver_raw_error: Option<String>,
 }
 
 impl FakeRepo {
     fn with(market: MarketForBuyFullSet) -> Self {
-        Self { market: Mutex::new(Some(market)), resolver_error: None }
+        Self { market: Mutex::new(Some(market)), resolver_error: None, resolver_raw_error: None }
     }
 
     fn failing_resolver(err: DomainError) -> Self {
-        Self { market: Mutex::new(None), resolver_error: Some(err) }
+        Self { market: Mutex::new(None), resolver_error: Some(err), resolver_raw_error: None }
+    }
+
+    fn failing_resolver_raw(msg: &str) -> Self {
+        Self {
+            market: Mutex::new(None),
+            resolver_error: None,
+            resolver_raw_error: Some(msg.to_string()),
+        }
     }
 }
 
@@ -159,6 +172,9 @@ impl MarketReadRepository for FakeRepo {
         _: &MarketAddress,
         _: i64,
     ) -> Result<MarketForBuyFullSet, anyhow::Error> {
+        if let Some(msg) = &self.resolver_raw_error {
+            return Err(anyhow::anyhow!("{msg}"));
+        }
         if let Some(err) = self.resolver_error {
             return Err(anyhow::anyhow!(err));
         }
@@ -410,17 +426,32 @@ async fn unknown_market_returns_404_minus_1121() {
 
 #[tokio::test]
 async fn non_open_market_returns_400_minus_2010() {
-    // Anything other than AWAITING_FREEZE or TRADING. Pick RESOLVING —
-    // a phase where buyFullSet is forbidden but sellFullSet would still
-    // be allowed (proving the gate is not "any active phase").
-    let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Resolving)));
-    let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
-    let service = setup_with(repo, sender);
+    // Every `MarketStatus` variant outside {AwaitingFreeze, Trading}
+    // must collapse to -2010. Spelled out so a future additive change
+    // to the enum forces an explicit decision here rather than
+    // silently admitting a new phase.
+    for status in [
+        MarketStatus::Pending,
+        MarketStatus::Upcoming,
+        MarketStatus::Staking,
+        MarketStatus::Resolving,
+        MarketStatus::Resolved,
+        MarketStatus::Cancelled,
+        MarketStatus::Expired,
+    ] {
+        let repo: SharedRepo = Arc::new(FakeRepo::with(market(status)));
+        let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
+        let service = setup_with(repo, sender);
 
-    let mut resp = send_post(&service, full_body("10")).await;
-    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
-    let err = resp.take_json::<ErrorBody>().await.expect("error body");
-    assert_eq!(err.code, -2010);
+        let mut resp = send_post(&service, full_body("10")).await;
+        assert_eq!(
+            resp.status_code,
+            Some(StatusCode::BAD_REQUEST),
+            "status={status:?} should reject with 400",
+        );
+        let err = resp.take_json::<ErrorBody>().await.expect("error body");
+        assert_eq!(err.code, -2010, "status={status:?} should map to -2010");
+    }
 }
 
 #[tokio::test]
@@ -484,6 +515,87 @@ async fn chain_validation_failure_returns_400_minus_2010() {
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
     assert_eq!(err.code, -2010);
+}
+
+#[tokio::test]
+async fn resolver_raw_anyhow_returns_500_minus_1000() {
+    // Pin the non-domain fallback in `BuyFullSetUseCase::execute`: an
+    // anyhow without a `DomainError` cause (e.g. raw sqlx pool drop)
+    // must surface as 500/-1000, not be swallowed as a no-op. The
+    // `error!` log on that branch carries `market_address` already
+    // (see the use-case site); not asserted here.
+    let repo: SharedRepo = Arc::new(FakeRepo::failing_resolver_raw("simulated sqlx pool drop"));
+    let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
+    let service = setup_with(repo, sender);
+
+    let mut resp = send_post(&service, full_body("10")).await;
+    assert_eq!(resp.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1000);
+}
+
+#[tokio::test]
+async fn handler_exceeding_request_timeout_returns_504_minus_1007() {
+    // Same race the timeout hoop guards on every chain entry point: a
+    // hung `split_full_set` past `chain.split_full_set_timeout_ms +
+    // slack` must surface as 504 with -1007 rather than stalling the
+    // worker. `SlowSplitFullSetSender` simulates the hung chain; a
+    // 50 ms request budget keeps the test fast.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Trading)));
+    let sender: SharedChainSender = Arc::new(SlowSplitFullSetSender);
+    let authenticator: SharedAuth =
+        Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
+    let state = AppState::new(
+        repo,
+        authenticator,
+        sender,
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    )
+    .with_request_timeout(std::time::Duration::from_millis(50));
+    let service = Service::new(build_router(state));
+
+    let started = std::time::Instant::now();
+    let mut resp = send_post(&service, full_body("10")).await;
+    let elapsed = started.elapsed();
+    assert_eq!(resp.status_code, Some(StatusCode::GATEWAY_TIMEOUT));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1007);
+    // Tight bound — much less than the 5 s sender sleep — confirms the
+    // timeout hoop actually cancelled the handler rather than letting
+    // it run to completion.
+    assert!(elapsed < std::time::Duration::from_secs(1), "elapsed {elapsed:?}");
+}
+
+/// `ChainOrderSender` that hangs in `split_full_set` longer than any
+/// reasonable test request-timeout budget. Used to drive the handler
+/// past the budget without an actual chain call.
+struct SlowSplitFullSetSender;
+
+#[async_trait]
+impl ChainOrderSender for SlowSplitFullSetSender {
+    async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
+        unreachable!("SlowSplitFullSetSender::submit_order called from buyFullSet test")
+    }
+
+    async fn cancel_order(&self, _: CancelOrderPayload) -> Result<(), DomainError> {
+        unreachable!("SlowSplitFullSetSender::cancel_order called from buyFullSet test")
+    }
+
+    async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
+        unreachable!("SlowSplitFullSetSender::submit_batch_order called from buyFullSet test")
+    }
+
+    async fn cancel_batch_order(&self, _: CancelBatchOrderPayload) -> Result<(), DomainError> {
+        unreachable!("SlowSplitFullSetSender::cancel_batch_order called from buyFullSet test")
+    }
+
+    async fn split_full_set(&self, _: SplitFullSetPayload) -> Result<(), DomainError> {
+        // 5 s — far longer than any reasonable test request-timeout
+        // budget. The regression test caps the budget at 50 ms.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Ok(())
+    }
 }
 
 #[tokio::test]

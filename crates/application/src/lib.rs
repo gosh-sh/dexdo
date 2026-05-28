@@ -1379,6 +1379,9 @@ pub struct CancelledBatchOrder {
 /// `POST /api/v1/buyFullSet` body + `AuthContext` + clock into this
 /// struct. `collateral` is kept as a string until precision validation
 /// lifts it to `u128` against the quote asset's on-chain `decimals`.
+/// Unlike the order-placement inputs, no `now_ms` is carried — the
+/// handler stamps `transactTime` from its own clock read, and this
+/// use case never returns a body-derived timestamp.
 #[derive(Debug, Clone)]
 pub struct BuyFullSetInput {
     pub trading_pn: TradingPn,
@@ -1386,8 +1389,6 @@ pub struct BuyFullSetInput {
     pub collateral: String,
     /// Unix seconds. Drives status derivation on the market row.
     pub now_seconds: i64,
-    /// Unix milliseconds. Returned to the client as `transactTime`.
-    pub now_ms: i64,
 }
 
 /// Chain-shaped payload handed to `ChainOrderSender::split_full_set`.
@@ -1396,13 +1397,11 @@ pub struct BuyFullSetInput {
 /// re-encoding pubkey/seckey for the `KeyPair` boundary.
 ///
 /// `collateral_raw` is a decimal string (smallest-unit `uint128`)
-/// matching the pattern `NewOrderPayload.amount_raw` uses on the
-/// placeOrder path: the use case has lifted by the quote asset's
-/// `decimals` and range-checked against `u64::MAX` (the upstream
-/// `serde_json::json!` ceiling — see
-/// [write-api.md §clientOrderId generation]). The chain sender parses
-/// the string to `u128` at the ABI boundary; the string carrier keeps
-/// the application crate from depending on `num_traits::ToPrimitive`.
+/// already lifted by the quote asset's `decimals` and range-checked at
+/// the use-case boundary — same shape `NewOrderPayload.amount_raw`
+/// uses. The chain sender parses to `u128` at the ABI boundary; the
+/// u64-ceiling rationale lives in
+/// [write-api.md §clientOrderId generation].
 #[derive(Debug, Clone)]
 pub struct SplitFullSetPayload {
     pub pn_address: String,
@@ -1469,12 +1468,13 @@ pub trait ChainOrderSender: Send + Sync {
     /// Dispatch a `PrivateNote.splitFullSet` external message to chain.
     /// Returns once the chain submission path has observed PN's
     /// execution — so PrivateNote-side `require(...)` failures
-    /// (`ERR_NOTE_BUSY`, `ERR_LOW_VALUE`, `ERR_INVALID_STATE`, etc.)
-    /// come back as typed `DomainError`s here. The chain-side
+    /// (`ERR_NOTE_BUSY`, `ERR_LOW_VALUE`, `ERR_DEBT_NON_ZERO`) come
+    /// back as typed `DomainError`s here. The chain-side
     /// `onSplitAccepted` / `onSplitRejected` callback runs as a
     /// separate internal message; its outcome is visible only through
-    /// the indexer once the new outcome-token balances project into
-    /// `live_positions` (see [api-spec §Buy Full Set](../../docs/api-spec.md#buy-full-set)
+    /// the on-chain `PrivateNote._stakes` getter, which the API
+    /// surfaces via `GET /api/v1/account/balances` (see
+    /// [api-spec §Buy Full Set](../../docs/api-spec.md#buy-full-set)
     /// — "the response confirms acceptance only").
     async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError>;
 }
@@ -2290,17 +2290,32 @@ where
             })?;
 
         // api-spec §Buy Full Set: available while the market is in
-        // `AWAITING_FREEZE` or `TRADING`. Anything else (PendingStakes,
-        // Frozen, AwaitingResult, Resolving, Resolved, Cancelled) → -2010.
+        // `AWAITING_FREEZE` or `TRADING`. Every other `MarketStatus`
+        // variant (Pending / Upcoming / Staking / Resolving / Resolved
+        // / Cancelled / Expired) collapses to -2010. Log so an ops
+        // incident triaged by `marketAddress` shows the actual phase
+        // rather than just the wire code.
         if !matches!(status, MarketStatus::AwaitingFreeze | MarketStatus::Trading) {
+            warn!(
+                market_address = %input.market_address.0,
+                ?status,
+                "buyFullSet rejected: market not in AWAITING_FREEZE/TRADING",
+            );
             return Err(DomainError::OrderValidationFailed);
         }
 
         // Defence-in-depth: the Postgres impl lifts NULL/blank
         // `oracle_list_hash` on a reconciled row to MarketInconsistent
         // already; this second-line guard keeps a future repo regression
-        // from pushing a zero-hash submission to chain.
+        // from pushing a zero-hash submission to chain. Log if hit —
+        // it means the repo's own guard let one through.
         if oracle_list_hash.is_empty() {
+            warn!(
+                market_address = %input.market_address.0,
+                event_id = %event_id,
+                token_type,
+                "buyFullSet: blank oracle_list_hash slipped past the repo guard",
+            );
             return Err(DomainError::MarketInconsistent);
         }
 
@@ -2316,27 +2331,34 @@ where
                 if let Some(domain) = err.downcast_ref::<DomainError>() {
                     return *domain;
                 }
-                error!(?err, token_type, "lookup_ref_token failed (non-domain)");
+                error!(
+                    ?err,
+                    market_address = %input.market_address.0,
+                    token_type,
+                    "lookup_ref_token failed (non-domain)",
+                );
                 DomainError::Unexpected
             })?
             .ok_or_else(|| {
-                warn!(token_type, "market token_type missing from ref_tokens");
+                warn!(
+                    market_address = %input.market_address.0,
+                    token_type,
+                    "market token_type missing from ref_tokens",
+                );
                 DomainError::MarketInconsistent
             })?;
 
-        // `lift_decimal` enforces digits-only + precision_within. A
-        // zero-value `collateral` parses cleanly through both, so the
-        // strictly-positive invariant needs its own check — without it
-        // the chain would accept the call, refund the zero, and the
-        // caller would burn one PN-busy window for nothing.
+        // Three remaps below all surface as -1130 per
+        // `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet
+        // §Input validation`. The spec doc is the single source of
+        // truth for why; comments here only name the gate they enforce.
         //
-        // api-spec §Buy Full Set maps "exceeds quote-asset precision"
-        // to -1130 `InvalidParameter`, not -1111 `PrecisionExceeded`.
-        // Quote-asset precision is not part of `Validation Rules` (the
-        // `pricePrecision` / `quantityPrecision` rules that yield -1111
-        // apply only to per-outcome fields) and the spec lumps it with
-        // "other body shape violation". Remap here so the wire code
-        // matches the spec table.
+        // 1. quote-asset precision → -1130 (not -1111: it is not part
+        //    of api-spec Validation Rules);
+        // 2. strictly positive (zero parses cleanly through
+        //    `lift_decimal`);
+        // 3. fits in u64 (upstream `serde_json::json!` ceiling — see
+        //    `write-api.md §clientOrderId generation`).
         let collateral_lifted =
             lift_decimal(&input.collateral, token.decimals).map_err(|e| match e {
                 DomainError::PrecisionExceeded => DomainError::InvalidParameter,
@@ -2345,11 +2367,6 @@ where
         if collateral_lifted == BigUint::from(0u32) {
             return Err(DomainError::InvalidParameter);
         }
-        // SDK serialization ceiling. `ParamsOfSplitFullSet.collateral`
-        // is `uint128` at the chain ABI, but the upstream
-        // `ackinacki-kit` → `serde_json::json!` path panics on any
-        // `u128 > u64::MAX` for the same reason `placeOrder.amount` is
-        // capped at u64. See `write-api.md §clientOrderId generation`.
         if collateral_lifted > BigUint::from(u64::MAX) {
             return Err(DomainError::InvalidParameter);
         }
@@ -5299,7 +5316,6 @@ mod buy_full_set_use_case_tests {
             market_address: MarketAddress("0:market".into()),
             collateral: collateral.into(),
             now_seconds: 1_000,
-            now_ms: 1_000_000,
         }
     }
 
@@ -5412,15 +5428,36 @@ mod buy_full_set_use_case_tests {
         // upstream). Surface as -1130 before we hand off to the chain
         // sender; reaching the sender would mean an at-rest user-facing
         // panic instead of a typed error.
+        //
+        // Pinned at exactly `u64::MAX + 1` so a future regression that
+        // flipped `>` to `>=` would be caught by the companion test
+        // below (which passes the same gate at the boundary).
         let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
         let sender = std::sync::Arc::new(BuyFullSetSender::ok());
         let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
-        // (u64::MAX + 1) at 6 decimals: 18446744073709551616 raw needs
-        // 18446744073709.551616 in human form. Add an extra prefix digit
-        // so the lifted value sits comfortably above the gate.
-        let err = uc.execute(input("99999999999999.999999")).await.unwrap_err();
+        // u64::MAX + 1 = 18_446_744_073_709_551_616 raw → at 6 decimals
+        // that's "18446744073709.551616" in human form. Smallest value
+        // the gate must reject.
+        let err = uc.execute(input("18446744073709.551616")).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
         assert!(sender.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepts_collateral_at_u64_max() {
+        // Boundary companion: a collateral whose lifted value is
+        // exactly `u64::MAX` must still pass the gate. Catches a
+        // future off-by-one (`>=` instead of `>`) on the comparison
+        // that would reject the boundary value the SDK can actually
+        // serialise.
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+        // u64::MAX = 18_446_744_073_709_551_615 raw → "18446744073709.551615"
+        // at 6 decimals.
+        uc.execute(input("18446744073709.551615")).await.expect("boundary must pass");
+        assert_eq!(sender.calls().len(), 1);
+        assert_eq!(sender.calls()[0].collateral_raw, u64::MAX.to_string());
     }
 
     #[tokio::test]

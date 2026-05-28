@@ -310,21 +310,33 @@ impl ChainOrderSender for DexChainSender {
     async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError> {
         let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
 
+        // Move correlation fields out before the parse so its error log
+        // can carry them — without `pn`/`event_id`/`token_type` an
+        // unmapped collateral payload is unactionable in ops triage.
+        let pn_address = payload.pn_address;
+        let event_id = payload.event_id;
+        let token_type = payload.token_type;
+        let oracle_list_hash = payload.oracle_list_hash;
+
         // Defence-in-depth: the application layer caps `collateral_raw`
-        // at `u64::MAX` (same `serde_json::json!` ceiling as
-        // `placeOrder.amount` and `clientOrderId`). Reaching the error
-        // arm means that gate was bypassed.
+        // at the u64 ceiling already; reaching the error arm means that
+        // gate was bypassed.
         let collateral = payload.collateral_raw.parse::<u128>().map_err(|err| {
-            error!(?err, raw = %payload.collateral_raw, "collateral_raw is not uint128");
+            error!(
+                ?err,
+                raw = %payload.collateral_raw,
+                pn = %pn_address,
+                event_id = %event_id,
+                token_type,
+                "collateral_raw is not uint128",
+            );
             DomainError::Unexpected
         })?;
 
-        let pn_address = payload.pn_address;
-        let event_id = payload.event_id;
         let params = ParamsOfSplitFullSet {
             event_id: event_id.clone(),
-            oracle_list_hash: payload.oracle_list_hash,
-            token_type: payload.token_type,
+            oracle_list_hash,
+            token_type,
             collateral,
         };
 
@@ -947,6 +959,77 @@ mod tests {
             client_order_id: "42".into(),
         };
         let err = encode_batch_item(item, 0).expect_err("amount > u128::MAX must fail closed");
+        assert_eq!(err, DomainError::Unexpected);
+    }
+
+    #[tokio::test]
+    async fn split_full_set_malformed_pn_pubkey_surfaces_as_market_inconsistent() {
+        // Sibling of the placeOrder/cancelBatch malformed-pubkey tests
+        // for the `split_full_set` entry. Pins `build_signer`'s
+        // fail-closed shape — a future refactor that propagated decode
+        // failure as `Unexpected` would leak 500 to the caller.
+        let sender = DexChainSender::new(
+            vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+        )
+        .expect("DexChainSender::new");
+
+        let payload = SplitFullSetPayload {
+            pn_address: "0:pn".into(),
+            pn_pubkey: "not-a-decimal".into(),
+            pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            event_id: "1".into(),
+            oracle_list_hash: "1".into(),
+            token_type: 3,
+            collateral_raw: "1000000".into(),
+        };
+
+        let err = sender.split_full_set(payload).await.expect_err("decode must fail closed");
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[tokio::test]
+    async fn split_full_set_collateral_above_u128_surfaces_as_unexpected() {
+        // Defence-in-depth pin: `BuyFullSetUseCase` caps `collateral_raw`
+        // at `u64::MAX` today, so this parse only sees values that fit
+        // in u128 trivially. If the upstream gate is ever relaxed, this
+        // guard is the last thing between a wider integer and a panic
+        // on the chain payload. Pin both the rejection
+        // (`DomainError::Unexpected`) and the field that trips it
+        // (`collateral_raw`) so a future refactor that drops the guard
+        // cannot regress silently. Uses a real `pn_pubkey` so the
+        // signer build does not short-circuit before the parse runs.
+        let sender = DexChainSender::new(
+            vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+        )
+        .expect("DexChainSender::new");
+
+        let payload = SplitFullSetPayload {
+            pn_address: "0:pn".into(),
+            // Decimal uint256 — valid for `decimal_uint256_to_hex`, so
+            // `build_signer` passes and the parse arm gets exercised.
+            pn_pubkey: "1".into(),
+            pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            event_id: "1".into(),
+            oracle_list_hash: "1".into(),
+            token_type: 3,
+            // u128::MAX + 1 — the smallest value the u128 parse must reject.
+            collateral_raw: "340282366920938463463374607431768211456".into(),
+        };
+
+        let err = sender
+            .split_full_set(payload)
+            .await
+            .expect_err("collateral > u128::MAX must fail closed");
         assert_eq!(err, DomainError::Unexpected);
     }
 

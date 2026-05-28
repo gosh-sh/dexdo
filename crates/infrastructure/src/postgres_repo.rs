@@ -1106,21 +1106,47 @@ impl MarketReadRepository for PostgresReadModelRepository {
             now,
         );
 
-        // Same fail-closed posture as `resolve_for_new_order` /
-        // `resolve_for_cancel`: a blank `oracle_list_hash` on a
-        // reconciled row is read-model corruption and the use case
-        // would reject it anyway. Surfacing 503 here keeps the chain
-        // submission path free of a NULL guard duplicated per resolver.
+        // Trim once, return the trimmed value — matches the chain ABI's
+        // expectation of a clean uint256 decimal. A NULL/blank entry on
+        // a reconciled row is read-model corruption, so 503 is the
+        // right surface; reading from `_balance` and the chain submission
+        // path stays free of a NULL guard duplicated per resolver.
         let oracle_list_hash = match row.oracle_list_hash {
-            Some(raw) if !raw.trim().is_empty() => raw,
-            other => {
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    warn!(
+                        pmp_address = %market_address.0,
+                        "resolve_for_buy_full_set: oracle_list_hash blank on reconciled row",
+                    );
+                    return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+                }
+                trimmed.to_string()
+            }
+            None => {
                 warn!(
                     pmp_address = %market_address.0,
-                    null = other.is_none(),
-                    "resolve_for_buy_full_set: oracle_list_hash NULL/blank on reconciled row",
+                    "resolve_for_buy_full_set: oracle_list_hash NULL on reconciled row",
                 );
                 return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
             }
+        };
+
+        // event_id is non-nullable in the DB schema, so sqlx would reject
+        // NULL at row level — but a blank string is still possible under
+        // read-model corruption. Trim and reject; without this an empty
+        // event_id would reach the chain ABI and collapse to an opaque
+        // -1000 instead of a typed -1500.
+        let event_id = {
+            let trimmed = row.event_id.trim();
+            if trimmed.is_empty() {
+                warn!(
+                    pmp_address = %market_address.0,
+                    "resolve_for_buy_full_set: event_id blank on reconciled row",
+                );
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+            }
+            trimmed.to_string()
         };
 
         let token_type: u32 = row.token_type.try_into().map_err(|_| {
@@ -1133,7 +1159,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         })?;
 
         Ok(dodex_application::MarketForBuyFullSet {
-            event_id: row.event_id,
+            event_id,
             oracle_list_hash,
             token_type,
             status,
