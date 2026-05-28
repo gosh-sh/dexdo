@@ -1,0 +1,64 @@
+{
+  "endpoint": "shellnet.ackinacki.org",
+  "created_at_unix": 1779976618,
+  "last_lifetime_secs": 18000,
+  "deployer_nominal": "N1000",
+  "deployer_raw_value": 1000000000000,
+  "token_type": 1,
+  "markets": [
+    {
+      "oracle_address": "0:332a3c4b48187ce9446c0344a16aa2eb40d675de851126cf2429788d3b415736",
+      "oracle_name": "BeeOB-6a1849aa",
+      "oracle_pubkey_hex": "8365276d40f546562a5731935d264f48ecaa502165332a7dbb23a16d9499c04b",
+      "oracle_secret_hex": "7d8664b749959b9e262c0d0fb2294a1611fc1525381c12aa88fa25c51df6ddfe",
+      "oracle_list_address": "0:34a7e546f2453e5db2235e40f08c8706da490250c763e0e3116a22ab0164b9cc",
+      "event_id": "0x3d1a66cb4b06bb09e7162f449ecac77ba77ba8ac31f40f8b1b9f995c3e7b2039",
+      "outcome_names": {
+        "1": "Team A",
+        "2": "Team B"
+      },
+      "deployer_pn_address": "0:7b5fb1303b4315cb5ffc6d6549962b454925f748eeb07c176744efd1bc8ac9c7",
+      "deployer_pn_pubkey_hex": "7994d0f71eb97aed558e4bd84753f2bbc48b59a9b3c83449976774746b47a1f2",
+      "deployer_pn_secret_hex": "8358a7d38a82a01582e8b9e23b95a3f4382d310f0e8dfc631b3c5a83a13a7bc9",
+      "deployer_deposit_identifier_hash": "23265760440762433404999441715975814253384533765955450474385060184523524195342",
+      "pmp_address": "0:39cea68a5b94379b20718c324b364386e9ecc6cbcbb74dce55b98fbad2bb1bee",
+      "order_book_address": "0:2af56e8d201380e42db0cb4eee80b30682793ee607566d8471b02d0bee444cae",
+      "oracle_list_hash": "0xa1fd30dfac548e2bc031a4ffa90f8aee3c0985ff9de0f24c301adcb8984b2634",
+      "token_type": 1,
+      "stake_start_unix": 1779976848,
+      "stake_end_unix": 1779978648,
+      "result_start_unix": 1779994848,
+      "result_end_unix": 1780081248,
+      "freeze_unix": 1779978653,
+      "deployer_split_collateral": 100000000000,
+      "lifetime_secs": 18000
+    },
+    {
+      "oracle_address": "0:7e06040ce2a1e7e3e64d1000ef5912115e9e444336f1620237880493c7ef9aab",
+      "oracle_name": "BeeOB-6a1851a2",
+      "oracle_pubkey_hex": "a369455a1c2e4334cedf562e91a05845b2ab4a831eeb2f4eff5df4ff91f38692",
+      "oracle_secret_hex": "319566164223e09f6c445decabe49c543a72ea9977b6a36a71fdabc004748510",
+      "oracle_list_address": "0:adcc73cf2f4ecd2050c7700982f38fe79277c66596316d05c8defbb30d2bc259",
+      "event_id": "0x14ed8546b4d0caac1ea008eea0a655a598f843e31b51aea581f3d90e27aeac19",
+      "outcome_names": {
+        "1": "Team A",
+        "2": "Team B"
+      },
+      "deployer_pn_address": "0:04795e141c960ef0f3a1b18c7995979d15f34e9a09d8cd2c7bd9b39bb8fa0aa1",
+      "deployer_pn_pubkey_hex": "fd48722ac957efc5b2c055f682bcad55dd5f6eb1c18ebc2d380c59d5bbf48519",
+      "deployer_pn_secret_hex": "198e00bbb4e316f9fa2dcdc6c8a58895b4c363303f550111a5b51703d804764f",
+      "deployer_deposit_identifier_hash": "64028116654839650127617165730676593618012699141445824666462262812972479353893",
+      "pmp_address": "0:49924211f257fdce350263458e779eb89b03443c8366cea610177a0a2c0a8012",
+      "order_book_address": "0:f2b976071f3be2b186145c75ac5521494b83510c9d54ada1c28398b7b2b36877",
+      "oracle_list_hash": "0x236a424480245810f4d5be1a0ce35763c10a42f4e22a447451738dbe158d1c28",
+      "token_type": 1,
+      "stake_start_unix": 1779978920,
+      "stake_end_unix": 1779980719,
+      "result_start_unix": 1779996919,
+      "result_end_unix": 1780083319,
+      "freeze_unix": 1779980724,
+      "deployer_split_collateral": 100000000000,
+      "lifetime_secs": 18000
+    }
+  ]
+}

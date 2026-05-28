@@ -2,6 +2,12 @@
 
 All notable changes to DODEX are recorded here. Entries are date-based, newest first.
 
+## [2026-05-29]
+
+### Added
+
+- `sdk/`: new `dodex-sdk` crate — the write-side DEX facade over `ackinacki-kit` (private notes, order book, PMP, oracle/market) plus the halo2 voucher proof pipeline. Kept as its own workspace and `exclude`d from the root build, since the halo2 pipeline pulls private SSH-only git sources that CI hosts have no key for; build it directly from `sdk/`.
+
 ## [2026-05-27]
 
 ### Added

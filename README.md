@@ -25,12 +25,16 @@ services/
   api/               # REST API service
   indexer/           # chain-event indexer
 contracts/           # on-chain DODEX contracts (TVM)
+sdk/                 # dodex-sdk: write-side DEX facade + halo2 voucher pipeline
+                     # (separate workspace, excluded from the root build)
 docs/                # specs and plans (see docs/README.md)
 migrations/          # SQL migrations applied by sqlx::migrate! at startup
 config/              # service config files (api.<env>.yaml, indexer.<env>.yaml)
 scripts/             # operational scripts
 tests/               # repo-level integration fixtures (REST .rest files, e2e)
 ```
+
+`sdk/` is its own Cargo workspace and is **not** part of `cargo build --workspace`; its halo2 proof pipeline depends on private SSH-only git sources. Build it from `sdk/` directly where an SSH key is available.
 
 ## Configuration
 

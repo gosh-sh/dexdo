@@ -1,0 +1,3 @@
+# SRS (KZG trusted setup) — 64 MB universal parameter blob, downloaded
+# once from the ceremony, kept locally. Re-fetched as needed; not source.
+*.srs
