@@ -2321,8 +2321,8 @@ where
 
         // Quote asset's on-chain `decimals` come from `ref_tokens`,
         // keyed by the same `token_type` used in the ABI call. An
-        // unknown token_type means read-model corruption (the indexer
-        // ships with the canonical set); 503 is the right surface.
+        // unknown token_type means read-model corruption (the initial
+        // migration seeds the canonical set); 503 is the right surface.
         let token = self
             .refs
             .lookup_ref_token(token_type)
@@ -5462,7 +5462,7 @@ mod buy_full_set_use_case_tests {
 
     #[tokio::test]
     async fn unknown_quote_token_type_collapses_to_market_inconsistent() {
-        // `lookup_ref_token` returning None means the indexer-seeded
+        // `lookup_ref_token` returning None means the migration-seeded
         // canonical set does not cover this token_type — read-model
         // corruption, 503.
         let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };

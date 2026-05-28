@@ -1093,77 +1093,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         let Some(row) = row else {
             return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
         };
-
-        let status = compute_status(
-            row.cancelled_at,
-            row.is_cancelled,
-            row.resolved_at,
-            row.stake_start,
-            row.stake_end,
-            row.result_start,
-            row.result_end,
-            row.frozen_at,
-            now,
-        );
-
-        // Trim once, return the trimmed value — matches the chain ABI's
-        // expectation of a clean uint256 decimal. A NULL/blank entry on
-        // a reconciled row is read-model corruption, so 503 is the
-        // right surface; reading from `_balance` and the chain submission
-        // path stays free of a NULL guard duplicated per resolver.
-        let oracle_list_hash = match row.oracle_list_hash {
-            Some(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    warn!(
-                        pmp_address = %market_address.0,
-                        "resolve_for_buy_full_set: oracle_list_hash blank on reconciled row",
-                    );
-                    return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
-                }
-                trimmed.to_string()
-            }
-            None => {
-                warn!(
-                    pmp_address = %market_address.0,
-                    "resolve_for_buy_full_set: oracle_list_hash NULL on reconciled row",
-                );
-                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
-            }
-        };
-
-        // event_id is non-nullable in the DB schema, so sqlx would reject
-        // NULL at row level — but a blank string is still possible under
-        // read-model corruption. Trim and reject; without this an empty
-        // event_id would reach the chain ABI and collapse to an opaque
-        // -1000 instead of a typed -1500.
-        let event_id = {
-            let trimmed = row.event_id.trim();
-            if trimmed.is_empty() {
-                warn!(
-                    pmp_address = %market_address.0,
-                    "resolve_for_buy_full_set: event_id blank on reconciled row",
-                );
-                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
-            }
-            trimmed.to_string()
-        };
-
-        let token_type: u32 = row.token_type.try_into().map_err(|_| {
-            tracing::warn!(
-                pmp = %market_address.0,
-                raw = row.token_type,
-                "resolve_for_buy_full_set: token_type is negative",
-            );
-            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
-        })?;
-
-        Ok(dodex_application::MarketForBuyFullSet {
-            event_id,
-            oracle_list_hash,
-            token_type,
-            status,
-        })
+        project_buy_full_set_row(row, market_address, now)
     }
 
     async fn sum_open_sell_remaining(
@@ -1233,6 +1163,73 @@ struct BuyFullSetRow {
     resolved_at: Option<i64>,
     cancelled_at: Option<i64>,
     is_cancelled: bool,
+}
+
+fn project_buy_full_set_row(
+    row: BuyFullSetRow,
+    market_address: &MarketAddress,
+    now: i64,
+) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
+    let status = compute_status(
+        row.cancelled_at,
+        row.is_cancelled,
+        row.resolved_at,
+        row.stake_start,
+        row.stake_end,
+        row.result_start,
+        row.result_end,
+        row.frozen_at,
+        now,
+    );
+
+    let oracle_list_hash = match row.oracle_list_hash {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                warn!(
+                    pmp_address = %market_address.0,
+                    "resolve_for_buy_full_set: oracle_list_hash blank on reconciled row",
+                );
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+            }
+            trimmed.to_string()
+        }
+        None => {
+            warn!(
+                pmp_address = %market_address.0,
+                "resolve_for_buy_full_set: oracle_list_hash NULL on reconciled row",
+            );
+            return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+        }
+    };
+
+    let event_id = {
+        let trimmed = row.event_id.trim();
+        if trimmed.is_empty() {
+            warn!(
+                pmp_address = %market_address.0,
+                "resolve_for_buy_full_set: event_id blank on reconciled row",
+            );
+            return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+        }
+        trimmed.to_string()
+    };
+
+    let token_type: u32 = row.token_type.try_into().map_err(|_| {
+        tracing::warn!(
+            pmp = %market_address.0,
+            raw = row.token_type,
+            "resolve_for_buy_full_set: token_type is negative",
+        );
+        anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+    })?;
+
+    Ok(dodex_application::MarketForBuyFullSet {
+        event_id,
+        oracle_list_hash,
+        token_type,
+        status,
+    })
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2921,6 +2918,38 @@ mod tests {
             !sql.contains("order by extract(epoch from m.created_at)::bigint"),
             "seconds-only ordering would re-introduce the keyset bug; sql=\n{sql}"
         );
+    }
+
+    fn buy_full_set_row(event_id: &str, oracle_list_hash: Option<&str>) -> BuyFullSetRow {
+        BuyFullSetRow {
+            event_id: event_id.into(),
+            oracle_list_hash: oracle_list_hash.map(str::to_string),
+            token_type: 3,
+            stake_start: None,
+            stake_end: None,
+            result_start: None,
+            result_end: None,
+            frozen_at: None,
+            resolved_at: None,
+            cancelled_at: None,
+            is_cancelled: false,
+        }
+    }
+
+    #[test]
+    fn project_buy_full_set_row_rejects_blank_oracle_list_hash() {
+        let row = buy_full_set_row("42", Some("   "));
+        let err = project_buy_full_set_row(row, &MarketAddress("0:pmp".into()), 0).unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn project_buy_full_set_row_rejects_blank_event_id() {
+        let row = buy_full_set_row("   ", Some("0xfeedface"));
+        let err = project_buy_full_set_row(row, &MarketAddress("0:pmp".into()), 0).unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
     }
 
     #[test]

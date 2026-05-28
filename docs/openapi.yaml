@@ -277,6 +277,9 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+              - marketAddress
+              - collateral
               properties:
                 collateral:
                   type: string

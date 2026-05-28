@@ -244,6 +244,35 @@ async fn negative_token_type_fails_closed() {
 }
 
 #[tokio::test]
+async fn resolve_for_buy_full_set_derives_cancelled_status() {
+    // The use case rejects everything except {Trading, AwaitingFreeze},
+    // but the resolver itself must surface the actual derived status so
+    // the rejection lands at the application boundary with -2010 rather
+    // than collapsing to a generic InvalidMarketOrSymbol miss. A
+    // cancelled market should resolve with status = Cancelled, leaving
+    // the use case to fail closed (HTTP-side coverage of the rejection
+    // already exists in `buy_full_set_http::non_open_market_returns_400_minus_2010`;
+    // this test pins the DB-side derivation feeding it).
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:rfbfs_cancelled_pmp";
+    purge_market(&pool, pmp).await;
+    seed_trading_market(&pool, pmp, 3, "1", "42").await;
+    sqlx::query("update markets set is_cancelled = true where pmp_address = $1")
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .expect("flip is_cancelled");
+
+    let resolved = repo
+        .resolve_for_buy_full_set(&MarketAddress(pmp.into()), 1_700_000_250)
+        .await
+        .expect("resolve cancelled");
+    assert_eq!(resolved.status, MarketStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn resolver_ignores_market_outcomes() {
     // splitFullSet operates at the market level; the resolver must
     // succeed even when `market_outcomes` is empty for the row.

@@ -374,6 +374,63 @@ async fn missing_collateral_returns_400_minus_1102() {
 }
 
 #[tokio::test]
+async fn blank_market_address_returns_400_minus_1102() {
+    // `non_empty` trims at the boundary, so a whitespace-only
+    // `marketAddress` collapses to `None` — pinned here so the trim
+    // can't silently drift to a permissive accept on this destructive
+    // write surface (mirrors the same guard on cancelBatchOrders).
+    let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Trading)));
+    let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
+    let service = setup_with(repo, sender);
+
+    let body = json!({ "marketAddress": "   ", "collateral": "10" });
+    let mut resp = send_post(&service, body).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+}
+
+#[tokio::test]
+async fn blank_collateral_returns_400_minus_1102() {
+    // Symmetric to blank_market_address: `non_empty` runs on
+    // `collateral` too, so whitespace-only must surface as
+    // MissingParameter (-1102), not as a numeric-parse failure (-1130).
+    // Pins the ordering between `non_empty` and `parse_positive_decimal`.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Trading)));
+    let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
+    let service = setup_with(repo, sender);
+
+    let mut resp = send_post(&service, full_body("\t\n")).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1102);
+}
+
+#[tokio::test]
+async fn unknown_field_in_body_returns_400_minus_1130() {
+    // `#[serde(deny_unknown_fields)]` surfaces caller typos (e.g.
+    // `marketAddres` vs `marketAddress`) as a structural reject
+    // (-1130 InvalidParameter via the body-parse path), not as a
+    // misleading `MissingParameter` from the now-silently-`None`
+    // real field. Pins the strict-input contract on the only
+    // deny_unknown_fields body in this endpoint set that lacks
+    // its own unknown-field test.
+    let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Trading)));
+    let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
+    let service = setup_with(repo, sender);
+
+    let body = json!({
+        "marketAddress": MARKET_ADDRESS,
+        "collateral": "10",
+        "marketAddres": "typo",
+    });
+    let mut resp = send_post(&service, body).await;
+    assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+    assert_eq!(err.code, -1130);
+}
+
+#[tokio::test]
 async fn zero_collateral_returns_400_minus_1130() {
     let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Trading)));
     let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
@@ -470,7 +527,7 @@ async fn blank_oracle_list_hash_returns_503_minus_1500() {
 
 #[tokio::test]
 async fn unknown_quote_token_type_returns_503_minus_1500() {
-    // `lookup_ref_token` returning None means the indexer-seeded
+    // `lookup_ref_token` returning None means the migration-seeded
     // canonical set does not cover this token_type — read-model
     // corruption, 503. Use a token_type the seeded repo has no row
     // for; `FakeReferenceRepo::with_seeded` covers 1, 2, 3.

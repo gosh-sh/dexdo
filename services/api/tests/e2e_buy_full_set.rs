@@ -261,11 +261,12 @@ async fn buy_full_set_against_shellnet() {
 
     // Outcome-token credit probe: balance debit alone proves the chain
     // ACCEPTED the splitFullSet, but the user-visible effect is the
-    // outcome tokens credited via `onSplitAccepted` (line 688-style
-    // path in `contracts/PrivateNote.sol`). Read `_stakes[hash].amount`
-    // post-callback and assert each outcome's amount is strictly
-    // greater than its pre-snapshot — closes the gap where a chain bug
-    // could debit collateral without crediting outcome tokens.
+    // outcome tokens credited via `onSplitAccepted` (the `stake.amount[i] +=
+    // amounts[i]` loop body in `contracts/PrivateNote.sol`). Read
+    // `_stakes[hash].amount` post-callback and assert each outcome's
+    // amount is strictly greater than its pre-snapshot — closes the gap
+    // where a chain bug could debit collateral without crediting outcome
+    // tokens.
     let post_stake = read_stake_amounts(&raw_dex, &trader.address, &stake_key)
         .await
         .expect("post-snapshot _stakes[hash].amount must exist");

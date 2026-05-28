@@ -955,8 +955,16 @@ struct BuyFullSetRequest {
 }
 
 // Manual `ToSchema` impl: `#[derive(ToSchema)]` is incompatible with
-// `#[serde(deny_unknown_fields)]` in salvo-oapi-macros 0.74.3 — see
-// the symmetric comment on `CancelBatchOrdersRequest` above.
+// `#[serde(deny_unknown_fields)]` in salvo-oapi-macros 0.74.3 — same
+// reason as `CancelBatchOrdersRequest` above.
+//
+// Both fields are marked required even though the Rust struct uses
+// `Option<String>`: the `Option` only exists so a missing field
+// surfaces as a typed `MissingParameter` (-1102) via the
+// `non_empty(...).ok_or(...)` chain in the handler, not because the
+// API contract treats either field as optional. The schema reflects
+// the runtime contract so codegen'd clients get an actionable
+// signal.
 impl ToSchema for BuyFullSetRequest {
     fn to_schema(_components: &mut Components) -> salvo_oapi::RefOr<salvo_oapi::schema::Schema> {
         use salvo_oapi::schema::AdditionalProperties;
@@ -965,6 +973,8 @@ impl ToSchema for BuyFullSetRequest {
         Object::new()
             .property("marketAddress", Object::new().schema_type(BasicType::String))
             .property("collateral", Object::new().schema_type(BasicType::String))
+            .required("marketAddress")
+            .required("collateral")
             .additional_properties(AdditionalProperties::FreeForm(false))
             .into()
     }
