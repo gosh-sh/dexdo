@@ -1324,7 +1324,9 @@ on every live event:
 
 A single event type, `orderUpdate`, covers the full order lifecycle: acceptance, partial fill, full fill, cancel, reject, expire. Clients dispatch on the pair `x` (what just happened) × `X` (where the order is now).
 
-Field keys are intentionally aligned with Binance Spot `executionReport` semantics where the field exists in both APIs — same letter, same meaning, same string-vs-number convention. The single Dodex-specific addition is `a` (market address), which has no Binance analog because Binance identifies a market by `symbol` alone.
+Field keys are deliberately short (mostly one letter) — a bandwidth optimization. A high-frequency `orderUpdate` stream on a busy account compresses better and saves measurable per-frame bytes on the wire vs. a full-name JSON shape. The same trade-off is why Binance Spot `executionReport` uses single-letter keys; we follow that convention so the keys are aligned with it where the field exists in both APIs — same letter, same meaning, same string-vs-number convention. The single Dodex-specific addition is `a` (market address), which has no Binance analog because Binance identifies a market by `symbol` alone.
+
+The short-key convention is scoped to WebSocket frames. REST endpoints keep full descriptive names (`orderId`, `executedQty`, `clientOrderId`, ...) because their payloads are read once per request, not streamed, and human readability outweighs the byte savings.
 
 Partial vs. full fill is signaled by `X`: `PARTIALLY_FILLED` while `z < q`, `FILLED` once `z == q`. Both carry `x: "TRADE"`.
 
