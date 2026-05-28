@@ -412,9 +412,8 @@ async fn unknown_field_in_body_returns_400_minus_1130() {
     // `marketAddres` vs `marketAddress`) as a structural reject
     // (-1130 InvalidParameter via the body-parse path), not as a
     // misleading `MissingParameter` from the now-silently-`None`
-    // real field. Pins the strict-input contract on the only
-    // deny_unknown_fields body in this endpoint set that lacks
-    // its own unknown-field test.
+    // real field. Pins the strict-input contract on this
+    // destructive write surface.
     let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Trading)));
     let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
     let service = setup_with(repo, sender);

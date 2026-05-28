@@ -1470,8 +1470,9 @@ pub trait ChainOrderSender: Send + Sync {
     /// execution — so PrivateNote-side `require(...)` failures
     /// (`ERR_NOTE_BUSY`, `ERR_LOW_VALUE`, `ERR_DEBT_NON_ZERO`) come
     /// back as typed `DomainError`s here. The chain-side
-    /// `onSplitAccepted` / `onSplitRejected` callback runs as a
-    /// separate internal message; its outcome is visible only through
+    /// `onSplitAccepted` (credit) / `onBounce` (refund on a PMP-side
+    /// revert) callback runs as a separate internal message; its
+    /// outcome is visible only through
     /// the on-chain `PrivateNote._stakes` getter, which the API
     /// surfaces via `GET /api/v1/account/balances` (see
     /// [api-spec §Buy Full Set](../../docs/api-spec.md#buy-full-set)

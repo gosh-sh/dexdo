@@ -241,7 +241,7 @@ async fn buy_full_set_against_shellnet() {
     // requested `COLLATERAL_RAW`. The exact debit equals
     // `collateral - (collateral % Q)` where `Q = sum(u_k)` over the
     // gcd-reduced pool — Q depends on the deployer's stake shape.
-    // For the standard symmetric deploy (`[100.2, 100.2]` NACKL → u_k
+    // For the standard symmetric deploy (`[21, 21]` NACKL → u_k
     // = [1, 1], Q = 2), the debit is exactly `COLLATERAL_RAW`. Asserting
     // the upper bound keeps the test correct under any future
     // tweak to `deploy_market.rs` stake amounts without re-deriving Q.

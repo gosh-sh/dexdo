@@ -908,10 +908,14 @@ struct CancelBatchOrdersRequest {
 // expects `Into<AdditionalProperties<Schema>>`, so the derive fails
 // to compile. We keep `deny_unknown_fields` (a strict-input contract
 // pinned by `unknown_field_in_body_returns_400_minus_1130`) and
-// reproduce here what the derive would have generated for the other
-// batch DTOs: camelCase property names, Optional fields → no
-// `required(...)`, and an explicit `additionalProperties: false` so
-// the OpenAPI consumer sees the same strict signal as the runtime.
+// reproduce here what the derive would have generated: camelCase
+// property names and an explicit `additionalProperties: false` so the
+// OpenAPI consumer sees the same strict signal as the runtime. All
+// three fields are marked required: the `Option<_>` only exists so a
+// missing field surfaces as a typed `MissingParameter` via the
+// `non_empty(...).ok_or(...)` chain in
+// `build_cancel_batch_orders_input`, not because the contract treats
+// any field as optional.
 impl ToSchema for CancelBatchOrdersRequest {
     fn to_schema(_components: &mut Components) -> salvo_oapi::RefOr<salvo_oapi::schema::Schema> {
         use salvo_oapi::schema::AdditionalProperties;
@@ -922,6 +926,9 @@ impl ToSchema for CancelBatchOrdersRequest {
             .property("marketAddress", Object::new().schema_type(BasicType::String))
             .property("symbol", Object::new().schema_type(BasicType::String))
             .property("orderIds", Array::new().items(Object::new().schema_type(BasicType::String)))
+            .required("marketAddress")
+            .required("symbol")
+            .required("orderIds")
             .additional_properties(AdditionalProperties::FreeForm(false))
             .into()
     }

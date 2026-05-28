@@ -209,6 +209,10 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+              - marketAddress
+              - symbol
+              - orderIds
               properties:
                 marketAddress:
                   type: string
