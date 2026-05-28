@@ -1,7 +1,8 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Production trader-path methods. Each one constructs the relevant
-// kit contract handle on demand and forwards. Deploy/setup methods
+// kit contract handle on demand and forwards. Deploy/setup helpers and
+// extra read-only getters used only by e2e tests and `market-manager`
 // live in `test_helpers.rs` behind the `test-helpers` feature so the
 // prod build does not carry them.
 
