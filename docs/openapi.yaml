@@ -276,7 +276,13 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/BuyFullSetRequest'
+              type: object
+              properties:
+                collateral:
+                  type: string
+                marketAddress:
+                  type: string
+              additionalProperties: false
         required: true
       responses:
         '200':
@@ -739,17 +745,6 @@ components:
           - string
           - 'null'
         type:
-          type:
-          - string
-          - 'null'
-    BuyFullSetRequest:
-      type: object
-      properties:
-        collateral:
-          type:
-          - string
-          - 'null'
-        marketAddress:
           type:
           - string
           - 'null'
