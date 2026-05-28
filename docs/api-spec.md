@@ -38,6 +38,7 @@
       - [Order Status](#order-status)
   - [WebSocket Streams](#websocket-streams)
     - [Connection](#connection)
+    - [Splice and Gap Detection](#splice-and-gap-detection)
     - [Order Update Event](#order-update-event)
       - [Common Enums](#common-enums-2)
         - [Execution Type](#execution-type)
@@ -1189,7 +1190,8 @@ Response:
       "updateTime": 1710000001000
     }
   ],
-  "nextCursor": "5f8000000000017c5a"
+  "nextCursor": "5f8000000000017c5a",
+  "lastSq": 4289
 }
 ```
 
@@ -1199,6 +1201,7 @@ Top-level response fields:
 | --- | --- | --- |
 | `orders` | ARRAY | Orders matching the filter, in stable chain-order descending. Empty when there are no matches. |
 | `nextCursor` | STRING \| null | Opaque lex-comparable pagination cursor. Pass back verbatim to fetch the next page; do not parse or generate. `null` when the last page has been returned. |
+| `lastSq` | LONG | Largest event sequence number the server has emitted on the user-stream for the caller's account at the moment this response was assembled. Used to splice into the [`orderUpdate`](#order-update-event) WebSocket stream — see [Splice and Gap Detection](#splice-and-gap-detection). `0` for an account that has never had any order events. |
 
 Order fields:
 
@@ -1294,6 +1297,29 @@ Connection lifecycle:
 - The server sends a WebSocket ping every 20 seconds. Clients MUST reply with pong within 60 seconds or the server closes the socket.
 - The server closes the connection after 24 hours of uptime. Clients MUST reconnect and resubscribe.
 
+### Splice and Gap Detection
+
+Every `orderUpdate` carries a per-account contiguous integer `sq`. For one subscription, `sq` of the next event is **exactly** `prev_sq + 1`. The first event a fresh account ever receives carries `sq = 1`. `sq` is scoped to the authenticated account — one client never observes another account's counter.
+
+[`GET /api/v1/orders`](#orders) returns `lastSq` — the largest `sq` the server has already emitted for the caller's account at the moment the snapshot was assembled. Together with `sq` on each event, this lets clients splice a REST snapshot into the live stream and detect lost events without any server-side replay buffer.
+
+Recommended client algorithm:
+
+```text
+on (re)connect:
+  open WebSocket, subscribe, start buffering incoming events
+  fetch GET /api/v1/orders → L = lastSq
+  expected_next = L + 1
+  discard buffered events with sq <= L
+  apply remaining buffered events in sq-asc order:
+    for each, require sq == expected_next, then expected_next = sq + 1
+on every live event:
+  if sq != expected_next: gap detected → resnapshot
+  apply; expected_next = sq + 1
+```
+
+`sq` is monotonic over the life of the account, not the life of the subscription — a reconnect does not reset the counter. The snapshot watermark `lastSq` from `GET /api/v1/orders` is therefore directly comparable with any `sq` the client has previously stored.
+
 ### Order Update Event
 
 A single event type, `orderUpdate`, covers the full order lifecycle: acceptance, partial fill, full fill, cancel, reject, expire. Clients dispatch on the pair `x` (what just happened) × `X` (where the order is now).
@@ -1328,7 +1354,8 @@ Example — order accepted into the book:
   "m": null,
   "O": 1710000000100,
   "T": 1710000000100,
-  "r": null
+  "r": null,
+  "sq": 4287
 }
 ```
 
@@ -1358,7 +1385,8 @@ Example — partial fill:
   "m": true,
   "O": 1710000000100,
   "T": 1710000004980,
-  "r": null
+  "r": null,
+  "sq": 4288
 }
 ```
 
@@ -1388,7 +1416,8 @@ Example — full fill:
   "m": true,
   "O": 1710000000100,
   "T": 1710000008980,
-  "r": null
+  "r": null,
+  "sq": 4289
 }
 ```
 
@@ -1419,6 +1448,7 @@ Field reference:
 | `O` | LONG | Order creation time, Unix ms. Stable across all events for the same order. |
 | `T` | LONG | Transaction time — when this specific event was produced on-chain, Unix ms. |
 | `r` | ENUM \| null | Rejection reason. Set when `x == "REJECTED"`; `null` otherwise. |
+| `sq` | LONG | Per-account contiguous event counter. The next event for the same account is exactly `prev_sq + 1`. See [Splice and Gap Detection](#splice-and-gap-detection). |
 
 #### Common Enums
 
