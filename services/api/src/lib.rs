@@ -16,6 +16,8 @@ use anyhow::Context;
 use dodex_application::AuthContext;
 use dodex_application::Authenticator;
 use dodex_application::BatchOrderInputItem;
+use dodex_application::BuyFullSetInput;
+use dodex_application::BuyFullSetUseCase;
 use dodex_application::CancelBatchOrdersInput;
 use dodex_application::CancelBatchOrdersUseCase;
 use dodex_application::CancelOrderInput;
@@ -938,6 +940,27 @@ struct CancelBatchOrderResponseItem {
     status: &'static str,
 }
 
+// Request body for `POST /api/v1/buyFullSet`. Field names match
+// docs/api-spec.md §Buy Full Set verbatim.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct BuyFullSetRequest {
+    market_address: Option<String>,
+    collateral: Option<String>,
+}
+
+// Minimal acceptance envelope per docs/api-spec.md §Buy Full Set: the
+// resulting collateral debit and outcome-token credits become visible
+// through `GET /api/v1/account` and `GET /api/v1/account/balances`
+// once the chain confirms, so the synchronous response carries only
+// the echoed identifier plus the moment we accepted.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct BuyFullSetResponse {
+    market_address: String,
+    transact_time: i64,
+}
+
 /// Read the authenticated identity from the depot and enforce the
 /// endpoint's required permission in one call. Protected handlers
 /// must call this rather than `depot.obtain::<AuthContext>()`
@@ -1427,6 +1450,58 @@ fn build_cancel_batch_orders_input(
     })
 }
 
+// Auth hoop verified the request; this handler enforces `TRADE`,
+// hands the parsed body off to the use case, and shapes the minimal
+// two-field acceptance envelope. The chain-side outcome (collateral
+// debit, outcome-token credits) surfaces later through
+// `GET /api/v1/account` / `/api/v1/account/balances`.
+#[endpoint(
+    tags("positions"),
+    summary = "Buy a full set of outcome tokens",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
+    ),
+    request_body = BuyFullSetRequest,
+    security(("apiKey" = [])),
+)]
+async fn buy_full_set(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<BuyFullSetResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::Trade)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let body: BuyFullSetRequest = parse_strict_body(req, "POST /api/v1/buyFullSet").await?;
+
+    let market_address =
+        non_empty(body.market_address).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let collateral =
+        non_empty(body.collateral).ok_or(ApiError::from(DomainError::MissingParameter))?;
+
+    let (now_seconds, now_ms) = now_pair();
+    let input = BuyFullSetInput {
+        trading_pn: ctx.trading_pn,
+        market_address: MarketAddress(market_address.clone()),
+        collateral,
+        now_seconds,
+        now_ms,
+    };
+
+    let use_case = BuyFullSetUseCase::new(state.repo, state.ref_repo, state.chain_sender);
+    use_case.execute(input).await.map_err(ApiError::from)?;
+
+    Ok(Json(BuyFullSetResponse { market_address, transact_time: now_ms }))
+}
+
 /// Account balances aggregated across all markets the authenticated PN holds.
 #[endpoint(
     tags("account"),
@@ -1588,7 +1663,8 @@ pub fn build_router(state: AppState) -> Router {
                         .delete(delete_batch_orders),
                 )
                 .push(Router::with_path("api/v1/account").get(get_account))
-                .push(Router::with_path("api/v1/account/balances").get(get_account_balances)),
+                .push(Router::with_path("api/v1/account/balances").get(get_account_balances))
+                .push(Router::with_path("api/v1/buyFullSet").post(buy_full_set)),
         )
 }
 
@@ -1615,7 +1691,8 @@ pub fn openapi_doc() -> OpenApi {
                 .delete(delete_batch_orders),
         )
         .push(Router::with_path("api/v1/account").get(get_account))
-        .push(Router::with_path("api/v1/account/balances").get(get_account_balances));
+        .push(Router::with_path("api/v1/account/balances").get(get_account_balances))
+        .push(Router::with_path("api/v1/buyFullSet").post(buy_full_set));
 
     OpenApi::new("Dodex REST API", env!("CARGO_PKG_VERSION"))
         .info(
@@ -1674,6 +1751,7 @@ pub async fn run() -> anyhow::Result<()> {
         Duration::from_millis(config.chain.cancel_order_timeout_ms),
         Duration::from_millis(config.chain.place_batch_timeout_ms),
         Duration::from_millis(config.chain.cancel_batch_timeout_ms),
+        Duration::from_millis(config.chain.split_full_set_timeout_ms),
     )?);
     let graphql = Arc::new(dodex_infrastructure::graphql::GraphqlClient::new(
         config.graphql.endpoint.clone(),

@@ -23,7 +23,6 @@ use ackinacki_kit::contracts::dex::pmp::Pmp;
 use ackinacki_kit::contracts::dex::pmp::ResultOfGetDetails as PmpKitDetails;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
 use ackinacki_kit::contracts::dex::private_note::PrivateNote;
 use ackinacki_kit::contracts::dex::root_oracle::ParamsOfDeployOracle;
 use ackinacki_kit::contracts::dex::root_oracle::ParamsOfGetOracleAddress;
@@ -67,18 +66,6 @@ impl Dex {
     ) -> ChainResult<ResultOfSendMessage> {
         PrivateNote::new(self.ctx.clone(), pn_address)
             .set_stake(params, signer)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn split_full_set(
-        &self,
-        pn_address: &str,
-        params: ParamsOfSplitFullSet,
-        signer: Signer,
-    ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
-            .split_full_set(params, signer)
             .await
             .map_err(Into::into)
     }

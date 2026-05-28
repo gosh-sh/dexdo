@@ -14,7 +14,9 @@ use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
+use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
 use ackinacki_kit::contracts::dex::private_note::PrivateNote;
+use ackinacki_kit::contracts::dex::private_note::ResultOfGetDetails as PnDetails;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 use ackinacki_kit::tvm_client::ClientConfig;
@@ -99,6 +101,24 @@ impl Dex {
             .map_err(Into::into)
     }
 
+    /// Buy a full set of outcome tokens by depositing `collateral` of
+    /// the market's quote asset into the PMP. On a market sitting in
+    /// `AWAITING_FREEZE`, the first successful call also activates the
+    /// OrderBook — same chain entry point as the staging market-manager
+    /// uses to seed initial MM liquidity, but signed by the caller's
+    /// trading PN. See `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet`.
+    pub async fn split_full_set(
+        &self,
+        pn_address: &str,
+        params: ParamsOfSplitFullSet,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), pn_address)
+            .split_full_set(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Best-effort cleanup entry point — same PN method as the
     /// trader-signed `cancel_order`, but signed by the deposit-owner
     /// key. Tests use it to drain leaked coids between runs.
@@ -112,6 +132,18 @@ impl Dex {
             .cancel_order_by_client(params, signer)
             .await
             .map_err(Into::into)
+    }
+
+    /// Read-only `PrivateNote.getDetails` accessor. Surfaces
+    /// `_balance[tokenType]`, `_busy.busyAddress`, and a handful of
+    /// other public PN fields without touching the read-model. Used by
+    /// e2e tests to verify on-chain balance moves after `splitFullSet`
+    /// and to poll the `_busy` window between submission and the
+    /// `onSplitAccepted` callback. The production API path uses the
+    /// GraphQL-backed `pn_state_reader` instead — this is a thin direct
+    /// fallback for tests and tooling.
+    pub async fn get_private_note_details(&self, pn_address: &str) -> ChainResult<PnDetails> {
+        PrivateNote::new(self.ctx.clone(), pn_address).get_details().await.map_err(Into::into)
     }
 
     // ── OrderBook (read-only, test cleanup polling) ──────────────────

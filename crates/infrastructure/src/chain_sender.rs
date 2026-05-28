@@ -19,6 +19,7 @@ use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
+use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use async_trait::async_trait;
@@ -28,6 +29,7 @@ use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::NewBatchOrderPayload;
 use dodex_application::NewOrderPayload;
+use dodex_application::SplitFullSetPayload;
 use dodex_chain::ChainError;
 use dodex_chain::Dex;
 use dodex_domain::DomainError;
@@ -46,6 +48,7 @@ pub struct DexChainSender {
     cancel_order_timeout: Duration,
     place_batch_timeout: Duration,
     cancel_batch_timeout: Duration,
+    split_full_set_timeout: Duration,
 }
 
 impl DexChainSender {
@@ -67,6 +70,7 @@ impl DexChainSender {
         cancel_order_timeout: Duration,
         place_batch_timeout: Duration,
         cancel_batch_timeout: Duration,
+        split_full_set_timeout: Duration,
     ) -> anyhow::Result<Self> {
         let dex = Dex::from_endpoints(endpoints)
             .map_err(|err| anyhow::anyhow!("Dex::from_endpoints failed: {err:?}"))?;
@@ -76,6 +80,7 @@ impl DexChainSender {
             cancel_order_timeout,
             place_batch_timeout,
             cancel_batch_timeout,
+            split_full_set_timeout,
         })
     }
 }
@@ -300,6 +305,51 @@ impl ChainOrderSender for DexChainSender {
             order_count,
         };
         classify_chain_outcome(outcome, self.cancel_batch_timeout.as_millis() as u64, &ctx)
+    }
+
+    async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError> {
+        let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
+
+        // Defence-in-depth: the application layer caps `collateral_raw`
+        // at `u64::MAX` (same `serde_json::json!` ceiling as
+        // `placeOrder.amount` and `clientOrderId`). Reaching the error
+        // arm means that gate was bypassed.
+        let collateral = payload.collateral_raw.parse::<u128>().map_err(|err| {
+            error!(?err, raw = %payload.collateral_raw, "collateral_raw is not uint128");
+            DomainError::Unexpected
+        })?;
+
+        let pn_address = payload.pn_address;
+        let event_id = payload.event_id;
+        let params = ParamsOfSplitFullSet {
+            event_id: event_id.clone(),
+            oracle_list_hash: payload.oracle_list_hash,
+            token_type: payload.token_type,
+            collateral,
+        };
+
+        debug!(
+            pn = %pn_address,
+            event_id = %params.event_id,
+            oracle_list_hash = %params.oracle_list_hash,
+            token_type = params.token_type,
+            collateral = params.collateral,
+            "split_full_set params",
+        );
+
+        let call = self.dex.split_full_set(&pn_address, params, signer);
+        let outcome = timeout(self.split_full_set_timeout, call).await;
+        let ctx = ChainCallContext {
+            entry_point: "split_full_set",
+            pn: &pn_address,
+            event_id: &event_id,
+            // splitFullSet is a market-level op, not an order op;
+            // `order_count` has no meaning for it. Carry `1` so the
+            // unified audit shape stays consistent with the other
+            // single-call entry points.
+            order_count: 1,
+        };
+        classify_chain_outcome(outcome, self.split_full_set_timeout.as_millis() as u64, &ctx)
     }
 }
 
@@ -815,6 +865,7 @@ mod tests {
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
         )
         .expect("DexChainSender::new");
 
@@ -849,6 +900,7 @@ mod tests {
         // itself, not by this test.
         let sender = DexChainSender::new(
             vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),

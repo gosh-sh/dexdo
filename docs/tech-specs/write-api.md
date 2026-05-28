@@ -9,6 +9,7 @@ Implementation-facing requirements for the trading write endpoints. The public c
 | `/api/v1/batchOrders` | POST | [New Batch Orders](../api-spec.md#new-batch-orders) |
 | `/api/v1/batchOrders` | DELETE | [Cancel Batch Orders](../api-spec.md#cancel-batch-orders) |
 | `/api/v1/openOrders` | DELETE | [Cancel All Open Orders On Symbol](../api-spec.md#cancel-all-open-orders-on-symbol) |
+| `/api/v1/buyFullSet` | POST | [Buy Full Set](../api-spec.md#buy-full-set) |
 
 ## Glossary
 
@@ -677,3 +678,132 @@ Same per-PN serial constraint as the single-order paths and `placeBatch` — `ca
 See [api-spec §Cancel All Open Orders On Symbol](../api-spec.md#cancel-all-open-orders-on-symbol) for the public contract.
 
 _Implementation tech spec to be filled in._
+
+## `POST /api/v1/buyFullSet`
+
+Buys a full set of outcome tokens for one market by depositing `collateral` of the market's quote asset into the PMP. The chain entry point is `PrivateNote.splitFullSet`; the staging market-manager already drives the same ABI to seed initial MM liquidity ([market-manager `splitFullSet — freezing PMP and spawning OrderBook`](../../services/market-manager/src/main.rs)), and on a market sitting in `AWAITING_FREEZE` the first successful call also activates the OrderBook for everyone else. From the caller's standpoint the request and response are identical to any later call against the same market.
+
+The handler runs three phases: request parsing → market resolution + status gate → collateral validation + chain submission. Each phase fails closed with its own error code (see [Error mapping](#error-mapping-3)).
+
+### Authorization
+
+Same hoop as the order endpoints. The handler calls `require_auth(depot, Permission::Trade)` and reads the resolved [`TradingPn`](auth.md#trading-private-note) (`pn_address`, `pn_pubkey`, `pn_dih`, decrypted `pn_seckey`) out of `AuthContext`.
+
+### Request parsing
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `marketAddress` | `MarketAddress` | Mandatory. |
+| `collateral` | `String` | Mandatory; decimal. Kept as a string until quote-asset precision validation. |
+
+Mandatory-field absence (the field missing or trimming to the empty string) returns `MissingParameter` → 400.
+
+### Market resolution
+
+Resolve `marketAddress` via [`markets`](data-schema.md#markets), filtered by `m.last_reconciled_at IS NOT NULL` — same visibility gate as [`/api/v1/markets`](read-api.md#visibility-filter). No `market_outcomes` join: `splitFullSet` operates at the market level (collateral → one outcome token of every outcome), so there is no per-outcome resolution to perform. A miss surfaces as `InvalidMarketOrSymbol` → 404 / -1121.
+
+Derive `status` from the row and the request `now` using the logic in [read-api.md §Status derivation](read-api.md#status-derivation). Per [api-spec §Buy Full Set](../api-spec.md#buy-full-set), the call is permitted only when `status ∈ { AWAITING_FREEZE, TRADING }`; every other phase rejects with `OrderValidationFailed` → 400 / -2010.
+
+The same row supplies every value the chain submission requires:
+
+| Source column | Bound to |
+| --- | --- |
+| `markets.event_id` | `splitFullSet.eventId` (uint256). |
+| `markets.oracle_list_hash` | `splitFullSet.oracleListHash` (uint256). Stamped by the market reconciler from `PMP.getDetails().oracleListHash`. NULL/blank on a reconciled row → `MarketInconsistent` → 503. |
+| `markets.token_type` | `splitFullSet.tokenType` (uint32). Doubles as the [`ref_tokens`](data-schema.md#ref_tokens) lookup key the use case uses to retrieve the quote asset's on-chain `decimals`. |
+
+### Input validation
+
+`collateral` is the quote-asset amount in human form; the use case lifts it by the quote asset's on-chain `decimals` (looked up via `ReferenceRepository::lookup_ref_token(markets.token_type)`) and submits the lifted raw `uint128` to chain.
+
+| api-spec rule | Failure |
+| --- | --- |
+| `collateral` digits-only, non-negative | `InvalidParameter` |
+| `collateral` decimals ≤ quote-asset `decimals` | `InvalidParameter` (api-spec maps this to -1130, not -1111 — quote-asset precision is **not** part of [api-spec §Validation Rules]) |
+| `collateral` strictly positive after lift (`> 0`) | `InvalidParameter` |
+| Lifted value fits in `u64` (chain ABI is `uint128`; the upstream `ackinacki-kit` → `serde_json::json!` path panics on values above `u64::MAX` — same constraint documented in [§clientOrderId generation](#clientorderid-generation)) | `InvalidParameter` |
+| Resolved `token_type` exists in `ref_tokens` | `MarketInconsistent` (the indexer ships with the canonical set; a missing row is read-model corruption) |
+
+Free-balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_LOW_VALUE` at `contracts/PrivateNote.sol`) and the synchronous chain return maps that to `OrderValidationFailed` → 400 / -2010, same shape as placement.
+
+#### Refund-on-too-small is not pre-validated
+
+`PMP.splitFullSet` computes `t = collateral / Q` and credits `t * u_k` of each outcome (`u_k = clean_pool[k] / gcd(clean_pool[*])`, `Q = sum(u_k)`). When `collateral < Q` the integer division yields `t = 0`, the chain credits zero outcome tokens, and the full `collateral` is refunded — no on-chain reject, no error code. `Q` is determined at the moment of the first post-stakeEnd split; on a market still in `AWAITING_FREEZE` no split has run yet, so the value the use case would need to compare against does not exist. The API therefore does not pre-validate a "useful" lower bound on `collateral` — callers must size against their own knowledge of pool composition, or accept that a tiny `collateral` may complete successfully with zero outcome-token credits.
+
+### Chain submission
+
+Encode and dispatch a `PrivateNote.splitFullSet` external message against `trading_pn.pn_address`. ABI from `contracts/PrivateNote.sol::splitFullSet`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfSplitFullSet`:
+
+```text
+splitFullSet(
+  eventId,         // uint256, markets.event_id
+  oracleListHash,  // uint256, markets.oracle_list_hash
+  tokenType,       // uint32,  markets.token_type
+  collateral,      // uint128 ABI, capped at u64 today (same serde_json constraint as placeOrder)
+)
+```
+
+Sender boundary: extends the `ChainOrderSender` trait in `crates/application/src/lib.rs` with `async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError>`. The production `DexChainSender` impl wraps `dodex_chain::Dex::split_full_set`; the call shares `classify_chain_outcome` and `map_tvm_exit_code` with the other write-path entry points, so the exit-code mapping table in [§Failure surface](#failure-surface) applies verbatim — every PN-side `require(...)` the splitFullSet path can raise (`ERR_LOW_VALUE`, `ERR_NOTE_BUSY`, `ERR_DEBT_NON_ZERO`, `ERR_INVALID_STATE`) is already mapped.
+
+`dodex_chain::Dex::split_full_set` lives in `crates/chain/src/client.rs` alongside the other trader-path methods; the prior staging-only `test-helpers` placement was promoted so the prod API build links it without enabling that feature.
+
+`split_full_set_timeout_ms` is added to `ChainSection` (`config/api.<env>.yaml`) and pinned at boot by `ApiConfig::validate` to satisfy `request_timeout_ms > split_full_set_timeout_ms`, same invariant the other chain timeouts carry. Elapsed surfaces as `RequestTimeout` → 504 / -1007 with the same "retry with the same id" contract as placement.
+
+### Response
+
+A successful submission returns the minimal two-field body from [api-spec §Buy Full Set](../api-spec.md#buy-full-set):
+
+| Field | Source |
+| --- | --- |
+| `marketAddress` | Echoed from the request. |
+| `transactTime` | `now_pair()` captured once at the start of the handler. |
+
+Why minimal: the resulting collateral debit and per-outcome credits become visible through [`GET /api/v1/account`](read-api.md) and [`GET /api/v1/account/balances`](read-api.md) once the chain confirms — the synchronous response confirms acceptance only. There is no chain-assigned identifier the response could carry that the caller does not already have.
+
+### Failure surface
+
+Two failure classes — synchronous (pre-submit + PrivateNote chain-side) and async (the `onSplitAccepted` / `onSplitRejected` callback). The synchronous path is identical to placement's classes 1 and 2:
+
+1. **Pre-submit** — request shape, market resolution, status gate, collateral validation. Mapped per [Error mapping](#error-mapping-3).
+
+2. **PrivateNote chain-side, surfaced synchronously** — `dodex_chain::Dex::split_full_set` awaits the chain's execution of `PrivateNote.splitFullSet`, so any `require(...)` failure inside that ABI call comes back as a typed `AppError` carrying the TVM `exit_code`. `map_tvm_exit_code` (in `crates/infrastructure/src/chain_sender.rs`) translates the codes from `contracts/modifiers/errors.sol`. `splitFullSet` itself carries three PN-side `require(...)` invariants (`contracts/PrivateNote.sol::splitFullSet`): `121 ERR_NOTE_BUSY` (per-PN serial), `102 ERR_LOW_VALUE` (collateral non-positive, or free `_balance[tokenType]` below `collateral`), and `150 ERR_DEBT_NON_ZERO` (PN has outstanding debt). All three are already wired into the shared exit-code map; no new mapping required.
+
+3. **PMP-side callback, surfaced asynchronously** — `PrivateNote.splitFullSet` accepts the request and sends an internal message to `PMP.acceptSplit`, which executes in a separate transaction the synchronous return cannot observe. If `PMP` then rejects (e.g. status drift between the read-model snapshot and the on-chain phase, free balance changed mid-flight), the chain emits `onSplitRejected` and the caller's `collateral` is fully refunded. From the HTTP standpoint the `POST` returned `200`; clients detect this class through `GET /api/v1/account/balances` showing no new outcome-token credits and the `GET /api/v1/account` `free` quote-asset row unchanged.
+
+Transport-level failures collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error`, same as placement.
+
+### Error mapping
+
+| Condition | DomainError | HTTP |
+| --- | --- | --- |
+| Auth envelope / unknown api_key / bad signature / timestamp | handled upstream by [auth_hoop](auth.md#authentication) | 401 |
+| Caller lacks `TRADE` permission | `AuthRequired` | 401 |
+| `marketAddress` or `collateral` missing | `MissingParameter` | 400 |
+| `collateral` not positive, exceeds quote-asset precision, non-numeric, or lifted above `u64::MAX` | `InvalidParameter` | 400 |
+| Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
+| Reconciled market with NULL/blank `oracle_list_hash`, or quote `token_type` absent from `ref_tokens` | `MarketInconsistent` | 503 |
+| Resolved market `status ∉ { AWAITING_FREEZE, TRADING }`; chain `ERR_LOW_VALUE` / `ERR_DEBT_NON_ZERO` | `OrderValidationFailed` | 400 |
+| Chain `ERR_NOTE_BUSY` (per-PN serial; another op still in flight) | `OrderPnBusy` | 429 |
+| Handler exceeded `ServerSection.request_timeout_ms` | `RequestTimeout` | 504 |
+| Unmapped chain `tvm_exit` code or gateway transport failure | `Unexpected` | 500 |
+
+`RequestTimeout` (`-1007`) is enforced at two layers: the HTTP request_timeout hoop (`services/api/src/timeout_hoop.rs`) for handler-wide budgets, and the chain sender (`crates/infrastructure/src/chain_sender.rs::classify_chain_outcome`) for gateway-side hangs. `ApiConfig::validate` pins `server.request_timeout_ms > chain.split_full_set_timeout_ms` at boot so the HTTP timeout cannot fire while a chain submission is still in flight.
+
+### Layering
+
+| Layer | Responsibility |
+| --- | --- |
+| `crates/domain` | Reuses `parse_positive_decimal` / `lift_decimal`. No new primitives. |
+| `crates/application` | `BuyFullSetInput` (HTTP-shaped), `SplitFullSetPayload` (chain-shaped), `MarketForBuyFullSet` (repo-shaped), `BuyFullSetUseCase`. Extends `ChainOrderSender` with `split_full_set` and `MarketReadRepository` with `resolve_for_buy_full_set`. Quote-asset `decimals` come from `ReferenceRepository::lookup_ref_token`, reused from the `/account` path. |
+| `crates/infrastructure` | `DexChainSender::split_full_set` wraps `dodex_chain::Dex::split_full_set` (pubkey/seckey re-encode reused, classify_chain_outcome reused). `PostgresReadModelRepository::resolve_for_buy_full_set` runs a single-row `SELECT` against `markets` with the `last_reconciled_at IS NOT NULL` visibility gate. A NULL/blank `oracle_list_hash` is logged as a `warn` and surfaces as `MarketInconsistent`. |
+| `services/api` | `buy_full_set` handler attached as `Router::with_path("api/v1/buyFullSet").post(buy_full_set)` on the auth subrouter. HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` extends the existing `DexChainSender` construction with `chain.split_full_set_timeout_ms`. |
+
+The use case constructor takes trait objects; `services/api/tests/buy_full_set_http.rs` injects `FakeRepo` + `FakeAuthenticator` + `RecordingSplitFullSetSender` against the full router, matching the triad established by `create_order_http.rs` and `cancel_order_http.rs`.
+
+### Idempotency and retries
+
+The backend does not store inflight submissions and does not retry on its own. `splitFullSet` is **not** idempotent at the chain level: repeating the call with the same `collateral` on the same `(eventId, oracleListHash, tokenType)` results in a second deposit and a second per-outcome credit. Clients that need at-least-once delivery must track acceptance through `GET /api/v1/account` (`free` quote-asset row dropping by `collateral`) and refrain from re-`POST`ing on transient errors.
+
+### Concurrency
+
+`splitFullSet` takes the same per-PN `_busy` lock as placement — see [§Concurrency for POST /order](#concurrency). A buyFullSet that races a placement, cancellation, or another buyFullSet from the same account surfaces as `OrderPnBusy` → 429 / -2014 with the same retry semantics.

@@ -237,6 +237,62 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - apiKey: []
+  /api/v1/buyFullSet:
+    post:
+      tags:
+      - positions
+      summary: Buy a full set of outcome tokens
+      operationId: buy_full_set
+      parameters:
+      - name: X-DODEX-APIKEY
+        in: header
+        description: API key.
+        required: true
+        schema:
+          type: string
+      - name: timestamp
+        in: query
+        description: Unix milliseconds. Signed.
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: recvWindow
+        in: query
+        description: Request validity window in milliseconds. Default 5000, max 60000.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: signature
+        in: query
+        description: Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody.
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuyFullSetRequest'
+        required: true
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuyFullSetResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - apiKey: []
   /api/v1/depth:
     get:
       tags:
@@ -686,6 +742,28 @@ components:
           type:
           - string
           - 'null'
+    BuyFullSetRequest:
+      type: object
+      properties:
+        collateral:
+          type:
+          - string
+          - 'null'
+        marketAddress:
+          type:
+          - string
+          - 'null'
+    BuyFullSetResponse:
+      type: object
+      required:
+      - marketAddress
+      - transactTime
+      properties:
+        marketAddress:
+          type: string
+        transactTime:
+          type: integer
+          format: int64
     CancelBatchOrderResponseItem:
       type: object
       required:

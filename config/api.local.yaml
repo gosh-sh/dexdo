@@ -6,11 +6,12 @@ server:
   host: 0.0.0.0
   port: 8080
   # Enforced by the request_timeout hoop in services/api. Must exceed
-  # every chain timeout (place_order, cancel_order, place_batch, cancel_batch)
-  # by a safety margin — cutting off the HTTP request while the chain call
-  # is still in flight would land the operation on chain while returning
-  # 504 to the client, who would then not know its id (the worst failure
-  # mode for optimistic submission). 35 s = 30 s chain + ~5 s slack covers it.
+  # every chain timeout (place_order, cancel_order, place_batch,
+  # cancel_batch, split_full_set) by a safety margin — cutting off the
+  # HTTP request while the chain call is still in flight would land the
+  # operation on chain while returning 504 to the client, who would then
+  # not know its id (the worst failure mode for optimistic submission).
+  # 35 s = 30 s chain + ~5 s slack covers it.
   request_timeout_ms: 35000
 
 database:
@@ -34,6 +35,7 @@ chain:
   cancel_order_timeout_ms: 30000
   place_batch_timeout_ms: 30000
   cancel_batch_timeout_ms: 30000
+  split_full_set_timeout_ms: 30000
 
 graphql:
   # On-demand PN BOC reads for /api/v1/account and /account/balances.

@@ -35,6 +35,15 @@
       "deployed_at_unix": 1779726913,
       "shell_funded": true,
       "native_funded": true
+    },
+    {
+      "address": "0:0706a2added4fb6a0eca07cb211897d7696bc8da254cbc0e30a9a4ca0efe65af",
+      "deposit_identifier_hash": "19952852056699539317455769202803041697146598325833300619404087949661494579216",
+      "owner_public_key_hex": "04f5b824a77eefd73e23733b5343b59a08493354df2b4c071e7319a09593f8da",
+      "owner_secret_key_hex": "e136755930177ef0440481031212f4ae75bf551b835cb741dcf7d390848b0b32",
+      "deployed_at_unix": 1779961824,
+      "shell_funded": true,
+      "native_funded": true
     }
   ]
 }

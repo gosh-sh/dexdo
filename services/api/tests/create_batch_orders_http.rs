@@ -194,6 +194,14 @@ impl MarketReadRepository for FakeRepo {
         )
     }
 
+    async fn resolve_for_buy_full_set(
+        &self,
+        _: &MarketAddress,
+        _: i64,
+    ) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
+        unimplemented!("resolve_for_buy_full_set is not exercised by create_batch_orders_http tests")
+    }
+
     async fn sum_open_sell_remaining(
         &self,
         _: &str,
@@ -250,6 +258,13 @@ impl ChainOrderSender for RecordingBatchSender {
         _: dodex_application::CancelBatchOrderPayload,
     ) -> Result<(), DomainError> {
         unreachable!("RecordingBatchSender::cancel_batch_order called from POST /batchOrders test")
+    }
+
+    async fn split_full_set(
+        &self,
+        _: dodex_application::SplitFullSetPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("RecordingBatchSender::split_full_set called from order/batch test")
     }
 }
 
@@ -1023,6 +1038,13 @@ impl ChainOrderSender for SlowBatchSender {
         _: dodex_application::CancelBatchOrderPayload,
     ) -> Result<(), DomainError> {
         unreachable!("SlowBatchSender::cancel_batch_order called from POST /batchOrders test")
+    }
+
+    async fn split_full_set(
+        &self,
+        _: dodex_application::SplitFullSetPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("SlowBatchSender::split_full_set called from order/batch test")
     }
 }
 

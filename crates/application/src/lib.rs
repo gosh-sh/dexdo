@@ -169,6 +169,27 @@ pub struct MarketForPlacement {
     pub outcome: Outcome,
 }
 
+/// Slim market projection the `POST /api/v1/buyFullSet` path needs.
+/// No `market_outcomes` join — splitFullSet is a market-level operation
+/// (the chain produces one outcome token of every outcome from the
+/// `collateral`), so no symbol resolution is involved. `status` is
+/// computed against the caller's `now` so downstream validation can
+/// gate on `AWAITING_FREEZE | TRADING` without a second round-trip per
+/// [api-spec §Buy Full Set](../../docs/api-spec.md#buy-full-set).
+#[derive(Debug, Clone)]
+pub struct MarketForBuyFullSet {
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    /// Validated as non-negative at the repo boundary (the DB column is
+    /// `integer` but the chain ABI is `uint32`); callers can use it
+    /// directly as `u32` without a secondary cast. Doubles as the
+    /// `tokenType` slot of `ParamsOfSplitFullSet` and as the lookup key
+    /// for the quote asset's on-chain `decimals` via
+    /// [`ReferenceRepository::lookup_ref_token`].
+    pub token_type: u32,
+    pub status: MarketStatus,
+}
+
 /// Per-outcome metadata needed to render a market-balances row.
 #[derive(Debug, Clone)]
 pub struct BalanceOutcome {
@@ -288,6 +309,18 @@ pub trait MarketReadRepository: Send + Sync {
         market_address: &MarketAddress,
     ) -> Result<MarketBalancesResolution, anyhow::Error>;
 
+    /// Resolve `marketAddress` for `POST /api/v1/buyFullSet`. Returns
+    /// chain identity (`event_id`, `oracle_list_hash`, `token_type`)
+    /// plus the `MarketStatus` derived against `now`. Gated by
+    /// `last_reconciled_at IS NOT NULL`; misses collapse to
+    /// `DomainError::InvalidMarketOrSymbol`. No outcome join — the
+    /// splitFullSet ABI operates at the market level.
+    async fn resolve_for_buy_full_set(
+        &self,
+        market_address: &MarketAddress,
+        now: i64,
+    ) -> Result<MarketForBuyFullSet, anyhow::Error>;
+
     /// Sum `amount_remaining` over OPEN SELL rows owned by `owner_pn`
     /// on `orderbook_address`, grouped by `outcome_id`. Returns a map
     /// keyed by `outcome_id` with raw uint128 values as decimal strings
@@ -357,6 +390,14 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         market_address: &MarketAddress,
     ) -> Result<MarketBalancesResolution, anyhow::Error> {
         (**self).resolve_market_for_balances(market_address).await
+    }
+
+    async fn resolve_for_buy_full_set(
+        &self,
+        market_address: &MarketAddress,
+        now: i64,
+    ) -> Result<MarketForBuyFullSet, anyhow::Error> {
+        (**self).resolve_for_buy_full_set(market_address, now).await
     }
 
     async fn sum_open_sell_remaining(
@@ -1334,6 +1375,47 @@ pub struct CancelledBatchOrder {
     pub client_order_id: Option<String>,
 }
 
+/// Input shape for `BuyFullSetUseCase`. The HTTP layer parses
+/// `POST /api/v1/buyFullSet` body + `AuthContext` + clock into this
+/// struct. `collateral` is kept as a string until precision validation
+/// lifts it to `u128` against the quote asset's on-chain `decimals`.
+#[derive(Debug, Clone)]
+pub struct BuyFullSetInput {
+    pub trading_pn: TradingPn,
+    pub market_address: MarketAddress,
+    pub collateral: String,
+    /// Unix seconds. Drives status derivation on the market row.
+    pub now_seconds: i64,
+    /// Unix milliseconds. Returned to the client as `transactTime`.
+    pub now_ms: i64,
+}
+
+/// Chain-shaped payload handed to `ChainOrderSender::split_full_set`.
+/// Maps directly to `ackinacki-kit::PrivateNote::split_full_set`
+/// (`ParamsOfSplitFullSet`); the only call-site responsibility is
+/// re-encoding pubkey/seckey for the `KeyPair` boundary.
+///
+/// `collateral_raw` is a decimal string (smallest-unit `uint128`)
+/// matching the pattern `NewOrderPayload.amount_raw` uses on the
+/// placeOrder path: the use case has lifted by the quote asset's
+/// `decimals` and range-checked against `u64::MAX` (the upstream
+/// `serde_json::json!` ceiling — see
+/// [write-api.md §clientOrderId generation]). The chain sender parses
+/// the string to `u128` at the ABI boundary; the string carrier keeps
+/// the application crate from depending on `num_traits::ToPrimitive`.
+#[derive(Debug, Clone)]
+pub struct SplitFullSetPayload {
+    pub pn_address: String,
+    /// Decimal-encoded `uint256` public half of the trading-PN keypair.
+    /// `DexChainSender` re-encodes it as hex for `KeyPair.public`.
+    pub pn_pubkey: String,
+    pub pn_seckey: SensitiveBytes,
+    pub event_id: String,
+    pub oracle_list_hash: String,
+    pub token_type: u32,
+    pub collateral_raw: String,
+}
+
 /// Dispatch a `PrivateNote.placeOrder` external message to chain.
 /// Returns once the chain submission path has observed execution of
 /// `PrivateNote.placeOrder` — so PrivateNote-side `require(...)`
@@ -1383,6 +1465,18 @@ pub trait ChainOrderSender: Send + Sync {
     /// through the indexer.
     async fn cancel_batch_order(&self, payload: CancelBatchOrderPayload)
         -> Result<(), DomainError>;
+
+    /// Dispatch a `PrivateNote.splitFullSet` external message to chain.
+    /// Returns once the chain submission path has observed PN's
+    /// execution — so PrivateNote-side `require(...)` failures
+    /// (`ERR_NOTE_BUSY`, `ERR_LOW_VALUE`, `ERR_INVALID_STATE`, etc.)
+    /// come back as typed `DomainError`s here. The chain-side
+    /// `onSplitAccepted` / `onSplitRejected` callback runs as a
+    /// separate internal message; its outcome is visible only through
+    /// the indexer once the new outcome-token balances project into
+    /// `live_positions` (see [api-spec §Buy Full Set](../../docs/api-spec.md#buy-full-set)
+    /// — "the response confirms acceptance only").
+    async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError>;
 }
 
 #[async_trait]
@@ -1404,6 +1498,10 @@ impl<T: ?Sized + ChainOrderSender> ChainOrderSender for Arc<T> {
         payload: CancelBatchOrderPayload,
     ) -> Result<(), DomainError> {
         (**self).cancel_batch_order(payload).await
+    }
+
+    async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError> {
+        (**self).split_full_set(payload).await
     }
 }
 
@@ -2148,6 +2246,128 @@ where
     }
 }
 
+/// Orchestrates `POST /api/v1/buyFullSet`: resolves the market (gate
+/// `AWAITING_FREEZE | TRADING` per [api-spec §Buy Full Set]), looks up
+/// the quote asset's on-chain `decimals` so the public `collateral`
+/// decimal string can be lifted into the ABI's `uint128`, validates the
+/// value as strictly positive and within `u64::MAX` (the same
+/// `serde_json::json!` ceiling that bounds `placeOrder.amount` —
+/// [write-api.md §clientOrderId generation](../../docs/tech-specs/write-api.md#clientorderid-generation)),
+/// then dispatches a single `PrivateNote.splitFullSet` external message.
+/// On `AWAITING_FREEZE` the first successful call also activates the
+/// OrderBook for everyone else (chain-side effect of `splitFullSet`);
+/// from the caller's standpoint the request and response are identical
+/// to any later call.
+pub struct BuyFullSetUseCase<R, F, S> {
+    repo: R,
+    refs: F,
+    sender: S,
+}
+
+impl<R, F, S> BuyFullSetUseCase<R, F, S> {
+    pub fn new(repo: R, refs: F, sender: S) -> Self {
+        Self { repo, refs, sender }
+    }
+}
+
+impl<R, F, S> BuyFullSetUseCase<R, F, S>
+where
+    R: MarketReadRepository,
+    F: ReferenceRepository,
+    S: ChainOrderSender,
+{
+    pub async fn execute(&self, input: BuyFullSetInput) -> Result<(), DomainError> {
+        let MarketForBuyFullSet { event_id, oracle_list_hash, token_type, status } = self
+            .repo
+            .resolve_for_buy_full_set(&input.market_address, input.now_seconds)
+            .await
+            .map_err(|err| {
+                if let Some(domain) = err.downcast_ref::<DomainError>() {
+                    return *domain;
+                }
+                error!(?err, market_address = %input.market_address.0, "resolve_for_buy_full_set failed (non-domain)");
+                DomainError::Unexpected
+            })?;
+
+        // api-spec §Buy Full Set: available while the market is in
+        // `AWAITING_FREEZE` or `TRADING`. Anything else (PendingStakes,
+        // Frozen, AwaitingResult, Resolving, Resolved, Cancelled) → -2010.
+        if !matches!(status, MarketStatus::AwaitingFreeze | MarketStatus::Trading) {
+            return Err(DomainError::OrderValidationFailed);
+        }
+
+        // Defence-in-depth: the Postgres impl lifts NULL/blank
+        // `oracle_list_hash` on a reconciled row to MarketInconsistent
+        // already; this second-line guard keeps a future repo regression
+        // from pushing a zero-hash submission to chain.
+        if oracle_list_hash.is_empty() {
+            return Err(DomainError::MarketInconsistent);
+        }
+
+        // Quote asset's on-chain `decimals` come from `ref_tokens`,
+        // keyed by the same `token_type` used in the ABI call. An
+        // unknown token_type means read-model corruption (the indexer
+        // ships with the canonical set); 503 is the right surface.
+        let token = self
+            .refs
+            .lookup_ref_token(token_type)
+            .await
+            .map_err(|err| {
+                if let Some(domain) = err.downcast_ref::<DomainError>() {
+                    return *domain;
+                }
+                error!(?err, token_type, "lookup_ref_token failed (non-domain)");
+                DomainError::Unexpected
+            })?
+            .ok_or_else(|| {
+                warn!(token_type, "market token_type missing from ref_tokens");
+                DomainError::MarketInconsistent
+            })?;
+
+        // `lift_decimal` enforces digits-only + precision_within. A
+        // zero-value `collateral` parses cleanly through both, so the
+        // strictly-positive invariant needs its own check — without it
+        // the chain would accept the call, refund the zero, and the
+        // caller would burn one PN-busy window for nothing.
+        //
+        // api-spec §Buy Full Set maps "exceeds quote-asset precision"
+        // to -1130 `InvalidParameter`, not -1111 `PrecisionExceeded`.
+        // Quote-asset precision is not part of `Validation Rules` (the
+        // `pricePrecision` / `quantityPrecision` rules that yield -1111
+        // apply only to per-outcome fields) and the spec lumps it with
+        // "other body shape violation". Remap here so the wire code
+        // matches the spec table.
+        let collateral_lifted =
+            lift_decimal(&input.collateral, token.decimals).map_err(|e| match e {
+                DomainError::PrecisionExceeded => DomainError::InvalidParameter,
+                other => other,
+            })?;
+        if collateral_lifted == BigUint::from(0u32) {
+            return Err(DomainError::InvalidParameter);
+        }
+        // SDK serialization ceiling. `ParamsOfSplitFullSet.collateral`
+        // is `uint128` at the chain ABI, but the upstream
+        // `ackinacki-kit` → `serde_json::json!` path panics on any
+        // `u128 > u64::MAX` for the same reason `placeOrder.amount` is
+        // capped at u64. See `write-api.md §clientOrderId generation`.
+        if collateral_lifted > BigUint::from(u64::MAX) {
+            return Err(DomainError::InvalidParameter);
+        }
+        let collateral_raw = collateral_lifted.to_str_radix(10);
+
+        let payload = SplitFullSetPayload {
+            pn_address: input.trading_pn.pn_address,
+            pn_pubkey: input.trading_pn.pn_pubkey,
+            pn_seckey: input.trading_pn.pn_seckey,
+            event_id,
+            oracle_list_hash,
+            token_type,
+            collateral_raw,
+        };
+        self.sender.split_full_set(payload).await
+    }
+}
+
 /// Inputs to `GetOrdersUseCase::execute`, mirroring the shape of
 /// [`NewOrderInput`] for symmetry across read/write use cases. The
 /// HTTP handler is the only intended constructor: it owns the
@@ -2537,6 +2757,28 @@ mod tests {
             unimplemented!("resolve_market_for_balances not exercised by FakeRepo")
         }
 
+        async fn resolve_for_buy_full_set(
+            &self,
+            _: &MarketAddress,
+            _: i64,
+        ) -> Result<MarketForBuyFullSet, anyhow::Error> {
+            // Projects the seeded `Market` down to the slim shape the
+            // buyFullSet use case consumes. Mirrors
+            // `resolve_for_new_order`'s miss behaviour so tests can reuse
+            // the same `with_market` / `without_market` seeding helpers.
+            let Some(market) = self.market.clone() else {
+                return Err(anyhow::anyhow!(DomainError::InvalidMarketOrSymbol));
+            };
+            let token_type = u32::try_from(market.token_type)
+                .map_err(|_| anyhow::anyhow!(DomainError::MarketInconsistent))?;
+            Ok(MarketForBuyFullSet {
+                event_id: market.event.event_id,
+                oracle_list_hash: market.oracle_list_hash,
+                token_type,
+                status: market.status,
+            })
+        }
+
         async fn sum_open_sell_remaining(
             &self,
             _: &str,
@@ -2551,6 +2793,7 @@ mod tests {
         recorded_cancels: Mutex<Vec<CancelOrderPayload>>,
         recorded_batches: Mutex<Vec<NewBatchOrderPayload>>,
         recorded_cancel_batches: Mutex<Vec<CancelBatchOrderPayload>>,
+        recorded_full_sets: Mutex<Vec<SplitFullSetPayload>>,
         fail_with: Option<DomainError>,
     }
 
@@ -2561,6 +2804,7 @@ mod tests {
                 recorded_cancels: Mutex::new(Vec::new()),
                 recorded_batches: Mutex::new(Vec::new()),
                 recorded_cancel_batches: Mutex::new(Vec::new()),
+                recorded_full_sets: Mutex::new(Vec::new()),
                 fail_with: None,
             }
         }
@@ -2571,6 +2815,7 @@ mod tests {
                 recorded_cancels: Mutex::new(Vec::new()),
                 recorded_batches: Mutex::new(Vec::new()),
                 recorded_cancel_batches: Mutex::new(Vec::new()),
+                recorded_full_sets: Mutex::new(Vec::new()),
                 fail_with: Some(err),
             }
         }
@@ -2629,6 +2874,14 @@ mod tests {
                 return Err(err);
             }
             self.recorded_cancel_batches.lock().unwrap().push(payload);
+            Ok(())
+        }
+
+        async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError> {
+            if let Some(err) = self.fail_with {
+                return Err(err);
+            }
+            self.recorded_full_sets.lock().unwrap().push(payload);
             Ok(())
         }
     }
@@ -4599,6 +4852,14 @@ mod get_market_balances_use_case_tests {
             self.resolution.lock().unwrap().clone().map_err(anyhow::Error::from)
         }
 
+        async fn resolve_for_buy_full_set(
+            &self,
+            _: &MarketAddress,
+            _: i64,
+        ) -> anyhow::Result<MarketForBuyFullSet> {
+            unreachable!("balances use case does not exercise resolve_for_buy_full_set")
+        }
+
         async fn sum_open_sell_remaining(
             &self,
             _: &str,
@@ -4853,5 +5114,359 @@ mod get_market_balances_use_case_tests {
             .unwrap_err();
         let dom = err.downcast_ref::<DomainError>().expect("DomainError");
         assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+}
+
+#[cfg(test)]
+mod buy_full_set_use_case_tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    // Slim `MarketReadRepository` for the buyFullSet path: only the
+    // resolver the use case actually calls is implemented. Other methods
+    // panic so an accidental coupling regression (the use case taking a
+    // second dependency on the repo) surfaces loudly instead of passing
+    // for the wrong reason.
+    struct BuyFullSetRepo {
+        resolution: Result<MarketForBuyFullSet, DomainError>,
+    }
+
+    #[async_trait]
+    impl MarketReadRepository for BuyFullSetRepo {
+        async fn list_markets(&self, _: &MarketsRequest) -> anyhow::Result<MarketsPage> {
+            unreachable!()
+        }
+        async fn get_depth(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u16,
+        ) -> anyhow::Result<DepthSnapshot> {
+            unreachable!()
+        }
+        async fn resolve_for_new_order(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: i64,
+        ) -> anyhow::Result<MarketForPlacement> {
+            unreachable!()
+        }
+        async fn resolve_for_cancel(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u64,
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<OrderForCancel> {
+            unreachable!()
+        }
+        async fn resolve_for_cancel_batch(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: &[u64],
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<Option<CancelBatchResolution>> {
+            unreachable!()
+        }
+        async fn list_orders(&self, _: &OrdersQuery) -> anyhow::Result<OrdersPage> {
+            unreachable!()
+        }
+        async fn resolve_market_for_balances(
+            &self,
+            _: &MarketAddress,
+        ) -> anyhow::Result<MarketBalancesResolution> {
+            unreachable!()
+        }
+        async fn resolve_for_buy_full_set(
+            &self,
+            _: &MarketAddress,
+            _: i64,
+        ) -> anyhow::Result<MarketForBuyFullSet> {
+            self.resolution.clone().map_err(anyhow::Error::from)
+        }
+        async fn sum_open_sell_remaining(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<std::collections::HashMap<u32, String>> {
+            unreachable!()
+        }
+    }
+
+    struct BuyFullSetRefs {
+        token: Option<RefToken>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl ReferenceRepository for BuyFullSetRefs {
+        async fn lookup_ref_token(&self, _: u32) -> anyhow::Result<Option<RefToken>> {
+            if self.fail {
+                anyhow::bail!("gateway down")
+            }
+            Ok(self.token.clone())
+        }
+    }
+
+    struct BuyFullSetSender {
+        recorded: Mutex<Vec<SplitFullSetPayload>>,
+        fail_with: Option<DomainError>,
+    }
+
+    impl BuyFullSetSender {
+        fn ok() -> Self {
+            Self { recorded: Mutex::new(Vec::new()), fail_with: None }
+        }
+        fn failing(err: DomainError) -> Self {
+            Self { recorded: Mutex::new(Vec::new()), fail_with: Some(err) }
+        }
+        fn calls(&self) -> Vec<SplitFullSetPayload> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChainOrderSender for BuyFullSetSender {
+        async fn submit_order(&self, _: NewOrderPayload) -> Result<(), DomainError> {
+            unreachable!()
+        }
+        async fn cancel_order(&self, _: CancelOrderPayload) -> Result<(), DomainError> {
+            unreachable!()
+        }
+        async fn submit_batch_order(&self, _: NewBatchOrderPayload) -> Result<(), DomainError> {
+            unreachable!()
+        }
+        async fn cancel_batch_order(
+            &self,
+            _: CancelBatchOrderPayload,
+        ) -> Result<(), DomainError> {
+            unreachable!()
+        }
+        async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError> {
+            if let Some(err) = self.fail_with {
+                return Err(err);
+            }
+            self.recorded.lock().unwrap().push(payload);
+            Ok(())
+        }
+    }
+
+    fn ok_resolution(status: MarketStatus) -> MarketForBuyFullSet {
+        MarketForBuyFullSet {
+            event_id: "0xevent".into(),
+            oracle_list_hash: "0xdead".into(),
+            // token_type=3 matches the USDC entry in `usdc_refs` below
+            // (decimals=6), so the lifted collateral can be asserted to
+            // exact-decimal precision in the happy-path tests.
+            token_type: 3,
+            status,
+        }
+    }
+
+    fn usdc_refs() -> BuyFullSetRefs {
+        BuyFullSetRefs {
+            token: Some(RefToken { token_type: 3, token_code: "USDC".into(), decimals: 6 }),
+            fail: false,
+        }
+    }
+
+    fn input(collateral: &str) -> BuyFullSetInput {
+        BuyFullSetInput {
+            trading_pn: TradingPn {
+                pn_address: "0:pn".into(),
+                pn_pubkey: "1".into(),
+                pn_dih: "2".into(),
+                pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            },
+            market_address: MarketAddress("0:market".into()),
+            collateral: collateral.into(),
+            now_seconds: 1_000,
+            now_ms: 1_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn happy_path_on_trading_lifts_collateral_by_quote_decimals() {
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+
+        uc.execute(input("1.5")).await.expect("happy path");
+
+        let calls = sender.calls();
+        assert_eq!(calls.len(), 1);
+        let p = &calls[0];
+        assert_eq!(p.pn_address, "0:pn");
+        assert_eq!(p.pn_pubkey, "1");
+        assert_eq!(p.event_id, "0xevent");
+        assert_eq!(p.oracle_list_hash, "0xdead");
+        assert_eq!(p.token_type, 3);
+        // 1.5 lifted by USDC decimals=6 → 1_500_000 raw.
+        assert_eq!(p.collateral_raw, "1500000");
+    }
+
+    #[tokio::test]
+    async fn happy_path_on_awaiting_freeze_dispatches_too() {
+        // api-spec §Buy Full Set: AWAITING_FREEZE is explicitly allowed —
+        // first successful call activates the OrderBook for the market.
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::AwaitingFreeze)) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+
+        uc.execute(input("10")).await.expect("happy path AWAITING_FREEZE");
+        assert_eq!(sender.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_non_trading_non_awaiting_freeze_statuses() {
+        // Every other lifecycle phase from `MarketStatus` must collapse to
+        // OrderValidationFailed (-2010). Spell each out — a future status
+        // additive change should force this list to update before silently
+        // admitting collateral on a market that should reject.
+        for status in [
+            MarketStatus::Pending,
+            MarketStatus::Upcoming,
+            MarketStatus::Staking,
+            MarketStatus::Resolving,
+            MarketStatus::Resolved,
+            MarketStatus::Cancelled,
+            MarketStatus::Expired,
+        ] {
+            let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(status)) };
+            let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+            let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+            let err = uc.execute(input("10")).await.expect_err("non-trading rejected");
+            assert_eq!(err, DomainError::OrderValidationFailed, "status={status:?}");
+            assert!(sender.calls().is_empty(), "no dispatch on bad status={status:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_market() {
+        let repo = BuyFullSetRepo { resolution: Err(DomainError::InvalidMarketOrSymbol) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+        let err = uc.execute(input("10")).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidMarketOrSymbol);
+        assert!(sender.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_collateral_as_invalid_parameter() {
+        // Strictly-positive invariant — `lift_decimal("0", 6)` lifts to
+        // zero without erroring; the explicit `> 0` check is what catches
+        // it. Without it the chain would accept and refund, burning a
+        // PN-busy window for nothing.
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+        let err = uc.execute(input("0")).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        assert!(sender.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_over_precision_as_invalid_parameter() {
+        // api-spec table maps "exceeds quote-asset precision" to -1130
+        // (InvalidParameter), not -1111 (PrecisionExceeded). Pin the
+        // remap so a future refactor cannot drift back to -1111.
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+        // USDC decimals=6; 7 fractional digits exceeds precision.
+        let err = uc.execute(input("0.0000001")).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+    }
+
+    #[tokio::test]
+    async fn rejects_non_numeric_collateral_as_invalid_parameter() {
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+        let err = uc.execute(input("not-a-number")).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+    }
+
+    #[tokio::test]
+    async fn rejects_collateral_above_u64_max_as_invalid_parameter() {
+        // ackinacki-kit's `serde_json::json!(params)` panics on any
+        // `collateral: u128 > u64::MAX` (no arbitrary_precision feature
+        // upstream). Surface as -1130 before we hand off to the chain
+        // sender; reaching the sender would mean an at-rest user-facing
+        // panic instead of a typed error.
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+        // (u64::MAX + 1) at 6 decimals: 18446744073709551616 raw needs
+        // 18446744073709.551616 in human form. Add an extra prefix digit
+        // so the lifted value sits comfortably above the gate.
+        let err = uc.execute(input("99999999999999.999999")).await.unwrap_err();
+        assert_eq!(err, DomainError::InvalidParameter);
+        assert!(sender.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_quote_token_type_collapses_to_market_inconsistent() {
+        // `lookup_ref_token` returning None means the indexer-seeded
+        // canonical set does not cover this token_type — read-model
+        // corruption, 503.
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let refs = BuyFullSetRefs { token: None, fail: false };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, refs, sender.clone());
+        let err = uc.execute(input("10")).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+        assert!(sender.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ref_repo_failure_collapses_to_unexpected() {
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let refs = BuyFullSetRefs { token: None, fail: true };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, refs, sender.clone());
+        let err = uc.execute(input("10")).await.unwrap_err();
+        assert_eq!(err, DomainError::Unexpected);
+    }
+
+    #[tokio::test]
+    async fn empty_oracle_list_hash_collapses_to_market_inconsistent() {
+        let mut res = ok_resolution(MarketStatus::Trading);
+        res.oracle_list_hash = String::new();
+        let repo = BuyFullSetRepo { resolution: Ok(res) };
+        let sender = std::sync::Arc::new(BuyFullSetSender::ok());
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender.clone());
+        let err = uc.execute(input("10")).await.unwrap_err();
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[tokio::test]
+    async fn chain_err_low_value_propagates_as_validation_failed() {
+        // PN-side `ERR_LOW_VALUE` (102) on splitFullSet (insufficient
+        // free quote-asset balance for the requested collateral) is
+        // mapped by the infra `map_tvm_exit_code` to
+        // `OrderValidationFailed`; verify the use case forwards the
+        // sender error verbatim without remapping.
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let sender = BuyFullSetSender::failing(DomainError::OrderValidationFailed);
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender);
+        let err = uc.execute(input("10")).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderValidationFailed);
+    }
+
+    #[tokio::test]
+    async fn chain_err_note_busy_propagates_as_pn_busy() {
+        let repo = BuyFullSetRepo { resolution: Ok(ok_resolution(MarketStatus::Trading)) };
+        let sender = BuyFullSetSender::failing(DomainError::OrderPnBusy);
+        let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender);
+        let err = uc.execute(input("10")).await.unwrap_err();
+        assert_eq!(err, DomainError::OrderPnBusy);
     }
 }
