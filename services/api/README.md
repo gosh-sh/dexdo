@@ -1,6 +1,6 @@
 # dodex-api
 
-HTTP service for the DODEX REST API. It serves the read side of the system from
+HTTP service for the DEX.DO REST API. It serves the read side of the system from
 Postgres and hosts authenticated private API routes.
 
 ## Specifications

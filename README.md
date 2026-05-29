@@ -1,11 +1,11 @@
-# DODEX
+# DEX.DO
 
-Backend for DODEX — a decentralized exchange on the Acki Nacki chain. Two Rust services share a Postgres read-model:
+Backend for DEX.DO — a decentralized exchange on the Acki Nacki chain. Two Rust services share a Postgres read-model:
 
 - `services/api` — HTTP service serving the public REST API.
 - `services/indexer` — chain-event ingestor that builds the Postgres read-model.
 
-On-chain DODEX contracts live under `contracts/`.
+On-chain DEX.DO contracts live under `contracts/`.
 
 ## Documentation
 
@@ -24,7 +24,7 @@ crates/
 services/
   api/               # REST API service
   indexer/           # chain-event indexer
-contracts/           # on-chain DODEX contracts (TVM)
+contracts/           # on-chain DEX.DO contracts (TVM)
 sdk/                 # dodex-sdk: write-side DEX facade + halo2 voucher pipeline
                      # (separate workspace, excluded from the root build)
 docs/                # specs and plans (see docs/README.md)
