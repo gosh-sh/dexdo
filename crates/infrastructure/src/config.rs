@@ -121,6 +121,8 @@ pub struct ChainSection {
     pub place_batch_timeout_ms: u64,
     #[serde(default = "default_cancel_batch_timeout_ms")]
     pub cancel_batch_timeout_ms: u64,
+    #[serde(default = "default_split_full_set_timeout_ms")]
+    pub split_full_set_timeout_ms: u64,
 }
 
 /// 30 s — comfortable budget given typical chain round-trip is 1-3 s.
@@ -154,6 +156,16 @@ fn default_place_batch_timeout_ms() -> u64 {
 /// (one external message, `_pendingBatchActive` held until
 /// `onBatchComplete` returns), so the synchronous wait is comparable.
 fn default_cancel_batch_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Same 30 s budget. `PrivateNote.splitFullSet` shares the same
+/// busy-window profile (one external message, `_busy` cleared by the
+/// asynchronous `onSplitAccepted` callback) — the synchronous chain
+/// return from the kit awaits only `splitFullSet`'s own execution, not
+/// the callback, so the timeout bounds the same network round-trip as
+/// placement.
+fn default_split_full_set_timeout_ms() -> u64 {
     30_000
 }
 
@@ -262,6 +274,12 @@ impl ApiConfig {
             self.server.request_timeout_ms,
             self.chain.cancel_batch_timeout_ms,
         );
+        anyhow::ensure!(
+            self.server.request_timeout_ms > self.chain.split_full_set_timeout_ms,
+            "server.request_timeout_ms ({}) must exceed chain.split_full_set_timeout_ms ({})",
+            self.server.request_timeout_ms,
+            self.chain.split_full_set_timeout_ms,
+        );
         // The HTTP request_timeout hoop must also outlast each GraphQL
         // read — the PN BOC fetch for /account and /account/balances runs
         // inside the request budget. A graphql.request_timeout_ms that
@@ -300,6 +318,10 @@ impl ChainSection {
         anyhow::ensure!(
             self.cancel_batch_timeout_ms > 0,
             "chain.cancel_batch_timeout_ms must be > 0"
+        );
+        anyhow::ensure!(
+            self.split_full_set_timeout_ms > 0,
+            "chain.split_full_set_timeout_ms must be > 0"
         );
         Ok(())
     }
@@ -861,6 +883,7 @@ chain:
   cancel_order_timeout_ms: 15000
   place_batch_timeout_ms: 15000
   cancel_batch_timeout_ms: 15000
+  split_full_set_timeout_ms: 15000
 graphql:
   endpoint: https://graphql.example.invalid
   page_size: 100
@@ -873,6 +896,7 @@ graphql:
         assert_eq!(cfg.chain.cancel_order_timeout_ms, 15_000);
         assert_eq!(cfg.chain.place_batch_timeout_ms, 15_000);
         assert_eq!(cfg.chain.cancel_batch_timeout_ms, 15_000);
+        assert_eq!(cfg.chain.split_full_set_timeout_ms, 15_000);
         cfg.validate().unwrap();
     }
 
@@ -899,6 +923,7 @@ graphql:
         assert_eq!(cfg.chain.cancel_order_timeout_ms, 30_000);
         assert_eq!(cfg.chain.place_batch_timeout_ms, 30_000);
         assert_eq!(cfg.chain.cancel_batch_timeout_ms, 30_000);
+        assert_eq!(cfg.chain.split_full_set_timeout_ms, 30_000);
     }
 
     #[test]
@@ -1104,6 +1129,7 @@ chain:
   cancel_order_timeout_ms: 1000
   place_batch_timeout_ms: 1000
   cancel_batch_timeout_ms: 5000
+  split_full_set_timeout_ms: 1000
 graphql:
   endpoint: https://graphql.example.invalid
   page_size: 100
@@ -1112,6 +1138,64 @@ graphql:
         );
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
         cfg.validate().expect("1 ms above cancel_batch_timeout must validate");
+    }
+
+    #[test]
+    fn api_validate_rejects_zero_split_full_set_timeout() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 4000
+  cancel_order_timeout_ms: 4000
+  place_batch_timeout_ms: 4000
+  cancel_batch_timeout_ms: 4000
+  split_full_set_timeout_ms: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 4000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("split_full_set_timeout_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn api_validate_rejects_request_timeout_not_exceeding_split_full_set_timeout() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 5000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  place_order_timeout_ms: 1000
+  cancel_order_timeout_ms: 1000
+  place_batch_timeout_ms: 1000
+  cancel_batch_timeout_ms: 1000
+  split_full_set_timeout_ms: 5000
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 4000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_ms"), "got: {msg}");
+        assert!(msg.contains("split_full_set_timeout_ms"), "got: {msg}");
     }
 
     #[test]

@@ -8,6 +8,12 @@ All notable changes to DODEX are recorded here. Entries are date-based, newest f
 
 - `sdk/`: new `dodex-sdk` crate — the write-side DEX facade over `ackinacki-kit` (private notes, order book, PMP, oracle/market) plus the halo2 voucher proof pipeline. Kept as its own workspace and `exclude`d from the root build, since the halo2 pipeline pulls private SSH-only git sources that CI hosts have no key for; build it directly from `sdk/`.
 
+## [2026-05-28]
+
+### Added
+
+- `POST /api/v1/buyFullSet`: trader-facing endpoint backing the chain `PrivateNote.splitFullSet`. Permitted on `AWAITING_FREEZE` (first successful call activates the OrderBook) and `TRADING`. New `BuyFullSetUseCase`, `chain.split_full_set_timeout_ms` config, and `docs/tech-specs/write-api.md` section. `crates/chain` promotes `Dex::split_full_set` out of `test-helpers` into the prod path.
+
 ## [2026-05-27]
 
 ### Added

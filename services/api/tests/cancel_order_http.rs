@@ -153,6 +153,14 @@ impl MarketReadRepository for FakeRepo {
         unimplemented!("resolve_market_for_balances is not exercised by cancel_order_http tests")
     }
 
+    async fn resolve_for_buy_full_set(
+        &self,
+        _: &MarketAddress,
+        _: i64,
+    ) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
+        unimplemented!("resolve_for_buy_full_set is not exercised by cancel_order_http tests")
+    }
+
     async fn sum_open_sell_remaining(
         &self,
         _: &str,
@@ -210,6 +218,13 @@ impl ChainOrderSender for RecordingCancelSender {
         _: dodex_application::CancelBatchOrderPayload,
     ) -> Result<(), DomainError> {
         unreachable!("RecordingCancelSender::cancel_batch_order called from DELETE /order test")
+    }
+
+    async fn split_full_set(
+        &self,
+        _: dodex_application::SplitFullSetPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("RecordingCancelSender::split_full_set called from order/batch test")
     }
 }
 

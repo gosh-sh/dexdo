@@ -19,6 +19,7 @@ use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
+use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use async_trait::async_trait;
@@ -28,6 +29,7 @@ use dodex_application::CancelOrderPayload;
 use dodex_application::ChainOrderSender;
 use dodex_application::NewBatchOrderPayload;
 use dodex_application::NewOrderPayload;
+use dodex_application::SplitFullSetPayload;
 use dodex_chain::ChainError;
 use dodex_chain::Dex;
 use dodex_domain::DomainError;
@@ -46,6 +48,7 @@ pub struct DexChainSender {
     cancel_order_timeout: Duration,
     place_batch_timeout: Duration,
     cancel_batch_timeout: Duration,
+    split_full_set_timeout: Duration,
 }
 
 impl DexChainSender {
@@ -67,6 +70,7 @@ impl DexChainSender {
         cancel_order_timeout: Duration,
         place_batch_timeout: Duration,
         cancel_batch_timeout: Duration,
+        split_full_set_timeout: Duration,
     ) -> anyhow::Result<Self> {
         let dex = Dex::from_endpoints(endpoints)
             .map_err(|err| anyhow::anyhow!("Dex::from_endpoints failed: {err:?}"))?;
@@ -76,6 +80,7 @@ impl DexChainSender {
             cancel_order_timeout,
             place_batch_timeout,
             cancel_batch_timeout,
+            split_full_set_timeout,
         })
     }
 }
@@ -301,6 +306,63 @@ impl ChainOrderSender for DexChainSender {
         };
         classify_chain_outcome(outcome, self.cancel_batch_timeout.as_millis() as u64, &ctx)
     }
+
+    async fn split_full_set(&self, payload: SplitFullSetPayload) -> Result<(), DomainError> {
+        let signer = build_signer(&payload.pn_pubkey, &payload.pn_seckey)?;
+
+        // Move correlation fields out before the parse so its error log
+        // can carry them — without `pn`/`event_id`/`token_type` an
+        // unmapped collateral payload is unactionable in ops triage.
+        let pn_address = payload.pn_address;
+        let event_id = payload.event_id;
+        let token_type = payload.token_type;
+        let oracle_list_hash = payload.oracle_list_hash;
+
+        // Defence-in-depth: the application layer caps `collateral_raw`
+        // at the u64 ceiling already; reaching the error arm means that
+        // gate was bypassed.
+        let collateral = payload.collateral_raw.parse::<u128>().map_err(|err| {
+            error!(
+                ?err,
+                raw = %payload.collateral_raw,
+                pn = %pn_address,
+                event_id = %event_id,
+                token_type,
+                "collateral_raw is not uint128",
+            );
+            DomainError::Unexpected
+        })?;
+
+        let params = ParamsOfSplitFullSet {
+            event_id: event_id.clone(),
+            oracle_list_hash,
+            token_type,
+            collateral,
+        };
+
+        debug!(
+            pn = %pn_address,
+            event_id = %params.event_id,
+            oracle_list_hash = %params.oracle_list_hash,
+            token_type = params.token_type,
+            collateral = params.collateral,
+            "split_full_set params",
+        );
+
+        let call = self.dex.split_full_set(&pn_address, params, signer);
+        let outcome = timeout(self.split_full_set_timeout, call).await;
+        let ctx = ChainCallContext {
+            entry_point: "split_full_set",
+            pn: &pn_address,
+            event_id: &event_id,
+            // splitFullSet is a market-level op, not an order op;
+            // `order_count` has no meaning for it. Carry `1` so the
+            // unified audit shape stays consistent with the other
+            // single-call entry points.
+            order_count: 1,
+        };
+        classify_chain_outcome(outcome, self.split_full_set_timeout.as_millis() as u64, &ctx)
+    }
 }
 
 /// Translate one application-layer `BatchOrderPayloadItem` into the
@@ -416,7 +478,8 @@ fn classify_chain_outcome<T>(
             // (`chain.place_order_timeout_ms`,
             // `chain.cancel_order_timeout_ms`,
             // `chain.place_batch_timeout_ms`,
-            // `chain.cancel_batch_timeout_ms`). Most often a
+            // `chain.cancel_batch_timeout_ms`,
+            // `chain.split_full_set_timeout_ms`). Most often a
             // network partition or a gateway-side deadlock. Surface as
             // `RequestTimeout` (504 / -1007) so the client receives the
             // same "retry with the same id" contract as the HTTP
@@ -505,9 +568,9 @@ fn map_chain_error(err: &ChainError, ctx: &ChainCallContext<'_>) -> DomainError 
 }
 
 /// `PrivateNote` exit codes from `contracts/modifiers/errors.sol`,
-/// shared across the four entry points (`placeOrder`, `cancelOrder`,
-/// `placeBatch`, `cancelBatch`) the wrapper dispatches — the
-/// originating entry point is carried in `ChainCallContext.entry_point`
+/// shared across the five entry points (`placeOrder`, `cancelOrder`,
+/// `placeBatch`, `cancelBatch`, `splitFullSet`) the wrapper dispatches —
+/// the originating entry point is carried in `ChainCallContext.entry_point`
 /// for the unmapped-code log site. Only codes the trading path can
 /// plausibly raise are mapped; everything else returns `None` so
 /// `map_chain_error` can fall through to `Unexpected` (and log the
@@ -815,6 +878,7 @@ mod tests {
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
         )
         .expect("DexChainSender::new");
 
@@ -849,6 +913,7 @@ mod tests {
         // itself, not by this test.
         let sender = DexChainSender::new(
             vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
             std::time::Duration::from_millis(100),
@@ -895,6 +960,77 @@ mod tests {
             client_order_id: "42".into(),
         };
         let err = encode_batch_item(item, 0).expect_err("amount > u128::MAX must fail closed");
+        assert_eq!(err, DomainError::Unexpected);
+    }
+
+    #[tokio::test]
+    async fn split_full_set_malformed_pn_pubkey_surfaces_as_market_inconsistent() {
+        // Sibling of the placeOrder/cancelBatch malformed-pubkey tests
+        // for the `split_full_set` entry. Pins `build_signer`'s
+        // fail-closed shape — a future refactor that propagated decode
+        // failure as `Unexpected` would leak 500 to the caller.
+        let sender = DexChainSender::new(
+            vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+        )
+        .expect("DexChainSender::new");
+
+        let payload = SplitFullSetPayload {
+            pn_address: "0:pn".into(),
+            pn_pubkey: "not-a-decimal".into(),
+            pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            event_id: "1".into(),
+            oracle_list_hash: "1".into(),
+            token_type: 3,
+            collateral_raw: "1000000".into(),
+        };
+
+        let err = sender.split_full_set(payload).await.expect_err("decode must fail closed");
+        assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[tokio::test]
+    async fn split_full_set_collateral_above_u128_surfaces_as_unexpected() {
+        // Defence-in-depth pin: `BuyFullSetUseCase` caps `collateral_raw`
+        // at `u64::MAX` today, so this parse only sees values that fit
+        // in u128 trivially. If the upstream gate is ever relaxed, this
+        // guard is the last thing between a wider integer and a panic
+        // on the chain payload. Pin both the rejection
+        // (`DomainError::Unexpected`) and the field that trips it
+        // (`collateral_raw`) so a future refactor that drops the guard
+        // cannot regress silently. Uses a real `pn_pubkey` so the
+        // signer build does not short-circuit before the parse runs.
+        let sender = DexChainSender::new(
+            vec!["http://invalid.example.test".to_string()],
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+        )
+        .expect("DexChainSender::new");
+
+        let payload = SplitFullSetPayload {
+            pn_address: "0:pn".into(),
+            // Decimal uint256 — valid for `decimal_uint256_to_hex`, so
+            // `build_signer` passes and the parse arm gets exercised.
+            pn_pubkey: "1".into(),
+            pn_seckey: SensitiveBytes::new(vec![0u8; 32]),
+            event_id: "1".into(),
+            oracle_list_hash: "1".into(),
+            token_type: 3,
+            // u128::MAX + 1 — the smallest value the u128 parse must reject.
+            collateral_raw: "340282366920938463463374607431768211456".into(),
+        };
+
+        let err = sender
+            .split_full_set(payload)
+            .await
+            .expect_err("collateral > u128::MAX must fail closed");
         assert_eq!(err, DomainError::Unexpected);
     }
 

@@ -8,7 +8,7 @@ Postgres and hosts authenticated private API routes.
 - Functional REST requirements: [docs/api-spec.md](../../docs/api-spec.md).
 - Authentication implementation: [docs/tech-specs/auth.md](../../docs/tech-specs/auth.md).
 - Read API implementation (all `GET` endpoints): [docs/tech-specs/read-api.md](../../docs/tech-specs/read-api.md).
-- Write API implementation (order placement / cancellation / batching): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md). Covers `POST /api/v1/order`, `DELETE /api/v1/order`, `POST /api/v1/batchOrders`, and `DELETE /api/v1/batchOrders` today; `DELETE /api/v1/openOrders` is a stub section inside that doc.
+- Write API implementation (order placement / cancellation / batching / position writes): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md). Covers `POST /api/v1/order`, `DELETE /api/v1/order`, `POST /api/v1/batchOrders`, `DELETE /api/v1/batchOrders`, and `POST /api/v1/buyFullSet` today; `DELETE /api/v1/openOrders` is a stub section inside that doc.
 - Data schema: [docs/tech-specs/data-schema.md](../../docs/tech-specs/data-schema.md).
 
 Implementation details belong in the tech specs above, not in this README.
@@ -26,10 +26,10 @@ Config sections:
 - `auth`: HMAC recvWindow limits and local seed-account toggle.
 - `chain`: Acki Nacki gateway endpoint (`gateway_endpoint`) the trading
   path POSTs external messages to, plus `place_order_timeout_ms`,
-  `cancel_order_timeout_ms`, `place_batch_timeout_ms`, and
-  `cancel_batch_timeout_ms` bounding the per-call wait for each chain
-  entry point. Local config defaults to `shellnet.ackinacki.org`;
-  stage/prod ship their own.
+  `cancel_order_timeout_ms`, `place_batch_timeout_ms`,
+  `cancel_batch_timeout_ms`, and `split_full_set_timeout_ms` bounding
+  the per-call wait for each chain entry point. Local config defaults
+  to `shellnet.ackinacki.org`; stage/prod ship their own.
 - `graphql`: gateway URL for on-demand PrivateNote BOC reads. `endpoint`
   (HTTP URL) and `request_timeout_ms` (per-request budget for BOC fetch).
   `page_size` defaults to 100 and may be omitted; it is used by the

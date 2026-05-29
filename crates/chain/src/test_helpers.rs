@@ -1,11 +1,13 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
-// Deploy + setup methods — only compiled when the `test-helpers`
-// feature is enabled. Used by:
+// Methods compiled only with the `test-helpers` feature — deploy +
+// setup entry points plus the read-only PN getters used by e2e tests
+// to verify on-chain state. Used by:
 //
 //   * the api crate's e2e integration tests, which spawn an
 //     ephemeral PMP + OrderBook per run before exercising the
-//     trader write-path;
+//     trader write-path, and poll PN getters to assert on-chain
+//     effects;
 //   * `market-manager`, the staging tool that deploys real markets
 //     on shellnet.
 //
@@ -23,8 +25,9 @@ use ackinacki_kit::contracts::dex::pmp::Pmp;
 use ackinacki_kit::contracts::dex::pmp::ResultOfGetDetails as PmpKitDetails;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
 use ackinacki_kit::contracts::dex::private_note::PrivateNote;
+use ackinacki_kit::contracts::dex::private_note::ResultOfGetDetails as PnDetails;
+use ackinacki_kit::contracts::dex::private_note::ResultOfGetStakes as PnStakesRaw;
 use ackinacki_kit::contracts::dex::root_oracle::ParamsOfDeployOracle;
 use ackinacki_kit::contracts::dex::root_oracle::ParamsOfGetOracleAddress;
 use ackinacki_kit::contracts::dex::root_oracle::RootOracle;
@@ -71,16 +74,26 @@ impl Dex {
             .map_err(Into::into)
     }
 
-    pub async fn split_full_set(
-        &self,
-        pn_address: &str,
-        params: ParamsOfSplitFullSet,
-        signer: Signer,
-    ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
-            .split_full_set(params, signer)
-            .await
-            .map_err(Into::into)
+    /// Read-only `PrivateNote.getDetails` accessor. Surfaces
+    /// `_balance[tokenType]`, `_busy.busyAddress`, and a handful of
+    /// other public PN fields without touching the read-model. The
+    /// production API reads PN state via the GraphQL-backed
+    /// `pn_state_reader`; this direct accessor exists so e2e tests can
+    /// verify on-chain balance moves after `splitFullSet` and poll the
+    /// `_busy` window between submission and the `onSplitAccepted`
+    /// callback without standing up the GraphQL gateway.
+    pub async fn get_private_note_details(&self, pn_address: &str) -> ChainResult<PnDetails> {
+        PrivateNote::new(self.ctx.clone(), pn_address).get_details().await.map_err(Into::into)
+    }
+
+    /// Read-only `PrivateNote._stakes` accessor. Returns the raw
+    /// `HashMap<String, Value>` keyed by `tvm.hash(eventId,
+    /// oracleListHash, tokenType)` (0x-prefixed lowercase hex). Each
+    /// value carries the StakeInfo tuple — `amount`, `debtAmount`,
+    /// `couponsAmount` plus bookkeeping fields. Sibling of
+    /// `get_private_note_details`, scoped to the same e2e niche.
+    pub async fn get_private_note_stakes(&self, pn_address: &str) -> ChainResult<PnStakesRaw> {
+        PrivateNote::new(self.ctx.clone(), pn_address).get_stakes().await.map_err(Into::into)
     }
 
     // ── PMP (oracle-signed ops + getters) ────────────────────────────

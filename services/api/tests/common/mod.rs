@@ -173,6 +173,13 @@ impl ChainOrderSender for NoopChainSender {
     ) -> Result<(), DomainError> {
         Ok(())
     }
+
+    async fn split_full_set(
+        &self,
+        _: dodex_application::SplitFullSetPayload,
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
 }
 
 /// In-memory PnStateReader for HTTP tests. Each handler test that

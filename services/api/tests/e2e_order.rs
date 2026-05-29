@@ -105,6 +105,7 @@ async fn buy_limit_gtc_against_shellnet() {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
+            Duration::from_secs(30),
         )
         .expect("DexChainSender::new"),
     );

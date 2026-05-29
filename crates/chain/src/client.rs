@@ -1,7 +1,8 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Production trader-path methods. Each one constructs the relevant
-// kit contract handle on demand and forwards. Deploy/setup methods
+// kit contract handle on demand and forwards. Deploy/setup helpers and
+// extra read-only getters used only by e2e tests and `market-manager`
 // live in `test_helpers.rs` behind the `test-helpers` feature so the
 // prod build does not carry them.
 
@@ -14,6 +15,7 @@ use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
+use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
 use ackinacki_kit::contracts::dex::private_note::PrivateNote;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
@@ -95,6 +97,24 @@ impl Dex {
     ) -> ChainResult<ResultOfSendMessage> {
         PrivateNote::new(self.ctx.clone(), pn_address)
             .cancel_batch(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Buy a full set of outcome tokens by depositing `collateral` of
+    /// the market's quote asset into the PMP. On a market sitting in
+    /// `AWAITING_FREEZE`, the first successful call also activates the
+    /// OrderBook — same chain entry point as the staging market-manager
+    /// uses to seed initial MM liquidity, but signed by the caller's
+    /// trading PN. See `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet`.
+    pub async fn split_full_set(
+        &self,
+        pn_address: &str,
+        params: ParamsOfSplitFullSet,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), pn_address)
+            .split_full_set(params, signer)
             .await
             .map_err(Into::into)
     }

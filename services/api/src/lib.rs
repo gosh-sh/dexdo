@@ -16,6 +16,8 @@ use anyhow::Context;
 use dodex_application::AuthContext;
 use dodex_application::Authenticator;
 use dodex_application::BatchOrderInputItem;
+use dodex_application::BuyFullSetInput;
+use dodex_application::BuyFullSetUseCase;
 use dodex_application::CancelBatchOrdersInput;
 use dodex_application::CancelBatchOrdersUseCase;
 use dodex_application::CancelOrderInput;
@@ -906,10 +908,14 @@ struct CancelBatchOrdersRequest {
 // expects `Into<AdditionalProperties<Schema>>`, so the derive fails
 // to compile. We keep `deny_unknown_fields` (a strict-input contract
 // pinned by `unknown_field_in_body_returns_400_minus_1130`) and
-// reproduce here what the derive would have generated for the other
-// batch DTOs: camelCase property names, Optional fields → no
-// `required(...)`, and an explicit `additionalProperties: false` so
-// the OpenAPI consumer sees the same strict signal as the runtime.
+// reproduce here what the derive would have generated: camelCase
+// property names and an explicit `additionalProperties: false` so the
+// OpenAPI consumer sees the same strict signal as the runtime. All
+// three fields are marked required: the `Option<_>` only exists so a
+// missing field surfaces as a typed `MissingParameter` via the
+// `non_empty(...).ok_or(...)` chain in
+// `build_cancel_batch_orders_input`, not because the contract treats
+// any field as optional.
 impl ToSchema for CancelBatchOrdersRequest {
     fn to_schema(_components: &mut Components) -> salvo_oapi::RefOr<salvo_oapi::schema::Schema> {
         use salvo_oapi::schema::AdditionalProperties;
@@ -920,6 +926,9 @@ impl ToSchema for CancelBatchOrdersRequest {
             .property("marketAddress", Object::new().schema_type(BasicType::String))
             .property("symbol", Object::new().schema_type(BasicType::String))
             .property("orderIds", Array::new().items(Object::new().schema_type(BasicType::String)))
+            .required("marketAddress")
+            .required("symbol")
+            .required("orderIds")
             .additional_properties(AdditionalProperties::FreeForm(false))
             .into()
     }
@@ -936,6 +945,58 @@ struct CancelBatchOrderResponseItem {
     client_order_id: String,
     transact_time: i64,
     status: &'static str,
+}
+
+/// Request body for `POST /api/v1/buyFullSet`. Field names match
+/// docs/api-spec.md §Buy Full Set verbatim. `deny_unknown_fields` is
+/// strict on this destructive write surface — same rationale as
+/// `CancelBatchOrdersRequest`: a typo like `marketAddres` would
+/// otherwise silently deserialise as `market_address = None` and
+/// surface as MissingParameter, masking the real bug; -1130 with
+/// `unknown field` is the actionable signal.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BuyFullSetRequest {
+    market_address: Option<String>,
+    collateral: Option<String>,
+}
+
+// Manual `ToSchema` impl: `#[derive(ToSchema)]` is incompatible with
+// `#[serde(deny_unknown_fields)]` in salvo-oapi-macros 0.74.3 — same
+// reason as `CancelBatchOrdersRequest` above.
+//
+// Both fields are marked required even though the Rust struct uses
+// `Option<String>`: the `Option` only exists so a missing field
+// surfaces as a typed `MissingParameter` (-1102) via the
+// `non_empty(...).ok_or(...)` chain in the handler, not because the
+// API contract treats either field as optional. The schema reflects
+// the runtime contract so codegen'd clients get an actionable
+// signal.
+impl ToSchema for BuyFullSetRequest {
+    fn to_schema(_components: &mut Components) -> salvo_oapi::RefOr<salvo_oapi::schema::Schema> {
+        use salvo_oapi::schema::AdditionalProperties;
+        use salvo_oapi::BasicType;
+        use salvo_oapi::Object;
+        Object::new()
+            .property("marketAddress", Object::new().schema_type(BasicType::String))
+            .property("collateral", Object::new().schema_type(BasicType::String))
+            .required("marketAddress")
+            .required("collateral")
+            .additional_properties(AdditionalProperties::FreeForm(false))
+            .into()
+    }
+}
+
+// Minimal acceptance envelope per docs/api-spec.md §Buy Full Set: the
+// resulting collateral debit and outcome-token credits become visible
+// through `GET /api/v1/account` and `GET /api/v1/account/balances`
+// once the chain confirms, so the synchronous response carries only
+// the echoed identifier plus the moment we accepted.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct BuyFullSetResponse {
+    market_address: String,
+    transact_time: i64,
 }
 
 /// Read the authenticated identity from the depot and enforce the
@@ -1427,6 +1488,57 @@ fn build_cancel_batch_orders_input(
     })
 }
 
+// Auth hoop verified the request; this handler enforces `TRADE`,
+// hands the parsed body off to the use case, and shapes the minimal
+// two-field acceptance envelope. The chain-side outcome (collateral
+// debit, outcome-token credits) surfaces later through
+// `GET /api/v1/account` / `/api/v1/account/balances`.
+#[endpoint(
+    tags("positions"),
+    summary = "Buy a full set of outcome tokens",
+    parameters(
+        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
+    ),
+    request_body = BuyFullSetRequest,
+    security(("apiKey" = [])),
+)]
+async fn buy_full_set(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<BuyFullSetResponse>, ApiError> {
+    let ctx = require_auth(depot, Permission::Trade)?.clone();
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let body: BuyFullSetRequest = parse_strict_body(req, "POST /api/v1/buyFullSet").await?;
+
+    let market_address =
+        non_empty(body.market_address).ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let collateral =
+        non_empty(body.collateral).ok_or(ApiError::from(DomainError::MissingParameter))?;
+
+    let (now_seconds, now_ms) = now_pair();
+    let input = BuyFullSetInput {
+        trading_pn: ctx.trading_pn,
+        market_address: MarketAddress(market_address.clone()),
+        collateral,
+        now_seconds,
+    };
+
+    let use_case = BuyFullSetUseCase::new(state.repo, state.ref_repo, state.chain_sender);
+    use_case.execute(input).await.map_err(ApiError::from)?;
+
+    Ok(Json(BuyFullSetResponse { market_address, transact_time: now_ms }))
+}
+
 /// Account balances aggregated across all markets the authenticated PN holds.
 #[endpoint(
     tags("account"),
@@ -1588,7 +1700,8 @@ pub fn build_router(state: AppState) -> Router {
                         .delete(delete_batch_orders),
                 )
                 .push(Router::with_path("api/v1/account").get(get_account))
-                .push(Router::with_path("api/v1/account/balances").get(get_account_balances)),
+                .push(Router::with_path("api/v1/account/balances").get(get_account_balances))
+                .push(Router::with_path("api/v1/buyFullSet").post(buy_full_set)),
         )
 }
 
@@ -1615,7 +1728,8 @@ pub fn openapi_doc() -> OpenApi {
                 .delete(delete_batch_orders),
         )
         .push(Router::with_path("api/v1/account").get(get_account))
-        .push(Router::with_path("api/v1/account/balances").get(get_account_balances));
+        .push(Router::with_path("api/v1/account/balances").get(get_account_balances))
+        .push(Router::with_path("api/v1/buyFullSet").post(buy_full_set));
 
     OpenApi::new("Dodex REST API", env!("CARGO_PKG_VERSION"))
         .info(
@@ -1674,6 +1788,7 @@ pub async fn run() -> anyhow::Result<()> {
         Duration::from_millis(config.chain.cancel_order_timeout_ms),
         Duration::from_millis(config.chain.place_batch_timeout_ms),
         Duration::from_millis(config.chain.cancel_batch_timeout_ms),
+        Duration::from_millis(config.chain.split_full_set_timeout_ms),
     )?);
     let graphql = Arc::new(dodex_infrastructure::graphql::GraphqlClient::new(
         config.graphql.endpoint.clone(),

@@ -303,6 +303,16 @@ impl MarketReadRepository for FakeRepo {
         )
     }
 
+    async fn resolve_for_buy_full_set(
+        &self,
+        _: &MarketAddress,
+        _: i64,
+    ) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
+        unimplemented!(
+            "resolve_for_buy_full_set is not exercised by cancel_batch_orders_http tests"
+        )
+    }
+
     async fn sum_open_sell_remaining(
         &self,
         _: &str,
@@ -364,6 +374,13 @@ impl ChainOrderSender for RecordingCancelBatchSender {
         }
         self.recorded.lock().unwrap().push(payload);
         Ok(())
+    }
+
+    async fn split_full_set(
+        &self,
+        _: dodex_application::SplitFullSetPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("RecordingCancelBatchSender::split_full_set called from order/batch test")
     }
 }
 
@@ -1281,6 +1298,13 @@ impl ChainOrderSender for SlowCancelBatchSender {
         // test caps it at 50 ms so wall-clock stays in the tens of ms.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         Ok(())
+    }
+
+    async fn split_full_set(
+        &self,
+        _: dodex_application::SplitFullSetPayload,
+    ) -> Result<(), DomainError> {
+        unreachable!("SlowCancelBatchSender::split_full_set called from order/batch test")
     }
 }
 

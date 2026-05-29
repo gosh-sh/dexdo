@@ -1058,6 +1058,44 @@ impl MarketReadRepository for PostgresReadModelRepository {
         })
     }
 
+    async fn resolve_for_buy_full_set(
+        &self,
+        market_address: &MarketAddress,
+        now: i64,
+    ) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
+        // splitFullSet is a market-level chain op (collateral → one
+        // outcome token of every outcome), so no `market_outcomes` join
+        // is needed. Single SELECT, same visibility gate as the other
+        // trading-path resolvers (`last_reconciled_at IS NOT NULL`),
+        // same timing columns feeding `compute_status` so the use case
+        // can gate `AWAITING_FREEZE | TRADING` from one round-trip.
+        let row: Option<BuyFullSetRow> = sqlx::query_as(
+            r#"select event_id::text         as event_id,
+                      oracle_list_hash::text as oracle_list_hash,
+                      token_type             as token_type,
+                      stake_start            as stake_start,
+                      stake_end              as stake_end,
+                      result_start           as result_start,
+                      result_end             as result_end,
+                      frozen_at              as frozen_at,
+                      resolved_at            as resolved_at,
+                      cancelled_at           as cancelled_at,
+                      is_cancelled           as is_cancelled
+                 from markets
+                where pmp_address = $1
+                  and last_reconciled_at is not null"#,
+        )
+        .bind(market_address.0.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("resolve_for_buy_full_set: select markets")?;
+
+        let Some(row) = row else {
+            return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
+        };
+        project_buy_full_set_row(row, market_address, now)
+    }
+
     async fn sum_open_sell_remaining(
         &self,
         orderbook_address: &str,
@@ -1110,6 +1148,83 @@ struct PlacementRow {
     step_size: String,
     min_notional: String,
     max_batch_size: i32,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct BuyFullSetRow {
+    event_id: String,
+    oracle_list_hash: Option<String>,
+    token_type: i32,
+    stake_start: Option<i64>,
+    stake_end: Option<i64>,
+    result_start: Option<i64>,
+    result_end: Option<i64>,
+    frozen_at: Option<i64>,
+    resolved_at: Option<i64>,
+    cancelled_at: Option<i64>,
+    is_cancelled: bool,
+}
+
+fn project_buy_full_set_row(
+    row: BuyFullSetRow,
+    market_address: &MarketAddress,
+    now: i64,
+) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
+    let status = compute_status(
+        row.cancelled_at,
+        row.is_cancelled,
+        row.resolved_at,
+        row.stake_start,
+        row.stake_end,
+        row.result_start,
+        row.result_end,
+        row.frozen_at,
+        now,
+    );
+
+    let oracle_list_hash = match row.oracle_list_hash {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                warn!(
+                    pmp_address = %market_address.0,
+                    "resolve_for_buy_full_set: oracle_list_hash blank on reconciled row",
+                );
+                return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+            }
+            trimmed.to_string()
+        }
+        None => {
+            warn!(
+                pmp_address = %market_address.0,
+                "resolve_for_buy_full_set: oracle_list_hash NULL on reconciled row",
+            );
+            return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+        }
+    };
+
+    let event_id = {
+        let trimmed = row.event_id.trim();
+        if trimmed.is_empty() {
+            warn!(
+                pmp_address = %market_address.0,
+                "resolve_for_buy_full_set: event_id blank on reconciled row",
+            );
+            return Err(anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent));
+        }
+        trimmed.to_string()
+    };
+
+    let token_type: u32 = row.token_type.try_into().map_err(|_| {
+        tracing::warn!(
+            pmp = %market_address.0,
+            raw = row.token_type,
+            "resolve_for_buy_full_set: token_type is negative",
+        );
+        anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+    })?;
+
+    Ok(dodex_application::MarketForBuyFullSet { event_id, oracle_list_hash, token_type, status })
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2798,6 +2913,38 @@ mod tests {
             !sql.contains("order by extract(epoch from m.created_at)::bigint"),
             "seconds-only ordering would re-introduce the keyset bug; sql=\n{sql}"
         );
+    }
+
+    fn buy_full_set_row(event_id: &str, oracle_list_hash: Option<&str>) -> BuyFullSetRow {
+        BuyFullSetRow {
+            event_id: event_id.into(),
+            oracle_list_hash: oracle_list_hash.map(str::to_string),
+            token_type: 3,
+            stake_start: None,
+            stake_end: None,
+            result_start: None,
+            result_end: None,
+            frozen_at: None,
+            resolved_at: None,
+            cancelled_at: None,
+            is_cancelled: false,
+        }
+    }
+
+    #[test]
+    fn project_buy_full_set_row_rejects_blank_oracle_list_hash() {
+        let row = buy_full_set_row("42", Some("   "));
+        let err = project_buy_full_set_row(row, &MarketAddress("0:pmp".into()), 0).unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn project_buy_full_set_row_rejects_blank_event_id() {
+        let row = buy_full_set_row("   ", Some("0xfeedface"));
+        let err = project_buy_full_set_row(row, &MarketAddress("0:pmp".into()), 0).unwrap_err();
+        let dom = err.downcast_ref::<DomainError>().expect("DomainError");
+        assert!(matches!(dom, DomainError::MarketInconsistent));
     }
 
     #[test]

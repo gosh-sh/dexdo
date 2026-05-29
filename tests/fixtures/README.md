@@ -5,7 +5,7 @@ integration tests.
 
 ## Files
 
-- `test_pns.json` — **plaintext `owner_secret_key_hex` for FOUR
+- `test_pns.json` — **plaintext `owner_secret_key_hex` for FIVE
   shellnet-only throwaway trading PNs**.
 
 ## PN slot ownership
@@ -22,10 +22,48 @@ to `ERR_NOTE_BUSY`. Assignments:
 | 1    | DELETE `/order`       |
 | 2    | POST `/batchOrders`   |
 | 3    | DELETE `/batchOrders` |
+| 4    | POST `/buyFullSet`    |
 
 A new e2e test that needs its own deployer-PN takes the next free slot
 and adds the row here; top up the pool via `mint_pn_pool` when adding
-slots beyond the four currently in `test_pns.json`.
+slots beyond the five currently in `test_pns.json`.
+
+## Run the e2e suite single-threaded
+
+```sh
+cargo nextest run -p dodex-api --run-ignored only --test-threads 1
+```
+
+Slot ownership keeps the **PN-level** `_busy` lock contention-free
+across tests, but the e2e setup in
+[`services/api/tests/common/deploy_market.rs`](../../services/api/tests/common/deploy_market.rs)
+also talks to **shellnet-global** contracts that every test shares:
+
+- `RootOracle` at `0:1515…` — every test calls `deployOracle` against
+  the same singleton.
+- The deploy's `OracleEventList` — every test calls `addEvent` against
+  it.
+
+Both contracts serialise their own write paths on chain. Running the
+e2e binaries in parallel (`--test-threads N` for `N > 1`, or the
+nextest default which is "one binary per CPU") leads several
+`deployOracle` / `addEvent` external messages to land on the same
+target inside one shard-time slot; the loser exits the compute phase
+with `exit_code 52` or `101` and the whole deploy unwinds. Failures
+look like:
+
+```text
+deploy ephemeral market: deploy_oracle: Kit(KitError { tvm_error: …
+  exit_code: Number(52), … address: "0:1515151515151515151515151515151515151515151515151515151515151515" })
+```
+
+`--test-threads 1` makes the suite run sequentially. Each test spends
+~50 s blocked on `stake_end` plus ~30 s round-tripping its write
+path; per-test budget itself is fine, only across-tests parallelism
+is poisoned by shared chain state.
+
+CI does not run `--ignored` tests, so this constraint only affects
+manual runs.
 
 ## `[SHELLNET-TESTKEYS]` — read before reusing
 
