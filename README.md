@@ -119,4 +119,4 @@ The API needs Postgres running and the indexer feeding it; see the service READM
 
 ## License
 
-See [LICENSE.md](LICENSE.md).
+DEX.DO is licensed under the **GNU Affero General Public License v3.0** — see [LICENSE.md](LICENSE.md) for the full text and [NOTICE.md](NOTICE.md) for copyright and the note on the Acki Nacki Block Manager runtime dependency (which is published separately under its own license).
