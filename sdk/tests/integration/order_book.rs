@@ -719,9 +719,12 @@ async fn test_ob_events_match_fills() {
 
     // 30 NACKL × 5000 bps / FULL_PERCENT = 15 NACKL notional.
     let notional: u128 = 15_000_000_000;
-    let expected_maker_fee = notional * 15 / 100_000; // MAKER_FEE_RATE = 0.015%
-    let expected_taker_fee = notional * 45 / 100_000; // TAKER_FEE_RATE = 0.045%
-    assert_eq!(seller_fill.fee_amount, expected_maker_fee, "maker fee = 0.015% of notional");
+    // Taker pays TAKER_FEE_RATE/FEE_DENOMINATOR (0.045%); the maker is rebated
+    // MAKER_REBATE_NUM/MAKER_REBATE_DEN (3/4) of that taker fee, so the maker's
+    // reported fee is 75% of the taker's, i.e. 0.03375% of notional.
+    let expected_taker_fee = notional * 45 / 100_000;
+    let expected_maker_fee = expected_taker_fee * 3 / 4;
+    assert_eq!(seller_fill.fee_amount, expected_maker_fee, "maker rebate = 75% of taker fee");
     assert_eq!(buyer_fill.fee_amount, expected_taker_fee, "taker fee = 0.045% of notional");
 
     eprintln!(
@@ -2110,11 +2113,7 @@ async fn diag_dump_market1_orders() {
 
 /// Demo: deployer-PN (which was staked on both outcomes during mint_ob_pool's
 /// bidding window) places a resting sell; trader[0] from pn_pool splits and
-/// crosses with a matching buy → both sides fully fill. The test writes a
-/// JSON artifact at `dodex_sdk/demo_artifacts.json` capturing the deployer-PN
-/// credentials (staked + traded), the counter-party trader, the PMP and the
-/// OrderBook addresses. BOC snapshots are dumped externally by the wrapper
-/// script (see /tmp/watch_pmp_boc.sh for the post-stake snapshot).
+/// crosses with a matching buy → both sides fully fill.
 ///
 /// Run with a freshly-seeded `ob_pool.json` (1h lifetime) and `pn_pool.json`:
 ///   cargo test -p dodex-sdk --test integration \
@@ -2225,56 +2224,5 @@ async fn test_ob_demo_deployer_staked_and_trades() {
         deployer_fill.clearing_price,
     );
 
-    // Persist artifacts as JSON for the wrapper to consume (BOC dumps land
-    // adjacent, named via the addresses below).
-    let artifacts = serde_json::json!({
-        "endpoint": "shellnet.ackinacki.org",
-        "market": {
-            "pmp_address": market.pmp_address,
-            "order_book_address": market.order_book_address,
-            "event_id": market.event_id,
-            "oracle_list_hash": market.oracle_list_hash,
-            "token_type": market.token_type,
-            "stake_start_unix": market.stake_start_unix,
-            "stake_end_unix": market.stake_end_unix,
-            "result_start_unix": market.result_start_unix,
-            "result_end_unix": market.result_end_unix,
-            "freeze_unix": market.freeze_unix,
-        },
-        "staked_and_traded_pn": {
-            "role": "deployer-PN: staked initial + setStake on both outcomes during bidding window, splitFullSet after freeze, sold 30 outcome-0 @ 5000bps as maker",
-            "address": market.deployer_pn_address,
-            "owner_public_key_hex": market.deployer_pn_pubkey_hex,
-            "owner_secret_key_hex": market.deployer_pn_secret_hex,
-            "deposit_identifier_hash": market.deployer_deposit_identifier_hash,
-        },
-        "counter_party_pn": {
-            "role": "trader[0] from pn_pool: splitFullSet, bought 30 outcome-0 @ 5000bps as taker",
-            "address": trader.address,
-            "owner_public_key_hex": trader.owner_public_key_hex,
-            "owner_secret_key_hex": trader.owner_secret_key_hex,
-            "deposit_identifier_hash": trader.deposit_identifier_hash,
-        },
-        "trade": {
-            "outcome_id": outcome_id,
-            "price_bps": ORDER_PRICE_BPS,
-            "amount_raw": ORDER_AMOUNT,
-            "clearing_price": deployer_fill.clearing_price.to_string(),
-            "deployer_order_id": deployer_fill.order_id.to_string(),
-            "deployer_fee_raw": deployer_fill.fee_amount.to_string(),
-            "trader_order_id": trader_fill.order_id.to_string(),
-            "trader_fee_raw": trader_fill.fee_amount.to_string(),
-        },
-        "boc_snapshots": {
-            "pmp_after_stake": "pmp_after_stake.boc",
-            "pmp_after_trades": "pmp_after_trades.boc",
-            "orderbook_after_trades": "orderbook_after_trades.boc",
-        },
-    });
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    let out = std::path::Path::new(&manifest).join("demo_artifacts.json");
-    std::fs::write(&out, serde_json::to_string_pretty(&artifacts).unwrap())
-        .expect("write demo_artifacts.json");
-    eprintln!("[demo] wrote artifacts → {}", out.display());
 }
 
