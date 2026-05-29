@@ -15,7 +15,11 @@ pub const DEPLOYER_SEED_AMOUNT: u128 = 100_000_000_000; // 100 NACKL per outcome
 pub const STAKE_AMOUNT: u128 = 200_000_000;
 pub const STAKE_OUTCOME: u32 = 0;
 pub const ORACLE_FEE: u128 = 100;
-pub const STAKE_PERIOD: u64 = 60;
+// Must clear the PMP `MIN_RESULT_GAP` (60s) gate with slack: `setTimings` runs
+// seconds after this client-side `now`, so an exact 60 races the gate (ERR
+// 129). The derived stake window is 10% of the period, so the value also has to
+// leave room for the staking step.
+pub const STAKE_PERIOD: u64 = 180;
 pub const STAKE_PERIOD_LONG: u64 = 300; // 5 min — stake window = 30 sec for multi-step tests
 pub const CURRENCY_ID_SHELL: u32 = 2;
 pub const CURRENCY_ID_NACKL: u32 = 1;
