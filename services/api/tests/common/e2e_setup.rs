@@ -36,7 +36,8 @@ pub const SHELLNET_ENDPOINT: &str = "shellnet.ackinacki.org";
 // `contracts/modifiers/modifiers.sol`. The `market_outcomes` row we
 // insert mirrors them so our local validation does not reject (or
 // under-scale) values the chain would actually accept:
-//   - TICK_SIZE = 10 bps; price must be a uint multiple of 10.
+//   - TICK_SIZE = 10 bps on chain → tick_size = 0.001 as a probability, so
+//     API prices are decimals on the 0.001 grid (e.g. "0.5"), not raw bps ints.
 //   - LOT_SIZE_NACKL = 10_000_000 raw = 0.01 NACKL (9 decimals).
 //   - MIN_ORDER_NOTIONAL_NACKL = 10 NACKL.
 pub const TEST_TICK_SIZE: &str = "0.001";

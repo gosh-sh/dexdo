@@ -1835,6 +1835,27 @@ fn now_pair() -> (i64, i64) {
 }
 
 #[cfg(test)]
+mod error_status_tests {
+    use dodex_domain::DomainError;
+    use salvo::http::StatusCode;
+
+    use super::ApiError;
+
+    #[test]
+    fn market_inconsistent_maps_to_503() {
+        // The read paths (get_depth, list_orders) fail closed with
+        // MarketInconsistent when the read-model is off the chain grid. The
+        // client must see 503 (transient, retryable) rather than 500 — this
+        // pins the status code the descale fail-closed behaviour relies on,
+        // which is otherwise asserted only as a domain variant, never as HTTP.
+        assert_eq!(
+            ApiError::from(DomainError::MarketInconsistent).status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
+}
+
+#[cfg(test)]
 mod balances_hasher_tests {
     use dodex_domain::DomainError;
 

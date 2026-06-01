@@ -785,8 +785,8 @@ pub fn lift_decimal(value: &str, target_decimals: u8) -> Result<BigUint, DomainE
 /// The drop is lossless only when the `k` dropped digits are all zero. For an
 /// on-grid chain value that holds by construction — `price` is a `TICK_SIZE`
 /// multiple, `amount` a lot multiple — but only down to the grid the lattice
-/// guarantees (one zero digit per `TICK_SIZE = 10` bps, `log10(LOT_SIZE)` per
-/// lot). A nonzero dropped digit therefore means the value is off that grid (a
+/// guarantees (one zero digit per `TICK_SIZE` — 10 bps for current tokens —
+/// and `log10(LOT_SIZE)` per lot). A nonzero dropped digit therefore means the value is off that grid (a
 /// display precision coarser than the lattice, or a raw value the chain would
 /// never have accepted): surface it as `MarketInconsistent` rather than return
 /// a confidently-wrong rounded value. A non-digit input is read-model

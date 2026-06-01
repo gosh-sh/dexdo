@@ -409,6 +409,50 @@ async fn depth_fails_closed_on_off_grid_price() {
 }
 
 #[tokio::test]
+async fn depth_fails_closed_on_off_grid_amount() {
+    // The amount axis is held to the lot grid just as the price axis is held to
+    // the tick grid: price is on the tick grid here but the level amount is off
+    // the lot grid (last atom digit nonzero), so the per-level quantity descale
+    // must reject it rather than re-grid the book.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_off_grid_amount_pmp";
+    let symbol = "DEPTH_OFF_GRID_AMOUNT_YES";
+    let orderbook = "0:depth_off_grid_amount_book";
+    purge_market(&pool, pmp, symbol).await;
+    sqlx::query("delete from live_orders where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge live_orders");
+    insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
+
+    // price 6100 is on the grid (drops "00" at price drop 2); amount
+    // 100_000_001 leaves a nonzero "1" after the drop-4 lot descale.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, 1::numeric, 1, true, 6100::numeric,
+                   100000001::numeric, 100000001::numeric, 'OPEN',
+                   '5f800000000000', '5f800000000000')"#,
+    )
+    .bind(orderbook)
+    .execute(&pool)
+    .await
+    .expect("insert off-grid live_orders");
+
+    let err = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect_err("off-grid level amount must fail the depth request closed");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::MarketInconsistent);
+}
+
+#[tokio::test]
 async fn depth_aggregates_across_owners_into_single_level() {
     // Depth is global (all open orders) and per-price aggregated. Two
     // regressions could deanonymize it:

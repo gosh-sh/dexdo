@@ -299,9 +299,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // live_orders mirrors the chain: price is in basis points, amount in
         // token atoms. Step each down to its display grid before formatting —
         // price bps → probability (price_precision), amount atoms → tokens
-        // (quantity_precision). descale_pow10 keeps the floor only when the
-        // dropped digits are zero, so an on-grid value renders exactly and an
-        // off-grid one fails closed. A display precision finer than the chain
+        // (quantity_precision). descale_pow10 returns the exact quotient when
+        // the dropped digits are all zero and fails closed otherwise, so an
+        // on-grid value renders exactly and an off-grid one is rejected. A display precision finer than the chain
         // scale (price_precision > the basis-point exponent, or
         // quantity_precision > decimals) is read-model misconfiguration, caught
         // as a negative drop below.
@@ -326,8 +326,26 @@ impl MarketReadRepository for PostgresReadModelRepository {
             anyhow!(DomainError::MarketInconsistent)
         })?;
         for level in bids.iter_mut().chain(asks.iter_mut()) {
-            let price_grid = descale_pow10(&level.price, price_drop).map_err(|e| anyhow!(e))?;
-            let qty_grid = descale_pow10(&level.quantity, amount_drop).map_err(|e| anyhow!(e))?;
+            let price_grid = descale_pow10(&level.price, price_drop).map_err(|e| {
+                tracing::warn!(
+                    orderbook = %orderbook_address,
+                    outcome_id,
+                    axis = "price",
+                    raw = %level.price,
+                    "depth level value cannot be descaled to the display grid",
+                );
+                anyhow!(e)
+            })?;
+            let qty_grid = descale_pow10(&level.quantity, amount_drop).map_err(|e| {
+                tracing::warn!(
+                    orderbook = %orderbook_address,
+                    outcome_id,
+                    axis = "quantity",
+                    raw = %level.quantity,
+                    "depth level value cannot be descaled to the display grid",
+                );
+                anyhow!(e)
+            })?;
             level.price = scale_uint_to_decimal(&price_grid, price_scale);
             level.quantity = scale_uint_to_decimal(&qty_grid, quantity_scale);
         }
@@ -1489,12 +1507,13 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     let descale = |raw: &str, k: usize, field: &str| -> Option<String> {
         match descale_pow10(raw, k) {
             Ok(grid) => Some(grid),
-            Err(_) => {
+            Err(e) => {
                 error!(
                     order_id = %row.order_id,
                     market = %row.market_address,
                     field,
-                    "live_orders value is off the chain tick/lot grid; skipping order row"
+                    reason = ?e,
+                    "live_orders value cannot be descaled to the display grid; skipping order row"
                 );
                 None
             }
@@ -2945,6 +2964,24 @@ mod tests {
             order_from_row(row).is_none(),
             "off-grid executed_qty on a partial fill must skip the row rather than round"
         );
+    }
+
+    #[test]
+    fn order_from_row_renders_partial_fill_at_production_precision() {
+        // Positive partial fill with a real amount drop (decimals=6,
+        // quantity_precision=2 → drop 4): executed_qty must descale to its
+        // display grid and surface as PARTIALLY_FILLED, not merely be checked
+        // for off-grid rejection.
+        let mut row = order_row("OPEN", "5000000"); // 5.00 filled
+        row.decimals = 6;
+        row.price_precision = 3;
+        row.quantity_precision = 2;
+        row.price = "4880".into(); // 0.488
+        row.orig_qty = "20000000".into(); // 20.00 placed
+        let order = order_from_row(row).expect("on-grid partial fill must render");
+        assert_eq!(order.status().as_str(), "PARTIALLY_FILLED");
+        assert_eq!(order.orig_qty(), "20.00");
+        assert_eq!(order.executed_qty(), "5.00");
     }
 
     #[test]
