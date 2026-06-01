@@ -1,4 +1,4 @@
-# dodex-api
+# DEX.DO-api
 
 HTTP service for the DEX.DO REST API. It serves the read side of the system from
 Postgres and hosts authenticated private API routes.

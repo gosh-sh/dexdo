@@ -1,4 +1,4 @@
-# dodex-indexer
+# DEX.DO-indexer
 
 Writer-side service. It ingests Acki Nacki chain data, decodes DEX events, and
 maintains the Postgres read-model served by `services/api`.

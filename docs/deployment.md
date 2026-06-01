@@ -1,6 +1,6 @@
-# Self-hosting DODEX: `indexer` + `api`
+# Self-hosting DEX.DO: `indexer` + `api`
 
-How to run the two DODEX backend services on your own server and wire them to
+How to run the two DEX.DO backend services on your own server and wire them to
 your own Acki Nacki GraphQL endpoint and your own Postgres (self-managed or
 Supabase).
 
