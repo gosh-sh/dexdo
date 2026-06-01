@@ -2869,8 +2869,8 @@ mod tests {
     fn order_from_row_descales_production_precision() {
         // Production USDC config: decimals=6, quantity_precision=2 (amount drop
         // 4), price_precision=3 (price drop 1). Fixtures where
-        // decimals == quantity_precision make the descale a no-op; this one
-        // pins the real chain-units → display descale.
+        // decimals == quantity_precision make the amount descale a no-op; this
+        // one pins the real chain-units → display descale on both axes.
         let mut row = order_row("OPEN", "0");
         row.decimals = 6;
         row.price_precision = 3;
@@ -2899,9 +2899,10 @@ mod tests {
 
     #[test]
     fn order_from_row_skips_quantity_precision_above_decimals() {
-        // Amount-axis mirror of the price guard above: quantity_precision finer
-        // than the quote asset's decimals asks for more amount detail than the
-        // chain carries — a negative drop, so the row is skipped.
+        // quantity_precision finer than the quote asset's decimals asks for more
+        // amount detail than the chain carries — a negative amount drop, the
+        // amount-axis counterpart of an over-fine price_precision. Either is
+        // read-model misconfiguration and skips the row.
         let mut row = order_row("OPEN", "0");
         row.decimals = 6;
         row.price_precision = 3;
@@ -2931,15 +2932,15 @@ mod tests {
     #[test]
     fn order_from_row_skips_off_grid_executed_qty() {
         // A partially-filled OPEN row with on-grid price and orig_qty but an
-        // executed_qty off the lot grid (last atom digit nonzero) must skip
-        // rather than render a rounded fill. executed_qty descales after price
-        // and orig_qty, so this is the only fixture that reaches that branch.
+        // off-lot executed_qty (last atom digit nonzero) must skip rather than
+        // render a rounded fill — the fill amount is held to the same lot grid
+        // as the placement amounts.
         let mut row = order_row("OPEN", "10000001"); // off lot: amount drop 4 strips a nonzero "1"
         row.decimals = 6;
         row.price_precision = 3;
         row.quantity_precision = 2;
         row.price = "4880".into(); // on-grid (drops one zero)
-        row.orig_qty = "10000000".into(); // on-grid (drops "0000")
+        row.orig_qty = "20000000".into(); // on-grid; > executed, so amount_remaining stays non-negative
         assert!(
             order_from_row(row).is_none(),
             "off-grid executed_qty on a partial fill must skip the row rather than round"
