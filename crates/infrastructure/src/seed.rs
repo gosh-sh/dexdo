@@ -24,10 +24,10 @@ use uuid::Uuid;
 use crate::crypto;
 use crate::crypto::Kek;
 
-/// Hard-coded test credentials baked into the binary. The
-/// `api_secret_hex` cannot be recovered from the DB after seeding
-/// (only the HMAC of it is stored), so this literal is the only place
-/// to look the secrets up.
+/// Hard-coded test credentials baked into the binary. In the DB the
+/// `api_secret_hex` and `pn_seckey_hex` are stored encrypted under the
+/// KEK (`crypto::seal`), so recovering them requires that environment's
+/// KEK — this literal is the readable reference for the dev/test secrets.
 const SEED_DATA: &str = r#"{
   "accounts": [
     {

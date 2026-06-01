@@ -224,18 +224,27 @@ read-model the api serves.
 #### Validation rules enforced at startup
 
 Both services validate their config on load and refuse to start on violation.
-The non-obvious ones:
+The `auth`, `server`, and `chain` sections exist only in the api config, so the
+rules over them are checked by the api alone — the indexer config has no `auth`
+section and never reads a KEK. The non-obvious ones:
+
+Shared (both services):
 
 - Config structs use `deny_unknown_fields` — a typo'd or stray key is a hard
   parse error, not a silent ignore.
+- `database.url` non-empty, `max_connections > 0`,
+  `max_connections >= min_connections`, and pool/timeout values `> 0`.
+- `graphql.endpoint` non-empty and `graphql.request_timeout_ms > 0`.
+
+api only:
+
 - `auth.kek_hex` must be exactly 32 bytes of hex (64 chars).
 - `auth.max_recv_window_ms` must be `<= 60000`; `default_recv_window_ms <= max_recv_window_ms`.
+- `chain.gateway_endpoint` non-empty and every `chain.*_timeout_ms > 0`.
 - `server.request_timeout_ms` must be **strictly greater than** every
   `chain.*_timeout_ms` and than `graphql.request_timeout_ms` — otherwise the
   HTTP timeout could fire while a chain submission or BOC read is still in
   flight.
-- `database.max_connections >= min_connections`, both pool/timeout values `> 0`.
-- `graphql.endpoint` and `chain.gateway_endpoint` must be non-empty.
 
 ## Step 4 — Compose override, build, and run
 
