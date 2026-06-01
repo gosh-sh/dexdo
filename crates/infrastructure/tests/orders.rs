@@ -120,8 +120,9 @@ async fn insert_market(pool: &PgPool, pmp: &str, symbol: &str, book: &str) {
                    -- quantity_precision = decimals (6) makes the atom→token
                    -- descale a no-op: these tests exercise
                    -- pagination/status/owner filtering, not amount scaling.
-                   -- A non-trivial amount descale (drop 4) runs in depth.rs and
-                   -- the order_from_row unit tests.
+                   -- The non-trivial amount descale is pinned with contract
+                   -- numbers in the infra depth tests and the order_from_row
+                   -- unit tests.
                    3, 6, '0.001', '0.01',
                    '1.00', 100)"#,
     )
@@ -161,8 +162,9 @@ async fn insert_market_unreconciled(pool: &PgPool, pmp: &str, symbol: &str, book
                    -- quantity_precision = decimals (6) makes the atom→token
                    -- descale a no-op: these tests exercise
                    -- pagination/status/owner filtering, not amount scaling.
-                   -- A non-trivial amount descale (drop 4) runs in depth.rs and
-                   -- the order_from_row unit tests.
+                   -- The non-trivial amount descale is pinned with contract
+                   -- numbers in the infra depth tests and the order_from_row
+                   -- unit tests.
                    3, 6, '0.001', '0.01',
                    '1.00', 100)"#,
     )

@@ -364,6 +364,51 @@ async fn depth_fails_closed_when_quantity_precision_exceeds_decimals() {
 }
 
 #[tokio::test]
+async fn depth_fails_closed_on_off_grid_price() {
+    // Both precisions are in range (so the negative-drop guards pass), but a
+    // stored bid price sits off the chain tick grid: at price_precision=2 the
+    // descale drops two basis-point digits, and "6105" leaves a nonzero "5".
+    // descale_pow10 must reject it at the per-level step rather than re-grid —
+    // a depth snapshot with silently rounded levels would misprice the book.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_off_grid_price_pmp";
+    let symbol = "DEPTH_OFF_GRID_PRICE_YES";
+    let orderbook = "0:depth_off_grid_price_book";
+    purge_market(&pool, pmp, symbol).await;
+    sqlx::query("delete from live_orders where orderbook_address = $1")
+        .bind(orderbook)
+        .execute(&pool)
+        .await
+        .expect("purge live_orders");
+    insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
+
+    // amount is on-grid (100_000_000 atoms drops "0000" at amount drop 4); only
+    // the price is off the tick grid, so the failure is attributable to it.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, 1::numeric, 1, true, 6105::numeric,
+                   100000000::numeric, 100000000::numeric, 'OPEN',
+                   '5f800000000000', '5f800000000000')"#,
+    )
+    .bind(orderbook)
+    .execute(&pool)
+    .await
+    .expect("insert off-grid live_orders");
+
+    let err = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect_err("off-grid chain price must fail the depth request closed");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::MarketInconsistent);
+}
+
+#[tokio::test]
 async fn depth_aggregates_across_owners_into_single_level() {
     // Depth is global (all open orders) and per-price aggregated. Two
     // regressions could deanonymize it:
