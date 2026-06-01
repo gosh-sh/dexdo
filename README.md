@@ -12,6 +12,7 @@ On-chain DODEX contracts live under `contracts/`.
 - [docs/api-spec.md](docs/api-spec.md) — public REST API contract.
 - [docs/openapi.yaml](docs/openapi.yaml) — OpenAPI 3.1 contract, generated from the Rust handlers. See [openapi/README.md](openapi/README.md) for the regen workflow and the GitHub Pages deployment.
 - [docs/README.md](docs/README.md) — documentation map and file ownership.
+- [docs/deployment.md](docs/deployment.md) — self-hosting the `indexer` and `api` on your own server, wired to your own Acki Nacki GraphQL endpoint and your own Postgres / Supabase.
 - [AGENT_REQUIREMENTS.md](AGENT_REQUIREMENTS.md) — rules for any agent making repository changes.
 
 ## Repository layout
@@ -116,6 +117,13 @@ cargo run -p dodex-indexer
 ```
 
 The API needs Postgres running and the indexer feeding it; see the service READMEs for the bring-up sequence.
+
+## Deployment
+
+To run the services on your own server — wired to your own Acki Nacki GraphQL
+endpoint and your own Postgres or Supabase — follow
+[docs/deployment.md](docs/deployment.md). It uses the shipped Dockerfiles and a
+Compose override (the same mechanism as `docker-compose.stage.yml`).
 
 ## License
 

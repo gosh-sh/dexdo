@@ -89,4 +89,6 @@ on connect.
 
 ## Deployment
 
-Use the repository-level deployment process from [README.md](../../README.md).
+Self-hosting the service (Docker Compose, own GraphQL + Postgres/Supabase) is
+covered in [docs/deployment.md](../../docs/deployment.md); the repository-level
+entry point is [README.md](../../README.md).
