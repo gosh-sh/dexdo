@@ -375,7 +375,12 @@ async fn upsert_account(
         r#"insert into accounts
                (label, pn_address, pn_pubkey, pn_seckey_enc, pn_dih)
            values ($1, $2, $3::numeric, $4, $5::numeric)
-           on conflict (pn_address) do nothing
+           -- No arbiter target: `accounts` is unique on both pn_address and
+           -- pn_dih (accounts_pn_dih_key). A narrow (pn_address) arbiter lets a
+           -- concurrent identical seed (parallel test setups) raise a pn_dih
+           -- unique violation instead of skipping, since ON CONFLICT only
+           -- suppresses conflicts on its arbiter index.
+           on conflict do nothing
            returning id"#,
     )
     .bind(&account.label)
