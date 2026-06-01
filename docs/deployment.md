@@ -173,6 +173,9 @@ auth:
   # On first boot, applies migrations and inserts seed accounts. Turn OFF once
   # the schema exists and you manage accounts yourself; with it off the api
   # stays read-only against the schema and relies on the indexer for migrations.
+  # Seeding only writes DB rows — the PrivateNote contracts those accounts
+  # point at must be deployed and funded on-chain first. See
+  # docs/seed-private-notes.md.
   seed_accounts: true
 
 chain:

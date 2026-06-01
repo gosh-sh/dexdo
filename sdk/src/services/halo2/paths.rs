@@ -2,8 +2,12 @@
 //!
 //! `prove_voucher_for_event` needs three directories on disk:
 //!
-//! 1. **SRS** — `kzg_bn254_19.srs` (~64 MB), KZG trusted-setup parameter blob.
-//!    Read-only at runtime, regenerated only via the trusted setup ceremony.
+//! 1. **SRS** — `kzg_bn254_19.srs` (~64 MB), KZG parameter blob. Reproducible
+//!    from a fixed seed via `halo2_base::gen_srs` (see `ensure_srs`), so the
+//!    dev deploy tooling can generate it on first use. A halo2 proving host on
+//!    a real network would instead supply one from a genuine trusted-setup
+//!    ceremony. (The dodex `api` / `indexer` never use halo2, so none of this
+//!    applies to deploying the backend.)
 //! 2. **Prover cache** — `pk_cache.bin` (~464 MB) + `vk_cache.bin` +
 //!    `break_points_cache.bin`. Read-write, persistent. Lost cache means one
 //!    ~5-minute keygen on the next call.
@@ -86,6 +90,33 @@ impl Halo2Paths {
     /// Absolute path of the SRS file (`{srs_dir}/kzg_bn254_{SRS_K}.srs`).
     pub fn srs_path(&self) -> PathBuf {
         self.srs_dir.join(format!("kzg_bn254_{SRS_K}.srs"))
+    }
+
+    /// Whether the SRS file is already on disk.
+    pub fn srs_exists(&self) -> bool {
+        self.srs_path().is_file()
+    }
+
+    /// Generate the SRS if it is absent. `halo2_base::gen_srs` derives the
+    /// KZG parameters from a fixed seed, so the output is byte-for-byte
+    /// reproducible and matches the verifier key the on-chain contract was
+    /// built against — there is nothing environment-specific to source.
+    /// Generating on first use spares a fresh checkout (the `.srs` is
+    /// gitignored, ~64 MB) from sourcing the file out of band. CPU-bound
+    /// and one-time; the result is cached on disk under `srs_dir`.
+    ///
+    /// This is for the dev/test deploy tooling (`mint_pn_pool` /
+    /// `mint_ob_pool`), which targets networks with a giver — not the dodex
+    /// `api` / `indexer`, which never use halo2 at all. A halo2 proving host
+    /// on a real network (e.g. a wallet minting vouchers) would instead supply
+    /// an SRS from a genuine trusted-setup ceremony and rely on `validate()`
+    /// to reject a missing one.
+    pub fn ensure_srs(&self) {
+        if self.srs_exists() {
+            return;
+        }
+        self.install_env();
+        let _ = halo2_base::utils::fs::gen_srs(SRS_K);
     }
 
     /// Apply this configuration to the global env so the third-party

@@ -1,4 +1,5 @@
-# SRS (KZG trusted setup) — 64 MB universal parameter blob, downloaded
-# once from the ceremony, kept locally. Re-fetched as needed; not source.
+# SRS (KZG params) — ~64 MB blob, reproducible from a fixed seed via
+# halo2_base::gen_srs. The mint_pn_pool / mint_ob_pool tools regenerate it
+# on first run; kept local, not source.
 *.srs
 halo2_cache
