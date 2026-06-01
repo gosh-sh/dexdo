@@ -299,10 +299,12 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // live_orders mirrors the chain: price is in basis points, amount in
         // token atoms. Step each down to its display grid before formatting —
         // price bps → probability (price_precision), amount atoms → tokens
-        // (quantity_precision). The drops are exact: bps are a TICK_SIZE
-        // multiple, atoms a lot multiple. A display precision finer than the
-        // chain scale (price_precision > the basis-point exponent, or
-        // quantity_precision > decimals) is read-model misconfiguration.
+        // (quantity_precision). descale_pow10 keeps the floor only when the
+        // dropped digits are zero, so an on-grid value renders exactly and an
+        // off-grid one fails closed. A display precision finer than the chain
+        // scale (price_precision > the basis-point exponent, or
+        // quantity_precision > decimals) is read-model misconfiguration, caught
+        // as a negative drop below.
         let price_drop =
             usize::try_from(i32::from(PRICE_BPS_DECIMALS) - price_precision).map_err(|_| {
                 tracing::warn!(
@@ -1454,15 +1456,53 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     let price_scale = precision_to_scale(row.price_precision, "price", &row)?;
     let quantity_scale = precision_to_scale(row.quantity_precision, "quantity", &row)?;
     // live_orders mirrors chain units (price in basis points, amount in token
-    // atoms); step each down to its display grid before formatting. Exact: bps
-    // are a TICK_SIZE multiple, atoms a lot multiple. A negative drop means
-    // display precision finer than the chain scale — read-model
-    // misconfiguration; skip the row (None) like the other corruption guards.
-    let price_drop = usize::try_from(i32::from(PRICE_BPS_DECIMALS) - row.price_precision).ok()?;
-    let amount_drop = usize::try_from(row.decimals - row.quantity_precision).ok()?;
-    let price_grid = descale_pow10(&row.price, price_drop).ok()?;
-    let orig_qty_grid = descale_pow10(&row.orig_qty, amount_drop).ok()?;
-    let executed_qty_grid = descale_pow10(&row.executed_qty, amount_drop).ok()?;
+    // atoms); step each down to its display grid before formatting.
+    // descale_pow10 renders an on-grid value exactly and rejects an off-grid
+    // one. A negative drop (display precision finer than the chain scale) is
+    // read-model misconfiguration. Either failure drops the row from the page
+    // (None) with a logged reason, so a vanished order is never silent.
+    let price_drop = match usize::try_from(i32::from(PRICE_BPS_DECIMALS) - row.price_precision) {
+        Ok(d) => d,
+        Err(_) => {
+            error!(
+                order_id = %row.order_id,
+                market = %row.market_address,
+                price_precision = row.price_precision,
+                "price_precision exceeds the basis-point scale; skipping order row"
+            );
+            return None;
+        }
+    };
+    let amount_drop = match usize::try_from(row.decimals - row.quantity_precision) {
+        Ok(d) => d,
+        Err(_) => {
+            error!(
+                order_id = %row.order_id,
+                market = %row.market_address,
+                quantity_precision = row.quantity_precision,
+                decimals = row.decimals,
+                "quantity_precision exceeds the quote-asset decimals; skipping order row"
+            );
+            return None;
+        }
+    };
+    let descale = |raw: &str, k: usize, field: &str| -> Option<String> {
+        match descale_pow10(raw, k) {
+            Ok(grid) => Some(grid),
+            Err(_) => {
+                error!(
+                    order_id = %row.order_id,
+                    market = %row.market_address,
+                    field,
+                    "live_orders value is off the chain tick/lot grid; skipping order row"
+                );
+                None
+            }
+        }
+    };
+    let price_grid = descale(&row.price, price_drop, "price")?;
+    let orig_qty_grid = descale(&row.orig_qty, amount_drop, "orig_qty")?;
+    let executed_qty_grid = descale(&row.executed_qty, amount_drop, "executed_qty")?;
 
     // Derive the public OrderStatus from the stored raw_status and
     // (for OPEN rows) the SQL-side `fully_filled` boolean.
@@ -2823,6 +2863,53 @@ mod tests {
         let order = order_from_row(row).expect("REJECTED sentinel row should render");
         assert_eq!(order.status().as_str(), "REJECTED");
         assert_eq!(order.order_id(), "");
+    }
+
+    #[test]
+    fn order_from_row_descales_production_precision() {
+        // Production USDC config: decimals=6, quantity_precision=2 (amount drop
+        // 4), price_precision=3 (price drop 1). Unlike the no-op fixtures
+        // above, this pins the real chain-units → display descale.
+        let mut row = order_row("OPEN", "0");
+        row.decimals = 6;
+        row.price_precision = 3;
+        row.quantity_precision = 2;
+        row.price = "4880".into(); // 0.488 on the 10-bps tick grid
+        row.orig_qty = "10000000".into(); // 10 USDC on the 10^4-atom lot grid
+        let order = order_from_row(row).expect("on-grid production row must render");
+        assert_eq!(order.price(), "0.488");
+        assert_eq!(order.orig_qty(), "10.00");
+        assert_eq!(order.status().as_str(), "NEW");
+    }
+
+    #[test]
+    fn order_from_row_skips_price_precision_above_bps_scale() {
+        // price_precision in (PRICE_BPS_DECIMALS, MAX] clears the earlier scale
+        // guard but asks for finer price detail than the chain carries — a
+        // negative drop, so the row is skipped.
+        let mut row = order_row("OPEN", "0");
+        row.price_precision = i32::from(PRICE_BPS_DECIMALS) + 1;
+        row.quantity_precision = 2;
+        assert!(
+            order_from_row(row).is_none(),
+            "price_precision finer than the basis-point scale must skip the row"
+        );
+    }
+
+    #[test]
+    fn order_from_row_skips_off_grid_chain_price() {
+        // A raw price not on the tick grid (last bps digit nonzero) cannot be
+        // rendered at price_precision=3 without rounding — fail closed.
+        let mut row = order_row("OPEN", "0");
+        row.decimals = 6;
+        row.price_precision = 3;
+        row.quantity_precision = 2;
+        row.price = "4885".into(); // 4885 % TICK_SIZE(10) != 0
+        row.orig_qty = "10000000".into();
+        assert!(
+            order_from_row(row).is_none(),
+            "off-tick chain price must skip the row rather than round"
+        );
     }
 
     #[test]

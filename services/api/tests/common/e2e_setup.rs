@@ -39,11 +39,11 @@ pub const SHELLNET_ENDPOINT: &str = "shellnet.ackinacki.org";
 //   - TICK_SIZE = 10 bps; price must be a uint multiple of 10.
 //   - LOT_SIZE_NACKL = 10_000_000 raw = 0.01 NACKL (9 decimals).
 //   - MIN_ORDER_NOTIONAL_NACKL = 10 NACKL.
-pub const TEST_TICK_SIZE: &str = "10";
+pub const TEST_TICK_SIZE: &str = "0.001";
 pub const TEST_STEP_SIZE: &str = "0.01";
 pub const TEST_MIN_NOTIONAL: &str = "10";
-pub const TEST_PRICE_PRECISION: i32 = 0;
-pub const TEST_QUANTITY_PRECISION: i32 = 9;
+pub const TEST_PRICE_PRECISION: i32 = 3;
+pub const TEST_QUANTITY_PRECISION: i32 = 2;
 
 /// Per-process `clientOrderId` salt: the suite's start timestamp
 /// shifted left by 32 bits (occupying bits 32 through ~62 for any

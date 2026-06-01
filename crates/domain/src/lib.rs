@@ -764,6 +764,10 @@ pub fn parse_positive_decimal(value: &str, max_decimals: u8) -> Result<(BigUint,
 /// `price_precision` decimals but must be lifted to basis points for the chain.
 pub const PRICE_BPS_DECIMALS: u8 = 4;
 
+// The price scale is `FULL_PERCENT = 10_000` by definition; pin the exponent to
+// that literal so the two cannot drift apart silently.
+const _: () = assert!(10u128.pow(PRICE_BPS_DECIMALS as u32) == 10_000);
+
 /// Lift a decimal string to `BigUint` at exactly `target_decimals` fractional
 /// digits. Fails with `PrecisionExceeded` when the input carries more
 /// fractional digits than the target.
@@ -773,13 +777,20 @@ pub fn lift_decimal(value: &str, target_decimals: u8) -> Result<BigUint, DomainE
     Ok(scaled * BigUint::from(10u32).pow(pad))
 }
 
-/// Divide a non-negative integer string by `10^k`, exactly (floor — drops the
-/// last `k` digits). Steps a chain-scale integer (price in basis points,
-/// amount in token atoms) down to a coarser display grid before fixed-point
-/// formatting; the dropped digits are guaranteed zero by the chain's tick /
-/// lot lattice, so the floor is exact. Inverse direction of [`lift_decimal`].
-/// A non-digit input is read-model corruption and surfaces as
-/// `MarketInconsistent`.
+/// Divide a non-negative integer string by `10^k` by dropping the last `k`
+/// digits. Steps a chain-scale integer (price in basis points, amount in token
+/// atoms) down to a coarser display grid before fixed-point formatting; the
+/// inverse direction of [`lift_decimal`].
+///
+/// The drop is lossless only when the `k` dropped digits are all zero. For an
+/// on-grid chain value that holds by construction — `price` is a `TICK_SIZE`
+/// multiple, `amount` a lot multiple — but only down to the grid the lattice
+/// guarantees (one zero digit per `TICK_SIZE = 10` bps, `log10(LOT_SIZE)` per
+/// lot). A nonzero dropped digit therefore means the value is off that grid (a
+/// display precision coarser than the lattice, or a raw value the chain would
+/// never have accepted): surface it as `MarketInconsistent` rather than return
+/// a confidently-wrong rounded value. A non-digit input is read-model
+/// corruption and surfaces the same way.
 pub fn descale_pow10(raw: &str, k: usize) -> Result<String, DomainError> {
     let raw = raw.trim();
     if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
@@ -788,10 +799,15 @@ pub fn descale_pow10(raw: &str, k: usize) -> Result<String, DomainError> {
     if k == 0 {
         return Ok(raw.to_string());
     }
-    if raw.len() <= k {
+    let keep = raw.len().saturating_sub(k);
+    let (head, dropped) = raw.split_at(keep);
+    if dropped.bytes().any(|b| b != b'0') {
+        return Err(DomainError::MarketInconsistent);
+    }
+    if head.is_empty() {
         return Ok("0".to_string());
     }
-    Ok(raw[..raw.len() - k].to_string())
+    Ok(head.to_string())
 }
 
 fn count_decimals(value: &str) -> Result<u8, DomainError> {
@@ -1584,14 +1600,24 @@ mod tests {
         assert_eq!(descale_pow10("4880", 1).unwrap(), "488"); // bps → 0.001 price grid
         assert_eq!(descale_pow10("10000000", 4).unwrap(), "1000"); // USDC atoms → 0.01 qty grid
         assert_eq!(descale_pow10("488", 0).unwrap(), "488");
-        assert_eq!(descale_pow10("5", 1).unwrap(), "0"); // fewer digits than k
-        assert_eq!(descale_pow10("0", 3).unwrap(), "0");
+        assert_eq!(descale_pow10("0", 3).unwrap(), "0"); // whole value is zero
+        assert_eq!(descale_pow10("1000", 3).unwrap(), "1"); // dropped "000" are all zero
     }
 
     #[test]
     fn descale_pow10_rejects_non_digit() {
         assert_eq!(descale_pow10("4.88", 1), Err(DomainError::MarketInconsistent));
         assert_eq!(descale_pow10("", 1), Err(DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn descale_pow10_rejects_nonzero_dropped_digits() {
+        // A nonzero digit inside the dropped tail means the value is off the
+        // chain's tick / lot grid — fail closed instead of rounding.
+        assert_eq!(descale_pow10("4885", 1), Err(DomainError::MarketInconsistent)); // off TICK_SIZE
+        assert_eq!(descale_pow10("10000001", 4), Err(DomainError::MarketInconsistent)); // off lot
+        assert_eq!(descale_pow10("5", 1), Err(DomainError::MarketInconsistent));
+        // whole value dropped, nonzero
     }
 
     #[test]

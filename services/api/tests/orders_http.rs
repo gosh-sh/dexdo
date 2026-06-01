@@ -221,7 +221,7 @@ async fn insert_order(
                 placed_chain_order,
                 chain_created_at, chain_updated_at,
                 created_at, updated_at)
-           values ($1, $2::numeric, 1, $3, 12345::numeric,
+           values ($1, $2::numeric, 1, $3, 12340::numeric,
                    1000::numeric, $4::numeric, $5,
                    $6, $7, $8,
                    $8,
@@ -304,11 +304,11 @@ async fn readonly_user_data_key_can_fetch_orders() {
         // supply one; either form is well-formed (no NULL on the
         // wire). Decoded as plain String, not Option<String>.
         let _ = &o.client_order_id;
-        // insert_order seeds raw price = 12345 basis points; the read path
-        // decodes bps → probability (raw / FULL_PERCENT) at price_precision=3,
-        // so "12345" → "1.234". Exact equality catches a wire-shape regression
-        // (e.g. price/origQty swap in the JSON mapper) that a non-empty check
-        // would miss.
+        // insert_order seeds raw price = 12340 basis points (on the 10-bps tick
+        // grid); the read path decodes bps → probability (raw / FULL_PERCENT)
+        // at price_precision=3, so "12340" → "1.234". Exact equality catches a
+        // wire-shape regression (e.g. price/origQty swap in the JSON mapper)
+        // that a non-empty check would miss.
         assert_eq!(o.price, "1.234", "price decoded from basis points at price_precision=3");
         assert!(!o.orig_qty.is_empty(), "orig_qty rendered as decimal string");
         // `executedQty` is allowed to be "0" or non-zero depending on

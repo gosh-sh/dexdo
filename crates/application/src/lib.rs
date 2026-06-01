@@ -1126,7 +1126,9 @@ pub struct NewOrderInput {
 ///   lands on the contract's lot lattice. The scale is the same regardless of
 ///   side or type; only the unit it represents differs — outcome-token amount
 ///   on LIMIT and MARKET SELL, quote-asset spend amount on MARKET BUY (per
-///   [api-spec §New Order](../../docs/api-spec.md#new-order)).
+///   [api-spec §New Order](../../docs/api-spec.md#new-order)). Outcome-token
+///   amounts reuse the quote asset's `decimals`: a full set is minted 1:1
+///   against the collateral, so outcome and collateral atoms share one scale.
 /// - `client_order_id`: decimal string. ABI accepts uint128 but the
 ///   serialization path through `serde_json::json!` rejects values
 ///   above `u64::MAX` (no `arbitrary_precision` feature upstream), so
@@ -3252,8 +3254,8 @@ mod tests {
         let sender = Arc::new(FakeSender::ok());
         let uc = CreateOrderUseCase::new(FakeRepo::with(market), sender.clone());
         let mut input = base_input("PM-YES");
-        // u64::MAX = 18_446_744_073_709_551_615. After lift by
-        // quantity_precision=6, an input quantity of
+        // u64::MAX = 18_446_744_073_709_551_615. After lift by the quote
+        // asset's decimals (6), an input quantity of
         // "18446744073709.551616" lifts to u64::MAX + 1 — fits in
         // u128 (sender would not 500), but the SDK ceiling rejects.
         input.quantity = "18446744073709.551616".into();
@@ -4132,6 +4134,10 @@ mod tests {
         assert!(payload.is_buy);
         // MARKET items carry `price_raw = "0"` per the encode helper.
         assert_eq!(payload.price_raw, "0");
+        // MARKET-BUY `quantity` is the quote-asset spend, lifted to atoms by the
+        // quote decimals (6): "5" → 5_000_000. Pin the amount scale, not just
+        // the flag and price.
+        assert_eq!(payload.amount_raw, "5000000");
         // Pin FLAG_MARKET specifically — `assert_ne!(flags, 0)`
         // would accept any stray TIF bit.
         assert!(payload.flags & FLAG_MARKET != 0, "flags=0x{:02x}", payload.flags);

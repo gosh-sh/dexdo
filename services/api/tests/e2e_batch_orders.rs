@@ -123,12 +123,12 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
         Arc::new(common::FakeReferenceRepo::with_seeded()),
     )));
 
-    // Two BUY LIMIT GTC orders at non-crossing prices. Each notional
-    // (= quantity * price / 10000 NACKL) stays comfortably above
+    // Two BUY LIMIT GTC orders at non-crossing probability prices. Each
+    // notional (= quantity * price NACKL) stays comfortably above
     // MIN_ORDER_NOTIONAL_NACKL = 10 and well inside the ~100 NACKL
     // split-collateral budget on the deployer-PN.
-    //   25 * 4900 / 10000 = 12.25 NACKL
-    //   25 * 5000 / 10000 = 12.50 NACKL
+    //   25 * 0.49 = 12.25 NACKL
+    //   25 * 0.50 = 12.50 NACKL
     let coid_a = fresh_coid(1).to_string();
     let coid_b = fresh_coid(2).to_string();
     let body = serde_json::to_vec(&json!({
@@ -139,7 +139,7 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
                 "newOrderClientId": coid_a,
                 "side": "BUY",
                 "quantity": "25",
-                "price": "4900",
+                "price": "0.49",
                 "type": "LIMIT",
                 "timeInForce": "GTC",
             },
@@ -147,7 +147,7 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
                 "newOrderClientId": coid_b,
                 "side": "BUY",
                 "quantity": "25",
-                "price": "5000",
+                "price": "0.5",
                 "type": "LIMIT",
                 "timeInForce": "GTC",
             },

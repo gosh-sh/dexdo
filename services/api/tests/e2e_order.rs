@@ -130,15 +130,15 @@ async fn buy_limit_gtc_against_shellnet() {
     )));
 
     let coid = fresh_coid(1).to_string();
-    // 30 NACKL of outcome at 5000 bps (= 0.5 probability). Notional =
-    // 30 * 5000 / 10000 = 15 NACKL, above MIN_ORDER_NOTIONAL_NACKL = 10.
+    // 30 NACKL of outcome at price 0.5 (probability; encodes to 5000 bps).
+    // Notional = 30 * 0.5 = 15 NACKL, above MIN_ORDER_NOTIONAL_NACKL = 10.
     let body = serde_json::to_vec(&json!({
         "marketAddress": market.pmp_address,
         "symbol": symbol,
         "newOrderClientId": coid,
         "side": "BUY",
         "quantity": "30",
-        "price": "5000",
+        "price": "0.5",
         "type": "LIMIT",
         "timeInForce": "GTC",
     }))

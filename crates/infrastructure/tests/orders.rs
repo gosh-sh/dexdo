@@ -117,11 +117,11 @@ async fn insert_market(pool: &PgPool, pmp: &str, symbol: &str, book: &str) {
                 price_precision, quantity_precision, tick_size, step_size,
                 min_notional, max_batch_size)
            values ($1, $2, 1, 'YES', $3,
-                   -- quantity_precision = decimals (6): these tests exercise
-                   -- pagination/status/owner filtering, not amount scaling, so
-                   -- the chain-atoms → display descale is a no-op here. The
-                   -- real bps/atom decode is pinned with contract numbers in
-                   -- tests/depth.rs.
+                   -- quantity_precision = decimals (6) makes the atom→token
+                   -- descale a no-op: these tests exercise
+                   -- pagination/status/owner filtering, not amount scaling.
+                   -- A non-trivial amount descale (drop 4) runs in depth.rs and
+                   -- the order_from_row unit tests.
                    3, 6, '0.001', '0.01',
                    '1.00', 100)"#,
     )
@@ -158,11 +158,11 @@ async fn insert_market_unreconciled(pool: &PgPool, pmp: &str, symbol: &str, book
                 price_precision, quantity_precision, tick_size, step_size,
                 min_notional, max_batch_size)
            values ($1, $2, 1, 'YES', $3,
-                   -- quantity_precision = decimals (6): these tests exercise
-                   -- pagination/status/owner filtering, not amount scaling, so
-                   -- the chain-atoms → display descale is a no-op here. The
-                   -- real bps/atom decode is pinned with contract numbers in
-                   -- tests/depth.rs.
+                   -- quantity_precision = decimals (6) makes the atom→token
+                   -- descale a no-op: these tests exercise
+                   -- pagination/status/owner filtering, not amount scaling.
+                   -- A non-trivial amount descale (drop 4) runs in depth.rs and
+                   -- the order_from_row unit tests.
                    3, 6, '0.001', '0.01',
                    '1.00', 100)"#,
     )
@@ -376,9 +376,8 @@ async fn returns_only_owner_rows_across_all_statuses() {
     assert!(page.next_cursor.is_none());
     // Seeded raw price = "1000" basis points. The read path decodes bps →
     // probability (raw / FULL_PERCENT) and renders at price_precision = 3, so
-    // "1000" → "0.100" (10%). A missing bps descale or a precision swap would
-    // render a different value — the only positive observation of the price
-    // decode in this suite.
+    // "1000" → "0.100" (10%). Exact equality catches a missing bps descale or a
+    // price/qty precision swap that a non-empty check would miss.
     for order in &page.orders {
         assert_eq!(order.price(), "0.100", "price decoded from basis points at price_precision=3");
     }
@@ -1559,7 +1558,7 @@ async fn pair_filter_narrows_versus_all_markets_returns_both() {
         &scope.book_yes,
         1,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -1572,7 +1571,7 @@ async fn pair_filter_narrows_versus_all_markets_returns_both() {
         &scope.book_no,
         2,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -1723,7 +1722,7 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         &scope.book_yes,
         1,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -1738,7 +1737,7 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         &scope.book_yes,
         2,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "0",
         "OPEN",
@@ -1751,7 +1750,7 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         &scope.book_yes,
         3,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -1764,7 +1763,7 @@ async fn cursor_advances_past_corrupt_row_at_page_tail() {
         &scope.book_yes,
         4,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -1837,7 +1836,7 @@ async fn empty_page_with_cursor_advances_past_window_of_corrupt_rows() {
         &scope.book_yes,
         1,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -1851,7 +1850,7 @@ async fn empty_page_with_cursor_advances_past_window_of_corrupt_rows() {
             &scope.book_yes,
             i,
             Some(&scope.owner),
-            "12345",
+            "12340",
             "1000",
             "0",
             "OPEN",
@@ -1919,7 +1918,7 @@ async fn open_with_zero_initial_and_zero_remainder_is_skipped() {
         &scope.book_yes,
         1,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -1935,7 +1934,7 @@ async fn open_with_zero_initial_and_zero_remainder_is_skipped() {
         &scope.book_yes,
         2,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "0",
         "0",
         "OPEN",
@@ -1988,7 +1987,7 @@ async fn cursor_advances_past_unknown_status_row_at_page_tail() {
         &scope.book_yes,
         1,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -2001,7 +2000,7 @@ async fn cursor_advances_past_unknown_status_row_at_page_tail() {
         &scope.book_yes,
         2,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -2014,7 +2013,7 @@ async fn cursor_advances_past_unknown_status_row_at_page_tail() {
         &scope.book_yes,
         3,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",
@@ -2027,7 +2026,7 @@ async fn cursor_advances_past_unknown_status_row_at_page_tail() {
         &scope.book_yes,
         4,
         Some(&scope.owner),
-        "12345",
+        "12340",
         "1000",
         "1000",
         "OPEN",

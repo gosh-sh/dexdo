@@ -283,7 +283,7 @@ async fn last_update_id_is_scoped_per_outcome() {
                 amount_initial, amount_remaining, status,
                 last_chain_order, placed_chain_order)
            values ($1, 1::numeric, 2, true, 500::numeric,
-                   100::numeric, 100::numeric, 'OPEN',
+                   1000000::numeric, 1000000::numeric, 'OPEN',
                    $2, $2)"#,
     )
     .bind(orderbook)
@@ -308,6 +308,59 @@ async fn last_update_id_is_scoped_per_outcome() {
         .await
         .expect("get_depth NO");
     assert_eq!(no_depth.last_update_id, no_chain_order);
+}
+
+#[tokio::test]
+async fn depth_fails_closed_when_price_precision_exceeds_bps_scale() {
+    // price_precision above the basis-point scale (PRICE_BPS_DECIMALS = 4)
+    // clears the range guard but asks for finer price detail than the chain
+    // carries. The descale step must fail closed (503), never round.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_price_precision_overflow_pmp";
+    let symbol = "DEPTH_PP_OVERFLOW_YES";
+    let orderbook = "0:depth_pp_overflow_book";
+    purge_market(&pool, pmp, symbol).await;
+    insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
+    sqlx::query("update market_outcomes set price_precision = 5 where symbol = $1")
+        .bind(symbol)
+        .execute(&pool)
+        .await
+        .expect("widen price_precision past the bps scale");
+
+    let err = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect_err("price_precision finer than the bps scale must fail closed");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::MarketInconsistent);
+}
+
+#[tokio::test]
+async fn depth_fails_closed_when_quantity_precision_exceeds_decimals() {
+    // quantity_precision above the quote asset's decimals (USDC = 6) asks for
+    // more amount detail than the chain carries — a negative drop, fail closed.
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    let pmp = "0:depth_qty_precision_overflow_pmp";
+    let symbol = "DEPTH_QP_OVERFLOW_YES";
+    let orderbook = "0:depth_qp_overflow_book";
+    purge_market(&pool, pmp, symbol).await;
+    insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
+    sqlx::query("update market_outcomes set quantity_precision = 7 where symbol = $1")
+        .bind(symbol)
+        .execute(&pool)
+        .await
+        .expect("widen quantity_precision past the quote decimals");
+
+    let err = repo
+        .get_depth(&MarketAddress(pmp.into()), &Symbol(symbol.into()), 100)
+        .await
+        .expect_err("quantity_precision finer than quote decimals must fail closed");
+    let domain = err.downcast_ref::<DomainError>().expect("typed DomainError surfaced");
+    assert_eq!(*domain, DomainError::MarketInconsistent);
 }
 
 #[tokio::test]

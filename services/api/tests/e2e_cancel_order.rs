@@ -129,7 +129,7 @@ async fn cancel_order_against_shellnet() {
         "newOrderClientId": coid,
         "side": "BUY",
         "quantity": "30",
-        "price": "5000",
+        "price": "0.5",
         "type": "LIMIT",
         "timeInForce": "GTC",
     }))
