@@ -301,10 +301,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // price bps → probability (price_precision), amount atoms → tokens
         // (quantity_precision). descale_pow10 returns the exact quotient when
         // the dropped digits are all zero and fails closed otherwise, so an
-        // on-grid value renders exactly and an off-grid one is rejected. A display precision finer than the chain
-        // scale (price_precision > the basis-point exponent, or
-        // quantity_precision > decimals) is read-model misconfiguration, caught
-        // as a negative drop below.
+        // on-grid value renders exactly and an off-grid one is rejected. A
+        // display precision finer than the chain scale (price_precision > the
+        // basis-point exponent, or quantity_precision > decimals) is read-model
+        // misconfiguration, caught as a negative drop when computing
+        // price_drop / amount_drop.
         let price_drop =
             usize::try_from(i32::from(PRICE_BPS_DECIMALS) - price_precision).map_err(|_| {
                 tracing::warn!(
