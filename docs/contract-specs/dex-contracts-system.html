@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="ru">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>DODEX Contracts System</title>
+    <title>DEX.DO Contracts System</title>
     <style>
       :root {
         --bg: #f4efe3;
@@ -189,9 +189,9 @@
   <body>
     <main>
       <section class="card hero">
-        <h1>DODEX Contract System</h1>
-        <p>HTML-документация по всей системе контрактов из `contracts/`. Диаграммы ниже сделаны как inline SVG без внешнего JS: это дает предсказуемый рендер и упрощает локальную проверку.</p>
-        <p>Красные плашки на sequence diagrams — это внешние события. Они специально визуально утолщены и отделены от обычных вызовов, чтобы сразу было видно event-layer.</p>
+        <h1>DEX.DO Contract System</h1>
+        <p>HTML documentation for the entire contract system under `contracts/`. The diagrams below are inline SVG with no external JS — predictable rendering and easy local inspection.</p>
+        <p>Red badges on the sequence diagrams are external events. They are deliberately rendered thicker and separated from regular calls so the event layer is immediately distinguishable.</p>
         <div class="links">
           <a href="dex-contracts-object-diagram.drawio">Object Diagram (.drawio)</a>
           <a href="dex-events-routing.md">Event Routing Tables</a>
@@ -207,8 +207,8 @@
           <span class="pill">OrderBook</span>
         </div>
         <div class="legend">
-          <div class="legend-item"><span class="legend-line"></span><span>вызов / callback</span></div>
-          <div class="legend-item"><span class="legend-box"></span><span>внешний event-object (`emit ...{dest: ...}`)</span></div>
+          <div class="legend-item"><span class="legend-line"></span><span>call / callback</span></div>
+          <div class="legend-item"><span class="legend-box"></span><span>external event object (`emit ...{dest: ...}`)</span></div>
         </div>
       </section>
 
@@ -218,40 +218,40 @@
           <thead>
             <tr>
               <th>Contract</th>
-              <th>Роль</th>
-              <th>Ключевые deterministic keys</th>
+              <th>Role</th>
+              <th>Key deterministic keys</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td><strong>RootPN</strong></td>
-              <td>Корневой deployer для `PrivateNote`, `Nullifier` и vault-потока.</td>
+              <td>Root deployer for `PrivateNote`, `Nullifier`, and the vault flow.</td>
               <td>`_depositIdentifierHash`, `_nullifierHash`</td>
             </tr>
             <tr>
               <td><strong>PrivateNote</strong></td>
-              <td>Пользовательский кошелек DEX: stake, split/merge, claim, orders, transfer.</td>
+              <td>User-side DEX wallet: stake, split/merge, claim, orders, transfer.</td>
               <td>`_depositIdentifierHash`, `stakeHash = hash(eventId, oracleListHash, tokenType)`</td>
             </tr>
             <tr>
               <td><strong>Nullifier</strong></td>
-              <td>One-shot relay для shell-fee top-up в `PrivateNote`.</td>
+              <td>One-shot relay for shell-fee top-up into `PrivateNote`.</td>
               <td>`_nullifierHash`</td>
             </tr>
             <tr>
               <td><strong>RootOracle</strong></td>
-              <td>Корневой deployer для `Oracle`.</td>
-              <td>`_name` у downstream `Oracle`</td>
+              <td>Root deployer for `Oracle`.</td>
+              <td>`_name` on the downstream `Oracle`</td>
             </tr>
             <tr>
               <td><strong>Oracle</strong></td>
-              <td>Oracle-owner контракт, который создает `OracleEventList`.</td>
-              <td>`_name`, `(_oracle, _index)` у `OracleEventList`</td>
+              <td>Oracle-owner contract that creates `OracleEventList`.</td>
+              <td>`_name`, `(_oracle, _index)` on `OracleEventList`</td>
             </tr>
             <tr>
               <td><strong>OracleEventList</strong></td>
-              <td>Реестр событий и точка oracle-confirmation для PMP.</td>
-              <td>`(_oracle, _index)` для адреса контракта; `eventId` для внутренних `EventInfo`</td>
+              <td>Event registry and the oracle-confirmation entry point for PMP.</td>
+              <td>`(_oracle, _index)` for the contract address; `eventId` for the inner `EventInfo` entries</td>
             </tr>
             <tr>
               <td><strong>PMP</strong></td>
@@ -260,7 +260,7 @@
             </tr>
             <tr>
               <td><strong>OrderBook</strong></td>
-              <td>Книга заявок для frozen market, очереди, match/fill/cancel.</td>
+              <td>Order book for a frozen market — queues, match/fill/cancel.</td>
               <td>`(eventId, oracleListHash, tokenType)`, `orderId`, `clientOrderId`</td>
             </tr>
           </tbody>
@@ -269,7 +269,7 @@
 
       <section class="card">
         <h2>1. Vault And Note Lifecycle</h2>
-        <p>Эта цепочка покрывает три отдельных потока: создание `PrivateNote`, shell-fee top-up через `Nullifier` и генерацию voucher-event в `RootPN`.</p>
+        <p>This chain covers three separate flows: `PrivateNote` creation, shell-fee top-up via `Nullifier`, and voucher-event generation in `RootPN`.</p>
         <div class="diagram">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 500" role="img" aria-label="Vault and PrivateNote lifecycle">
             <defs>
@@ -327,12 +327,12 @@
             <text x="662" y="455" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">EVENT: VoucherGenerated</text>
           </svg>
         </div>
-        <p class="caption">`Nullifier` собственных событий не объявляет: событие создает `RootPN`, а затем `Nullifier` просто переводит средства в целевой `PrivateNote`.</p>
+        <p class="caption">`Nullifier` declares no events of its own: the event is emitted by `RootPN`, then `Nullifier` simply forwards funds into the target `PrivateNote`.</p>
       </section>
 
       <section class="card">
         <h2>2. Oracle Control Plane</h2>
-        <p>Oracle-ветка состоит из `RootOracle`, `Oracle` и `OracleEventList`. Именно `OracleEventList` хранит `EventInfo` и подтверждает рынок для PMP.</p>
+        <p>The Oracle branch consists of `RootOracle`, `Oracle`, and `OracleEventList`. `OracleEventList` is what stores the `EventInfo` records and confirms the market for PMP.</p>
         <div class="diagram">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 460" role="img" aria-label="Oracle deployment and event registry">
             <defs>
@@ -394,7 +394,7 @@
 
       <section class="card">
         <h2>3. Market Deployment, Oracle Approval, Freeze</h2>
-        <p>`PrivateNote` создает `PMP`, `PMP` собирает подтверждения от всех `OracleEventList`, на первом approval отдельно фиксирует initial stakes deployer-а, потом переходит в approved-state, получает timings и только после freeze поднимает `OrderBook`.</p>
+        <p>`PrivateNote` creates the `PMP`, the `PMP` collects approvals from every `OracleEventList`, records the deployer's initial stakes on the first approval, then transitions into approved state, receives timings, and only after freezing brings up `OrderBook`.</p>
         <div class="diagram">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 520" role="img" aria-label="PMP deployment, approvals and freeze">
             <defs>
@@ -469,12 +469,12 @@
             <text x="770" y="500" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">EVENT: PoolsFrozen</text>
           </svg>
         </div>
-        <p class="caption">`OrderBook` не создается при самом `deployPMP()`: он поднимается позже, когда PMP действительно freeze-ится. В этом же lifecycle есть внутренние callbacks без внешнего event-object: `onInitialStakesAccepted(...)`, `onInitialStakesFailed(...)` и затем `onPmpCleanRefund(...)` перед `PoolsFrozen`.</p>
+        <p class="caption">`OrderBook` is not created during `deployPMP()` itself: it comes up later, when the PMP actually freezes. The same lifecycle includes internal callbacks with no external event object: `onInitialStakesAccepted(...)`, `onInitialStakesFailed(...)`, and then `onPmpCleanRefund(...)` before `PoolsFrozen`.</p>
       </section>
 
       <section class="card">
         <h2>4. Stake, Split, Merge, Resolve, Claim</h2>
-        <p>Это основной execution-path рынка после approval: обычный stake, full-set split/merge, затем resolve и claim. Здесь наиболее заметна зеркальная пара событий PMP и PrivateNote.</p>
+        <p>This is the main market execution path after approval: regular stake, full-set split/merge, then resolve and claim. The mirrored PMP/PrivateNote event pairs are most visible here.</p>
         <div class="diagram">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 940" role="img" aria-label="Stake, split, merge, resolve and claim">
             <defs>
@@ -555,12 +555,12 @@
             <text x="585" y="905" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">EVENT: ClaimAccepted</text>
           </svg>
         </div>
-        <p class="caption">В реальном коде callback `PMP -> PrivateNote.onClaimAccepted(...)` и внешнее событие `ClaimProcessed` живут в одном PMP-flow, а `PrivateNote` затем отдельно эмитит `ClaimAccepted` в своем callback.</p>
+        <p class="caption">In the actual code the `PMP -> PrivateNote.onClaimAccepted(...)` callback and the external `ClaimProcessed` event live in the same PMP flow; `PrivateNote` then separately emits `ClaimAccepted` inside its own callback.</p>
       </section>
 
       <section class="card">
         <h2>5. OrderBook: Placement And Fill</h2>
-        <p>Order-flow разбит на очередь и callbacks. В single-order path `PrivateNote` сначала эмитит `OrderSubmitted`, а уже потом получает обратное подтверждение от `OrderBook` по `OrderPlacedConfirmed` / `OrderFilledConfirmed`. Batch placement использует тот же queue/match механизм, но без `OrderSubmitted` на каждый элемент и с завершающим `onBatchComplete(...)`.</p>
+        <p>The order flow is split into a queue and callbacks. In the single-order path, `PrivateNote` first emits `OrderSubmitted` and only then receives `OrderBook`'s callbacks via `OrderPlacedConfirmed` / `OrderFilledConfirmed`. Batch placement reuses the same queue/match machinery without an `OrderSubmitted` per item, terminated by `onBatchComplete(...)`.</p>
         <div class="diagram">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" role="img" aria-label="Order placement and fill sequence">
             <defs>
@@ -628,12 +628,12 @@
             <text x="635" y="590" text-anchor="middle" font-family="Arial" font-size="13" font-weight="800" fill="#b91c1c">EVENT: OrderFilledConfirmed</text>
           </svg>
         </div>
-        <p class="caption">`PartialFill` и `FullyFilled` используют специальный внешний канал `address.makeAddrExtern(0, bitCntAddress)` и агрегируются по всей обработке конкретного taker-order. `placeBatch()` в `PrivateNote` и `executeBatch()` в `OrderBook` переиспользуют ровно этот же путь; отдельным завершающим callback там служит `onBatchComplete(...)`, а не отдельный внешний event.</p>
+        <p class="caption">`PartialFill` and `FullyFilled` use the dedicated external channel `address.makeAddrExtern(0, bitCntAddress)` and are aggregated across the processing of a single taker order. `PrivateNote.placeBatch()` and `OrderBook.executeBatch()` reuse exactly the same path; the terminating signal there is the `onBatchComplete(...)` callback rather than a dedicated external event.</p>
       </section>
 
       <section class="card">
         <h2>6. OrderBook: Cancel, Reject, Bounce</h2>
-        <p>Отмена, reject и callback-bounce — отдельный observability path. Здесь важны именно сервисные события `Queued`, `Rejected` и `CallbackBounced`. Для batch cancel-path `cancelBatch()` / `cancelAllOrders()` `OrderBook` дополнительно завершает серию callback-ом `onBatchComplete(...)` без собственного event-object.</p>
+        <p>Cancellation, reject, and callback-bounce form a separate observability path. The service events `Queued`, `Rejected`, and `CallbackBounced` are what matters here. For the batch cancel path `cancelBatch()` / `cancelAllOrders()`, `OrderBook` also terminates the series with the `onBatchComplete(...)` callback without a dedicated event object.</p>
         <div class="diagram">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" role="img" aria-label="Order cancel, reject and bounce sequence">
             <defs>
@@ -697,7 +697,7 @@
 
       <section class="card">
         <h2>7. PrivateNote To PrivateNote Transfer</h2>
-        <p>P2P-перевод живет отдельно от order/stake-механики: отправитель блокирует сумму, получатель сразу кредитует баланс, а затем посылает ack.</p>
+        <p>P2P transfer lives apart from the order/stake machinery: the sender locks the amount, the receiver immediately credits the balance, then sends the ack.</p>
         <div class="diagram">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 380" role="img" aria-label="PrivateNote to PrivateNote transfer sequence">
             <defs>
@@ -736,53 +736,53 @@
             <text x="425" y="256" font-family="Arial" font-size="13">onTransferAccepted()</text>
 
             <rect x="135" y="292" width="580" height="46" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" />
-            <text x="425" y="320" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">Если `offerTransfer` bounce-ится, отправитель восстанавливает сумму через `onBounce`; если ack потерян, есть `clearTransferBusy()`.</text>
+            <text x="425" y="320" text-anchor="middle" font-family="Arial" font-size="12" fill="#526071">If `offerTransfer` bounces, the sender restores the amount via `onBounce`; if the ack is lost, `clearTransferBusy()` is available.</text>
           </svg>
         </div>
       </section>
 
       <section class="card">
         <h2>8. Internal Callbacks With State Changes</h2>
-        <p>Не все важные переходы в системе оформлены внешними event-object’ами. Ниже собраны внутренние callbacks, которые реально меняют state контрактов и поэтому важны для чтения flow рядом с sequence diagrams.</p>
+        <p>Not every important transition in the system has an external event object. Below are the internal callbacks that actually mutate contract state and therefore matter when reading flows alongside the sequence diagrams.</p>
         <table>
           <thead>
             <tr>
-              <th>Где возникает</th>
+              <th>Where it fires</th>
               <th>Internal callback</th>
-              <th>Что меняет</th>
-              <th>Внешний event рядом</th>
+              <th>What it changes</th>
+              <th>Adjacent external event</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td><strong>PMP</strong> первый `approveEvent()`</td>
+              <td><strong>PMP</strong> first `approveEvent()`</td>
               <td>`PrivateNote.onInitialStakesAccepted(...)`</td>
-              <td>Фиксирует initial stakes deployer-а по outcome-массивам и снимает начальную неопределенность вокруг `_busy` у creator note.</td>
-              <td>Позже в том же approval lifecycle может появиться `ApprovedByOracle`, но только на последнем oracle.</td>
+              <td>Records the deployer's initial stakes across the outcome arrays and clears the initial indeterminacy of `_busy` on the creator note.</td>
+              <td>`ApprovedByOracle` may follow later in the same approval lifecycle, but only on the final oracle.</td>
             </tr>
             <tr>
               <td><strong>PMP</strong> reject / invalid initial stakes</td>
               <td>`PrivateNote.onInitialStakesFailed(...)`</td>
-              <td>Возвращает deployer-у initial stakes и размораживает note, если рынок не смог пройти инициализацию.</td>
-              <td>Обычно рядом идет `PMPCancelled`, но у callback собственного event-object нет.</td>
+              <td>Refunds the deployer's initial stakes and unfreezes the note when the market fails to initialize.</td>
+              <td>Typically followed by `PMPRejected`, but the callback itself has no event object.</td>
             </tr>
             <tr>
               <td><strong>PMP</strong> `_ensureFrozen()`</td>
               <td>`PrivateNote.onPmpCleanRefund(...)`</td>
-              <td>Возвращает creator-у remainders clean-pools перед построением integer split/merge basket.</td>
-              <td>Следом идет `PoolsFrozen`.</td>
+              <td>Refunds the creator the clean-pool remainders before the integer split/merge basket is built.</td>
+              <td>`PoolsFrozen` follows.</td>
             </tr>
             <tr>
               <td><strong>OrderBook</strong> reject place-path</td>
               <td>`PrivateNote.onOrderRejected(...)`</td>
-              <td>Восстанавливает buy-lock или sell-lock, если заявка отвергнута на pre-validation или из-за переполненной очереди.</td>
-              <td>`Rejected` эмитится на стороне `OrderBook`.</td>
+              <td>Restores the buy-lock or sell-lock when an order is rejected during pre-validation or because of an overflowed queue.</td>
+              <td>`Rejected` is emitted on the `OrderBook` side.</td>
             </tr>
             <tr>
               <td><strong>OrderBook</strong> batch place / cancel / cancel-all</td>
               <td>`PrivateNote.onBatchComplete(...)`</td>
-              <td>Снимает `_pendingBatch*` защиту и очищает `_busy` после того, как весь batch уже dispatch-нут в callbacks.</td>
-              <td>Отдельного event-object нет; batch использует обычные `Queued` / `OrderPlaced` / `OrderCancelled` / `OrderFilled` по ходу обработки.</td>
+              <td>Clears the `_pendingBatch*` guard and `_busy` after the entire batch has been dispatched through callbacks.</td>
+              <td>No dedicated event object; the batch reuses the regular `Queued` / `OrderPlaced` / `OrderCancelled` / `OrderFilled` along the way.</td>
             </tr>
           </tbody>
         </table>
@@ -795,29 +795,29 @@
             <tr>
               <th>Contract</th>
               <th>Event</th>
-              <th>Статус</th>
+              <th>Status</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td><strong>Oracle</strong></td>
               <td>`EventPublished(eventId, eventName)`</td>
-              <td>Объявлен, но в текущем коде ни один `emit` его не создает.</td>
+              <td>Declared, but no `emit` in the current code produces it.</td>
             </tr>
             <tr>
               <td><strong>PMP</strong></td>
               <td>`NetworkFeeBurned(amount)`</td>
-              <td>Объявлен как reserved event, но сейчас не эмитится.</td>
+              <td>Declared as a reserved event, but not currently emitted.</td>
             </tr>
             <tr>
               <td><strong>PMP</strong></td>
               <td>`NumOutcomesSet(numOutcomes)`</td>
-              <td>Объявлен, но `_numOutcomes` сейчас заполняется внутри `approveEvent()` без отдельного event.</td>
+              <td>Declared, but `_numOutcomes` is currently set inside `approveEvent()` without a dedicated event.</td>
             </tr>
             <tr>
               <td><strong>Nullifier</strong></td>
-              <td>Собственных `event` нет</td>
-              <td>Observability идет через `RootPN.NullifierDeployed`.</td>
+              <td>No `event` declarations of its own</td>
+              <td>Observability flows through `RootPN.NullifierDeployed`.</td>
             </tr>
           </tbody>
         </table>

@@ -1,6 +1,6 @@
 # Data Schema Technical Specification
 
-Postgres tables that back the DODEX read-model and indexer. Source of truth is the migration set under `/migrations`; this document describes intent and field semantics. Schema changes ship as numbered migration files (`NNNN_*.sql`) and are applied by `sqlx::migrate!` at service startup (`crates/infrastructure/src/database.rs`).
+Postgres tables that back the DEX.DO read-model and indexer. Source of truth is the migration set under `/migrations`; this document describes intent and field semantics. Schema changes ship as numbered migration files (`NNNN_*.sql`) and are applied by `sqlx::migrate!` at service startup (`crates/infrastructure/src/database.rs`).
 
 Tables fall into five buckets:
 

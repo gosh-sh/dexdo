@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to DODEX are recorded here. Entries are date-based, newest first.
+All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
 ## [2026-05-29]
 
@@ -106,7 +106,7 @@ All notable changes to DODEX are recorded here. Entries are date-based, newest f
   - `market-data-indexer.md` → `indexer.md`.
   - `trading-api/write-api.md` → `write-api.md` (top-level).
 - Updated cross-references in `services/api/README.md`, `services/indexer/README.md`, `AGENT_REQUIREMENTS.md`, and inline test comments.
-- Rewrote root `README.md` for DODEX (previous content was carried over from a different project).
+- Rewrote root `README.md` for DEX.DO (previous content was carried over from a different project).
 - Centralized permission check and split authN/authZ in `docs/tech-specs/auth.md` to match code (#16, #17).
 
 ### Removed

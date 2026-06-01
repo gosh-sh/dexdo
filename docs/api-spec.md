@@ -1,4 +1,4 @@
-- [Dodex REST API Specification](#dodex-rest-api-specification)
+- [DEX.DO REST API Specification](#dexdo-rest-api-specification)
   - [Base URL](#base-url)
   - [Data Types](#data-types)
   - [Symbol Model](#symbol-model)
@@ -44,16 +44,16 @@
         - [Execution Type](#execution-type)
   - [Validation Rules](#validation-rules)
 
-# Dodex REST API Specification
+# DEX.DO REST API Specification
 
 Status: Draft
 
-This document defines the public REST interface required for basic spot-style trading on Dodex.
+This document defines the public REST interface required for basic spot-style trading on DEX.DO.
 
 ## Base URL
 
 ```text
-https://api.dodex.example.com
+https://api.dex.do.example.com
 ```
 
 All endpoints use JSON responses.
@@ -79,7 +79,7 @@ floating-point precision loss.
 
 ## Symbol Model
 
-Dodex uses the following market identifiers:
+DEX.DO uses the following market identifiers:
 
 - `marketAddress` is the stable market identifier across the entire lifecycle. Used in all market-specific requests. Example: `0:market-address`.
 - `orderBookAddress` is the deterministic order-book address returned by `/api/v1/markets`. It is always present on any market that appears in API responses — the backend stamps it on the first reconcile, before the OrderBook contract is active on-chain. The only state where it can be null internally is the pre-reconcile window, and such markets are hidden from the API. Clients MUST use `status` to determine whether the order book is currently available for trading; a non-null `orderBookAddress` does not by itself imply the book is open.
@@ -110,7 +110,7 @@ Private endpoints require:
 
 | Location | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- | --- |
-| Header | `X-DODEX-APIKEY` | STRING | YES | API key or API token issued by the Dodex backend. |
+| Header | `X-DODEX-APIKEY` | STRING | YES | API key or API token issued by the DEX.DO backend. |
 | Query | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | Query | `recvWindow` | LONG | NO | Request validity window in milliseconds. Default: `5000`. Max: `60000`. |
 | Query | `signature` | STRING | YES | Hex HMAC SHA256 signature generated from `canonicalQueryString + canonicalRequestBody` using the API secret. |
@@ -224,7 +224,7 @@ GET /api/v1/markets
 
 Fetch available prediction markets, their outcomes, lifecycle phase, timings, and oracle event metadata.
 
-A market in Dodex has a finite lifecycle anchored to an oracle event. The lifecycle has nine phases — see [Market Status](#market-status). Clients MUST treat `status` as an opaque enum value and not derive it from raw timings.
+A market in DEX.DO has a finite lifecycle anchored to an oracle event. The lifecycle has nine phases — see [Market Status](#market-status). Clients MUST treat `status` as an opaque enum value and not derive it from raw timings.
 
 Query parameters:
 
@@ -1269,7 +1269,7 @@ Real-time stream of order lifecycle updates for the authenticated account. Delta
 Base URL:
 
 ```text
-wss://api.dodex.example.com/ws/v1/user
+wss://api.dex.do.example.com/ws/v1/user
 ```
 
 Security: `USER_DATA`. Subscription requires the same signed envelope as private REST endpoints — `X-DODEX-APIKEY`, `timestamp`, `signature`, optional `recvWindow` — see [Signature Formation](#signature-formation). The signature payload is the canonical query string of the subscription parameters (sorted by key, excluding `signature`), HMAC-SHA256 with the API secret.
@@ -1328,7 +1328,7 @@ The algorithm above applies to `orderUpdate` frames only. Control frames (`ping`
 
 A single event type, `orderUpdate`, covers the full order lifecycle: acceptance, partial fill, full fill, cancel, reject, expire. Clients dispatch on the pair `x` (what just happened) × `X` (where the order is now).
 
-Field keys are deliberately short (mostly one letter) — a bandwidth optimization. A high-frequency `orderUpdate` stream on a busy account compresses better and saves measurable per-frame bytes on the wire vs. a full-name JSON shape. The same trade-off is why Binance Spot `executionReport` uses single-letter keys; we follow that convention so the keys are aligned with it where the field exists in both APIs — same letter, same meaning, same string-vs-number convention. The single Dodex-specific addition is `a` (market address), which has no Binance analog because Binance identifies a market by `symbol` alone.
+Field keys are deliberately short (mostly one letter) — a bandwidth optimization. A high-frequency `orderUpdate` stream on a busy account compresses better and saves measurable per-frame bytes on the wire vs. a full-name JSON shape. The same trade-off is why Binance Spot `executionReport` uses single-letter keys; we follow that convention so the keys are aligned with it where the field exists in both APIs — same letter, same meaning, same string-vs-number convention. The single DEX.DO-specific addition is `a` (market address), which has no Binance analog because Binance identifies a market by `symbol` alone.
 
 The short-key convention is scoped to WebSocket frames. REST endpoints keep full descriptive names (`orderId`, `executedQty`, `clientOrderId`, ...) because their payloads are read once per request, not streamed, and human readability outweighs the byte savings.
 
@@ -1433,7 +1433,7 @@ Field reference:
 | --- | --- | --- |
 | `e` | STRING | Event name. `"orderUpdate"` for order events; see [Connection](#connection) for `"ping"` / `"pong"` control frames. |
 | `E` | LONG | Event time. Server timestamp when the frame was emitted, Unix ms. |
-| `a` | STRING | Market address. Dodex-specific; no Binance analog. |
+| `a` | STRING | Market address. DEX.DO-specific; no Binance analog. |
 | `s` | STRING | Outcome-token symbol. |
 | `i` | STRING | Server-assigned `orderId`. Empty string for `x: "REJECTED"` events (the chain never assigns an id to a rejected placement). |
 | `c` | STRING | `clientOrderId`. Either the `newOrderClientId` from the request or the server-generated value. Empty string if the order was placed without one. |

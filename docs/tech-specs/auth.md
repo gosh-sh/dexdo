@@ -1,6 +1,6 @@
 # Authentication Technical Specification
 
-This document defines the implementation-facing requirements for DODEX authentication. The public HTTP contract — `X-DODEX-APIKEY` header, `signature`/`timestamp`/`recvWindow` query parameters, signature formula, and error codes — lives in [api-spec.md](../api-spec.md).
+This document defines the implementation-facing requirements for DEX.DO authentication. The public HTTP contract — `X-DODEX-APIKEY` header, `signature`/`timestamp`/`recvWindow` query parameters, signature formula, and error codes — lives in [api-spec.md](../api-spec.md).
 
 ## User Model
 
