@@ -154,6 +154,8 @@ impl MarketReadRepository for FakeRepo {
             token_type,
             status: market.status,
             outcome,
+            // Test token: chain decimals == fixture display precision (6).
+            decimals: 6,
         })
     }
 
@@ -440,8 +442,8 @@ async fn happy_path_two_items_returns_pending_new_array() {
     assert_eq!(payload.orders[1].client_order_id, "22");
     assert_eq!(payload.orders[0].outcome_id, 1);
     assert!(payload.orders[0].is_buy);
-    assert_eq!(payload.orders[0].price_raw, "615");
-    assert_eq!(payload.orders[0].amount_raw, "1500000");
+    assert_eq!(payload.orders[0].price_raw, "6150"); // 0.615 lifted to basis points
+    assert_eq!(payload.orders[0].amount_raw, "1500000"); // 1.5 lifted by quote decimals (6)
     assert_eq!(payload.orders[0].flags, 0); // LIMIT × GTC
 }
 

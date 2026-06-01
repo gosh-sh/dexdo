@@ -127,7 +127,7 @@ The API issues one SQL query that produces both sides of the book in a single ro
 
 Postgres applies the sort and `LIMIT` while reading, so the API receives only the top N price levels per side instead of loading the full open book into memory. The partial index `live_orders_open_book_idx` (`WHERE status = 'OPEN'`) is designed for this depth query.
 
-After the database returns, each side is re-sorted in Rust using exact-numeric `BigUint` comparison — lexicographic string comparison would silently misrank prices of different lengths (`"100" < "99"` lexicographically). Each `[price, quantity]` is then scaled to a fixed-point decimal using the outcome's `price_precision` and `quantity_precision`. The result matches the `[price, quantity]` shape in [api-spec.md](../api-spec.md).
+After the database returns, each side is re-sorted in Rust using exact-numeric `BigUint` comparison — lexicographic string comparison would silently misrank prices of different lengths (`"100" < "99"` lexicographically). Each `[price, quantity]` is then decoded from chain units: `live_orders` stores the raw integers the contract emitted (price in basis points, amount in token atoms), so price is divided by `FULL_PERCENT` (10 000) and amount by `10^decimals` (`decimals` joined from `ref_tokens`), then formatted at the outcome's `price_precision` / `quantity_precision`. The result matches the `[price, quantity]` shape in [api-spec.md](../api-spec.md).
 
 ### `lastUpdateId`
 
@@ -204,7 +204,7 @@ If `status` is absent, the SQL emits no status predicate at all and every owner 
 
 ### Field projection
 
-`origQty = scale(amount_initial)`, `executedQty = scale(amount_initial - amount_remaining)`, `price = scale(price)`. Scaling uses `market_outcomes.price_precision` / `quantity_precision`. `timeInForce` is always `GTC`, `type` is always `LIMIT` in v1 (no other combinations are produced by the order-placement path).
+`origQty = decode(amount_initial)`, `executedQty = decode(amount_initial - amount_remaining)`, `price = decode(price)`. `live_orders` holds raw chain integers (price in basis points, amount in token atoms); decoding divides price by `FULL_PERCENT` (10 000) and amount by `10^decimals`, then formats at `market_outcomes.price_precision` / `quantity_precision` (`decimals` joined from `ref_tokens`). `timeInForce` is always `GTC`, `type` is always `LIMIT` in v1 (no other combinations are produced by the order-placement path).
 
 Public `status` per row:
 

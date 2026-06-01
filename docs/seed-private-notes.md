@@ -1,4 +1,4 @@
-# Deploying the seed PrivateNotes
+# Deploying the seed Private Notes
 
 The api seed (`auth.seed_accounts: true`, see
 [deployment.md](deployment.md#generate-a-kek)) inserts a fixed set of test
@@ -7,37 +7,38 @@ accounts into Postgres — `pn_address`, `pn_pubkey`, the KEK-encrypted
 [`crates/infrastructure/src/seed.rs`](../crates/infrastructure/src/seed.rs).
 
 **Seeding only writes database rows. It does not create anything on-chain.**
-Each seeded account points at a PrivateNote (PN) contract by address; that
+Each seeded account points at a Private Note (PN) contract by address; that
 contract must already be deployed and funded on the target network. If it is
 not, the read paths still work (the rows exist), but the trading path
 (`POST /order`, `DELETE /order`, batch, `buyFullSet`) fails the moment the api
-submits an external message to a note that does not exist or has no gas.
+submits an external message to a Private Note that does not exist or has no gas.
 
 So the order of operations is:
 
-1. Deploy and fund the PrivateNotes on-chain (this document).
-2. Record each note's address, keypair, and deposit-identifier hash.
+1. Deploy and fund the Private Notes on-chain (this document).
+2. Record each Private Note's address, keypair, and deposit-identifier hash.
 3. Put those values into `SEED_DATA` (or provision the accounts directly in the
    database — see [auth.md](tech-specs/auth.md)).
 4. Run the api once with `auth.seed_accounts: true` to insert the rows, then
    turn the flag back off.
 
-## What makes a PrivateNote usable
+## What makes a Private Note usable
 
-A note has to clear three on-chain steps before the trading path can use it:
+A Private Note has to clear three on-chain steps before the trading path can use
+it:
 
-1. **Deploy** — `RootPN.deployPrivateNote`. The note is materialized at a
+1. **Deploy** — `RootPN.deployPrivateNote`. The Private Note is materialized at a
    deterministic address derived from its **deposit identifier hash (DIH)**.
-2. **SHELL ECC gas** — `RootPN.sendEccShellToPrivateNote` funds the note's gas
-   balance in SHELL.
-3. **Native top-up** — a native vmshell balance so the note can pay for its own
-   internal-message execution. This comes from the **giver** (see below).
+2. **SHELL ECC gas** — `RootPN.sendEccShellToPrivateNote` funds the Private
+   Note's gas balance in SHELL.
+3. **Native top-up** — a native vmshell balance so the Private Note can pay for
+   its own internal-message execution. This comes from the **giver** (see below).
 
-## Deploying a pool of notes: `mint_pn_pool`
+## Deploying a pool of Private Notes: `mint_pn_pool`
 
 The in-repo CLI
 [`sdk/src/bin/mint_pn_pool.rs`](../sdk/src/bin/mint_pn_pool.rs) runs the full
-per-note flow — halo2 deposit voucher → `deployPrivateNote` → halo2 SHELL
+per-PN flow — halo2 deposit voucher → `deployPrivateNote` → halo2 SHELL
 voucher → `sendEccShellToPrivateNote` → giver native top-up — and writes the
 result to JSON:
 
@@ -52,23 +53,23 @@ cargo run --release --bin mint_pn_pool -- \
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--count` / `-n` | `5` | number of PrivateNotes to deploy |
-| `--nominal` | `N10000` | per-note deposit nominal — `N100`, `N1000`, or `N10000` |
+| `--count` / `-n` | `5` | number of Private Notes to deploy |
+| `--nominal` | `N10000` | per-PN deposit nominal — `N100`, `N1000`, or `N10000` |
 | `--token-type` / `-t` | `nackl` | deposit currency — `nackl`, `shell`, or `usdc` |
 | `--endpoint` / `-e` | `shellnet.ackinacki.org` | network host |
-| `--output` / `-o` | `pn_pool.json` | output path; re-running against an existing file **appends** `--count` more notes |
+| `--output` / `-o` | `pn_pool.json` | output path; re-running against an existing file **appends** `--count` more Private Notes |
 
 Deployment is sequential by design — each halo2 voucher proof commits to current
-chain state and must be submitted inside its validity window, so notes cannot be
-minted in parallel.
+chain state and must be submitted inside its validity window, so Private Notes
+cannot be minted in parallel.
 
 ### Prerequisites
 
 `mint_pn_pool` is a maintainer tool with real build- and run-time dependencies:
 
-- **Private halo2 prover crates**, pulled over SSH in
-  [`sdk/Cargo.toml`](../sdk/Cargo.toml). Without access to them the binary will
-  not compile.
+- **Halo2 prover crates**, pulled over HTTPS in
+  [`sdk/Cargo.toml`](../sdk/Cargo.toml) from public git repos — no SSH key
+  required.
 - **Halo2 artifacts on disk** — a writable prover-cache directory, plus the KZG
   SRS file `kzg_bn254_19.srs` (~64 MB). The SRS is generated automatically on
   first run if it is missing — it is reproducible from a fixed seed, so the
@@ -77,28 +78,29 @@ minted in parallel.
   `./params`, `./params/halo2_cache`, `./target/halo2_fixtures`; override with
   `PARAMS_DIR`, `HALO2_PK_CACHE`, `HALO2_FIXTURE_DIR`. See
   [`sdk/src/services/halo2/paths.rs`](../sdk/src/services/halo2/paths.rs).
-- **A working giver** on the target network. Shellnet has one; a production
-  network typically does not — there you deploy and fund notes by other means.
+- **A working giver** on the target network. Shellnet has one; Mainnet does not.
+  On Mainnet, deploying and funding Private Notes requires purchasing SHELL
+  tokens.
 - A **release build** — the halo2 prover is CPU-bound.
 
-If you cannot run this tool (no SSH access, no giver on your network), deploy and
-fund the notes by whatever means your network provides, then record the same
-four values per note (address, DIH, public key, secret key) by hand.
+If you cannot run this tool (no giver on your network, say), deploy and fund the
+Private Notes by whatever means your network provides, then record the same four
+values per Private Note (address, DIH, public key, secret key) by hand.
 
 ### Output: `pn_pool.json`
 
-`pn_pool.json` holds one entry per note. **It contains secret keys — keep it
-private and out of any shared store.** Each entry carries `address`,
+`pn_pool.json` holds one entry per Private Note. **It contains secret keys — keep
+it private and out of any shared store.** Each entry carries `address`,
 `deposit_identifier_hash`, `owner_public_key_hex`, `owner_secret_key_hex`, and
 the funding flags `shell_funded` / `native_funded`. The next section turns these
 into seeder input.
 
-## Putting the notes into the seeder
+## Putting the Private Notes into the seeder
 
 The seeder reads one JSON literal, `SEED_DATA`, compiled into the api binary
 ([`crates/infrastructure/src/seed.rs`](../crates/infrastructure/src/seed.rs)). To
-seed your own notes you edit that literal and rebuild the api image. One account
-looks like this:
+seed your own Private Notes you edit that literal and rebuild the api image. One
+account looks like this:
 
 ```json
 {
@@ -121,10 +123,10 @@ looks like this:
 }
 ```
 
-### Fields from the deployed note
+### Fields from the deployed Private Note
 
 Four fields come straight from `pn_pool.json` (or from however you deployed the
-note):
+Private Note):
 
 | `pn_pool.json` | `SEED_DATA` | Conversion |
 | --- | --- | --- |
@@ -196,19 +198,20 @@ directly — re-seeding will not update it.
 > `pn_seckey` and `api_secret` under the KEK yourself; see
 > [auth.md](tech-specs/auth.md) for the table contract.
 
-## Funding a PrivateNote with the giver
+## Funding a Private Note with the giver
 
-On a network that has a giver (such as shellnet), **the giver tops up a
-PrivateNote directly by its address** — the same `pn_address` that is in
-`pn_pool.json` and in `SEED_DATA`. `mint_pn_pool` does this automatically at
-deploy time, but you can also top up an already-deployed note later: send SHELL
-(and native gas) from the giver to the note's address.
+On a network that has a giver (such as Shellnet), **the giver tops up a Private
+Note directly by its address** — the same `pn_address` that is in `pn_pool.json`
+and in `SEED_DATA`. `mint_pn_pool` does this automatically at deploy time, but you
+can also top up an already-deployed Private Note later: send SHELL (and native
+gas) from the giver to the Private Note's address.
 
-For getting test SHELL and using the giver on shellnet, follow the Acki Nacki
+For getting test SHELL and using the giver on Shellnet, follow the Acki Nacki
 guide:
 
 > https://dev.ackinacki.com/readme/get-test-tokens-in-shellnet#get-shell
 
-A note that runs out of gas stops being able to execute trading messages until
-it is topped up again, so re-funding existing seed notes is the normal way to
-keep a long-running dev/test environment working.
+A Private Note that runs out of gas stops being able to execute trading messages
+until it is topped up again, so re-funding existing seed Private Notes is the
+normal way to keep a long-running dev/test environment working.
+</content>

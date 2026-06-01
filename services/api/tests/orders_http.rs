@@ -182,7 +182,12 @@ async fn insert_market(pool: &PgPool, scope: &Scope) {
                 price_precision, quantity_precision, tick_size, step_size,
                 min_notional, max_batch_size)
            values ($1, $2, 1, 'YES', $3,
-                   3, 2, '0.001', '0.01',
+                   -- quantity_precision = decimals (6): these HTTP tests
+                   -- exercise filtering/pagination, not amount scaling, so the
+                   -- chain-atoms → display descale is a no-op here. The real
+                   -- bps/atom decode is pinned with contract numbers in the
+                   -- infra depth tests.
+                   3, 6, '0.001', '0.01',
                    '1.00', 100)"#,
     )
     .bind(market_id)
@@ -299,11 +304,12 @@ async fn readonly_user_data_key_can_fetch_orders() {
         // supply one; either form is well-formed (no NULL on the
         // wire). Decoded as plain String, not Option<String>.
         let _ = &o.client_order_id;
-        // insert_order seeds raw price = 12345; market_outcomes
-        // price_precision = 3 → "12.345". Exact equality catches a
-        // wire-shape regression (e.g. price/origQty swap in the JSON
-        // mapper) that a non-empty check would miss.
-        assert_eq!(o.price, "12.345", "price scaled against price_precision=3");
+        // insert_order seeds raw price = 12345 basis points; the read path
+        // decodes bps → probability (raw / FULL_PERCENT) at price_precision=3,
+        // so "12345" → "1.234". Exact equality catches a wire-shape regression
+        // (e.g. price/origQty swap in the JSON mapper) that a non-empty check
+        // would miss.
+        assert_eq!(o.price, "1.234", "price decoded from basis points at price_precision=3");
         assert!(!o.orig_qty.is_empty(), "orig_qty rendered as decimal string");
         // `executedQty` is allowed to be "0" or non-zero depending on
         // status; we only assert it decoded cleanly, not its value.

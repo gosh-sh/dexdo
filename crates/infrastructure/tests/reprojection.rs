@@ -998,7 +998,7 @@ async fn orderplaced_fill_cancel_pipeline_reports_partial_executed_qty() {
             "outcomeId": "1",
             "isBuy": true,
             "price": "100",
-            "amount": "1000",
+            "amount": "10000000",
             "clientOrderId": "partial-cancel",
         }),
     )
@@ -1008,7 +1008,7 @@ async fn orderplaced_fill_cancel_pipeline_reports_partial_executed_qty() {
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
-        &json!({ "orderId": order_id, "filledAmount": "300" }),
+        &json!({ "orderId": order_id, "filledAmount": "3000000" }),
     )
     .await;
     insert_raw(
@@ -1103,7 +1103,7 @@ async fn orderplaced_full_fill_then_cancel_keeps_filled_status() {
             "outcomeId": "1",
             "isBuy": true,
             "price": "100",
-            "amount": "1000",
+            "amount": "10000000",
             "clientOrderId": "full-fill-then-cancel",
         }),
     )
@@ -1114,7 +1114,7 @@ async fn orderplaced_full_fill_then_cancel_keeps_filled_status() {
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
-        &json!({ "orderId": order_id, "filledAmount": "1000" }),
+        &json!({ "orderId": order_id, "filledAmount": "10000000" }),
     )
     .await;
     // OrderCancelled arrives after the full fill — must NOT regress
@@ -1204,7 +1204,7 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
             "outcomeId": "1",
             "isBuy": true,
             "price": "100",
-            "amount": "1000",
+            "amount": "10000000",
             "clientOrderId": "cancel-then-fill",
         }),
     )
@@ -1222,7 +1222,7 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
-        &json!({ "orderId": order_id, "filledAmount": "1000" }),
+        &json!({ "orderId": order_id, "filledAmount": "10000000" }),
     )
     .await;
     insert_raw(
@@ -1259,10 +1259,10 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
     assert!(page.next_cursor.is_none());
 
     // executed_qty is `greatest(amount_initial - amount_remaining, 0)` in
-    // SQL, so a co-mutation of `amount_initial` (kept = 1000) and
+    // SQL, so a co-mutation of `amount_initial` (kept = 10_000_000 atoms) and
     // `amount_remaining` (zeroed by a stale fill) would still render
     // executed_qty = 0. Assert the stored `amount_remaining` directly
-    // to pin the storage truth.
+    // to pin the storage truth (raw chain atoms, not display units).
     let amount_remaining: String = sqlx::query_scalar(
         "select amount_remaining::text from live_orders
               where orderbook_address = $1 and order_id = $2::numeric",
@@ -1273,7 +1273,7 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
     .await
     .expect("read amount_remaining");
     assert_eq!(
-        amount_remaining, "1000",
+        amount_remaining, "10000000",
         "OrderCancelled before OrderFilled preserves the unfilled remainder",
     );
 }

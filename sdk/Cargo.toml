@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 # Own workspace root, deliberately excluded from the repo-root workspace
-# (see root `Cargo.toml` `exclude`). The halo2 proof pipeline pulls private
-# SSH-only git sources that CI hosts have no key for; isolating this crate in
-# its own workspace keeps the root `cargo --workspace` resolve clear of them.
+# (see root `Cargo.toml` `exclude`). The halo2 proof pipeline pulls a heavy,
+# distinct zk/halo2 dependency graph; keeping it in its own workspace leaves
+# the root `cargo --workspace` resolve light. All git sources are public over
+# HTTPS — no SSH key required.
 [workspace]
 
 [workspace.package]
@@ -60,9 +61,9 @@ url = "2"
 
 # Layered halo2 voucher pipeline (witness export -> prover -> public-input
 # decode). See src/services/halo2.
-halo2-proover = { git = "ssh://git@github.com/gosh-sh/dexdo-halo2-kit", branch = "main" }
-dark_dex_halo2_private_witness_export_lib = { git = "ssh://git@github.com/gosh-sh/dexdo-halo2-kit", branch = "main" }
-gosh-dark-dex-halo2-new-circuit = { git = "ssh://git@github.com/gosh-sh/dexdo-halo2-kit", branch = "main", package = "dex-halo2-circuit" }
+halo2-proover = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", branch = "main" }
+dark_dex_halo2_private_witness_export_lib = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", branch = "main" }
+gosh-dark-dex-halo2-new-circuit = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", branch = "main", package = "dex-halo2-circuit" }
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "main", default-features = false, features = ["halo2-axiom", "test-utils"] }
 
 console_error_panic_hook = { optional = true, version = "0.1.7" }

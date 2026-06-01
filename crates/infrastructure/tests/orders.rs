@@ -117,7 +117,12 @@ async fn insert_market(pool: &PgPool, pmp: &str, symbol: &str, book: &str) {
                 price_precision, quantity_precision, tick_size, step_size,
                 min_notional, max_batch_size)
            values ($1, $2, 1, 'YES', $3,
-                   3, 2, '0.001', '0.01',
+                   -- quantity_precision = decimals (6): these tests exercise
+                   -- pagination/status/owner filtering, not amount scaling, so
+                   -- the chain-atoms → display descale is a no-op here. The
+                   -- real bps/atom decode is pinned with contract numbers in
+                   -- tests/depth.rs.
+                   3, 6, '0.001', '0.01',
                    '1.00', 100)"#,
     )
     .bind(market_id)
@@ -153,7 +158,12 @@ async fn insert_market_unreconciled(pool: &PgPool, pmp: &str, symbol: &str, book
                 price_precision, quantity_precision, tick_size, step_size,
                 min_notional, max_batch_size)
            values ($1, $2, 1, 'YES', $3,
-                   3, 2, '0.001', '0.01',
+                   -- quantity_precision = decimals (6): these tests exercise
+                   -- pagination/status/owner filtering, not amount scaling, so
+                   -- the chain-atoms → display descale is a no-op here. The
+                   -- real bps/atom decode is pinned with contract numbers in
+                   -- tests/depth.rs.
+                   3, 6, '0.001', '0.01',
                    '1.00', 100)"#,
     )
     .bind(market_id)
@@ -364,13 +374,13 @@ async fn returns_only_owner_rows_across_all_statuses() {
     let ids: Vec<&str> = page.orders.iter().map(|o| o.order_id()).collect();
     assert_eq!(ids, vec!["4", "3", "2", "1"], "DESC placed_chain_order order");
     assert!(page.next_cursor.is_none());
-    // Seeded raw price = "1000", market_outcomes.price_precision = 3, so
-    // the scaler must emit "1.000". A precision swap (e.g., reading
-    // `quantity_precision` here) would render "10.00" and fail this
-    // assertion — the only positive observation of the price scaler in
-    // this suite.
+    // Seeded raw price = "1000" basis points. The read path decodes bps →
+    // probability (raw / FULL_PERCENT) and renders at price_precision = 3, so
+    // "1000" → "0.100" (10%). A missing bps descale or a precision swap would
+    // render a different value — the only positive observation of the price
+    // decode in this suite.
     for order in &page.orders {
-        assert_eq!(order.price(), "1.000", "price scaled against price_precision=3");
+        assert_eq!(order.price(), "0.100", "price decoded from basis points at price_precision=3");
     }
 
     scope.cleanup(&pool).await;
@@ -884,8 +894,9 @@ async fn rejected_filter_returns_only_rejected_rows() {
 }
 
 /// Canceled partial fill reports non-zero executed_qty.
-/// Seed: amount_initial=1000, amount_remaining=300, status='CANCELLED'.
-/// quantity_precision=2 → origQty="10.00", executedQty="7.00".
+/// Seed (atoms): amount_initial=10_000_000, amount_remaining=3_000_000,
+/// status='CANCELLED'. USDC decimals=6 → origQty="10.000000",
+/// executedQty=(10_000_000-3_000_000)/1e6="7.000000".
 #[tokio::test]
 async fn canceled_partial_fill_reports_nonzero_executed_qty() {
     let Some(pool) = setup().await else { return };
@@ -894,16 +905,17 @@ async fn canceled_partial_fill_reports_nonzero_executed_qty() {
     scope.cleanup(&pool).await;
     insert_market(&pool, &scope.pmp_yes, &scope.symbol_yes, &scope.book_yes).await;
 
-    // amount_initial=1000, amount_remaining=300: executed = 1000 - 300 = 700.
-    // quantity_precision=2 → scale by /100: origQty="10.00", executedQty="7.00".
+    // atoms: amount_initial=10_000_000, amount_remaining=3_000_000 →
+    // executed = 7_000_000. USDC decimals=6 → origQty="10.000000",
+    // executedQty="7.000000".
     insert_order(
         &pool,
         &scope.book_yes,
         1,
         Some(&scope.owner),
         "1000",
-        "1000",
-        "300",
+        "10000000",
+        "3000000",
         "CANCELLED",
         1_700_000_001,
         "001",
@@ -919,8 +931,8 @@ async fn canceled_partial_fill_reports_nonzero_executed_qty() {
         "CANCELED",
         "public status is CANCELED (American spelling)"
     );
-    assert_eq!(order.orig_qty(), "10.00", "origQty scaled by 2 decimals");
-    assert_eq!(order.executed_qty(), "7.00", "executedQty = (1000-300)/100 = 7.00");
+    assert_eq!(order.orig_qty(), "10.000000", "origQty = 10_000_000 atoms / 1e6");
+    assert_eq!(order.executed_qty(), "7.000000", "executedQty = 7_000_000 atoms / 1e6");
     assert!(page.next_cursor.is_none());
 
     scope.cleanup(&pool).await;

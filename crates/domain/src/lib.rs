@@ -756,6 +756,14 @@ pub fn parse_positive_decimal(value: &str, max_decimals: u8) -> Result<(BigUint,
     Ok((scaled, decimals as u8))
 }
 
+/// On-chain price scale. The OrderBook contract stores `price` in basis
+/// points with `FULL_PERCENT = 10_000` (= 10^4), so a probability price like
+/// "0.488" must be encoded as `4880` bps. This is the chain price scale and is
+/// deliberately distinct from the display `price_precision` (which only bounds
+/// the input's fractional digits): the same price is shown to clients at
+/// `price_precision` decimals but must be lifted to basis points for the chain.
+pub const PRICE_BPS_DECIMALS: u8 = 4;
+
 /// Lift a decimal string to `BigUint` at exactly `target_decimals` fractional
 /// digits. Fails with `PrecisionExceeded` when the input carries more
 /// fractional digits than the target.
@@ -763,6 +771,27 @@ pub fn lift_decimal(value: &str, target_decimals: u8) -> Result<BigUint, DomainE
     let (scaled, actual) = parse_positive_decimal(value, target_decimals)?;
     let pad = (target_decimals - actual) as u32;
     Ok(scaled * BigUint::from(10u32).pow(pad))
+}
+
+/// Divide a non-negative integer string by `10^k`, exactly (floor — drops the
+/// last `k` digits). Steps a chain-scale integer (price in basis points,
+/// amount in token atoms) down to a coarser display grid before fixed-point
+/// formatting; the dropped digits are guaranteed zero by the chain's tick /
+/// lot lattice, so the floor is exact. Inverse direction of [`lift_decimal`].
+/// A non-digit input is read-model corruption and surfaces as
+/// `MarketInconsistent`.
+pub fn descale_pow10(raw: &str, k: usize) -> Result<String, DomainError> {
+    let raw = raw.trim();
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(DomainError::MarketInconsistent);
+    }
+    if k == 0 {
+        return Ok(raw.to_string());
+    }
+    if raw.len() <= k {
+        return Ok("0".to_string());
+    }
+    Ok(raw[..raw.len() - k].to_string())
 }
 
 fn count_decimals(value: &str) -> Result<u8, DomainError> {
@@ -1548,6 +1577,40 @@ mod tests {
         assert_eq!(lift_decimal("0.5", 3).unwrap(), BigUint::from(500u32));
         assert_eq!(lift_decimal("0.615", 3).unwrap(), BigUint::from(615u32));
         assert_eq!(lift_decimal("123.45", 4).unwrap(), BigUint::from(1234500u32));
+    }
+
+    #[test]
+    fn descale_pow10_drops_exact_trailing_zeros() {
+        assert_eq!(descale_pow10("4880", 1).unwrap(), "488"); // bps → 0.001 price grid
+        assert_eq!(descale_pow10("10000000", 4).unwrap(), "1000"); // USDC atoms → 0.01 qty grid
+        assert_eq!(descale_pow10("488", 0).unwrap(), "488");
+        assert_eq!(descale_pow10("5", 1).unwrap(), "0"); // fewer digits than k
+        assert_eq!(descale_pow10("0", 3).unwrap(), "0");
+    }
+
+    #[test]
+    fn descale_pow10_rejects_non_digit() {
+        assert_eq!(descale_pow10("4.88", 1), Err(DomainError::MarketInconsistent));
+        assert_eq!(descale_pow10("", 1), Err(DomainError::MarketInconsistent));
+    }
+
+    #[test]
+    fn lift_then_descale_round_trips_on_contract_grid() {
+        // Encode ↔ decode are inverse on the contract grid (real numbers):
+        // price "0.488" -> 4880 bps -> 488 (== the 0.001 display grid int).
+        let bps = lift_decimal("0.488", PRICE_BPS_DECIMALS).unwrap().to_str_radix(10);
+        assert_eq!(bps, "4880");
+        assert_eq!(
+            descale_pow10(&bps, (PRICE_BPS_DECIMALS - 3) as usize).unwrap(),
+            lift_decimal("0.488", 3).unwrap().to_str_radix(10), // "488"
+        );
+        // amount "10" -> 10_000_000 USDC atoms -> 1000 (== the 0.01 display grid int).
+        let atoms = lift_decimal("10", 6).unwrap().to_str_radix(10);
+        assert_eq!(atoms, "10000000");
+        assert_eq!(
+            descale_pow10(&atoms, (6 - 2) as usize).unwrap(),
+            lift_decimal("10", 2).unwrap().to_str_radix(10), // "1000"
+        );
     }
 
     #[test]

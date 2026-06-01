@@ -1872,7 +1872,7 @@ dependencies = [
 [[package]]
 name = "dark_dex_halo2_private_witness_export_lib"
 version = "0.1.0"
-source = "git+ssh://git@github.com/gosh-sh/dexdo-halo2-kit?branch=main#03cacde38bab63e595bdc4a90892c066b3ea000c"
+source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?branch=main#0c0452281a06c0f484a52afb497fc7ed0d5d19ad"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2056,7 +2056,7 @@ dependencies = [
 [[package]]
 name = "dex-halo2-circuit"
 version = "0.1.0"
-source = "git+ssh://git@github.com/gosh-sh/dexdo-halo2-kit?branch=main#03cacde38bab63e595bdc4a90892c066b3ea000c"
+source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?branch=main#0c0452281a06c0f484a52afb497fc7ed0d5d19ad"
 dependencies = [
  "failure",
  "gosh-dense-balanced-tree",
@@ -2992,7 +2992,7 @@ dependencies = [
 [[package]]
 name = "halo2-proover"
 version = "0.3.0"
-source = "git+ssh://git@github.com/gosh-sh/dexdo-halo2-kit?branch=main#03cacde38bab63e595bdc4a90892c066b3ea000c"
+source = "git+https://github.com/gosh-sh/dexdo-halo2-kit?branch=main#0c0452281a06c0f484a52afb497fc7ed0d5d19ad"
 dependencies = [
  "dex-halo2-circuit",
  "failure",

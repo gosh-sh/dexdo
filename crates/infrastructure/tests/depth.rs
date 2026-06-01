@@ -177,13 +177,14 @@ async fn depth_returns_human_decimal_levels() {
     insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
 
     // market_outcomes inserted by insert_market_with_outcome uses
-    // price_precision = 2, quantity_precision = 2. raw 614 -> "6.14",
-    // raw 10000 -> "100.00". Two bids (so depth has something to sort) plus
-    // one ask to cover both branches.
+    // Market: price_precision=2, quantity_precision=2, USDC decimals=6.
+    // live_orders mirrors the chain: price in basis points, amount in atoms.
+    //   6100 bps -> 0.61 ; 100_000_000 atoms -> 100.00.
+    // Two bids (so depth has something to sort) plus one ask.
     let levels = [
-        (true, "614", "10000"), // bid: price 6.14, qty 100.00
-        (true, "613", "2550"),  // bid: price 6.13, qty 25.50
-        (false, "616", "5000"), // ask: price 6.16, qty 50.00
+        (true, "6100", "100000000"), // bid: price 0.61, qty 100.00
+        (true, "6000", "25500000"),  // bid: price 0.60, qty 25.50
+        (false, "6200", "50000000"), // ask: price 0.62, qty 50.00
     ];
     for (idx, (is_buy, price, amount)) in levels.iter().enumerate() {
         let chain_order = format!("5f8000000000{:06}", idx);
@@ -215,11 +216,11 @@ async fn depth_returns_human_decimal_levels() {
     assert_eq!(depth.bids.len(), 2);
     assert_eq!(depth.asks.len(), 1);
     // Bids descending by price.
-    assert_eq!(depth.bids[0].price, "6.14");
+    assert_eq!(depth.bids[0].price, "0.61");
     assert_eq!(depth.bids[0].quantity, "100.00");
-    assert_eq!(depth.bids[1].price, "6.13");
+    assert_eq!(depth.bids[1].price, "0.60");
     assert_eq!(depth.bids[1].quantity, "25.50");
-    assert_eq!(depth.asks[0].price, "6.16");
+    assert_eq!(depth.asks[0].price, "0.62");
     assert_eq!(depth.asks[0].quantity, "50.00");
 }
 
@@ -337,15 +338,16 @@ async fn depth_aggregates_across_owners_into_single_level() {
         .expect("purge live_orders");
     insert_market_with_outcome(&pool, pmp, symbol, Some(orderbook)).await;
 
-    // Three bids at the SAME raw price (500 → "5.00"), three owner states:
-    //   owner A:    raw amount 100 → "1.00"
-    //   owner B:    raw amount 200 → "2.00"
-    //   NULL owner: raw amount 300 → "3.00"
-    // Aggregated quantity = 600 → "6.00".
+    // Three bids at the SAME chain price (5000 bps → "0.50"), three owner
+    // states (amounts in USDC atoms, decimals=6, quantity_precision=2):
+    //   owner A:    1_000_000 atoms → "1.00"
+    //   owner B:    2_000_000 atoms → "2.00"
+    //   NULL owner: 3_000_000 atoms → "3.00"
+    // Aggregated quantity = 6_000_000 atoms → "6.00".
     let rows: [(i64, Option<&str>, &str); 3] = [
-        (1, Some("0:depth_cross_owner_a"), "100"),
-        (2, Some("0:depth_cross_owner_b"), "200"),
-        (3, None, "300"),
+        (1, Some("0:depth_cross_owner_a"), "1000000"),
+        (2, Some("0:depth_cross_owner_b"), "2000000"),
+        (3, None, "3000000"),
     ];
     for (order_id, owner, amount) in rows {
         let chain_order = format!("5f8000000000{:06}", order_id);
@@ -354,7 +356,7 @@ async fn depth_aggregates_across_owners_into_single_level() {
                    (orderbook_address, order_id, outcome_id, is_buy, price,
                     amount_initial, amount_remaining, owner_pn_address, status,
                     last_chain_order, placed_chain_order)
-               values ($1, $2::numeric, 1, true, 500::numeric,
+               values ($1, $2::numeric, 1, true, 5000::numeric,
                        $3::numeric, $3::numeric, $4, 'OPEN',
                        $5, $5)"#,
         )
@@ -378,7 +380,7 @@ async fn depth_aggregates_across_owners_into_single_level() {
         1,
         "same-price orders from different owners must aggregate into one level"
     );
-    assert_eq!(depth.bids[0].price, "5.00");
+    assert_eq!(depth.bids[0].price, "0.50");
     assert_eq!(
         depth.bids[0].quantity, "6.00",
         "level quantity must include ALL same-price open orders \

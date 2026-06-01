@@ -63,7 +63,7 @@ Both services read GraphQL; only the `api` writes to the chain gateway.
 
 Decide the two endpoint values both services will use:
 
-| Config field | Used by | Example (public shellnet) | Shape |
+| Config field | Used by | Example (public Shellnet) | Shape |
 | --- | --- | --- | --- |
 | `graphql.endpoint` | indexer + api | `https://shellnet.ackinacki.org/graphql` | full HTTP(S) URL ending in `/graphql` |
 | `chain.gateway_endpoint` | api only | `shellnet.ackinacki.org` | bare host (no scheme), as in `config/api.local.yaml` |

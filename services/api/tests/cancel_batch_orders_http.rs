@@ -224,6 +224,8 @@ impl MarketReadRepository for FakeRepo {
             token_type,
             status: market.status,
             outcome,
+            // Test token: chain decimals == fixture display precision (6).
+            decimals: 6,
         })
     }
 

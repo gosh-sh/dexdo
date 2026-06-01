@@ -25,6 +25,7 @@ use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
 use dodex_domain::TimeInForce;
+use dodex_domain::PRICE_BPS_DECIMALS;
 use num_bigint::BigUint;
 use tracing::error;
 use tracing::warn;
@@ -167,6 +168,11 @@ pub struct MarketForPlacement {
     pub token_type: u32,
     pub status: MarketStatus,
     pub outcome: Outcome,
+    /// Quote asset's on-chain `decimals` (from `ref_tokens`, keyed by
+    /// `token_type`). The order amount is lifted to token atoms with this —
+    /// not the coarser display `quantity_precision` — to match the OrderBook
+    /// contract's lot lattice.
+    pub decimals: u8,
 }
 
 /// Slim market projection the `POST /api/v1/buyFullSet` path needs.
@@ -1112,13 +1118,15 @@ pub struct NewOrderInput {
 
 /// Chain-shaped payload handed to `ChainOrderSender`. All numeric
 /// fields are decimal strings sized for the on-chain ABI:
-/// - `price_raw`: uint256 in the contract's tick units (lifted by
-///   `pricePrecision`); `"0"` for `MARKET`.
-/// - `amount_raw`: uint128 lifted by `quantityPrecision`. The scale
-///   is the same regardless of side or type; only the unit it
-///   represents differs — outcome-token amount on LIMIT and MARKET
-///   SELL, quote-asset spend amount on MARKET BUY (per [api-spec
-///   §New Order](../../docs/api-spec.md#new-order)).
+/// - `price_raw`: uint256 in basis points — the probability price lifted by
+///   `FULL_PERCENT` (10_000), matching the OrderBook contract's `price`
+///   unit; `"0"` for `MARKET`.
+/// - `amount_raw`: uint128 in the quote asset's on-chain atoms (lifted by the
+///   token's `decimals`, not the coarser display `quantity_precision`), so it
+///   lands on the contract's lot lattice. The scale is the same regardless of
+///   side or type; only the unit it represents differs — outcome-token amount
+///   on LIMIT and MARKET SELL, quote-asset spend amount on MARKET BUY (per
+///   [api-spec §New Order](../../docs/api-spec.md#new-order)).
 /// - `client_order_id`: decimal string. ABI accepts uint128 but the
 ///   serialization path through `serde_json::json!` rejects values
 ///   above `u64::MAX` (no `arbitrary_precision` feature upstream), so
@@ -1625,7 +1633,7 @@ where
     S: ChainOrderSender,
 {
     pub async fn execute(&self, input: NewOrderInput) -> Result<SubmittedOrder, DomainError> {
-        let MarketForPlacement { event_id, oracle_list_hash, token_type, status, outcome } = self
+        let MarketForPlacement { event_id, oracle_list_hash, token_type, status, outcome, decimals } = self
             .repo
             .resolve_for_new_order(&input.market_address, &input.symbol, input.now_seconds)
             .await
@@ -1667,6 +1675,7 @@ where
             input.time_in_force,
             input.client_order_id.as_deref(),
             &outcome,
+            decimals,
         )?;
 
         let payload = NewOrderPayload {
@@ -1703,6 +1712,9 @@ fn generate_client_order_id() -> String {
 /// result with chain-level fields into a `NewOrderPayload`; batch
 /// callers collect a `Vec<BatchOrderPayloadItem>` into
 /// `NewBatchOrderPayload`.
+// Inputs are all distinct order fields plus the market context (outcome rules
+// + quote decimals); bundling them would not aid readability.
+#[allow(clippy::too_many_arguments)]
 fn validate_and_encode_order_item(
     side: OrderSide,
     quantity: &str,
@@ -1711,6 +1723,7 @@ fn validate_and_encode_order_item(
     time_in_force: Option<TimeInForce>,
     client_order_id: Option<&str>,
     outcome: &Outcome,
+    quote_decimals: u8,
 ) -> Result<BatchOrderPayloadItem, DomainError> {
     let flags = encode_order_flags(order_type, time_in_force)?;
 
@@ -1731,7 +1744,10 @@ fn validate_and_encode_order_item(
             if !is_multiple_of(p, &outcome.tick_size)? {
                 return Err(DomainError::PrecisionExceeded);
             }
-            lift_decimal(p, outcome.price_precision)?.to_str_radix(10)
+            // Encode price in basis points (chain scale), not the display
+            // `price_precision`. Input was already validated against
+            // `price_precision` / `tick_size` above.
+            lift_decimal(p, PRICE_BPS_DECIMALS)?.to_str_radix(10)
         }
         None => "0".to_string(),
     };
@@ -1740,7 +1756,10 @@ fn validate_and_encode_order_item(
     if !is_multiple_of(quantity, &outcome.step_size)? {
         return Err(DomainError::PrecisionExceeded);
     }
-    let amount_lifted = lift_decimal(quantity, outcome.quantity_precision)?;
+    // Encode amount in token atoms (chain scale = quote `decimals`), not the
+    // coarser display `quantity_precision`. Input was already validated
+    // against `quantity_precision` / `step_size` above.
+    let amount_lifted = lift_decimal(quantity, quote_decimals)?;
     // Strictly-positive invariant. `quantity == "0"` survives
     // `precision_within` (no fractional digits) and `is_multiple_of`
     // (zero is a multiple of every non-zero step), and the
@@ -1924,7 +1943,14 @@ where
             return Err(DomainError::InvalidParameter);
         }
 
-        let MarketForPlacement { event_id, oracle_list_hash, token_type, status, outcome } = self
+        let MarketForPlacement {
+            event_id,
+            oracle_list_hash,
+            token_type,
+            status,
+            outcome,
+            decimals,
+        } = self
             .repo
             .resolve_for_new_order(&input.market_address, &input.symbol, input.now_seconds)
             .await
@@ -1979,6 +2005,7 @@ where
                 item.time_in_force,
                 item.client_order_id.as_deref(),
                 &outcome,
+                decimals,
             )
             .inspect_err(|err| {
                 warn!(phase = "validate", item_index, ?err, "batchOrders rejected");
@@ -2647,6 +2674,13 @@ mod tests {
                 token_type,
                 status: market.status,
                 outcome,
+                // Test token: chain `decimals` chosen equal to the fixture's
+                // display `quantity_precision` (6), so amount encoding is
+                // identity-scaled in these use-case tests; the bps price scale
+                // is still exercised. The realistic decimals != precision case
+                // (USDC, NACKL) is pinned by the `encode_matches_contract_*`
+                // tests against the real contract constants.
+                decimals: 6,
             })
         }
 
@@ -3007,9 +3041,9 @@ mod tests {
         assert_eq!(p.token_type, 1);
         assert_eq!(p.outcome_id, 1);
         assert!(p.is_buy);
-        // 0.615 lifted by price_precision=3 -> 615
-        assert_eq!(p.price_raw, "615");
-        // 1.5 lifted by quantity_precision=6 -> 1_500_000
+        // 0.615 lifted to basis points (× FULL_PERCENT 10_000) -> 6150
+        assert_eq!(p.price_raw, "6150");
+        // 1.5 lifted by quote decimals (6, == this fixture's precision) -> 1_500_000 atoms
         assert_eq!(p.amount_raw, "1500000");
         // LIMIT + GTC = flags 0x00
         assert_eq!(p.flags, 0);
@@ -3247,6 +3281,99 @@ mod tests {
         uc.execute(input).await.expect("boundary qty must pass");
         assert_eq!(sender.calls().len(), 1);
         assert_eq!(sender.calls()[0].amount_raw, u64::MAX.to_string());
+    }
+
+    // Contract-accurate encoding. The lifted price/amount must satisfy the
+    // exact lattice + notional gates the chain enforces — price in basis
+    // points (FULL_PERCENT=10_000, TICK_SIZE=10 bps) and amount in token atoms
+    // (LOT_SIZE per token) — per contracts/modifiers/modifiers.sol and
+    // contracts/PrivateNote.sol §placeOrder. Numbers are the real seeded
+    // params, not synthetic, so a regression in the lift scale fails here.
+    #[test]
+    fn encode_matches_contract_lattice_usdc() {
+        const FULL_PERCENT: u128 = 10_000;
+        const TICK_SIZE: u128 = 10; // bps
+        const LOT_SIZE_USDC: u128 = 10_000; // 0.01 token @ 6 decimals
+        const MIN_ORDER_NOTIONAL_USDC: u128 = 1_000_000; // 1 USDC
+
+        let outcome = Outcome {
+            outcome_id: 0,
+            outcome_name: "YES".into(),
+            symbol: Symbol("PM-YES".into()),
+            price_precision: 3,
+            quantity_precision: 2,
+            tick_size: "0.001".into(),
+            step_size: "0.01".into(),
+            min_notional: "1.000000".into(),
+            max_batch_size: 5,
+        };
+        let item = validate_and_encode_order_item(
+            OrderSide::Buy,
+            "10",
+            Some("0.488"),
+            OrderType::Limit,
+            Some(TimeInForce::Gtc),
+            None,
+            &outcome,
+            6, // USDC decimals
+        )
+        .expect("valid USDC order encodes");
+
+        assert_eq!(item.price_raw, "4880"); // 0.488 × 10_000 bps
+        assert_eq!(item.amount_raw, "10000000"); // 10 × 10^6 atoms
+
+        // Replay the contract's LIMIT gates on the encoded integers.
+        let price: u128 = item.price_raw.parse().unwrap();
+        let amount: u128 = item.amount_raw.parse().unwrap();
+        assert_eq!(price % TICK_SIZE, 0, "would hit ERR_PRICE_NOT_TICK_MULTIPLE");
+        assert_eq!(amount % LOT_SIZE_USDC, 0, "would hit ERR_AMOUNT_NOT_LOT_MULTIPLE");
+        let notional = amount * price / FULL_PERCENT;
+        assert_eq!(notional, 4_880_000); // 4.88 USDC in atoms
+        assert!(notional >= MIN_ORDER_NOTIONAL_USDC, "would hit ERR_ORDER_TOO_SMALL");
+    }
+
+    #[test]
+    fn encode_matches_contract_lattice_nackl() {
+        // NACKL: decimals=9, LOT_SIZE=10_000_000, MIN_ORDER_NOTIONAL=10 NACKL.
+        const FULL_PERCENT: u128 = 10_000;
+        const TICK_SIZE: u128 = 10;
+        const LOT_SIZE_NACKL: u128 = 10_000_000;
+        const MIN_ORDER_NOTIONAL_NACKL: u128 = 10_000_000_000;
+
+        let outcome = Outcome {
+            outcome_id: 0,
+            outcome_name: "YES".into(),
+            symbol: Symbol("PM-YES".into()),
+            price_precision: 3,
+            quantity_precision: 2,
+            tick_size: "0.001".into(),
+            step_size: "0.01".into(),
+            min_notional: "10.000000000".into(),
+            max_batch_size: 5,
+        };
+        // 0.50 × 50 = 25 NACKL notional clears the 10 NACKL minimum.
+        let item = validate_and_encode_order_item(
+            OrderSide::Buy,
+            "50",
+            Some("0.500"),
+            OrderType::Limit,
+            Some(TimeInForce::Gtc),
+            None,
+            &outcome,
+            9, // NACKL decimals
+        )
+        .expect("valid NACKL order encodes");
+
+        assert_eq!(item.price_raw, "5000"); // 0.5 × 10_000 bps
+        assert_eq!(item.amount_raw, "50000000000"); // 50 × 10^9 atoms
+
+        let price: u128 = item.price_raw.parse().unwrap();
+        let amount: u128 = item.amount_raw.parse().unwrap();
+        assert_eq!(price % TICK_SIZE, 0);
+        assert_eq!(amount % LOT_SIZE_NACKL, 0);
+        let notional = amount * price / FULL_PERCENT; // 50e9 × 5000 / 10_000
+        assert_eq!(notional, 25_000_000_000); // 25 NACKL in atoms
+        assert!(notional >= MIN_ORDER_NOTIONAL_NACKL);
     }
 
     #[test]
@@ -3794,7 +3921,7 @@ mod tests {
         assert_eq!(payload.orders[0].client_order_id, "11");
         assert_eq!(payload.orders[1].client_order_id, "22");
         assert_eq!(payload.orders[0].outcome_id, 1);
-        assert_eq!(payload.orders[0].price_raw, "615");
+        assert_eq!(payload.orders[0].price_raw, "6150");
         assert_eq!(payload.orders[0].amount_raw, "1500000");
         assert_eq!(payload.orders[0].flags, 0);
         assert!(payload.orders[0].is_buy);

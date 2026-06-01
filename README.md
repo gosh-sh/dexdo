@@ -35,7 +35,7 @@ scripts/             # operational scripts
 tests/               # repo-level integration fixtures (REST .rest files, e2e)
 ```
 
-`sdk/` is its own Cargo workspace and is **not** part of `cargo build --workspace`; its halo2 proof pipeline depends on private SSH-only git sources. Build it from `sdk/` directly where an SSH key is available.
+`sdk/` is its own Cargo workspace and is **not** part of `cargo build --workspace` — its halo2 proof pipeline pulls a heavy, distinct zk/halo2 dependency graph. Build it from `sdk/` directly (`cargo build` there).
 
 ## Configuration
 

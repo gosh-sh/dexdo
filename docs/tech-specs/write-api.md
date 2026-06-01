@@ -146,8 +146,8 @@ placeOrder(
   tokenType,       // uint32,  markets.token_code
   outcomeId,       // uint32,  market_outcomes.outcome_id
   isBuy,           // bool,    side == BUY
-  price,           // uint256, lifted by price_precision; ignored on FLAG_MARKET
-  amount,          // uint128, lifted by quantity_precision (quote-decimals on MARKET BUY)
+  price,           // uint256, basis points (probability × FULL_PERCENT 10_000); ignored on FLAG_MARKET
+  amount,          // uint128, token atoms (lifted by quote decimals; quote-asset spend on MARKET BUY)
   flags,           // uint8,   see Flags
   minAmount,       // uint128, partial-fill minimum; this API always sends 0
   epochId,         // uint64,  dark-order-book matching; this API always sends 0

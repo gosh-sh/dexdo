@@ -8,8 +8,8 @@ members = [
     "crates/infrastructure",
 ]
 # `sdk/` is its own workspace, kept out of the root resolve on purpose: its
-# halo2 proof pipeline pulls private SSH-only git sources that CI hosts have
-# no key for. Build it directly from `sdk/` where an SSH key is available.
+# halo2 proof pipeline pulls a heavy, distinct zk/halo2 dependency graph.
+# Build it directly from `sdk/`; all its git sources are public over HTTPS.
 exclude = ["sdk"]
 resolver = "3"
 

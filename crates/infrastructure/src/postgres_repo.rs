@@ -22,6 +22,7 @@ use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
 use dodex_application::QueryableOrderStatus;
 use dodex_domain::decimal_string_is_zero;
+use dodex_domain::descale_pow10;
 use dodex_domain::CancelReason;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -44,6 +45,7 @@ use dodex_domain::Terminal;
 use dodex_domain::TerminalKind;
 use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
+use dodex_domain::PRICE_BPS_DECIMALS;
 use num_bigint::BigUint;
 use sqlx::PgPool;
 use tracing::error;
@@ -159,13 +161,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // stores raw uint256/uint128 integers as the contract emitted them, so
         // the API must scale by 10^-precision to honour the DECIMAL contract
         // in docs/api-spec.md (e.g. raw "61400" with price_precision=2 -> "614.00").
-        let target: Option<(Option<String>, i32, i32, i32)> = sqlx::query_as(
+        let target: Option<(Option<String>, i32, i32, i32, i32)> = sqlx::query_as(
             r#"select m.orderbook_address,
                       mo.outcome_id,
                       mo.price_precision,
-                      mo.quantity_precision
+                      mo.quantity_precision,
+                      rt.decimals
                  from markets m
                  join market_outcomes mo on mo.market_id_fk = m.id
+                 join ref_tokens rt on rt.token_type = m.token_type
                 where m.pmp_address = $1
                   and mo.symbol = $2
                   and m.last_reconciled_at is not null"#,
@@ -176,7 +180,8 @@ impl MarketReadRepository for PostgresReadModelRepository {
         .await
         .context("resolve orderbook_address from (marketAddress, symbol)")?;
 
-        let Some((orderbook_address, outcome_id, price_precision, quantity_precision)) = target
+        let Some((orderbook_address, outcome_id, price_precision, quantity_precision, decimals)) =
+            target
         else {
             return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
         };
@@ -291,9 +296,38 @@ impl MarketReadRepository for PostgresReadModelRepository {
             );
             anyhow!(DomainError::MarketInconsistent)
         })?;
+        // live_orders mirrors the chain: price is in basis points, amount in
+        // token atoms. Step each down to its display grid before formatting —
+        // price bps → probability (price_precision), amount atoms → tokens
+        // (quantity_precision). The drops are exact: bps are a TICK_SIZE
+        // multiple, atoms a lot multiple. A display precision finer than the
+        // chain scale (price_precision > the basis-point exponent, or
+        // quantity_precision > decimals) is read-model misconfiguration.
+        let price_drop =
+            usize::try_from(i32::from(PRICE_BPS_DECIMALS) - price_precision).map_err(|_| {
+                tracing::warn!(
+                    orderbook = %orderbook_address,
+                    outcome_id,
+                    price_precision,
+                    "price_precision exceeds the basis-point scale",
+                );
+                anyhow!(DomainError::MarketInconsistent)
+            })?;
+        let amount_drop = usize::try_from(decimals - quantity_precision).map_err(|_| {
+            tracing::warn!(
+                orderbook = %orderbook_address,
+                outcome_id,
+                quantity_precision,
+                decimals,
+                "quantity_precision exceeds the quote-asset decimals",
+            );
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
         for level in bids.iter_mut().chain(asks.iter_mut()) {
-            level.price = scale_uint_to_decimal(&level.price, price_scale);
-            level.quantity = scale_uint_to_decimal(&level.quantity, quantity_scale);
+            let price_grid = descale_pow10(&level.price, price_drop).map_err(|e| anyhow!(e))?;
+            let qty_grid = descale_pow10(&level.quantity, amount_drop).map_err(|e| anyhow!(e))?;
+            level.price = scale_uint_to_decimal(&price_grid, price_scale);
+            level.quantity = scale_uint_to_decimal(&qty_grid, quantity_scale);
         }
 
         // Scope to (orderbook, outcome_id): the depth response is per-outcome,
@@ -353,9 +387,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       mo.tick_size             as tick_size,
                       mo.step_size             as step_size,
                       mo.min_notional          as min_notional,
-                      mo.max_batch_size        as max_batch_size
+                      mo.max_batch_size        as max_batch_size,
+                      rt.decimals              as decimals
                  from markets m
                  join market_outcomes mo on mo.market_id_fk = m.id
+                 join ref_tokens rt on rt.token_type = m.token_type
                 where m.pmp_address = $1
                   and mo.symbol = $2
                   and m.last_reconciled_at is not null"#,
@@ -447,6 +483,15 @@ impl MarketReadRepository for PostgresReadModelRepository {
             );
             anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
         })?;
+        let decimals: u8 = row.decimals.try_into().map_err(|_| {
+            tracing::warn!(
+                market_address = %market_address.0,
+                symbol = %symbol.0,
+                raw = row.decimals,
+                "placement_row decimals out of range",
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
 
         Ok(MarketForPlacement {
             event_id: row.event_id,
@@ -464,6 +509,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 min_notional: row.min_notional,
                 max_batch_size,
             },
+            decimals,
         })
     }
 
@@ -785,12 +831,14 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.placed_chain_order as placed_chain_order,
                           mo.price_precision as price_precision,
                           mo.quantity_precision as quantity_precision,
+                          rt.decimals as decimals,
                           lo.status as raw_status
                      from live_orders lo
                      join markets m on m.orderbook_address = lo.orderbook_address
                      join market_outcomes mo
                        on mo.market_id_fk = m.id
                       and mo.outcome_id = lo.outcome_id
+                     join ref_tokens rt on rt.token_type = m.token_type
                     where lo.owner_pn_address = $1
                       and lo.chain_created_at is not null
                       and lo.chain_updated_at is not null
@@ -829,12 +877,14 @@ impl MarketReadRepository for PostgresReadModelRepository {
                           lo.placed_chain_order as placed_chain_order,
                           mo.price_precision as price_precision,
                           mo.quantity_precision as quantity_precision,
+                          rt.decimals as decimals,
                           lo.status as raw_status
                      from live_orders lo
                      join markets m on m.orderbook_address = lo.orderbook_address
                      join market_outcomes mo
                        on mo.market_id_fk = m.id
                       and mo.outcome_id = lo.outcome_id
+                     join ref_tokens rt on rt.token_type = m.token_type
                     where lo.owner_pn_address = $1
                       and lo.chain_created_at is not null
                       and lo.chain_updated_at is not null
@@ -1129,6 +1179,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
 #[derive(Debug, sqlx::FromRow)]
 struct PlacementRow {
+    decimals: i32,
     oracle_list_hash: Option<String>,
     token_type: i32,
     event_id: String,
@@ -1280,6 +1331,7 @@ struct DepthLevelRow {
 
 #[derive(Debug, sqlx::FromRow)]
 struct OrderRow {
+    decimals: i32,
     market_address: String,
     symbol: String,
     order_id: String,
@@ -1401,6 +1453,16 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     }
     let price_scale = precision_to_scale(row.price_precision, "price", &row)?;
     let quantity_scale = precision_to_scale(row.quantity_precision, "quantity", &row)?;
+    // live_orders mirrors chain units (price in basis points, amount in token
+    // atoms); step each down to its display grid before formatting. Exact: bps
+    // are a TICK_SIZE multiple, atoms a lot multiple. A negative drop means
+    // display precision finer than the chain scale — read-model
+    // misconfiguration; skip the row (None) like the other corruption guards.
+    let price_drop = usize::try_from(i32::from(PRICE_BPS_DECIMALS) - row.price_precision).ok()?;
+    let amount_drop = usize::try_from(row.decimals - row.quantity_precision).ok()?;
+    let price_grid = descale_pow10(&row.price, price_drop).ok()?;
+    let orig_qty_grid = descale_pow10(&row.orig_qty, amount_drop).ok()?;
+    let executed_qty_grid = descale_pow10(&row.executed_qty, amount_drop).ok()?;
 
     // Derive the public OrderStatus from the stored raw_status and
     // (for OPEN rows) the SQL-side `fully_filled` boolean.
@@ -1482,9 +1544,9 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
         Symbol(row.symbol),
         identity,
         row.client_order_id,
-        scale_uint_to_decimal(&row.price, price_scale),
-        scale_uint_to_decimal(&row.orig_qty, quantity_scale),
-        scale_uint_to_decimal(&row.executed_qty, quantity_scale),
+        scale_uint_to_decimal(&price_grid, price_scale),
+        scale_uint_to_decimal(&orig_qty_grid, quantity_scale),
+        scale_uint_to_decimal(&executed_qty_grid, quantity_scale),
         status,
         TimeInForce::Gtc,
         OrderType::Limit,
@@ -2655,6 +2717,7 @@ mod tests {
 
     fn order_row(raw_status: &str, executed_qty: &str) -> OrderRow {
         OrderRow {
+            decimals: 2,
             market_address: "0:market".into(),
             symbol: "YES".into(),
             order_id: "123".into(),
@@ -2675,11 +2738,12 @@ mod tests {
     }
 
     #[test]
-    fn order_from_row_accepts_decimal_executed_qty_for_open_rows() {
-        let mut row = order_row("OPEN", "0.00");
-        row.orig_qty = "10.00".into();
-        row.quantity_precision = 0;
-        let order = order_from_row(row).expect("decimal zero must not be treated as malformed");
+    fn order_from_row_renders_open_zero_executed_as_new() {
+        // live_orders stores integer raw (atoms); executed_qty "0" → NEW,
+        // rendered at quantity_precision. (decimals == quantity_precision in
+        // the fixture, so the atom→token descale is a no-op here.)
+        let row = order_row("OPEN", "0");
+        let order = order_from_row(row).expect("zero executed must not be treated as malformed");
         assert_eq!(order.status().as_str(), "NEW");
         assert_eq!(order.executed_qty(), "0.00");
     }
