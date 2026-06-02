@@ -16,11 +16,13 @@ services:
     environment:
       APP_CONFIG: /app/config/market-manager.stage.yaml
       RUST_LOG: info
+      LOG_DIR: /app/logs
     volumes:
       # Mount config dir read-only so YAML / events / secrets edits take
       # effect on container restart without rebuilding the image.
       - ./services/market-manager/config:/app/config:ro
       - market-manager-state:/state
+      - ./logs/market-manager:/app/logs
     restart: unless-stopped
 
 volumes:

@@ -6,10 +6,12 @@ services:
     environment:
       APP_CONFIG: /app/config/api.local.yaml
       RUST_LOG: info
+      LOG_DIR: /app/logs
     ports:
       - "8080:8080"
     volumes:
       - ./config:/app/config:ro
+      - ./logs/api:/app/logs
     restart: unless-stopped
     healthcheck:
       # Probe the running API rather than spawning a second `dodex-api`
@@ -28,6 +30,8 @@ services:
     environment:
       APP_CONFIG: /app/config/indexer.local.yaml
       RUST_LOG: info
+      LOG_DIR: /app/logs
     volumes:
       - ./config:/app/config:ro
+      - ./logs/indexer:/app/logs
     restart: unless-stopped
