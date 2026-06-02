@@ -1064,8 +1064,17 @@ impl MarketReadRepository for PostgresReadModelRepository {
             );
             anyhow!(DomainError::MarketInconsistent)
         })?;
-        // <= MAX_DECIMAL_PRECISION (38) always fits u8.
-        let decimals = decimals_scale as u8;
+        // Total conversion: validate_decimal_scale already capped this at
+        // MAX_DECIMAL_PRECISION (38). Checked rather than `as u8` so a future
+        // cap raised above 255 can't silently truncate.
+        let decimals = u8::try_from(decimals_scale).map_err(|_| {
+            tracing::warn!(
+                pmp = %market_address.0,
+                raw = decimals_scale,
+                "decimals exceeds u8 after scale validation — read-model corruption"
+            );
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
 
         // `oracle_list_hash` is nullable at the schema level (pre-reconcile),
         // but we already gated on last_reconciled_at IS NOT NULL — a NULL here

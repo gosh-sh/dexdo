@@ -628,14 +628,14 @@ Response:
     {
       "outcomeId": 0,
       "symbol": "PM-2026-ELECTION-NO",
-      "free": "10.00",
-      "lockedInOrders": "0.00"
+      "free": "10.000000000",
+      "lockedInOrders": "0.000000000"
     },
     {
       "outcomeId": 1,
       "symbol": "PM-2026-ELECTION-YES",
-      "free": "5.50",
-      "lockedInOrders": "1000.00"
+      "free": "5.500000000",
+      "lockedInOrders": "1000.000000000"
     }
   ]
 }
@@ -650,8 +650,8 @@ Response fields:
 | `balances` | ARRAY | One entry per outcome of the market, sorted by `outcomeId` ascending. Length equals the market's `outcomes[]` length in `/api/v1/markets`. |
 | `balances[].outcomeId` | INT | Stable outcome id; matches `outcomes[].outcomeId` from `/api/v1/markets`. |
 | `balances[].symbol` | STRING | Outcome-token symbol; matches `outcomes[].symbol` from `/api/v1/markets`. |
-| `balances[].free` | DECIMAL | Outcome tokens currently held by the trading PrivateNote across clean, debt, and coupon stake pools, scaled by the outcome's `quantityPrecision`. |
-| `balances[].lockedInOrders` | DECIMAL | Outcome tokens locked in resting SELL orders on this outcome, scaled by the outcome's `quantityPrecision`. |
+| `balances[].free` | DECIMAL | Outcome tokens currently held by the trading PrivateNote across clean, debt, and coupon stake pools, scaled by the quote asset's on-chain `decimals` (same scaling as `/api/v1/account`). |
+| `balances[].lockedInOrders` | DECIMAL | Outcome tokens locked in resting SELL orders on this outcome, scaled by the quote asset's on-chain `decimals`. |
 
 Errors:
 

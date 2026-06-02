@@ -5108,8 +5108,9 @@ mod get_market_balances_use_case_tests {
     // holding of 12.5 NACKL is `12_500_000_000` atoms and must render as ~12.5,
     // not 125_000_000. Scaling atoms by `quantity_precision` (2) instead of the
     // full `decimals` over-reports by 10^(9-2).
-    // `happy_path_sums_three_pools_per_outcome` can't catch that — its small
-    // synthetic inputs sit far below atom scale — so this feeds realistic ones.
+    // A small-synthetic-input happy path can't catch that — its inputs sit far
+    // below atom scale, where the 10^(9-2) error is invisible — so this feeds
+    // realistic atom-scale values.
     #[tokio::test]
     async fn market_balances_free_not_overscaled_for_real_atoms() {
         let stake = PnStake {
@@ -5131,12 +5132,8 @@ mod get_market_balances_use_case_tests {
             })
             .await
             .expect("ok");
-        let free = &out.balances[0].free;
-        let val: f64 = free.parse().expect("free parses as a number");
-        assert!(
-            (val - 12.5).abs() < 1e-6,
-            "outcome free over-scaled: got {free} (expected ~12.5 tokens for 12.5e9 atoms at decimals=9)"
-        );
+        // Exact: 12_500_000_000 atoms / 10^9 → "12.500000000" (not 125_000_000).
+        assert_eq!(out.balances[0].free, "12.500000000");
     }
 
     // Same over-scale on the `locked_in_orders` column, which is summed from
@@ -5162,17 +5159,13 @@ mod get_market_balances_use_case_tests {
             })
             .await
             .expect("ok");
-        let locked = &out.balances[0].locked_in_orders;
-        let val: f64 = locked.parse().expect("locked parses as a number");
-        assert!(
-            (val - 20.0).abs() < 1e-6,
-            "outcome locked over-scaled: got {locked} (expected ~20 tokens for 20e9 atoms at decimals=9)"
-        );
+        // Exact: 20_000_000_000 atoms / 10^9 → "20.000000000" (not 200_000_000).
+        assert_eq!(out.balances[0].locked_in_orders, "20.000000000");
     }
 
     // Golden-fixture regression (captured live on the local stack): a
     // `buyFullSet` at the market price splits collateral into outcome amounts
-    // of full-`decimals` precision, OFF the quantity_precision grid — 25 NACKL
+    // of full-`decimals` precision, OFF the quantity_precision grid — ~25 NACKL
     // → 11_567_164_168 / 13_432_835_808 atoms. Scaling by `quantity_precision`
     // would over-report (→ "115671641.68"); a grid-strict descale to the qp
     // lattice would have to drop non-zero low digits. Scaling by the full

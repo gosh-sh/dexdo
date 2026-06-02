@@ -104,8 +104,8 @@ impl Dex {
     /// Buy a full set of outcome tokens by depositing `collateral` of
     /// the market's quote asset into the PMP. On a market sitting in
     /// `AWAITING_FREEZE`, the first successful call also activates the
-    /// OrderBook for everyone else. See
-    /// `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet`.
+    /// OrderBook, after which it stays active for all subsequent callers.
+    /// See `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet`.
     pub async fn split_full_set(
         &self,
         pn_address: &str,
