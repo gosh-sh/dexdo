@@ -2,9 +2,9 @@
 //
 // Production trader-path methods. Each one constructs the relevant
 // kit contract handle on demand and forwards. Deploy/setup helpers and
-// extra read-only getters used only by e2e tests and `market-manager`
-// live in `test_helpers.rs` behind the `test-helpers` feature so the
-// prod build does not carry them.
+// extra read-only getters used only by the e2e tests live in
+// `test_helpers.rs` behind the `test-helpers` feature so the prod build
+// does not carry them.
 
 use std::sync::Arc;
 
@@ -25,17 +25,17 @@ use ackinacki_kit::tvm_client::ClientContext;
 use super::dto::OwnedOrders;
 use super::error::ChainResult;
 
-/// Long-lived TVM client + the typed entry points the API, e2e tests,
-/// and market-manager reach for.
+/// Long-lived TVM client + the typed entry points the API and e2e tests
+/// reach for.
 pub struct Dex {
     pub(crate) ctx: Arc<ClientContext>,
 }
 
 impl Dex {
     /// Wrap a caller-owned `ClientContext`. Use this when the caller
-    /// already has a context (e.g. `market-manager` shares one across
-    /// its trader + admin paths). For the common case of "just give me
-    /// a `Dex` for these endpoints", reach for `from_endpoints`.
+    /// already has a context to share across several paths. For the
+    /// common case of "just give me a `Dex` for these endpoints", reach
+    /// for `from_endpoints`.
     pub fn new(ctx: Arc<ClientContext>) -> Self {
         Self { ctx }
     }
@@ -104,9 +104,8 @@ impl Dex {
     /// Buy a full set of outcome tokens by depositing `collateral` of
     /// the market's quote asset into the PMP. On a market sitting in
     /// `AWAITING_FREEZE`, the first successful call also activates the
-    /// OrderBook — same chain entry point as the staging market-manager
-    /// uses to seed initial MM liquidity, but signed by the caller's
-    /// trading PN. See `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet`.
+    /// OrderBook for everyone else. See
+    /// `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet`.
     pub async fn split_full_set(
         &self,
         pn_address: &str,

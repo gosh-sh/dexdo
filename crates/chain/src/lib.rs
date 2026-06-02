@@ -7,12 +7,12 @@
 //     (`place_order` / `cancel_order` / `place_batch` / `cancel_batch`)
 //     plus the order-book read used by e2e cleanup polling.
 //
-//   * `dodex-market-manager` + the api e2e tests — both spawn
-//     ephemeral PMP + OrderBook setups via the deploy entry points
-//     (`deploy_pmp`, `submit_set_timings`, `submit_resolve`, ...) and
-//     pull this crate with `features = ["test-helpers"]`. The prod
-//     api/infrastructure build leaves the feature off, so deploy
-//     methods stay out of the request-handling binary.
+//   * the api e2e tests — spawn ephemeral PMP + OrderBook setups via
+//     the deploy entry points (`deploy_pmp`, `submit_set_timings`,
+//     `submit_resolve`, ...) and pull this crate with
+//     `features = ["test-helpers"]`. The prod api/infrastructure build
+//     leaves the feature off, so deploy methods stay out of the
+//     request-handling binary.
 //
 // Each method instantiates the relevant kit contract handle on demand
 // from a shared `Arc<ClientContext>`. No rate-limiter, no retries, no

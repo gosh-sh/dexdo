@@ -46,7 +46,7 @@ use dodex_sdk::Dex;
 use dodex_sdk::DexConfig;
 
 const DEFAULT_ENDPOINT: &str = "shellnet.ackinacki.org";
-const DEFAULT_NAME_PREFIX: &str = "market-manager";
+const DEFAULT_NAME_PREFIX: &str = "dodex-oracle";
 const ROOT_ORACLE_NATIVE_TARGET: u64 = 120_000_000_000;
 const ROOT_ORACLE_NATIVE_THRESHOLD: u64 = 50_000_000_000;
 

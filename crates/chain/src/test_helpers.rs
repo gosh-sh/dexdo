@@ -2,14 +2,10 @@
 //
 // Methods compiled only with the `test-helpers` feature — deploy +
 // setup entry points plus the read-only PN getters used by e2e tests
-// to verify on-chain state. Used by:
-//
-//   * the api crate's e2e integration tests, which spawn an
-//     ephemeral PMP + OrderBook per run before exercising the
-//     trader write-path, and poll PN getters to assert on-chain
-//     effects;
-//   * `market-manager`, the staging tool that deploys real markets
-//     on shellnet.
+// to verify on-chain state. Used by the api crate's e2e integration
+// tests, which spawn an ephemeral PMP + OrderBook per run before
+// exercising the trader write-path, and poll PN getters to assert
+// on-chain effects.
 //
 // The prod api/infrastructure build leaves `test-helpers` off so
 // `Dex` exposes only the trader-path methods in `client.rs`.

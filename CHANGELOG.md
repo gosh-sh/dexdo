@@ -18,14 +18,12 @@ All notable changes to DEX.DO are recorded here. Entries are date-based, newest 
 
 ### Added
 
-- `services/market-manager/`: new market-manager service with Dockerfile, stage configs, and event-list seed (`config/events.stage.json`) — wires DEX market lifecycle off-chain.
 - `openapi/openapi.yaml` and `openapi/index.html`: published OpenAPI spec rendered on GitHub Pages. Added `services/api/src/bin/gen-openapi.rs` generator binary, `openapi/generate.sh`, and `.github/workflows/{openapi,pages}.yml` to regenerate and deploy on push.
 - `crates/chain/`: new chain-client crate carved out of `infrastructure/chain_sender.rs` (client, DTO, error, test helpers).
 - `makerComission` and `takerComission` fields on the `GET /api/v1/markets` response. Signed `DECIMAL` strings (e.g. `"0.00045"`); a negative `makerComission` is a maker rebate credited rather than debited.
 
 ### Changed
 
-- Trimmed `services/market-manager/Cargo.toml` and `Dockerfile` to fix the stage image build (#32).
 - Regenerated OpenAPI after BE-DEX method sync; moved `openapi/index.html` → `docs/index.html` for Pages serving.
 
 ## [2026-05-26]

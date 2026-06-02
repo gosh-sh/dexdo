@@ -45,10 +45,9 @@ tvm_executor = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v2.24.20
 tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v2.24.20.an' }
 tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v2.24.20.an' }
 # Public chain primitives (PrivateNote, OrderBook, Pmp, RootPn, tvm_client).
-# The write-side facade that wraps these lives in `crates/chain/`; both
-# the API (trader path) and `market-manager` (deploy tool) reach for it
-# via the `dodex-chain` workspace dep. Kept in-tree because the
-# upstream facade `bee-dex` ships from a private SSH-only repo and
-# staging / CI hosts have no key for it.
+# The write-side facade that wraps these lives in `crates/chain/`; the
+# API (trader path) and the e2e tests reach for it via the `dodex-chain`
+# workspace dep. Kept in-tree because the upstream facade `bee-dex` ships
+# from a private SSH-only repo and staging / CI hosts have no key for it.
 ackinacki-kit = { git = "https://github.com/gosh-sh/ackinacki-kit.git", branch = "feature/update_dex", default-features = false, features = ["contracts", "default"] }
 dodex-chain = { path = "crates/chain" }
