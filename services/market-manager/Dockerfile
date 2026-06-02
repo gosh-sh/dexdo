@@ -4,6 +4,7 @@ WORKDIR /app
 COPY services/market-manager/Cargo.toml services/market-manager/Cargo.lock* ./
 COPY services/market-manager/src ./src
 COPY crates/chain /crates/chain
+COPY crates/logging /crates/logging
 
 RUN cargo build --release
 

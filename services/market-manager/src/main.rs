@@ -898,12 +898,9 @@ fn build_client_context(endpoint: &str) -> Result<Arc<ClientContext>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // When LOG_DIR is set, these guards keep the background file-log writer
+    // alive for the lifetime of the process; the manager loops until shutdown.
+    let _guards = dodex_logging::init("market-manager");
 
     let config_path =
         env::var("APP_CONFIG").unwrap_or_else(|_| "config/market-manager.stage.yaml".to_string());
