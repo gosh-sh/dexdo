@@ -1012,9 +1012,9 @@ impl MarketReadRepository for PostgresReadModelRepository {
             i32,            // ref_tokens.decimals
         )> = sqlx::query_as(
             // INNER join ref_tokens for the quote-asset `decimals`. `_stakes`
-            // amounts are atoms at this scale; the balances use case descales
-            // by `decimals - quantity_precision`. `markets.token_type` has an
-            // FK to ref_tokens, so the join never narrows a visible market.
+            // amounts are atoms at this scale; the balances use case scales by
+            // the full `decimals`. `markets.token_type` has an FK to
+            // ref_tokens, so the join never narrows a visible market.
             r#"select m.event_id::text,
                       m.oracle_list_hash::text,
                       m.token_type,
@@ -1045,17 +1045,27 @@ impl MarketReadRepository for PostgresReadModelRepository {
             None => return Err(anyhow::anyhow!(dodex_domain::DomainError::InvalidMarketOrSymbol)),
         };
 
-        // `ref_tokens.decimals` is `integer` (signed) but a non-negative
-        // small scale by contract; out-of-`u8` is read-model corruption.
-        // Mirrors the api-spec "decimals out of range → 503" mapping.
-        let decimals: u8 = decimals_raw.try_into().map_err(|_| {
+        // `ref_tokens.decimals` is `integer` (signed) but non-negative and
+        // bounded by the same domain cap as price/quantity precision:
+        // <= MAX_DECIMAL_PRECISION (NUMERIC(38,…)). Validate here rather than a
+        // bare `u8::try_from`, which would admit 39..=255 to be caught only
+        // later in scale_decimal. Negative or above-cap is read-model
+        // corruption → MarketInconsistent (api-spec "decimals out of range → 503").
+        let decimals_scale = validate_decimal_scale(decimals_raw).map_err(|reason| {
             tracing::warn!(
                 pmp = %market_address.0,
                 raw = decimals_raw,
-                "ref_tokens.decimals out of u8 range — read-model corruption"
+                max = MAX_DECIMAL_PRECISION,
+                reason = match reason {
+                    InvalidScale::Negative => "negative",
+                    InvalidScale::AboveMax => "above MAX_DECIMAL_PRECISION",
+                },
+                "ref_tokens.decimals out of range — read-model corruption",
             );
-            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+            anyhow!(DomainError::MarketInconsistent)
         })?;
+        // <= MAX_DECIMAL_PRECISION (38) always fits u8.
+        let decimals = decimals_scale as u8;
 
         // `oracle_list_hash` is nullable at the schema level (pre-reconcile),
         // but we already gated on last_reconciled_at IS NOT NULL — a NULL here

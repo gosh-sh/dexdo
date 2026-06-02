@@ -234,6 +234,8 @@ struct MarketRecord {
     stake_start_unix: u64,
     stake_end_unix: u64,
     result_start_unix: u64,
+    /// Persisted for state history; not a resolve trigger — resolve gates on
+    /// `result_start_unix` (see `flag_expired_for_resolve_at`).
     result_end_unix: u64,
     lifetime_hours: u64,
     status: MarketStatus,
@@ -249,7 +251,7 @@ enum MarketStatus {
     PendingFreeze,
     /// splitFullSet done, OrderBook live. Trader PNs may stake on it.
     Active,
-    /// `result_end_unix <= now`. Awaiting our `submitResolve`.
+    /// `result_start_unix <= now` (trading closed). Awaiting our `submitResolve`.
     PendingResolve,
     /// Terminal. Kept in state for history / debugging.
     Resolved,
@@ -336,7 +338,7 @@ async fn tick(ctx: &Ctx, state: &mut State, state_path: &Path) -> Result<()> {
         warn!(error = ?e, "advance_pending_freeze failed; continuing");
     }
 
-    // 3. Active → PendingResolve for markets past result_end (state-only
+    // 3. Active → PendingResolve for markets past result_start (state-only
     //    flip; the actual oracle submit happens in step 4 so the flag
     //    survives a crash between the two steps).
     flag_expired_for_resolve(state);
@@ -509,17 +511,21 @@ async fn advance_pending_freeze(ctx: &Ctx, state: &mut State, state_path: &Path)
 // --- step 3: Active → PendingResolve (state only) ------------------------
 
 fn flag_expired_for_resolve(state: &mut State) {
-    let now = now_unix();
+    flag_expired_for_resolve_at(state, now_unix());
+}
+
+/// `now`-injectable core so the result_start boundary is testable.
+///
+/// Flip the moment the trading window closes (`result_start`), not at the grace
+/// deadline (`result_end` = result_start + GRACE). The OrderBook is already
+/// closed at result_start and the PMP accepts `submitResolve` from result_start
+/// on (the resolve window is [result_start, result_start + GRACE]). Gating on
+/// result_end stranded each market in RESOLVING for the whole grace period —
+/// unclaimable — and, since `active_or_pending_freeze_count` still counts an
+/// Active market, kept the slot occupied so no replacement deployed.
+/// PendingResolve is not counted, so flipping here also frees the slot.
+fn flag_expired_for_resolve_at(state: &mut State, now: u64) {
     for m in &mut state.markets {
-        // Flip the moment the trading window closes (`result_start`), not at the
-        // grace deadline (`result_end` = result_start + GRACE). The OrderBook is
-        // already closed at result_start and the PMP accepts `submitResolve`
-        // from result_start on (the resolve window is [result_start,
-        // result_start + GRACE]). Waiting for result_end stranded each market in
-        // RESOLVING for the whole grace period — unclaimable — and, since
-        // `active_or_pending_freeze_count` still counts an Active market, kept
-        // the slot occupied so no replacement deployed. PendingResolve is not
-        // counted, so flipping here also frees the slot immediately.
         if m.status == MarketStatus::Active && m.result_start_unix <= now {
             m.status = MarketStatus::PendingResolve;
         }
@@ -956,5 +962,72 @@ async fn main() -> Result<()> {
         if let Err(e) = state.save(&state_path) {
             error!(error = ?e, "failed to persist state at end of tick");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // result_end = result_start + GRACE on the deploy path.
+    const GRACE: u64 = 86_400;
+
+    fn mk(status: MarketStatus, result_start_unix: u64) -> MarketRecord {
+        MarketRecord {
+            event_id: "e".into(),
+            event_name: "n".into(),
+            deployer_pn_address: "0:d".into(),
+            pmp_address: "0:p".into(),
+            order_book_address: None,
+            oracle_list_hash: "0".into(),
+            token_type: 1,
+            stake_start_unix: 0,
+            stake_end_unix: 0,
+            result_start_unix,
+            result_end_unix: result_start_unix + GRACE,
+            lifetime_hours: 1,
+            status,
+            resolved_outcome: None,
+        }
+    }
+
+    fn state_with(markets: Vec<MarketRecord>) -> State {
+        State { next_event_cursor: 0, markets }
+    }
+
+    #[test]
+    fn flips_active_exactly_at_result_start() {
+        let mut s = state_with(vec![mk(MarketStatus::Active, 1000)]);
+        flag_expired_for_resolve_at(&mut s, 1000);
+        assert_eq!(s.markets[0].status, MarketStatus::PendingResolve);
+    }
+
+    #[test]
+    fn keeps_active_one_second_before_result_start() {
+        let mut s = state_with(vec![mk(MarketStatus::Active, 1000)]);
+        flag_expired_for_resolve_at(&mut s, 999);
+        assert_eq!(s.markets[0].status, MarketStatus::Active);
+    }
+
+    #[test]
+    fn flips_inside_the_grace_window() {
+        // [result_start, result_end) now flips — the exact case the old
+        // result_end gate left stranded as Active for the whole grace period.
+        let mut s = state_with(vec![mk(MarketStatus::Active, 1000)]);
+        flag_expired_for_resolve_at(&mut s, 1000 + GRACE / 2);
+        assert_eq!(s.markets[0].status, MarketStatus::PendingResolve);
+    }
+
+    #[test]
+    fn leaves_non_active_statuses_untouched() {
+        let mut s = state_with(vec![
+            mk(MarketStatus::PendingFreeze, 1),
+            mk(MarketStatus::PendingResolve, 1),
+            mk(MarketStatus::Resolved, 1),
+        ]);
+        flag_expired_for_resolve_at(&mut s, 1_000_000);
+        assert_eq!(s.markets[0].status, MarketStatus::PendingFreeze);
+        assert_eq!(s.markets[1].status, MarketStatus::PendingResolve);
+        assert_eq!(s.markets[2].status, MarketStatus::Resolved);
     }
 }

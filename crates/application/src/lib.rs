@@ -219,9 +219,9 @@ pub struct MarketBalancesResolution {
     pub orderbook_address: String,
     /// Quote-asset on-chain `decimals` (from `ref_tokens` by `token_type`).
     /// Outcome `_stakes` amounts are in atoms at this scale, so display
-    /// must descale by `decimals - quantity_precision` — NOT scale the raw
-    /// atoms by `quantity_precision`, which over-reports by 10^(decimals -
-    /// quantity_precision).
+    /// scales by the full `decimals` (like `GetAccountUseCase` / `/account`),
+    /// NOT by `quantity_precision`, which would over-report by
+    /// 10^(decimals - quantity_precision).
     pub decimals: u8,
     /// Number of outcomes for this market. `u32` because outcome counts
     /// are non-negative; the Postgres `integer` column is cast at the
@@ -5073,7 +5073,7 @@ mod get_market_balances_use_case_tests {
     #[tokio::test]
     async fn happy_path_sums_three_pools_per_outcome() {
         // Atom-scale inputs (NACKL decimals=9, quantity_precision=2). The
-        // three stake pools are summed in atoms, then descaled to the qp grid.
+        // three stake pools are summed in atoms, then scaled by the full decimals.
         let stake = PnStake {
             amount: vec!["10000000000".into(), "5000000000".into()], // 0=10, 1=5 NACKL
             debt_amount: vec!["0".into(), "1000000000".into()],      //       0=0, 1=1
@@ -5104,12 +5104,12 @@ mod get_market_balances_use_case_tests {
         assert_eq!(out.balances[1].locked_in_orders, "100.000000000");
     }
 
-    // Bug proof: on-chain `_stakes.amount` is in token ATOMS (NACKL decimals
-    // = 9), but the use case scales it by `quantity_precision` (2). A holding
-    // of 12.5 NACKL is `12_500_000_000` atoms and must render as ~12.5, not
-    // 125_000_000. The happy-path test above masks this because its synthetic
-    // inputs ("10","12") are far below atom scale, so a 10^(9-2) magnitude
-    // error is invisible. This feeds realistic atom-scale values.
+    // Outcome `_stakes.amount` is in token ATOMS (NACKL decimals = 9): a
+    // holding of 12.5 NACKL is `12_500_000_000` atoms and must render as ~12.5,
+    // not 125_000_000. Scaling atoms by `quantity_precision` (2) instead of the
+    // full `decimals` over-reports by 10^(9-2).
+    // `happy_path_sums_three_pools_per_outcome` can't catch that — its small
+    // synthetic inputs sit far below atom scale — so this feeds realistic ones.
     #[tokio::test]
     async fn market_balances_free_not_overscaled_for_real_atoms() {
         let stake = PnStake {
@@ -5173,10 +5173,10 @@ mod get_market_balances_use_case_tests {
     // Golden-fixture regression (captured live on the local stack): a
     // `buyFullSet` at the market price splits collateral into outcome amounts
     // of full-`decimals` precision, OFF the quantity_precision grid — 25 NACKL
-    // → 11_567_164_168 / 13_432_835_808 atoms. The balance MUST render the
-    // exact value. A grid-strict descale (drop `decimals - quantity_precision`
-    // digits) would reject these as MarketInconsistent (503) because the
-    // dropped digits are non-zero — that bug shipped briefly and this pins it.
+    // → 11_567_164_168 / 13_432_835_808 atoms. Scaling by `quantity_precision`
+    // would over-report (→ "115671641.68"); a grid-strict descale to the qp
+    // lattice would have to drop non-zero low digits. Scaling by the full
+    // `decimals` renders the exact value, which this pins.
     #[tokio::test]
     async fn market_balances_renders_off_grid_buy_full_set_stake() {
         let stake = PnStake {

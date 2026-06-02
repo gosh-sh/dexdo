@@ -154,7 +154,7 @@ async fn resolve_market_for_balances_returns_reconciled_row() {
     assert_eq!(res.token_type, 1);
     assert_eq!(res.orderbook_address, ob);
     // Quote-asset decimals are joined from ref_tokens (NACKL = 9). The
-    // balances use case descales `_stakes` atoms by `decimals - qp`.
+    // balances use case scales `_stakes` atoms by the full decimals.
     assert_eq!(res.decimals, 9);
     assert_eq!(res.num_outcomes, 2);
     assert_eq!(res.outcomes.len(), 2);
