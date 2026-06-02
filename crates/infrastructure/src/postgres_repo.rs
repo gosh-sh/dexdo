@@ -1009,16 +1009,23 @@ impl MarketReadRepository for PostgresReadModelRepository {
             Option<String>, // orderbook_address
             i32,            // num_outcomes
             i64,            // markets.id
+            i32,            // ref_tokens.decimals
         )> = sqlx::query_as(
-            r#"select event_id::text,
-                      oracle_list_hash::text,
-                      token_type,
-                      orderbook_address,
-                      num_outcomes,
-                      id
-                 from markets
-                where pmp_address = $1
-                  and last_reconciled_at is not null"#,
+            // INNER join ref_tokens for the quote-asset `decimals`. `_stakes`
+            // amounts are atoms at this scale; the balances use case descales
+            // by `decimals - quantity_precision`. `markets.token_type` has an
+            // FK to ref_tokens, so the join never narrows a visible market.
+            r#"select m.event_id::text,
+                      m.oracle_list_hash::text,
+                      m.token_type,
+                      m.orderbook_address,
+                      m.num_outcomes,
+                      m.id,
+                      rt.decimals
+                 from markets m
+                 join ref_tokens rt on rt.token_type = m.token_type
+                where m.pmp_address = $1
+                  and m.last_reconciled_at is not null"#,
         )
         .bind(&market_address.0)
         .fetch_optional(&mut *tx)
@@ -1032,10 +1039,23 @@ impl MarketReadRepository for PostgresReadModelRepository {
             orderbook_address,
             num_outcomes,
             market_id,
+            decimals_raw,
         ) = match market {
             Some(m) => m,
             None => return Err(anyhow::anyhow!(dodex_domain::DomainError::InvalidMarketOrSymbol)),
         };
+
+        // `ref_tokens.decimals` is `integer` (signed) but a non-negative
+        // small scale by contract; out-of-`u8` is read-model corruption.
+        // Mirrors the api-spec "decimals out of range → 503" mapping.
+        let decimals: u8 = decimals_raw.try_into().map_err(|_| {
+            tracing::warn!(
+                pmp = %market_address.0,
+                raw = decimals_raw,
+                "ref_tokens.decimals out of u8 range — read-model corruption"
+            );
+            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
+        })?;
 
         // `oracle_list_hash` is nullable at the schema level (pre-reconcile),
         // but we already gated on last_reconciled_at IS NOT NULL — a NULL here
@@ -1124,6 +1144,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             oracle_list_hash,
             token_type,
             orderbook_address,
+            decimals,
             num_outcomes,
             outcomes,
         })

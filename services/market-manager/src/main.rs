@@ -511,7 +511,16 @@ async fn advance_pending_freeze(ctx: &Ctx, state: &mut State, state_path: &Path)
 fn flag_expired_for_resolve(state: &mut State) {
     let now = now_unix();
     for m in &mut state.markets {
-        if m.status == MarketStatus::Active && m.result_end_unix <= now {
+        // Flip the moment the trading window closes (`result_start`), not at the
+        // grace deadline (`result_end` = result_start + GRACE). The OrderBook is
+        // already closed at result_start and the PMP accepts `submitResolve`
+        // from result_start on (the resolve window is [result_start,
+        // result_start + GRACE]). Waiting for result_end stranded each market in
+        // RESOLVING for the whole grace period — unclaimable — and, since
+        // `active_or_pending_freeze_count` still counts an Active market, kept
+        // the slot occupied so no replacement deployed. PendingResolve is not
+        // counted, so flipping here also frees the slot immediately.
+        if m.status == MarketStatus::Active && m.result_start_unix <= now {
             m.status = MarketStatus::PendingResolve;
         }
     }

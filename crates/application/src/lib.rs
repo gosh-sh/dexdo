@@ -217,6 +217,12 @@ pub struct MarketBalancesResolution {
     /// directly as `u32` without a secondary cast.
     pub token_type: u32,
     pub orderbook_address: String,
+    /// Quote-asset on-chain `decimals` (from `ref_tokens` by `token_type`).
+    /// Outcome `_stakes` amounts are in atoms at this scale, so display
+    /// must descale by `decimals - quantity_precision` — NOT scale the raw
+    /// atoms by `quantity_precision`, which over-reports by 10^(decimals -
+    /// quantity_precision).
+    pub decimals: u8,
     /// Number of outcomes for this market. `u32` because outcome counts
     /// are non-negative; the Postgres `integer` column is cast at the
     /// repo boundary (negative DB values → `MarketInconsistent`).
@@ -1055,11 +1061,19 @@ where
             };
             let raw_locked =
                 sums.get(&outcome.outcome_id).cloned().unwrap_or_else(|| "0".to_string());
+            // `raw_free`/`raw_locked` are chain atoms at the quote-asset
+            // `decimals` scale. Scale to the human value by `decimals` (like
+            // `GetAccountUseCase` / `/api/v1/account`), NOT by
+            // `quantity_precision` — the latter over-reports by
+            // 10^(decimals - quantity_precision). A grid-strict descale to the
+            // `quantity_precision` lattice is wrong here: a `buyFullSet` at the
+            // market price mints outcome amounts of full-`decimals` precision
+            // (off the order step grid), so they must be rendered as-is.
             rows.push(dodex_domain::OutcomeBalance {
                 outcome_id: outcome.outcome_id,
                 symbol: outcome.symbol.clone(),
-                free: scale_decimal(&raw_free, outcome.quantity_precision)?,
-                locked_in_orders: scale_decimal(&raw_locked, outcome.quantity_precision)?,
+                free: scale_decimal(&raw_free, res.decimals)?,
+                locked_in_orders: scale_decimal(&raw_locked, res.decimals)?,
             });
         }
 
@@ -4896,6 +4910,7 @@ mod balances_port_tests {
             oracle_list_hash: "67890".to_string(),
             token_type: 1,
             orderbook_address: "0:orderbook".to_string(),
+            decimals: 9,
             num_outcomes: 2,
             outcomes: vec![
                 BalanceOutcome {
@@ -5034,6 +5049,7 @@ mod get_market_balances_use_case_tests {
             oracle_list_hash: "2".into(),
             token_type: 1,
             orderbook_address: "0:ob".into(),
+            decimals: 9, // NACKL-scale; outcome stake amounts are atoms (1e9)
             num_outcomes,
             outcomes,
         }
@@ -5056,14 +5072,16 @@ mod get_market_balances_use_case_tests {
 
     #[tokio::test]
     async fn happy_path_sums_three_pools_per_outcome() {
+        // Atom-scale inputs (NACKL decimals=9, quantity_precision=2). The
+        // three stake pools are summed in atoms, then descaled to the qp grid.
         let stake = PnStake {
-            amount: vec!["10".into(), "5".into()],     // outcome 0=10, 1=5
-            debt_amount: vec!["0".into(), "1".into()], //         0=0, 1=1
-            coupons_amount: vec!["2".into(), "0".into()], //         0=2, 1=0
+            amount: vec!["10000000000".into(), "5000000000".into()], // 0=10, 1=5 NACKL
+            debt_amount: vec!["0".into(), "1000000000".into()],      //       0=0, 1=1
+            coupons_amount: vec!["2000000000".into(), "0".into()],   //       0=2, 1=0
         };
         let pn = make_pn(Some(stake));
         let mut sums = std::collections::HashMap::new();
-        sums.insert(1u32, "100".into()); // outcome 1 has 100 locked
+        sums.insert(1u32, "100000000000".into()); // outcome 1: 100 NACKL locked
         let repo =
             StubRepo { resolution: Mutex::new(Ok(make_resolution(2))), sums: Mutex::new(sums) };
         let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
@@ -5076,21 +5094,119 @@ mod get_market_balances_use_case_tests {
             .await
             .expect("ok");
         assert_eq!(out.balances.len(), 2);
-        // outcome 0: free = 10+0+2 = 12, scale=2 → "0.12"; locked=0 → "0.00"
+        // outcome 0: free = 10+0+2 = 12 tokens; locked=0. Scaled by decimals=9.
         assert_eq!(out.balances[0].outcome_id, 0);
-        assert_eq!(out.balances[0].free, "0.12");
-        assert_eq!(out.balances[0].locked_in_orders, "0.00");
-        // outcome 1: free = 5+1+0 = 6, scale=2 → "0.06"; locked=100 → "1.00"
+        assert_eq!(out.balances[0].free, "12.000000000");
+        assert_eq!(out.balances[0].locked_in_orders, "0.000000000");
+        // outcome 1: free = 5+1+0 = 6 tokens; locked=100.
         assert_eq!(out.balances[1].outcome_id, 1);
-        assert_eq!(out.balances[1].free, "0.06");
-        assert_eq!(out.balances[1].locked_in_orders, "1.00");
+        assert_eq!(out.balances[1].free, "6.000000000");
+        assert_eq!(out.balances[1].locked_in_orders, "100.000000000");
+    }
+
+    // Bug proof: on-chain `_stakes.amount` is in token ATOMS (NACKL decimals
+    // = 9), but the use case scales it by `quantity_precision` (2). A holding
+    // of 12.5 NACKL is `12_500_000_000` atoms and must render as ~12.5, not
+    // 125_000_000. The happy-path test above masks this because its synthetic
+    // inputs ("10","12") are far below atom scale, so a 10^(9-2) magnitude
+    // error is invisible. This feeds realistic atom-scale values.
+    #[tokio::test]
+    async fn market_balances_free_not_overscaled_for_real_atoms() {
+        let stake = PnStake {
+            amount: vec!["12500000000".into(), "0".into()], // 12.5 NACKL atoms on outcome 0
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        };
+        let pn = make_pn(Some(stake));
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let out = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        let free = &out.balances[0].free;
+        let val: f64 = free.parse().expect("free parses as a number");
+        assert!(
+            (val - 12.5).abs() < 1e-6,
+            "outcome free over-scaled: got {free} (expected ~12.5 tokens for 12.5e9 atoms at decimals=9)"
+        );
+    }
+
+    // Same over-scale on the `locked_in_orders` column, which is summed from
+    // `live_orders` (also chain atoms). 20 NACKL locked = `20_000_000_000`
+    // atoms must render as ~20, not 200_000_000.
+    #[tokio::test]
+    async fn market_balances_locked_not_overscaled_for_real_atoms() {
+        let pn = make_pn(Some(PnStake {
+            amount: vec!["0".into(), "0".into()],
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        }));
+        let mut sums = std::collections::HashMap::new();
+        sums.insert(0u32, "20000000000".into()); // 20 NACKL atoms locked on outcome 0
+        let repo =
+            StubRepo { resolution: Mutex::new(Ok(make_resolution(2))), sums: Mutex::new(sums) };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let out = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        let locked = &out.balances[0].locked_in_orders;
+        let val: f64 = locked.parse().expect("locked parses as a number");
+        assert!(
+            (val - 20.0).abs() < 1e-6,
+            "outcome locked over-scaled: got {locked} (expected ~20 tokens for 20e9 atoms at decimals=9)"
+        );
+    }
+
+    // Golden-fixture regression (captured live on the local stack): a
+    // `buyFullSet` at the market price splits collateral into outcome amounts
+    // of full-`decimals` precision, OFF the quantity_precision grid — 25 NACKL
+    // → 11_567_164_168 / 13_432_835_808 atoms. The balance MUST render the
+    // exact value. A grid-strict descale (drop `decimals - quantity_precision`
+    // digits) would reject these as MarketInconsistent (503) because the
+    // dropped digits are non-zero — that bug shipped briefly and this pins it.
+    #[tokio::test]
+    async fn market_balances_renders_off_grid_buy_full_set_stake() {
+        let stake = PnStake {
+            amount: vec!["11567164168".into(), "13432835808".into()],
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        };
+        let pn = make_pn(Some(stake));
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution(2))),
+            sums: Mutex::new(std::collections::HashMap::new()),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let out = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .expect("off-grid stake must render, not 503");
+        assert_eq!(out.balances[0].free, "11.567164168");
+        assert_eq!(out.balances[1].free, "13.432835808");
     }
 
     #[tokio::test]
     async fn missing_stake_key_yields_zero_free() {
         let pn = make_pn(None); // simulates absent key
         let mut sums = std::collections::HashMap::new();
-        sums.insert(0u32, "500".into());
+        sums.insert(0u32, "500000000000".into()); // 500 NACKL atoms locked on outcome 0
         let repo =
             StubRepo { resolution: Mutex::new(Ok(make_resolution(2))), sums: Mutex::new(sums) };
         let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
@@ -5103,10 +5219,10 @@ mod get_market_balances_use_case_tests {
             .await
             .expect("ok");
         assert_eq!(out.balances.len(), 2);
-        assert_eq!(out.balances[0].free, "0.00");
-        assert_eq!(out.balances[0].locked_in_orders, "5.00");
-        assert_eq!(out.balances[1].free, "0.00");
-        assert_eq!(out.balances[1].locked_in_orders, "0.00");
+        assert_eq!(out.balances[0].free, "0.000000000");
+        assert_eq!(out.balances[0].locked_in_orders, "500.000000000");
+        assert_eq!(out.balances[1].free, "0.000000000");
+        assert_eq!(out.balances[1].locked_in_orders, "0.000000000");
     }
 
     #[tokio::test]
