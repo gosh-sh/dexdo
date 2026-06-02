@@ -25,12 +25,9 @@ const MAX_PAGES_PER_TICK: u32 = 100;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // When LOG_DIR is set, these guards keep the background file-log writer
+    // alive for the lifetime of the process; the indexer loops until shutdown.
+    let _guards = dodex_logging::init("indexer");
 
     let config_path =
         env::var("APP_CONFIG").unwrap_or_else(|_| "config/indexer.local.yaml".to_string());
