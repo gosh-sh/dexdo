@@ -19,6 +19,7 @@ uuid.workspace = true
 dodex-application = { path = "../../crates/application" }
 dodex-domain = { path = "../../crates/domain" }
 dodex-infrastructure = { path = "../../crates/infrastructure" }
+dodex-logging = { path = "../../crates/logging" }
 
 [dev-dependencies]
 ackinacki-kit.workspace = true
