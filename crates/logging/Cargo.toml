@@ -1,0 +1,18 @@
+[package]
+name = "dodex-logging"
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Acki-Nacki-Node-License"
+
+# Inline rather than `.workspace = true` so this crate can be consumed from
+# `services/market-manager` (its own Cargo workspace) and from inside the
+# market-manager Docker build, neither of which can reach the parent
+# workspace's `[workspace.dependencies]`. Same rationale as `crates/chain`.
+[dependencies]
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
