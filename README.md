@@ -46,6 +46,11 @@ Per-service config files live under `config/`:
 
 Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override at runtime with `APP_CONFIG=/path/to/file.yaml`.
 
+Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
+(optional) makes each service also write rotated log files into a directory —
+the Compose deployment bind-mounts these to `./logs/<service>`. See
+[docs/deployment.md](docs/deployment.md#logs).
+
 Secrets and environment-specific values live in `.env`:
 
 ```sh

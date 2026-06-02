@@ -35,6 +35,11 @@ Config sections:
   `page_size` defaults to 100 and may be omitted; it is used by the
   indexer's paginated fetches but not by the API tier.
 
+Logging is configured by environment variables, not YAML: `RUST_LOG` sets the
+filter (default `info`), and `LOG_DIR` (optional) makes the service additionally
+write daily-rotated `api.log.<date>` files into that directory, retaining
+`LOG_MAX_FILES` of them (default 14). See [docs/deployment.md](../../docs/deployment.md#logs).
+
 The `auth.kek_hex` field is the 32-byte master key used to encrypt
 `api_secret` and `pn_seckey` at rest. `config/api.local.yaml` ships a
 shared dev value; stage and prod configs carry their own KEKs assembled

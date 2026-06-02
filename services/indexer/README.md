@@ -25,6 +25,11 @@ Config sections:
 - `graphql`: gateway endpoint, page size, request timeout.
 - `indexer`: polling/reconciliation/reprojection intervals and ignored addresses.
 
+Logging is configured by environment variables, not YAML: `RUST_LOG` sets the
+filter (default `info`), and `LOG_DIR` (optional) makes the service additionally
+write daily-rotated `indexer.log.<date>` files into that directory, retaining
+`LOG_MAX_FILES` of them (default 14). See [docs/deployment.md](../../docs/deployment.md#logs).
+
 ## Database
 
 The indexer applies SQL migrations from `migrations/` on startup. Column and
