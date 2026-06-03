@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "ackinacki-kit"
 version = "1.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#cd2f2f6d6378efb1c751243fb1ac5963190e3914"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#e4d3b352dc2cd6f07ea7a55644a060b7883c4837"
 dependencies = [
  "contracts",
  "shared",
@@ -907,7 +907,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.52.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -961,7 +961,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "1.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#cd2f2f6d6378efb1c751243fb1ac5963190e3914"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#e4d3b352dc2cd6f07ea7a55644a060b7883c4837"
 dependencies = [
  "base64",
  "chrono",
@@ -5026,7 +5026,7 @@ dependencies = [
 [[package]]
 name = "shared"
 version = "1.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#cd2f2f6d6378efb1c751243fb1ac5963190e3914"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#e4d3b352dc2cd6f07ea7a55644a060b7883c4837"
 dependencies = [
  "tokio",
 ]
@@ -7119,7 +7119,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
