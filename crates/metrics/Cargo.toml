@@ -11,3 +11,4 @@ license = "LicenseRef-Acki-Nacki-Node-License"
 opentelemetry = { version = "0.27", features = ["metrics"] }
 opentelemetry-otlp = { version = "0.27", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+tracing = "0.1"

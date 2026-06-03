@@ -1734,6 +1734,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "tracing",
 ]
 
 [[package]]

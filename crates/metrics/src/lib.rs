@@ -112,6 +112,14 @@ fn metrics_endpoint() -> Option<String> {
     )
 }
 
+/// Builds the OTLP resource. The explicit `service.name` is merged on the
+/// right so it wins over the SDK default's `unknown_service` — `Resource::merge`
+/// gives precedence to its argument — while still inheriting the SDK-detected
+/// attributes carried by `Resource::default()`.
+fn build_resource() -> Resource {
+    Resource::default().merge(&Resource::new(vec![KeyValue::new("service.name", SERVICE_NAME)]))
+}
+
 /// Initialise OTLP metrics. Returns `None` when no OTLP endpoint env var is
 /// set — the caller then runs without metrics. The returned `Metrics` owns the
 /// meter provider and MUST be kept alive for the process lifetime. Must be
@@ -122,20 +130,23 @@ pub fn init() -> Option<Metrics> {
     // vars to configure its transport.
     metrics_endpoint()?;
 
-    let exporter = opentelemetry_otlp::MetricExporter::builder()
-        .with_tonic()
-        .build()
-        .expect("build OTLP metric exporter");
+    // Metrics are best-effort: a malformed endpoint must not take down the
+    // indexer's core ingestion, so degrade to no metrics rather than panic.
+    let exporter = match opentelemetry_otlp::MetricExporter::builder().with_tonic().build() {
+        Ok(exporter) => exporter,
+        Err(err) => {
+            tracing::warn!(?err, "failed to build OTLP metric exporter; metrics disabled");
+            return None;
+        }
+    };
 
     let reader = PeriodicReader::builder(exporter, Tokio)
         .with_interval(OTLP_READER_INTERVAL)
         .with_timeout(OTLP_READER_TIMEOUT)
         .build();
 
-    let resource = Resource::new(vec![KeyValue::new("service.name", SERVICE_NAME)])
-        .merge(&Resource::default());
-
-    let provider = SdkMeterProvider::builder().with_reader(reader).with_resource(resource).build();
+    let provider =
+        SdkMeterProvider::builder().with_reader(reader).with_resource(build_resource()).build();
 
     let meter = provider.meter(SERVICE_NAME);
     let indexer = IndexerMetrics::new(&meter);
@@ -177,6 +188,15 @@ mod tests {
         assert_eq!(
             select_endpoint(Some(String::new()), Some("generic".to_string())),
             Some("generic".to_string())
+        );
+    }
+
+    #[test]
+    fn resource_carries_our_service_name() {
+        let resource = super::build_resource();
+        assert_eq!(
+            resource.get(opentelemetry::Key::from_static_str("service.name")),
+            Some(opentelemetry::Value::from(super::SERVICE_NAME))
         );
     }
 
