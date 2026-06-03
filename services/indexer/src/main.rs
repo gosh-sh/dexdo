@@ -20,6 +20,8 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+mod metrics_refresh;
+
 const STREAM_NAME: &str = "blockchain_events";
 const MAX_PAGES_PER_TICK: u32 = 100;
 
@@ -82,6 +84,26 @@ async fn main() -> anyhow::Result<()> {
         interval_ms = config.indexer.oracle_event_list_reconciliation_interval_ms,
         "oracle event list reconciler started"
     );
+
+    // OTLP metrics. `init()` returns `None` when no OTEL endpoint env var is
+    // set, in which case nothing is collected. `_metrics` owns the meter
+    // provider and must outlive the loop — bound here for the process
+    // lifetime, exactly like `_guards` above.
+    let _metrics = dodex_metrics::init();
+    match _metrics.as_ref() {
+        Some(m) => {
+            tokio::spawn(metrics_refresh::run_refresh_loop(
+                repo.clone(),
+                dodex_metrics::REFRESH_INTERVAL,
+                m.indexer.clone(),
+            ));
+            info!(
+                interval_s = dodex_metrics::REFRESH_INTERVAL.as_secs(),
+                "metrics refresh loop started"
+            );
+        }
+        None => info!("no OTLP endpoint configured; metrics not collected"),
+    }
 
     let mut cursor = repo.load_cursor(STREAM_NAME).await?;
     info!(cursor = cursor.as_deref().unwrap_or(""), "indexer resumed from cursor");
