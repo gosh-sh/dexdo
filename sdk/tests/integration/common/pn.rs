@@ -13,6 +13,7 @@ use ackinacki_kit::contracts::giver::v3::top_up_native_with_giver_if_below;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 use dodex_sdk::Dex;
 
@@ -66,7 +67,7 @@ pub async fn deploy_pn(
         .await
         .expect("get_private_note_address");
 
-    let pn = PrivateNote::new(context.clone(), &pn_address);
+    let pn = PrivateNote::new(context.clone(), dex_contract_params(&pn_address));
     wait_active(&pn, "PrivateNote").await;
 
     (pn_address, dih_dec, keys)
@@ -113,7 +114,7 @@ pub async fn deploy_pn_with_keys(
         .await
         .expect("get_pn_address");
 
-    let pn = PrivateNote::new(context.clone(), &pn_address);
+    let pn = PrivateNote::new(context.clone(), dex_contract_params(&pn_address));
     wait_active(&pn, "PN").await;
 
     (pn_address, dih_dec)
@@ -183,7 +184,7 @@ pub async fn deploy_funded_pn(
 
 /// Top up RootPN with NACKL + Shell ECC for test operations.
 pub async fn ensure_root_pn_funded(context: &Arc<ClientContext>) {
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     wait_active(&root_pn, "RootPN").await;
     top_up_native_with_giver_if_below(
         context.clone(),

@@ -72,6 +72,7 @@ use ackinacki_kit::tvm_client::crypto::generate_random_sign_keys;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::halo2::giver_voucher::mint_voucher_via_giver;
 use dodex_sdk::halo2::Halo2Paths;
 use dodex_sdk::proof;
@@ -340,7 +341,7 @@ fn load_or_init_pool(path: &Path, args: &Args) -> Result<Pool, String> {
 // ── Pre-flight: top up RootOracle + RootPN ─────────────────────────
 
 async fn ensure_root_oracle_funded(context: &Arc<ClientContext>) -> Result<(), String> {
-    let root = RootOracle::new_default(context.clone());
+    let root = RootOracle::new(context.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS));
     eprintln!("[ob-pool] waiting for RootOracle to be Active…");
     root.wait_account(ParamsOfWaitAccount {
         status: AccountStatus::Active,
@@ -364,7 +365,7 @@ async fn ensure_root_oracle_funded(context: &Arc<ClientContext>) -> Result<(), S
 }
 
 async fn ensure_root_pn_funded(context: &Arc<ClientContext>) -> Result<(), String> {
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     eprintln!("[ob-pool] waiting for RootPN to be Active…");
     root_pn
         .wait_account(ParamsOfWaitAccount {
@@ -417,7 +418,7 @@ async fn deploy_funded_deployer_pn(
 ) -> Result<DeployedPn, String> {
     let keys = generate_random_sign_keys(context.clone())
         .map_err(|e| format!("generate_random_sign_keys: {e:?}"))?;
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
 
     eprintln!("    halo2 NACKL deposit voucher…");
     let deposit_zk = mint_voucher_via_giver(
@@ -464,7 +465,7 @@ async fn deploy_funded_deployer_pn(
         .map_err(|e| format!("get_private_note_address: {e:?}"))?
         .private_note_address;
 
-    let pn = PrivateNote::new(context.clone(), &pn_address);
+    let pn = PrivateNote::new(context.clone(), dex_contract_params(&pn_address));
     eprintln!("    waiting for PN {pn_address} Active…");
     pn.wait_account(ParamsOfWaitAccount {
         status: AccountStatus::Active,
@@ -560,7 +561,7 @@ async fn deploy_oracle_with_event(
         .await
         .map_err(|e| format!("get_oracle_address: {e:?}"))?;
 
-    let oracle_handle = Oracle::new(context.clone(), &oracle_address);
+    let oracle_handle = Oracle::new(context.clone(), dex_contract_params(&oracle_address));
     oracle_handle
         .wait_account(ParamsOfWaitAccount {
             status: AccountStatus::Active,
@@ -574,7 +575,7 @@ async fn deploy_oracle_with_event(
         .get_event_list_address(&oracle_address, ParamsOfGetEventListAddress { index: 0 })
         .await
         .map_err(|e| format!("get_event_list_address: {e:?}"))?;
-    let el_handle = OracleEventList::new(context, &event_list_address);
+    let el_handle = OracleEventList::new(context, dex_contract_params(&event_list_address));
     el_handle
         .wait_account(ParamsOfWaitAccount {
             status: AccountStatus::Active,
@@ -676,7 +677,7 @@ async fn deploy_one_market(
     .map_err(|e| format!("deploy_pmp: {e:?}"))?;
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     let pmp_address = root_pn
         .get_pmp_address(ParamsOfGetPmpAddress {
             event_id: oracle.event_id.clone(),
@@ -687,7 +688,7 @@ async fn deploy_one_market(
         .map_err(|e| format!("get_pmp_address: {e:?}"))?
         .pmp_address;
 
-    let pmp_handle = Pmp::new(context.clone(), &pmp_address);
+    let pmp_handle = Pmp::new(context.clone(), dex_contract_params(&pmp_address));
     pmp_handle
         .wait_account(ParamsOfWaitAccount {
             status: AccountStatus::Active,
@@ -811,7 +812,7 @@ async fn deploy_one_market(
         .map_err(|e| format!("get_order_book_address: {e:?}"))?;
     let ob_handle = ackinacki_kit::contracts::dex::order_book::OrderBook::new(
         context.clone(),
-        &order_book_address,
+        dex_contract_params(&order_book_address),
     );
     ob_handle
         .wait_account(ParamsOfWaitAccount {

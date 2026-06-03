@@ -9,6 +9,9 @@ use ackinacki_kit::tvm_client::ClientContext;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::dapp::account_id_of;
+use crate::dapp::dex_contract_params;
+use crate::dapp::dex_dapp_id;
 use crate::errors::AppError;
 use crate::errors::AppResult;
 
@@ -16,6 +19,29 @@ const GQL_DEPLOY_EVENTS_QUERY: &str = r#"
     query($address: String!, $dst: String!, $last: Int!, $before: String) {
       blockchain {
         account(address: $address) {
+          events(dst: $dst, last: $last, before: $before) {
+            edges {
+              node {
+                msg_id
+                created_at
+                dst
+                body
+              }
+            }
+            pageInfo {
+              startCursor
+              hasPreviousPage
+            }
+          }
+        }
+      }
+    }
+"#;
+
+const GQL_DEPLOY_EVENTS_QUERY_V3: &str = r#"
+    query($accountId: String!, $dappId: String!, $dst: String!, $last: Int!, $before: String) {
+      blockchain {
+        account(account_id: $accountId, dapp_id: $dappId) {
           events(dst: $dst, last: $last, before: $before) {
             edges {
               node {
@@ -100,8 +126,14 @@ pub async fn discover_private_notes(
     tvm_client: Arc<ClientContext>,
     derived_pubkeys_dec: &HashSet<String>,
 ) -> AppResult<Vec<DiscoveredNote>> {
-    let root_pn = RootPn::new_default(tvm_client.clone());
+    let root_pn = RootPn::new(tvm_client.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     let dst_filter = RootPnEvent::PrivateNoteDeployed.to_address().replacen("0:", ":", 1);
+
+    let dapp_id_api = tvm_client
+        .supports_dapp_id()
+        .await
+        .map_err(|e| AppError::from(e).with_context("detect gateway version"))?;
+    let query = if dapp_id_api { GQL_DEPLOY_EVENTS_QUERY_V3 } else { GQL_DEPLOY_EVENTS_QUERY };
 
     let mut discovered = Vec::new();
     let mut cursor: Option<String> = None;
@@ -109,17 +141,27 @@ pub async fn discover_private_notes(
 
     // Paginate through all deploy events
     loop {
-        let variables = json!({
-            "address": RootPn::DEFAULT_ADDRESS,
-            "dst": dst_filter,
-            "last": page_size,
-            "before": cursor,
-        });
+        let variables = if dapp_id_api {
+            json!({
+                "accountId": account_id_of(RootPn::DEFAULT_ADDRESS),
+                "dappId": dex_dapp_id(),
+                "dst": dst_filter,
+                "last": page_size,
+                "before": cursor,
+            })
+        } else {
+            json!({
+                "address": RootPn::DEFAULT_ADDRESS,
+                "dst": dst_filter,
+                "last": page_size,
+                "before": cursor,
+            })
+        };
 
         let result = ackinacki_kit::tvm_client::net::query(
             tvm_client.clone(),
             ackinacki_kit::tvm_client::net::ParamsOfQuery {
-                query: GQL_DEPLOY_EVENTS_QUERY.to_string(),
+                query: query.to_string(),
                 variables: Some(variables),
             },
         )
@@ -144,7 +186,7 @@ pub async fn discover_private_notes(
                 // Check if this note belongs to one of our keys by querying its details
                 let pn = ackinacki_kit::contracts::dex::private_note::PrivateNote::new(
                     tvm_client.clone(),
-                    &data.note_address,
+                    dex_contract_params(&data.note_address),
                 );
                 if let Ok(details) = pn.get_details().await {
                     let epk_dec =

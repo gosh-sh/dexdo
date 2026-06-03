@@ -15,6 +15,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::dapp::account_id_of;
+use crate::dapp::dex_contract_params;
+use crate::dapp::dex_dapp_id;
 use crate::errors::AppError;
 use crate::errors::AppResult;
 
@@ -24,6 +27,29 @@ const GQL_EVENTS_QUERY: &str = r#"
     query($address: String!, $dst: String!, $last: Int!, $before: String) {
       blockchain {
         account(address: $address) {
+          events(dst: $dst, last: $last, before: $before) {
+            edges {
+              node {
+                msg_id
+                created_at
+                dst
+                body
+              }
+            }
+            pageInfo {
+              startCursor
+              hasPreviousPage
+            }
+          }
+        }
+      }
+    }
+"#;
+
+const GQL_EVENTS_QUERY_V3: &str = r#"
+    query($accountId: String!, $dappId: String!, $dst: String!, $last: Int!, $before: String) {
+      blockchain {
+        account(account_id: $accountId, dapp_id: $dappId) {
           events(dst: $dst, last: $last, before: $before) {
             edges {
               node {
@@ -117,24 +143,41 @@ pub struct MarketInfo {
 // ── Discover oracles ─────────────────────────────────────────────
 
 pub async fn discover_oracles(tvm_client: Arc<ClientContext>) -> AppResult<Vec<OracleInfo>> {
-    let root_oracle = RootOracle::new_default(tvm_client.clone());
+    let root_oracle =
+        RootOracle::new(tvm_client.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS));
     let dst_filter = RootOracleEvent::OracleDeployed.to_address().replacen("0:", ":", 1);
+
+    let dapp_id_api = tvm_client
+        .supports_dapp_id()
+        .await
+        .map_err(|e| AppError::from(e).with_context("detect gateway version"))?;
+    let query = if dapp_id_api { GQL_EVENTS_QUERY_V3 } else { GQL_EVENTS_QUERY };
 
     let mut oracles = Vec::new();
     let mut cursor: Option<String> = None;
 
     loop {
-        let variables = json!({
-            "address": RootOracle::DEFAULT_ADDRESS,
-            "dst": dst_filter,
-            "last": 50,
-            "before": cursor,
-        });
+        let variables = if dapp_id_api {
+            json!({
+                "accountId": account_id_of(RootOracle::DEFAULT_ADDRESS),
+                "dappId": dex_dapp_id(),
+                "dst": dst_filter,
+                "last": 50,
+                "before": cursor,
+            })
+        } else {
+            json!({
+                "address": RootOracle::DEFAULT_ADDRESS,
+                "dst": dst_filter,
+                "last": 50,
+                "before": cursor,
+            })
+        };
 
         let result = ackinacki_kit::tvm_client::net::query(
             tvm_client.clone(),
             ackinacki_kit::tvm_client::net::ParamsOfQuery {
-                query: GQL_EVENTS_QUERY.to_string(),
+                query: query.to_string(),
                 variables: Some(variables),
             },
         )
@@ -188,12 +231,12 @@ pub async fn discover_markets(
     token_type: u32,
 ) -> AppResult<Vec<MarketInfo>> {
     let oracles = discover_oracles(tvm_client.clone()).await?;
-    let root_pn = RootPn::new_default(tvm_client.clone());
+    let root_pn = RootPn::new(tvm_client.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
 
     let mut markets = Vec::new();
 
     for oracle_info in &oracles {
-        let oracle = Oracle::new(tvm_client.clone(), &oracle_info.address);
+        let oracle = Oracle::new(tvm_client.clone(), dex_contract_params(&oracle_info.address));
 
         // Get event list 0 address
         let el_address =
@@ -202,7 +245,7 @@ pub async fn discover_markets(
                 Err(_) => continue,
             };
 
-        let event_list = OracleEventList::new(tvm_client.clone(), &el_address);
+        let event_list = OracleEventList::new(tvm_client.clone(), dex_contract_params(&el_address));
         let events = match event_list.get_events().await {
             Ok(e) => e,
             Err(_) => continue,
@@ -229,7 +272,7 @@ pub async fn discover_markets(
             };
 
             // Check if PMP is deployed
-            let pmp = Pmp::new(tvm_client.clone(), &pmp_address);
+            let pmp = Pmp::new(tvm_client.clone(), dex_contract_params(&pmp_address));
             let details = match pmp.get_details().await {
                 Ok(d) => d,
                 Err(_) => continue, // PMP not deployed for this event

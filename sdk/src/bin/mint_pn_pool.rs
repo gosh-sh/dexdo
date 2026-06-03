@@ -49,6 +49,7 @@ use ackinacki_kit::tvm_client::crypto::generate_random_sign_keys;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::halo2::giver_voucher::mint_voucher_via_giver;
 use dodex_sdk::halo2::Halo2Paths;
 use dodex_sdk::proof;
@@ -339,7 +340,7 @@ fn load_or_init_pool(path: &Path, args: &Args) -> Result<Pool, String> {
 }
 
 async fn ensure_root_pn_funded(context: &Arc<ClientContext>) -> Result<(), String> {
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     eprintln!("[pool] waiting for RootPN ({}) to be Active…", root_pn.address());
     root_pn
         .wait_account(ackinacki_kit::contracts::account::ParamsOfWaitAccount {
@@ -385,7 +386,7 @@ async fn deploy_one_pn(
     nominal_raw: u64,
     keys: KeyPair,
 ) -> Result<PoolNote, String> {
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
 
     // 1. Halo2 deposit voucher in the chosen currency.
     eprintln!(
@@ -437,7 +438,7 @@ async fn deploy_one_pn(
         .map_err(|e| format!("get_private_note_address: {e:?}"))?
         .private_note_address;
 
-    let pn = PrivateNote::new(context.clone(), &pn_address);
+    let pn = PrivateNote::new(context.clone(), dex_contract_params(&pn_address));
     eprintln!("    waiting for PN {pn_address} to be Active…");
     pn.wait_account(ackinacki_kit::contracts::account::ParamsOfWaitAccount {
         status: ackinacki_kit::contracts::account::AccountStatus::Active,

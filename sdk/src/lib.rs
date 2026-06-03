@@ -1,11 +1,13 @@
 mod adapters;
 mod client;
+mod dapp;
 pub mod errors;
 mod modules;
 mod rate_limiter;
 mod services;
 
 pub use client::DexConfig;
+pub use dapp::dex_contract_params;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use adapters::native::dto::market::MarketInfo;

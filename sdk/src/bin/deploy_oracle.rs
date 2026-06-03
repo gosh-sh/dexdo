@@ -41,6 +41,7 @@ use ackinacki_kit::tvm_client::crypto::ParamsOfMnemonicDeriveSignKeys;
 use ackinacki_kit::tvm_client::crypto::ParamsOfMnemonicFromRandom;
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 use dodex_sdk::Dex;
 use dodex_sdk::DexConfig;
@@ -162,7 +163,8 @@ async fn main() -> ExitCode {
     eprintln!("[deploy_oracle] oracle pubkey = {}", oracle_keys.public);
 
     // 2. Top up RootOracle so it has gas to materialize the Oracle.
-    let root_oracle = RootOracle::new_default(context.clone());
+    let root_oracle =
+        RootOracle::new(context.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS));
     if let Err(e) = wait_active(&root_oracle, "RootOracle").await {
         eprintln!("[deploy_oracle] {e}");
         return ExitCode::FAILURE;
@@ -204,7 +206,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let oracle_contract = Oracle::new(context.clone(), &oracle_address);
+    let oracle_contract = Oracle::new(context.clone(), dex_contract_params(&oracle_address));
     if let Err(e) = wait_active(&oracle_contract, "Oracle").await {
         eprintln!("[deploy_oracle] {e}");
         return ExitCode::FAILURE;
@@ -221,7 +223,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let el_contract = OracleEventList::new(context.clone(), &event_list_address);
+    let el_contract = OracleEventList::new(context.clone(), dex_contract_params(&event_list_address));
     if let Err(e) = wait_active(&el_contract, "EventList").await {
         eprintln!("[deploy_oracle] {e}");
         return ExitCode::FAILURE;

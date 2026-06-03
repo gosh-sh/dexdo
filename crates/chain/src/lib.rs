@@ -20,6 +20,7 @@
 // `chain_sender` wraps each call in `tokio::time::timeout`).
 
 mod client;
+mod dapp;
 mod dto;
 mod error;
 
@@ -27,6 +28,7 @@ mod error;
 mod test_helpers;
 
 pub use client::Dex;
+pub use dapp::dex_contract_params;
 pub use dto::OwnedOrder;
 pub use dto::OwnedOrders;
 pub use error::ChainError;

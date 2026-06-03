@@ -11,6 +11,7 @@ use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::giver::v3::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 
 use crate::common::context::create_context;
@@ -101,8 +102,8 @@ async fn test_aggregated_balance_via_dex() {
         .await
         .expect("addr2");
 
-    let pn1 = PrivateNote::new(context.clone(), &addr1);
-    let pn2 = PrivateNote::new(context.clone(), &addr2);
+    let pn1 = PrivateNote::new(context.clone(), dex_contract_params(&addr1));
+    let pn2 = PrivateNote::new(context.clone(), dex_contract_params(&addr2));
     wait_active(&pn1, "PN1").await;
     wait_active(&pn2, "PN2").await;
 
@@ -154,7 +155,7 @@ async fn test_discover_my_notes_via_dex() {
         })
         .await
         .expect("addr");
-    let pn = PrivateNote::new(context.clone(), &pn_address);
+    let pn = PrivateNote::new(context.clone(), dex_contract_params(&pn_address));
     wait_active(&pn, "PN").await;
 
     // Discover: our key should find this PN

@@ -17,6 +17,7 @@ use ackinacki_kit::tvm_client::abi::CallSet;
 use ackinacki_kit::tvm_client::abi::ParamsOfEncodeMessageBody;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::halo2::live::prove_voucher_for_event;
 use dodex_sdk::halo2::sk_commit::compute_sk_u_commit_hex;
 use dodex_sdk::halo2::voucher_event;
@@ -41,7 +42,7 @@ pub async fn make_voucher_proof(
     is_fee: bool,
 ) -> proof::Halo2Proof {
     let t_total = std::time::Instant::now();
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     let network_url = format!("https://{ENDPOINT}");
     let ephemeral_pubkey_hex = proof::strip_0x(ephemeral_pubkey_hex).to_string();
 

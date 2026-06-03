@@ -33,6 +33,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 
 use super::client::Dex;
+use super::dapp::dex_contract_params;
 use super::error::ChainResult;
 
 /// Shape returned by `Pmp.getDetails`. Aliased so call sites don't
@@ -52,7 +53,7 @@ impl Dex {
         params: ParamsOfDeployPmp,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .deploy_pmp(params, signer)
             .await
             .map_err(Into::into)
@@ -64,7 +65,7 @@ impl Dex {
         params: ParamsOfSetStake,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .set_stake(params, signer)
             .await
             .map_err(Into::into)
@@ -79,7 +80,7 @@ impl Dex {
     /// `_busy` window between submission and the `onSplitAccepted`
     /// callback without standing up the GraphQL gateway.
     pub async fn get_private_note_details(&self, pn_address: &str) -> ChainResult<PnDetails> {
-        PrivateNote::new(self.ctx.clone(), pn_address).get_details().await.map_err(Into::into)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address)).get_details().await.map_err(Into::into)
     }
 
     /// Read-only `PrivateNote._stakes` accessor. Returns the raw
@@ -89,7 +90,7 @@ impl Dex {
     /// `couponsAmount` plus bookkeeping fields. Sibling of
     /// `get_private_note_details`, scoped to the same e2e niche.
     pub async fn get_private_note_stakes(&self, pn_address: &str) -> ChainResult<PnStakesRaw> {
-        PrivateNote::new(self.ctx.clone(), pn_address).get_stakes().await.map_err(Into::into)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address)).get_stakes().await.map_err(Into::into)
     }
 
     // ── PMP (oracle-signed ops + getters) ────────────────────────────
@@ -100,7 +101,7 @@ impl Dex {
         params: ParamsOfSubmitSetTimings,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        Pmp::new(self.ctx.clone(), pmp_address)
+        Pmp::new(self.ctx.clone(), dex_contract_params(pmp_address))
             .submit_set_timings(params, signer)
             .await
             .map_err(Into::into)
@@ -112,18 +113,18 @@ impl Dex {
         params: ParamsOfSubmitResolve,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        Pmp::new(self.ctx.clone(), pmp_address)
+        Pmp::new(self.ctx.clone(), dex_contract_params(pmp_address))
             .submit_resolve(params, signer)
             .await
             .map_err(Into::into)
     }
 
     pub async fn get_pmp_details(&self, pmp_address: &str) -> ChainResult<PmpDetails> {
-        Pmp::new(self.ctx.clone(), pmp_address).get_details().await.map_err(Into::into)
+        Pmp::new(self.ctx.clone(), dex_contract_params(pmp_address)).get_details().await.map_err(Into::into)
     }
 
     pub async fn get_order_book_address(&self, pmp_address: &str) -> ChainResult<String> {
-        Pmp::new(self.ctx.clone(), pmp_address)
+        Pmp::new(self.ctx.clone(), dex_contract_params(pmp_address))
             .get_order_book_address()
             .await
             .map(|r| r.order_book_address)
@@ -138,7 +139,7 @@ impl Dex {
         names: Vec<String>,
         token_type: u32,
     ) -> ChainResult<String> {
-        RootPn::new_default(self.ctx.clone())
+        RootPn::new(self.ctx.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS))
             .get_pmp_address(ParamsOfGetPmpAddress { event_id, names, token_type })
             .await
             .map(|r| r.pmp_address)
@@ -152,14 +153,14 @@ impl Dex {
         params: ParamsOfDeployOracle,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        RootOracle::new_default(self.ctx.clone())
+        RootOracle::new(self.ctx.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS))
             .deploy_oracle(params, signer)
             .await
             .map_err(Into::into)
     }
 
     pub async fn get_oracle_address(&self, name: String) -> ChainResult<String> {
-        RootOracle::new_default(self.ctx.clone())
+        RootOracle::new(self.ctx.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS))
             .get_oracle_address(ParamsOfGetOracleAddress { name })
             .await
             .map(|r| r.oracle_address)
@@ -173,7 +174,7 @@ impl Dex {
         oracle_address: &str,
         params: ParamsOfGetEventListAddress,
     ) -> ChainResult<String> {
-        Oracle::new(self.ctx.clone(), oracle_address)
+        Oracle::new(self.ctx.clone(), dex_contract_params(oracle_address))
             .get_event_list_address(params)
             .await
             .map(|r| r.address)
@@ -186,14 +187,14 @@ impl Dex {
         params: ParamsOfAddEvent,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        OracleEventList::new(self.ctx.clone(), event_list_address)
+        OracleEventList::new(self.ctx.clone(), dex_contract_params(event_list_address))
             .add_event(params, signer)
             .await
             .map_err(Into::into)
     }
 
     pub async fn get_events(&self, event_list_address: &str) -> ChainResult<OracleEvents> {
-        OracleEventList::new(self.ctx.clone(), event_list_address)
+        OracleEventList::new(self.ctx.clone(), dex_contract_params(event_list_address))
             .get_events()
             .await
             .map_err(Into::into)

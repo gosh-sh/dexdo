@@ -14,6 +14,7 @@ use ackinacki_kit::contracts::giver::v3::top_up_native_with_giver_if_below;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 use dodex_sdk::Dex;
 
@@ -45,7 +46,8 @@ pub async fn deploy_oracle_with_event(
     let oracle_name = format!("{prefix}{run_id:x}");
 
     // Top up RootOracle
-    let root_oracle = RootOracle::new_default(context.clone());
+    let root_oracle =
+        RootOracle::new(context.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS));
     wait_active(&root_oracle, "RootOracle").await;
     top_up_native_with_giver_if_below(
         context.clone(),
@@ -69,14 +71,14 @@ pub async fn deploy_oracle_with_event(
 
     let oracle_address =
         dex.get_oracle_address(oracle_name.clone()).await.expect("get_oracle_address");
-    let oracle_contract = Oracle::new(context.clone(), &oracle_address);
+    let oracle_contract = Oracle::new(context.clone(), dex_contract_params(&oracle_address));
     wait_active(&oracle_contract, "Oracle").await;
 
     let el_address = dex
         .get_event_list_address(&oracle_address, ParamsOfGetEventListAddress { index: 0 })
         .await
         .expect("get_event_list_address");
-    let el_contract = OracleEventList::new(context.clone(), &el_address);
+    let el_contract = OracleEventList::new(context.clone(), dex_contract_params(&el_address));
     wait_active(&el_contract, "EventList").await;
 
     let event_name = format!("Match {run_id:x}");
@@ -151,7 +153,7 @@ pub async fn setup_pmp(context: &Arc<ClientContext>, dex: &Dex) -> PmpSetup {
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     let pmp_address = root_pn
         .get_pmp_address(ParamsOfGetPmpAddress {
             event_id: event_id.clone(),
@@ -162,7 +164,7 @@ pub async fn setup_pmp(context: &Arc<ClientContext>, dex: &Dex) -> PmpSetup {
         .expect("get_pmp_address")
         .pmp_address;
 
-    let pmp_contract = Pmp::new(context.clone(), &pmp_address);
+    let pmp_contract = Pmp::new(context.clone(), dex_contract_params(&pmp_address));
     wait_active(&pmp_contract, "PMP").await;
 
     // Wait for approval

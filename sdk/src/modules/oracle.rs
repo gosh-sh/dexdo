@@ -14,6 +14,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 
 use crate::client::DexContext;
+use crate::dex_contract_params;
 use crate::errors::AppResult;
 use crate::services;
 
@@ -27,15 +28,18 @@ impl<'a> OracleModule<'a> {
     }
 
     fn root_oracle(&self) -> RootOracle {
-        RootOracle::new_default(self.ctx.tvm_client.clone())
+        RootOracle::new(
+            self.ctx.tvm_client.clone(),
+            dex_contract_params(RootOracle::DEFAULT_ADDRESS),
+        )
     }
 
     fn oracle(&self, address: &str) -> Oracle {
-        Oracle::new(self.ctx.tvm_client.clone(), address)
+        Oracle::new(self.ctx.tvm_client.clone(), dex_contract_params(address))
     }
 
     fn event_list(&self, address: &str) -> OracleEventList {
-        OracleEventList::new(self.ctx.tvm_client.clone(), address)
+        OracleEventList::new(self.ctx.tvm_client.clone(), dex_contract_params(address))
     }
 
     // --- RootOracle ---

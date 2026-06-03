@@ -13,6 +13,7 @@ use ackinacki_kit::contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
 use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::giver::v3::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::tvm_client::abi::Signer;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 
 use crate::common::context::create_context;
@@ -138,7 +139,7 @@ async fn test_recovery_and_operate_via_dex() {
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     let pmp_address = root_pn
         .get_pmp_address(ParamsOfGetPmpAddress {
             event_id: event_id.clone(),
@@ -149,7 +150,7 @@ async fn test_recovery_and_operate_via_dex() {
         .expect("pmp_address")
         .pmp_address;
 
-    let pmp = Pmp::new(context.clone(), &pmp_address);
+    let pmp = Pmp::new(context.clone(), dex_contract_params(&pmp_address));
     wait_active(&pmp, "PMP").await;
 
     for _ in 0..30 {

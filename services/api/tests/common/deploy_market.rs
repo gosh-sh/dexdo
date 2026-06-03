@@ -46,6 +46,7 @@ use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
 use anyhow::Context;
+use dodex_chain::dex_contract_params;
 use dodex_chain::Dex;
 use num_bigint::BigUint;
 
@@ -164,7 +165,7 @@ pub async fn deploy_ephemeral_market(
     .map_err(|e| anyhow!("deploy_pmp: {e:?}"))?;
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     let pmp_address = root_pn
         .get_pmp_address(ParamsOfGetPmpAddress {
             event_id: oracle.event_id.clone(),
@@ -174,7 +175,8 @@ pub async fn deploy_ephemeral_market(
         .await
         .map_err(|e| anyhow!("get_pmp_address: {e:?}"))?
         .pmp_address;
-    wait_active(Pmp::new(context.clone(), &pmp_address), 60, 2_000, "PMP").await?;
+    wait_active(Pmp::new(context.clone(), dex_contract_params(&pmp_address)), 60, 2_000, "PMP")
+        .await?;
 
     // Oracle quorum lands a few seconds after deployPMP — poll PMP
     // details until `approved_oracle_events == number_of_oracle_events`.
@@ -257,7 +259,7 @@ pub async fn deploy_ephemeral_market(
         .map_err(|e| anyhow!("get_order_book_address: {e:?}"))?;
     let ob = ackinacki_kit::contracts::dex::order_book::OrderBook::new(
         context.clone(),
-        &order_book_address,
+        dex_contract_params(&order_book_address),
     );
     wait_active(ob, 60, 3_000, "OrderBook").await?;
 
@@ -322,14 +324,20 @@ async fn deploy_oracle_with_event(
         .get_oracle_address(oracle_name.clone())
         .await
         .map_err(|e| anyhow!("get_oracle_address: {e:?}"))?;
-    wait_active(Oracle::new(context.clone(), &oracle_address), 60, 2_000, "Oracle").await?;
+    wait_active(Oracle::new(context.clone(), dex_contract_params(&oracle_address)), 60, 2_000, "Oracle")
+        .await?;
 
     let event_list_address = dex
         .get_event_list_address(&oracle_address, ParamsOfGetEventListAddress { index: 0 })
         .await
         .map_err(|e| anyhow!("get_event_list_address: {e:?}"))?;
-    wait_active(OracleEventList::new(context.clone(), &event_list_address), 60, 2_000, "EventList")
-        .await?;
+    wait_active(
+        OracleEventList::new(context.clone(), dex_contract_params(&event_list_address)),
+        60,
+        2_000,
+        "EventList",
+    )
+    .await?;
 
     let event_name = format!("DodexE2EMatch_{:x}", now_unix());
     let mut outcome_names = HashMap::new();

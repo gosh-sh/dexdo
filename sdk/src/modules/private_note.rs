@@ -25,6 +25,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 
 use crate::client::DexContext;
+use crate::dex_contract_params;
 use crate::errors::AppResult;
 use crate::services;
 
@@ -42,11 +43,11 @@ impl<'a> PrivateNoteModule<'a> {
     }
 
     fn root_pn(&self) -> RootPn {
-        RootPn::new_default(self.ctx.tvm_client.clone())
+        RootPn::new(self.ctx.tvm_client.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS))
     }
 
     fn pn(&self, address: &str) -> PrivateNote {
-        PrivateNote::new(self.ctx.tvm_client.clone(), address)
+        PrivateNote::new(self.ctx.tvm_client.clone(), dex_contract_params(address))
     }
 
     // --- Voucher (entry point from multifactor wallet) ---

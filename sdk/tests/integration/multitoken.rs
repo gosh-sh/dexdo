@@ -10,6 +10,7 @@ use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
 use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::giver::v3::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::tvm_client::abi::Signer;
+use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 
 use crate::common::context::create_context;
@@ -73,7 +74,7 @@ async fn test_one_pn_per_token_type() {
             })
             .await
             .expect("nackl addr");
-        let pn = PrivateNote::new(context.clone(), &addr);
+        let pn = PrivateNote::new(context.clone(), dex_contract_params(&addr));
         wait_active(&pn, "NACKL PN").await;
         (addr, dih, keys_nackl)
     };
@@ -109,7 +110,7 @@ async fn test_one_pn_per_token_type() {
             })
             .await
             .expect("shell addr");
-        let pn = PrivateNote::new(context.clone(), &addr);
+        let pn = PrivateNote::new(context.clone(), dex_contract_params(&addr));
         wait_active(&pn, "SHELL PN").await;
         (addr, dih, keys_shell)
     };
@@ -145,7 +146,7 @@ async fn test_one_pn_per_token_type() {
             })
             .await
             .expect("usdc addr");
-        let pn = PrivateNote::new(context.clone(), &addr);
+        let pn = PrivateNote::new(context.clone(), dex_contract_params(&addr));
         wait_active(&pn, "USDC PN").await;
         (addr, dih, keys_usdc)
     };

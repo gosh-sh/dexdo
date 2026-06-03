@@ -24,6 +24,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::ClientContext;
 use serde_json::json;
 
+use crate::dex_contract_params;
 use crate::services::halo2::live::prove_voucher_for_event;
 use crate::services::halo2::live::Halo2Proof;
 use crate::services::halo2::paths::Halo2Paths;
@@ -58,7 +59,7 @@ pub async fn mint_voucher_via_giver(
     is_fee: bool,
     paths: &Halo2Paths,
 ) -> Result<Halo2Proof, Halo2PathsError> {
-    let root_pn = RootPn::new_default(context.clone());
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     let recipient_ephemeral_pubkey_hex =
         proof::strip_0x(recipient_ephemeral_pubkey_hex).to_string();
 

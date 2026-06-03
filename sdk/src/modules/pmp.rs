@@ -6,6 +6,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 
 use crate::client::DexContext;
+use crate::dex_contract_params;
 use crate::errors::AppResult;
 use crate::services;
 
@@ -19,7 +20,7 @@ impl<'a> PmpModule<'a> {
     }
 
     fn pmp(&self, address: &str) -> Pmp {
-        Pmp::new(self.ctx.tvm_client.clone(), address)
+        Pmp::new(self.ctx.tvm_client.clone(), dex_contract_params(address))
     }
 
     pub async fn submit_set_timings(

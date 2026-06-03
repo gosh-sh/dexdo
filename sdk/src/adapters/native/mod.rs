@@ -40,6 +40,7 @@ use dto::private_note::ResultOfBlockchainWrite;
 
 use crate::client::DexClient;
 use crate::client::DexConfig;
+use crate::dex_contract_params;
 use crate::errors::AppResult;
 
 pub struct Dex {
@@ -274,8 +275,9 @@ impl Dex {
         names: Vec<String>,
         token_type: u32,
     ) -> AppResult<String> {
-        let root_pn = ackinacki_kit::contracts::dex::root_pn::RootPn::new_default(
+        let root_pn = ackinacki_kit::contracts::dex::root_pn::RootPn::new(
             self.inner.private_note().ctx_client(),
+            dex_contract_params(ackinacki_kit::contracts::dex::root_pn::RootPn::DEFAULT_ADDRESS),
         );
         let result = root_pn
             .get_pmp_address(ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPmpAddress {

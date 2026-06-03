@@ -9,6 +9,9 @@ use ackinacki_kit::tvm_client::ClientContext;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::dapp::account_id_of;
+use crate::dapp::dex_contract_params;
+use crate::dapp::dex_dapp_id;
 use crate::errors::AppError;
 use crate::errors::AppResult;
 
@@ -16,6 +19,29 @@ const GQL_EVENTS_QUERY: &str = r#"
     query($address: String!, $last: Int!, $before: String) {
       blockchain {
         account(address: $address) {
+          events(last: $last, before: $before) {
+            edges {
+              node {
+                msg_id
+                created_at
+                dst
+                body
+              }
+            }
+            pageInfo {
+              startCursor
+              hasPreviousPage
+            }
+          }
+        }
+      }
+    }
+"#;
+
+const GQL_EVENTS_QUERY_V3: &str = r#"
+    query($accountId: String!, $dappId: String!, $last: Int!, $before: String) {
+      blockchain {
+        account(account_id: $accountId, dapp_id: $dappId) {
           events(last: $last, before: $before) {
             edges {
               node {
@@ -257,19 +283,34 @@ pub async fn get_notes_history(
     let mut all_events: Vec<NoteEvent> = Vec::new();
     let mut last_page_info = PageInfo { end_cursor: None, has_next_page: false };
 
-    for pn_address in pn_addresses {
-        let pn_contract = PrivateNote::new(tvm_client.clone(), pn_address);
+    let dapp_id_api = tvm_client
+        .supports_dapp_id()
+        .await
+        .map_err(|e| AppError::from(e).with_context("detect gateway version"))?;
+    let query = if dapp_id_api { GQL_EVENTS_QUERY_V3 } else { GQL_EVENTS_QUERY };
 
-        let variables = json!({
-            "address": pn_address,
-            "last": limit,
-            "before": cursor,
-        });
+    for pn_address in pn_addresses {
+        let pn_contract = PrivateNote::new(tvm_client.clone(), dex_contract_params(pn_address));
+
+        let variables = if dapp_id_api {
+            json!({
+                "accountId": account_id_of(pn_address),
+                "dappId": dex_dapp_id(),
+                "last": limit,
+                "before": cursor,
+            })
+        } else {
+            json!({
+                "address": pn_address,
+                "last": limit,
+                "before": cursor,
+            })
+        };
 
         let result = ackinacki_kit::tvm_client::net::query(
             tvm_client.clone(),
             ackinacki_kit::tvm_client::net::ParamsOfQuery {
-                query: GQL_EVENTS_QUERY.to_string(),
+                query: query.to_string(),
                 variables: Some(variables),
             },
         )

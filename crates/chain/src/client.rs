@@ -22,6 +22,7 @@ use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
 
+use super::dapp::dex_contract_params;
 use super::dto::OwnedOrders;
 use super::error::ChainResult;
 
@@ -59,7 +60,7 @@ impl Dex {
         params: ParamsOfPlaceOrder,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .place_order(params, signer)
             .await
             .map_err(Into::into)
@@ -71,7 +72,7 @@ impl Dex {
         params: ParamsOfPlaceBatch,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .place_batch(params, signer)
             .await
             .map_err(Into::into)
@@ -83,7 +84,7 @@ impl Dex {
         params: ParamsOfCancelOrder,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .cancel_order(params, signer)
             .await
             .map_err(Into::into)
@@ -95,7 +96,7 @@ impl Dex {
         params: ParamsOfCancelBatch,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .cancel_batch(params, signer)
             .await
             .map_err(Into::into)
@@ -112,7 +113,7 @@ impl Dex {
         params: ParamsOfSplitFullSet,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .split_full_set(params, signer)
             .await
             .map_err(Into::into)
@@ -127,7 +128,7 @@ impl Dex {
         params: ParamsOfCancelOrderByClient,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), pn_address)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .cancel_order_by_client(params, signer)
             .await
             .map_err(Into::into)
@@ -140,7 +141,7 @@ impl Dex {
         ob_address: &str,
         deposit_identifier_hash: String,
     ) -> ChainResult<OwnedOrders> {
-        let raw = OrderBook::new(self.ctx.clone(), ob_address)
+        let raw = OrderBook::new(self.ctx.clone(), dex_contract_params(ob_address))
             .get_orders_by_owner(ParamsOfGetOrdersByOwner { deposit_hash: deposit_identifier_hash })
             .await?;
         OwnedOrders::try_from(raw)

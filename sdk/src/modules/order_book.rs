@@ -8,6 +8,7 @@ use ackinacki_kit::contracts::dex::order_book::ResultOfGetQueueSize;
 use ackinacki_kit::contracts::dex::order_book::ResultOfGetShutdownState;
 
 use crate::client::DexContext;
+use crate::dex_contract_params;
 use crate::errors::AppResult;
 use crate::services;
 
@@ -21,7 +22,7 @@ impl<'a> OrderBookModule<'a> {
     }
 
     fn ob(&self, address: &str) -> OrderBook {
-        OrderBook::new(self.ctx.tvm_client.clone(), address)
+        OrderBook::new(self.ctx.tvm_client.clone(), dex_contract_params(address))
     }
 
     pub async fn get_details(&self, ob_address: &str) -> AppResult<ResultOfGetDetails> {
