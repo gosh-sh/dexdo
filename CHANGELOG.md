@@ -2,6 +2,12 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-06-04]
+
+### Added
+
+- Indexer metrics `orders_created_event_cnt` and `order_partially_filled_event_cnt`, exported over OpenTelemetry/OTLP. Both are observable counters derived from `raw_events` totals (`OrderBook.OrderPlaced` / `OrderBook.PartialFill`), refreshed every 15s and pushed every 30s; collection is gated on the `OTEL_EXPORTER_OTLP_*` env (no-op when unset). New `dodex-metrics` crate encapsulates the OTLP setup. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#metrics).
+
 ## [2026-05-29]
 
 ### Added

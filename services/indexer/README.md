@@ -30,6 +30,12 @@ filter (default `info`), and `LOG_DIR` (optional) makes the service additionally
 write daily-rotated `indexer.log.<date>` files into that directory, retaining
 `LOG_MAX_FILES` of them (default 14). See [docs/deployment.md](../../docs/deployment.md#logs).
 
+Metrics are OpenTelemetry/OTLP and also environment-driven: when
+`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) is set,
+the service exports `orders_created_event_cnt` and
+`order_partially_filled_event_cnt`; with neither set, no metrics are collected.
+See [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#metrics).
+
 ## Database
 
 The indexer applies SQL migrations from `migrations/` on startup. Column and
