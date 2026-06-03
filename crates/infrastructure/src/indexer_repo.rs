@@ -63,6 +63,28 @@ impl IndexerRepository {
         Self { pool }
     }
 
+    /// Counts `raw_events` rows grouped by `event_type`, restricted to the
+    /// given types. Types with zero matching rows are omitted from the result;
+    /// the caller defaults them to 0. Backs the indexer's DB-derived metric
+    /// counters — cheap thanks to `raw_events_event_type_idx`.
+    pub async fn count_events_by_type(
+        &self,
+        event_types: &[&str],
+    ) -> anyhow::Result<Vec<(String, i64)>> {
+        let types: Vec<String> = event_types.iter().map(|s| s.to_string()).collect();
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"select event_type, count(*)
+                 from raw_events
+                where event_type = any($1)
+                group by event_type"#,
+        )
+        .bind(types.as_slice())
+        .fetch_all(&self.pool)
+        .await
+        .context("count raw_events by event_type")?;
+        Ok(rows)
+    }
+
     pub async fn load_cursor(&self, stream_name: &str) -> anyhow::Result<Option<String>> {
         let row: Option<(Option<String>,)> =
             sqlx::query_as("select cursor from indexer_cursors where stream_name = $1")
