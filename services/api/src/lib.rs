@@ -1752,12 +1752,9 @@ pub fn openapi_doc() -> OpenApi {
 /// stays a single line and every meaningful step is testable in
 /// isolation.
 pub async fn run() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // When LOG_DIR is set, these guards keep the background file-log writer
+    // alive for the lifetime of the process; `run()` serves until shutdown.
+    let _guards = dodex_logging::init("api");
 
     let config_path =
         env::var("APP_CONFIG").unwrap_or_else(|_| "config/api.local.yaml".to_string());

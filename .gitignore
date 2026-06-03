@@ -3,6 +3,8 @@
 internal-docs/
 target/
 worktrees/
+# Host-mounted service logs (docker-compose bind mounts ./logs/<service>).
+logs/
 .claude/roles/
 .claude/commands.txt
 .claude/skills/reviewer-core/

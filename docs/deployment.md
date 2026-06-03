@@ -250,8 +250,10 @@ api only:
 ## Step 4 — Compose override, build, and run
 
 The base `docker-compose.yml` mounts `./config` into each container read-only
-(`/app/config`) and defaults `APP_CONFIG` to the `*.local.yaml` files. Add an
-override that points `APP_CONFIG` at your own files — mirroring how
+(`/app/config`), bind-mounts a per-service host log directory
+(`./logs/api`, `./logs/indexer` → `/app/logs`) with `LOG_DIR=/app/logs` set,
+and defaults `APP_CONFIG` to the `*.local.yaml` files. Add an override that
+points `APP_CONFIG` at your own files — mirroring how
 `docker-compose.stage.yml` selects the Supabase configs.
 
 Create `docker-compose.prod.yml`:
@@ -325,12 +327,30 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml kill -s SIGUSR1 
 
 ### Logs
 
+Each service writes to **both** stdout and a host-mounted directory. The base
+`docker-compose.yml` bind-mounts `./logs/api` and `./logs/indexer` (on the host)
+to `/app/logs` (in each container) and sets `LOG_DIR=/app/logs`. With `LOG_DIR`
+set, the service writes daily-rotated, human-readable files named
+`<service>.log.<YYYY-MM-DD>` into that directory, keeping at most `LOG_MAX_FILES`
+of them (default 14):
+
 ```sh
+# tail the live stdout stream (unchanged)
 docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f api indexer
+
+# the persisted files on the host (survive container removal / redeploy)
+tail -f logs/api/api.log.*
+ls -1 logs/indexer/
 ```
 
-Log verbosity is controlled by `RUST_LOG` (set in the override) and
-`app.log_level` in config.
+Notes:
+
+- The containers run as `root`, so files under `logs/` are root-owned — use
+  `sudo` to read/rotate them as a non-root user.
+- `LOG_DIR` and `LOG_MAX_FILES` are environment variables (there is no YAML
+  config key). Unset `LOG_DIR` to disable file logging and keep stdout only.
+- Verbosity is still controlled by `RUST_LOG` (set in the override) and
+  `app.log_level` in config; the same filter applies to stdout and files.
 
 ### Upgrades
 

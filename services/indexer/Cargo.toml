@@ -10,4 +10,5 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 dodex-infrastructure = { path = "../../crates/infrastructure" }
+dodex-logging = { path = "../../crates/logging" }
 
