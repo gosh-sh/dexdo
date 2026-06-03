@@ -1671,20 +1671,20 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     }
 }
 
-/// Upper bound on `market_outcomes.price_precision` /
-/// `quantity_precision` accepted by the read path. Matches the SQL
-/// NUMERIC(38, …) cap — financial decimal precision never reaches this
-/// in practice, but `scale_uint_to_decimal` allocates `O(scale)` bytes
-/// per row via `"0".repeat(...)`, so an unbounded value on a corrupt
-/// row would OOM the API process on the first page that touches it.
-/// The `market_outcomes` column has no `CHECK` in 0001_initial.sql; this
-/// is the read-side defence.
+/// Upper bound on the decimal-scale columns read off the model:
+/// `market_outcomes.price_precision` / `quantity_precision` and
+/// `ref_tokens.decimals`. Matches the SQL NUMERIC(38, …) cap — financial
+/// decimal precision never reaches this in practice, but
+/// `scale_uint_to_decimal` allocates `O(scale)` bytes per row via
+/// `"0".repeat(...)`, so an unbounded value on a corrupt row would OOM the
+/// API process on the first page that touches it. Neither column carries a
+/// `CHECK` in 0001_initial.sql; this is the read-side defence.
 const MAX_DECIMAL_PRECISION: u32 = 38;
 
-/// Reason a `(price|quantity)_precision` value is unusable. Distinguishes
-/// the two corruption modes so callers can log them with the same field
-/// names while keeping their own surrounding context (skip-row vs
-/// MarketInconsistent).
+/// Reason a decimal-scale value (`(price|quantity)_precision` or
+/// `ref_tokens.decimals`) is unusable. Distinguishes the two corruption
+/// modes so callers can log them with the same field names while keeping
+/// their own surrounding context (skip-row vs MarketInconsistent).
 enum InvalidScale {
     Negative,
     AboveMax,

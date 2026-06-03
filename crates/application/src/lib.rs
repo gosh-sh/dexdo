@@ -5037,6 +5037,11 @@ mod get_market_balances_use_case_tests {
     }
 
     fn make_resolution(num_outcomes: u32) -> MarketBalancesResolution {
+        // NACKL-scale; outcome stake amounts are atoms (1e9).
+        make_resolution_with_decimals(num_outcomes, 9)
+    }
+
+    fn make_resolution_with_decimals(num_outcomes: u32, decimals: u8) -> MarketBalancesResolution {
         let outcomes: Vec<_> = (0..num_outcomes)
             .map(|i| BalanceOutcome {
                 outcome_id: i,
@@ -5049,7 +5054,7 @@ mod get_market_balances_use_case_tests {
             oracle_list_hash: "2".into(),
             token_type: 1,
             orderbook_address: "0:ob".into(),
-            decimals: 9, // NACKL-scale; outcome stake amounts are atoms (1e9)
+            decimals,
             num_outcomes,
             outcomes,
         }
@@ -5107,10 +5112,8 @@ mod get_market_balances_use_case_tests {
     // Outcome `_stakes.amount` is in token ATOMS (NACKL decimals = 9): a
     // holding of 12.5 NACKL is `12_500_000_000` atoms and must render as ~12.5,
     // not 125_000_000. Scaling atoms by `quantity_precision` (2) instead of the
-    // full `decimals` over-reports by 10^(9-2).
-    // A small-synthetic-input happy path can't catch that — its inputs sit far
-    // below atom scale, where the 10^(9-2) error is invisible — so this feeds
-    // realistic atom-scale values.
+    // full `decimals` over-reports by 10^(9-2); this anchors the expectation to
+    // a realistic atom-scale value.
     #[tokio::test]
     async fn market_balances_free_not_overscaled_for_real_atoms() {
         let stake = PnStake {
@@ -5193,6 +5196,40 @@ mod get_market_balances_use_case_tests {
             .expect("off-grid stake must render, not 503");
         assert_eq!(out.balances[0].free, "11.567164168");
         assert_eq!(out.balances[1].free, "13.432835808");
+    }
+
+    // A `decimals = 0` quote asset (whole-token quote, atoms ARE tokens) must
+    // render the count verbatim plus the format-invariant ".0" suffix — no
+    // fractional digits, no spurious scaling. `scale_decimal` is unit-tested at
+    // the primitive level; this drives the same scale through the balances use
+    // case, where `ref_tokens.decimals = 0` is reachable (no schema `CHECK > 0`).
+    #[tokio::test]
+    async fn market_balances_renders_zero_decimals_verbatim() {
+        let stake = PnStake {
+            amount: vec!["125".into(), "0".into()],
+            debt_amount: vec!["0".into(), "0".into()],
+            coupons_amount: vec!["0".into(), "0".into()],
+        };
+        let pn = make_pn(Some(stake));
+        let mut sums = std::collections::HashMap::new();
+        sums.insert(1u32, "7".into()); // 7 whole tokens locked on outcome 1
+        let repo = StubRepo {
+            resolution: Mutex::new(Ok(make_resolution_with_decimals(2, 0))),
+            sums: Mutex::new(sums),
+        };
+        let uc = GetMarketBalancesUseCase::new(pn, repo, stub_hasher);
+        let out = uc
+            .execute(GetMarketBalancesInput {
+                pn_address: "0:pn".into(),
+                market_address: MarketAddress("0:m".into()),
+                now_ms: 0,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(out.balances[0].free, "125.0");
+        assert_eq!(out.balances[0].locked_in_orders, "0.0");
+        assert_eq!(out.balances[1].free, "0.0");
+        assert_eq!(out.balances[1].locked_in_orders, "7.0");
     }
 
     #[tokio::test]

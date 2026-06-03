@@ -660,7 +660,7 @@ Errors:
 | `marketAddress` missing or blank | `-1102` | 400 |
 | `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
 | Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
-| Backend could not read the trading PrivateNote state (gateway timeout, malformed reply, unknown token type) | `-1500` | 503 |
+| Backend could not read the trading PrivateNote state (gateway timeout, malformed reply, unknown token type, decimals out of range) | `-1500` | 503 |
 
 ## Position Endpoints
 

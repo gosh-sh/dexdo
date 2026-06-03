@@ -501,6 +501,55 @@ async fn resolve_market_for_balances_decimals_above_max_fails_closed() {
 }
 
 #[tokio::test]
+async fn resolve_market_for_balances_negative_decimals_fails_closed() {
+    // `ref_tokens.decimals` is `integer` (signed) with no `CHECK`. The resolve
+    // path validates the joined value via validate_decimal_scale, whose
+    // Negative arm (u32::try_from on a sub-zero raw) must lift to
+    // MarketInconsistent rather than be handed to scale_decimal. Pairs with
+    // resolve_market_for_balances_decimals_above_max_fails_closed, which covers
+    // the AboveMax arm.
+    let Some(pool) = setup().await else { return };
+    let pmp = "0:dec-neg-bal-pmp";
+    let ob = "0:dec-neg-bal-ob";
+    sqlx::query("delete from markets where pmp_address = $1")
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Sentinel ref_tokens row with a negative decimals. All `not null` columns
+    // filled; only `decimals` is read by the code under test.
+    sqlx::query(
+        r#"insert into ref_tokens (
+              token_type, token_code, decimals,
+              min_notional, lot_size, tick_size_bps,
+              price_precision, quantity_precision)
+                values (39040, '__DECNEG__', -3,
+                        0::numeric, 0::numeric, 0::numeric, 0, 0)
+           on conflict (token_type) do nothing"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"insert into markets (
+              pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
+              orderbook_address, num_outcomes, last_reconciled_at)
+           values ($1, 'dec-neg', 39040, '__DECNEG__', 42::numeric, 24::numeric,
+                   $2, 1, now())"#,
+    )
+    .bind(pmp)
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo.resolve_market_for_balances(&MarketAddress(pmp.to_string())).await.unwrap_err();
+    let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
+    assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
+}
+
+#[tokio::test]
 async fn resolve_for_new_order_negative_outcome_id_fails_closed() {
     // market_outcomes.outcome_id has no CHECK constraint enforcing non-negative.
     // The try_into::<u32>() guard in resolve_for_new_order must surface a negative
