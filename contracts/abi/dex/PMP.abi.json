@@ -94,6 +94,17 @@
 			]
 		},
 		{
+			"name": "forfeitStake",
+			"inputs": [
+				{"name":"stakeAmount","type":"uint128[]"},
+				{"name":"debtAmount","type":"uint128[]"},
+				{"name":"couponsAmount","type":"uint128[]"},
+				{"name":"depositIdentifierHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "submitSetTimings",
 			"inputs": [
 				{"name":"resultStart","type":"uint64"}

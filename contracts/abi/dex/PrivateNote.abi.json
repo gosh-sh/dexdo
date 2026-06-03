@@ -85,6 +85,13 @@
 			]
 		},
 		{
+			"name": "onForfeitAccepted",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "cancelStake",
 			"inputs": [
 				{"name":"eventId","type":"uint256"},
@@ -401,18 +408,8 @@
 				{"name":"eventId","type":"uint256"},
 				{"name":"oracleListHash","type":"uint256"},
 				{"name":"tokenType","type":"uint32"},
-				{"components":[{"name":"outcomeId","type":"uint32"},{"name":"isBuy","type":"bool"},{"name":"flags","type":"uint8"},{"name":"price","type":"uint256"},{"name":"amount","type":"uint128"},{"name":"minAmount","type":"uint128"},{"name":"epochId","type":"uint64"},{"name":"clientOrderId","type":"uint128"}],"name":"orders","type":"tuple[]"}
-			],
-			"outputs": [
-			]
-		},
-		{
-			"name": "cancelBatch",
-			"inputs": [
-				{"name":"eventId","type":"uint256"},
-				{"name":"oracleListHash","type":"uint256"},
-				{"name":"tokenType","type":"uint32"},
-				{"name":"orderIds","type":"uint128[]"}
+				{"components":[{"name":"outcomeId","type":"uint32"},{"name":"isBuy","type":"bool"},{"name":"flags","type":"uint8"},{"name":"price","type":"uint256"},{"name":"amount","type":"uint128"},{"name":"minAmount","type":"uint128"},{"name":"epochId","type":"uint64"},{"name":"clientOrderId","type":"uint128"}],"name":"orders","type":"tuple[]"},
+				{"name":"cancelIds","type":"uint128[]"}
 			],
 			"outputs": [
 			]
@@ -705,6 +702,7 @@
 		{"init":false,"name":"_pendingBatchBuyLock","type":"uint128"},
 		{"init":false,"name":"_pendingBatchTokenType","type":"uint32"},
 		{"init":false,"name":"_pendingBatchStakeHash","type":"uint256"},
+		{"init":false,"name":"_pendingForfeit","type":"bool"},
 		{"components":[{"name":"outcomeId","type":"uint32"},{"name":"amount","type":"uint128"}],"init":false,"name":"_pendingBatchSells","type":"tuple[]"},
 		{"init":false,"name":"_balance","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_debt","type":"uint128"},
