@@ -44,9 +44,7 @@ pub async fn run_refresh_loop(
     metrics: IndexerMetrics,
 ) {
     loop {
-        match repo
-            .count_events_by_type(&[ORDERS_CREATED_EVENT, ORDER_PARTIALLY_FILLED_EVENT])
-            .await
+        match repo.count_events_by_type(&[ORDERS_CREATED_EVENT, ORDER_PARTIALLY_FILLED_EVENT]).await
         {
             Ok(rows) => {
                 let (created, partially) = resolve_counts(&rows);

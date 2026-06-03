@@ -135,8 +135,7 @@ pub fn init() -> Option<Metrics> {
     let resource = Resource::new(vec![KeyValue::new("service.name", SERVICE_NAME)])
         .merge(&Resource::default());
 
-    let provider =
-        SdkMeterProvider::builder().with_reader(reader).with_resource(resource).build();
+    let provider = SdkMeterProvider::builder().with_reader(reader).with_resource(resource).build();
 
     let meter = provider.meter(SERVICE_NAME);
     let indexer = IndexerMetrics::new(&meter);
@@ -164,10 +163,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_generic_endpoint() {
-        assert_eq!(
-            select_endpoint(None, Some("generic".to_string())),
-            Some("generic".to_string())
-        );
+        assert_eq!(select_endpoint(None, Some("generic".to_string())), Some("generic".to_string()));
     }
 
     #[test]

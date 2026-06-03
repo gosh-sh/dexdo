@@ -63,12 +63,7 @@ async fn count_events_by_type_returns_per_type_counts() {
     let never = "metrics_counts_test.Never";
 
     sqlx::query("delete from raw_events where event_type = any($1)")
-        .bind(vec![
-            created.to_string(),
-            partial.to_string(),
-            other.to_string(),
-            never.to_string(),
-        ])
+        .bind(vec![created.to_string(), partial.to_string(), other.to_string(), never.to_string()])
         .execute(&pool)
         .await
         .expect("purge");
@@ -82,10 +77,8 @@ async fn count_events_by_type_returns_per_type_counts() {
     insert_raw(&pool, "metrics_counts_test.o.0", other).await;
 
     let repo = IndexerRepository::new(pool.clone());
-    let rows = repo
-        .count_events_by_type(&[created, partial, never])
-        .await
-        .expect("count_events_by_type");
+    let rows =
+        repo.count_events_by_type(&[created, partial, never]).await.expect("count_events_by_type");
     let counts: HashMap<String, i64> = rows.into_iter().collect();
 
     assert_eq!(counts.get(created), Some(&3));
