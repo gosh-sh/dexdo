@@ -351,3 +351,34 @@ async fn fails_closed_on_malformed_outcome_names() {
 
     purge(&pool, oracle).await;
 }
+
+#[tokio::test]
+async fn omits_oracle_with_only_unavailable_events() {
+    // An oracle whose every event is unavailable (here: reconciled but past
+    // deadline) must be absent from the response entirely — this is the
+    // Phase-1 EXISTS gate, not Phase-2 row filtering. If the EXISTS were
+    // dropped, the oracle head would still be selected and surface with an
+    // empty `eventLists`, which would also corrupt `has_more`/cursor counts.
+    let Some(pool) = setup().await else { return };
+    let oracle = "0:oracles_it_only_unavail";
+    purge(&pool, oracle).await;
+    seed_available(
+        &pool, oracle, "oracles-it-only-unavail", "0:oracles_it_only_unavail_list", 0, "1", PAST,
+        None, serde_json::json!({ "0": "NO" }),
+    )
+    .await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let page = repo
+        .list_oracles(&req(OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() }, None, 50))
+        .await
+        .expect("list_oracles");
+
+    assert!(
+        page.oracles.is_empty(),
+        "oracle with only unavailable events must be omitted entirely, got {} oracle(s)",
+        page.oracles.len()
+    );
+
+    purge(&pool, oracle).await;
+}
