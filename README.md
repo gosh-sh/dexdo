@@ -51,6 +51,11 @@ Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
 the Compose deployment bind-mounts these to `./logs/<service>`. See
 [docs/deployment.md](docs/deployment.md#logs).
 
+Metrics are OpenTelemetry/OTLP: the indexer exports event counters when
+`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) is set,
+and collects nothing when unset. See
+[docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#metrics).
+
 Secrets and environment-specific values live in `.env`:
 
 ```sh

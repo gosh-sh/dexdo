@@ -7,6 +7,7 @@ members = [
     "crates/application",
     "crates/infrastructure",
     "crates/logging",
+    "crates/metrics",
 ]
 # `sdk/` is its own workspace, kept out of the root resolve on purpose: its
 # halo2 proof pipeline pulls a heavy, distinct zk/halo2 dependency graph.
