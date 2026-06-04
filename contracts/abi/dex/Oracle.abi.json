@@ -17,7 +17,8 @@
 		{
 			"name": "deployEventList",
 			"inputs": [
-				{"name":"index","type":"uint128"}
+				{"name":"index","type":"uint128"},
+				{"name":"description","type":"string"}
 			],
 			"outputs": [
 			]
@@ -55,7 +56,8 @@
 			"name": "OracleEventListDeployed",
 			"inputs": [
 				{"name":"eventListAddress","type":"address"},
-				{"name":"index","type":"uint128"}
+				{"name":"index","type":"uint128"},
+				{"name":"description","type":"string"}
 			],
 			"outputs": [
 			]

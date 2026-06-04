@@ -30,7 +30,9 @@ abstract contract Modifiers is Errors {
     uint128 constant ORACLE_EVENT_LIST_DEPLOYED = 105;
     /// @notice External event id for `OracleEventList.EventConfirmed`.
     uint128 constant ORACLE_EVENT_CONFIRMED = 106;
-    
+    /// @notice External event id for `OracleEventList.DescriptionUpdated`.
+    uint128 constant ORACLE_LIST_DESCRIPTION_UPDATED = 107;
+
     // PrivateNote events
     /// @notice External event id for `PrivateNote.PMPDeployed`.
     uint128 constant PRIVATENOTE_PMP_DEPLOYED = 111;
@@ -165,11 +167,11 @@ abstract contract Modifiers is Errors {
     uint256 constant TICK_SIZE = 10; // 10 bps = 0.1%
 
     /// @notice Maximum number of orders (or cancels) in a single batch.
-    ///         Shared across PrivateNote.placeBatch/cancelBatch and
-    ///         OrderBook.executeBatch — keeping the limit in one place
-    ///         prevents PN from accepting more than OB can dispatch
-    ///         (truncation on OB side would leak collateral / stake).
-    uint32 constant MAX_BATCH_SIZE = 5;
+    ///         Applies independently to the `orders` and `cancelIds` arrays of
+    ///         PrivateNote.placeBatch / OrderBook.executeBatch — keeping the
+    ///         limit in one place prevents PN from accepting more than OB can
+    ///         dispatch (truncation on OB side would leak collateral / stake).
+    uint32 constant MAX_BATCH_SIZE = 10;
 
     /// @notice Currency ID used for PMP pools (staking tokens)
     uint32 constant CURRENCIES_ID = 1;

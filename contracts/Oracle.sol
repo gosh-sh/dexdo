@@ -28,7 +28,8 @@ contract Oracle is Modifiers {
     /// @notice Emitted when a new OracleEventList is deployed.
     /// @param eventListAddress Deployed OracleEventList address.
     /// @param index Deployed OracleEventList index.
-    event OracleEventListDeployed(address eventListAddress, uint128 index);
+    /// @param description Human-readable description of the list.
+    event OracleEventListDeployed(address eventListAddress, uint128 index, string description);
 
     /// @notice Reserved event for external publication flow.
     /// @param eventId Event identifier.
@@ -64,15 +65,16 @@ contract Oracle is Modifiers {
                 _oracleEventListCode, address(this), 0
             ),
             value: 10 vmshell, flag: 1
-        }(_oraclePubkey, _pmpSaltedCodeHash, _pmpSaltedCodeDepth);
+        }(_oraclePubkey, _pmpSaltedCodeHash, _pmpSaltedCodeDepth, "");
 
         address addrExtern = address.makeAddrExtern(ORACLE_DEPLOYED, bitCntAddress);
-        emit OracleEventListDeployed{dest: addrExtern}(oracleEventList, 0);
+        emit OracleEventListDeployed{dest: addrExtern}(oracleEventList, 0, "");
     }
 
     /// @notice Deploys an OracleEventList with a custom index.
     /// @param index OracleEventList index.
-    function deployEventList(uint128 index) public view onlyOwnerPubkey(_oraclePubkey) accept {
+    /// @param description Human-readable description of the list.
+    function deployEventList(uint128 index, string description) public view onlyOwnerPubkey(_oraclePubkey) accept {
         ensureBalance();
 
         address oracleEventList = new OracleEventList{
@@ -80,10 +82,10 @@ contract Oracle is Modifiers {
                 _oracleEventListCode, address(this), index
             ),
             value: 10 vmshell, flag: 1
-        }(_oraclePubkey, _pmpSaltedCodeHash, _pmpSaltedCodeDepth);
+        }(_oraclePubkey, _pmpSaltedCodeHash, _pmpSaltedCodeDepth, description);
 
         address addrExtern = address.makeAddrExtern(ORACLE_DEPLOYED, bitCntAddress);
-        emit OracleEventListDeployed{dest: addrExtern}(oracleEventList, index);
+        emit OracleEventListDeployed{dest: addrExtern}(oracleEventList, index, description);
     }
 
     /// @notice Ensures minimal native balance for operations.
