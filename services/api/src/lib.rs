@@ -2,6 +2,7 @@
 //
 
 mod auth_hoop;
+mod dto;
 #[doc(hidden)]
 pub mod testkit;
 mod timeout_hoop;
@@ -47,12 +48,10 @@ use dodex_domain::MarketStatus;
 use dodex_domain::Order;
 use dodex_domain::OrderParts;
 use dodex_domain::OrderSide;
-use dodex_domain::OrderStatus;
 use dodex_domain::OrderType;
 use dodex_domain::Permission;
 use dodex_domain::Symbol;
 use dodex_domain::Terminal;
-use dodex_domain::TerminalKind;
 use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
 use dodex_infrastructure::auth::PostgresAuthenticator;
@@ -146,30 +145,54 @@ impl AppState {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct MarketsResponse {
+    /// Unix seconds. All timestamps in this response are unix seconds
+    /// unless stated otherwise.
     server_time: i64,
+    /// Pagination cursor for the next page. `null` when `hasMore` is
+    /// `false`.
     next_cursor: Option<String>,
+    /// Whether more pages follow.
     has_more: bool,
+    /// Markets matching the request.
     markets: Vec<MarketDto>,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct MarketDto {
+    /// Stable market identifier.
     market_address: String,
+    /// Deterministic order-book address. Always present; trading
+    /// availability depends on `status`.
     order_book_address: String,
+    /// Technical market name. Not the user-facing title; see
+    /// `event.eventName`.
     market_name: String,
-    status: &'static str,
+    status: dto::MarketStatus,
+    /// Quote-asset symbol for display.
     quote_asset: String,
+    /// Numeric quote-asset token type.
     token_type: i32,
+    /// Maker fee rate as a signed decimal string. A negative value is
+    /// a maker rebate credited to the maker.
     maker_commission: String,
+    /// Taker fee rate as a decimal string, charged to the taker.
+    /// Always non-negative.
     taker_commission: String,
+    /// Unix seconds. Market creation timestamp.
     created_at: i64,
+    // Nullability notes for `timings` / `terminal` live in the
+    // referenced schemas' doc comments: the ToSchema derive drops
+    // field-level doc comments next to `$ref`s.
     timings: Option<TimingsDto>,
     event: EventDto,
     terminal: Option<TerminalDto>,
+    /// Outcome-token descriptors.
     outcomes: Vec<OutcomeDto>,
 }
 
+/// Market lifecycle timestamps, all unix seconds. The market's
+/// `timings` is `null` while `status` is `PENDING`.
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct TimingsDto {
@@ -177,98 +200,185 @@ struct TimingsDto {
     stake_end: i64,
     result_start: i64,
     result_end: i64,
+    /// `null` before the order book is active.
     frozen_at: Option<i64>,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EventDto {
+    /// `0x`-prefixed uint256 hex digest, computed on-chain from the
+    /// event metadata; identical across every oracle confirming the
+    /// same event.
     event_id: String,
+    /// User-facing event title. `null` until at least one oracle
+    /// confirmation has landed.
     event_name: Option<String>,
+    /// User-facing description. Same confirmation caveat as
+    /// `eventName`.
     description: Option<String>,
+    /// One entry per oracle that confirmed this market. Empty when no
+    /// confirmation has landed yet.
     oracles: Vec<OracleDto>,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OracleDto {
+    /// Oracle name. `null` if the oracle row has not been reconciled
+    /// yet.
     name: Option<String>,
+    /// Oracle contract address.
     address: Option<String>,
+    /// Oracle fee for this confirmation, as a uint128 decimal string.
     fee: Option<String>,
 }
 
+/// How the market ended. The market's `terminal` is `null` while the
+/// market is alive and populated for the terminal statuses `RESOLVED`,
+/// `CANCELLED`, `EXPIRED`.
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct TerminalDto {
-    kind: &'static str,
+    kind: dto::TerminalKind,
+    /// Unix seconds. When the market entered the terminal state.
     at: i64,
+    /// The winning outcome's `outcomeId`. Present only when `kind` is
+    /// `RESOLVED`; `null` otherwise.
     resolved_outcome_id: Option<u32>,
-    cancel_reason: Option<&'static str>,
+    cancel_reason: Option<dto::CancelReason>,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OutcomeDto {
+    /// Stable outcome ID. Clients MUST use this field, not the array
+    /// index.
     outcome_id: u32,
+    /// Human-readable outcome name.
     outcome_name: String,
+    /// Outcome-token symbol used in trading and order-book requests.
     symbol: String,
+    /// Maximum number of decimal places accepted for order prices.
     price_precision: u8,
+    /// Maximum number of decimal places accepted for order quantities.
     quantity_precision: u8,
+    /// Minimum price increment.
     tick_size: String,
+    /// Minimum quantity increment.
     step_size: String,
+    /// Minimum accepted notional value for an order.
     min_notional: String,
+    /// Maximum number of orders accepted in one batch request for this
+    /// outcome.
     max_batch_size: u16,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct DepthResponse {
+    /// Market address.
     market_address: String,
+    /// Outcome-token symbol.
     symbol: String,
+    /// Opaque lex-comparable chain-order cursor; a larger string means
+    /// a newer event has touched this `(marketAddress, symbol)`. Empty
+    /// string when no order event has landed yet. Do not parse as an
+    /// integer.
     last_update_id: String,
+    #[salvo(schema(schema_with = depth_bids_schema))]
     bids: Vec<[String; 2]>,
+    #[salvo(schema(schema_with = depth_asks_schema))]
     asks: Vec<[String; 2]>,
+}
+
+/// `[String; 2]` derives as an unbounded `array of string`; pin the
+/// exact `[price, quantity]` pair shape for codegen clients. The
+/// description lives here too — the derive drops doc comments on
+/// `schema_with` fields.
+fn depth_levels_schema(description: &str) -> salvo_oapi::schema::Array {
+    use salvo_oapi::Array;
+    use salvo_oapi::BasicType;
+    use salvo_oapi::Object;
+    Array::new()
+        .items(
+            Array::new()
+                .items(Object::new().schema_type(BasicType::String))
+                .min_items(2)
+                .max_items(2),
+        )
+        .description(description)
+}
+
+fn depth_bids_schema() -> salvo_oapi::schema::Array {
+    depth_levels_schema("Price levels as [price, quantity] decimal-string pairs, best bid first.")
+}
+
+fn depth_asks_schema() -> salvo_oapi::schema::Array {
+    depth_levels_schema("Price levels as [price, quantity] decimal-string pairs, best ask first.")
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OrderResponse {
+    /// Market address.
     market_address: String,
+    /// Outcome-token symbol.
     symbol: String,
+    /// Chain-side order id, u64 as a decimal string. Empty string for
+    /// `REJECTED` orders.
     order_id: String,
+    /// Client-supplied id, or an empty string if absent.
     client_order_id: String,
+    /// Limit price, scaled by the outcome price precision.
     price: String,
+    /// Original order quantity, scaled by the outcome quantity
+    /// precision.
     orig_qty: String,
+    /// Filled quantity. Can be `> 0` for `CANCELED` orders that filled
+    /// partially before cancellation.
     executed_qty: String,
-    status: &'static str,
-    time_in_force: &'static str,
+    status: dto::OrderStatus,
+    time_in_force: dto::TimeInForce,
     #[serde(rename = "type")]
-    order_type: &'static str,
-    side: &'static str,
+    order_type: dto::OrderType,
+    side: dto::OrderSide,
+    /// Unix milliseconds. On-chain order creation time.
     time: i64,
+    /// Unix milliseconds. On-chain time of the most recent book event
+    /// that touched the order.
     update_time: i64,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OrdersPageResponse {
+    /// Orders matching the filter, most recently placed first.
     orders: Vec<OrderResponse>,
+    /// Opaque pagination cursor. Pass back verbatim to fetch the next
+    /// page; `null` when the last page has been returned.
     next_cursor: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct AccountResponse {
+    /// Account UUID.
     account_id: String,
+    /// Unix milliseconds. When the balances snapshot was assembled.
     update_time: i64,
+    /// Per-asset balances aggregated across all markets.
     balances: Vec<AccountBalanceItem>,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct AccountBalanceItem {
+    /// Asset symbol.
     asset: String,
+    /// Spendable amount, as a decimal string.
     free: String,
+    /// Amount locked in open orders, as a decimal string.
     locked: String,
 }
 
@@ -289,17 +399,24 @@ impl AccountResponse {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct MarketBalancesResponse {
+    /// Market address.
     market_address: String,
+    /// Unix milliseconds. When the balances snapshot was assembled.
     update_time: i64,
+    /// Per-outcome balances on this market.
     balances: Vec<OutcomeBalanceItem>,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct OutcomeBalanceItem {
+    /// Stable outcome ID.
     outcome_id: u32,
+    /// Outcome-token symbol.
     symbol: String,
+    /// Spendable outcome-token amount, as a decimal string.
     free: String,
+    /// Amount locked in open orders, as a decimal string.
     locked_in_orders: String,
 }
 
@@ -324,7 +441,10 @@ impl MarketBalancesResponse {
 
 #[derive(Serialize, ToSchema)]
 struct ErrorBody {
+    /// Negative machine-readable error code. See docs/api-spec.md
+    /// §Error Codes for the full table.
     code: i32,
+    /// Human-readable error message.
     msg: &'static str,
 }
 
@@ -450,13 +570,13 @@ const MAX_LIMIT: u16 = 200;
     summary = "List markets",
     parameters(
         ("marketAddress" = Option<String>, Query, description = "Single-market lookup. Mutually exclusive with listing filters and pagination."),
-        ("status" = Option<String>, Query, description = "Comma-separated MarketStatus filter."),
+        ("status" = Option<Vec<dto::MarketStatus>>, Query, style = Form, explode = false, description = "Comma-separated MarketStatus filter."),
         ("quoteAsset" = Option<String>, Query, description = "Filter by quote asset symbol."),
         ("oracleName" = Option<String>, Query, description = "Filter by oracle name."),
-        ("closingBefore" = Option<i64>, Query, description = "Upper bound on resultStart, unix seconds."),
-        ("sort" = Option<String>, Query, description = "Sort order: resultStart (default) or createdAt."),
+        ("closingBefore" = Option<i64>, Query, description = "Return only markets with timings.resultEnd before this unix-seconds bound."),
+        ("sort" = Option<dto::MarketsSort>, Query, description = "Sort order: resultStart (default, ascending) or createdAt (descending)."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor returned from a previous page."),
-        ("limit" = Option<i64>, Query, description = "Page size. Default 50, max 200."),
+        ("limit" = Option<i64>, Query, minimum = 1, maximum = 200, description = "Page size. Default 50, max 200; out-of-range values clamp."),
     ),
     security(()),
 )]
@@ -547,7 +667,7 @@ fn market_to_dto(market: Market) -> MarketDto {
         market_address: market.market_address.0,
         order_book_address: market.order_book_address,
         market_name: market.market_name.0,
-        status: market.status.as_str(),
+        status: market.status.into(),
         quote_asset: market.quote_asset,
         token_type: market.token_type,
         maker_commission: market.maker_commission,
@@ -585,14 +705,10 @@ fn event_to_dto(e: MarketEvent) -> EventDto {
 
 fn terminal_to_dto(t: Terminal) -> TerminalDto {
     TerminalDto {
-        kind: match t.kind {
-            TerminalKind::Resolved => "RESOLVED",
-            TerminalKind::Cancelled => "CANCELLED",
-            TerminalKind::Expired => "EXPIRED",
-        },
+        kind: t.kind.into(),
         at: t.at,
         resolved_outcome_id: t.resolved_outcome_id,
-        cancel_reason: t.cancel_reason.map(|r| r.as_str()),
+        cancel_reason: t.cancel_reason.map(Into::into),
     }
 }
 
@@ -617,7 +733,7 @@ fn outcome_to_dto(o: dodex_domain::Outcome) -> OutcomeDto {
     parameters(
         ("marketAddress" = String, Query, description = "Market address."),
         ("symbol" = String, Query, description = "Outcome-token symbol."),
-        ("limit" = Option<i64>, Query, description = "Levels per side. Default 100, max 1000."),
+        ("limit" = Option<i64>, Query, minimum = 1, maximum = 1000, description = "Levels per side. Default 100, max 1000; out-of-range values clamp."),
     ),
     security(()),
 )]
@@ -669,8 +785,8 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
         ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
         ("marketAddress" = Option<String>, Query, description = "Market filter. Must pair with symbol when set."),
         ("symbol" = Option<String>, Query, description = "Symbol filter. Must pair with marketAddress."),
-        ("status" = Option<String>, Query, description = "Comma-separated OrderStatus filter. Default: all statuses."),
-        ("limit" = Option<i64>, Query, description = "Page size, 1..=500."),
+        ("status" = Option<Vec<dto::QueryableOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated OrderStatus filter. PENDING_NEW and PENDING_CANCEL are not queryable. Default: all statuses."),
+        ("limit" = Option<i64>, Query, minimum = 1, maximum = 500, description = "Page size, 1..=500. Default 100."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor."),
     ),
     security(("apiKey" = [])),
@@ -755,10 +871,10 @@ fn order_to_dto(order: Order) -> OrderResponse {
         price,
         orig_qty,
         executed_qty,
-        status: status.as_str(),
-        time_in_force: time_in_force.as_str(),
-        order_type: order_type.as_str(),
-        side: side.as_str(),
+        status: status.into(),
+        time_in_force: time_in_force.into(),
+        order_type: order_type.into(),
+        side: side.into(),
         time,
         update_time,
     }
@@ -806,17 +922,35 @@ fn optional_typed_query<T: std::str::FromStr>(
 // Request body for `POST /api/v1/order`. Field names match
 // docs/api-spec.md §New Order verbatim; `type` is the reserved keyword
 // we rename for serde and rebind to `order_type` internally.
+// Every field is `Option` at runtime so the handler can distinguish
+// missing (-1102) from unknown value (-1130). `value_type` overrides
+// restore the contract in the spec: mandatory fields override to a
+// non-Option type (lands in `required`, drops the spurious `null`),
+// enum-shaped fields override to the typed enum reference the runtime
+// parse enforces.
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateOrderRequest {
+    /// Market address.
+    #[salvo(schema(value_type = String))]
     market_address: Option<String>,
+    /// Outcome-token symbol.
+    #[salvo(schema(value_type = String))]
     symbol: Option<String>,
+    /// Client-supplied order id. Auto-generated by the backend when
+    /// omitted.
     new_order_client_id: Option<String>,
+    #[salvo(schema(value_type = dto::OrderSide))]
     side: Option<String>,
+    /// Order quantity as a decimal string.
+    #[salvo(schema(value_type = String))]
     quantity: Option<String>,
+    /// Limit price as a decimal string. Required for `LIMIT` orders.
     price: Option<String>,
     #[serde(rename = "type")]
+    #[salvo(schema(value_type = Option<dto::OrderType>))]
     order_type: Option<String>,
+    #[salvo(schema(value_type = Option<dto::TimeInForce>))]
     time_in_force: Option<String>,
 }
 
@@ -829,9 +963,13 @@ struct CreateOrderRequest {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateOrderResponse {
+    /// Echo of `newOrderClientId`, or the backend-generated id when
+    /// none was supplied.
     client_order_id: String,
+    /// Unix milliseconds. The moment the order was accepted.
     transact_time: i64,
-    status: &'static str,
+    /// Always `PENDING_NEW` on success.
+    status: dto::OrderStatus,
 }
 
 // Minimal by design, parallel to CreateOrderResponse. `clientOrderId` is
@@ -841,10 +979,15 @@ struct CreateOrderResponse {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CancelOrderResponse {
+    /// Echo of the cancelled order's id.
     order_id: String,
+    /// Id recorded at placement; empty string when the order was
+    /// placed without a `newOrderClientId`.
     client_order_id: String,
+    /// Unix milliseconds. The moment the cancel was accepted.
     transact_time: i64,
-    status: &'static str,
+    /// Always `PENDING_CANCEL` on success.
+    status: dto::OrderStatus,
 }
 
 // One market+symbol per request; every item is placed on that single
@@ -855,20 +998,37 @@ struct CancelOrderResponse {
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchOrdersRequest {
+    /// Market address.
+    #[salvo(schema(value_type = String))]
     market_address: Option<String>,
+    /// Outcome-token symbol shared by every item.
+    #[salvo(schema(value_type = String))]
     symbol: Option<String>,
+    /// Orders to place atomically. At most `outcome.maxBatchSize`
+    /// items.
+    #[salvo(schema(value_type = Vec<BatchOrdersRequestItem>))]
     orders: Option<Vec<BatchOrdersRequestItem>>,
 }
 
+// Same `Option`-plus-`value_type` treatment as `CreateOrderRequest`,
+// for the same missing-vs-invalid reason.
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchOrdersRequestItem {
+    /// Client-supplied order id. Auto-generated by the backend when
+    /// omitted.
     new_order_client_id: Option<String>,
+    #[salvo(schema(value_type = dto::OrderSide))]
     side: Option<String>,
+    /// Order quantity as a decimal string.
+    #[salvo(schema(value_type = String))]
     quantity: Option<String>,
+    /// Limit price as a decimal string. Required for `LIMIT` orders.
     price: Option<String>,
     #[serde(rename = "type")]
+    #[salvo(schema(value_type = Option<dto::OrderType>))]
     order_type: Option<String>,
+    #[salvo(schema(value_type = Option<dto::TimeInForce>))]
     time_in_force: Option<String>,
 }
 
@@ -878,9 +1038,13 @@ struct BatchOrdersRequestItem {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchOrderResponseItem {
+    /// Echo of the item's `newOrderClientId`, or the backend-generated
+    /// id when none was supplied.
     client_order_id: String,
+    /// Unix milliseconds. The moment the batch was accepted.
     transact_time: i64,
-    status: &'static str,
+    /// Always `PENDING_NEW` on success.
+    status: dto::OrderStatus,
 }
 
 /// Request body for `DELETE /api/v1/batchOrders`. One market+symbol per
@@ -923,9 +1087,22 @@ impl ToSchema for CancelBatchOrdersRequest {
         use salvo_oapi::BasicType;
         use salvo_oapi::Object;
         Object::new()
-            .property("marketAddress", Object::new().schema_type(BasicType::String))
-            .property("symbol", Object::new().schema_type(BasicType::String))
-            .property("orderIds", Array::new().items(Object::new().schema_type(BasicType::String)))
+            .property(
+                "marketAddress",
+                Object::new().schema_type(BasicType::String).description("Market address."),
+            )
+            .property(
+                "symbol",
+                Object::new()
+                    .schema_type(BasicType::String)
+                    .description("Outcome-token symbol shared by every id."),
+            )
+            .property(
+                "orderIds",
+                Array::new()
+                    .items(Object::new().schema_type(BasicType::String))
+                    .description("Chain-assigned order ids, u64 decimal strings. Cancelled atomically; at most `outcome.maxBatchSize` ids."),
+            )
             .required("marketAddress")
             .required("symbol")
             .required("orderIds")
@@ -941,10 +1118,15 @@ impl ToSchema for CancelBatchOrdersRequest {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CancelBatchOrderResponseItem {
+    /// Echo of the cancelled order's id.
     order_id: String,
+    /// Id recorded at placement; empty string when the order was
+    /// placed without a `newOrderClientId`.
     client_order_id: String,
+    /// Unix milliseconds. The moment the batch cancel was accepted.
     transact_time: i64,
-    status: &'static str,
+    /// Always `PENDING_CANCEL` on success.
+    status: dto::OrderStatus,
 }
 
 /// Request body for `POST /api/v1/buyFullSet`. Field names match
@@ -978,8 +1160,16 @@ impl ToSchema for BuyFullSetRequest {
         use salvo_oapi::BasicType;
         use salvo_oapi::Object;
         Object::new()
-            .property("marketAddress", Object::new().schema_type(BasicType::String))
-            .property("collateral", Object::new().schema_type(BasicType::String))
+            .property(
+                "marketAddress",
+                Object::new().schema_type(BasicType::String).description("Market address."),
+            )
+            .property(
+                "collateral",
+                Object::new()
+                    .schema_type(BasicType::String)
+                    .description("Quote-asset amount to spend, as a decimal string. Spent from the caller's free balance; any remainder that does not divide evenly is refunded."),
+            )
             .required("marketAddress")
             .required("collateral")
             .additional_properties(AdditionalProperties::FreeForm(false))
@@ -995,7 +1185,9 @@ impl ToSchema for BuyFullSetRequest {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BuyFullSetResponse {
+    /// Echo of the request's `marketAddress`.
     market_address: String,
+    /// Unix milliseconds. The moment the request was accepted.
     transact_time: i64,
 }
 
@@ -1067,8 +1259,8 @@ async fn parse_strict_body<T: serde::de::DeserializeOwned>(
     tags("trading"),
     summary = "Submit a new order",
     parameters(
-        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
-        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("X-DODEX-APIKEY" = String, Header, description = "API key issued by the Dodex backend."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
         ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
         ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
     ),
@@ -1102,7 +1294,7 @@ async fn create_order(
     Ok(Json(CreateOrderResponse {
         client_order_id: submitted.client_order_id,
         transact_time: now_ms,
-        status: OrderStatus::PendingNew.as_str(),
+        status: dto::OrderStatus::PendingNew,
     }))
 }
 
@@ -1159,13 +1351,13 @@ fn non_empty(value: Option<String>) -> Option<String> {
     tags("trading"),
     summary = "Cancel an order by orderId",
     parameters(
-        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
-        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
-        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds."),
-        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString."),
+        ("X-DODEX-APIKEY" = String, Header, description = "API key issued by the Dodex backend."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
         ("marketAddress" = String, Query, description = "Market address."),
         ("symbol" = String, Query, description = "Outcome-token symbol."),
-        ("orderId" = String, Query, description = "Chain-assigned order id, u64."),
+        ("orderId" = String, Query, description = "Chain-assigned order id, u64 decimal string."),
     ),
     security(("apiKey" = [])),
 )]
@@ -1213,7 +1405,7 @@ async fn delete_order(
         // placed without a `newOrderClientId`.
         client_order_id: cancelled.client_order_id.unwrap_or_default(),
         transact_time: now_ms,
-        status: OrderStatus::PendingCancel.as_str(),
+        status: dto::OrderStatus::PendingCancel,
     }))
 }
 
@@ -1225,9 +1417,9 @@ async fn delete_order(
     tags("trading"),
     summary = "Submit a batch of orders atomically",
     parameters(
-        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
-        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
-        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds."),
+        ("X-DODEX-APIKEY" = String, Header, description = "API key issued by the Dodex backend."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
         ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
     ),
     request_body = BatchOrdersRequest,
@@ -1260,7 +1452,7 @@ async fn create_batch_orders(
         .map(|item| BatchOrderResponseItem {
             client_order_id: item.client_order_id,
             transact_time: now_ms,
-            status: OrderStatus::PendingNew.as_str(),
+            status: dto::OrderStatus::PendingNew,
         })
         .collect();
     Ok(Json(response))
@@ -1370,9 +1562,9 @@ fn build_batch_orders_input(
     tags("trading"),
     summary = "Cancel a batch of orders atomically",
     parameters(
-        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
-        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
-        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds."),
+        ("X-DODEX-APIKEY" = String, Header, description = "API key issued by the Dodex backend."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
         ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
     ),
     request_body = CancelBatchOrdersRequest,
@@ -1432,7 +1624,7 @@ async fn delete_batch_orders(
             order_id: item.order_id.to_string(),
             client_order_id: item.client_order_id.unwrap_or_default(),
             transact_time: response_now_ms,
-            status: OrderStatus::PendingCancel.as_str(),
+            status: dto::OrderStatus::PendingCancel,
         })
         .collect();
     Ok(Json(response))
@@ -1497,8 +1689,8 @@ fn build_cancel_batch_orders_input(
     tags("positions"),
     summary = "Buy a full set of outcome tokens",
     parameters(
-        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
-        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
+        ("X-DODEX-APIKEY" = String, Header, description = "API key issued by the Dodex backend."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
         ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
         ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
     ),
@@ -1584,10 +1776,10 @@ async fn get_account(
     tags("account"),
     summary = "Market balances",
     parameters(
-        ("X-DODEX-APIKEY" = String, Header, description = "API key."),
-        ("timestamp" = i64, Query, description = "Unix milliseconds. Signed."),
-        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds."),
-        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString."),
+        ("X-DODEX-APIKEY" = String, Header, description = "API key issued by the Dodex backend."),
+        ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
+        ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
+        ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
         ("marketAddress" = String, Query, description = "Market address."),
     ),
     security(("apiKey" = [])),

@@ -65,20 +65,20 @@ paths:
       parameters:
       - name: X-DODEX-APIKEY
         in: header
-        description: API key.
+        description: API key issued by the Dodex backend.
         required: true
         schema:
           type: string
       - name: timestamp
         in: query
-        description: Unix milliseconds. Signed.
+        description: Unix milliseconds. Included in the signed payload.
         required: true
         schema:
           type: integer
           format: int64
       - name: recvWindow
         in: query
-        description: Request validity window in milliseconds.
+        description: Request validity window in milliseconds. Default 5000, max 60000.
         required: false
         schema:
           type:
@@ -87,7 +87,7 @@ paths:
           format: int64
       - name: signature
         in: query
-        description: Hex HMAC SHA-256 of canonicalQueryString.
+        description: Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody.
         required: true
         schema:
           type: string
@@ -121,20 +121,20 @@ paths:
       parameters:
       - name: X-DODEX-APIKEY
         in: header
-        description: API key.
+        description: API key issued by the Dodex backend.
         required: true
         schema:
           type: string
       - name: timestamp
         in: query
-        description: Unix milliseconds. Signed.
+        description: Unix milliseconds. Included in the signed payload.
         required: true
         schema:
           type: integer
           format: int64
       - name: recvWindow
         in: query
-        description: Request validity window in milliseconds.
+        description: Request validity window in milliseconds. Default 5000, max 60000.
         required: false
         schema:
           type:
@@ -178,20 +178,20 @@ paths:
       parameters:
       - name: X-DODEX-APIKEY
         in: header
-        description: API key.
+        description: API key issued by the Dodex backend.
         required: true
         schema:
           type: string
       - name: timestamp
         in: query
-        description: Unix milliseconds. Signed.
+        description: Unix milliseconds. Included in the signed payload.
         required: true
         schema:
           type: integer
           format: int64
       - name: recvWindow
         in: query
-        description: Request validity window in milliseconds.
+        description: Request validity window in milliseconds. Default 5000, max 60000.
         required: false
         schema:
           type:
@@ -216,12 +216,15 @@ paths:
               properties:
                 marketAddress:
                   type: string
+                  description: Market address.
                 orderIds:
                   type: array
                   items:
                     type: string
+                  description: Chain-assigned order ids, u64 decimal strings. Cancelled atomically; at most `outcome.maxBatchSize` ids.
                 symbol:
                   type: string
+                  description: Outcome-token symbol shared by every id.
               additionalProperties: false
         required: true
       responses:
@@ -250,13 +253,13 @@ paths:
       parameters:
       - name: X-DODEX-APIKEY
         in: header
-        description: API key.
+        description: API key issued by the Dodex backend.
         required: true
         schema:
           type: string
       - name: timestamp
         in: query
-        description: Unix milliseconds. Signed.
+        description: Unix milliseconds. Included in the signed payload.
         required: true
         schema:
           type: integer
@@ -287,8 +290,10 @@ paths:
               properties:
                 collateral:
                   type: string
+                  description: Quote-asset amount to spend, as a decimal string. Spent from the caller's free balance; any remainder that does not divide evenly is refunded.
                 marketAddress:
                   type: string
+                  description: Market address.
               additionalProperties: false
         required: true
       responses:
@@ -327,13 +332,15 @@ paths:
           type: string
       - name: limit
         in: query
-        description: Levels per side. Default 100, max 1000.
+        description: Levels per side. Default 100, max 1000; out-of-range values clamp.
         required: false
         schema:
           type:
           - integer
           - 'null'
           format: int64
+          maximum: 1000.0
+          minimum: 1.0
       responses:
         '200':
           description: Response with json format data
@@ -370,8 +377,12 @@ paths:
         required: false
         schema:
           type:
-          - string
+          - array
           - 'null'
+          items:
+            $ref: '#/components/schemas/MarketStatus'
+        style: form
+        explode: false
       - name: quoteAsset
         in: query
         description: Filter by quote asset symbol.
@@ -390,7 +401,7 @@ paths:
           - 'null'
       - name: closingBefore
         in: query
-        description: Upper bound on resultStart, unix seconds.
+        description: Return only markets with timings.resultEnd before this unix-seconds bound.
         required: false
         schema:
           type:
@@ -399,12 +410,12 @@ paths:
           format: int64
       - name: sort
         in: query
-        description: 'Sort order: resultStart (default) or createdAt.'
+        description: 'Sort order: resultStart (default, ascending) or createdAt (descending).'
         required: false
         schema:
-          type:
-          - string
-          - 'null'
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/MarketsSort'
       - name: cursor
         in: query
         description: Opaque pagination cursor returned from a previous page.
@@ -415,13 +426,15 @@ paths:
           - 'null'
       - name: limit
         in: query
-        description: Page size. Default 50, max 200.
+        description: Page size. Default 50, max 200; out-of-range values clamp.
         required: false
         schema:
           type:
           - integer
           - 'null'
           format: int64
+          maximum: 200.0
+          minimum: 1.0
       responses:
         '200':
           description: Response with json format data
@@ -446,13 +459,13 @@ paths:
       parameters:
       - name: X-DODEX-APIKEY
         in: header
-        description: API key.
+        description: API key issued by the Dodex backend.
         required: true
         schema:
           type: string
       - name: timestamp
         in: query
-        description: Unix milliseconds. Signed.
+        description: Unix milliseconds. Included in the signed payload.
         required: true
         schema:
           type: integer
@@ -501,20 +514,20 @@ paths:
       parameters:
       - name: X-DODEX-APIKEY
         in: header
-        description: API key.
+        description: API key issued by the Dodex backend.
         required: true
         schema:
           type: string
       - name: timestamp
         in: query
-        description: Unix milliseconds. Signed.
+        description: Unix milliseconds. Included in the signed payload.
         required: true
         schema:
           type: integer
           format: int64
       - name: recvWindow
         in: query
-        description: Request validity window in milliseconds.
+        description: Request validity window in milliseconds. Default 5000, max 60000.
         required: false
         schema:
           type:
@@ -523,7 +536,7 @@ paths:
           format: int64
       - name: signature
         in: query
-        description: Hex HMAC SHA-256 of canonicalQueryString.
+        description: Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody.
         required: true
         schema:
           type: string
@@ -541,7 +554,7 @@ paths:
           type: string
       - name: orderId
         in: query
-        description: Chain-assigned order id, u64.
+        description: Chain-assigned order id, u64 decimal string.
         required: true
         schema:
           type: string
@@ -613,21 +626,27 @@ paths:
           - 'null'
       - name: status
         in: query
-        description: 'Comma-separated OrderStatus filter. Default: all statuses.'
+        description: 'Comma-separated OrderStatus filter. PENDING_NEW and PENDING_CANCEL are not queryable. Default: all statuses.'
         required: false
         schema:
           type:
-          - string
+          - array
           - 'null'
+          items:
+            $ref: '#/components/schemas/QueryableOrderStatus'
+        style: form
+        explode: false
       - name: limit
         in: query
-        description: Page size, 1..=500.
+        description: Page size, 1..=500. Default 100.
         required: false
         schema:
           type:
           - integer
           - 'null'
           format: int64
+          maximum: 500.0
+          minimum: 1.0
       - name: cursor
         in: query
         description: Opaque pagination cursor.
@@ -677,10 +696,13 @@ components:
       properties:
         asset:
           type: string
+          description: Asset symbol.
         free:
           type: string
+          description: Spendable amount, as a decimal string.
         locked:
           type: string
+          description: Amount locked in open orders, as a decimal string.
     AccountResponse:
       type: object
       required:
@@ -690,13 +712,16 @@ components:
       properties:
         accountId:
           type: string
+          description: Account UUID.
         balances:
           type: array
           items:
             $ref: '#/components/schemas/AccountBalanceItem'
+          description: Per-asset balances aggregated across all markets.
         updateTime:
           type: integer
           format: int64
+          description: Unix milliseconds. When the balances snapshot was assembled.
     BatchOrderResponseItem:
       type: object
       required:
@@ -706,55 +731,66 @@ components:
       properties:
         clientOrderId:
           type: string
+          description: |-
+            Echo of the item's `newOrderClientId`, or the backend-generated
+            id when none was supplied.
         status:
-          type: string
+          $ref: '#/components/schemas/OrderStatus'
         transactTime:
           type: integer
           format: int64
+          description: Unix milliseconds. The moment the batch was accepted.
     BatchOrdersRequest:
       type: object
+      required:
+      - marketAddress
+      - symbol
+      - orders
       properties:
         marketAddress:
-          type:
-          - string
-          - 'null'
+          type: string
+          description: Market address.
         orders:
-          type:
-          - array
-          - 'null'
+          type: array
           items:
             $ref: '#/components/schemas/BatchOrdersRequestItem'
+          description: |-
+            Orders to place atomically. At most `outcome.maxBatchSize`
+            items.
         symbol:
-          type:
-          - string
-          - 'null'
+          type: string
+          description: Outcome-token symbol shared by every item.
     BatchOrdersRequestItem:
       type: object
+      required:
+      - side
+      - quantity
       properties:
         newOrderClientId:
           type:
           - string
           - 'null'
+          description: |-
+            Client-supplied order id. Auto-generated by the backend when
+            omitted.
         price:
           type:
           - string
           - 'null'
+          description: Limit price as a decimal string. Required for `LIMIT` orders.
         quantity:
-          type:
-          - string
-          - 'null'
+          type: string
+          description: Order quantity as a decimal string.
         side:
-          type:
-          - string
-          - 'null'
+          $ref: '#/components/schemas/OrderSide'
         timeInForce:
-          type:
-          - string
-          - 'null'
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/TimeInForce'
         type:
-          type:
-          - string
-          - 'null'
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/OrderType'
     BuyFullSetResponse:
       type: object
       required:
@@ -763,9 +799,11 @@ components:
       properties:
         marketAddress:
           type: string
+          description: Echo of the request's `marketAddress`.
         transactTime:
           type: integer
           format: int64
+          description: Unix milliseconds. The moment the request was accepted.
     CancelBatchOrderResponseItem:
       type: object
       required:
@@ -776,13 +814,18 @@ components:
       properties:
         clientOrderId:
           type: string
+          description: |-
+            Id recorded at placement; empty string when the order was
+            placed without a `newOrderClientId`.
         orderId:
           type: string
+          description: Echo of the cancelled order's id.
         status:
-          type: string
+          $ref: '#/components/schemas/OrderStatus'
         transactTime:
           type: integer
           format: int64
+          description: Unix milliseconds. The moment the batch cancel was accepted.
     CancelOrderResponse:
       type: object
       required:
@@ -793,48 +836,65 @@ components:
       properties:
         clientOrderId:
           type: string
+          description: |-
+            Id recorded at placement; empty string when the order was
+            placed without a `newOrderClientId`.
         orderId:
           type: string
+          description: Echo of the cancelled order's id.
         status:
-          type: string
+          $ref: '#/components/schemas/OrderStatus'
         transactTime:
           type: integer
           format: int64
+          description: Unix milliseconds. The moment the cancel was accepted.
+    CancelReason:
+      type: string
+      description: |-
+        Why a market was cancelled. Present only when `terminal.kind` is
+        `CANCELLED`; `null` otherwise.
+      enum:
+      - PMP_REJECTED_BY_ORACLE
+      - EVENT_CANCELLED
     CreateOrderRequest:
       type: object
+      required:
+      - marketAddress
+      - symbol
+      - side
+      - quantity
       properties:
         marketAddress:
-          type:
-          - string
-          - 'null'
+          type: string
+          description: Market address.
         newOrderClientId:
           type:
           - string
           - 'null'
+          description: |-
+            Client-supplied order id. Auto-generated by the backend when
+            omitted.
         price:
           type:
           - string
           - 'null'
+          description: Limit price as a decimal string. Required for `LIMIT` orders.
         quantity:
-          type:
-          - string
-          - 'null'
+          type: string
+          description: Order quantity as a decimal string.
         side:
-          type:
-          - string
-          - 'null'
+          $ref: '#/components/schemas/OrderSide'
         symbol:
-          type:
-          - string
-          - 'null'
+          type: string
+          description: Outcome-token symbol.
         timeInForce:
-          type:
-          - string
-          - 'null'
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/TimeInForce'
         type:
-          type:
-          - string
-          - 'null'
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/OrderType'
     CreateOrderResponse:
       type: object
       required:
@@ -844,11 +904,15 @@ components:
       properties:
         clientOrderId:
           type: string
+          description: |-
+            Echo of `newOrderClientId`, or the backend-generated id when
+            none was supplied.
         status:
-          type: string
+          $ref: '#/components/schemas/OrderStatus'
         transactTime:
           type: integer
           format: int64
+          description: Unix milliseconds. The moment the order was accepted.
     DepthResponse:
       type: object
       required:
@@ -864,18 +928,31 @@ components:
             type: array
             items:
               type: string
+            maxItems: 2
+            minItems: 2
+          description: Price levels as [price, quantity] decimal-string pairs, best ask first.
         bids:
           type: array
           items:
             type: array
             items:
               type: string
+            maxItems: 2
+            minItems: 2
+          description: Price levels as [price, quantity] decimal-string pairs, best bid first.
         lastUpdateId:
           type: string
+          description: |-
+            Opaque lex-comparable chain-order cursor; a larger string means
+            a newer event has touched this `(marketAddress, symbol)`. Empty
+            string when no order event has landed yet. Do not parse as an
+            integer.
         marketAddress:
           type: string
+          description: Market address.
         symbol:
           type: string
+          description: Outcome-token symbol.
     ErrorBody:
       type: object
       required:
@@ -885,8 +962,12 @@ components:
         code:
           type: integer
           format: int32
+          description: |-
+            Negative machine-readable error code. See docs/api-spec.md
+            §Error Codes for the full table.
         msg:
           type: string
+          description: Human-readable error message.
     EventDto:
       type: object
       required:
@@ -897,16 +978,29 @@ components:
           type:
           - string
           - 'null'
+          description: |-
+            User-facing description. Same confirmation caveat as
+            `eventName`.
         eventId:
           type: string
+          description: |-
+            `0x`-prefixed uint256 hex digest, computed on-chain from the
+            event metadata; identical across every oracle confirming the
+            same event.
         eventName:
           type:
           - string
           - 'null'
+          description: |-
+            User-facing event title. `null` until at least one oracle
+            confirmation has landed.
         oracles:
           type: array
           items:
             $ref: '#/components/schemas/OracleDto'
+          description: |-
+            One entry per oracle that confirmed this market. Empty when no
+            confirmation has landed yet.
     MarketBalancesResponse:
       type: object
       required:
@@ -918,11 +1012,14 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/OutcomeBalanceItem'
+          description: Per-outcome balances on this market.
         marketAddress:
           type: string
+          description: Market address.
         updateTime:
           type: integer
           format: int64
+          description: Unix milliseconds. When the balances snapshot was assembled.
     MarketDto:
       type: object
       required:
@@ -941,26 +1038,42 @@ components:
         createdAt:
           type: integer
           format: int64
+          description: Unix seconds. Market creation timestamp.
         event:
           $ref: '#/components/schemas/EventDto'
         makerCommission:
           type: string
+          description: |-
+            Maker fee rate as a signed decimal string. A negative value is
+            a maker rebate credited to the maker.
         marketAddress:
           type: string
+          description: Stable market identifier.
         marketName:
           type: string
+          description: |-
+            Technical market name. Not the user-facing title; see
+            `event.eventName`.
         orderBookAddress:
           type: string
+          description: |-
+            Deterministic order-book address. Always present; trading
+            availability depends on `status`.
         outcomes:
           type: array
           items:
             $ref: '#/components/schemas/OutcomeDto'
+          description: Outcome-token descriptors.
         quoteAsset:
           type: string
+          description: Quote-asset symbol for display.
         status:
-          type: string
+          $ref: '#/components/schemas/MarketStatus'
         takerCommission:
           type: string
+          description: |-
+            Taker fee rate as a decimal string, charged to the taker.
+            Always non-negative.
         terminal:
           allOf:
           - type: 'null'
@@ -972,6 +1085,22 @@ components:
         tokenType:
           type: integer
           format: int32
+          description: Numeric quote-asset token type.
+    MarketStatus:
+      type: string
+      description: |-
+        Market phase. A market is in exactly one of nine phases; see
+        docs/api-spec.md §Market Status for the lifecycle.
+      enum:
+      - PENDING
+      - UPCOMING
+      - STAKING
+      - AWAITING_FREEZE
+      - TRADING
+      - RESOLVING
+      - RESOLVED
+      - CANCELLED
+      - EXPIRED
     MarketsResponse:
       type: object
       required:
@@ -981,17 +1110,33 @@ components:
       properties:
         hasMore:
           type: boolean
+          description: Whether more pages follow.
         markets:
           type: array
           items:
             $ref: '#/components/schemas/MarketDto'
+          description: Markets matching the request.
         nextCursor:
           type:
           - string
           - 'null'
+          description: |-
+            Pagination cursor for the next page. `null` when `hasMore` is
+            `false`.
         serverTime:
           type: integer
           format: int64
+          description: |-
+            Unix seconds. All timestamps in this response are unix seconds
+            unless stated otherwise.
+    MarketsSort:
+      type: string
+      description: |-
+        Sort order for `GET /api/v1/markets`: `resultStart` ascending
+        (default) or `createdAt` descending.
+      enum:
+      - resultStart
+      - createdAt
     OracleDto:
       type: object
       properties:
@@ -999,14 +1144,19 @@ components:
           type:
           - string
           - 'null'
+          description: Oracle contract address.
         fee:
           type:
           - string
           - 'null'
+          description: Oracle fee for this confirmation, as a uint128 decimal string.
         name:
           type:
           - string
           - 'null'
+          description: |-
+            Oracle name. `null` if the oracle row has not been reconciled
+            yet.
     OrderResponse:
       type: object
       required:
@@ -1026,32 +1176,75 @@ components:
       properties:
         clientOrderId:
           type: string
+          description: Client-supplied id, or an empty string if absent.
         executedQty:
           type: string
+          description: |-
+            Filled quantity. Can be `> 0` for `CANCELED` orders that filled
+            partially before cancellation.
         marketAddress:
           type: string
+          description: Market address.
         orderId:
           type: string
+          description: |-
+            Chain-side order id, u64 as a decimal string. Empty string for
+            `REJECTED` orders.
         origQty:
           type: string
+          description: |-
+            Original order quantity, scaled by the outcome quantity
+            precision.
         price:
           type: string
+          description: Limit price, scaled by the outcome price precision.
         side:
-          type: string
+          $ref: '#/components/schemas/OrderSide'
         status:
-          type: string
+          $ref: '#/components/schemas/OrderStatus'
         symbol:
           type: string
+          description: Outcome-token symbol.
         time:
           type: integer
           format: int64
+          description: Unix milliseconds. On-chain order creation time.
         timeInForce:
-          type: string
+          $ref: '#/components/schemas/TimeInForce'
         type:
-          type: string
+          $ref: '#/components/schemas/OrderType'
         updateTime:
           type: integer
           format: int64
+          description: |-
+            Unix milliseconds. On-chain time of the most recent book event
+            that touched the order.
+    OrderSide:
+      type: string
+      description: Order side.
+      enum:
+      - BUY
+      - SELL
+    OrderStatus:
+      type: string
+      description: |-
+        Order lifecycle status. `PENDING_NEW` / `PENDING_CANCEL` are
+        write-side acceptance states: they appear only in synchronous
+        POST/DELETE responses, never in `GET /api/v1/orders` rows.
+      enum:
+      - PENDING_NEW
+      - NEW
+      - PARTIALLY_FILLED
+      - PENDING_CANCEL
+      - FILLED
+      - CANCELED
+      - REJECTED
+    OrderType:
+      type: string
+      description: Order type. Defaults to `LIMIT` when omitted on order placement.
+      enum:
+      - LIMIT
+      - MARKET
     OrdersPageResponse:
       type: object
       required:
@@ -1061,10 +1254,14 @@ components:
           type:
           - string
           - 'null'
+          description: |-
+            Opaque pagination cursor. Pass back verbatim to fetch the next
+            page; `null` when the last page has been returned.
         orders:
           type: array
           items:
             $ref: '#/components/schemas/OrderResponse'
+          description: Orders matching the filter, most recently placed first.
     OutcomeBalanceItem:
       type: object
       required:
@@ -1075,14 +1272,18 @@ components:
       properties:
         free:
           type: string
+          description: Spendable outcome-token amount, as a decimal string.
         lockedInOrders:
           type: string
+          description: Amount locked in open orders, as a decimal string.
         outcomeId:
           type: integer
           format: int32
+          description: Stable outcome ID.
           minimum: 0.0
         symbol:
           type: string
+          description: Outcome-token symbol.
     OutcomeDto:
       type: object
       required:
@@ -1099,31 +1300,60 @@ components:
         maxBatchSize:
           type: integer
           format: int32
+          description: |-
+            Maximum number of orders accepted in one batch request for this
+            outcome.
           minimum: 0.0
         minNotional:
           type: string
+          description: Minimum accepted notional value for an order.
         outcomeId:
           type: integer
           format: int32
+          description: |-
+            Stable outcome ID. Clients MUST use this field, not the array
+            index.
           minimum: 0.0
         outcomeName:
           type: string
+          description: Human-readable outcome name.
         pricePrecision:
           type: integer
           format: int32
+          description: Maximum number of decimal places accepted for order prices.
           minimum: 0.0
         quantityPrecision:
           type: integer
           format: int32
+          description: Maximum number of decimal places accepted for order quantities.
           minimum: 0.0
         stepSize:
           type: string
+          description: Minimum quantity increment.
         symbol:
           type: string
+          description: Outcome-token symbol used in trading and order-book requests.
         tickSize:
           type: string
+          description: Minimum price increment.
+    QueryableOrderStatus:
+      type: string
+      description: |-
+        Order statuses accepted by the `GET /api/v1/orders` `status` filter.
+        Excludes the write-side acceptance states `PENDING_NEW` /
+        `PENDING_CANCEL`, which never appear in stored rows.
+      enum:
+      - NEW
+      - PARTIALLY_FILLED
+      - FILLED
+      - CANCELED
+      - REJECTED
     TerminalDto:
       type: object
+      description: |-
+        How the market ended. The market's `terminal` is `null` while the
+        market is alive and populated for the terminal statuses `RESOLVED`,
+        `CANCELLED`, `EXPIRED`.
       required:
       - kind
       - at
@@ -1131,20 +1361,44 @@ components:
         at:
           type: integer
           format: int64
+          description: Unix seconds. When the market entered the terminal state.
         cancelReason:
-          type:
-          - string
-          - 'null'
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CancelReason'
         kind:
-          type: string
+          $ref: '#/components/schemas/TerminalKind'
         resolvedOutcomeId:
           type:
           - integer
           - 'null'
           format: int32
+          description: |-
+            The winning outcome's `outcomeId`. Present only when `kind` is
+            `RESOLVED`; `null` otherwise.
           minimum: 0.0
+    TerminalKind:
+      type: string
+      description: How a market ended. Mirrors the terminal subset of `MarketStatus`.
+      enum:
+      - RESOLVED
+      - CANCELLED
+      - EXPIRED
+    TimeInForce:
+      type: string
+      description: |-
+        Time-in-force. Applies to `LIMIT` orders only; defaults to `GTC`
+        when omitted on order placement.
+      enum:
+      - GTC
+      - IOC
+      - FOK
+      - POST_ONLY
     TimingsDto:
       type: object
+      description: |-
+        Market lifecycle timestamps, all unix seconds. The market's
+        `timings` is `null` while `status` is `PENDING`.
       required:
       - stakeStart
       - stakeEnd
@@ -1156,6 +1410,7 @@ components:
           - integer
           - 'null'
           format: int64
+          description: '`null` before the order book is active.'
         resultEnd:
           type: integer
           format: int64
