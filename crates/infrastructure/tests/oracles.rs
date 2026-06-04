@@ -7,6 +7,8 @@
 use std::env;
 use std::time::Duration;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use dodex_application::MarketReadRepository;
 use dodex_application::OraclesFilter;
 use dodex_application::OraclesRequest;
@@ -49,6 +51,7 @@ async fn purge(pool: &PgPool, oracle_addr: &str) {
 
 /// Seed one oracle with one event list and one *available* event
 /// (reconciled, future deadline, not deleted). Returns (oracle_id, eventlist_id).
+#[allow(clippy::too_many_arguments)] // test seed helper — explicit columns read better than a params struct here
 async fn seed_available(
     pool: &PgPool,
     oracle_addr: &str,
@@ -360,10 +363,16 @@ async fn invalid_event_id_hex_is_invalid_parameter() {
 
 #[tokio::test]
 async fn paginates_by_oracle_with_cursor() {
+    // Hermetic pagination check on a shared, concurrently-written DB: seed
+    // three oracles under a bespoke, late-sorting name prefix and walk pages
+    // starting from a cursor that brackets exactly that prefix. Bracketing
+    // keeps the global scan past every other test's fixture — in particular
+    // the malformed-outcomes oracle, which sorts earlier and would otherwise
+    // fail a page closed. Counting only our exact names tolerates any
+    // unrelated oracle that happens to sort into the same window.
     let Some(pool) = setup().await else { return };
-    // Three oracles with names that sort A < B < C.
-    let addrs = ["0:oracles_it_pg_a", "0:oracles_it_pg_b", "0:oracles_it_pg_c"];
-    let names = ["oracles-it-pg-a", "oracles-it-pg-b", "oracles-it-pg-c"];
+    let addrs = ["0:zzzpgtesta", "0:zzzpgtestb", "0:zzzpgtestc"];
+    let names = ["zzzpgtesta", "zzzpgtestb", "zzzpgtestc"];
     for a in addrs {
         purge(&pool, a).await;
     }
@@ -384,22 +393,33 @@ async fn paginates_by_oracle_with_cursor() {
 
     let repo = PostgresReadModelRepository::new(pool.clone());
 
-    // Restrict to our three oracles by name prefix is not supported; instead
-    // page globally with limit 2 and walk until our cursor advances. To keep
-    // the test hermetic, filter the asserted set to our known names.
-    let page1 = repo.list_oracles(&req(OraclesFilter::default(), None, 2)).await.expect("p1");
-    assert!(page1.has_more);
-    assert!(page1.next_cursor.is_some());
-    let page2 = repo
-        .list_oracles(&req(OraclesFilter::default(), page1.next_cursor.clone(), 2))
-        .await
-        .expect("p2");
-    // The cursor must strictly advance: no oracle appears on both pages.
-    let p1: std::collections::HashSet<_> =
-        page1.oracles.iter().map(|o| o.address.clone()).collect();
-    for o in &page2.oracles {
-        assert!(!p1.contains(&o.address), "cursor must not re-list {}", o.address);
+    // Cursor format is base64url("<id>:<name>"); name "zzzpgtest" with id 0
+    // sits just before "zzzpgtesta" under the (name, id) keyset, so the walk
+    // begins exactly at our first seeded oracle.
+    let start = URL_SAFE_NO_PAD.encode("0:zzzpgtest");
+    let mine: std::collections::HashSet<&str> = names.iter().copied().collect();
+
+    let mut collected: Vec<String> = Vec::new();
+    let mut cursor = Some(start);
+    let mut pages = 0;
+    while collected.len() < names.len() {
+        let Some(c) = cursor.take() else { break };
+        pages += 1;
+        assert!(pages <= 25, "pagination did not reach all seeded oracles within 25 pages");
+        let page =
+            repo.list_oracles(&req(OraclesFilter::default(), Some(c), 2)).await.expect("page");
+        for o in &page.oracles {
+            if mine.contains(o.name.as_str()) {
+                collected.push(o.name.clone());
+            }
+        }
+        cursor = page.next_cursor;
     }
+
+    // Order preserved and every seeded oracle seen exactly once — the cursor
+    // strictly advanced (no skip, no duplicate) — across more than one page.
+    assert_eq!(collected, vec!["zzzpgtesta", "zzzpgtestb", "zzzpgtestc"]);
+    assert!(pages >= 2, "limit=2 over 3 oracles must span at least two pages");
 
     for a in addrs {
         purge(&pool, a).await;

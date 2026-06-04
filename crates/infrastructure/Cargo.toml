@@ -35,3 +35,4 @@ dodex-domain = { path = "../domain" }
 
 [dev-dependencies]
 dotenvy.workspace = true
+base64.workspace = true

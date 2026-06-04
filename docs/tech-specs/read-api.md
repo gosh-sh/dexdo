@@ -134,7 +134,7 @@ All four query filters combine freely — there is no mutually-exclusive mode li
 | Param | Predicate |
 | --- | --- |
 | `oracleAddress` | `oracles.address = $addr`, applied to oracle selection only. Blank / whitespace is treated as absent. |
-| `eventId` | The client passes the hex form (as rendered in `eventId` responses); the handler converts it to decimal and matches `oracle_events.internal_id_in_eventlist = $decimal::numeric`. With this filter the `events[]` arrays contain only the matching event, and lists / oracles without it are omitted. Un-decodable hex → `InvalidParameter` / 400. |
+| `eventId` | The client passes the hex form (as rendered in `eventId` responses); the read path converts it to decimal and matches `oracle_events.internal_id_in_eventlist = $decimal::numeric`. With this filter the `events[]` arrays contain only the matching event, and lists / oracles without it are omitted. Un-decodable hex → `InvalidParameter` / 400. |
 | `deadlineBefore` | `oracle_events.deadline < $deadlineBefore` (unix seconds), combined with the availability `deadline > now`, i.e. `now < deadline < deadlineBefore`. Non-numeric → `InvalidParameter` / 400. |
 | `limit` | Oracle page size. Default 50, clamped to `[1, 200]`; non-numeric → `InvalidParameter` / 400. Clamping (rather than rejecting) out-of-range values matches `/api/v1/markets`. |
 

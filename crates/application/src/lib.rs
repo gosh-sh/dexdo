@@ -362,10 +362,7 @@ pub trait MarketReadRepository: Send + Sync {
     /// and the only caller (the `/api/v1/oracles` handler) reaches that impl
     /// through `Arc<dyn MarketReadRepository>` → the `Arc<T>` forward below.
     /// Unrelated test doubles inherit this default and never call it.
-    async fn list_oracles(
-        &self,
-        _request: &OraclesRequest,
-    ) -> Result<OraclesPage, anyhow::Error> {
+    async fn list_oracles(&self, _request: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
         Err(anyhow::anyhow!("list_oracles not implemented for this MarketReadRepository"))
     }
 }
@@ -445,10 +442,7 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         (**self).sum_open_sell_remaining(orderbook_address, owner_pn_address).await
     }
 
-    async fn list_oracles(
-        &self,
-        request: &OraclesRequest,
-    ) -> Result<OraclesPage, anyhow::Error> {
+    async fn list_oracles(&self, request: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
         (**self).list_oracles(request).await
     }
 }
@@ -5153,10 +5147,7 @@ mod get_market_balances_use_case_tests {
             unimplemented!()
         }
 
-        async fn list_oracles(
-            &self,
-            _: &OraclesRequest,
-        ) -> Result<OraclesPage, anyhow::Error> {
+        async fn list_oracles(&self, _: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
             use dodex_domain::OracleListing;
             Ok(OraclesPage {
                 oracles: vec![OracleListing {
