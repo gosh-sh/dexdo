@@ -24,6 +24,8 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **DTO** — Data Transfer Object. In this document it means the API response object after the backend has assembled it from database rows, but before it is serialized to JSON and sent to the client.
 
+**Available event** — an `oracle_events` row eligible to surface in `/api/v1/oracles`: `is_deleted = false`, `deadline` strictly in the future relative to request `now`, and metadata-reconciled (`meta_reconciled_at IS NOT NULL`). Event lists and oracles with no available events are omitted from the response.
+
 ## Market identity
 
 The backend treats `marketAddress` as the PMP address. `orderBookAddress` is the deterministic address returned by `PMP.getOrderBookAddress()` and is stamped on the first successful reconciler pass — pre-`PoolsFrozen` rows already carry it. The pre-reconcile window between `PMPDeployed` and the first reconciler pass is the only state where the column is legitimately null, and such rows are hidden from the API by the `last_reconciled_at IS NOT NULL` visibility filter. The write-side flow is described in [indexer.md](indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
@@ -104,6 +106,166 @@ The matching write-side rules are in [indexer.md](indexer.md#schema-invariants--
 | Mutually exclusive params (`marketAddress` together with list filters) | `MissingParameter` | 400 |
 | Corrupted cursor | `InvalidParameter` (from cursor decode) | 400 |
 | Invariant violation on built DTO | `MarketInconsistent` | 503 |
+
+## `/api/v1/oracles`
+
+Public discovery endpoint: lists oracles, their event lists, and the events those lists currently offer for market creation. Public contract: [api-spec §Oracles](../api-spec.md#oracles). No authentication — the route is mounted alongside `/api/v1/markets` and `/api/v1/depth`, outside the auth subrouter. The Postgres source is [`oracles`](data-schema.md#oracles) ⨝ [`oracle_event_lists`](data-schema.md#oracle_event_lists) ⨝ [`oracle_events`](data-schema.md#oracle_events); the write side (projectors plus the OracleEventList reconciler) is in [indexer.md](indexer.md). The endpoint never queries the oracle contracts at request time — it reads the indexed discovery read-model.
+
+The response is grouped oracle → event list → event. Pagination is **by oracle** (`limit` counts oracles); an oracle's full set of event lists and available events is always returned whole — there is no inner pagination in v1.
+
+### serverTime
+
+`serverTime` is the unix-seconds timestamp captured once at handler entry. The same value is the `now` used for the deadline-availability predicate, so one response cannot mix an availability boundary computed from a different clock reading than the one it reports — the same discipline `/api/v1/markets` applies to lifecycle status.
+
+### Available events
+
+An `oracle_events` row is **available** (eligible to surface) when all hold:
+
+- `is_deleted = false` — not soft-deleted. No projector sets this `true` today: the OracleEventList contract emits no delete/cancel event, so the conjunct is currently a no-op kept for forward-compatibility.
+- `deadline > now` — the event can still be used for a new market. The boundary is strict: at `now == deadline` the event is past and hidden, mirroring the `now >= result_end → EXPIRED` boundary in `/api/v1/markets`.
+- `meta_reconciled_at IS NOT NULL` — the OracleEventList reconciler has filled the metadata that lives only in the `_events` getter (`describe`, `trust_addr`, and `outcome_names_jsonb`). This is the symmetric analogue of the `last_reconciled_at IS NOT NULL` visibility gate on `/api/v1/markets`: an event is hidden until the backend can describe it fully, so `outcomes` is never served empty merely because reconciliation has not run. `event_name`, `oracle_fee`, and `deadline` arrive earlier via the `EventAdded` projector, but the reconciler-only fields gate visibility.
+
+Event lists with no available events, and oracles with no non-empty event lists, are omitted (see [api-spec §Oracles](../api-spec.md#oracles): "Event lists and oracles with no remaining events are omitted").
+
+### Filters
+
+All four query filters combine freely — there is no mutually-exclusive mode like `/api/v1/markets`'s `marketAddress`:
+
+| Param | Predicate |
+| --- | --- |
+| `oracleAddress` | `oracles.address = $addr`, applied to oracle selection only. Blank / whitespace is treated as absent. |
+| `eventId` | The client passes the hex form (as rendered in `eventId` responses); the handler converts it to decimal and matches `oracle_events.internal_id_in_eventlist = $decimal::numeric`. With this filter the `events[]` arrays contain only the matching event, and lists / oracles without it are omitted. Un-decodable hex → `InvalidParameter` / 400. |
+| `deadlineBefore` | `oracle_events.deadline < $deadlineBefore` (unix seconds), combined with the availability `deadline > now`, i.e. `now < deadline < deadlineBefore`. Non-numeric → `InvalidParameter` / 400. |
+| `limit` | Oracle page size. Default 50, clamped to `[1, 200]`; non-numeric → `InvalidParameter` / 400. Clamping (rather than rejecting) out-of-range values matches `/api/v1/markets`. |
+
+The availability predicate plus the `eventId` / `deadlineBefore` event-level filters form a single shared SQL fragment, bound identically into the Phase-1 `EXISTS` sub-query and the Phase-2 fetch (see [§ Query](#query)). Sharing one fragment is load-bearing: were the two to diverge, Phase 1 could select an oracle whose events Phase 2 then filters away, emitting an empty oracle and inflating `hasMore` — the same class of bug the markets `STATUS_CASE` sharing prevents.
+
+### Query
+
+Two round-trips, mirroring `/api/v1/markets`'s `fetch_listing` → `fetch_outcomes` shape:
+
+1. **Oracle page.** Select the next page of oracle ids, keyset-ordered by `(name, id)`:
+
+   ```sql
+   select o.id, o.name, o.address
+     from oracles o
+    where ($oracle_address is null or o.address = $oracle_address)
+      and ( $cursor_name is null
+            or o.name > $cursor_name
+            or (o.name = $cursor_name and o.id > $cursor_id) )
+      and exists (
+          select 1
+            from oracle_event_lists oel
+            join oracle_events oe on oe.eventlist_id = oel.id
+           where oel.oracle_id = o.id
+             and <available-event predicate + event filters>
+      )
+    order by o.name asc, o.id asc
+    limit $limit + 1;
+   ```
+
+   `oracles.name` is `UNIQUE`, so `name` alone is a total order and `id` is only a defensive tiebreaker. The `+1` lookahead is the sole signal distinguishing "exactly `$limit` oracles remain" from "more follow", identical to the markets listing. `hasMore` is true iff `$limit + 1` rows return; the extra row is dropped and `nextCursor` is built from the last *retained* oracle.
+
+2. **List + event fetch.** For the retained oracle ids, one query returns every available list+event row:
+
+   ```sql
+   select oel.oracle_id,
+          oel.list_index,
+          oel.address                       as eventlist_address,
+          oel.description                   as eventlist_description,
+          oe.internal_id_in_eventlist::text as event_id,
+          oe.event_name,
+          oe.describe                       as event_description,
+          oe.oracle_fee::text               as oracle_fee,
+          oe.deadline,
+          oe.trust_addr,
+          oe.outcome_names_jsonb
+     from oracle_event_lists oel
+     join oracle_events oe on oe.eventlist_id = oel.id
+    where oel.oracle_id = any($ids)
+      and <available-event predicate + event filters>
+    order by oel.oracle_id, oel.list_index asc, oe.deadline asc, oe.internal_id_in_eventlist asc;
+   ```
+
+   The rows are grouped in Rust: `oracle_id` → `(list_index, address, description)` → events. SQL already emits them in the api-spec order (oracle name fixed by Phase 1, then list index, deadline, event id), so grouping preserves order without a re-sort.
+
+### Response assembly
+
+Field mapping (see [api-spec §Oracles](../api-spec.md#oracles) for the public shapes):
+
+| Response field | Source | Notes |
+| --- | --- | --- |
+| `oracles[].name` / `.address` | `oracles.name` / `.address` | |
+| `eventLists[].index` | `oracle_event_lists.list_index` | |
+| `eventLists[].address` | `oracle_event_lists.address` | |
+| `eventLists[].description` | `oracle_event_lists.description` | New column written by the deploy projector. `null` for lists deployed before the column existed — see [§ Decisions for review](#decisions-for-review). |
+| `events[].eventId` | `oracle_events.internal_id_in_eventlist` → `numeric_to_hex` | The same hex rendering `/api/v1/markets` uses for `event.eventId`, so the value round-trips back into the `eventId` filter. |
+| `events[].eventName` | `oracle_events.event_name` | `EventAdded` projector. |
+| `events[].description` | `oracle_events.describe` | Reconciler-only; `null` until reconciled to a non-null value. |
+| `events[].oracleFee.asset` | literal `"SHELL"` | The oracle contracts denominate fees in SHELL today; not stored per-event. A second fee asset would turn this into a `ref_tokens` lookup. |
+| `events[].oracleFee.amount` | `oracle_events.oracle_fee::text` | Raw chain integer as a decimal string — **not** scaled, matching the unscaled `fee` rendering in `/api/v1/markets`'s `event.oracles[]`. |
+| `events[].deadline` | `oracle_events.deadline` | Unix seconds. |
+| `events[].trustAddress` | `oracle_events.trust_addr` | Reconciler-only; the raw `0x…` form returned by the `_events` getter. `null` when absent on chain. |
+| `events[].outcomes` | `oracle_events.outcome_names_jsonb` | Decoded to `[{outcomeId, outcomeName}]` sorted by `outcomeId` ascending. |
+
+`outcome_names_jsonb` holds the on-chain `outcomeNames` map as `{"<outcomeId>": "<name>"}`. The decoder parses each key as `u32`, sorts ascending, and rejects a malformed map (non-object, non-numeric or out-of-`u32` key, non-string value) as `MarketInconsistent` — see fail-closed below. A legitimately empty `{}` (the chain published no labels) yields an empty `outcomes` array, not an error.
+
+The top-level response is returned directly (no envelope), like `/api/v1/markets`: `{ serverTime, nextCursor, hasMore, oracles }`.
+
+### Pagination cursor
+
+`nextCursor` is `URL_SAFE_NO_PAD(base64("<id>:<name>"))` of the last retained oracle. The id is written first so the split stays unambiguous when an oracle name itself contains `:` — the decoder splits on the first `:`, parses the left side as `i64`, and takes the entire remainder as the name. A corrupted cursor surfaces as `InvalidParameter` → 400 (wrapped via the same typed-error pattern as the markets cursor), never as a 500.
+
+The cursor is opaque to clients: pass it back verbatim, do not synthesize it. Standard keyset caveat: an oracle inserted (a fresh `OracleDeployed`) with a name sorting *before* the current position is missed until a fresh first-page read; one sorting *after* is picked up. No duplication or skipping of oracles already in range.
+
+### Indexer changes
+
+The read path depends on two write-side additions (write-side detail in [indexer.md](indexer.md)):
+
+1. **`oracle_event_lists.description`** — a new nullable `text` column (migration; [`data-schema.md`](data-schema.md#oracle_event_lists) updated synchronously). The `Oracle.OracleEventListDeployed` event now carries `description` alongside `eventListAddress` and `index`; the `apply_oracle_event_list_deployed` projector writes it via `coalesce(description, $new)` so replays do not clobber it. Lists deployed before this field existed keep `description = NULL`.
+2. **`oracle_events.outcome_names_jsonb` population** — the OracleEventList reconciler already fetches each list's `_events` getter, whose per-event tuple includes `outcomeNames` (`map(uint32,string)`), but today extracts only `describe` / `trustAddr`. It is extended to also persist `outcomeNames` into `outcome_names_jsonb` (`coalesce`, idempotent, stamped under the same `meta_reconciled_at` pass). Until this ships every `oracle_events` row carries the default `'{}'`, so `outcomes` would be empty for all events; the availability gate's `meta_reconciled_at IS NOT NULL` conjunct keeps unreconciled events hidden in the meantime.
+
+Decoder checkpoint: the contract change also added a new `Oracle.EventPublished` event, which changes Oracle's event count. The decoder's event-count assertion in `crates/infrastructure/src/decoder.rs` must be re-pinned to the new total when the ABI lands.
+
+### Fail-closed validation
+
+After building each oracle DTO the assembled shape is checked; any violation is `MarketInconsistent` → 503. The 503 is deliberate: the inconsistency is transient (the indexer is mid-replay) and the client should retry.
+
+| Rule | Source |
+| --- | --- |
+| `outcome_names_jsonb` is a JSON object; every key parses to `u32`; every value is a string | The `_events.outcomeNames` map shape; a non-conforming blob is reconciler / ingestion corruption, not a renderable outcome set. |
+| `eventId` renders (numeric → hex conversion succeeds on `internal_id_in_eventlist`) | The same `numeric_to_hex` invariant `/api/v1/markets` enforces on `event.eventId`. |
+
+### Error mapping
+
+| Condition | DomainError | API code | HTTP |
+| --- | --- | --- | --- |
+| `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
+| `deadlineBefore` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
+| `eventId` present but not decodable as a uint256 hex | `InvalidParameter` | `-1130` | 400 |
+| Corrupted `cursor` | `InvalidParameter` | `-1130` | 400 |
+| Invariant violation on built DTO | `MarketInconsistent` | `-1500` | 503 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+The endpoint is public, so there are no auth rows.
+
+### Decisions for review
+
+Three points decided here for the team to confirm:
+
+1. **Confirmed events are not excluded.** The default availability filter is exactly "not deleted, not past deadline" per [api-spec §Oracles](../api-spec.md#oracles); an event with `confirmed_pmp_address IS NOT NULL` (already backing a market) still lists. Rationale: `OracleEventList.confirmEvent(eventId, oracleListHash, tokenType)` is parameterized by `(oracleListHash, tokenType)`, so one event can back more than one market, and the read-model's single `confirmed_pmp_address` column cannot express "fully consumed". If product intent is "hide once used", add `confirmed_pmp_address IS NULL` to the availability predicate.
+2. **`eventLists[].description` nullability.** The api-spec types it as `STRING`, but lists deployed before the new `description` field carry `NULL`, and the read path renders `null` rather than inventing a value. Recommend api-spec mark the field `STRING | null`.
+3. **`oracleFee.amount` is unscaled.** Rendered as the raw chain integer (decimal string), consistent with `/api/v1/markets`. If clients need a human-scaled amount, scale by SHELL's `ref_tokens.decimals` — deferred until a concrete need.
+
+### Test coverage
+
+Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
+
+- `crates/infrastructure/tests/oracles.rs` — grouping (oracle → list → event); api-spec ordering (name, list index, deadline, event id); the availability gate (deleted / past-deadline / unreconciled rows excluded); each filter (`oracleAddress`, `eventId` narrowing `events[]` to one, `deadlineBefore`); empty-list and empty-oracle omission; cursor advance and stability across pages; `limit` default and clamp; `outcomes` decoded from `outcome_names_jsonb` sorted by `outcomeId`; fail-closed on a malformed `outcome_names_jsonb`.
+- Projector / reconciler tests — `apply_oracle_event_list_deployed` persists `description` from the deploy event (and `coalesce` keeps it across replays); the reconciler persists `outcomeNames` into `outcome_names_jsonb` alongside `describe` / `trust_addr`.
+- `services/api/tests/oracles_http.rs` — happy path through the production router (top-level `serverTime` / `nextCursor` / `hasMore` / `oracles`); the four `400` shapes (`limit`, `deadlineBefore`, `eventId`, `cursor`); pagination round-trip across multiple oracle pages; the route is reachable without an auth envelope (public).
+
+Domain note: the unused `Oracle` / `OracleEventList` / `OracleEvent` structs in `crates/domain/src/lib.rs` predate the api-spec shape and are replaced by the response types this endpoint introduces (`OracleListing` / `OracleEventListEntry` / `OracleEventEntry` / `OracleOutcome` / `OracleFee`).
 
 ## `/api/v1/depth`
 
