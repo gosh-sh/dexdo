@@ -135,6 +135,10 @@ struct Args {
     output: PathBuf,
     endpoint: String,
     network_url: String,
+    // When set, reuse pre-deployed PrivateNotes from this pn_pool.json as the
+    // per-market deployer instead of minting a fresh halo2 voucher each time
+    // (skips step 2/8's ZK proof + PN deploy). One note is consumed per market.
+    deployer_pn_pool: Option<PathBuf>,
 }
 
 impl Args {
@@ -143,6 +147,7 @@ impl Args {
         let mut lifetime = Duration::from_secs(DEFAULT_LIFETIME_SECS);
         let mut output = PathBuf::from("ob_pool.json");
         let mut endpoint = "shellnet.ackinacki.org".to_string();
+        let mut deployer_pn_pool: Option<PathBuf> = None;
 
         let mut argv = std::env::args().skip(1);
         while let Some(arg) = argv.next() {
@@ -175,6 +180,10 @@ impl Args {
                 "--endpoint" | "-e" => {
                     endpoint = argv.next().ok_or("--endpoint requires a value")?;
                 }
+                "--deployer-pn-pool" => {
+                    deployer_pn_pool =
+                        Some(PathBuf::from(argv.next().ok_or("--deployer-pn-pool requires a path")?));
+                }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown arg `{other}`\n\n{}", usage())),
             }
@@ -186,7 +195,7 @@ impl Args {
             format!("https://{endpoint}")
         };
 
-        Ok(Args { count, lifetime, output, endpoint, network_url })
+        Ok(Args { count, lifetime, output, endpoint, network_url, deployer_pn_pool })
     }
 }
 
@@ -195,7 +204,10 @@ fn usage() -> String {
          --count     number of markets to deploy (default 2)\n  \
          --lifetime  total market lifetime, e.g. 5h / 90m / 1800s (default 5h, min 5m, max 24h)\n  \
          --output    JSON output path (default ./ob_pool.json)\n  \
-         --endpoint  network host (default shellnet.ackinacki.org)\n\n\
+         --endpoint  network host (default shellnet.ackinacki.org)\n  \
+         --deployer-pn-pool PATH  reuse pre-deployed PNs from this pn_pool.json as \
+         deployers (skips the halo2 voucher mint; consumes one note per market; \
+         needs >= --count notes)\n\n\
          Bidding window = lifetime / 10 (contract-fixed). With default 5h: bidding ≈ 30min, \
          OrderBook live ≈ 4h30m."
         .to_string()
@@ -525,6 +537,61 @@ async fn deploy_funded_deployer_pn(
     Ok(DeployedPn { address: pn_address, deposit_identifier_hash_dec: dih_dec, keys })
 }
 
+// ── Deployer PN reuse (skip the halo2 voucher mint) ────────────────
+
+/// A pre-deployed PrivateNote loaded from a `pn_pool.json` (the format
+/// `mint_pn_pool` writes). Only the fields needed to drive the PN as a market
+/// deployer are read; the rest are ignored.
+#[derive(Deserialize, Clone)]
+struct PnPoolNote {
+    address: String,
+    deposit_identifier_hash: String,
+    owner_public_key_hex: String,
+    owner_secret_key_hex: String,
+}
+
+#[derive(Deserialize)]
+struct PnPoolFile {
+    notes: Vec<PnPoolNote>,
+}
+
+fn load_pn_pool_notes(path: &std::path::Path) -> Result<Vec<PnPoolNote>, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("read pn_pool {}: {e}", path.display()))?;
+    let file: PnPoolFile = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse pn_pool {}: {e}", path.display()))?;
+    Ok(file.notes)
+}
+
+/// Adopt a pn_pool note as the market deployer: top up its native gas from the
+/// giver (it already holds NACKL + shell from `mint_pn_pool`) and hand back a
+/// `DeployedPn` the rest of the flow drives exactly like a freshly-minted one.
+async fn deployer_from_pool_note(
+    context: Arc<ClientContext>,
+    note: &PnPoolNote,
+) -> Result<DeployedPn, String> {
+    eprintln!("    reuse pn_pool note {} — giver native gas top-up…", note.address);
+    send_currency_with_flag_from_default_giver(
+        context.clone(),
+        &note.address,
+        NATIVE_GAS_TOPUP_RAW,
+        HashMap::new(),
+        1,
+    )
+    .await
+    .map_err(|e| format!("giver native top-up (reuse): {e:?}"))?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    Ok(DeployedPn {
+        address: note.address.clone(),
+        deposit_identifier_hash_dec: note.deposit_identifier_hash.clone(),
+        keys: KeyPair {
+            public: note.owner_public_key_hex.clone(),
+            secret: note.owner_secret_key_hex.clone(),
+        },
+    })
+}
+
 // ── Oracle + event setup ───────────────────────────────────────────
 
 struct DeployedOracle {
@@ -642,6 +709,7 @@ async fn deploy_one_market(
     network_url: &str,
     paths: &Halo2Paths,
     lifetime: Duration,
+    deployer_override: Option<&PnPoolNote>,
 ) -> Result<PoolMarket, String> {
     // 1. Oracle + event
     eprintln!("  [1/8] oracle + event…");
@@ -651,9 +719,17 @@ async fn deploy_one_market(
         oracle.address, oracle.name, oracle.event_id
     );
 
-    // 2. Deployer PN (halo2 voucher → deploy → fund)
-    eprintln!("  [2/8] deployer PN ({DEPLOYER_NOMINAL_LABEL})…");
-    let deployer = deploy_funded_deployer_pn(context.clone(), network_url, paths).await?;
+    // 2. Deployer PN — reuse a pn_pool note when provided, else mint fresh.
+    let deployer = match deployer_override {
+        Some(note) => {
+            eprintln!("  [2/8] deployer PN — reuse pn_pool note (skip halo2 voucher)…");
+            deployer_from_pool_note(context.clone(), note).await?
+        }
+        None => {
+            eprintln!("  [2/8] deployer PN ({DEPLOYER_NOMINAL_LABEL})…");
+            deploy_funded_deployer_pn(context.clone(), network_url, paths).await?
+        }
+    };
     eprintln!(
         "        pn={} dih={}",
         deployer.address, deployer.deposit_identifier_hash_dec
@@ -938,13 +1014,48 @@ async fn main() -> ExitCode {
     pool.markets.reserve(args.count);
     save_pool(&pool, &args.output);
 
+    let deployer_notes = match &args.deployer_pn_pool {
+        Some(path) => match load_pn_pool_notes(path) {
+            Ok(notes) if notes.len() >= args.count => {
+                eprintln!(
+                    "[ob-pool] reusing {} pn_pool note(s) from {} as deployers \
+                     (skipping halo2 voucher mint; one note consumed per market)",
+                    args.count,
+                    path.display(),
+                );
+                Some(notes)
+            }
+            Ok(notes) => {
+                eprintln!(
+                    "[ob-pool] pn_pool {} has {} note(s), --count needs {}",
+                    path.display(),
+                    notes.len(),
+                    args.count,
+                );
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("[ob-pool] {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
     let started = std::time::Instant::now();
     for i in 0..args.count {
         let t = std::time::Instant::now();
         eprintln!("\n[ob-pool] === market {}/{} ===", i + 1, args.count);
 
-        match deploy_one_market(context.clone(), &dex, &args.network_url, &paths, args.lifetime)
-            .await
+        match deploy_one_market(
+            context.clone(),
+            &dex,
+            &args.network_url,
+            &paths,
+            args.lifetime,
+            deployer_notes.as_ref().map(|n| &n[i]),
+        )
+        .await
         {
             Ok(market) => {
                 eprintln!(
