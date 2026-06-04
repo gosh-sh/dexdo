@@ -513,12 +513,13 @@ pub struct OracleListing {
 }
 
 /// One event list owned by an oracle. Maps to api-spec `OracleEventList`.
-/// `description` is NULL for lists deployed before the deploy event carried it.
+/// `description` is required (`NOT NULL`): it is carried by every
+/// `OracleEventListDeployed` event, so the public contract is a plain STRING.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleEventListEntry {
     pub index: i64,
     pub address: String,
-    pub description: Option<String>,
+    pub description: String,
     pub events: Vec<OracleEventEntry>,
 }
 

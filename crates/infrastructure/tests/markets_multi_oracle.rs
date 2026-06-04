@@ -130,8 +130,8 @@ async fn seed_oracle_confirmation(pool: &PgPool, pmp_address: &str, seed: Oracle
     .await
     .expect("insert oracles");
     let eventlist_id: i64 = sqlx::query_scalar(
-        r#"insert into oracle_event_lists (msg_id, oracle_id, address)
-           values ($1, $2, $3)
+        r#"insert into oracle_event_lists (msg_id, oracle_id, address, description)
+           values ($1, $2, $3, '')
            returning id"#,
     )
     .bind(format!("{}-list-msg", seed.eventlist_address))

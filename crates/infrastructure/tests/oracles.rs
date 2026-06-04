@@ -60,7 +60,7 @@ async fn seed_available(
     list_index: i64,
     event_internal_id_decimal: &str,
     deadline: i64,
-    description: Option<&str>,
+    description: &str,
     outcomes: serde_json::Value,
 ) -> (i64, i64) {
     let oracle_id: i64 = sqlx::query_scalar(
@@ -123,7 +123,7 @@ async fn lists_available_event_with_fields() {
         0,
         "1",
         FUTURE,
-        Some("Election markets."),
+        "Election markets.",
         serde_json::json!({ "0": "NO", "1": "YES" }),
     )
     .await;
@@ -144,7 +144,7 @@ async fn lists_available_event_with_fields() {
     assert_eq!(o.event_lists.len(), 1);
     let l = &o.event_lists[0];
     assert_eq!(l.index, 0);
-    assert_eq!(l.description.as_deref(), Some("Election markets."));
+    assert_eq!(l.description, "Election markets.");
     assert_eq!(l.events.len(), 1);
     let e = &l.events[0];
     assert_eq!(e.event_id, "0x0000000000000000000000000000000000000000000000000000000000000001");
@@ -175,7 +175,7 @@ async fn hides_unavailable_events() {
         0,
         "1",
         FUTURE,
-        None,
+        "",
         serde_json::json!({ "0": "NO" }),
     )
     .await;
@@ -245,7 +245,7 @@ async fn event_id_filter_narrows_to_one_event() {
         0,
         "1",
         FUTURE,
-        None,
+        "",
         serde_json::json!({ "0": "NO" }),
     )
     .await;
@@ -301,7 +301,7 @@ async fn deadline_before_excludes_later_events() {
         0,
         "1",
         NOW + 100,
-        None,
+        "",
         serde_json::json!({ "0": "NO" }),
     )
     .await;
@@ -385,7 +385,7 @@ async fn paginates_by_oracle_with_cursor() {
             0,
             "1",
             FUTURE,
-            None,
+            "",
             serde_json::json!({ "0": "NO" }),
         )
         .await;
@@ -439,7 +439,7 @@ async fn fails_closed_on_malformed_outcome_names() {
         0,
         "1",
         FUTURE,
-        None,
+        "",
         serde_json::json!({ "0": "NO" }),
     )
     .await;
@@ -487,7 +487,7 @@ async fn omits_oracle_with_only_unavailable_events() {
         0,
         "1",
         PAST,
-        None,
+        "",
         serde_json::json!({ "0": "NO" }),
     )
     .await;

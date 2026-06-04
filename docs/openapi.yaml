@@ -1121,14 +1121,13 @@ components:
       required:
       - index
       - address
+      - description
       - events
       properties:
         address:
           type: string
         description:
-          type:
-          - string
-          - 'null'
+          type: string
         events:
           type: array
           items:

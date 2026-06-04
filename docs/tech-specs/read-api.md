@@ -198,7 +198,7 @@ Field mapping (see [api-spec §Oracles](../api-spec.md#oracles) for the public s
 | `oracles[].name` / `.address` | `oracles.name` / `.address` | |
 | `eventLists[].index` | `oracle_event_lists.list_index` | |
 | `eventLists[].address` | `oracle_event_lists.address` | |
-| `eventLists[].description` | `oracle_event_lists.description` | New column written by the deploy projector. `null` for lists deployed before the column existed — see [§ Decisions for review](#decisions-for-review). |
+| `eventLists[].description` | `oracle_event_lists.description` | `NOT NULL` column written by the deploy projector from the `OracleEventListDeployed` payload (read strictly). The public field is therefore a plain `STRING` (possibly empty, never null). |
 | `events[].eventId` | `oracle_events.internal_id_in_eventlist` → `numeric_to_hex` | The same hex rendering `/api/v1/markets` uses for `event.eventId`, so the value round-trips back into the `eventId` filter. |
 | `events[].eventName` | `oracle_events.event_name` | `EventAdded` projector. |
 | `events[].description` | `oracle_events.describe` | Reconciler-only; `null` until reconciled to a non-null value. |
@@ -222,7 +222,7 @@ The cursor is opaque to clients: pass it back verbatim, do not synthesize it. St
 
 The read path depends on two write-side additions (write-side detail in [indexer.md](indexer.md)):
 
-1. **`oracle_event_lists.description`** — a new nullable `text` column (migration; [`data-schema.md`](data-schema.md#oracle_event_lists) updated synchronously). The `Oracle.OracleEventListDeployed` event now carries `description` alongside `eventListAddress` and `index`; the `apply_oracle_event_list_deployed` projector writes it via `coalesce(description, $new)` so replays do not clobber it. Lists deployed before this field existed keep `description = NULL`.
+1. **`oracle_event_lists.description`** — a new `text NOT NULL` column (migration; [`data-schema.md`](data-schema.md#oracle_event_lists) updated synchronously). The `Oracle.OracleEventListDeployed` event carries `description` alongside `eventListAddress` and `index`; the `apply_oracle_event_list_deployed` projector reads it strictly (a missing field is a decoder/ABI mismatch and fails the projection) and writes it via `coalesce(description, $new)` so replays do not clobber it. Because every list is created from such an event, the column is `NOT NULL` and the public contract stays a plain `STRING`.
 2. **`oracle_events.outcome_names_jsonb` population** — the OracleEventList reconciler already fetches each list's `_events` getter, whose per-event tuple includes `outcomeNames` (`map(uint32,string)`), but today extracts only `describe` / `trustAddr`. It is extended to also persist `outcomeNames` into `outcome_names_jsonb` (`coalesce`, idempotent, stamped under the same `meta_reconciled_at` pass). Until this ships every `oracle_events` row carries the default `'{}'`, so `outcomes` would be empty for all events; the availability gate's `meta_reconciled_at IS NOT NULL` conjunct keeps unreconciled events hidden in the meantime.
 
 Decoder checkpoint: the contract change also added a new `Oracle.EventPublished` event, which changes Oracle's event count. The decoder's event-count assertion in `crates/infrastructure/src/decoder.rs` must be re-pinned to the new total when the ABI lands.
@@ -254,7 +254,7 @@ The endpoint is public, so there are no auth rows.
 Three points decided here for the team to confirm:
 
 1. **Confirmed events are not excluded.** The default availability filter is exactly "not deleted, not past deadline" per [api-spec §Oracles](../api-spec.md#oracles); an event with `confirmed_pmp_address IS NOT NULL` (already backing a market) still lists. Rationale: `OracleEventList.confirmEvent(eventId, oracleListHash, tokenType)` is parameterized by `(oracleListHash, tokenType)`, so one event can back more than one market, and the read-model's single `confirmed_pmp_address` column cannot express "fully consumed". If product intent is "hide once used", add `confirmed_pmp_address IS NULL` to the availability predicate.
-2. **`eventLists[].description` nullability.** The api-spec types it as `STRING`, but lists deployed before the new `description` field carry `NULL`, and the read path renders `null` rather than inventing a value. Recommend api-spec mark the field `STRING | null`.
+2. **`eventLists[].description` is required (resolved).** The api-spec keeps it `STRING`; the fresh path is hardened to match — `OracleEventListDeployed` always carries `description`, the projector reads it strictly, and the column is `NOT NULL`. The value may be an empty string but is never null, so no `STRING | null` softening is needed.
 3. **`oracleFee.amount` is unscaled.** Rendered as the raw chain integer (decimal string), consistent with `/api/v1/markets`. If clients need a human-scaled amount, scale by SHELL's `ref_tokens.decimals` — deferred until a concrete need.
 
 ### Test coverage

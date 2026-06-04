@@ -152,7 +152,7 @@ struct OracleListEventRow {
     oracle_id: i64,
     list_index: Option<i64>,
     eventlist_address: String,
-    eventlist_description: Option<String>,
+    eventlist_description: String,
     event_id: String,
     event_name: String,
     event_description: Option<String>,

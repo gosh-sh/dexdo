@@ -66,7 +66,8 @@ create table oracle_event_lists (
     list_index bigint,
     created_at timestamptz not null default now(),
     last_reconcile_failed_at timestamptz,
-    reconcile_attempts integer not null default 0
+    reconcile_attempts integer not null default 0,
+    description text not null
 );
 
 create index oracle_event_lists_oracle_id_idx on oracle_event_lists (oracle_id);

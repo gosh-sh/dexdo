@@ -245,7 +245,7 @@ struct OracleEntryDto {
 struct OracleEventListDto {
     index: i64,
     address: String,
-    description: Option<String>,
+    description: String,
     events: Vec<OracleEventDto>,
 }
 

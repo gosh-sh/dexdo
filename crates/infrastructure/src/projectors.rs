@@ -130,11 +130,11 @@ async fn apply_oracle_event_list_deployed(
         return Ok(ProjectionOutcome::Deferred);
     };
 
-    // Optional: present on events emitted after the description field was
-    // added to OracleEventListDeployed; absent (NULL) when replaying older
-    // history. Read with `get`, not `field_str`, so a missing field is NULL
-    // rather than a hard error.
-    let description = event.value.get("description").and_then(Value::as_str);
+    // Required: OracleEventListDeployed always carries `description`, and the
+    // column is NOT NULL so the public contract stays a plain STRING. A missing
+    // field is a decoder/ABI mismatch — fail the projection loudly rather than
+    // inventing a value.
+    let description = field_str(&event.value, "description")?;
 
     sqlx::query(
         r#"insert into oracle_event_lists (msg_id, oracle_id, address, list_index, description)

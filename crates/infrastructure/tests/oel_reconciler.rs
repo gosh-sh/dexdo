@@ -64,8 +64,8 @@ async fn seed_oel_with_event(
     .expect("insert oracle");
 
     let eventlist_id: i64 = sqlx::query_scalar(
-        r#"insert into oracle_event_lists (msg_id, oracle_id, address, list_index)
-           values ($1, $2, $3, 1) returning id"#,
+        r#"insert into oracle_event_lists (msg_id, oracle_id, address, list_index, description)
+           values ($1, $2, $3, 1, '') returning id"#,
     )
     .bind(format!("{eventlist_address}-deploy-msg"))
     .bind(oracle_id)

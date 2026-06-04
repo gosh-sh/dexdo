@@ -194,6 +194,7 @@ async fn deferred_row_is_replayed_after_parent_arrives() {
     let decoded = json!({
         "eventListAddress": eventlist_addr,
         "index": "1",
+        "description": "Deferred reprojection list",
     });
     insert_raw(&pool, &msg_id, &oracle_addr, "Oracle.OracleEventListDeployed", &decoded).await;
 
