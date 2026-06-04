@@ -70,6 +70,9 @@ async fn happy_path_lists_oracle() {
 
     assert!(body.get("serverTime").and_then(Value::as_i64).is_some());
     assert_eq!(body["hasMore"], Value::Bool(false));
+    // Single page: the top-level shape still carries nextCursor, as null.
+    assert!(body.as_object().unwrap().contains_key("nextCursor"));
+    assert!(body["nextCursor"].is_null());
     let oracles = body["oracles"].as_array().expect("oracles array");
     assert_eq!(oracles.len(), 1);
     assert_eq!(oracles[0]["name"], "oracles-http-happy");
@@ -77,6 +80,12 @@ async fn happy_path_lists_oracle() {
     assert_eq!(lists[0]["description"], "Election markets.");
     let events = lists[0]["events"].as_array().unwrap();
     assert_eq!(events[0]["eventName"], "Election");
+    // eventId renders as 0x-hex of internal_id_in_eventlist (=1), end-to-end.
+    assert_eq!(
+        events[0]["eventId"],
+        "0x0000000000000000000000000000000000000000000000000000000000000001"
+    );
+    assert_eq!(events[0]["deadline"], FUTURE);
     assert_eq!(events[0]["oracleFee"]["asset"], "SHELL");
     assert_eq!(events[0]["oracleFee"]["amount"], "100");
     assert_eq!(events[0]["outcomes"].as_array().unwrap().len(), 2);
@@ -122,5 +131,9 @@ async fn reachable_without_auth() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     // No X-DODEX-APIKEY / signature headers — must NOT be 401.
     let resp = TestClient::get("http://test/api/v1/oracles").send(&service).await;
-    assert_ne!(resp.status_code, Some(StatusCode::UNAUTHORIZED));
+    assert_ne!(
+        resp.status_code,
+        Some(StatusCode::UNAUTHORIZED),
+        "GET /api/v1/oracles must not be 401-gated by the auth hoop",
+    );
 }
