@@ -98,11 +98,13 @@ async fn apply(
     event_id_decimal: &str,
     describe: Option<&str>,
     trust_addr: Option<&str>,
+    outcome_names: serde_json::Value,
 ) -> u64 {
     sqlx::query(
         r#"update oracle_events
               set describe = coalesce(describe, $1),
                   trust_addr = coalesce(trust_addr, $2),
+                  outcome_names_jsonb = $5::jsonb,
                   meta_reconciled_at = now(),
                   updated_at = now()
             where eventlist_id = $3
@@ -113,6 +115,7 @@ async fn apply(
     .bind(trust_addr)
     .bind(eventlist_id)
     .bind(event_id_decimal)
+    .bind(&outcome_names)
     .execute(pool)
     .await
     .expect("apply event metadata")
@@ -134,7 +137,7 @@ async fn fills_describe_when_null() {
         seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
 
     let updated =
-        apply(&pool, eventlist_id, event_id, Some("Will candidate X win?"), Some("0xabc")).await;
+        apply(&pool, eventlist_id, event_id, Some("Will candidate X win?"), Some("0xabc"), serde_json::json!({})).await;
     assert_eq!(updated, 1, "metadata write must affect the event row");
 
     let row: (Option<String>, Option<String>) = sqlx::query_as(
@@ -166,12 +169,12 @@ async fn does_not_overwrite_existing_values() {
         seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
 
     // First pass: fill from chain.
-    let first = apply(&pool, eventlist_id, event_id, Some("Original"), Some("0xaaa")).await;
+    let first = apply(&pool, eventlist_id, event_id, Some("Original"), Some("0xaaa"), serde_json::json!({})).await;
     assert_eq!(first, 1);
 
     // Second pass with different values must be a no-op — the WHERE guard
     // (`meta_reconciled_at is null`) excludes the row once the marker is set.
-    let second = apply(&pool, eventlist_id, event_id, Some("Replaced"), Some("0xbbb")).await;
+    let second = apply(&pool, eventlist_id, event_id, Some("Replaced"), Some("0xbbb"), serde_json::json!({})).await;
     assert_eq!(second, 0, "rows already stamped meta_reconciled_at must be skipped");
 
     let row: (Option<String>, Option<String>) = sqlx::query_as(
@@ -216,7 +219,7 @@ async fn fills_only_missing_field_when_partially_set() {
     .expect("preset describe");
 
     let updated =
-        apply(&pool, eventlist_id, event_id, Some("Should not stick"), Some("0xnewtrust")).await;
+        apply(&pool, eventlist_id, event_id, Some("Should not stick"), Some("0xnewtrust"), serde_json::json!({})).await;
     assert_eq!(updated, 1, "unstamped row matches the pending predicate");
 
     let row: (Option<String>, Option<String>) = sqlx::query_as(
@@ -253,7 +256,7 @@ async fn null_chain_metadata_clears_pending_predicate() {
     let (_oracle_id, eventlist_id) =
         seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
 
-    let updated = apply(&pool, eventlist_id, event_id, None, None).await;
+    let updated = apply(&pool, eventlist_id, event_id, None, None, serde_json::json!({})).await;
     assert_eq!(updated, 1, "first pass with null metadata must still stamp the marker");
 
     let pending: i64 = sqlx::query_scalar(
@@ -266,7 +269,7 @@ async fn null_chain_metadata_clears_pending_predicate() {
     .expect("count pending");
     assert_eq!(pending, 0, "row must drop out of the pending set after one pass");
 
-    let second = apply(&pool, eventlist_id, event_id, None, None).await;
+    let second = apply(&pool, eventlist_id, event_id, None, None, serde_json::json!({})).await;
     assert_eq!(second, 0, "second pass must be a no-op — no starvation loop");
 }
 
@@ -360,4 +363,41 @@ async fn no_progress_pass_backs_off_under_cooldown() {
     let pos_b = ids.iter().position(|&id| id == oel_b_id);
     assert!(pos_b.is_some() && pos_a.is_some(), "both OELs eligible after cooldown");
     assert!(pos_b < pos_a, "never-failed OEL must run before cooled-down failed one");
+}
+
+#[tokio::test]
+async fn fills_outcome_names_when_reconciled() {
+    let Some(pool) = setup().await else { return };
+
+    let test = "oel_reconcile_fills_outcomes";
+    let oracle_addr = format!("0:{test}_oracle");
+    let oracle_name = format!("{test}-oracle");
+    let eventlist_addr = format!("0:{test}_evlist");
+    let event_id = "1";
+
+    purge(&pool, &oracle_addr, &eventlist_addr).await;
+    let (_oracle_id, eventlist_id) =
+        seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
+
+    let updated = apply(
+        &pool,
+        eventlist_id,
+        event_id,
+        Some("Will candidate X win?"),
+        None,
+        serde_json::json!({ "0": "NO", "1": "YES" }),
+    )
+    .await;
+    assert_eq!(updated, 1);
+
+    let names: serde_json::Value = sqlx::query_scalar(
+        "select outcome_names_jsonb from oracle_events
+                where eventlist_id = $1 and internal_id_in_eventlist = $2::numeric",
+    )
+    .bind(eventlist_id)
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(names, serde_json::json!({ "0": "NO", "1": "YES" }));
 }
