@@ -40,7 +40,11 @@ async fn setup() -> Option<PgPool> {
 
 async fn purge(pool: &PgPool, oracle_addr: &str) {
     // Cascades to oracle_event_lists and oracle_events.
-    sqlx::query("delete from oracles where address = $1").bind(oracle_addr).execute(pool).await.unwrap();
+    sqlx::query("delete from oracles where address = $1")
+        .bind(oracle_addr)
+        .execute(pool)
+        .await
+        .unwrap();
 }
 
 /// Seed one oracle with one event list and one *available* event
@@ -123,7 +127,11 @@ async fn lists_available_event_with_fields() {
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page = repo
-        .list_oracles(&req(OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() }, None, 50))
+        .list_oracles(&req(
+            OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() },
+            None,
+            50,
+        ))
         .await
         .expect("list_oracles");
 
@@ -206,7 +214,11 @@ async fn hides_unavailable_events() {
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page = repo
-        .list_oracles(&req(OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() }, None, 50))
+        .list_oracles(&req(
+            OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() },
+            None,
+            50,
+        ))
         .await
         .expect("list_oracles");
 
@@ -223,7 +235,14 @@ async fn event_id_filter_narrows_to_one_event() {
     let oracle = "0:oracles_it_eventid";
     purge(&pool, oracle).await;
     let (_oid, eventlist_id) = seed_available(
-        &pool, oracle, "oracles-it-eventid", "0:oracles_it_eventid_list", 0, "1", FUTURE, None,
+        &pool,
+        oracle,
+        "oracles-it-eventid",
+        "0:oracles_it_eventid_list",
+        0,
+        "1",
+        FUTURE,
+        None,
         serde_json::json!({ "0": "NO" }),
     )
     .await;
@@ -265,6 +284,63 @@ async fn event_id_filter_narrows_to_one_event() {
 }
 
 #[tokio::test]
+async fn deadline_before_excludes_later_events() {
+    // Two available events with different deadlines; deadlineBefore set
+    // between them must surface only the earlier one and drop the later.
+    let Some(pool) = setup().await else { return };
+    let oracle = "0:oracles_it_deadline_before";
+    purge(&pool, oracle).await;
+    let (_oid, eventlist_id) = seed_available(
+        &pool,
+        oracle,
+        "oracles-it-deadline-before",
+        "0:oracles_it_deadline_before_list",
+        0,
+        "1",
+        NOW + 100,
+        None,
+        serde_json::json!({ "0": "NO" }),
+    )
+    .await;
+    // Second available event with a much later deadline, same list.
+    sqlx::query(
+        r#"insert into oracle_events (eventlist_id, internal_id_in_eventlist, event_name,
+               oracle_fee, deadline, outcome_names_jsonb, meta_reconciled_at, last_seen_at, updated_at)
+           values ($1, 2::numeric, 'Later', 1::numeric, $2, '{}'::jsonb, now(), now(), now())"#,
+    )
+    .bind(eventlist_id)
+    .bind(NOW + 10_000)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let page = repo
+        .list_oracles(&req(
+            OraclesFilter {
+                oracle_address: Some(oracle.into()),
+                deadline_before: Some(NOW + 1_000),
+                ..Default::default()
+            },
+            None,
+            50,
+        ))
+        .await
+        .expect("list_oracles");
+
+    let events: Vec<_> = page
+        .oracles
+        .iter()
+        .flat_map(|o| o.event_lists.iter())
+        .flat_map(|l| l.events.iter())
+        .collect();
+    assert_eq!(events.len(), 1, "only the event before deadlineBefore should surface");
+    assert_eq!(events[0].event_name, "Election");
+
+    purge(&pool, oracle).await;
+}
+
+#[tokio::test]
 async fn invalid_event_id_hex_is_invalid_parameter() {
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
@@ -293,7 +369,14 @@ async fn paginates_by_oracle_with_cursor() {
     }
     for i in 0..3 {
         seed_available(
-            &pool, addrs[i], names[i], &format!("{}_list", addrs[i]), 0, "1", FUTURE, None,
+            &pool,
+            addrs[i],
+            names[i],
+            &format!("{}_list", addrs[i]),
+            0,
+            "1",
+            FUTURE,
+            None,
             serde_json::json!({ "0": "NO" }),
         )
         .await;
@@ -312,7 +395,8 @@ async fn paginates_by_oracle_with_cursor() {
         .await
         .expect("p2");
     // The cursor must strictly advance: no oracle appears on both pages.
-    let p1: std::collections::HashSet<_> = page1.oracles.iter().map(|o| o.address.clone()).collect();
+    let p1: std::collections::HashSet<_> =
+        page1.oracles.iter().map(|o| o.address.clone()).collect();
     for o in &page2.oracles {
         assert!(!p1.contains(&o.address), "cursor must not re-list {}", o.address);
     }
@@ -328,20 +412,33 @@ async fn fails_closed_on_malformed_outcome_names() {
     let oracle = "0:oracles_it_badjson";
     purge(&pool, oracle).await;
     let (_oid, eventlist_id) = seed_available(
-        &pool, oracle, "oracles-it-badjson", "0:oracles_it_badjson_list", 0, "1", FUTURE, None,
+        &pool,
+        oracle,
+        "oracles-it-badjson",
+        "0:oracles_it_badjson_list",
+        0,
+        "1",
+        FUTURE,
+        None,
         serde_json::json!({ "0": "NO" }),
     )
     .await;
     // Overwrite outcomes with a JSON array (not an object) → MarketInconsistent.
-    sqlx::query("update oracle_events set outcome_names_jsonb = '[\"NO\"]'::jsonb where eventlist_id = $1")
-        .bind(eventlist_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "update oracle_events set outcome_names_jsonb = '[\"NO\"]'::jsonb where eventlist_id = $1",
+    )
+    .bind(eventlist_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let err = repo
-        .list_oracles(&req(OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() }, None, 50))
+        .list_oracles(&req(
+            OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() },
+            None,
+            50,
+        ))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -363,14 +460,25 @@ async fn omits_oracle_with_only_unavailable_events() {
     let oracle = "0:oracles_it_only_unavail";
     purge(&pool, oracle).await;
     seed_available(
-        &pool, oracle, "oracles-it-only-unavail", "0:oracles_it_only_unavail_list", 0, "1", PAST,
-        None, serde_json::json!({ "0": "NO" }),
+        &pool,
+        oracle,
+        "oracles-it-only-unavail",
+        "0:oracles_it_only_unavail_list",
+        0,
+        "1",
+        PAST,
+        None,
+        serde_json::json!({ "0": "NO" }),
     )
     .await;
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page = repo
-        .list_oracles(&req(OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() }, None, 50))
+        .list_oracles(&req(
+            OraclesFilter { oracle_address: Some(oracle.into()), ..Default::default() },
+            None,
+            50,
+        ))
         .await
         .expect("list_oracles");
 

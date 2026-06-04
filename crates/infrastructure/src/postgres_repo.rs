@@ -14,13 +14,13 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::OraclesRequest;
 use dodex_application::OrderForCancel;
 use dodex_application::OrderForCancelBatch;
 use dodex_application::OrderStatusFilter;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
-use dodex_application::OraclesRequest;
 use dodex_application::QueryableOrderStatus;
 use dodex_domain::decimal_string_is_zero;
 use dodex_domain::descale_pow10;
@@ -53,11 +53,12 @@ use dodex_domain::TerminalKind;
 use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
 use dodex_domain::PRICE_BPS_DECIMALS;
-use crate::projectors::uint256_hex_to_decimal;
 use num_bigint::BigUint;
 use sqlx::PgPool;
 use tracing::error;
 use tracing::warn;
+
+use crate::projectors::uint256_hex_to_decimal;
 
 #[derive(Debug, Clone)]
 pub struct PostgresReadModelRepository {
@@ -1227,10 +1228,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             .collect()
     }
 
-    async fn list_oracles(
-        &self,
-        request: &OraclesRequest,
-    ) -> Result<OraclesPage, anyhow::Error> {
+    async fn list_oracles(&self, request: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
         let limit = request.limit.clamp(1, 200) as i64;
 
         // eventId (hex) → decimal, fail closed (400) on bad hex.
@@ -2103,9 +2101,7 @@ fn assemble_oracles_page(
         .into_iter()
         .map(|h| {
             let event_lists = match by_oracle.remove(&h.id) {
-                Some(mut acc) => {
-                    acc.order.iter().filter_map(|idx| acc.lists.remove(idx)).collect()
-                }
+                Some(mut acc) => acc.order.iter().filter_map(|idx| acc.lists.remove(idx)).collect(),
                 None => Vec::new(),
             };
             OracleListing { name: h.name, address: h.address, event_lists }
@@ -3473,10 +3469,7 @@ mod tests {
     #[test]
     fn oracles_cursor_rejects_garbage() {
         let err = decode_oracles_cursor("!!!not-base64!!!").unwrap_err();
-        assert!(matches!(
-            err.downcast_ref::<DomainError>(),
-            Some(DomainError::InvalidParameter)
-        ));
+        assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidParameter)));
     }
 
     #[test]
@@ -3494,20 +3487,14 @@ mod tests {
     fn parse_oracle_outcomes_rejects_non_object() {
         let v = serde_json::json!(["NO", "YES"]);
         let err = parse_oracle_outcomes(&v, "test").unwrap_err();
-        assert!(matches!(
-            err.downcast_ref::<DomainError>(),
-            Some(DomainError::MarketInconsistent)
-        ));
+        assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
     }
 
     #[test]
     fn parse_oracle_outcomes_rejects_non_u32_key() {
         let v = serde_json::json!({ "-1": "NO" });
         let err = parse_oracle_outcomes(&v, "test").unwrap_err();
-        assert!(matches!(
-            err.downcast_ref::<DomainError>(),
-            Some(DomainError::MarketInconsistent)
-        ));
+        assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
     }
 
     #[test]

@@ -136,8 +136,15 @@ async fn fills_describe_when_null() {
     let (_oracle_id, eventlist_id) =
         seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
 
-    let updated =
-        apply(&pool, eventlist_id, event_id, Some("Will candidate X win?"), Some("0xabc"), serde_json::json!({})).await;
+    let updated = apply(
+        &pool,
+        eventlist_id,
+        event_id,
+        Some("Will candidate X win?"),
+        Some("0xabc"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(updated, 1, "metadata write must affect the event row");
 
     let row: (Option<String>, Option<String>) = sqlx::query_as(
@@ -169,12 +176,28 @@ async fn does_not_overwrite_existing_values() {
         seed_oel_with_event(&pool, &oracle_addr, &oracle_name, &eventlist_addr, event_id).await;
 
     // First pass: fill from chain.
-    let first = apply(&pool, eventlist_id, event_id, Some("Original"), Some("0xaaa"), serde_json::json!({})).await;
+    let first = apply(
+        &pool,
+        eventlist_id,
+        event_id,
+        Some("Original"),
+        Some("0xaaa"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(first, 1);
 
     // Second pass with different values must be a no-op — the WHERE guard
     // (`meta_reconciled_at is null`) excludes the row once the marker is set.
-    let second = apply(&pool, eventlist_id, event_id, Some("Replaced"), Some("0xbbb"), serde_json::json!({})).await;
+    let second = apply(
+        &pool,
+        eventlist_id,
+        event_id,
+        Some("Replaced"),
+        Some("0xbbb"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(second, 0, "rows already stamped meta_reconciled_at must be skipped");
 
     let row: (Option<String>, Option<String>) = sqlx::query_as(
@@ -218,8 +241,15 @@ async fn fills_only_missing_field_when_partially_set() {
     .await
     .expect("preset describe");
 
-    let updated =
-        apply(&pool, eventlist_id, event_id, Some("Should not stick"), Some("0xnewtrust"), serde_json::json!({})).await;
+    let updated = apply(
+        &pool,
+        eventlist_id,
+        event_id,
+        Some("Should not stick"),
+        Some("0xnewtrust"),
+        serde_json::json!({}),
+    )
+    .await;
     assert_eq!(updated, 1, "unstamped row matches the pending predicate");
 
     let row: (Option<String>, Option<String>) = sqlx::query_as(
