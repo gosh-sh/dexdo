@@ -1556,6 +1556,72 @@ async fn ordercancelled_is_noop_on_already_canceled_row() {
 }
 
 #[tokio::test]
+async fn oracle_event_list_deployed_persists_description() {
+    let Some(pool) = setup().await else { return };
+
+    let oracle_addr = "0:oracles_desc_test_oracle";
+    let oel_addr = "0:oracles_desc_test_evlist";
+    let msg_id = "oracles_desc_test_msg";
+
+    // Clean slate.
+    sqlx::query("delete from oracle_event_lists where address = $1")
+        .bind(oel_addr)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from oracles where address = $1")
+        .bind(oracle_addr)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Parent oracle must exist or the projector defers.
+    sqlx::query(
+        r#"insert into oracles (name, address, deploy_msg_id, pubkey)
+           values ('oracles-desc-test', $1, 'oracles-desc-deploy', '0xff')"#,
+    )
+    .bind(oracle_addr)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let event = dodex_infrastructure::decoder::DecodedEvent {
+        contract_kind: "Oracle",
+        event_name: "OracleEventListDeployed".to_string(),
+        event_type: "Oracle.OracleEventListDeployed".to_string(),
+        value: serde_json::json!({
+            "eventListAddress": oel_addr,
+            "index": "0",
+            "description": "Election markets verified by ElectionOracle."
+        }),
+    };
+    let node = dodex_infrastructure::graphql::EventNode {
+        msg_id: msg_id.to_string(),
+        src: Some(oracle_addr.to_string()),
+        msg_chain_order: None,
+        src_dapp_id: None,
+        dst: None,
+        body: None,
+        created_at: None,
+    };
+
+    let mut tx = pool.begin().await.unwrap();
+    let outcome = dodex_infrastructure::projectors::project_event(&mut tx, &event, &node)
+        .await
+        .expect("project");
+    tx.commit().await.unwrap();
+    assert_eq!(outcome, dodex_infrastructure::projectors::ProjectionOutcome::Applied);
+
+    let desc: Option<String> =
+        sqlx::query_scalar("select description from oracle_event_lists where address = $1")
+            .bind(oel_addr)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(desc.as_deref(), Some("Election markets verified by ElectionOracle."));
+}
+
+#[tokio::test]
 async fn orderfilled_does_not_rewrite_rejected_row() {
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
