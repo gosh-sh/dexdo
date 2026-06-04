@@ -20,6 +20,7 @@ use opentelemetry::metrics::Meter;
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::metrics::ObservableCounter;
 use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::PeriodicReader;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::runtime::Tokio;
@@ -126,13 +127,20 @@ fn build_resource() -> Resource {
 /// called from within a Tokio runtime (the OTLP exporter uses it).
 #[must_use]
 pub fn init() -> Option<Metrics> {
-    // Gate on the endpoint; the OTLP exporter independently reads the same env
-    // vars to configure its transport.
-    metrics_endpoint()?;
+    // Resolve the endpoint ourselves and hand it to the exporter, rather than
+    // letting the exporter re-read env: the SDK gives the signal-specific var
+    // precedence even when it is empty, which would defeat the empty-string
+    // fallback in `select_endpoint`. Passing the resolved value makes our
+    // resolution the single source of truth.
+    let endpoint = metrics_endpoint()?;
 
     // Metrics are best-effort: a malformed endpoint must not take down the
     // indexer's core ingestion, so degrade to no metrics rather than panic.
-    let exporter = match opentelemetry_otlp::MetricExporter::builder().with_tonic().build() {
+    let exporter = match opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+    {
         Ok(exporter) => exporter,
         Err(err) => {
             tracing::warn!(?err, "failed to build OTLP metric exporter; metrics disabled");
