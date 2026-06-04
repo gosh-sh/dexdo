@@ -344,7 +344,7 @@ async fn apply_event_metadata(
     .await
     .with_context(|| {
         format!(
-            "update oracle_events.describe for eventlist_id={eventlist_id} event_id={}",
+            "update oracle_events metadata for eventlist_id={eventlist_id} event_id={}",
             item.event_id_decimal
         )
     })?
