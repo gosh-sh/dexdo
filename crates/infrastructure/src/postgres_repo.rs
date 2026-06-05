@@ -1040,16 +1040,23 @@ impl MarketReadRepository for PostgresReadModelRepository {
             Option<String>, // orderbook_address
             i32,            // num_outcomes
             i64,            // markets.id
+            i32,            // ref_tokens.decimals
         )> = sqlx::query_as(
-            r#"select event_id::text,
-                      oracle_list_hash::text,
-                      token_type,
-                      orderbook_address,
-                      num_outcomes,
-                      id
-                 from markets
-                where pmp_address = $1
-                  and last_reconciled_at is not null"#,
+            // INNER join ref_tokens for the quote-asset `decimals`. `_stakes`
+            // amounts are atoms at this scale; the balances use case scales by
+            // the full `decimals`. `markets.token_type` has an FK to
+            // ref_tokens, so the join never narrows a visible market.
+            r#"select m.event_id::text,
+                      m.oracle_list_hash::text,
+                      m.token_type,
+                      m.orderbook_address,
+                      m.num_outcomes,
+                      m.id,
+                      rt.decimals
+                 from markets m
+                 join ref_tokens rt on rt.token_type = m.token_type
+                where m.pmp_address = $1
+                  and m.last_reconciled_at is not null"#,
         )
         .bind(&market_address.0)
         .fetch_optional(&mut *tx)
@@ -1063,10 +1070,42 @@ impl MarketReadRepository for PostgresReadModelRepository {
             orderbook_address,
             num_outcomes,
             market_id,
+            decimals_raw,
         ) = match market {
             Some(m) => m,
             None => return Err(anyhow::anyhow!(dodex_domain::DomainError::InvalidMarketOrSymbol)),
         };
+
+        // `ref_tokens.decimals` is `integer` (signed) but non-negative and
+        // bounded by the same domain cap as price/quantity precision:
+        // <= MAX_DECIMAL_PRECISION (NUMERIC(38,…)). Validate here rather than a
+        // bare `u8::try_from`, which would admit 39..=255 to be caught only
+        // later in scale_decimal. Negative or above-cap is read-model
+        // corruption → MarketInconsistent (api-spec "decimals out of range → 503").
+        let decimals_scale = validate_decimal_scale(decimals_raw).map_err(|reason| {
+            tracing::warn!(
+                pmp = %market_address.0,
+                raw = decimals_raw,
+                max = MAX_DECIMAL_PRECISION,
+                reason = match reason {
+                    InvalidScale::Negative => "negative",
+                    InvalidScale::AboveMax => "above MAX_DECIMAL_PRECISION",
+                },
+                "ref_tokens.decimals out of range — read-model corruption",
+            );
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
+        // Total conversion: validate_decimal_scale already capped this at
+        // MAX_DECIMAL_PRECISION (38). Checked rather than `as u8` so a future
+        // cap raised above 255 can't silently truncate.
+        let decimals = u8::try_from(decimals_scale).map_err(|_| {
+            tracing::warn!(
+                pmp = %market_address.0,
+                raw = decimals_scale,
+                "decimals exceeds u8 after scale validation — read-model corruption"
+            );
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
 
         // `oracle_list_hash` is nullable at the schema level (pre-reconcile),
         // but we already gated on last_reconciled_at IS NOT NULL — a NULL here
@@ -1155,6 +1194,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
             oracle_list_hash,
             token_type,
             orderbook_address,
+            decimals,
             num_outcomes,
             outcomes,
         })
@@ -1762,20 +1802,20 @@ fn order_from_row(row: OrderRow) -> Option<Order> {
     }
 }
 
-/// Upper bound on `market_outcomes.price_precision` /
-/// `quantity_precision` accepted by the read path. Matches the SQL
-/// NUMERIC(38, …) cap — financial decimal precision never reaches this
-/// in practice, but `scale_uint_to_decimal` allocates `O(scale)` bytes
-/// per row via `"0".repeat(...)`, so an unbounded value on a corrupt
-/// row would OOM the API process on the first page that touches it.
-/// The `market_outcomes` column has no `CHECK` in 0001_initial.sql; this
-/// is the read-side defence.
+/// Upper bound on the decimal-scale columns read off the model:
+/// `market_outcomes.price_precision` / `quantity_precision` and
+/// `ref_tokens.decimals`. Matches the SQL NUMERIC(38, …) cap — financial
+/// decimal precision never reaches this in practice, but
+/// `scale_uint_to_decimal` allocates `O(scale)` bytes per row via
+/// `"0".repeat(...)`, so an unbounded value on a corrupt row would OOM the
+/// API process on the first page that touches it. Neither column carries a
+/// `CHECK` in 0001_initial.sql; this is the read-side defence.
 const MAX_DECIMAL_PRECISION: u32 = 38;
 
-/// Reason a `(price|quantity)_precision` value is unusable. Distinguishes
-/// the two corruption modes so callers can log them with the same field
-/// names while keeping their own surrounding context (skip-row vs
-/// MarketInconsistent).
+/// Reason a decimal-scale value (`(price|quantity)_precision` or
+/// `ref_tokens.decimals`) is unusable. Distinguishes the two corruption
+/// modes so callers can log them with the same field names while keeping
+/// their own surrounding context (skip-row vs MarketInconsistent).
 enum InvalidScale {
     Negative,
     AboveMax,

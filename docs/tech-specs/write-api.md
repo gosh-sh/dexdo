@@ -681,7 +681,7 @@ _Implementation tech spec to be filled in._
 
 ## `POST /api/v1/buyFullSet`
 
-Buys a full set of outcome tokens for one market by depositing `collateral` of the market's quote asset into the PMP. The chain entry point is `PrivateNote.splitFullSet`; the staging market-manager already drives the same ABI to seed initial MM liquidity ([market-manager `splitFullSet — freezing PMP and spawning OrderBook`](../../services/market-manager/src/main.rs)), and on a market sitting in `AWAITING_FREEZE` the first successful call also activates the OrderBook for everyone else. From the caller's standpoint the request and response are identical to any later call against the same market.
+Buys a full set of outcome tokens for one market by depositing `collateral` of the market's quote asset into the PMP. The chain entry point is `PrivateNote.splitFullSet`; on a market sitting in `AWAITING_FREEZE` the first successful call also activates the OrderBook, after which it stays active for all subsequent callers. From the caller's standpoint the request and response are identical to any later call against the same market.
 
 The handler runs three phases: request parsing → market resolution + status gate → collateral validation + chain submission. Each phase fails closed with its own error code (see [Error mapping](#error-mapping-3)).
 

@@ -153,6 +153,9 @@ async fn resolve_market_for_balances_returns_reconciled_row() {
     assert_eq!(res.oracle_list_hash, "24");
     assert_eq!(res.token_type, 1);
     assert_eq!(res.orderbook_address, ob);
+    // Quote-asset decimals are joined from ref_tokens (NACKL = 9). The
+    // balances use case scales `_stakes` atoms by the full decimals.
+    assert_eq!(res.decimals, 9);
     assert_eq!(res.num_outcomes, 2);
     assert_eq!(res.outcomes.len(), 2);
     assert_eq!(res.outcomes[0].outcome_id, 0);
@@ -434,6 +437,104 @@ async fn resolve_market_for_balances_negative_token_type_fails_closed() {
               pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
               orderbook_address, num_outcomes, last_reconciled_at)
            values ($1, 'neg-tt', -1, '__NEG_TT__', 42::numeric, 24::numeric,
+                   $2, 1, now())"#,
+    )
+    .bind(pmp)
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo.resolve_market_for_balances(&MarketAddress(pmp.to_string())).await.unwrap_err();
+    let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
+    assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
+}
+
+#[tokio::test]
+async fn resolve_market_for_balances_decimals_above_max_fails_closed() {
+    // The resolve path validates the joined `ref_tokens.decimals` via
+    // validate_decimal_scale (cap MAX_DECIMAL_PRECISION = 38), NOT a bare
+    // u8::try_from (which would admit up to 255). 39 sits in that gap, so it
+    // distinguishes the two validators: it must lift to MarketInconsistent
+    // rather than be handed to scale_decimal, where the over-cap scale would
+    // blow up the allocation.
+    let Some(pool) = setup().await else { return };
+    let pmp = "0:dec-overmax-bal-pmp";
+    let ob = "0:dec-overmax-bal-ob";
+    sqlx::query("delete from markets where pmp_address = $1")
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Sentinel ref_tokens row with an out-of-cap decimals (39). All `not null`
+    // columns filled; only `decimals` is read by the code under test.
+    sqlx::query(
+        r#"insert into ref_tokens (
+              token_type, token_code, decimals,
+              min_notional, lot_size, tick_size_bps,
+              price_precision, quantity_precision)
+                values (39039, '__DEC39__', 39,
+                        0::numeric, 0::numeric, 0::numeric, 0, 0)
+           on conflict (token_type) do nothing"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"insert into markets (
+              pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
+              orderbook_address, num_outcomes, last_reconciled_at)
+           values ($1, 'dec-overmax', 39039, '__DEC39__', 42::numeric, 24::numeric,
+                   $2, 1, now())"#,
+    )
+    .bind(pmp)
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo.resolve_market_for_balances(&MarketAddress(pmp.to_string())).await.unwrap_err();
+    let dom = err.downcast_ref::<dodex_domain::DomainError>().expect("DomainError");
+    assert!(matches!(dom, dodex_domain::DomainError::MarketInconsistent));
+}
+
+#[tokio::test]
+async fn resolve_market_for_balances_negative_decimals_fails_closed() {
+    // `ref_tokens.decimals` is `integer` (signed) with no `CHECK`. The resolve
+    // path validates the joined value via validate_decimal_scale, whose
+    // Negative arm (u32::try_from on a sub-zero raw) must lift to
+    // MarketInconsistent rather than be handed to scale_decimal. Pairs with
+    // resolve_market_for_balances_decimals_above_max_fails_closed, which covers
+    // the AboveMax arm.
+    let Some(pool) = setup().await else { return };
+    let pmp = "0:dec-neg-bal-pmp";
+    let ob = "0:dec-neg-bal-ob";
+    sqlx::query("delete from markets where pmp_address = $1")
+        .bind(pmp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Sentinel ref_tokens row with a negative decimals. All `not null` columns
+    // filled; only `decimals` is read by the code under test.
+    sqlx::query(
+        r#"insert into ref_tokens (
+              token_type, token_code, decimals,
+              min_notional, lot_size, tick_size_bps,
+              price_precision, quantity_precision)
+                values (39040, '__DECNEG__', -3,
+                        0::numeric, 0::numeric, 0::numeric, 0, 0)
+           on conflict (token_type) do nothing"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"insert into markets (
+              pmp_address, name, token_type, token_code, event_id, oracle_list_hash,
+              orderbook_address, num_outcomes, last_reconciled_at)
+           values ($1, 'dec-neg', 39040, '__DECNEG__', 42::numeric, 24::numeric,
                    $2, 1, now())"#,
     )
     .bind(pmp)

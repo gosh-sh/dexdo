@@ -9,8 +9,8 @@
 //! into that directory, keeping at most `LOG_MAX_FILES` (default 14) of them.
 //!
 //! Lives in its own crate — free of the heavy `dodex-infrastructure`
-//! dependency graph — so the standalone `market-manager` workspace can reuse
-//! it by path, exactly like `dodex-chain`.
+//! dependency graph — so a standalone workspace can reuse it by path,
+//! exactly like `dodex-chain`.
 
 use std::env;
 

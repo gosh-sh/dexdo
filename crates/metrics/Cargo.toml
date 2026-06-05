@@ -1,0 +1,14 @@
+[package]
+name = "dodex-metrics"
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Acki-Nacki-Node-License"
+
+# Inline pins (not `.workspace = true`) so this crate can be consumed
+# standalone from a separate Cargo workspace or Docker build. Same rationale as
+# `crates/logging` and `crates/chain`.
+[dependencies]
+opentelemetry = { version = "0.27", features = ["metrics"] }
+opentelemetry-otlp = { version = "0.27", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+tracing = "0.1"

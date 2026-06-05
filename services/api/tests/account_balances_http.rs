@@ -171,11 +171,12 @@ async fn happy_path_returns_outcomes_sorted_by_id() {
     let Some((service, pool, _kek, pn)) = common::setup().await else { return };
     let (pmp, ob) = seed_market(&pool, "happy-bal").await;
     let pn_addr = seeded_pn_address(&pool).await;
-    seed_open_sell(&pool, &ob, 1001, 1, &pn_addr, "100").await; // outcome 1: 1.00 locked
-    seed_open_sell(&pool, &ob, 1002, 1, &pn_addr, "50").await; // outcome 1: +0.50 = 1.50 total
+    // Token-atom scale (decimals=9), matching on-chain order amounts / _stakes.amount.
+    seed_open_sell(&pool, &ob, 1001, 1, &pn_addr, "1000000000").await; // outcome 1: 1.0 locked
+    seed_open_sell(&pool, &ob, 1002, 1, &pn_addr, "500000000").await; // outcome 1: +0.5 = 1.5 total
 
     pn.set_stake(Some(PnStake {
-        amount: vec!["1000".into(), "500".into()], // outcome 0=10.00, 1=5.00
+        amount: vec!["10000000000".into(), "5000000000".into()], // outcome 0=10, 1=5 tokens
         debt_amount: vec!["0".into(), "0".into()],
         coupons_amount: vec!["0".into(), "0".into()],
     }));
@@ -198,12 +199,12 @@ async fn happy_path_returns_outcomes_sorted_by_id() {
     assert_eq!(body.balances.len(), 2);
     assert_eq!(body.balances[0].outcome_id, 0);
     assert_eq!(body.balances[0].symbol, "happy-bal-NO");
-    assert_eq!(body.balances[0].free, "10.00");
-    assert_eq!(body.balances[0].locked_in_orders, "0.00");
+    assert_eq!(body.balances[0].free, "10.000000000");
+    assert_eq!(body.balances[0].locked_in_orders, "0.000000000");
     assert_eq!(body.balances[1].outcome_id, 1);
     assert_eq!(body.balances[1].symbol, "happy-bal-YES");
-    assert_eq!(body.balances[1].free, "5.00");
-    assert_eq!(body.balances[1].locked_in_orders, "1.50");
+    assert_eq!(body.balances[1].free, "5.000000000");
+    assert_eq!(body.balances[1].locked_in_orders, "1.500000000");
 }
 
 #[tokio::test]
@@ -211,7 +212,7 @@ async fn no_stake_yields_zero_free_with_nonzero_locked() {
     let Some((service, pool, _kek, pn)) = common::setup().await else { return };
     let (pmp, ob) = seed_market(&pool, "nostake-bal").await;
     let pn_addr = seeded_pn_address(&pool).await;
-    seed_open_sell(&pool, &ob, 2001, 0, &pn_addr, "75").await;
+    seed_open_sell(&pool, &ob, 2001, 0, &pn_addr, "750000000").await; // 0.75 locked (atoms)
     pn.set_stake(None);
 
     let ts = now_ms();
@@ -227,11 +228,11 @@ async fn no_stake_yields_zero_free_with_nonzero_locked() {
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_json::<BalancesBody>().await.expect("ok");
     assert_eq!(body.balances.len(), 2);
-    assert_eq!(body.balances[0].free, "0.00");
-    assert_eq!(body.balances[0].locked_in_orders, "0.75");
+    assert_eq!(body.balances[0].free, "0.000000000");
+    assert_eq!(body.balances[0].locked_in_orders, "0.750000000");
     assert_eq!(body.balances[1].outcome_id, 1);
-    assert_eq!(body.balances[1].free, "0.00");
-    assert_eq!(body.balances[1].locked_in_orders, "0.00");
+    assert_eq!(body.balances[1].free, "0.000000000");
+    assert_eq!(body.balances[1].locked_in_orders, "0.000000000");
 }
 
 #[tokio::test]
@@ -314,7 +315,7 @@ async fn terminal_market_serves_balances() {
     .await
     .unwrap();
     pn.set_stake(Some(PnStake {
-        amount: vec!["100".into(), "200".into()],
+        amount: vec!["1000000000".into(), "2000000000".into()], // 1 / 2 tokens (atoms)
         debt_amount: vec!["0".into(), "0".into()],
         coupons_amount: vec!["0".into(), "0".into()],
     }));
@@ -331,10 +332,10 @@ async fn terminal_market_serves_balances() {
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_json::<BalancesBody>().await.expect("balances body");
     assert_eq!(body.balances.len(), 2);
-    // outcome 0: free = 100 scaled by quantity_precision=2 → "1.00"
-    assert_eq!(body.balances[0].free, "1.00");
-    // outcome 1: free = 200 scaled → "2.00"
-    assert_eq!(body.balances[1].free, "2.00");
+    // outcome 0: free = 1e9 atoms scaled by decimals=9 → "1.000000000"
+    assert_eq!(body.balances[0].free, "1.000000000");
+    // outcome 1: free = 2e9 atoms → "2.000000000"
+    assert_eq!(body.balances[1].free, "2.000000000");
 }
 
 #[tokio::test]
@@ -386,8 +387,8 @@ async fn cross_tenant_isolation_excludes_other_owner_orders() {
     let pn1 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY).await;
     let pn2 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY_2).await;
 
-    seed_open_sell(&pool, &ob, 9901, 0, &pn1, "100").await;
-    seed_open_sell(&pool, &ob, 9902, 0, &pn2, "999").await;
+    seed_open_sell(&pool, &ob, 9901, 0, &pn1, "1000000000").await; // 1.0 (atoms)
+    seed_open_sell(&pool, &ob, 9902, 0, &pn2, "999000000000").await; // pn2, must be excluded
 
     pn.set_stake_for(
         &pn1,
@@ -410,9 +411,9 @@ async fn cross_tenant_isolation_excludes_other_owner_orders() {
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_json::<BalancesBody>().await.expect("ok");
-    // outcome 0: pn1 locked 100 / quantity_precision=2 → "1.00"
-    // pn2's 999 must NOT contribute.
-    assert_eq!(body.balances[0].locked_in_orders, "1.00");
+    // outcome 0: pn1 locked 1e9 atoms / decimals=9 → "1.000000000"
+    // pn2's amount must NOT contribute.
+    assert_eq!(body.balances[0].locked_in_orders, "1.000000000");
 }
 
 #[tokio::test]
@@ -426,8 +427,8 @@ async fn cross_tenant_isolation_symmetric_from_second_account() {
     let pn1 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY).await;
     let pn2 = common::seeded_pn_address_for_key(&pool, SEED_API_KEY_2).await;
 
-    seed_open_sell(&pool, &ob, 9911, 0, &pn1, "100").await;
-    seed_open_sell(&pool, &ob, 9912, 0, &pn2, "999").await;
+    seed_open_sell(&pool, &ob, 9911, 0, &pn1, "1000000000").await; // pn1, must be excluded
+    seed_open_sell(&pool, &ob, 9912, 0, &pn2, "9990000000").await; // 9.99 (atoms)
 
     pn.set_stake_for(
         &pn2,
@@ -450,9 +451,9 @@ async fn cross_tenant_isolation_symmetric_from_second_account() {
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_json::<BalancesBody>().await.expect("ok");
-    // outcome 0: pn2 locked 999 / quantity_precision=2 → "9.99"
-    // pn1's "1.00" must NOT appear; the value must be exactly "9.99".
-    assert_eq!(body.balances[0].locked_in_orders, "9.99");
+    // outcome 0: pn2 locked 9.99e9 atoms / decimals=9 → "9.990000000"
+    // pn1's amount must NOT appear; the value must be exactly "9.990000000".
+    assert_eq!(body.balances[0].locked_in_orders, "9.990000000");
 }
 
 #[tokio::test]
@@ -490,9 +491,9 @@ async fn cross_tenant_isolation_free_side_does_not_leak_other_pn_stake() {
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_json::<BalancesBody>().await.expect("ok");
-    // pn2 has no stake registered; pn1's "700"/"300" must NOT appear.
-    assert_eq!(body.balances[0].free, "0.00");
-    assert_eq!(body.balances[1].free, "0.00");
+    // pn2 has no stake registered; pn1's amounts must NOT appear.
+    assert_eq!(body.balances[0].free, "0.000000000");
+    assert_eq!(body.balances[1].free, "0.000000000");
 }
 
 #[tokio::test]
@@ -520,7 +521,7 @@ async fn production_hasher_is_wired_to_stake_lookup() {
     pn.set_stake_for_hash(
         &expected_hash,
         Some(PnStake {
-            amount: vec!["700".into(), "300".into()],
+            amount: vec!["7000000000".into(), "3000000000".into()], // 7 / 3 tokens (atoms)
             debt_amount: vec!["0".into(), "0".into()],
             coupons_amount: vec!["0".into(), "0".into()],
         }),
@@ -540,8 +541,8 @@ async fn production_hasher_is_wired_to_stake_lookup() {
     let body = resp.take_json::<BalancesBody>().await.expect("balances body");
     // Non-zero free => the production hasher emitted exactly `expected_hash`
     // and the handler looked up `_stakes` with that key.
-    assert_eq!(body.balances[0].free, "7.00");
-    assert_eq!(body.balances[1].free, "3.00");
+    assert_eq!(body.balances[0].free, "7.000000000");
+    assert_eq!(body.balances[1].free, "3.000000000");
 }
 
 #[tokio::test]
@@ -576,8 +577,8 @@ async fn stake_registered_at_wrong_hash_yields_zero_free() {
         .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body = resp.take_json::<BalancesBody>().await.expect("balances body");
-    assert_eq!(body.balances[0].free, "0.00");
-    assert_eq!(body.balances[1].free, "0.00");
+    assert_eq!(body.balances[0].free, "0.000000000");
+    assert_eq!(body.balances[1].free, "0.000000000");
 }
 
 #[tokio::test]

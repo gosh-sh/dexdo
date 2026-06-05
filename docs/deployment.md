@@ -47,8 +47,6 @@ Both services read GraphQL; only the `api` writes to the chain gateway.
 > `blockchain_events` stream and reads account BOCs — it is **not** a generic
 > GraphQL server you can swap for an arbitrary schema.
 
-`services/market-manager` is a separate, optional service and is out of scope here.
-
 ## Prerequisites
 
 - A server with Docker Engine and the Docker Compose plugin.
