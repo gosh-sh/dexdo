@@ -405,7 +405,7 @@ Top-level body fields:
 | --- | --- | --- |
 | `marketAddress` | `MarketAddress` | Mandatory. |
 | `symbol` | `Symbol` | Mandatory. |
-| `orders` | `Vec<BatchOrderInputItem>` | Mandatory and non-empty. Maximum length equals the resolved outcome's `max_batch_size`. |
+| `orders` | `Vec<BatchOrderInputItem>` | Mandatory and non-empty. Maximum length equals the configured `chain.max_batch_size` (advertised as `maxBatchSize` in `/api/v1/markets`). |
 
 Each `BatchOrderInputItem` is shaped the same as the body of `POST /api/v1/order` minus `marketAddress` / `symbol` (the chain ABI takes those once per batch, not per item). An unknown enum value (`side`, `type`, `timeInForce`) on any item returns `InvalidParameter` → 400.
 
@@ -424,11 +424,10 @@ The resolved row supplies the chain-level fields once for the whole batch:
 | `market_outcomes.price_precision` / `tick_size` | Per-item price scaling and tick-size validation. |
 | `market_outcomes.quantity_precision` / `step_size` | Per-item quantity scaling and step-size validation. |
 | `market_outcomes.min_notional` | Per-item notional validation. |
-| `market_outcomes.max_batch_size` | Length cap for `orders[]`. |
 
 ### Batch size cap
 
-The cap is sourced from `market_outcomes.max_batch_size` on the resolved outcome — the same value `/api/v1/markets` returns. The chain enforces its own `MAX_BATCH_SIZE` (`contracts/modifiers/modifiers.sol`); the read-model value is the public contract clients can act on, so the local check uses it rather than a hard-coded constant. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
+The cap is the api config knob `chain.max_batch_size` — the same value `/api/v1/markets` advertises as `maxBatchSize`, so the promise and the enforcement share one source. It manually mirrors the chain's compiled-in per-side `MAX_BATCH_SIZE` (`contracts/modifiers/modifiers.sol`, 10 today; the chain exposes no getter for it) and must not exceed it. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
 
 ### Per-item input validation
 
@@ -456,10 +455,11 @@ placeBatch(
   orders,          // OrderBookOrder[]; each item carries
                    //   outcomeId, isBuy, flags, price, amount,
                    //   minAmount, epochId, clientOrderId
+  cancelIds,       // uint128[]; this endpoint always sends []
 )
 ```
 
-Per-item `minAmount` and `epochId` stay at 0 — same constants as `placeOrder` (neither is exposed by api-spec and neither has a per-order meaning in this version of the public API).
+Per-item `minAmount` and `epochId` stay at 0 — same constants as `placeOrder` (neither is exposed by api-spec and neither has a per-order meaning in this version of the public API). `cancelIds` is the cancellation side of the chain's atomic batch — `placeBatch` is the single batch entry point and processes both sides in one `OrderBook.executeBatch` dispatch. `POST /api/v1/batchOrders` is placement-only and always sends `cancelIds = []`; the populated side belongs to `DELETE /api/v1/batchOrders`.
 
 Sender boundary: the existing `ChainOrderSender` trait grows a third method `async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError>`. The production `BeeDexChainSender` impl wraps `bee_dex::Dex::place_batch`, reuses `build_signer` for pubkey/seckey re-encoding and `classify_chain_outcome` for the timeout / exit-code translation. A dedicated `chain.place_batch_timeout_ms` config knob bounds the per-call wait; `ApiConfig::validate` pins `server.request_timeout_ms > chain.place_batch_timeout_ms` at boot so the HTTP timeout cannot fire while a batch submission is still in flight.
 
@@ -488,7 +488,7 @@ Same three-class split as `POST /api/v1/order`:
    | chain `exit_code` | source | `DomainError` |
    | --- | --- | --- |
    | `129` `ERR_INVALID_PARAMS` | `clientOrderId` collision against the PN's `_clientOrderIds` map — covers both intra-batch duplicates AND any still-live coid from an earlier `placeOrder` on the same PN. The chain also raises 129 for `minAmount != 0` on any MARKET order, but our wire payload always sends `minAmount = 0`. | `InvalidParameter` → 400 / -1130 |
-   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the read-model's `max_batch_size` drifted from the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
+   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the configured `chain.max_batch_size` drifted above the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
    | `168` `ERR_NOTIONAL_OVERFLOW` | `price * amount` overflowed uint256 inside `placeBatch` (only the chain checks for this; the read-model has no equivalent ceiling) | `OrderValidationFailed` → 400 / -2010 |
 
 3. **OrderBook chain-side, surfaced asynchronously** — same shape as the single-order path: the internal `executeBatch` message runs in a later transaction and `OrderBook.Rejected` events (e.g. queue overflow) are visible only through the indexer.
@@ -533,7 +533,7 @@ Same per-PN serial constraint as the single-order path — `placeBatch` takes th
 
 ## `DELETE /api/v1/batchOrders`
 
-The handler runs three phases: request parsing → market/outcome resolution and bulk order resolution → chain submission. Layout mirrors `DELETE /api/v1/order` lifted from one order to N, with the same batch-level resolution gate `POST /api/v1/batchOrders` uses. Each phase fails closed with its own error code (see [Batch cancel error mapping](#error-mapping-3)). The on-chain cancel is optimistic in the same sense as the single-order DELETE: `PrivateNote.cancelBatch` accepts the request atomically and forwards one `OrderBook.executeBatch` message; per-order removal from the book and the projection into [`live_orders`](data-schema.md#live_orders) happen asynchronously through the indexer.
+The handler runs three phases: request parsing → market/outcome resolution and bulk order resolution → chain submission. Layout mirrors `DELETE /api/v1/order` lifted from one order to N, with the same batch-level resolution gate `POST /api/v1/batchOrders` uses. Each phase fails closed with its own error code (see [Batch cancel error mapping](#error-mapping-3)). The on-chain cancel is optimistic in the same sense as the single-order DELETE: the chain has no standalone batch-cancel method — `PrivateNote.placeBatch` is the atomic batch entry point, and this endpoint dispatches it with an empty placements side (`orders = []`, `cancelIds` populated), forwarding one `OrderBook.executeBatch` message; per-order removal from the book and the projection into [`live_orders`](data-schema.md#live_orders) happen asynchronously through the indexer.
 
 ### Authorization
 
@@ -549,7 +549,7 @@ Top-level body fields:
 | --- | --- | --- |
 | `marketAddress` | `MarketAddress` | Mandatory. |
 | `symbol` | `Symbol` | Mandatory. |
-| `orderIds` | `Vec<String>` | Mandatory and non-empty. Maximum length equals the resolved outcome's `max_batch_size`. Each element is parsed as `u64::from_str` in the handler (`build_cancel_batch_orders_input`); out-of-range or non-numeric → `InvalidParameter` → 400 / -1130 — same `arbitrary_precision` constraint documented for the single-order path. A blank or whitespace-only element is treated as an absent slot and surfaces as `MissingParameter` → 400 / -1102, matching the single-order DELETE's handling of a blank `orderId`. |
+| `orderIds` | `Vec<String>` | Mandatory and non-empty. Maximum length equals the configured `chain.max_batch_size`. Each element is parsed as `u64::from_str` in the handler (`build_cancel_batch_orders_input`); out-of-range or non-numeric → `InvalidParameter` → 400 / -1130 — same `arbitrary_precision` constraint documented for the single-order path. A blank or whitespace-only element is treated as an absent slot and surfaces as `MissingParameter` → 400 / -1102, matching the single-order DELETE's handling of a blank `orderId`. |
 
 Intra-batch duplicate `orderId` values are rejected with `InvalidParameter` → 400 / -1130 before the chain submission. Duplicates would produce two `PENDING_CANCEL` receipts for the same id (useless to the caller) and waste one slot in the chain's `MAX_BATCH_SIZE` window; the local check keeps the surface honest and the chain's `_busy` budget intact.
 
@@ -561,14 +561,13 @@ The resolved row supplies the chain-level fields once for the whole batch:
 
 | Source column | Bound to |
 | --- | --- |
-| `markets.event_id` | `cancelBatch.eventId` (uint256). |
-| `markets.oracle_list_hash` | `cancelBatch.oracleListHash` (uint256). |
-| `markets.token_type` | `cancelBatch.tokenType` (uint32). |
-| `market_outcomes.max_batch_size` | Length cap for `orderIds[]`. |
+| `markets.event_id` | `placeBatch.eventId` (uint256). |
+| `markets.oracle_list_hash` | `placeBatch.oracleListHash` (uint256). |
+| `markets.token_type` | `placeBatch.tokenType` (uint32). |
 
 ### Batch size cap
 
-Sourced from `market_outcomes.max_batch_size` on the resolved outcome, same as `POST /api/v1/batchOrders`. The chain's own `MAX_BATCH_SIZE` (5 today) is the ceiling the local check must not exceed; using the read-model value keeps the public surface aligned with `/api/v1/markets`. An empty `orderIds[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
+Sourced from the api config knob `chain.max_batch_size`, same as `POST /api/v1/batchOrders`. The chain's own `MAX_BATCH_SIZE` (10 today, applied independently to the `orders` and `cancelIds` sides of `placeBatch`) is the ceiling the configured value must not exceed; serving `/api/v1/markets` from the same knob keeps the public surface aligned with the enforcement. An empty `orderIds[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
 
 ### Order resolution
 
@@ -583,24 +582,25 @@ The SELECT also returns each row's `live_orders.client_order_id` (echoed in the 
 
 `MarketReadRepository::resolve_for_cancel_batch` mirrors `resolve_for_cancel`'s join shape (live_orders ⨝ markets ⨝ market_outcomes) and returns `Option<CancelBatchResolution>`. The resolution carries `event_id`, `oracle_list_hash`, `token_type`, `market_status` once (the SELECT filter `m.pmp_address = $1 AND mo.symbol = $2` pins every matched row to the same `(markets, market_outcomes)` snapshot) and `orders: HashMap<u64, OrderForCancelBatch{client_order_id}>` keyed by the chain `order_id`. The trait contract — every key in `orders` is a member of `input.order_ids[]` — is enforced by the `lo.order_id = ANY($3::text[]::numeric[])` predicate; HashMap natural uniqueness plus the `(orderbook_address, order_id)` primary key guarantees no key collisions. The use case looks each input id up against the map with `orders.remove(&id).ok_or(MarketInconsistent)` — a `None` is a trait-contract violation, never a panic — and assembles the response in `input.order_ids` order. A shortfall (matched count below input length, including the `None` case when zero rows joined) surfaces as `UnknownOrder` for the whole batch.
 
-The bulk SELECT projects the same market-timing columns as `resolve_for_cancel`. Because every matched row shares one `(markets, market_outcomes)` snapshot, the infrastructure layer runs `compute_status` once against the head row and projects the result into `CancelBatchResolution.market_status`. The use case re-checks `resolution.market_status == Trading` after the shortfall gate and rejects with `OrderValidationFailed` otherwise. Single-cancel achieves the same atomicity in one SELECT; for the batch path the placement-shape lookup (`resolve_for_new_order`) and the bulk order resolution run in two independent statements, and without the post-SELECT re-check a reconciler commit between them could let `cancelBatch` reach the chain on a market that had just left `Trading`.
+The bulk SELECT projects the same market-timing columns as `resolve_for_cancel`. Because every matched row shares one `(markets, market_outcomes)` snapshot, the infrastructure layer runs `compute_status` once against the head row and projects the result into `CancelBatchResolution.market_status`. The use case re-checks `resolution.market_status == Trading` after the shortfall gate and rejects with `OrderValidationFailed` otherwise. Single-cancel achieves the same atomicity in one SELECT; for the batch path the placement-shape lookup (`resolve_for_new_order`) and the bulk order resolution run in two independent statements, and without the post-SELECT re-check a reconciler commit between them could let the batch cancel reach the chain on a market that had just left `Trading`.
 
 ### Chain submission
 
-Encode and dispatch a `PrivateNote.cancelBatch` external message against `trading_pn.pn_address`. ABI from `contracts/PrivateNote.sol::cancelBatch`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfCancelBatch`:
+Encode and dispatch a `PrivateNote.placeBatch` external message against `trading_pn.pn_address`, with the placements side empty — `placeBatch` is the chain's single atomic batch entry and carries both placements and cancellations. ABI from `contracts/PrivateNote.sol::placeBatch`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceBatch`:
 
 ```text
-cancelBatch(
+placeBatch(
   eventId,         // uint256, markets.event_id
   oracleListHash,  // uint256, markets.oracle_list_hash
   tokenType,       // uint32,  markets.token_type
-  orderIds,        // uint128[] ABI; each capped at u64 today (see Request parsing)
+  orders,          // OrderBookOrder[]; this endpoint always sends []
+  cancelIds,       // uint128[] ABI; each capped at u64 today (see Request parsing)
 )
 ```
 
-`PrivateNote.cancelBatch` performs no ownership or existence check on the ids — only the per-PN busy guard (`require(!_busy.hasValue(), ERR_NOTE_BUSY)`) and the chain-side range guards (`ERR_EMPTY_BATCH`, `ERR_BATCH_TOO_LARGE`), then forwards one `OrderBook.executeBatch` message with an empty placements array and the orderIds for cancellation. The PN sets `_pendingBatchActive = true` and holds `_busy` until `onBatchComplete` arrives back from OrderBook — same busy-window shape as `placeBatch`, longer than single-order cancel. The OrderBook side runs in a separate transaction; per-order `_doCancel` silently no-ops on orders that are no longer on the book or whose owner doesn't match. See [Batch cancel failure surface](#failure-surface-3).
+`PrivateNote.placeBatch` performs no ownership or existence check on the ids — only the per-PN busy guard (`require(!_busy.hasValue(), ERR_NOTE_BUSY)`) and the chain-side range guards (`ERR_EMPTY_BATCH`, `ERR_BATCH_TOO_LARGE`), then forwards one `OrderBook.executeBatch` message with an empty placements array and the `cancelIds` for cancellation. The PN sets `_pendingBatchActive = true` and holds `_busy` until `onBatchComplete` arrives back from OrderBook — same busy-window shape as the placement batch, longer than single-order cancel. The OrderBook side runs in a separate transaction; per-order `_doCancel` silently no-ops on orders that are no longer on the book or whose owner doesn't match. See [Batch cancel failure surface](#failure-surface-3).
 
-Sender boundary: `ChainOrderSender::cancel_batch_order(&self, payload: CancelBatchOrderPayload) -> Result<(), DomainError>` is the cancel-batch entry on the trait. The production `BeeDexChainSender` impl wraps `bee_dex::Dex::cancel_batch`, reuses `build_signer` and `classify_chain_outcome` from `crates/infrastructure/src/chain_sender.rs`. A dedicated `chain.cancel_batch_timeout_ms` config knob bounds the per-call wait; `ApiConfig::validate` pins `server.request_timeout_ms > chain.cancel_batch_timeout_ms` at boot so the HTTP timeout cannot fire while a submission is still in flight.
+Sender boundary: `ChainOrderSender::cancel_batch_order(&self, payload: CancelBatchOrderPayload) -> Result<(), DomainError>` is the cancel-batch entry on the trait. The production `BeeDexChainSender` impl wraps `bee_dex::Dex::place_batch` with `orders = []`, reuses `build_signer` and `classify_chain_outcome` from `crates/infrastructure/src/chain_sender.rs`. A dedicated `chain.cancel_batch_timeout_ms` config knob bounds the per-call wait; `ApiConfig::validate` pins `server.request_timeout_ms > chain.cancel_batch_timeout_ms` at boot so the HTTP timeout cannot fire while a submission is still in flight.
 
 ### Response
 
@@ -611,7 +611,7 @@ One `PENDING_CANCEL` envelope per accepted item, returned as a flat array in req
 | `orderId` | Echoed from the request item. |
 | `clientOrderId` | Per-item `live_orders.client_order_id` from the resolved row. Empty string when the column is NULL. |
 | `transactTime` | `now_pair()` captured once before use-case dispatch, repeated for every item — one chain submission, one moment of acceptance. |
-| `status` | Always `"PENDING_CANCEL"` — `PrivateNote.cancelBatch` has accepted the request and forwarded to OrderBook, but no order has been removed from the book yet. Each `OrderCancelled` event surfaces individually through the indexer. |
+| `status` | Always `"PENDING_CANCEL"` — the cancel-only `PrivateNote.placeBatch` has accepted the request and forwarded to OrderBook, but no order has been removed from the book yet. Each `OrderCancelled` event surfaces individually through the indexer. |
 
 ### Failure surface
 
@@ -619,17 +619,17 @@ Three failure classes — two synchronous, one async — same split as `DELETE /
 
 1. **Pre-submit, surfaced synchronously** — request shape, market/outcome resolution, batch size cap, intra-batch duplicate check, bulk order resolution. First failure rejects the whole request; no chain message is sent. Mapped per [Batch cancel error mapping](#error-mapping-3).
 
-2. **PrivateNote chain-side, surfaced synchronously** — `bee_dex::Dex::cancel_batch` awaits PN's execution. The single-order cancel exit codes carry over; the batch path adds the two range guards already mapped on the placement side:
+2. **PrivateNote chain-side, surfaced synchronously** — the cancel-only `bee_dex::Dex::place_batch` awaits PN's execution. The single-order cancel exit codes carry over; the batch path adds the two range guards already mapped on the placement side:
 
    | chain `exit_code` | source | `DomainError` |
    | --- | --- | --- |
    | `121` `ERR_NOTE_BUSY` | another op from this PN is still in flight (`_busy` not cleared) | `OrderPnBusy` → 429 / -2014 |
-   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the read-model's `max_batch_size` drifted from the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
+   | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the configured `chain.max_batch_size` drifted above the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
    | any other `tvm_exit` code | unmapped chain code | `Unexpected` → 500 / -1000, logged at `error` for ops triage |
 
 3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancels from its internal queue in a later transaction. The single-order DELETE's three async outcomes (race with fill/earlier cancel, owner mismatch under read-model corruption, queue overflow) extend to the batch case **per order**: the batch as a whole can have some ids land as `CANCELED`, some as `FILLED` (matching raced the cancel), and — under queue overflow — some remain `OPEN`. The indexer projects each outcome independently into `live_orders` (stored status `CANCELLED` / `FILLED`); clients reconcile by polling `/api/v1/orders`, which surfaces each id with the public-spec status `CANCELED` or `FILLED`.
 
-   An HTTP 200 `PENDING_CANCEL` array is therefore not a guarantee that every cancel will land — it confirms only that `PrivateNote.cancelBatch` accepted the request.
+   An HTTP 200 `PENDING_CANCEL` array is therefore not a guarantee that every cancel will land — it confirms only that `PrivateNote.placeBatch` accepted the request.
 
 Transport-level failures (gateway drop, decode error) collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error`, same as the placement and single-cancel paths.
 
@@ -656,7 +656,7 @@ Transport-level failures (gateway drop, decode error) collapse to `Unexpected` �
 | --- | --- |
 | `crates/domain` | No new types — `OrderStatus::PendingCancel` is reused. |
 | `crates/application` | `CancelBatchOrdersInput` (HTTP-shaped), `CancelBatchOrderPayload { items: Vec<CancelBatchPayloadItem{order_id, client_order_id}> }` (chain-shaped, one per batch), `CancelledBatchOrder` per-item (`order_id`, `client_order_id`); `CancelBatchOrdersUseCase`. Extends `ChainOrderSender` with `cancel_batch_order`. Extends `MarketReadRepository` with `resolve_for_cancel_batch(market_address, symbol, order_ids, owner_pn_address, now)` returning `Option<CancelBatchResolution{event_id, oracle_list_hash, token_type, market_status, orders: HashMap<u64, OrderForCancelBatch{client_order_id}>}>` — the use case looks each input id up via `orders.remove(&id)`. |
-| `crates/infrastructure` | `BeeDexChainSender::cancel_batch_order` wraps `bee_dex::Dex::cancel_batch` and packs `payload.items.iter().map(|i| i.order_id as u128)` into the `uint128[]` chain ABI. `PostgresReadModelRepository::resolve_for_cancel_batch` runs the bulk SELECT filtered by `lo.order_id = ANY($3::text[]::numeric[])` (cast on the bind side, preserving PK index use) and assembles the result into a `HashMap` keyed on chain `order_id`. `ChainSection` carries `cancel_batch_timeout_ms` with the same validation invariant as the other timeouts. |
+| `crates/infrastructure` | `BeeDexChainSender::cancel_batch_order` wraps `bee_dex::Dex::place_batch` (`orders = []`) and packs `payload.items.iter().map(|i| i.order_id as u128)` into the `cancelIds` `uint128[]` chain ABI. `PostgresReadModelRepository::resolve_for_cancel_batch` runs the bulk SELECT filtered by `lo.order_id = ANY($3::text[]::numeric[])` (cast on the bind side, preserving PK index use) and assembles the result into a `HashMap` keyed on chain `order_id`. `ChainSection` carries `cancel_batch_timeout_ms` with the same validation invariant as the other timeouts. |
 | `services/api` | `delete_batch_orders` handler attached as `Router::with_path("api/v1/batchOrders").delete(delete_batch_orders)` on the existing auth subrouter (alongside `.post(create_batch_orders)`). HMAC enforced by `auth_hoop`; permission by `require_auth(Permission::Trade)`. `run()` passes `Duration::from_millis(config.chain.cancel_batch_timeout_ms)` to the `BeeDexChainSender` constructor. |
 
 Use case constructors take trait objects; `services/api/tests/cancel_batch_orders_http.rs` injects `FakeRepo` + `FakeAuthenticator` + a `RecordingCancelBatchSender` variant that records cancel-batch payloads, matching the triad established by `create_batch_orders_http.rs`.
@@ -671,7 +671,7 @@ The backend stores no inflight cancel state and does not retry on its own. Dupli
 
 ### Concurrency
 
-Same per-PN serial constraint as the single-order paths and `placeBatch` — `cancelBatch` takes the `_busy` lock and holds it until `onBatchComplete` arrives. A DELETE `/batchOrders` racing any other placement or cancellation from the same account surfaces as `OrderPnBusy` → 429 / -2014. Submitting one batch instead of N sequential DELETEs is the canonical way to cancel multiple orders without per-call back-pressure today — one chain message, one `_busy` lock, one `onBatchComplete` callback.
+Same per-PN serial constraint as the single-order paths and the placement batch — the cancel-only `placeBatch` takes the `_busy` lock and holds it until `onBatchComplete` arrives. A DELETE `/batchOrders` racing any other placement or cancellation from the same account surfaces as `OrderPnBusy` → 429 / -2014. Submitting one batch instead of N sequential DELETEs is the canonical way to cancel multiple orders without per-call back-pressure today — one chain message, one `_busy` lock, one `onBatchComplete` callback.
 
 ## `DELETE /api/v1/openOrders`
 

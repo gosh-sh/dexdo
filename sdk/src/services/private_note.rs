@@ -1,5 +1,4 @@
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelAllOrders;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfChangeOwner;
@@ -167,14 +166,6 @@ pub(crate) async fn cancel_order_by_client(
     signer: Signer,
 ) -> AppResult<ResultOfSendMessage> {
     pn.cancel_order_by_client(params, signer).await.map_err(Into::into)
-}
-
-pub(crate) async fn cancel_batch(
-    pn: &PrivateNote,
-    params: ParamsOfCancelBatch,
-    signer: Signer,
-) -> AppResult<ResultOfSendMessage> {
-    pn.cancel_batch(params, signer).await.map_err(Into::into)
 }
 
 pub(crate) async fn cancel_all_orders(

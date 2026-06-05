@@ -6,7 +6,6 @@ use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfAddEvent;
 use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfConfirmOrCancelEvent;
 use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfDeleteEvent;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelAllOrders;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfChangeOwner;
@@ -218,15 +217,6 @@ impl Dex {
             .cancel_order_by_client(pn_address, params, signer)
             .await
             .map(Into::into)
-    }
-
-    pub async fn cancel_batch(
-        &self,
-        pn_address: &str,
-        params: ParamsOfCancelBatch,
-        signer: Signer,
-    ) -> AppResult<ResultOfBlockchainWrite> {
-        self.inner.private_note().cancel_batch(pn_address, params, signer).await.map(Into::into)
     }
 
     pub async fn cancel_all_orders(

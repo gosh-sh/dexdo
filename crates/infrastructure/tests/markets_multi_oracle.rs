@@ -92,10 +92,10 @@ async fn insert_market_outcome(pool: &PgPool, market_id: i64, pmp_address: &str,
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                 price_precision, quantity_precision, tick_size, step_size,
-                min_notional, max_batch_size)
+                min_notional)
            values ($1, $2, 1, 'YES', $3,
                    2, 2, '0.01', '0.01',
-                   '1.00', 100)"#,
+                   '1.00')"#,
     )
     .bind(market_id)
     .bind(pmp_address)

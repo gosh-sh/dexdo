@@ -323,7 +323,6 @@ fn trading_market() -> Market {
             // 0.9225) clears comfortably; tests that target the notional
             // rule construct their own market.
             min_notional: "0.5".into(),
-            max_batch_size: 5,
         }],
     }
 }

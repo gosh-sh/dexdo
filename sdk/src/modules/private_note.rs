@@ -1,5 +1,4 @@
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelAllOrders;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfChangeOwner;
@@ -234,16 +233,6 @@ impl<'a> PrivateNoteModule<'a> {
     ) -> AppResult<ResultOfSendMessage> {
         self.ctx.acquire().await;
         services::private_note::cancel_order_by_client(&self.pn(pn_address), params, signer).await
-    }
-
-    pub async fn cancel_batch(
-        &self,
-        pn_address: &str,
-        params: ParamsOfCancelBatch,
-        signer: Signer,
-    ) -> AppResult<ResultOfSendMessage> {
-        self.ctx.acquire().await;
-        services::private_note::cancel_batch(&self.pn(pn_address), params, signer).await
     }
 
     pub async fn cancel_all_orders(

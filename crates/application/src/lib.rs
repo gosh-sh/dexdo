@@ -1320,9 +1320,10 @@ pub struct CancelBatchPayloadItem {
 }
 
 /// Chain-shaped payload handed to `ChainOrderSender::cancel_batch_order`.
-/// Mirrors `NewBatchOrderPayload` but the ABI is narrower —
-/// `PrivateNote.cancelBatch` takes only event/oracle/token coordinates
-/// plus the chain-assigned `orderId[]`. No price, amount, or flags.
+/// Mirrors `NewBatchOrderPayload` but the ABI is narrower — the
+/// cancel side of `PrivateNote.placeBatch` takes only
+/// event/oracle/token coordinates plus the chain-assigned
+/// `cancelIds[]`. No price, amount, or flags.
 #[derive(Debug, Clone)]
 pub struct CancelBatchOrderPayload {
     pub pn_address: String,
@@ -1474,10 +1475,12 @@ pub trait ChainOrderSender: Send + Sync {
     /// `168 ERR_NOTIONAL_OVERFLOW`.
     async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError>;
 
-    /// Dispatch a `PrivateNote.cancelBatch` external message to chain.
-    /// `cancelBatch` accepts the orderId list atomically at the PN
-    /// (one external message, one `_busy` window) and forwards a single
-    /// `OrderBook.executeBatch` for the per-order cancels. Chain-side
+    /// Dispatch a cancel-only `PrivateNote.placeBatch` external message
+    /// to chain (`orders = []`, `cancelIds` populated — the chain has
+    /// no standalone batch-cancel method). The PN accepts the id list
+    /// atomically (one external message, one `_busy` window) and
+    /// forwards a single `OrderBook.executeBatch` for the per-order
+    /// cancels. Chain-side
     /// rejects mapped here: `121 ERR_NOTE_BUSY` → `OrderPnBusy`, and the
     /// range guards `161 ERR_BATCH_TOO_LARGE` / `162 ERR_EMPTY_BATCH`
     /// → `MarketInconsistent` (defence-in-depth — the use case
@@ -1922,7 +1925,7 @@ where
 
 /// Orchestrates `POST /api/v1/batchOrders`: resolves market+outcome
 /// once, validates the request shape (non-empty,
-/// `len ≤ outcome.max_batch_size`), runs the same per-item validation
+/// `len ≤ max_batch_size`), runs the same per-item validation
 /// chain `POST /api/v1/order` uses (any failure rejects the whole
 /// batch), and dispatches a single `PrivateNote.placeBatch` call. The
 /// chain itself enforces all-or-nothing — if any item fails on-chain
@@ -1930,11 +1933,17 @@ where
 pub struct CreateBatchOrdersUseCase<R, S> {
     repo: R,
     sender: S,
+    /// Batch-length cap from api config (`chain.max_batch_size`) —
+    /// the backend's mirror of the chain's compiled-in per-side
+    /// `MAX_BATCH_SIZE` (not readable via any getter). The same value
+    /// is advertised as `maxBatchSize` in `/api/v1/markets`, so the
+    /// promise and the enforcement share one source.
+    max_batch_size: u16,
 }
 
 impl<R, S> CreateBatchOrdersUseCase<R, S> {
-    pub fn new(repo: R, sender: S) -> Self {
-        Self { repo, sender }
+    pub fn new(repo: R, sender: S, max_batch_size: u16) -> Self {
+        Self { repo, sender, max_batch_size }
     }
 }
 
@@ -1988,16 +1997,16 @@ where
         if oracle_list_hash.is_empty() {
             return Err(DomainError::MarketInconsistent);
         }
-        // Per-outcome cap. Authoritative source is `/api/v1/markets`
-        // (`outcome.max_batch_size`); the chain enforces the same
-        // (161 `ERR_BATCH_TOO_LARGE`). Reject locally so a misbehaving
-        // client gets `-1130 / 400` instead of paying a chain
-        // round-trip on a doomed batch.
-        if input.orders.len() > outcome.max_batch_size as usize {
+        // Batch cap from api config — the same value `/api/v1/markets`
+        // advertises as `maxBatchSize`; the chain enforces its own
+        // ceiling (161 `ERR_BATCH_TOO_LARGE`). Reject locally so a
+        // misbehaving client gets `-1130 / 400` instead of paying a
+        // chain round-trip on a doomed batch.
+        if input.orders.len() > self.max_batch_size as usize {
             warn!(
                 phase = "shape",
                 orders_len = input.orders.len(),
-                max_batch_size = outcome.max_batch_size,
+                max_batch_size = self.max_batch_size,
                 "batchOrders rejected",
             );
             return Err(DomainError::InvalidParameter);
@@ -2048,19 +2057,23 @@ where
 
 /// Orchestrates `DELETE /api/v1/batchOrders`: resolves market+outcome
 /// once, validates the request shape (non-empty,
-/// `len ≤ outcome.max_batch_size`, no intra-batch duplicates), resolves
+/// `len ≤ max_batch_size`, no intra-batch duplicates), resolves
 /// every order via one bulk SELECT, then dispatches a single
-/// `PrivateNote.cancelBatch` call. Any shortfall in the resolved set
+/// cancel-only `PrivateNote.placeBatch` call. Any shortfall in the
+/// resolved set
 /// collapses to `UnknownOrder` for the whole batch — same opacity as
 /// single-cancel.
 pub struct CancelBatchOrdersUseCase<R, S> {
     repo: R,
     sender: S,
+    /// Batch-length cap from api config (`chain.max_batch_size`); see
+    /// [`CreateBatchOrdersUseCase::max_batch_size`].
+    max_batch_size: u16,
 }
 
 impl<R, S> CancelBatchOrdersUseCase<R, S> {
-    pub fn new(repo: R, sender: S) -> Self {
-        Self { repo, sender }
+    pub fn new(repo: R, sender: S, max_batch_size: u16) -> Self {
+        Self { repo, sender, max_batch_size }
     }
 }
 
@@ -2082,13 +2095,13 @@ where
         }
 
         // `resolve_for_new_order` here is the early-exit gate: only its
-        // `outcome.max_batch_size` and `status` feed the pre-bulk-SELECT
-        // checks. Chain identity (`event_id`, `oracle_list_hash`,
-        // `token_type`) is read later from `CancelBatchResolution` of
+        // `status` feeds the pre-bulk-SELECT checks. Chain identity
+        // (`event_id`, `oracle_list_hash`, `token_type`) is read later
+        // from `CancelBatchResolution` of
         // the bulk SELECT — same MVCC snapshot as the order rows — so a
         // reconciler commit between the two queries cannot leak a
         // stale market generation into the chain payload.
-        let MarketForPlacement { status, outcome, .. } = self
+        let MarketForPlacement { status, .. } = self
             .repo
             .resolve_for_new_order(&input.market_address, &input.symbol, input.now_seconds)
             .await
@@ -2110,11 +2123,11 @@ where
         // Cap check runs BEFORE the dedup HashSet allocation and BEFORE
         // the bulk SELECT so an oversize input is rejected without paying
         // O(N) memory or a second DB round trip.
-        if input.order_ids.len() > outcome.max_batch_size as usize {
+        if input.order_ids.len() > self.max_batch_size as usize {
             warn!(
                 phase = "shape",
                 order_ids_len = input.order_ids.len(),
-                max_batch_size = outcome.max_batch_size,
+                max_batch_size = self.max_batch_size,
                 "cancelBatch rejected",
             );
             return Err(DomainError::InvalidParameter);
@@ -2955,6 +2968,10 @@ mod tests {
         }
     }
 
+    /// Batch cap handed to the batch use cases — small on purpose so
+    /// boundary tests stay cheap to construct.
+    const TEST_MAX_BATCH_SIZE: u16 = 5;
+
     fn test_outcome(symbol: &str) -> Outcome {
         Outcome {
             outcome_id: 1,
@@ -2969,7 +2986,6 @@ mod tests {
             // would make every base case fail spuriously on notional.
             // Tests that exercise the notional rule override this.
             min_notional: "0.5".into(),
-            max_batch_size: 5,
         }
     }
 
@@ -3321,7 +3337,6 @@ mod tests {
             tick_size: "0.001".into(),
             step_size: "0.01".into(),
             min_notional: "1.000000".into(),
-            max_batch_size: 5,
         };
         let item = validate_and_encode_order_item(
             OrderSide::Buy,
@@ -3365,7 +3380,6 @@ mod tests {
             tick_size: "0.001".into(),
             step_size: "0.01".into(),
             min_notional: "10.000000000".into(),
-            max_batch_size: 5,
         };
         // 0.50 × 50 = 25 NACKL notional clears the 10 NACKL minimum.
         let item = validate_and_encode_order_item(
@@ -3916,7 +3930,11 @@ mod tests {
     async fn create_batch_orders_happy_path_two_items() {
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let input =
             base_batch_input("PM-YES", vec![batch_item(Some("11")), batch_item(Some("22"))]);
@@ -3950,7 +3968,11 @@ mod tests {
         // and avoids contending for the per-PN _busy lock.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let err = uc.execute(base_batch_input("PM-YES", vec![])).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
@@ -3964,9 +3986,13 @@ mod tests {
         // `max_batch_size + 1` items must fail locally with -1130 instead
         // of paying a chain ERR_BATCH_TOO_LARGE round-trip.
         let market = trading_market("PM-YES");
-        let max = test_outcome("PM-YES").max_batch_size as usize;
+        let max = TEST_MAX_BATCH_SIZE as usize;
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let orders = (0..=max).map(|i| batch_item(Some(&i.to_string()))).collect();
         let err = uc.execute(base_batch_input("PM-YES", orders)).await.unwrap_err();
@@ -3980,9 +4006,13 @@ mod tests {
         // Catches a future off-by-one (e.g. `>=` instead of `>`) that
         // would reject the boundary value.
         let market = trading_market("PM-YES");
-        let max = test_outcome("PM-YES").max_batch_size as usize;
+        let max = TEST_MAX_BATCH_SIZE as usize;
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let orders: Vec<_> = (0..max).map(|i| batch_item(Some(&i.to_string()))).collect();
         let out = uc.execute(base_batch_input("PM-YES", orders)).await.expect("max size accepted");
@@ -3992,7 +4022,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_market_not_found() {
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::empty(), FakeSender::ok());
+        let uc =
+            CreateBatchOrdersUseCase::new(FakeRepo::empty(), FakeSender::ok(), TEST_MAX_BATCH_SIZE);
         let err =
             uc.execute(base_batch_input("PM-YES", vec![batch_item(Some("1"))])).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidMarketOrSymbol);
@@ -4002,7 +4033,11 @@ mod tests {
     async fn create_batch_orders_rejects_non_trading_status() {
         let mut market = trading_market("PM-YES");
         market.status = MarketStatus::Resolving;
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            FakeSender::ok(),
+            TEST_MAX_BATCH_SIZE,
+        );
         let err =
             uc.execute(base_batch_input("PM-YES", vec![batch_item(Some("1"))])).await.unwrap_err();
         assert_eq!(err, DomainError::OrderValidationFailed);
@@ -4012,7 +4047,11 @@ mod tests {
     async fn create_batch_orders_rejects_blank_oracle_list_hash() {
         let mut market = trading_market("PM-YES");
         market.oracle_list_hash = String::new();
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), FakeSender::ok());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            FakeSender::ok(),
+            TEST_MAX_BATCH_SIZE,
+        );
         let err =
             uc.execute(base_batch_input("PM-YES", vec![batch_item(Some("1"))])).await.unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
@@ -4027,7 +4066,11 @@ mod tests {
         // would diverge from the chain contract.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let mut bad = batch_item(Some("2"));
         bad.price = Some("0.6155".into()); // 4 dp > pricePrecision=3
@@ -4050,7 +4093,11 @@ mod tests {
         // chain.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let mut bad = batch_item(Some("2"));
         bad.quantity = "0".into();
@@ -4068,6 +4115,7 @@ mod tests {
         let uc = CreateBatchOrdersUseCase::new(
             FakeRepo::with(market),
             FakeSender::failing(DomainError::OrderPnBusy),
+            TEST_MAX_BATCH_SIZE,
         );
         let err = uc
             .execute(base_batch_input("PM-YES", vec![batch_item(Some("1")), batch_item(Some("2"))]))
@@ -4086,7 +4134,11 @@ mod tests {
         // items pick up the same constant.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let input = base_batch_input("PM-YES", vec![batch_item(None), batch_item(None)]);
         let out = uc.execute(input).await.unwrap();
@@ -4112,7 +4164,11 @@ mod tests {
         // would silently skip index 0 validation.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let mut bad = batch_item(Some("1"));
         bad.price = Some("0.6155".into()); // 4 dp > pricePrecision=3
@@ -4131,7 +4187,11 @@ mod tests {
         // `FLAG_MARKET` set and `price_raw == "0"`.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let mut item = batch_item(Some("1"));
         item.order_type = OrderType::Market;
@@ -4165,7 +4225,11 @@ mod tests {
         let mut market = trading_market("PM-YES");
         market.outcomes[0].min_notional = "10".into();
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let mut bad = batch_item(Some("2"));
         bad.order_type = OrderType::Market;
@@ -4189,7 +4253,11 @@ mod tests {
         // batch loop runs that gate per item.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let mut bad = batch_item(Some("2"));
         bad.order_type = OrderType::Market;
@@ -4212,7 +4280,11 @@ mod tests {
         // the chain sender would 500 on serialise. Pin per-item.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let mut bad = batch_item(Some("2"));
         // u64::MAX = 18_446_744_073_709_551_615. With
@@ -4233,7 +4305,11 @@ mod tests {
         // hitting the SDK's panic-on-u128 serialize path. Pin per-item.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CreateBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CreateBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let mut bad = batch_item(None);
         // u64::MAX + 1
@@ -4280,7 +4356,7 @@ mod tests {
             market,
             vec![live_order(123, Some("42")), live_order(456, None)],
         );
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let out = uc
             .execute(base_cancel_batch_input("PM-YES", vec![123, 456]))
@@ -4321,7 +4397,7 @@ mod tests {
             market,
             vec![live_order(11, Some("a")), live_order(22, Some("b")), live_order(33, Some("c"))],
         );
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         // Input: 33, 11, 22 (deliberately scrambled).
         let out = uc.execute(base_cancel_batch_input("PM-YES", vec![33, 11, 22])).await.unwrap();
@@ -4343,7 +4419,11 @@ mod tests {
         // ERR_EMPTY_BATCH (162); failing here saves the round-trip.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![])).await.unwrap_err();
         assert_eq!(err, DomainError::InvalidParameter);
@@ -4356,12 +4436,12 @@ mod tests {
         // Catches a future off-by-one (e.g. `>=` instead of `>`) at the
         // cap check that would reject the boundary value.
         let market = trading_market("PM-YES");
-        let max = test_outcome("PM-YES").max_batch_size as usize;
+        let max = TEST_MAX_BATCH_SIZE as usize;
         let sender = Arc::new(FakeSender::ok());
         let live: Vec<FakeCancelableOrder> =
             (0..max).map(|i| live_order(1000 + i as u64, None)).collect();
         let repo = FakeRepo::with_live_orders(market, live);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let ids: Vec<u64> = (0..max).map(|i| 1000 + i as u64).collect();
         let out = uc
@@ -4381,9 +4461,13 @@ mod tests {
         // ERR_BATCH_TOO_LARGE round-trip. Pairs with
         // `cancel_batch_orders_accepts_exactly_max_batch_size`.
         let market = trading_market("PM-YES");
-        let max = test_outcome("PM-YES").max_batch_size as usize;
+        let max = TEST_MAX_BATCH_SIZE as usize;
         let sender = Arc::new(FakeSender::ok());
-        let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let ids: Vec<u64> = (0..=max).map(|i| 1 + i as u64).collect();
         let err = uc.execute(base_cancel_batch_input("PM-YES", ids)).await.unwrap_err();
@@ -4398,7 +4482,11 @@ mod tests {
         // chain submission.
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
-        let uc = CancelBatchOrdersUseCase::new(FakeRepo::with(market), sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(
+            FakeRepo::with(market),
+            sender.clone(),
+            TEST_MAX_BATCH_SIZE,
+        );
 
         let err =
             uc.execute(base_cancel_batch_input("PM-YES", vec![10, 20, 10])).await.unwrap_err();
@@ -4413,7 +4501,7 @@ mod tests {
         let sender = Arc::new(FakeSender::ok());
         let repo =
             FakeRepo::with_live_orders(market, vec![live_order(1, None), live_order(2, None)]);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
         assert_eq!(err, DomainError::OrderValidationFailed);
@@ -4426,7 +4514,7 @@ mod tests {
         // snapshot); `resolve_for_cancel_batch` then returns rows
         // tagged `Resolving` (the order-resolution snapshot). Without
         // the post-SELECT status re-check the request would dispatch
-        // `cancelBatch` against a market that single-cancel would
+        // the batch cancel against a market that single-cancel would
         // reject — single-cancel does both reads in one atomic JOIN
         // and naturally sees the later state. Pins the race-window
         // closure.
@@ -4435,7 +4523,7 @@ mod tests {
         let repo =
             FakeRepo::with_live_orders(market, vec![live_order(1, None), live_order(2, None)])
                 .with_cancel_batch_status(MarketStatus::Resolving);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
         assert_eq!(err, DomainError::OrderValidationFailed);
@@ -4448,7 +4536,7 @@ mod tests {
         market.oracle_list_hash = String::new();
         let sender = Arc::new(FakeSender::ok());
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
@@ -4465,7 +4553,7 @@ mod tests {
         market.token_type = -1;
         let sender = Arc::new(FakeSender::ok());
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
@@ -4479,7 +4567,7 @@ mod tests {
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::ok());
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
         assert_eq!(err, DomainError::UnknownOrder);
@@ -4501,6 +4589,7 @@ mod tests {
         let uc = CancelBatchOrdersUseCase::new(
             FakeRepo::with_live_orders(market, vec![foreign]),
             sender.clone(),
+            TEST_MAX_BATCH_SIZE,
         );
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
@@ -4521,7 +4610,7 @@ mod tests {
         let repo =
             FakeRepo::with_live_orders(market, vec![live_order(1, Some("a")), live_order(2, None)])
                 .with_cancel_batch_rogue_key(999);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1, 2])).await.unwrap_err();
         assert_eq!(err, DomainError::MarketInconsistent);
@@ -4533,7 +4622,7 @@ mod tests {
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::failing(DomainError::OrderPnBusy));
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::OrderPnBusy);
@@ -4548,7 +4637,7 @@ mod tests {
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::failing(DomainError::RequestTimeout));
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::RequestTimeout);
@@ -4562,7 +4651,7 @@ mod tests {
         let market = trading_market("PM-YES");
         let sender = Arc::new(FakeSender::failing(DomainError::Unexpected));
         let repo = FakeRepo::with_live_orders(market, vec![live_order(1, None)]);
-        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone());
+        let uc = CancelBatchOrdersUseCase::new(repo, sender.clone(), TEST_MAX_BATCH_SIZE);
 
         let err = uc.execute(base_cancel_batch_input("PM-YES", vec![1])).await.unwrap_err();
         assert_eq!(err, DomainError::Unexpected);

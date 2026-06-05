@@ -713,8 +713,8 @@ async fn negative_price_precision_fails_closed() {
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                 price_precision, quantity_precision, tick_size, step_size,
-                min_notional, max_batch_size)
-           values ($1, $2, 0, 'NO', $3, -1, 2, '0.001', '0.01', '1', 5)"#,
+                min_notional)
+           values ($1, $2, 0, 'NO', $3, -1, 2, '0.001', '0.01', '1')"#,
     )
     .bind(market_id)
     .bind(&pmp)

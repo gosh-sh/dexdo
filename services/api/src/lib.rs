@@ -108,6 +108,11 @@ pub struct AppState {
     /// is the implicit default `AppState::new` chooses so tests that
     /// don't care about timeouts can ignore it.
     pub(crate) request_timeout: Duration,
+    /// `chain.max_batch_size` from api config: the batch-length cap the
+    /// batch use cases enforce and `/api/v1/markets` advertises as
+    /// `maxBatchSize`. `AppState::new` defaults it to the config
+    /// default; tests pin a different cap via `with_max_batch_size`.
+    pub(crate) max_batch_size: u16,
 }
 
 impl AppState {
@@ -132,12 +137,19 @@ impl AppState {
             pn_reader,
             ref_repo,
             request_timeout: Duration::ZERO,
+            max_batch_size: 10,
         }
     }
 
     #[doc(hidden)]
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_max_batch_size(mut self, max_batch_size: u16) -> Self {
+        self.max_batch_size = max_batch_size;
         self
     }
 }
@@ -605,7 +617,7 @@ async fn get_markets(
         server_time: now,
         next_cursor: page.next_cursor,
         has_more: page.has_more,
-        markets: page.markets.into_iter().map(market_to_dto).collect(),
+        markets: page.markets.into_iter().map(|m| market_to_dto(m, state.max_batch_size)).collect(),
     };
     Ok(Json(payload))
 }
@@ -662,7 +674,7 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
     }))
 }
 
-fn market_to_dto(market: Market) -> MarketDto {
+fn market_to_dto(market: Market, max_batch_size: u16) -> MarketDto {
     MarketDto {
         market_address: market.market_address.0,
         order_book_address: market.order_book_address,
@@ -676,7 +688,7 @@ fn market_to_dto(market: Market) -> MarketDto {
         timings: market.timings.map(timings_to_dto),
         event: event_to_dto(market.event),
         terminal: market.terminal.map(terminal_to_dto),
-        outcomes: market.outcomes.into_iter().map(outcome_to_dto).collect(),
+        outcomes: market.outcomes.into_iter().map(|o| outcome_to_dto(o, max_batch_size)).collect(),
     }
 }
 
@@ -712,7 +724,11 @@ fn terminal_to_dto(t: Terminal) -> TerminalDto {
     }
 }
 
-fn outcome_to_dto(o: dodex_domain::Outcome) -> OutcomeDto {
+/// `max_batch_size` comes from api config (`chain.max_batch_size`), not
+/// the read model — it is backend policy mirroring the chain's
+/// compiled-in cap, advertised here and enforced by the batch use cases
+/// from the same source.
+fn outcome_to_dto(o: dodex_domain::Outcome, max_batch_size: u16) -> OutcomeDto {
     OutcomeDto {
         outcome_id: o.outcome_id,
         outcome_name: o.outcome_name,
@@ -722,7 +738,7 @@ fn outcome_to_dto(o: dodex_domain::Outcome) -> OutcomeDto {
         tick_size: o.tick_size,
         step_size: o.step_size,
         min_notional: o.min_notional,
-        max_batch_size: o.max_batch_size,
+        max_batch_size,
     }
 }
 
@@ -1049,8 +1065,9 @@ struct BatchOrderResponseItem {
 
 /// Request body for `DELETE /api/v1/batchOrders`. One market+symbol per
 /// request, every id is cancelled on that single book — matches the
-/// chain ABI's `PrivateNote.cancelBatch(eventId, oracleListHash,
-/// tokenType, uint128[])`. `deny_unknown_fields` is strict on this
+/// chain ABI's `PrivateNote.placeBatch(eventId, oracleListHash,
+/// tokenType, orders = [], cancelIds: uint128[])`.
+/// `deny_unknown_fields` is strict on this
 /// destructive write surface: a typo like `orderIDs` would otherwise
 /// silently deserialise as `order_ids = None` and surface as
 /// MissingParameter, masking the real bug — better to 400 with
@@ -1443,7 +1460,8 @@ async fn create_batch_orders(
     let (now_seconds, now_ms) = now_pair();
     let input = build_batch_orders_input(body, ctx, now_seconds, now_ms)?;
 
-    let use_case = CreateBatchOrdersUseCase::new(state.repo, state.chain_sender);
+    let use_case =
+        CreateBatchOrdersUseCase::new(state.repo, state.chain_sender, state.max_batch_size);
     let submitted = use_case.execute(input).await.map_err(ApiError::from)?;
 
     let response = submitted
@@ -1556,8 +1574,9 @@ fn build_batch_orders_input(
 // to `CancelBatchOrdersUseCase`, and shapes a flat array of
 // `PENDING_CANCEL` envelopes. The use case enforces non-empty
 // `orderIds[]`, intra-batch dedup, the `outcome.max_batch_size` cap,
-// and bulk order resolution. The chain (`PrivateNote.cancelBatch`)
-// accepts the list atomically under one `_busy` window.
+// and bulk order resolution. The chain (a cancel-only
+// `PrivateNote.placeBatch`) accepts the list atomically under one
+// `_busy` window.
 #[endpoint(
     tags("trading"),
     summary = "Cancel a batch of orders atomically",
@@ -1604,7 +1623,8 @@ async fn delete_batch_orders(
     let audit_symbol = input.symbol.0.clone();
     let audit_order_ids = input.order_ids.clone();
 
-    let use_case = CancelBatchOrdersUseCase::new(state.repo, state.chain_sender);
+    let use_case =
+        CancelBatchOrdersUseCase::new(state.repo, state.chain_sender, state.max_batch_size);
     let cancelled = use_case.execute(input).await.map_err(|err| {
         warn!(
             pn = %audit_pn,
@@ -1989,7 +2009,8 @@ pub async fn run() -> anyhow::Result<()> {
         dodex_infrastructure::postgres_repo::PostgresReferenceRepository::new(pool.clone()),
     );
     let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
-        .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms));
+        .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms))
+        .with_max_batch_size(config.chain.max_batch_size);
 
     // The API is intentionally restart-to-reconfigure. None of the live
     // request paths read runtime config — pool, server bind, request_timeout
@@ -2161,7 +2182,7 @@ mod dto_tests {
             terminal: None,
             outcomes: vec![],
         };
-        let dto = market_to_dto(market);
+        let dto = market_to_dto(market, 10);
         let v = serde_json::to_value(&dto).unwrap();
         // Snapshot: literals catch silent drift in the domain constants.
         assert_eq!(v["makerCommission"], "-0.0003375");

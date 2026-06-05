@@ -210,7 +210,6 @@ One row per outcome of each market. Source for outcome listings and the per-outc
 | `tick_size` | `text` | Minimum price increment as a decimal string. |
 | `step_size` | `text` | Minimum quantity increment as a decimal string. |
 | `min_notional` | `text` | Minimum order notional as a decimal string. |
-| `max_batch_size` | `integer` | Max orders per batch request for this outcome. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Index: `market_outcomes_market_id_fk_idx` speeds up loading all outcome rows for one market. Symbol is globally unique by construction.

@@ -324,8 +324,13 @@ async fn deploy_oracle_with_event(
         .get_oracle_address(oracle_name.clone())
         .await
         .map_err(|e| anyhow!("get_oracle_address: {e:?}"))?;
-    wait_active(Oracle::new(context.clone(), dex_contract_params(&oracle_address)), 60, 2_000, "Oracle")
-        .await?;
+    wait_active(
+        Oracle::new(context.clone(), dex_contract_params(&oracle_address)),
+        60,
+        2_000,
+        "Oracle",
+    )
+    .await?;
 
     let event_list_address = dex
         .get_event_list_address(&oracle_address, ParamsOfGetEventListAddress { index: 0 })

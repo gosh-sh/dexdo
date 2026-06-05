@@ -335,6 +335,17 @@ contract OrderBook is Modifiers {
         uint128 lot = lotSize(_tokenType);
         bool anyQueued = false;
         uint8 lastSlot = 0;
+
+        // Cancels first: frees price-level slots, owner orders, and queue
+        // capacity before new placements race for the same room. Avoids
+        // self-match against the about-to-be-cancelled orders.
+        for (uint32 j = 0; j < nCancel; j++) {
+            if (_enqueueCancel(depositIdentifierHash, cancelIds[j], opNonce)) {
+                lastSlot = _queueTail == 0 ? uint8(QUEUE_CAPACITY - 1) : _queueTail - 1;
+                anyQueued = true;
+            }
+        }
+
         for (uint32 i = 0; i < nPlace; i++) {
             PlaceParams op = orders[i];
             bool valid = true;
@@ -395,13 +406,6 @@ contract OrderBook is Modifiers {
                 address addrExtern = address.makeAddrExtern(0, bitCntAddress);
                 emit Rejected{dest: addrExtern}(QENTRY_PLACE, depositIdentifierHash);
                 _notifyRejectedPlace(depositIdentifierHash, op, opNonce);
-            }
-        }
-
-        for (uint32 j = 0; j < nCancel; j++) {
-            if (_enqueueCancel(depositIdentifierHash, cancelIds[j], opNonce)) {
-                lastSlot = _queueTail == 0 ? uint8(QUEUE_CAPACITY - 1) : _queueTail - 1;
-                anyQueued = true;
             }
         }
 

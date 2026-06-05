@@ -123,8 +123,8 @@ async fn insert_market(pool: &PgPool, name: &str) -> (String, String, i64) {
             r#"insert into market_outcomes (
                   market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                   price_precision, quantity_precision, tick_size, step_size,
-                  min_notional, max_batch_size)
-               values ($1, $2, $3, $4, $5, 3, 2, '0.001', '0.01', '1', 5)"#,
+                  min_notional)
+               values ($1, $2, $3, $4, $5, 3, 2, '0.001', '0.01', '1')"#,
         )
         .bind(id)
         .bind(&pmp)
@@ -316,8 +316,8 @@ async fn resolve_market_for_balances_outcome_count_mismatch_fails_closed() {
             r#"insert into market_outcomes (
                   market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                   price_precision, quantity_precision, tick_size, step_size,
-                  min_notional, max_batch_size)
-               values ($1, $2, $3, $4, $5, 3, 2, '0.001', '0.01', '1', 5)"#,
+                  min_notional)
+               values ($1, $2, $3, $4, $5, 3, 2, '0.001', '0.01', '1')"#,
         )
         .bind(id)
         .bind(pmp)
@@ -590,8 +590,8 @@ async fn resolve_for_new_order_negative_outcome_id_fails_closed() {
         r#"insert into market_outcomes (
               market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
               price_precision, quantity_precision, tick_size, step_size,
-              min_notional, max_batch_size)
-           values ($1, $2, -1, 'NO', $3, 3, 2, '0.001', '0.01', '1', 5)"#,
+              min_notional)
+           values ($1, $2, -1, 'NO', $3, 3, 2, '0.001', '0.01', '1')"#,
     )
     .bind(id)
     .bind(pmp)

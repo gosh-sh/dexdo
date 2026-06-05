@@ -132,7 +132,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
     mapping(uint128 => uint128) _clientOrderIds;
 
     /// @notice Monotonic counter of user-initiated ops sent to any OB.
-    ///         Each placeOrder / placeBatch / cancelOrder / cancelBatch /
+    ///         Each placeOrder / placeBatch / cancelOrder /
     ///         cancelOrderByClient increments it. Echoed by OB in every
     ///         callback so PN can tell "this is ack of MY current op"
     ///         from "this is a late callback from a previous/incidental
@@ -162,6 +162,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Stake hash associated with the pending batch (for sell-side restore).
     uint256 _pendingBatchStakeHash;
+
+    /// @notice In-flight `deleteStake` → `PMP.forfeitStake` notification. Set
+    ///         when `deleteStake` dispatches; cleared on
+    ///         `onForfeitAccepted` (PMP accepted the forfeit) or on
+    ///         `onBounce` (PMP unreachable — e.g. already self-destructed).
+    ///         Used by `onBounce` to disambiguate from the stake/order
+    ///         bounce branch (no candidate-amount restoration needed).
+    bool _pendingForfeit;
 
     /// @notice Single record per sell order in the pending batch (used for
     ///         bounce-protection restore). Combined into one array (vs two
@@ -536,7 +544,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         }(_depositIdentifierHash);
     }
 
-    /// @notice Deletes a stake record
+    /// @notice Abandons a stake. The user forfeits any claim against the
+    ///         PMP. Before deleting the local stake record, PN notifies
+    ///         PMP via `forfeitStake(...)` so PMP can decrement its
+    ///         `_totalWinPool` by this PN's win-outcome contribution.
+    ///         Without that notification PMP would be unable to reach
+    ///         the `_totalWinPool == 0` condition that triggers
+    ///         `selfdestruct(_deployer)` (every winning stake must be
+    ///         either claimed or forfeited).
     /// @param eventId PMP event ID
     /// @param oracleListHash Hash of Oracles
     /// @param tokenType Token type
@@ -545,7 +560,33 @@ contract PrivateNote is Modifiers, ReplayProtection {
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
         uint256 hash = tvm.hash(data);
-        delete _stakes[hash];
+        require(_stakes.exists(hash), ERR_STAKE_NOT_EXISTS);
+        // Mirror the cancel/claim path: any resting orders against this
+        // PMP must be cleared first, otherwise a late `onOrderCancelled`
+        // callback would find no `_stakes[hash]` and silently drop the
+        // released outcome tokens.
+        require(_openOrdersByEvent[hash] == 0, ERR_OPEN_ORDERS_EXIST);
+
+        StakeInfo stake = _stakes[hash];
+        address pmpAddress = DexLib.computePMPAddress(_privateNoteCode, _pmpCode, eventId, stake.oracleListHash, tokenType);
+        _busy = pmpAddress;
+        _lastHash = hash;
+        _pendingForfeit = true;
+
+        PMP(pmpAddress).forfeitStake{
+            value: 0.1 vmshell,
+            flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+        }(stake.amount, stake.debtAmount, stake.couponsAmount, _depositIdentifierHash);
+    }
+
+    /// @notice PMP→PN callback acknowledging `forfeitStake`. Deletes the
+    ///         local stake record and clears the busy lock.
+    function onForfeitAccepted() public senderIs(_busy.get()) accept {
+        ensureBalance();
+        delete _stakes[_lastHash];
+        _pendingForfeit = false;
+        delete _busy;
+        _busyOpNonce = 0;
     }
 
     /// @notice Cancels a stake on a PMP contract
@@ -590,7 +631,10 @@ contract PrivateNote is Modifiers, ReplayProtection {
         uint256 hash = tvm.hash(data);
         delete _stakes[hash];
         _balance[tokenType] += value;
-        _couponsValue += couponValue;
+        if (couponValue > 0) {
+            if (_couponsValue == 0) { _couponsTokenType = tokenType; }
+            _couponsValue += couponValue;
+        }
         
         address addrExtern = address.makeAddrExtern(PRIVATENOTE_STAKE_CANCELLED, bitCntAddress);
         emit StakeCancelled{dest: addrExtern}(_busy.get(), value);
@@ -1081,6 +1125,17 @@ contract PrivateNote is Modifiers, ReplayProtection {
             return;
         }
 
+        // --- Forfeit bounce: PMP was unreachable (already self-destructed
+        //     by an earlier claim) when `deleteStake` dispatched. The
+        //     stake is moot — clean up locally.
+        if (_pendingForfeit) {
+            delete _stakes[_lastHash];
+            _pendingForfeit = false;
+            delete _busy;
+            _busyOpNonce = 0;
+            return;
+        }
+
         // --- Batch bounce: executePlaceBatch/executeCancelBatch/executeCancelAll ---
         if (_pendingBatchActive) {
             // Restore pre-batch balance and stake amounts.
@@ -1159,7 +1214,10 @@ contract PrivateNote is Modifiers, ReplayProtection {
 
         // Return funds to proper balance based on bet type
         if (stake.candidateBetType == BET_TYPE_COUPON) {
-            _couponsValue += stake.candidateAmount;
+            if (stake.candidateAmount > 0) {
+                if (_couponsValue == 0) { _couponsTokenType = stake.tokenType; }
+                _couponsValue += stake.candidateAmount;
+            }
         } else if (stake.candidateBetType == BET_TYPE_OB_SELL) {
             // Sell order bounce: return outcome tokens to stake
             stake.amount[stake.candidateOutcome] += stake.candidateAmount;
@@ -2018,21 +2076,26 @@ contract PrivateNote is Modifiers, ReplayProtection {
     // ===== Batch order-book operations =====
     // MAX_BATCH_SIZE is inherited from Modifiers (shared with OrderBook).
 
-    /// @notice Places a batch of orders atomically. All-or-nothing in WASM;
-    ///         if any order is invalid, the whole batch bounces and state is restored.
+    /// @notice Atomic batch: cancels `cancelIds` and places `orders` in a single
+    ///         OrderBook.executeBatch dispatch. Either side may be empty (but not
+    ///         both). All-or-nothing in WASM; on bounce the pre-batch state is
+    ///         restored by onBounce.
     function placeBatch(
         uint256 eventId,
         uint256 oracleListHash,
         uint32 tokenType,
-        OrderBook.PlaceParams[] orders
+        OrderBook.PlaceParams[] orders,
+        uint128[] cancelIds
     ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
-        require(!_hasWithdrawn, ERR_INVALID_STATE);
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
-        require(_debt == 0, ERR_DEBT_NON_ZERO);
-        require(orders.length > 0, ERR_EMPTY_BATCH);
+        require(orders.length + cancelIds.length > 0, ERR_EMPTY_BATCH);
         require(orders.length <= MAX_BATCH_SIZE, ERR_BATCH_TOO_LARGE);
-
+        require(cancelIds.length <= MAX_BATCH_SIZE, ERR_BATCH_TOO_LARGE);
+        if (orders.length > 0) {
+            require(!_hasWithdrawn, ERR_INVALID_STATE);
+            require(_debt == 0, ERR_DEBT_NON_ZERO);
+        }
 
         TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
         uint256 hash = tvm.hash(data);
@@ -2106,11 +2169,6 @@ contract PrivateNote is Modifiers, ReplayProtection {
             _stakes[hash] = stake;
         }
 
-        _pendingBatchActive = true;
-        _pendingBatchBuyLock = totalBuyLock;
-        _pendingBatchTokenType = tokenType;
-        _pendingBatchStakeHash = hash;
-
         address obAddress = DexLib.computeOrderBookAddress(
             _privateNoteCode,
             _orderBookCode,
@@ -2118,51 +2176,20 @@ contract PrivateNote is Modifiers, ReplayProtection {
             oracleListHash,
             tokenType
         );
+
+        _pendingBatchActive = true;
+        _pendingBatchBuyLock = totalBuyLock;
+        _pendingBatchTokenType = tokenType;
+        _pendingBatchStakeHash = hash;
         _busy = obAddress;
         _lastHash = hash;
         _opNonce++;
         _busyOpNonce = _opNonce;
 
-        uint128[] emptyIds;
         OrderBook(obAddress).executeBatch{
             value: 1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_depositIdentifierHash, orders, emptyIds, _opNonce);
-    }
-
-    /// @notice Cancels a batch of orders by ID atomically. All-or-nothing.
-    function cancelBatch(
-        uint256 eventId,
-        uint256 oracleListHash,
-        uint32 tokenType,
-        uint128[] orderIds
-    ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
-        ensureBalance();
-        require(!_busy.hasValue(), ERR_NOTE_BUSY);
-        require(orderIds.length > 0, ERR_EMPTY_BATCH);
-        require(orderIds.length <= MAX_BATCH_SIZE, ERR_BATCH_TOO_LARGE);
-
-
-        address obAddress = DexLib.computeOrderBookAddress(
-            _privateNoteCode,
-            _orderBookCode,
-            eventId,
-            oracleListHash,
-            tokenType
-        );
-
-        TvmCell data = abi.encode(eventId, oracleListHash, tokenType);
-        _lastHash = tvm.hash(data);
-        _pendingBatchActive = true;
-        _busy = obAddress;
-        _opNonce++;
-        _busyOpNonce = _opNonce;
-
-        OrderBook.PlaceParams[] emptyOrders;
-        OrderBook(obAddress).executeBatch{
-            value: 1 vmshell,
-            flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-        }(_depositIdentifierHash, emptyOrders, orderIds, _opNonce);
+        }(_depositIdentifierHash, orders, cancelIds, _opNonce);
     }
 
     /// @notice Enqueues a CANCEL_ALL request on the given OrderBook. The OB will

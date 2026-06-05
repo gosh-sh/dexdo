@@ -1,0 +1,28 @@
+{
+  "endpoint": "shellnet.ackinacki.org",
+  "created_at_unix": 1780608995,
+  "nominal": "N100",
+  "token_type": 1,
+  "raw_value_per_pn": 100000000000,
+  "ecc_shell_deposit_per_pn": 100000000000,
+  "notes": [
+    {
+      "address": "0:226a11381ec34e454ccd81245c6f103d6b0e5c025e3a7d63687e3974f39b5fc1",
+      "deposit_identifier_hash": "85774108203041554522530686085576132788677530070825805429320449065067519568683",
+      "owner_public_key_hex": "b3dd74bdc060785a732eb78d6a9a0456008896e28ef4bdcf114696ec233932b3",
+      "owner_secret_key_hex": "4e46f923a33e9f9cee7995efa4f4671472c53fb78ec998c3f651b4567547a06b",
+      "deployed_at_unix": 1780609106,
+      "shell_funded": true,
+      "native_funded": true
+    },
+    {
+      "address": "0:b31e818c89da8d6857f2b0ea1e58bbf7ee850b89e47223862f618f4cc19800a8",
+      "deposit_identifier_hash": "111510900670539798274852472160881612320092431409344691632470372983522460029723",
+      "owner_public_key_hex": "e370127a068ab60d2827b5dbf1ab10a9948b21efe52b1e88dfbf961b5b9f46d6",
+      "owner_secret_key_hex": "b173c478177362c7312e62345c56dfcdc9033d14d3dc2f3b71cdfaba17c45a51",
+      "deployed_at_unix": 1780609275,
+      "shell_funded": true,
+      "native_funded": true
+    }
+  ]
+}

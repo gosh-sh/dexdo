@@ -85,10 +85,10 @@ async fn seed_trading_market(
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                 price_precision, quantity_precision, tick_size, step_size,
-                min_notional, max_batch_size)
+                min_notional)
            values ($1, $2, 7, 'YES', $3,
                    2, 4, '0.01', '0.0001',
-                   '5.00', 100)"#,
+                   '5.00')"#,
     )
     .bind(market_id)
     .bind(pmp_address)
@@ -129,7 +129,6 @@ async fn resolve_for_new_order_happy_path_returns_slim_projection() {
     assert_eq!(resolved.outcome.tick_size, "0.01");
     assert_eq!(resolved.outcome.step_size, "0.0001");
     assert_eq!(resolved.outcome.min_notional, "5.00");
-    assert_eq!(resolved.outcome.max_batch_size, 100);
 }
 
 #[tokio::test]
@@ -204,9 +203,9 @@ async fn resolve_for_new_order_pre_reconcile_row_is_invisible() {
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                 price_precision, quantity_precision, tick_size, step_size,
-                min_notional, max_batch_size)
+                min_notional)
            values ($1, $2, 1, 'YES', $3,
-                   2, 4, '0.01', '0.0001', '5.00', 100)"#,
+                   2, 4, '0.01', '0.0001', '5.00')"#,
     )
     .bind(market_id)
     .bind(pmp)
@@ -281,9 +280,9 @@ async fn resolve_for_new_order_blank_oracle_list_hash_fails_closed() {
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                 price_precision, quantity_precision, tick_size, step_size,
-                min_notional, max_batch_size)
+                min_notional)
            values ($1, $2, 7, 'YES', $3,
-                   2, 4, '0.01', '0.0001', '5.00', 100)"#,
+                   2, 4, '0.01', '0.0001', '5.00')"#,
     )
     .bind(market_id)
     .bind(pmp)

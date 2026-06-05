@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use ackinacki_kit::contracts::dex::order_book::OrderBook;
 use ackinacki_kit::contracts::dex::order_book::ParamsOfGetOrdersByOwner;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
@@ -86,18 +85,6 @@ impl Dex {
     ) -> ChainResult<ResultOfSendMessage> {
         PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .cancel_order(params, signer)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn cancel_batch(
-        &self,
-        pn_address: &str,
-        params: ParamsOfCancelBatch,
-        signer: Signer,
-    ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
-            .cancel_batch(params, signer)
             .await
             .map_err(Into::into)
     }

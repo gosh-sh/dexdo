@@ -1095,11 +1095,16 @@ contract PMP is Modifiers {
             profitBudget -= fee;
 
             // Coupon coefficient (capped at COUPON_MAX_PAYOUT_MULTIPLIER).
+            // Exception: when ONLY coupon stakes won (no clean/debt winners),
+            // the cap is lifted so the surplus is not stranded in the contract
+            // and eventually swept to the creator. Coupon winners absorb the
+            // whole profitBudget instead.
             uint128 profitPerUnit = uint128(
                 (uint256(profitBudget) * FULL_PERCENT) / totalWinMass
             );
             uint128 couponCoef = profitPerUnit;
-            if (couponCoef > COUPON_MAX_PAYOUT_MULTIPLIER) {
+            bool onlyCouponWins = (winClean == 0 && winDebt == 0 && winCoupon > 0);
+            if (!onlyCouponWins && couponCoef > COUPON_MAX_PAYOUT_MULTIPLIER) {
                 couponCoef = COUPON_MAX_PAYOUT_MULTIPLIER;
             }
             _couponWinCoef = couponCoef;
@@ -1394,6 +1399,84 @@ contract PMP is Modifiers {
             }
             // OrderBook was shut down earlier via `triggerOrderBookShutdown` (gate
             // for `claim` entry). Here we just finalize the PMP itself.
+            selfdestruct(_deployer);
+        }
+    }
+
+    /// @notice Forfeit path: a PrivateNote calls this from `deleteStake`
+    ///         to drop its (potentially winning) stake without claiming
+    ///         a payout. PMP subtracts the PN's win-outcome mass from
+    ///         `_totalWinPool` so that, once every other winner has
+    ///         claimed, the contract can reach `_totalWinPool == 0` and
+    ///         self-destruct — otherwise a PN that quietly abandoned
+    ///         its stake would leave PMP permanently un-closable.
+    ///
+    ///         Pre-resolve / debt-refund-mode events are ack'd without
+    ///         touching pool state (no `_totalWinPool` yet / different
+    ///         accounting).
+    ///
+    /// @param stakeAmount   Clean stakes per outcome (must match `_numOutcomes`).
+    /// @param debtAmount    Debt stakes per outcome.
+    /// @param couponsAmount Coupon stakes per outcome.
+    /// @param depositIdentifierHash Hash that derives the caller's PN address.
+    function forfeitStake(
+        uint128[] stakeAmount,
+        uint128[] debtAmount,
+        uint128[] couponsAmount,
+        uint256 depositIdentifierHash
+    ) public {
+        address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
+        require(msg.sender == wallet, ERR_INVALID_SENDER);
+        tvm.accept();
+        ensureBalance();
+
+        // Decrement the win-pool by the caller's win-outcome contribution
+        // (only meaningful once `claim` is open: `_approved && _orderBookDone
+        // && _resolvedOutcome.hasValue() && !_debtRefundMode`). For all
+        // other states the ack is a no-op state-wise.
+        bool poolHit = _approved
+            && _orderBookDone
+            && _resolvedOutcome.hasValue()
+            && !_debtRefundMode;
+
+        if (poolHit) {
+            uint32 W = _resolvedOutcome.get();
+            uint128 stakeW   = (uint32(stakeAmount.length)   > W) ? stakeAmount[W]   : 0;
+            uint128 debtW    = (uint32(debtAmount.length)    > W) ? debtAmount[W]    : 0;
+            uint128 couponsW = (uint32(couponsAmount.length) > W) ? couponsAmount[W] : 0;
+            uint128 forfeitedMass = stakeW + debtW + couponsW;
+
+            if (_totalWinPool >= forfeitedMass) {
+                _totalWinPool -= forfeitedMass;
+            } else {
+                _totalWinPool = 0;
+            }
+        }
+
+        // Ack first so PN can clear `_busy` and delete its local stake
+        // before any selfdestruct flushes outbound messages from this tx.
+        PrivateNote(wallet).onForfeitAccepted{
+            value: 0.05 vmshell,
+            flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+        }();
+
+        // If forfeit drained the last winning mass, sweep residual to
+        // deployer and self-destruct (mirrors the `claim` close path).
+        if (poolHit && _totalWinPool == 0) {
+            uint128 residual = _totalRewardsClean + _totalRewardsDebt + _totalRewardsCoupon;
+            _totalRewardsClean  = 0;
+            _totalRewardsDebt   = 0;
+            _totalRewardsCoupon = 0;
+            if (residual > _totalUnclaimedBalance) {
+                residual = _totalUnclaimedBalance;
+            }
+            if (residual > 0) {
+                _totalUnclaimedBalance -= residual;
+                PrivateNote(_deployer).acceptFee{
+                    value: 0.1 vmshell,
+                    flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+                }(residual, _tokenType, _eventId, _oracleListHash);
+            }
             selfdestruct(_deployer);
         }
     }

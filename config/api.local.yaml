@@ -36,6 +36,11 @@ chain:
   place_batch_timeout_ms: 30000
   cancel_batch_timeout_ms: 30000
   split_full_set_timeout_ms: 30000
+  # Batch-length cap for POST/DELETE /batchOrders, advertised as
+  # maxBatchSize in /api/v1/markets. Mirrors the chain's per-side
+  # MAX_BATCH_SIZE (contracts/modifiers/modifiers.sol, 10 today) —
+  # must not exceed it.
+  max_batch_size: 10
 
 graphql:
   # On-demand PN BOC reads for /api/v1/account and /account/balances.

@@ -80,7 +80,10 @@ impl Dex {
     /// `_busy` window between submission and the `onSplitAccepted`
     /// callback without standing up the GraphQL gateway.
     pub async fn get_private_note_details(&self, pn_address: &str) -> ChainResult<PnDetails> {
-        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address)).get_details().await.map_err(Into::into)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .get_details()
+            .await
+            .map_err(Into::into)
     }
 
     /// Read-only `PrivateNote._stakes` accessor. Returns the raw
@@ -90,7 +93,10 @@ impl Dex {
     /// `couponsAmount` plus bookkeeping fields. Sibling of
     /// `get_private_note_details`, scoped to the same e2e niche.
     pub async fn get_private_note_stakes(&self, pn_address: &str) -> ChainResult<PnStakesRaw> {
-        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address)).get_stakes().await.map_err(Into::into)
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .get_stakes()
+            .await
+            .map_err(Into::into)
     }
 
     // ── PMP (oracle-signed ops + getters) ────────────────────────────
@@ -120,7 +126,10 @@ impl Dex {
     }
 
     pub async fn get_pmp_details(&self, pmp_address: &str) -> ChainResult<PmpDetails> {
-        Pmp::new(self.ctx.clone(), dex_contract_params(pmp_address)).get_details().await.map_err(Into::into)
+        Pmp::new(self.ctx.clone(), dex_contract_params(pmp_address))
+            .get_details()
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn get_order_book_address(&self, pmp_address: &str) -> ChainResult<String> {

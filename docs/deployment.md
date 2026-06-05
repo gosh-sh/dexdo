@@ -183,6 +183,7 @@ chain:
   place_batch_timeout_ms: 30000
   cancel_batch_timeout_ms: 30000
   split_full_set_timeout_ms: 30000
+  max_batch_size: 10   # batch cap for /batchOrders; must not exceed the chain's MAX_BATCH_SIZE
 
 graphql:
   endpoint: https://shellnet.ackinacki.org/graphql   # your Acki Nacki GraphQL

@@ -421,7 +421,6 @@ fn trading_market() -> Market {
             tick_size: "0.001".into(),
             step_size: "0.000001".into(),
             min_notional: "0.5".into(),
-            max_batch_size: 5,
         }],
     }
 }
@@ -438,13 +437,18 @@ fn row(order_id: u64, coid: Option<&str>) -> (u64, OrderForCancelBatch) {
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    Service::new(build_router(AppState::new(
-        repo,
-        authenticator,
-        sender,
-        Arc::new(common::FakePnStateReader::default()),
-        Arc::new(common::FakeReferenceRepo::with_seeded()),
-    )))
+    Service::new(build_router(
+        AppState::new(
+            repo,
+            authenticator,
+            sender,
+            Arc::new(common::FakePnStateReader::default()),
+            Arc::new(common::FakeReferenceRepo::with_seeded()),
+        )
+        // Cap pinned small so the boundary tests (exactly-N / N+1)
+        // stay cheap to construct.
+        .with_max_batch_size(5),
+    ))
 }
 
 fn auth_envelope() -> Vec<(&'static str, String)> {
@@ -789,7 +793,7 @@ async fn empty_order_ids_returns_400_minus_1130() {
 
 #[tokio::test]
 async fn exactly_max_batch_size_returns_pending_cancel_array() {
-    // trading_market().outcomes[0].max_batch_size == 5. Exactly five
+    // The test AppState pins max_batch_size = 5. Exactly five
     // ids must reach the chain and round-trip a 5-item PENDING_CANCEL
     // array — pins the `>` boundary against an off-by-one that would
     // either reject the at-cap call (`>=`) or let an oversized one
@@ -820,7 +824,7 @@ async fn exactly_max_batch_size_returns_pending_cancel_array() {
 
 #[tokio::test]
 async fn over_max_batch_size_returns_400_minus_1130() {
-    // trading_market().outcomes[0].max_batch_size == 5; six ids must
+    // The test AppState pins max_batch_size = 5; six ids must
     // fail locally with -1130 instead of paying a chain
     // ERR_BATCH_TOO_LARGE round-trip.
     let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
@@ -1113,9 +1117,9 @@ async fn chain_batch_size_drift_returns_503_minus_1500() {
     // Defence-in-depth: the use case pre-rejects oversize/empty batches
     // locally, but the chain still raises ERR_BATCH_TOO_LARGE (161) /
     // ERR_EMPTY_BATCH (162) if the local guard is bypassed. Reaching
-    // either code means the read-model's `max_batch_size` drifted from
-    // the on-chain ceiling — a server-state inconsistency, not a client
-    // bug — so `chain_sender::map_tvm_exit_code` surfaces it as
+    // either code means the configured `chain.max_batch_size` drifted
+    // above the on-chain ceiling — a server-config inconsistency, not a
+    // client bug — so `chain_sender::map_tvm_exit_code` surfaces it as
     // `DomainError::MarketInconsistent` → 503 / -1500. Simulate the
     // chain leg with a failing sender; this pins the HTTP shape contract
     // for that path.

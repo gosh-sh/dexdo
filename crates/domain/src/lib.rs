@@ -45,7 +45,6 @@ pub struct Outcome {
     pub tick_size: String,
     pub step_size: String,
     pub min_notional: String,
-    pub max_batch_size: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

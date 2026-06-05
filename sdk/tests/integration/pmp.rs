@@ -392,21 +392,13 @@ async fn test_delete_stake_via_dex() {
     .expect("resolve");
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    // Claim first
-    dex.claim(
-        &s.pn_address,
-        ParamsOfStakeKey {
-            event_id: s.event_id.clone(),
-            oracle_list_hash: s.oracle_list_hash.clone(),
-            token_type: TOKEN_TYPE_NACKL,
-        },
-        Signer::Keys { keys: s.pn_keys.clone() },
-    )
-    .await
-    .expect("claim");
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // `deleteStake` is the forfeit path — the ALTERNATIVE to claim, not a
+    // post-claim cleanup: the PN notifies `PMP.forfeitStake` (so the PMP can
+    // decrement `_totalWinPool` and stay closable) and deletes the record on
+    // the `onForfeitAccepted` ack. Claiming first would remove the record and
+    // a follow-up delete dies with `ERR_STAKE_NOT_EXISTS` (142).
+    let balance_before = pn_nackl(&dex.get_private_note_details(&s.pn_address).await.expect("details"));
 
-    // delete_stake — cleans up the stake record after claim
     dex.delete_stake(
         &s.pn_address,
         ParamsOfStakeKey {
@@ -418,10 +410,25 @@ async fn test_delete_stake_via_dex() {
     )
     .await
     .expect("delete_stake");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     let stakes = dex.get_stakes(&s.pn_address).await.expect("stakes");
-    assert!(stakes.stakes.is_empty(), "stakes should be empty after delete_stake");
+    assert!(stakes.stakes.is_empty(), "stakes should be empty after forfeit");
+
+    // Forfeit returns everything the PN paid in (initial stakes + the
+    // regular stake) but abandons any claim on the pool: the balance
+    // recovers to at most the original deposit, never above it. (With a
+    // single staker a claim would return the same total — what forfeit
+    // pins here is the record cleanup + no payout beyond pay-in.)
+    let balance_after = pn_nackl(&dex.get_private_note_details(&s.pn_address).await.expect("details"));
+    assert!(
+        balance_after > balance_before,
+        "forfeit must return the staked principal (before={balance_before}, after={balance_after})",
+    );
+    assert!(
+        balance_after <= PMP_DEPOSIT as u128,
+        "forfeit must not pay out beyond the original deposit (after={balance_after})",
+    );
 }
 
 #[tokio::test]

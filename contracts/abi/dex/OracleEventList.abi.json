@@ -8,7 +8,16 @@
 			"inputs": [
 				{"name":"pubkey","type":"uint256"},
 				{"name":"pmpSaltedCodeHash","type":"uint256"},
-				{"name":"pmpSaltedCodeDepth","type":"uint16"}
+				{"name":"pmpSaltedCodeDepth","type":"uint16"},
+				{"name":"description","type":"string"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setDescription",
+			"inputs": [
+				{"name":"description","type":"string"}
 			],
 			"outputs": [
 			]
@@ -92,6 +101,14 @@
 			],
 			"outputs": [
 			]
+		},
+		{
+			"name": "DescriptionUpdated",
+			"inputs": [
+				{"name":"description","type":"string"}
+			],
+			"outputs": [
+			]
 		}
 	],
 	"fields": [
@@ -103,6 +120,7 @@
 		{"init":false,"name":"_oraclePubkey","type":"uint256"},
 		{"init":false,"name":"_pmpSaltedCodeHash","type":"uint256"},
 		{"init":false,"name":"_pmpSaltedCodeDepth","type":"uint16"},
+		{"init":false,"name":"_description","type":"string"},
 		{"components":[{"name":"eventName","type":"string"},{"name":"oracleFee","type":"uint128"},{"name":"deadline","type":"uint64"},{"name":"describe","type":"string"},{"name":"outcomeNames","type":"map(uint32,string)"},{"name":"count","type":"uint128"},{"name":"trustAddr","type":"optional(uint256)"}],"init":false,"name":"_events","type":"map(uint256,tuple)"}
 	]
 }

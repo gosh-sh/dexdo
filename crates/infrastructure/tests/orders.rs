@@ -115,7 +115,7 @@ async fn insert_market(pool: &PgPool, pmp: &str, symbol: &str, book: &str) {
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                 price_precision, quantity_precision, tick_size, step_size,
-                min_notional, max_batch_size)
+                min_notional)
            values ($1, $2, 1, 'YES', $3,
                    -- quantity_precision = decimals (6) makes the atom→token
                    -- descale a no-op: these tests exercise
@@ -124,7 +124,7 @@ async fn insert_market(pool: &PgPool, pmp: &str, symbol: &str, book: &str) {
                    -- numbers in the infra depth tests and the order_from_row
                    -- unit tests.
                    3, 6, '0.001', '0.01',
-                   '1.00', 100)"#,
+                   '1.00')"#,
     )
     .bind(market_id)
     .bind(pmp)
@@ -157,7 +157,7 @@ async fn insert_market_unreconciled(pool: &PgPool, pmp: &str, symbol: &str, book
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                 price_precision, quantity_precision, tick_size, step_size,
-                min_notional, max_batch_size)
+                min_notional)
            values ($1, $2, 1, 'YES', $3,
                    -- quantity_precision = decimals (6) makes the atom→token
                    -- descale a no-op: these tests exercise
@@ -166,7 +166,7 @@ async fn insert_market_unreconciled(pool: &PgPool, pmp: &str, symbol: &str, book
                    -- numbers in the infra depth tests and the order_from_row
                    -- unit tests.
                    3, 6, '0.001', '0.01',
-                   '1.00', 100)"#,
+                   '1.00')"#,
     )
     .bind(market_id)
     .bind(pmp)

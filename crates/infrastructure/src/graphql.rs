@@ -2,11 +2,15 @@
 //
 
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
-use std::time::Instant;
 
 use ackinacki_kit::contracts::dapp::SystemDapp;
+use ackinacki_kit::tvm_client::account::get_account;
+use ackinacki_kit::tvm_client::account::ParamsOfGetAccount;
+use ackinacki_kit::tvm_client::ClientConfig;
+use ackinacki_kit::tvm_client::ClientContext;
+use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use reqwest::Client;
@@ -38,49 +42,17 @@ const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
   }
 }"#;
 
-const SERVER_INFO_QUERY: &str = r#"query ServerInfo {
-  info {
-    version
-  }
-}"#;
-
-// A GraphQL gateway < 1.0.0 keys account lookups on the raw address; >= 1.0.0
-// drops that form and keys on (account_id, dapp_id). The shape of the result
-// is unchanged, so both share the same response decode below.
-const ACCOUNT_BOC_QUERY: &str = r#"query AccountBoc($address: String!) {
-  blockchain {
-    account(address: $address) {
-      info {
-        boc
-      }
-    }
-  }
-}"#;
-
-const ACCOUNT_BOC_QUERY_V3: &str = r#"query AccountBocV3($accountId: String!, $dappId: String!) {
-  blockchain {
-    account(account_id: $accountId, dapp_id: $dappId) {
-      info {
-        boc
-      }
-    }
-  }
-}"#;
-
-// How long a resolved gateway version is trusted before re-probing. Bounds
-// the window in which a live 0.9.x -> >= 1.0.0 upgrade keeps us on the stale
-// account query form.
-const VERSION_PROBE_TTL: Duration = Duration::from_secs(30);
-
 #[derive(Debug, Clone)]
 pub struct GraphqlClient {
     http: Client,
     endpoint: String,
-    // Cached `info.version` verdict with the instant it was taken, shared
-    // across clones. Re-probed after `VERSION_PROBE_TTL` (and dropped on an
-    // account-fetch error) so a gateway that upgrades while the indexer runs
-    // flips the query form at runtime without a restart.
-    dapp_id_support: Arc<Mutex<Option<(bool, Instant)>>>,
+    // Lazily-built tvm_client context for account-state reads. Account
+    // BOCs are NOT fetched over GraphQL: the >= 1.0.0 gateway's
+    // `account(){info{boc}}` sub-resolver hangs server-side, while the
+    // REST `/v2/account` route `tvm_client::account::get_account` uses
+    // works on both old and new gateways (it picks the `address=` vs
+    // `account_id=&dapp_id=` wire form from the server version itself).
+    tvm_ctx: Arc<OnceLock<Arc<ClientContext>>>,
 }
 
 impl GraphqlClient {
@@ -90,7 +62,7 @@ impl GraphqlClient {
             .user_agent(concat!("dodex-indexer/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("build http client")?;
-        Ok(Self { http, endpoint: endpoint.into(), dapp_id_support: Arc::new(Mutex::new(None)) })
+        Ok(Self { http, endpoint: endpoint.into(), tvm_ctx: Arc::new(OnceLock::new()) })
     }
 
     pub async fn fetch_events(
@@ -128,125 +100,59 @@ impl GraphqlClient {
 
     /// Fetches the account state BOC (base64) for off-chain getter execution.
     /// Returns `None` if the account does not exist or has not been deployed yet.
+    ///
+    /// Goes through `tvm_client::account::get_account` (REST `/v2/account`),
+    /// not GraphQL — see the `tvm_ctx` field doc. DEX contracts live under
+    /// the System dApp (all-zero id); `account_id` is the address without
+    /// its `0:` workchain prefix.
     pub async fn fetch_account_boc(&self, address: &str) -> anyhow::Result<Option<String>> {
-        let result = self.account_boc(address).await;
-        if result.is_err() {
-            // A live gateway version flip makes the in-flight query form wrong;
-            // forget the cached probe so the next call re-detects instead of
-            // repeating the failure for the whole TTL window.
-            *self.dapp_id_support.lock().unwrap() = None;
-        }
-        result
-    }
-
-    async fn account_boc(&self, address: &str) -> anyhow::Result<Option<String>> {
-        let payload = if self.supports_dapp_id().await? {
-            // DEX contracts live under the System dApp (all-zero id); `account_id`
-            // is the address without its `0:` workchain prefix.
-            let account_id = address.strip_prefix("0:").unwrap_or(address);
-            json!({
-                "query": ACCOUNT_BOC_QUERY_V3,
-                "variables": { "accountId": account_id, "dappId": SystemDapp::System.dapp_id() },
-            })
-        } else {
-            json!({
-                "query": ACCOUNT_BOC_QUERY,
-                "variables": { "address": address },
-            })
+        let ctx = self.tvm_context()?;
+        let account_id = address.strip_prefix("0:").unwrap_or(address);
+        let params = ParamsOfGetAccount {
+            account_id: account_id.to_string(),
+            dapp_id: SystemDapp::System.dapp_id().to_string(),
         };
-
-        let response: GraphqlResponse<AccountBocData> = self
-            .http
-            .post(&self.endpoint)
-            .json(&payload)
-            .send()
-            .await
-            .context("graphql account request failed")?
-            .error_for_status()
-            .context("graphql account returned http error")?
-            .json()
-            .await
-            .context("graphql account response is not valid json")?;
-
-        if let Some(errors) = response.errors
-            && !errors.is_empty()
-        {
-            bail!("graphql account errors: {errors:?}");
-        }
-
-        let data = response.data.context("graphql account response missing data")?;
-        Ok(data.blockchain.account.and_then(|a| a.info.and_then(|i| i.boc)))
-    }
-
-    /// Whether the connected gateway speaks the `>= 1.0.0` dApp-ID account
-    /// API. Cached for `VERSION_PROBE_TTL` then re-probed, so a gateway that
-    /// upgrades while the indexer runs is picked up without a restart. On a
-    /// probe failure the last known verdict is reused; only a cold cache
-    /// surfaces the error.
-    async fn supports_dapp_id(&self) -> anyhow::Result<bool> {
-        {
-            let guard = self.dapp_id_support.lock().unwrap();
-            if let Some((value, at)) = *guard
-                && at.elapsed() < VERSION_PROBE_TTL
+        match get_account(ctx, params).await {
+            Ok(result) => Ok(Some(result.boc)),
+            // The account-state service keys lookups per dApp and answers a
+            // missing (account, dapp) pair with an error rather than an
+            // empty payload — that's this method's `None`. Observed shapes:
+            // "Not found: Resource not found: http://…/v2/account?…" and
+            // "Can't find account in shard state".
+            Err(e)
+                if {
+                    let msg = e.message().to_ascii_lowercase();
+                    msg.contains("not found") || msg.contains("find account")
+                } =>
             {
-                return Ok(value);
+                Ok(None)
             }
-        }
-        match self.probe_dapp_id_support().await {
-            Ok(value) => {
-                *self.dapp_id_support.lock().unwrap() = Some((value, Instant::now()));
-                Ok(value)
-            }
-            Err(e) => {
-                let last = self.dapp_id_support.lock().unwrap().map(|(value, _)| value);
-                last.ok_or(e)
-            }
+            Err(e) => Err(anyhow!("get_account for {address}: {e}")),
         }
     }
 
-    async fn probe_dapp_id_support(&self) -> anyhow::Result<bool> {
-        let payload = json!({ "query": SERVER_INFO_QUERY });
-
-        let response: GraphqlResponse<ServerInfoData> = self
-            .http
-            .post(&self.endpoint)
-            .json(&payload)
-            .send()
-            .await
-            .context("graphql server-info request failed")?
-            .error_for_status()
-            .context("graphql server-info returned http error")?
-            .json()
-            .await
-            .context("graphql server-info response is not valid json")?;
-
-        if let Some(errors) = response.errors
-            && !errors.is_empty()
-        {
-            bail!("graphql server-info errors: {errors:?}");
+    /// tvm_client context for `get_account`, built once per client from the
+    /// GraphQL endpoint's host (`https://host/graphql` → `host`).
+    fn tvm_context(&self) -> anyhow::Result<Arc<ClientContext>> {
+        if let Some(ctx) = self.tvm_ctx.get() {
+            return Ok(ctx.clone());
         }
-
-        let version = response
-            .data
-            .and_then(|d| d.info)
-            .and_then(|i| i.version)
-            .context("graphql server-info missing info.version")?;
-        Ok(version_supports_dapp_id(&version))
+        let host = self
+            .endpoint
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| anyhow!("cannot derive gateway host from `{}`", self.endpoint))?;
+        let mut config = ClientConfig::default();
+        config.network.endpoints = Some(vec![host.to_string()]);
+        let ctx = Arc::new(ClientContext::new(config).context("build tvm client context")?);
+        // Two clones racing here both build a context; the loser's copy is
+        // dropped. Harmless — construction is cheap and side-effect free.
+        let _ = self.tvm_ctx.set(ctx.clone());
+        Ok(ctx)
     }
-}
-
-/// Encodes a `major.minor.patch` string the way the node does
-/// (`major*1_000_000 + minor*1_000 + patch`) and tests the `1.0.0` cutover
-/// at which the account query switches to the dApp-ID form. Missing or
-/// non-numeric components count as zero, so a malformed version reads as
-/// legacy rather than panicking the indexer.
-fn version_supports_dapp_id(version: &str) -> bool {
-    let mut parts = version.split('.');
-    let mut next = || parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
-    let major = next();
-    let minor = next();
-    let patch = next();
-    major * 1_000_000 + minor * 1_000 + patch >= 1_000_000
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,41 +178,6 @@ struct EventsData {
 #[derive(Debug, Deserialize)]
 struct Blockchain {
     events: EventsPage,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccountBocData {
-    blockchain: AccountBocBlockchain,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccountBocBlockchain {
-    #[serde(default)]
-    account: Option<AccountBocNode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccountBocNode {
-    #[serde(default)]
-    info: Option<AccountBocInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccountBocInfo {
-    #[serde(default)]
-    boc: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ServerInfoData {
-    #[serde(default)]
-    info: Option<ServerInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ServerInfo {
-    #[serde(default)]
-    version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -427,19 +298,6 @@ mod tests {
         assert!(page.edges[0].node.src.is_none());
         assert!(page.page_info.end_cursor.is_none());
         assert!(page.page_info.has_next_page);
-    }
-
-    #[test]
-    fn version_cutover_at_one_zero_zero() {
-        assert!(!version_supports_dapp_id("0.9.0"));
-        assert!(!version_supports_dapp_id("0.999.999"));
-        assert!(version_supports_dapp_id("1.0.0"));
-        assert!(version_supports_dapp_id("1.2.3"));
-        assert!(version_supports_dapp_id("2.0.0"));
-        // Short and malformed strings degrade to legacy, never panic.
-        assert!(!version_supports_dapp_id("0.9"));
-        assert!(!version_supports_dapp_id(""));
-        assert!(!version_supports_dapp_id("garbage"));
     }
 
     #[test]

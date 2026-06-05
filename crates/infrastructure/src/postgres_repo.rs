@@ -128,7 +128,6 @@ struct OutcomeRow {
     tick_size: String,
     step_size: String,
     min_notional: String,
-    max_batch_size: i32,
 }
 
 #[async_trait]
@@ -408,7 +407,6 @@ impl MarketReadRepository for PostgresReadModelRepository {
                       mo.tick_size             as tick_size,
                       mo.step_size             as step_size,
                       mo.min_notional          as min_notional,
-                      mo.max_batch_size        as max_batch_size,
                       rt.decimals              as decimals
                  from markets m
                  join market_outcomes mo on mo.market_id_fk = m.id
@@ -495,15 +493,6 @@ impl MarketReadRepository for PostgresReadModelRepository {
             );
             anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
         })?;
-        let max_batch_size: u16 = row.max_batch_size.try_into().map_err(|_| {
-            tracing::warn!(
-                market_address = %market_address.0,
-                symbol = %symbol.0,
-                raw = row.max_batch_size,
-                "placement_row max_batch_size out of range",
-            );
-            anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
-        })?;
         let decimals: u8 = row.decimals.try_into().map_err(|_| {
             tracing::warn!(
                 market_address = %market_address.0,
@@ -528,7 +517,6 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 tick_size: row.tick_size,
                 step_size: row.step_size,
                 min_notional: row.min_notional,
-                max_batch_size,
             },
             decimals,
         })
@@ -1259,7 +1247,6 @@ struct PlacementRow {
     tick_size: String,
     step_size: String,
     min_notional: String,
-    max_batch_size: i32,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1819,8 +1806,7 @@ impl PostgresReadModelRepository {
                       quantity_precision,
                       tick_size,
                       step_size,
-                      min_notional,
-                      max_batch_size
+                      min_notional
                  from market_outcomes
                 where market_id_fk = any($1)
                 order by market_id_fk, outcome_id"#,
@@ -1856,14 +1842,6 @@ impl PostgresReadModelRepository {
                 );
                 anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
             })?;
-            let max_batch_size: u16 = r.max_batch_size.try_into().map_err(|_| {
-                tracing::warn!(
-                    market_id_fk = r.market_id_fk,
-                    raw = r.max_batch_size,
-                    "fetch_outcomes max_batch_size out of range",
-                );
-                anyhow::anyhow!(dodex_domain::DomainError::MarketInconsistent)
-            })?;
             by_market.entry(r.market_id_fk).or_default().push(Outcome {
                 outcome_id,
                 outcome_name: r.outcome_name,
@@ -1873,7 +1851,6 @@ impl PostgresReadModelRepository {
                 tick_size: r.tick_size,
                 step_size: r.step_size,
                 min_notional: r.min_notional,
-                max_batch_size,
             });
         }
         Ok(by_market)

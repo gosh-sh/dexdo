@@ -1,13 +1,15 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Production implementation of `ChainOrderSender` that dispatches
-// `PrivateNote.placeOrder`, `PrivateNote.cancelOrder`,
-// `PrivateNote.placeBatch`, and `PrivateNote.cancelBatch` through the
-// `dodex_chain::Dex` facade. The wrapper does nothing except translate
-// the application-layer payloads into the chain ABI's
-// `ParamsOfPlaceOrder` / `ParamsOfCancelOrder` / `ParamsOfPlaceBatch` /
-// `ParamsOfCancelBatch` and forward the call — ABI encoding, signing,
-// and gateway transport all live in `ackinacki_kit`.
+// `PrivateNote.placeOrder`, `PrivateNote.cancelOrder`, and
+// `PrivateNote.placeBatch` through the `dodex_chain::Dex` facade.
+// `placeBatch` is the chain's atomic batch entry: it carries both a
+// placements side and a `cancelIds` side, so batch cancels dispatch the
+// same method with an empty `orders` array. The wrapper does nothing
+// except translate the application-layer payloads into the chain ABI's
+// `ParamsOfPlaceOrder` / `ParamsOfCancelOrder` / `ParamsOfPlaceBatch`
+// and forward the call — ABI encoding, signing, and gateway transport
+// all live in `ackinacki_kit`.
 //
 // See `docs/tech-specs/write-api.md §Chain submission` for the layering
 // contract this implements.
@@ -15,7 +17,6 @@
 use std::time::Duration;
 
 use ackinacki_kit::contracts::dex::order_book::OrderBookOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
@@ -237,6 +238,7 @@ impl ChainOrderSender for DexChainSender {
             oracle_list_hash: payload.oracle_list_hash,
             token_type: payload.token_type,
             orders,
+            cancel_ids: vec![],
         };
 
         let call = self.dex.place_batch(&pn_address, params, signer);
@@ -289,14 +291,18 @@ impl ChainOrderSender for DexChainSender {
         let pn_address = payload.pn_address;
         let event_id = payload.event_id;
 
-        let params = ParamsOfCancelBatch {
+        // The chain has no standalone cancelBatch: `placeBatch` is the
+        // atomic batch dispatch and a pure cancel rides it with an
+        // empty placements side.
+        let params = ParamsOfPlaceBatch {
             event_id: event_id.clone(),
             oracle_list_hash: payload.oracle_list_hash,
             token_type: payload.token_type,
-            order_ids,
+            orders: vec![],
+            cancel_ids: order_ids,
         };
 
-        let call = self.dex.cancel_batch(&pn_address, params, signer);
+        let call = self.dex.place_batch(&pn_address, params, signer);
         let outcome = timeout(self.cancel_batch_timeout, call).await;
         let ctx = ChainCallContext {
             entry_point: "cancel_batch",

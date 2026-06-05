@@ -308,7 +308,6 @@ fn trading_market() -> Market {
             tick_size: "0.001".into(),
             step_size: "0.000001".into(),
             min_notional: "0.5".into(),
-            max_batch_size: 5,
         }],
     }
 }
@@ -328,7 +327,6 @@ fn trading_market_with_no_outcome() -> Market {
         tick_size: "0.001".into(),
         step_size: "0.000001".into(),
         min_notional: "0.5".into(),
-        max_batch_size: 5,
     });
     market
 }
@@ -336,13 +334,18 @@ fn trading_market_with_no_outcome() -> Market {
 fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
     let authenticator: SharedAuth =
         Arc::new(FakeAuthenticator { permissions: vec![Permission::Trade] });
-    Service::new(build_router(AppState::new(
-        repo,
-        authenticator,
-        sender,
-        Arc::new(common::FakePnStateReader::default()),
-        Arc::new(common::FakeReferenceRepo::with_seeded()),
-    )))
+    Service::new(build_router(
+        AppState::new(
+            repo,
+            authenticator,
+            sender,
+            Arc::new(common::FakePnStateReader::default()),
+            Arc::new(common::FakeReferenceRepo::with_seeded()),
+        )
+        // Cap pinned small so the boundary tests (exactly-N / N+1)
+        // stay cheap to construct.
+        .with_max_batch_size(5),
+    ))
 }
 
 fn valid_item(client_order_id: &str) -> serde_json::Value {
@@ -613,7 +616,7 @@ async fn empty_orders_returns_400_minus_1130() {
 
 #[tokio::test]
 async fn over_max_batch_size_returns_400_minus_1130() {
-    // trading_market().outcomes[0].max_batch_size == 5. Six items
+    // The test AppState pins max_batch_size = 5. Six items
     // must fail locally with -1130 instead of paying a chain
     // ERR_BATCH_TOO_LARGE round-trip.
     let repo: SharedRepo = Arc::new(FakeRepo::with(trading_market()));
@@ -707,7 +710,7 @@ async fn per_item_excess_precision_returns_400_minus_1111() {
 
 #[tokio::test]
 async fn exactly_max_batch_size_returns_pending_new_array() {
-    // `max_batch_size = 5` per the trading_market fixture. A batch of
+    // The test AppState pins `max_batch_size = 5`. A batch of
     // exactly 5 items must reach the chain and round-trip a 5-item
     // PENDING_NEW array — pins the boundary against an off-by-one in
     // the `orders.len() > max_batch_size` gate.

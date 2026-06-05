@@ -325,12 +325,6 @@ async fn write_market_outcomes(
     let tick_size = power_of_ten_neg(price_precision as u32);
     let step_size = power_of_ten_neg(quantity_precision as u32);
     let min_notional = scale_uint_to_decimal(&min_notional_raw, token_decimals.max(0) as u32);
-    // `max_batch_size` is intentionally global today — it caps batch endpoints
-    // at the API layer, not a per-token chain rule, and `ref_tokens` has no
-    // column for it. Centralising as a constant keeps the contract honest;
-    // when batch endpoints land, this should move to api config.
-    let max_batch_size: i32 = 5;
-
     for (outcome_id_str, outcome_name_value) in map {
         let outcome_id: i32 = outcome_id_str
             .parse()
@@ -344,8 +338,8 @@ async fn write_market_outcomes(
             r#"insert into market_outcomes
                    (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                     price_precision, quantity_precision,
-                    tick_size, step_size, min_notional, max_batch_size, updated_at)
-               values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+                    tick_size, step_size, min_notional, updated_at)
+               values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
                on conflict (pmp_address, outcome_id) do update
                    set outcome_name = excluded.outcome_name,
                        symbol = excluded.symbol,
@@ -354,7 +348,6 @@ async fn write_market_outcomes(
                        tick_size = excluded.tick_size,
                        step_size = excluded.step_size,
                        min_notional = excluded.min_notional,
-                       max_batch_size = excluded.max_batch_size,
                        updated_at = now()"#,
         )
         .bind(market_id)
@@ -367,7 +360,6 @@ async fn write_market_outcomes(
         .bind(&tick_size)
         .bind(&step_size)
         .bind(&min_notional)
-        .bind(max_batch_size)
         .execute(&mut **tx)
         .await
         .with_context(|| format!("upsert market_outcomes outcome_id={outcome_id}"))?;

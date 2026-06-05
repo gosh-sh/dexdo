@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "ackinacki-kit"
 version = "1.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#e4d3b352dc2cd6f07ea7a55644a060b7883c4837"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#d0cf6bed201d5ac08f6c8d62a5e90ccdd8c35a0c"
 dependencies = [
  "contracts",
  "shared",
@@ -138,8 +138,8 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "api_derive"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "api_info",
  "proc-macro2",
@@ -150,8 +150,8 @@ dependencies = [
 
 [[package]]
 name = "api_info"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "serde",
  "serde_derive",
@@ -976,7 +976,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.48.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1030,7 +1030,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "1.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#e4d3b352dc2cd6f07ea7a55644a060b7883c4837"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#d0cf6bed201d5ac08f6c8d62a5e90ccdd8c35a0c"
 dependencies = [
  "base64",
  "chrono",
@@ -2730,7 +2730,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4131,7 +4131,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4169,7 +4169,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -5230,7 +5230,7 @@ dependencies = [
 [[package]]
 name = "shared"
 version = "1.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#e4d3b352dc2cd6f07ea7a55644a060b7883c4837"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=v3.0.0#d0cf6bed201d5ac08f6c8d62a5e90ccdd8c35a0c"
 dependencies = [
  "tokio",
 ]
@@ -6282,8 +6282,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_abi"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6299,8 +6299,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_block"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "anyhow",
  "base64",
@@ -6318,8 +6318,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_block_json"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "anyhow",
  "hex",
@@ -6338,8 +6338,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_client"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "aes",
  "anyhow",
@@ -6400,8 +6400,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_client_processing"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "api_derive",
  "api_info",
@@ -6420,8 +6420,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_executor"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -6436,8 +6436,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_sdk"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "anyhow",
  "api_derive",
@@ -6461,8 +6461,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_struct"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "thiserror 2.0.18",
  "tvm_block",
@@ -6471,8 +6471,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_types"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "aes",
  "anyhow",
@@ -6502,8 +6502,8 @@ dependencies = [
 
 [[package]]
 name = "tvm_vm"
-version = "3.0.0-alpha"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#1bd7a1618cb00cfa9ef9d70682c0c48fbcdf76d0"
+version = "3.0.0"
+source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0-rc.an#47d28f9d1d837540e1e5a26817554bb4c7f7c751"
 dependencies = [
  "anyhow",
  "ark-bls12-381",
@@ -7383,7 +7383,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

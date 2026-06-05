@@ -180,7 +180,7 @@ async fn insert_market(pool: &PgPool, scope: &Scope) {
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
                 price_precision, quantity_precision, tick_size, step_size,
-                min_notional, max_batch_size)
+                min_notional)
            values ($1, $2, 1, 'YES', $3,
                    -- quantity_precision = decimals (6): these HTTP tests
                    -- exercise filtering/pagination, not amount scaling, so the
@@ -188,7 +188,7 @@ async fn insert_market(pool: &PgPool, scope: &Scope) {
                    -- bps/atom decode is pinned with contract numbers in the
                    -- infra depth tests.
                    3, 6, '0.001', '0.01',
-                   '1.00', 100)"#,
+                   '1.00')"#,
     )
     .bind(market_id)
     .bind(&scope.pmp)

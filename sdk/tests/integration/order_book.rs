@@ -19,7 +19,6 @@
 
 use ackinacki_kit::contracts::dex::order_book::OrderBookOrder;
 use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelBatch;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfMergeFullSet;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
@@ -797,6 +796,7 @@ async fn test_ob_place_batch_sells() {
             oracle_list_hash: market.oracle_list_hash.clone(),
             token_type: market.token_type,
             orders,
+            cancel_ids: vec![],
         },
         Signer::Keys { keys: trader.keys() },
     )
@@ -846,7 +846,8 @@ async fn test_ob_place_batch_sells() {
 }
 
 /// Place a batch, then cancel the same orders by `order_id` via
-/// `cancelBatch`. Verifies each `OrderCancelled` event fires.
+/// `placeBatch` with an empty placements side (`cancelIds` only).
+/// Verifies each `OrderCancelled` event fires.
 #[tokio::test]
 #[ignore = "requires ob_pool.json + pn_pool[_1].json + shellnet"]
 async fn test_ob_cancel_batch() {
@@ -893,6 +894,7 @@ async fn test_ob_cancel_batch() {
             oracle_list_hash: market.oracle_list_hash.clone(),
             token_type: market.token_type,
             orders,
+            cancel_ids: vec![],
         },
         Signer::Keys { keys: trader.keys() },
     )
@@ -916,22 +918,23 @@ async fn test_ob_cancel_batch() {
     }
     eprintln!("[batch-cancel] placed: order_ids={order_ids:?}");
 
-    // PN must be idle before we send the next external (cancelBatch).
-    // place_batch's onBatchComplete eventually clears _busy.
+    // PN must be idle before we send the next external (the cancel-only
+    // placeBatch). place_batch's onBatchComplete eventually clears _busy.
     wait_not_busy(&dex, &trader, "place_batch").await;
 
-    dex.cancel_batch(
+    dex.place_batch(
         &trader.address,
-        ParamsOfCancelBatch {
+        ParamsOfPlaceBatch {
             event_id: market.event_id.clone(),
             oracle_list_hash: market.oracle_list_hash.clone(),
             token_type: market.token_type,
-            order_ids: order_ids.clone(),
+            orders: vec![],
+            cancel_ids: order_ids.clone(),
         },
         Signer::Keys { keys: trader.keys() },
     )
     .await
-    .expect("cancel_batch");
+    .expect("cancel-only place_batch");
 
     // Each cancel produces an OrderCancelled event matching its
     // client_order_id (the cancel callback reuses the original coid).
@@ -1684,6 +1687,7 @@ async fn test_ob_negative_validation() {
                 oracle_list_hash: market.oracle_list_hash.clone(),
                 token_type: market.token_type,
                 orders: oversized,
+                cancel_ids: vec![],
             },
             signer(),
         )

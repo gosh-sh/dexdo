@@ -25,6 +25,9 @@ contract OracleEventList is Modifiers {
     /// @notice Depth of salted PMP code used to validate caller PMP address.
     uint16  _pmpSaltedCodeDepth;
 
+    /// @notice Human-readable description of this OracleEventList (set at deploy).
+    string _description;
+
     /// @notice Registry of events managed by this OracleEventList.
     mapping(uint256 => EventInfo) public _events;
 
@@ -40,11 +43,21 @@ contract OracleEventList is Modifiers {
     /// @param pmpAddress PMP address that received confirmation.
     event EventConfirmed(uint256 eventId, address pmpAddress);
 
+    /// @notice Emitted when the list description is updated via setDescription.
+    /// @param description New description string.
+    event DescriptionUpdated(string description);
+
     /// @notice Initializes OracleEventList parameters.
     /// @param pubkey Oracle owner pubkey.
     /// @param pmpSaltedCodeHash Hash of salted PMP code.
     /// @param pmpSaltedCodeDepth Depth of salted PMP code.
-    constructor(uint256 pubkey, uint256 pmpSaltedCodeHash, uint16 pmpSaltedCodeDepth) {
+    /// @param description Human-readable description of this list.
+    constructor(
+        uint256 pubkey,
+        uint256 pmpSaltedCodeHash,
+        uint16 pmpSaltedCodeDepth,
+        string description
+    ) {
         tvm.accept();
         // `_oracle` is a static field (set via stateInit to the legitimate
         // Oracle address). Without this check, the old code was
@@ -62,12 +75,23 @@ contract OracleEventList is Modifiers {
         _oraclePubkey = pubkey;
         _pmpSaltedCodeHash = pmpSaltedCodeHash;
         _pmpSaltedCodeDepth = pmpSaltedCodeDepth;
+        _description = description;
     }
 
     /// @notice Ensures minimal native balance for operations.
     function ensureBalance() private pure {
         if (address(this).balance > MIN_BALANCE) return;
         gosh.mintshellq(MIN_BALANCE);
+    }
+
+    /// @notice Updates the human-readable description of this list. Only the
+    ///         Oracle owner pubkey may rotate it.
+    /// @param description New description string.
+    function setDescription(string description) public onlyOwnerPubkey(_oraclePubkey) accept {
+        ensureBalance();
+        _description = description;
+        address addrExtern = address.makeAddrExtern(ORACLE_LIST_DESCRIPTION_UPDATED, bitCntAddress);
+        emit DescriptionUpdated{dest: addrExtern}(description);
     }
     
     /// @notice Adds a new event that Oracle is willing to service

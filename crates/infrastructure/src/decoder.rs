@@ -132,9 +132,9 @@ mod tests {
             assert!(decoder.contracts.contains_key(kind), "missing contract {kind}");
         }
 
-        // 13 PMP + 2 Oracle + 2 OracleEventList + 8 OrderBook + 1 RootOracle
-        // + 3 RootPN + 14 PrivateNote + 0 Nullifier = 43
-        assert_eq!(decoder.known_events(), 43, "unexpected total event count");
+        // 13 PMP + 2 Oracle + 3 OracleEventList + 8 OrderBook + 1 RootOracle
+        // + 3 RootPN + 14 PrivateNote + 0 Nullifier = 44
+        assert_eq!(decoder.known_events(), 44, "unexpected total event count");
 
         // sample lookups
         let pmp_event_ids: Vec<_> = decoder

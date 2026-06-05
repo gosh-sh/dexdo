@@ -124,9 +124,8 @@ pub async fn upsert_market(
     sqlx::query(
         r#"insert into market_outcomes
                (market_id_fk, pmp_address, outcome_id, outcome_name, symbol,
-                price_precision, quantity_precision, tick_size, step_size, min_notional,
-                max_batch_size)
-           select id, $1, $2, $3, $4, $5, $6, $7, $8, $9, 5
+                price_precision, quantity_precision, tick_size, step_size, min_notional)
+           select id, $1, $2, $3, $4, $5, $6, $7, $8, $9
              from markets where pmp_address = $1
            on conflict (pmp_address, outcome_id) do update set
                symbol = excluded.symbol,
