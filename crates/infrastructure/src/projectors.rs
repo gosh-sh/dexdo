@@ -130,18 +130,26 @@ async fn apply_oracle_event_list_deployed(
         return Ok(ProjectionOutcome::Deferred);
     };
 
+    // Required: OracleEventListDeployed always carries `description`, and the
+    // column is NOT NULL so the public contract stays a plain STRING. A missing
+    // field is a decoder/ABI mismatch — fail the projection loudly rather than
+    // inventing a value.
+    let description = field_str(&event.value, "description")?;
+
     sqlx::query(
-        r#"insert into oracle_event_lists (msg_id, oracle_id, address, list_index)
-           values ($1, $2, $3, $4)
+        r#"insert into oracle_event_lists (msg_id, oracle_id, address, list_index, description)
+           values ($1, $2, $3, $4, $5)
            on conflict (msg_id) do update
                set oracle_id = excluded.oracle_id,
                    address = excluded.address,
-                   list_index = excluded.list_index"#,
+                   list_index = excluded.list_index,
+                   description = coalesce(oracle_event_lists.description, excluded.description)"#,
     )
     .bind(&node.msg_id)
     .bind(oracle_id)
     .bind(address)
     .bind(list_index)
+    .bind(description)
     .execute(&mut **tx)
     .await
     .context("upsert oracle_event_lists")?;

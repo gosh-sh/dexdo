@@ -16,6 +16,7 @@ use dodex_domain::DomainError;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
+use dodex_domain::OraclesPage;
 use dodex_domain::Order;
 use dodex_domain::OrderSide;
 use dodex_domain::OrderStatus;
@@ -126,6 +127,24 @@ pub struct MarketsListing {
 pub enum MarketsRequest {
     One { market_address: MarketAddress, now: i64 },
     Listing(MarketsListing),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OraclesFilter {
+    pub oracle_address: Option<String>,
+    /// Raw hex form as supplied by the client (e.g. `0xabc…`). The repo
+    /// converts it to the decimal form of `internal_id_in_eventlist`;
+    /// un-decodable hex surfaces as `DomainError::InvalidParameter`.
+    pub event_id: Option<String>,
+    pub deadline_before: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OraclesRequest {
+    pub filter: OraclesFilter,
+    pub cursor: Option<String>,
+    pub limit: u16,
+    pub now: i64,
 }
 
 /// Slim projection the `DELETE /api/v1/order` path needs. Built by a
@@ -343,6 +362,15 @@ pub trait MarketReadRepository: Send + Sync {
         orderbook_address: &str,
         owner_pn_address: &str,
     ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error>;
+
+    /// List oracles → event lists → available events, paginated by oracle.
+    /// Default errors loudly: only the production repository implements it,
+    /// and the only caller (the `/api/v1/oracles` handler) reaches that impl
+    /// through `Arc<dyn MarketReadRepository>` → the `Arc<T>` forward below.
+    /// Unrelated test doubles inherit this default and never call it.
+    async fn list_oracles(&self, _request: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
+        Err(anyhow::anyhow!("list_oracles not implemented for this MarketReadRepository"))
+    }
 }
 
 #[async_trait]
@@ -418,6 +446,10 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         owner_pn_address: &str,
     ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
         (**self).sum_open_sell_remaining(orderbook_address, owner_pn_address).await
+    }
+
+    async fn list_oracles(&self, request: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
+        (**self).list_oracles(request).await
     }
 }
 
@@ -715,6 +747,25 @@ where
 {
     pub async fn execute(&self, request: MarketsRequest) -> Result<MarketsPage, anyhow::Error> {
         self.repo.list_markets(&request).await
+    }
+}
+
+pub struct GetOraclesUseCase<R> {
+    repo: R,
+}
+
+impl<R> GetOraclesUseCase<R> {
+    pub fn new(repo: R) -> Self {
+        Self { repo }
+    }
+}
+
+impl<R> GetOraclesUseCase<R>
+where
+    R: MarketReadRepository,
+{
+    pub async fn execute(&self, request: OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
+        self.repo.list_oracles(&request).await
     }
 }
 
@@ -5123,6 +5174,113 @@ mod get_market_balances_use_case_tests {
         ) -> anyhow::Result<std::collections::HashMap<u32, String>> {
             Ok(self.sums.lock().unwrap().clone())
         }
+    }
+
+    struct OraclesStubRepo;
+
+    #[async_trait]
+    impl MarketReadRepository for OraclesStubRepo {
+        async fn list_markets(&self, _: &MarketsRequest) -> anyhow::Result<MarketsPage> {
+            unimplemented!()
+        }
+
+        async fn get_depth(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u16,
+        ) -> anyhow::Result<DepthSnapshot> {
+            unimplemented!()
+        }
+
+        async fn resolve_for_new_order(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: i64,
+        ) -> anyhow::Result<MarketForPlacement> {
+            unimplemented!()
+        }
+
+        async fn resolve_for_cancel(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: u64,
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<OrderForCancel> {
+            unimplemented!()
+        }
+
+        async fn resolve_for_cancel_batch(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: &[u64],
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<Option<CancelBatchResolution>> {
+            unimplemented!()
+        }
+
+        async fn list_orders(&self, _: &OrdersQuery) -> anyhow::Result<OrdersPage> {
+            unimplemented!()
+        }
+
+        async fn resolve_market_for_balances(
+            &self,
+            _: &MarketAddress,
+        ) -> anyhow::Result<MarketBalancesResolution> {
+            unimplemented!()
+        }
+
+        async fn resolve_for_buy_full_set(
+            &self,
+            _: &MarketAddress,
+            _: i64,
+        ) -> anyhow::Result<MarketForBuyFullSet> {
+            unimplemented!()
+        }
+
+        async fn sum_open_sell_remaining(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<std::collections::HashMap<u32, String>> {
+            unimplemented!()
+        }
+
+        async fn list_oracles(&self, _: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
+            use dodex_domain::OracleListing;
+            Ok(OraclesPage {
+                oracles: vec![OracleListing {
+                    name: "ElectionOracle".into(),
+                    address: "0:oracle-a".into(),
+                    event_lists: vec![],
+                }],
+                next_cursor: Some("cur".into()),
+                has_more: true,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn get_oracles_use_case_forwards_to_repo() {
+        let uc = GetOraclesUseCase::new(OraclesStubRepo);
+        let page = uc
+            .execute(OraclesRequest {
+                filter: OraclesFilter::default(),
+                cursor: None,
+                limit: 50,
+                now: 1_710_000_000,
+            })
+            .await
+            .expect("list_oracles");
+        assert_eq!(page.oracles.len(), 1);
+        assert_eq!(page.oracles[0].name, "ElectionOracle");
+        assert!(page.has_more);
+        assert_eq!(page.next_cursor.as_deref(), Some("cur"));
     }
 
     fn make_resolution(num_outcomes: u32) -> MarketBalancesResolution {

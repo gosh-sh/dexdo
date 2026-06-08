@@ -450,6 +450,70 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
+  /api/v1/oracles:
+    get:
+      tags:
+      - market-data
+      summary: List oracles
+      operationId: get_oracles
+      parameters:
+      - name: oracleAddress
+        in: query
+        description: Filter by oracle address.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: eventId
+        in: query
+        description: Return only the event list containing this event id; events[] is narrowed to it.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: deadlineBefore
+        in: query
+        description: Include only events with deadline < deadlineBefore (unix seconds).
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: cursor
+        in: query
+        description: Opaque pagination cursor returned from a previous page.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: limit
+        in: query
+        description: Number of oracles. Default 50, max 200.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OraclesResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
   /api/v1/order:
     post:
       tags:
@@ -1157,6 +1221,112 @@ components:
           description: |-
             Oracle name. `null` if the oracle row has not been reconciled
             yet.
+    OracleEntryDto:
+      type: object
+      required:
+      - name
+      - address
+      - eventLists
+      properties:
+        address:
+          type: string
+        eventLists:
+          type: array
+          items:
+            $ref: '#/components/schemas/OracleEventListDto'
+        name:
+          type: string
+    OracleEventDto:
+      type: object
+      required:
+      - eventId
+      - eventName
+      - oracleFee
+      - deadline
+      - outcomes
+      properties:
+        deadline:
+          type: integer
+          format: int64
+        description:
+          type:
+          - string
+          - 'null'
+        eventId:
+          type: string
+        eventName:
+          type: string
+        oracleFee:
+          $ref: '#/components/schemas/OracleFeeDto'
+        outcomes:
+          type: array
+          items:
+            $ref: '#/components/schemas/OracleOutcomeDto'
+        trustAddress:
+          type:
+          - string
+          - 'null'
+    OracleEventListDto:
+      type: object
+      required:
+      - index
+      - address
+      - description
+      - events
+      properties:
+        address:
+          type: string
+        description:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/OracleEventDto'
+        index:
+          type: integer
+          format: int64
+    OracleFeeDto:
+      type: object
+      required:
+      - asset
+      - amount
+      properties:
+        amount:
+          type: string
+        asset:
+          type: string
+    OracleOutcomeDto:
+      type: object
+      required:
+      - outcomeId
+      - outcomeName
+      properties:
+        outcomeId:
+          type: integer
+          format: int32
+          minimum: 0.0
+        outcomeName:
+          type: string
+    OraclesResponse:
+      type: object
+      required:
+      - serverTime
+      - hasMore
+      - oracles
+      properties:
+        hasMore:
+          type: boolean
+        nextCursor:
+          type:
+          - string
+          - 'null'
+        oracles:
+          type: array
+          items:
+            $ref: '#/components/schemas/OracleEntryDto'
+        serverTime:
+          type: integer
+          format: int64
     OrderResponse:
       type: object
       required:

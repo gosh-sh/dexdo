@@ -494,27 +494,62 @@ fn parse_decimal_string(s: &str) -> Result<(BigUint, usize), DomainError> {
     Ok((value, fractional.len()))
 }
 
+/// One page of `/api/v1/oracles`. Pagination is by oracle; `next_cursor`
+/// encodes the last retained oracle (see the repo's oracle cursor helpers).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Oracle {
+pub struct OraclesPage {
+    pub oracles: Vec<OracleListing>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+/// One oracle with its event lists. Maps to api-spec `OracleEntry`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleListing {
     pub name: String,
     pub address: String,
+    pub event_lists: Vec<OracleEventListEntry>,
 }
 
+/// One event list owned by an oracle. Maps to api-spec `OracleEventList`.
+/// `description` is required (`NOT NULL`): it is carried by every
+/// `OracleEventListDeployed` event, so the public contract is a plain STRING.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OracleEventList {
-    pub oracle_address: String,
-    pub msg_id: String,
+pub struct OracleEventListEntry {
+    pub index: i64,
     pub address: String,
-    pub list_index: Option<u128>,
+    pub description: String,
+    pub events: Vec<OracleEventEntry>,
 }
 
+/// One available event offered by an event list. Maps to api-spec `OracleEvent`.
+/// `event_id` is the `0x`-hex rendering (same as `/api/v1/markets`
+/// `event.eventId`). `description` / `trust_address` are reconciler-filled and
+/// may be NULL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OracleEvent {
-    pub event_list_address: String,
+pub struct OracleEventEntry {
     pub event_id: String,
     pub event_name: String,
-    pub deadline: u64,
-    pub outcome_names: serde_json::Value,
+    pub description: Option<String>,
+    pub oracle_fee: OracleFee,
+    pub deadline: i64,
+    pub trust_address: Option<String>,
+    pub outcomes: Vec<OracleOutcome>,
+}
+
+/// Fee required by an oracle for an event. `asset` is the literal `"SHELL"`
+/// today; `amount` is the raw chain integer as a decimal string (unscaled).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleFee {
+    pub asset: String,
+    pub amount: String,
+}
+
+/// One outcome label of an event. Maps to api-spec `OracleOutcome`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleOutcome {
+    pub outcome_id: u32,
+    pub outcome_name: String,
 }
 
 /// Access level associated with an api_key. Mirrors the public

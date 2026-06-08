@@ -14,6 +14,7 @@ use dodex_application::MarketReadRepository;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::OraclesRequest;
 use dodex_application::OrderForCancel;
 use dodex_application::OrderForCancelBatch;
 use dodex_application::OrderStatusFilter;
@@ -33,6 +34,12 @@ use dodex_domain::MarketName;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
 use dodex_domain::OracleEntry;
+use dodex_domain::OracleEventEntry;
+use dodex_domain::OracleEventListEntry;
+use dodex_domain::OracleFee;
+use dodex_domain::OracleListing;
+use dodex_domain::OracleOutcome;
+use dodex_domain::OraclesPage;
 use dodex_domain::Order;
 use dodex_domain::OrderIdentity;
 use dodex_domain::OrderSide;
@@ -50,6 +57,8 @@ use num_bigint::BigUint;
 use sqlx::PgPool;
 use tracing::error;
 use tracing::warn;
+
+use crate::projectors::uint256_hex_to_decimal;
 
 #[derive(Debug, Clone)]
 pub struct PostgresReadModelRepository {
@@ -128,6 +137,28 @@ struct OutcomeRow {
     tick_size: String,
     step_size: String,
     min_notional: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct OracleHeadRow {
+    id: i64,
+    name: String,
+    address: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct OracleListEventRow {
+    oracle_id: i64,
+    list_index: Option<i64>,
+    eventlist_address: String,
+    eventlist_description: String,
+    event_id: String,
+    event_name: String,
+    event_description: Option<String>,
+    oracle_fee: Option<String>,
+    deadline: i64,
+    trust_addr: Option<String>,
+    outcome_names_jsonb: serde_json::Value,
 }
 
 #[async_trait]
@@ -1224,6 +1255,106 @@ impl MarketReadRepository for PostgresReadModelRepository {
             })
             .collect()
     }
+
+    async fn list_oracles(&self, request: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
+        let limit = request.limit.clamp(1, 200) as i64;
+
+        // eventId (hex) → decimal, fail closed (400) on bad hex.
+        let event_id_decimal = match &request.filter.event_id {
+            Some(hex) => Some(oracle_event_id_to_decimal(hex)?),
+            None => None,
+        };
+
+        // Decode the cursor (400 on garbage); split into name/id binds.
+        let (cursor_id, cursor_name) = match &request.cursor {
+            Some(raw) => {
+                let (id, name) = decode_oracles_cursor(raw)?;
+                (Some(id), Some(name))
+            }
+            None => (None, None),
+        };
+
+        // Phase 1: oracle page. Placeholders: $1 now, $2 oracle_address,
+        // $3 cursor_name, $4 cursor_id, $5 event_id_decimal, $6 deadline_before,
+        // $7 limit+1. $1/$5/$6 are referenced inside the EXISTS availability.
+        let phase1 = format!(
+            r#"select o.id, o.name, o.address
+                 from oracles o
+                where ($2::text is null or o.address = $2)
+                  and ($3::text is null or o.name > $3 or (o.name = $3 and o.id > $4))
+                  and exists (
+                      select 1
+                        from oracle_event_lists oel
+                        join oracle_events oe on oe.eventlist_id = oel.id
+                       where oel.oracle_id = o.id
+                         and {availability}
+                  )
+                order by o.name asc, o.id asc
+                limit $7"#,
+            availability = oracle_event_availability(1, 5, 6),
+        );
+
+        let heads: Vec<OracleHeadRow> = sqlx::query_as(&phase1)
+            .bind(request.now)
+            .bind(request.filter.oracle_address.as_deref())
+            .bind(cursor_name.as_deref())
+            .bind(cursor_id)
+            .bind(event_id_decimal.as_deref())
+            .bind(request.filter.deadline_before)
+            .bind(limit + 1)
+            .fetch_all(&self.pool)
+            .await
+            .context("select oracles page")?;
+
+        let mut heads = heads;
+        let has_more = heads.len() as i64 > limit;
+        if has_more {
+            heads.truncate(limit as usize);
+        }
+        let next_cursor = if has_more {
+            heads.last().map(|h| encode_oracles_cursor(h.id, &h.name))
+        } else {
+            None
+        };
+
+        if heads.is_empty() {
+            return Ok(OraclesPage { oracles: Vec::new(), next_cursor: None, has_more: false });
+        }
+
+        // Phase 2: list+event rows for the retained oracle ids. Placeholders:
+        // $1 oracle ids, $2 now, $3 event_id_decimal, $4 deadline_before.
+        let ids: Vec<i64> = heads.iter().map(|h| h.id).collect();
+        let phase2 = format!(
+            r#"select oel.oracle_id,
+                      oel.list_index,
+                      oel.address                       as eventlist_address,
+                      oel.description                   as eventlist_description,
+                      oe.internal_id_in_eventlist::text as event_id,
+                      oe.event_name,
+                      oe.describe                       as event_description,
+                      oe.oracle_fee::text               as oracle_fee,
+                      oe.deadline,
+                      oe.trust_addr,
+                      oe.outcome_names_jsonb
+                 from oracle_event_lists oel
+                 join oracle_events oe on oe.eventlist_id = oel.id
+                where oel.oracle_id = any($1)
+                  and {availability}
+                order by oel.oracle_id, oel.list_index asc, oe.deadline asc, oe.internal_id_in_eventlist asc"#,
+            availability = oracle_event_availability(2, 3, 4),
+        );
+
+        let rows: Vec<OracleListEventRow> = sqlx::query_as(&phase2)
+            .bind(ids.as_slice())
+            .bind(request.now)
+            .bind(event_id_decimal.as_deref())
+            .bind(request.filter.deadline_before)
+            .fetch_all(&self.pool)
+            .await
+            .context("select oracle list+event rows")?;
+
+        Ok(assemble_oracles_page(heads, rows, next_cursor, has_more)?)
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1924,6 +2055,79 @@ fn aggregate_oracle_events(
     Ok(by_pmp)
 }
 
+/// Group Phase-2 rows under their Phase-1 oracle heads, preserving SQL order
+/// (oracles by Phase-1 order; lists by `list_index`; events by `deadline`,
+/// then `internal_id`). Fails closed (`MarketInconsistent`) on a non-renderable
+/// `eventId` or malformed `outcome_names_jsonb`. The two-step
+/// contains-key/insert/get_mut avoids holding a `&mut acc.lists` borrow across
+/// the `acc.order.push`, which the borrow checker rejects.
+fn assemble_oracles_page(
+    heads: Vec<OracleHeadRow>,
+    rows: Vec<OracleListEventRow>,
+    next_cursor: Option<String>,
+    has_more: bool,
+) -> Result<OraclesPage, anyhow::Error> {
+    // Per-oracle accumulator: `order` preserves first-seen list_index order,
+    // `lists` holds the entries keyed by list_index.
+    struct ListAcc {
+        order: Vec<i64>,
+        lists: HashMap<i64, OracleEventListEntry>,
+    }
+    let mut by_oracle: HashMap<i64, ListAcc> = HashMap::new();
+
+    for row in rows {
+        let event_id = numeric_to_hex(&row.event_id).map_err(|cause| {
+            tracing::warn!(event_id = %row.event_id, %cause, "oracle event_id not renderable");
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
+        // Borrow eventlist_address for the ctx label before it is moved below.
+        let outcomes = parse_oracle_outcomes(&row.outcome_names_jsonb, &row.eventlist_address)?;
+        let event = OracleEventEntry {
+            event_id,
+            event_name: row.event_name,
+            description: row.event_description,
+            oracle_fee: OracleFee {
+                asset: "SHELL".to_string(),
+                amount: row.oracle_fee.unwrap_or_else(|| "0".to_string()),
+            },
+            deadline: row.deadline,
+            trust_address: row.trust_addr,
+            outcomes,
+        };
+
+        let list_index = row.list_index.unwrap_or(0);
+        let acc = by_oracle
+            .entry(row.oracle_id)
+            .or_insert_with(|| ListAcc { order: Vec::new(), lists: HashMap::new() });
+        if !acc.lists.contains_key(&list_index) {
+            acc.order.push(list_index);
+            acc.lists.insert(
+                list_index,
+                OracleEventListEntry {
+                    index: list_index,
+                    address: row.eventlist_address,
+                    description: row.eventlist_description,
+                    events: Vec::new(),
+                },
+            );
+        }
+        acc.lists.get_mut(&list_index).expect("list entry inserted above").events.push(event);
+    }
+
+    let oracles = heads
+        .into_iter()
+        .map(|h| {
+            let event_lists = match by_oracle.remove(&h.id) {
+                Some(mut acc) => acc.order.iter().filter_map(|idx| acc.lists.remove(idx)).collect(),
+                None => Vec::new(),
+            };
+            OracleListing { name: h.name, address: h.address, event_lists }
+        })
+        .collect();
+
+    Ok(OraclesPage { oracles, next_cursor, has_more })
+}
+
 fn unify_optional(
     slot: &mut Option<String>,
     incoming: Option<String>,
@@ -2453,6 +2657,74 @@ fn decode_cursor_inner(raw: &str) -> Result<DecodedCursor, anyhow::Error> {
         sort_key_i64: key.parse().context("sort_key not i64")?,
         id: id.parse().context("id not i64")?,
     })
+}
+
+/// Shared availability predicate for `/api/v1/oracles`, parameterised by the
+/// 1-based placeholder positions each query uses for `now`, the optional
+/// eventId (decimal), and the optional `deadlineBefore`. Both Phase-1 EXISTS
+/// and Phase-2 fetch format this with their own positions so the rule has a
+/// single source of truth.
+fn oracle_event_availability(now: usize, event_id: usize, deadline_before: usize) -> String {
+    format!(
+        "oe.is_deleted = false \
+         and oe.deadline > ${now} \
+         and oe.meta_reconciled_at is not null \
+         and (${event_id}::numeric is null or oe.internal_id_in_eventlist = ${event_id}::numeric) \
+         and (${deadline_before}::bigint is null or oe.deadline < ${deadline_before})"
+    )
+}
+
+/// Oracle pagination cursor: base64url of `"<id>:<name>"`. The id is written
+/// first so the split stays unambiguous when an oracle name contains `:`.
+fn encode_oracles_cursor(id: i64, name: &str) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{id}:{name}"))
+}
+
+fn decode_oracles_cursor(raw: &str) -> Result<(i64, String), anyhow::Error> {
+    decode_oracles_cursor_inner(raw).map_err(|cause| {
+        anyhow::Error::from(DomainError::InvalidParameter).context(format!("cursor: {cause}"))
+    })
+}
+
+fn decode_oracles_cursor_inner(raw: &str) -> Result<(i64, String), anyhow::Error> {
+    let bytes = URL_SAFE_NO_PAD.decode(raw).context("not valid base64")?;
+    let s = std::str::from_utf8(&bytes).context("not utf-8")?;
+    let (id, name) = s.split_once(':').context("missing separator")?;
+    Ok((id.parse().context("id not i64")?, name.to_string()))
+}
+
+/// Convert a client-supplied hex eventId to the decimal form stored in
+/// `internal_id_in_eventlist`. Un-decodable hex is the client's fault → 400.
+fn oracle_event_id_to_decimal(hex: &str) -> Result<String, anyhow::Error> {
+    uint256_hex_to_decimal(hex).map_err(|cause| {
+        anyhow::Error::from(DomainError::InvalidParameter).context(format!("eventId: {cause}"))
+    })
+}
+
+/// Decode `outcome_names_jsonb` (`{"<outcomeId>": "<name>"}`) into a sorted
+/// `Vec<OracleOutcome>`. A malformed blob fails closed (`MarketInconsistent`).
+fn parse_oracle_outcomes(
+    raw: &serde_json::Value,
+    ctx: &str,
+) -> Result<Vec<OracleOutcome>, anyhow::Error> {
+    let obj = raw.as_object().ok_or_else(|| {
+        tracing::warn!(ctx, "outcome_names_jsonb is not a JSON object");
+        anyhow!(DomainError::MarketInconsistent)
+    })?;
+    let mut out = Vec::with_capacity(obj.len());
+    for (k, v) in obj {
+        let outcome_id: u32 = k.parse().map_err(|_| {
+            tracing::warn!(ctx, key = %k, "outcome_names_jsonb key is not a u32");
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
+        let name = v.as_str().ok_or_else(|| {
+            tracing::warn!(ctx, key = %k, "outcome_names_jsonb value is not a string");
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
+        out.push(OracleOutcome { outcome_id, outcome_name: name.to_string() });
+    }
+    out.sort_by_key(|o| o.outcome_id);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -3201,6 +3473,55 @@ mod tests {
         );
         l.sort = MarketsSort::CreatedAtDesc;
         assert_placeholders_match_params("full combo", &l);
+    }
+
+    #[test]
+    fn oracles_cursor_roundtrip() {
+        let c = encode_oracles_cursor(42, "Election:Oracle"); // name with a colon
+        let (id, name) = decode_oracles_cursor(&c).expect("decode");
+        assert_eq!(id, 42);
+        assert_eq!(name, "Election:Oracle");
+    }
+
+    #[test]
+    fn oracles_cursor_rejects_garbage() {
+        let err = decode_oracles_cursor("!!!not-base64!!!").unwrap_err();
+        assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidParameter)));
+    }
+
+    #[test]
+    fn parse_oracle_outcomes_sorts_by_id() {
+        let v = serde_json::json!({ "1": "YES", "0": "NO" });
+        let out = parse_oracle_outcomes(&v, "test").expect("parse");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].outcome_id, 0);
+        assert_eq!(out[0].outcome_name, "NO");
+        assert_eq!(out[1].outcome_id, 1);
+        assert_eq!(out[1].outcome_name, "YES");
+    }
+
+    #[test]
+    fn parse_oracle_outcomes_rejects_non_object() {
+        let v = serde_json::json!(["NO", "YES"]);
+        let err = parse_oracle_outcomes(&v, "test").unwrap_err();
+        assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
+    }
+
+    #[test]
+    fn parse_oracle_outcomes_rejects_non_u32_key() {
+        let v = serde_json::json!({ "-1": "NO" });
+        let err = parse_oracle_outcomes(&v, "test").unwrap_err();
+        assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
+    }
+
+    #[test]
+    fn oracle_event_availability_uses_given_placeholders() {
+        let frag = oracle_event_availability(1, 5, 6);
+        assert!(frag.contains("oe.deadline > $1"));
+        assert!(frag.contains("$5::numeric"));
+        assert!(frag.contains("$6::bigint"));
+        assert!(frag.contains("meta_reconciled_at is not null"));
+        assert!(frag.contains("oe.is_deleted = false"));
     }
 }
 

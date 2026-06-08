@@ -2,6 +2,18 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-06-05]
+
+### Added
+
+- `GET /api/v1/oracles`: public oracle-discovery endpoint returning oracles, their event lists, and available events for market creation. Supports `oracleAddress`, `eventId`, `deadlineBefore`, `cursor`, and clamped `limit` filters; pagination is by oracle, ordered by oracle name, then event-list index, deadline, and event id. Response includes list descriptions, per-event oracle fee, trusted address, and sorted outcome labels. Added domain/application DTOs, `GetOraclesUseCase`, Postgres two-phase listing, API route/OpenAPI output, and DB-backed + HTTP coverage.
+- Oracle event-list description indexing: `oracle_event_lists.description text not null` is populated from `Oracle.OracleEventListDeployed`, and `OracleEventList` contracts/ABI now carry a deploy-time description plus `setDescription` / `DescriptionUpdated`.
+
+### Changed
+
+- OracleEventList reconciliation now persists `outcomeNames` into `oracle_events.outcome_names_jsonb` alongside `describe` and `trust_addr`; `/api/v1/oracles` hides unreconciled events so `events[].outcomes` is not empty because metadata has not been fetched yet.
+- `docs/api-spec.md`, `docs/openapi.yaml`, and `docs/tech-specs/{read-api,indexer,data-schema}.md` document the oracles endpoint, availability/filter semantics, schema changes, and current indexer limitations for post-deploy list-description updates.
+
 ## [2026-06-04]
 
 ### Added

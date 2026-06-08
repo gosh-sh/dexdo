@@ -272,6 +272,7 @@ pub(crate) struct EventMetadata {
     pub event_id_decimal: String,
     pub describe: Option<String>,
     pub trust_addr: Option<String>,
+    pub outcome_names: serde_json::Value,
 }
 
 pub(crate) fn parse_events_map(raw: &Value) -> Result<Vec<EventMetadata>> {
@@ -299,7 +300,12 @@ pub(crate) fn parse_events_map(raw: &Value) -> Result<Vec<EventMetadata>> {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        out.push(EventMetadata { event_id_decimal, describe, trust_addr });
+        let outcome_names = tuple
+            .get("outcomeNames")
+            .cloned()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        out.push(EventMetadata { event_id_decimal, describe, trust_addr, outcome_names });
     }
     Ok(out)
 }
@@ -322,6 +328,7 @@ async fn apply_event_metadata(
         r#"update oracle_events
               set describe = coalesce(describe, $1),
                   trust_addr = coalesce(trust_addr, $2),
+                  outcome_names_jsonb = $5::jsonb,
                   meta_reconciled_at = now(),
                   updated_at = now()
             where eventlist_id = $3
@@ -332,11 +339,12 @@ async fn apply_event_metadata(
     .bind(item.trust_addr.as_deref())
     .bind(eventlist_id)
     .bind(&item.event_id_decimal)
+    .bind(&item.outcome_names)
     .execute(&mut **tx)
     .await
     .with_context(|| {
         format!(
-            "update oracle_events.describe for eventlist_id={eventlist_id} event_id={}",
+            "update oracle_events metadata for eventlist_id={eventlist_id} event_id={}",
             item.event_id_decimal
         )
     })?
@@ -442,5 +450,25 @@ mod tests {
         )]);
         let err = parse_events_map(&raw).unwrap_err();
         assert!(err.to_string().contains("uint256"));
+    }
+
+    #[test]
+    fn parse_events_map_extracts_outcome_names() {
+        let raw = getter_response(vec![(
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+            json!({
+                "eventName": "Election",
+                "oracleFee": "100",
+                "deadline": "1710000000",
+                "describe": "Will candidate X win?",
+                "outcomeNames": { "0": "NO", "1": "YES" },
+                "count": "0",
+                "trustAddr": Value::Null,
+            }),
+        )]);
+
+        let items = parse_events_map(&raw).expect("parse");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].outcome_names, json!({ "0": "NO", "1": "YES" }));
     }
 }

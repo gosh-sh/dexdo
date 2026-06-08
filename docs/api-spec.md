@@ -16,6 +16,12 @@
           - [OracleEntry](#oracleentry)
         - [Terminal](#terminal)
         - [Outcome](#outcome)
+    - [Oracles](#oracles)
+      - [Oracle Data Objects](#oracle-data-objects)
+        - [OracleEntry](#oracleentry-1)
+        - [OracleEventList](#oracleeventlist)
+        - [OracleEvent](#oracleevent)
+        - [OracleOutcome](#oracleoutcome)
     - [Order Book](#order-book)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
@@ -200,6 +206,7 @@ envelope field failed or why a credential was rejected.
 | Function | Method | Path | Security |
 | --- | --- | --- | --- |
 | List markets | `GET` | `/api/v1/markets` | `NONE` |
+| List oracles and their available events | `GET` | `/api/v1/oracles` | `NONE` |
 | Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
@@ -226,6 +233,8 @@ Fetch available prediction markets, their outcomes, lifecycle phase, timings, an
 
 A market in DEX.DO has a finite lifecycle anchored to an oracle event. The lifecycle has nine phases — see [Market Status](#market-status). Clients MUST treat `status` as an opaque enum value and not derive it from raw timings.
 
+In `/api/v1/markets`, `event.oracles[]` contains only the oracles for that market. Use `/api/v1/oracles` to list oracles and events available for creating markets.
+
 Query parameters:
 
 | Name | Type | Mandatory | Description |
@@ -233,7 +242,7 @@ Query parameters:
 | `marketAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
 | `status` | STRING | NO | Comma-separated list of statuses to include. Example: `TRADING,AWAITING_FREEZE`. |
 | `quoteAsset` | STRING | NO | Filter by quote asset. Example: `USDC`. |
-| `oracleName` | STRING | NO | Filter by oracle name. A market matches if **any** of its confirming oracles has this name — a multi-oracle PMP is included as long as one of its `event.oracles[]` entries matches. |
+| `oracleName` | STRING | NO | Filter by oracle name. A market matches if its `event.oracles[]` contains this oracle name. |
 | `closingBefore` | LONG | NO | Return only markets with `timings.resultEnd < closingBefore` (unix seconds). |
 | `sort` | STRING | NO | Sort field. One of: `resultStart` (default, ASC), `createdAt` (DESC). |
 | `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. |
@@ -333,8 +342,8 @@ A market is in exactly one of nine phases.
 
 | Value | Description |
 | --- | --- |
-| `PENDING` | Market exists, but timings are not set yet. `timings` is `null`. |
-| `UPCOMING` | Timings are set and staking has not started yet. |
+| `PENDING` | Market exists, but its schedule is not available yet. `timings` is `null`. Clients cannot stake or trade. This may mean oracle approval is still incomplete, or the market is approved but timings have not been set yet. |
+| `UPCOMING` | Market schedule is available, but staking has not started yet. Clients cannot stake or trade until the market reaches `STAKING` or `TRADING`, respectively. |
 | `STAKING` | Staking is open. |
 | `AWAITING_FREEZE` | Staking has ended and trading has not started yet. |
 | `TRADING` | Orders may be placed. |
@@ -393,10 +402,10 @@ All timestamps are unix seconds.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `eventId` | STRING | `0x`-prefixed uint256 hex digest. Computed on-chain as a hash of `eventName`, `description`, `deadline`, `outcomeNames`; therefore identical across every oracle that confirms the same event. |
-| `eventName` | STRING \| null | User-facing event title. Shared across all confirming oracles by the hash invariant above. `null` until at least one `EventAdded` has landed. |
-| `description` | STRING \| null | User-facing description. Same shared-by-hash invariant as `eventName`. |
-| `oracles` | ARRAY of [OracleEntry](#oracleentry) | One entry per oracle that confirmed this PMP. A PMP can require confirmation from multiple `OracleEventList` contracts; each adds an entry with its own `fee`. Empty array means no oracle has confirmed yet (the row exists in `markets` but no `EventConfirmed` has landed). |
+| `eventId` | STRING | `0x`-prefixed uint256 event identifier. Shared by all oracle entries for the same event. |
+| `eventName` | STRING \| null | User-facing event title. `null` when unavailable. |
+| `description` | STRING \| null | User-facing event description. `null` when unavailable. |
+| `oracles` | ARRAY of [OracleEntry](#oracleentry) | Oracle entries for this market. Empty array means no oracle entry is available for the market yet. |
 
 ###### OracleEntry
 
@@ -406,7 +415,7 @@ All timestamps are unix seconds.
 | `address` | STRING \| null | Oracle contract address. |
 | `fee` | DECIMAL \| null | Oracle fee for this confirmation, as a uint128 decimal string. Different oracles can charge different fees for the same event. |
 
-If any two entries in `oracles[]` for the same market disagree on `eventName` or `description`, the backend fails the request closed with `MarketInconsistent` (HTTP 503) — that disagreement contradicts the hash invariant and indicates indexer corruption.
+If oracle entries for the same market disagree on `eventName` or `description`, the backend returns `MarketInconsistent` (HTTP 503).
 
 ##### Terminal
 
@@ -484,6 +493,157 @@ Example for a non-terminal market (any of the six live statuses, including the t
 | `stepSize` | DECIMAL | Minimum quantity increment. |
 | `minNotional` | DECIMAL | Minimum accepted notional value for an order. |
 | `maxBatchSize` | INT | Maximum number of orders accepted in one batch request for this outcome. |
+
+### Oracles
+
+```http
+GET /api/v1/oracles
+```
+
+Fetch oracles, their event lists, and events that can be used to create a market.
+
+The response is grouped by oracle, then by event list. Each event list contains its description and the events it currently offers for market creation.
+
+This endpoint does not return markets already created from these events. Use `/api/v1/markets` for market lifecycle, status, timings, order-book address, and market outcomes.
+
+By default, each event list includes only events that are still available for new markets: not deleted and not past `deadline`.
+
+Results are ordered by oracle name, then event-list index, then event deadline, then event id.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `oracleAddress` | STRING | NO | Filter by oracle address. Example: `0:oracle-address`. |
+| `eventId` | STRING | NO | Return only oracles with an event list that contains this event id. The `events[]` arrays contain only the matching event. |
+| `deadlineBefore` | LONG | NO | Include only events with `deadline < deadlineBefore` (unix seconds). Event lists and oracles with no remaining events are omitted. |
+| `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. |
+| `limit` | INT | NO | Number of oracles to return. Default: `50`. Max: `200`. |
+
+Response:
+
+```json
+{
+  "serverTime": 1710000000,
+  "nextCursor": "eyJ...",
+  "hasMore": false,
+  "oracles": [
+    {
+      "name": "ElectionOracle",
+      "address": "0:oracle-a",
+      "eventLists": [
+        {
+          "index": 0,
+          "address": "0:event-list-a",
+          "description": "Election markets verified by ElectionOracle.",
+          "events": [
+            {
+              "eventId": "0xabc...",
+              "eventName": "2026 US Presidential Election",
+              "description": "Will candidate X win?",
+              "oracleFee": {
+                "asset": "SHELL",
+                "amount": "100"
+              },
+              "deadline": 1710011600,
+              "trustAddress": null,
+              "outcomes": [
+                {
+                  "outcomeId": 0,
+                  "outcomeName": "NO"
+                },
+                {
+                  "outcomeId": 1,
+                  "outcomeName": "YES"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `serverTime` | LONG | Unix timestamp in seconds. All timestamp fields returned by `/api/v1/oracles` are unix seconds unless explicitly stated otherwise. |
+| `nextCursor` | STRING \| null | Pagination cursor for the next page. `null` when `hasMore` is `false`. |
+| `hasMore` | BOOLEAN | Whether more pages follow. |
+| `oracles` | ARRAY of [OracleEntry](#oracleentry-1) | Oracles with available events. |
+| `oracles[].name` | STRING | Oracle name. |
+| `oracles[].address` | STRING | Oracle address. |
+| `oracles[].eventLists` | ARRAY of [OracleEventList](#oracleeventlist) | Event lists owned by this oracle. |
+| `oracles[].eventLists[].index` | LONG | Oracle-local event-list index. |
+| `oracles[].eventLists[].address` | STRING | Event-list address. |
+| `oracles[].eventLists[].description` | STRING | Human-readable event-list description. |
+| `oracles[].eventLists[].events` | ARRAY of [OracleEvent](#oracleevent) | Events offered by this event list. |
+| `oracles[].eventLists[].events[].eventId` | STRING | Stable event identifier. |
+| `oracles[].eventLists[].events[].eventName` | STRING | Human-readable event name. |
+| `oracles[].eventLists[].events[].description` | STRING \| null | Human-readable event description. `null` when unavailable. |
+| `oracles[].eventLists[].events[].oracleFee.asset` | STRING | Fee asset. Current oracle contracts use `SHELL`. |
+| `oracles[].eventLists[].events[].oracleFee.amount` | DECIMAL | Fee amount, encoded as a decimal string. |
+| `oracles[].eventLists[].events[].deadline` | LONG | Unix seconds. Deadline for using this oracle event. |
+| `oracles[].eventLists[].events[].trustAddress` | STRING \| null | Optional trusted address attached to the event. `null` when absent or unavailable. |
+| `oracles[].eventLists[].events[].outcomes` | ARRAY of [OracleOutcome](#oracleoutcome) | Event outcome labels, sorted by `outcomeId`. |
+
+#### Oracle Data Objects
+
+##### OracleEntry
+
+```json
+{
+  "name": "ElectionOracle",
+  "address": "0:oracle-a",
+  "eventLists": [
+    {
+      "index": 0,
+      "address": "0:event-list-a",
+      "description": "Election markets verified by ElectionOracle.",
+      "events": []
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | STRING | Oracle name. |
+| `address` | STRING | Oracle address. |
+| `eventLists` | ARRAY of [OracleEventList](#oracleeventlist) | Event lists owned by this oracle. |
+
+##### OracleEventList
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `index` | LONG | Oracle-local event-list index. This is the value used with the oracle name when creating a market from one of its events. |
+| `address` | STRING | Event-list address. |
+| `description` | STRING | Human-readable event-list description. |
+| `events` | ARRAY of [OracleEvent](#oracleevent) | Events offered by this event list. |
+
+##### OracleEvent
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `eventId` | STRING | Stable event identifier. |
+| `eventName` | STRING | Human-readable event name. |
+| `description` | STRING \| null | Human-readable event description. `null` when unavailable. |
+| `oracleFee` | OBJECT | Fee required by this oracle for the event. |
+| `oracleFee.asset` | STRING | Fee asset. Current oracle contracts use `SHELL`. |
+| `oracleFee.amount` | DECIMAL | Fee amount, encoded as a decimal string. |
+| `deadline` | LONG | Unix seconds. Deadline for using this oracle event. |
+| `trustAddress` | STRING \| null | Optional trusted address attached to the event. `null` when absent or unavailable. |
+| `outcomes` | ARRAY of [OracleOutcome](#oracleoutcome) | Event outcome labels, sorted by `outcomeId`. |
+
+##### OracleOutcome
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `outcomeId` | INT | Outcome id. |
+| `outcomeName` | STRING | Human-readable outcome label. |
 
 ### Order Book
 

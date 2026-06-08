@@ -30,6 +30,7 @@ use dodex_application::CreateOrderUseCase;
 use dodex_application::GetDepthQuery;
 use dodex_application::GetDepthUseCase;
 use dodex_application::GetMarketsUseCase;
+use dodex_application::GetOraclesUseCase;
 use dodex_application::GetOrdersInput;
 use dodex_application::GetOrdersUseCase;
 use dodex_application::MarketReadRepository;
@@ -38,6 +39,8 @@ use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
 use dodex_application::NewOrderInput;
+use dodex_application::OraclesFilter;
+use dodex_application::OraclesRequest;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersMarketFilter;
 use dodex_domain::DomainError;
@@ -284,6 +287,58 @@ struct OutcomeDto {
     /// Maximum number of orders accepted in one batch request for this
     /// outcome.
     max_batch_size: u16,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OraclesResponse {
+    server_time: i64,
+    next_cursor: Option<String>,
+    has_more: bool,
+    oracles: Vec<OracleEntryDto>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OracleEntryDto {
+    name: String,
+    address: String,
+    event_lists: Vec<OracleEventListDto>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OracleEventListDto {
+    index: i64,
+    address: String,
+    description: String,
+    events: Vec<OracleEventDto>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OracleEventDto {
+    event_id: String,
+    event_name: String,
+    description: Option<String>,
+    oracle_fee: OracleFeeDto,
+    deadline: i64,
+    trust_address: Option<String>,
+    outcomes: Vec<OracleOutcomeDto>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OracleFeeDto {
+    asset: String,
+    amount: String,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct OracleOutcomeDto {
+    outcome_id: u32,
+    outcome_name: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -739,6 +794,100 @@ fn outcome_to_dto(o: dodex_domain::Outcome, max_batch_size: u16) -> OutcomeDto {
         step_size: o.step_size,
         min_notional: o.min_notional,
         max_batch_size,
+    }
+}
+
+/// List oracles, their event lists, and the events available for market creation.
+#[endpoint(
+    tags("market-data"),
+    summary = "List oracles",
+    parameters(
+        ("oracleAddress" = Option<String>, Query, description = "Filter by oracle address."),
+        ("eventId" = Option<String>, Query, description = "Return only the event list containing this event id; events[] is narrowed to it."),
+        ("deadlineBefore" = Option<i64>, Query, description = "Include only events with deadline < deadlineBefore (unix seconds)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor returned from a previous page."),
+        ("limit" = Option<i64>, Query, description = "Number of oracles. Default 50, max 200."),
+    ),
+    security(()),
+)]
+async fn get_oracles(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<OraclesResponse>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    let now = now_seconds();
+    let request = build_oracles_request(req, now)?;
+
+    let use_case = GetOraclesUseCase::new(state.repo);
+    let page = use_case
+        .execute(request)
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "list_oracles"))?;
+
+    let payload = OraclesResponse {
+        server_time: now,
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
+        oracles: page.oracles.into_iter().map(oracle_to_dto).collect(),
+    };
+    Ok(Json(payload))
+}
+
+fn build_oracles_request(req: &mut Request, now: i64) -> Result<OraclesRequest, ApiError> {
+    let oracle_address = non_empty_query(req, "oracleAddress");
+    let event_id = non_empty_query(req, "eventId");
+    let deadline_before = optional_typed_query::<i64>(req, "deadlineBefore")?;
+    let cursor = non_empty_query(req, "cursor");
+    // Permissive i64 parse so out-of-range limits clamp instead of 400ing;
+    // only non-numeric input is InvalidParameter (matches get_markets).
+    let limit_param = optional_typed_query::<i64>(req, "limit")?;
+    let limit = limit_param.map(|v| v.clamp(1, MAX_LIMIT as i64) as u16).unwrap_or(DEFAULT_LIMIT);
+
+    Ok(OraclesRequest {
+        filter: OraclesFilter { oracle_address, event_id, deadline_before },
+        cursor,
+        limit,
+        now,
+    })
+}
+
+fn oracle_to_dto(o: dodex_domain::OracleListing) -> OracleEntryDto {
+    OracleEntryDto {
+        name: o.name,
+        address: o.address,
+        event_lists: o.event_lists.into_iter().map(oracle_event_list_to_dto).collect(),
+    }
+}
+
+fn oracle_event_list_to_dto(l: dodex_domain::OracleEventListEntry) -> OracleEventListDto {
+    OracleEventListDto {
+        index: l.index,
+        address: l.address,
+        description: l.description,
+        events: l.events.into_iter().map(oracle_event_to_dto).collect(),
+    }
+}
+
+fn oracle_event_to_dto(e: dodex_domain::OracleEventEntry) -> OracleEventDto {
+    OracleEventDto {
+        event_id: e.event_id,
+        event_name: e.event_name,
+        description: e.description,
+        oracle_fee: OracleFeeDto { asset: e.oracle_fee.asset, amount: e.oracle_fee.amount },
+        deadline: e.deadline,
+        trust_address: e.trust_address,
+        outcomes: e
+            .outcomes
+            .into_iter()
+            .map(|o| OracleOutcomeDto { outcome_id: o.outcome_id, outcome_name: o.outcome_name })
+            .collect(),
     }
 }
 
@@ -1893,6 +2042,7 @@ pub fn build_router(state: AppState) -> Router {
         .push(Router::with_path("readiness").get(readiness))
         .push(Router::with_path("api/v1/markets").get(get_markets))
         .push(Router::with_path("api/v1/depth").get(get_depth))
+        .push(Router::with_path("api/v1/oracles").get(get_oracles))
         .push(
             // Subrouter scoped to private endpoints. The auth hoop
             // runs only for routes pushed under this branch, so the
@@ -1932,6 +2082,7 @@ pub fn openapi_doc() -> OpenApi {
         .push(Router::with_path("readiness").get(readiness))
         .push(Router::with_path("api/v1/markets").get(get_markets))
         .push(Router::with_path("api/v1/depth").get(get_depth))
+        .push(Router::with_path("api/v1/oracles").get(get_oracles))
         .push(Router::with_path("api/v1/order").post(create_order).delete(delete_order))
         .push(Router::with_path("api/v1/orders").get(get_orders))
         .push(

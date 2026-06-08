@@ -109,6 +109,7 @@ Each oracle owns a sequence of EventList contracts created by the `Oracle.Oracle
 | `oracle_id` | `bigint` FK → `oracles(id)` ON DELETE CASCADE | Parent oracle. |
 | `address` | `text` UNIQUE | EventList contract address. |
 | `list_index` | `bigint` | Oracle-local index of the event list. |
+| `description` | `text` `NOT NULL` | Human-readable list description from the `OracleEventListDeployed` event (always carried; projector reads it strictly). May be an empty string, never null. Surfaced as `/api/v1/oracles` `eventLists[].description`. |
 | `created_at` | `timestamptz` | Bookkeeping. |
 | `last_reconcile_failed_at` | `timestamptz` | Stamped when a reconcile attempt fails. Used for backoff and queue ordering. |
 | `reconcile_attempts` | `integer` default `0` | Diagnostic counter for permanently broken EventLists. |
