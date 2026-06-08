@@ -5,8 +5,11 @@ integration tests.
 
 ## Files
 
-- `test_pns.json` — **plaintext `owner_secret_key_hex` for FIVE
-  shellnet-only throwaway trading PNs**.
+- `test_pns.json` — **git-ignored, local-only**: plaintext
+  `owner_secret_key_hex` for shellnet-only throwaway trading PNs. Not
+  checked in (it carries secret keys); generate it with the
+  `mint_pn_pool` binary and drop it here before running the e2e suite.
+  See [`PRIVATE_NOTE_POOLS.md`](../../PRIVATE_NOTE_POOLS.md).
 
 ## PN slot ownership
 
@@ -26,7 +29,7 @@ to `ERR_NOTE_BUSY`. Assignments:
 
 A new e2e test that needs its own deployer-PN takes the next free slot
 and adds the row here; top up the pool via `mint_pn_pool` when adding
-slots beyond the five currently in `test_pns.json`.
+slots beyond those listed above.
 
 ## Run the e2e suite single-threaded
 
@@ -91,8 +94,8 @@ the OrderBook lives for one test run and ages out on its own.
 Each deploy spends ~300 NACKL of collateral on the deployer-PN (2 ×
 100 NACKL initial stakes + 2 × 0.2 NACKL regular stakes + 100 NACKL
 split collateral). The `test_pns.json` pool must hold PNs funded above
-that threshold; top up via `bee-engine-private/bee_dex`'s `mint_pn_pool`
-when balances drop.
+that threshold; top up via the in-tree `mint_pn_pool` binary
+(`sdk/src/bin/mint_pn_pool.rs`) when balances drop.
 
 See the `SECURITY NOTE` block at the top of
 [`services/api/tests/e2e_order.rs`](../../services/api/tests/e2e_order.rs)

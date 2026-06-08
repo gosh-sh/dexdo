@@ -8,6 +8,7 @@ use std::time::Duration;
 use ackinacki_kit::contracts::dapp::SystemDapp;
 use ackinacki_kit::tvm_client::account::get_account;
 use ackinacki_kit::tvm_client::account::ParamsOfGetAccount;
+use ackinacki_kit::tvm_client::net::ErrorCode;
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
@@ -114,19 +115,14 @@ impl GraphqlClient {
         };
         match get_account(ctx, params).await {
             Ok(result) => Ok(Some(result.boc)),
-            // The account-state service keys lookups per dApp and answers a
-            // missing (account, dapp) pair with an error rather than an
-            // empty payload — that's this method's `None`. Observed shapes:
-            // "Not found: Resource not found: http://…/v2/account?…" and
-            // "Can't find account in shard state".
-            Err(e)
-                if {
-                    let msg = e.message().to_ascii_lowercase();
-                    msg.contains("not found") || msg.contains("find account")
-                } =>
-            {
-                Ok(None)
-            }
+            // A missing (account, dApp) pair surfaces as HTTP 404, which
+            // tvm_client maps to `ErrorCode::NotFound` — that, and only
+            // that, is this method's `None`. Matching on the code rather
+            // than a substring of the message keeps a transient 5xx (whose
+            // body tvm_client echoes verbatim, and which can itself read
+            // "not found" from a proxy/CDN error page) propagating as an
+            // error instead of masquerading as a not-deployed account.
+            Err(e) if e.code() == ErrorCode::NotFound as u32 => Ok(None),
             Err(e) => Err(anyhow!("get_account for {address}: {e}")),
         }
     }

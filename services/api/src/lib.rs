@@ -284,8 +284,7 @@ struct OutcomeDto {
     step_size: String,
     /// Minimum accepted notional value for an order.
     min_notional: String,
-    /// Maximum number of orders accepted in one batch request for this
-    /// outcome.
+    /// Maximum number of orders accepted in a single batch request.
     max_batch_size: u16,
 }
 
@@ -1578,7 +1577,7 @@ async fn delete_order(
 // Parses one (marketAddress, symbol) plus `orders[]`, hands off to
 // the batch-create use case, and shapes a flat array of `PENDING_NEW`
 // envelopes. The use case enforces non-empty `orders[]` and the
-// `outcome.max_batch_size` cap; the chain enforces atomic placement.
+// configured `max_batch_size` cap; the chain enforces atomic placement.
 #[endpoint(
     tags("trading"),
     summary = "Submit a batch of orders atomically",
@@ -1633,7 +1632,7 @@ async fn create_batch_orders(
 /// request with the matching `DomainError` (`MissingParameter`
 /// → -1102 or `InvalidParameter` → -1130). Empty `orders[]` parses
 /// here without complaint; the use case enforces non-empty + the
-/// per-outcome `max_batch_size` cap.
+/// configured `max_batch_size` cap.
 fn build_batch_orders_input(
     body: BatchOrdersRequest,
     ctx: AuthContext,
@@ -1722,7 +1721,7 @@ fn build_batch_orders_input(
 // Parses one `(marketAddress, symbol)` plus `orderIds[]`, hands off
 // to `CancelBatchOrdersUseCase`, and shapes a flat array of
 // `PENDING_CANCEL` envelopes. The use case enforces non-empty
-// `orderIds[]`, intra-batch dedup, the `outcome.max_batch_size` cap,
+// `orderIds[]`, intra-batch dedup, the configured `max_batch_size` cap,
 // and bulk order resolution. The chain (a cancel-only
 // `PrivateNote.placeBatch`) accepts the list atomically under one
 // `_busy` window.
@@ -2344,5 +2343,52 @@ mod dto_tests {
         assert!(pos("tokenType") < pos("makerCommission"));
         assert!(pos("makerCommission") < pos("takerCommission"));
         assert!(pos("takerCommission") < pos("createdAt"));
+    }
+
+    #[test]
+    fn market_to_dto_stamps_configured_max_batch_size_on_each_outcome() {
+        use dodex_domain::Market;
+        use dodex_domain::MarketAddress;
+        use dodex_domain::MarketEvent;
+        use dodex_domain::MarketName;
+        use dodex_domain::MarketStatus;
+        use dodex_domain::Outcome;
+        use dodex_domain::Symbol;
+        let market = Market {
+            market_address: MarketAddress("0:m".into()),
+            order_book_address: "0:ob".into(),
+            oracle_list_hash: "0xdead".into(),
+            market_name: MarketName("PM".into()),
+            status: MarketStatus::Trading,
+            quote_asset: "USDC".into(),
+            token_type: 1,
+            maker_commission: dodex_domain::MAKER_COMMISSION.to_string(),
+            taker_commission: dodex_domain::TAKER_COMMISSION.to_string(),
+            created_at: 0,
+            timings: None,
+            event: MarketEvent {
+                event_id: "0x0".into(),
+                event_name: None,
+                description: None,
+                oracles: vec![],
+            },
+            terminal: None,
+            outcomes: vec![Outcome {
+                outcome_id: 1,
+                outcome_name: "Team A".into(),
+                symbol: Symbol("PM-A".into()),
+                price_precision: 2,
+                quantity_precision: 0,
+                tick_size: "0.01".into(),
+                step_size: "1".into(),
+                min_notional: "1".into(),
+            }],
+        };
+        // The cap is a backend-wide config value stamped onto every
+        // outcome — 7 (≠ the default 10) proves the passed value reaches
+        // the wire as `maxBatchSize` rather than a hardcoded constant.
+        let dto = market_to_dto(market, 7);
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["outcomes"][0]["maxBatchSize"], 7);
     }
 }

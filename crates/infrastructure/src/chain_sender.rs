@@ -574,8 +574,8 @@ fn map_chain_error(err: &ChainError, ctx: &ChainCallContext<'_>) -> DomainError 
 }
 
 /// `PrivateNote` exit codes from `contracts/modifiers/errors.sol`,
-/// shared across the five entry points (`placeOrder`, `cancelOrder`,
-/// `placeBatch`, `cancelBatch`, `splitFullSet`) the wrapper dispatches —
+/// shared across the entry points (`placeOrder`, `cancelOrder`,
+/// `placeBatch`, `splitFullSet`) the wrapper dispatches —
 /// the originating entry point is carried in `ChainCallContext.entry_point`
 /// for the unmapped-code log site. Only codes the trading path can
 /// plausibly raise are mapped; everything else returns `None` so
@@ -589,7 +589,7 @@ fn map_tvm_exit_code(code: u16) -> Option<DomainError> {
         // precision check, but the contract guards it too).
         102 => Some(DomainError::OrderValidationFailed),
         // ERR_NOTE_BUSY: another PN-level op (any of placeOrder /
-        // cancelOrder / placeBatch / cancelBatch) is still holding the
+        // cancelOrder / placeBatch / splitFullSet) is still holding the
         // `_busy` lock for this PN. Distinct retry semantics — 429 /
         // -2014 instead of -2010.
         121 => Some(DomainError::OrderPnBusy),
@@ -631,7 +631,7 @@ fn map_tvm_exit_code(code: u16) -> Option<DomainError> {
         // defence-in-depth against the same length checks the use
         // case pre-applies (`orders.len()` ∈ [1, `max_batch_size`]).
         // Reaching them means the local guard was bypassed — i.e.
-        // the read-model's `max_batch_size` drifted from the on-chain
+        // the configured `chain.max_batch_size` drifted from the on-chain
         // ceiling — which is a server-state inconsistency, not a
         // client error. Surface as `MarketInconsistent` (503 / -1500)
         // so ops sees it instead of confusing the client with a

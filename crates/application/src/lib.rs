@@ -4053,7 +4053,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_batch_orders_accepts_exactly_max_batch_size() {
-        // Boundary pin: `outcome.max_batch_size` items must succeed.
+        // Boundary pin: `max_batch_size` items must succeed.
         // Catches a future off-by-one (e.g. `>=` instead of `>`) that
         // would reject the boundary value.
         let market = trading_market("PM-YES");
@@ -4483,7 +4483,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_batch_orders_accepts_exactly_max_batch_size() {
-        // Boundary pin: `outcome.max_batch_size` ids must succeed.
+        // Boundary pin: `max_batch_size` ids must succeed.
         // Catches a future off-by-one (e.g. `>=` instead of `>`) at the
         // cap check that would reject the boundary value.
         let market = trading_market("PM-YES");

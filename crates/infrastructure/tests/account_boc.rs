@@ -140,6 +140,33 @@ async fn missing_account_maps_to_none() {
     assert!(boc.is_none());
 }
 
+#[tokio::test]
+async fn server_error_propagates_as_err_not_none() {
+    // A 5xx is an outage, not a verdict on deployment — it must surface
+    // as `Err` so the read path answers 503, not a false "not deployed".
+    let mock = spawn_mock("1.0.0", "503 Service Unavailable", "upstream is having a bad day");
+    let client = client_for(&mock);
+
+    assert!(
+        client.fetch_account_boc(ADDR).await.is_err(),
+        "a 5xx must propagate as Err, not collapse to Ok(None)",
+    );
+}
+
+#[tokio::test]
+async fn server_error_whose_body_says_not_found_still_propagates() {
+    // The exact trap a message-substring match falls into: a proxy/CDN
+    // 5xx whose body contains "not found". Classification is on the HTTP
+    // code (404 → NotFound), so this stays an error, not a phantom None.
+    let mock = spawn_mock("1.0.0", "502 Bad Gateway", "<html><body>404 Not Found</body></html>");
+    let client = client_for(&mock);
+
+    assert!(
+        client.fetch_account_boc(ADDR).await.is_err(),
+        "a 5xx body containing 'not found' must NOT collapse to Ok(None)",
+    );
+}
+
 /// Live smoke for the whole path against shellnet: RootPN must resolve
 /// to a real BOC under the System dApp; a ghost account must map to
 /// `None`. This is the read-path leg of the chain smoke ladder — run it
