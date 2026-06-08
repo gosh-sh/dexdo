@@ -940,6 +940,7 @@ graphql:
         assert_eq!(cfg.chain.place_batch_timeout_ms, 30_000);
         assert_eq!(cfg.chain.cancel_batch_timeout_ms, 30_000);
         assert_eq!(cfg.chain.split_full_set_timeout_ms, 30_000);
+        assert_eq!(cfg.chain.max_batch_size, 10);
     }
 
     #[test]
@@ -966,6 +967,30 @@ graphql:
         let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("place_batch_timeout_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn api_validate_rejects_zero_max_batch_size() {
+        let raw = format!(
+            "{COMMON}
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_ms: 60000
+auth:
+  kek_hex: \"{TEST_KEK_HEX}\"
+chain:
+  gateway_endpoint: shellnet.ackinacki.org
+  max_batch_size: 0
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
+"
+        );
+        let cfg: ApiConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_batch_size"), "got: {err}");
     }
 
     #[test]

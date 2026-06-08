@@ -1,13 +1,14 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Production implementation of `ChainOrderSender` that dispatches
-// `PrivateNote.placeOrder`, `PrivateNote.cancelOrder`, and
-// `PrivateNote.placeBatch` through the `dodex_chain::Dex` facade.
-// `placeBatch` is the chain's atomic batch entry: it carries both a
-// placements side and a `cancelIds` side, so batch cancels dispatch the
-// same method with an empty `orders` array. The wrapper does nothing
-// except translate the application-layer payloads into the chain ABI's
-// `ParamsOfPlaceOrder` / `ParamsOfCancelOrder` / `ParamsOfPlaceBatch`
+// `PrivateNote.placeOrder`, `PrivateNote.cancelOrder`,
+// `PrivateNote.placeBatch`, and `PrivateNote.splitFullSet` through the
+// `dodex_chain::Dex` facade. `placeBatch` is the chain's atomic batch
+// entry: it carries both a placements side and a `cancelIds` side, so
+// batch cancels dispatch the same method with an empty `orders` array.
+// The wrapper does nothing except translate the application-layer
+// payloads into the chain ABI's `ParamsOfPlaceOrder` /
+// `ParamsOfCancelOrder` / `ParamsOfPlaceBatch` / `ParamsOfSplitFullSet`
 // and forward the call — ABI encoding, signing, and gateway transport
 // all live in `ackinacki_kit`.
 //
@@ -292,15 +293,15 @@ impl ChainOrderSender for DexChainSender {
         let event_id = payload.event_id;
 
         // The chain has no standalone cancelBatch: `placeBatch` is the
-        // atomic batch dispatch and a pure cancel rides it with an
-        // empty placements side.
-        let params = ParamsOfPlaceBatch {
-            event_id: event_id.clone(),
-            oracle_list_hash: payload.oracle_list_hash,
-            token_type: payload.token_type,
-            orders: vec![],
-            cancel_ids: order_ids,
-        };
+        // atomic batch dispatch and a pure cancel rides it with an empty
+        // placements side. Built via `build_cancel_batch_params` so the
+        // orders-empty / ids-on-cancel-side shape is unit-testable.
+        let params = build_cancel_batch_params(
+            event_id.clone(),
+            payload.oracle_list_hash,
+            payload.token_type,
+            order_ids,
+        );
 
         let call = self.dex.place_batch(&pn_address, params, signer);
         let outcome = timeout(self.cancel_batch_timeout, call).await;
@@ -369,6 +370,21 @@ impl ChainOrderSender for DexChainSender {
         };
         classify_chain_outcome(outcome, self.split_full_set_timeout.as_millis() as u64, &ctx)
     }
+}
+
+/// Build the chain params for a batch cancel. The chain has no
+/// standalone cancelBatch: a pure cancel rides `placeBatch` with no
+/// placements and the ids on `cancel_ids`. Extracted so the
+/// orders-empty / ids-on-cancel-side shape is unit-testable — swapping
+/// the two sides would cancel nothing (or place phantom orders) yet
+/// pass every other test.
+fn build_cancel_batch_params(
+    event_id: String,
+    oracle_list_hash: String,
+    token_type: u32,
+    cancel_ids: Vec<u128>,
+) -> ParamsOfPlaceBatch {
+    ParamsOfPlaceBatch { event_id, oracle_list_hash, token_type, orders: vec![], cancel_ids }
 }
 
 /// Translate one application-layer `BatchOrderPayloadItem` into the
@@ -943,6 +959,21 @@ mod tests {
 
         let err = sender.cancel_batch_order(payload).await.expect_err("decode must fail closed");
         assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn cancel_batch_rides_place_batch_with_empty_orders() {
+        // The headline cancelBatch→placeBatch collapse: a pure cancel
+        // MUST carry no placements and put the ids on `cancel_ids`.
+        // Swapping the two sides would cancel nothing (or place phantom
+        // orders) yet pass the rest of the suite — this is the guard.
+        let params =
+            build_cancel_batch_params("0xevent".into(), "0xhash".into(), 1, vec![10, 20, 30]);
+        assert!(params.orders.is_empty(), "a batch cancel must place no orders");
+        assert_eq!(params.cancel_ids, vec![10u128, 20, 30]);
+        assert_eq!(params.event_id, "0xevent");
+        assert_eq!(params.oracle_list_hash, "0xhash");
+        assert_eq!(params.token_type, 1);
     }
 
     #[test]
