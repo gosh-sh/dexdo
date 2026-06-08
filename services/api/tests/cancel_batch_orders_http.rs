@@ -1138,7 +1138,7 @@ async fn chain_batch_size_drift_returns_503_minus_1500() {
 #[tokio::test]
 async fn pn_busy_returns_429_minus_2014() {
     // Sender raising `OrderPnBusy` simulates a real `ERR_NOTE_BUSY`
-    // (121) coming back from `dodex_chain::Dex::cancel_batch` while another
+    // (121) coming back from `dodex_chain::Dex::place_batch` while another
     // op from the same PN is still in flight.
     let repo: SharedRepo =
         Arc::new(FakeRepo::with_market_and_rows(trading_market(), vec![row(1, None)]));
@@ -1155,7 +1155,7 @@ async fn pn_busy_returns_429_minus_2014() {
 #[tokio::test]
 async fn chain_request_timeout_returns_504_minus_1007() {
     // `classify_chain_outcome` maps the elapsed branch to
-    // `DomainError::RequestTimeout` when `dodex_chain::Dex::cancel_batch`
+    // `DomainError::RequestTimeout` when `dodex_chain::Dex::place_batch`
     // doesn't return within `chain.cancel_batch_timeout_ms`.
     // `handler_exceeding_request_timeout_returns_504_minus_1007`
     // (driven by `SlowCancelBatchSender`) exercises the wall-clock

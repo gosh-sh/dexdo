@@ -234,13 +234,12 @@ impl ChainOrderSender for DexChainSender {
             orders.push(encode_batch_item(item, item_index)?);
         }
 
-        let params = ParamsOfPlaceBatch {
-            event_id: event_id.clone(),
-            oracle_list_hash: payload.oracle_list_hash,
-            token_type: payload.token_type,
+        let params = build_place_batch_params(
+            event_id.clone(),
+            payload.oracle_list_hash,
+            payload.token_type,
             orders,
-            cancel_ids: vec![],
-        };
+        );
 
         let call = self.dex.place_batch(&pn_address, params, signer);
         let outcome = timeout(self.place_batch_timeout, call).await;
@@ -370,6 +369,19 @@ impl ChainOrderSender for DexChainSender {
         };
         classify_chain_outcome(outcome, self.split_full_set_timeout.as_millis() as u64, &ctx)
     }
+}
+
+/// Build the chain params for a batch placement. `placeBatch` carries
+/// both sides; a placement MUST leave `cancel_ids` empty — a stray id
+/// here would silently cancel orders during a POST. Mirror of
+/// `build_cancel_batch_params` so that shape is unit-testable.
+fn build_place_batch_params(
+    event_id: String,
+    oracle_list_hash: String,
+    token_type: u32,
+    orders: Vec<OrderBookOrder>,
+) -> ParamsOfPlaceBatch {
+    ParamsOfPlaceBatch { event_id, oracle_list_hash, token_type, orders, cancel_ids: vec![] }
 }
 
 /// Build the chain params for a batch cancel. The chain has no
@@ -959,6 +971,17 @@ mod tests {
 
         let err = sender.cancel_batch_order(payload).await.expect_err("decode must fail closed");
         assert_eq!(err, DomainError::MarketInconsistent);
+    }
+
+    #[test]
+    fn place_batch_carries_no_cancel_ids() {
+        // Mirror of the cancel-side guard: a placement MUST leave
+        // `cancel_ids` empty — a stray id would silently cancel orders
+        // during a POST, the more dangerous direction of the collapse.
+        let params = build_place_batch_params("0xevent".into(), "0xhash".into(), 1, vec![]);
+        assert!(params.cancel_ids.is_empty(), "a place batch must carry no cancel ids");
+        assert_eq!(params.event_id, "0xevent");
+        assert_eq!(params.token_type, 1);
     }
 
     #[test]
