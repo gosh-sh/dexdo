@@ -1470,9 +1470,7 @@ components:
         maxBatchSize:
           type: integer
           format: int32
-          description: |-
-            Maximum number of orders accepted in one batch request for this
-            outcome.
+          description: Maximum number of orders accepted in a single batch request.
           minimum: 0.0
         minNotional:
           type: string
