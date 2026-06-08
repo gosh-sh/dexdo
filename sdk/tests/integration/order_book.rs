@@ -65,10 +65,7 @@ const FLAG_POST_ONLY: u8 = 0x08;
 /// reused `client_order_id` values would match historical events from
 /// previous test runs and the assertion would race against state.
 fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// Per-process salt used to derive collision-free `client_order_id`
@@ -229,10 +226,7 @@ async fn wait_owner_order(
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let owned = dex
-            .get_orders_by_owner(
-                &market.order_book_address,
-                trader.deposit_identifier_hash.clone(),
-            )
+            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
             .await
             .expect("get_orders_by_owner");
         if let Some(o) = owned.orders.iter().find(|o| o.client_order_id == client_order_id) {
@@ -256,10 +250,7 @@ async fn wait_owner_order_gone(
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let owned = dex
-            .get_orders_by_owner(
-                &market.order_book_address,
-                trader.deposit_identifier_hash.clone(),
-            )
+            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
             .await
             .expect("get_orders_by_owner");
         if !owned.orders.iter().any(|o| o.client_order_id == client_order_id) {
@@ -308,10 +299,7 @@ async fn test_ob_pool_smoke() {
     assert!(!shutdown.shutdown_pending, "OB must not be shutdown_pending");
 
     // queue empty by default for a freshly-spawned OB
-    let qs = dex
-        .get_order_book_queue_size(&market.order_book_address)
-        .await
-        .expect("queue size");
+    let qs = dex.get_order_book_queue_size(&market.order_book_address).await.expect("queue size");
     eprintln!("[smoke] OB queue size = {qs}");
 
     // PMP must be approved + frozen post-stakeEnd
@@ -319,10 +307,7 @@ async fn test_ob_pool_smoke() {
     assert!(pmp.approved, "PMP approved");
     assert!(pmp.frozen, "PMP frozen (post-stakeEnd, after deployer's splitFullSet)");
 
-    eprintln!(
-        "[smoke] OK — OB live, deployer outcomes pre-split, traders={}",
-        pn_pool.notes.len()
-    );
+    eprintln!("[smoke] OK — OB live, deployer outcomes pre-split, traders={}", pn_pool.notes.len());
 }
 
 /// Place a simple sell order from trader A and verify it shows up in the
@@ -391,10 +376,7 @@ async fn test_ob_place_single_sell_order() {
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let owned = dex
-            .get_orders_by_owner(
-                &market.order_book_address,
-                trader.deposit_identifier_hash.clone(),
-            )
+            .get_orders_by_owner(&market.order_book_address, trader.deposit_identifier_hash.clone())
             .await
             .expect("get_orders_by_owner");
         if let Some(o) = owned.orders.iter().find(|o| o.client_order_id == client_order_id) {
@@ -858,10 +840,7 @@ async fn test_ob_cancel_batch() {
     // trader[8] — distinct.
     let trader = pool.take_n(8, 1).into_iter().next().expect("pool has trader[8]");
 
-    eprintln!(
-        "[batch-cancel] using trader {} on ob {}",
-        trader.address, market.order_book_address,
-    );
+    eprintln!("[batch-cancel] using trader {} on ob {}", trader.address, market.order_book_address,);
 
     trader_split(&dex, &market, &trader, 200_000_000_000).await;
 
@@ -983,10 +962,7 @@ async fn test_ob_post_only_rest_and_reject() {
     // trader[9] — last unused slot in the 10-PN pool.
     let trader = pool.take_n(9, 1).into_iter().next().expect("pool has trader[9]");
 
-    eprintln!(
-        "[post-only] using trader {} on ob {}",
-        trader.address, market.order_book_address,
-    );
+    eprintln!("[post-only] using trader {} on ob {}", trader.address, market.order_book_address,);
 
     trader_split(&dex, &market, &trader, TRADER_SPLIT_COLLATERAL).await;
 
@@ -1642,25 +1618,22 @@ async fn test_ob_negative_validation() {
     //    LOT_SIZE_NACKL = 10_000_000 (0.01 NACKL), so 30_000_000_001
     //    leaves remainder 1.
     wait_not_busy(&dex, &trader, "neg_pre_1").await;
-    let r1 = dex
-        .place_order(&trader.address, base_params(30_000_000_001, "5000", 0), signer())
-        .await;
+    let r1 =
+        dex.place_order(&trader.address, base_params(30_000_000_001, "5000", 0), signer()).await;
     assert_err_code(&r1, "163", "amount not lot-multiple");
 
     // 2. ERR_PRICE_NOT_TICK_MULTIPLE = 164: price = 5005 (TICK_SIZE = 10
     //    bps, so 5005 % 10 == 5).
     wait_not_busy(&dex, &trader, "neg_pre_2").await;
-    let r2 = dex
-        .place_order(&trader.address, base_params(30_000_000_000, "5005", 0), signer())
-        .await;
+    let r2 =
+        dex.place_order(&trader.address, base_params(30_000_000_000, "5005", 0), signer()).await;
     assert_err_code(&r2, "164", "price not tick-multiple");
 
     // 3. ERR_ORDER_TOO_SMALL = 160: notional below 10 NACKL.
     //    20 NACKL × 1000 bps / 10000 = 2 NACKL, well below the floor.
     wait_not_busy(&dex, &trader, "neg_pre_3").await;
-    let r3 = dex
-        .place_order(&trader.address, base_params(20_000_000_000, "1000", 0), signer())
-        .await;
+    let r3 =
+        dex.place_order(&trader.address, base_params(20_000_000_000, "1000", 0), signer()).await;
     assert_err_code(&r3, "160", "notional too small");
 
     // 4. ERR_BATCH_TOO_LARGE = 161: 11 orders, MAX_BATCH_SIZE = 10.
@@ -1805,10 +1778,7 @@ async fn test_ob_resolve_and_claim() {
     // Wait for OB shutdown drain — `claim` is gated on this.
     let mut ob_drained = false;
     for _ in 0..60 {
-        let s = dex
-            .get_pmp_shutdown_state(&market.pmp_address)
-            .await
-            .expect("pmp shutdown state");
+        let s = dex.get_pmp_shutdown_state(&market.pmp_address).await.expect("pmp shutdown state");
         if s.order_book_done {
             ob_drained = true;
             break;
@@ -1837,9 +1807,7 @@ async fn test_ob_resolve_and_claim() {
 
     let after_claim = read_nackl_balance(&dex, &market.deployer_pn_address).await;
     let payout = after_claim.saturating_sub(before_claim);
-    eprintln!(
-        "[resolve] deployer NACKL after claim: {after_claim} (payout = +{payout})",
-    );
+    eprintln!("[resolve] deployer NACKL after claim: {after_claim} (payout = +{payout})",);
     assert!(
         payout > 0,
         "claim should pay out something to the deployer (initial stakes + outcome tokens)",
@@ -1849,10 +1817,7 @@ async fn test_ob_resolve_and_claim() {
     // be a no-op or fail.
     let stakes_after =
         dex.get_stakes(&market.deployer_pn_address).await.expect("stakes after claim");
-    eprintln!(
-        "[resolve] deployer stakes after claim: {} entry(ies)",
-        stakes_after.stakes.len(),
-    );
+    eprintln!("[resolve] deployer stakes after claim: {} entry(ies)", stakes_after.stakes.len(),);
 
     eprintln!("[resolve] OK — resolve + shutdown + claim end-to-end");
 }
@@ -2078,8 +2043,7 @@ async fn test_ob_ioc_partial_fill() {
 async fn diag_dump_market1_orders() {
     let dex = create_dex();
     let market = ob_pool::nth_live_market(1);
-    let details =
-        dex.get_order_book_details(&market.order_book_address).await.expect("ob details");
+    let details = dex.get_order_book_details(&market.order_book_address).await.expect("ob details");
     eprintln!(
         "[diag] OB {} next_order_id={} order_count={}",
         market.order_book_address, details.next_order_id, details.order_count,
@@ -2103,10 +2067,7 @@ async fn diag_dump_market1_orders() {
         .get_orders_by_owner(&market.order_book_address, trader9.deposit_identifier_hash.clone())
         .await
         .expect("get_orders_by_owner trader9");
-    eprintln!(
-        "[diag] getOrdersByOwner(trader[9].dih) → {} order(s)",
-        owned.orders.len(),
-    );
+    eprintln!("[diag] getOrdersByOwner(trader[9].dih) → {} order(s)", owned.orders.len(),);
     for o in &owned.orders {
         eprintln!(
             "  owned: order_id={} client_order_id={} outcome={} is_buy={} amount={}",
@@ -2181,8 +2142,17 @@ async fn test_ob_demo_deployer_staked_and_trades() {
     eprintln!("[demo] deployer sell rested: order_id={}", deployer_placed.order_id);
 
     // Trader crosses with matching buy.
-    trader_place(&dex, &market, &trader, outcome_id, true, ORDER_AMOUNT, ORDER_PRICE_BPS, trader_coid)
-        .await;
+    trader_place(
+        &dex,
+        &market,
+        &trader,
+        outcome_id,
+        true,
+        ORDER_AMOUNT,
+        ORDER_PRICE_BPS,
+        trader_coid,
+    )
+    .await;
     let trader_placed = dex
         .wait_for_order_placed(
             &market.order_book_address,
@@ -2227,6 +2197,4 @@ async fn test_ob_demo_deployer_staked_and_trades() {
         trader_fill.fee_amount,
         deployer_fill.clearing_price,
     );
-
 }
-

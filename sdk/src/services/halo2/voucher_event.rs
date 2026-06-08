@@ -20,9 +20,8 @@ use ackinacki_kit::tvm_client::net;
 use ackinacki_kit::tvm_client::ClientContext;
 use serde::Deserialize;
 
-use crate::dapp::account_id_of;
+use crate::dapp::account_query_vars;
 use crate::dapp::dex_contract_params;
-use crate::dapp::dex_dapp_id;
 
 /// External destination address every `VoucherGenerated` event lands on,
 /// computed by `RootPN.sol::generateVoucher` as
@@ -125,24 +124,12 @@ pub async fn fetch_extout_voucher_events(
 ) -> KitResult<Vec<VoucherExtoutMessage>> {
     let dapp_id_api = ackinacki_kit::contracts::dapp::supports_dapp_id(&context, MODULE).await?;
     let query = if dapp_id_api { GQL_EXTOUT_MESSAGES_V3 } else { GQL_EXTOUT_MESSAGES };
-    let variables = if dapp_id_api {
-        serde_json::json!({
-            "accountId": account_id_of(root_pn_address),
-            "dappId": dex_dapp_id(),
-            "last": last,
-        })
-    } else {
-        serde_json::json!({
-            "address": root_pn_address,
-            "last": last,
-        })
-    };
+    let mut variables = account_query_vars(dapp_id_api, root_pn_address);
+    variables.insert("last".to_string(), serde_json::json!(last));
+    let variables = serde_json::Value::Object(variables);
     let raw = net::query(
         context.clone(),
-        net::ParamsOfQuery {
-            query: query.to_string(),
-            variables: Some(variables),
-        },
+        net::ParamsOfQuery { query: query.to_string(), variables: Some(variables) },
     )
     .await
     .map_err(|e| {

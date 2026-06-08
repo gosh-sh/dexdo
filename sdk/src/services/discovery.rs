@@ -9,9 +9,8 @@ use ackinacki_kit::tvm_client::ClientContext;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::dapp::account_id_of;
+use crate::dapp::account_query_vars;
 use crate::dapp::dex_contract_params;
-use crate::dapp::dex_dapp_id;
 use crate::errors::AppError;
 use crate::errors::AppResult;
 
@@ -141,22 +140,11 @@ pub async fn discover_private_notes(
 
     // Paginate through all deploy events
     loop {
-        let variables = if dapp_id_api {
-            json!({
-                "accountId": account_id_of(RootPn::DEFAULT_ADDRESS),
-                "dappId": dex_dapp_id(),
-                "dst": dst_filter,
-                "last": page_size,
-                "before": cursor,
-            })
-        } else {
-            json!({
-                "address": RootPn::DEFAULT_ADDRESS,
-                "dst": dst_filter,
-                "last": page_size,
-                "before": cursor,
-            })
-        };
+        let mut variables = account_query_vars(dapp_id_api, RootPn::DEFAULT_ADDRESS);
+        variables.insert("dst".to_string(), json!(dst_filter));
+        variables.insert("last".to_string(), json!(page_size));
+        variables.insert("before".to_string(), json!(cursor));
+        let variables = serde_json::Value::Object(variables);
 
         let result = ackinacki_kit::tvm_client::net::query(
             tvm_client.clone(),

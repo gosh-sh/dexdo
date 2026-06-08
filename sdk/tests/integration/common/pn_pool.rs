@@ -82,8 +82,8 @@ fn pool_path() -> PathBuf {
     if let Ok(env) = std::env::var("PN_POOL_PATH") {
         return PathBuf::from(env);
     }
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR set during cargo test");
+    let manifest =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set during cargo test");
     let manifest = Path::new(&manifest);
     // Try dodex_sdk/ first (where mint_pn_pool lands JSON when run from
     // dodex_sdk/), then workspace root.

@@ -223,7 +223,8 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let el_contract = OracleEventList::new(context.clone(), dex_contract_params(&event_list_address));
+    let el_contract =
+        OracleEventList::new(context.clone(), dex_contract_params(&event_list_address));
     if let Err(e) = wait_active(&el_contract, "EventList").await {
         eprintln!("[deploy_oracle] {e}");
         return ExitCode::FAILURE;

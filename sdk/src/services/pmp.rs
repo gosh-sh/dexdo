@@ -36,9 +36,7 @@ pub(crate) async fn get_details(pmp: &Pmp) -> AppResult<ResultOfGetDetails> {
     pmp.get_details().await.map_err(Into::into)
 }
 
-pub(crate) async fn get_order_book_address(
-    pmp: &Pmp,
-) -> AppResult<ResultOfGetOrderBookAddress> {
+pub(crate) async fn get_order_book_address(pmp: &Pmp) -> AppResult<ResultOfGetOrderBookAddress> {
     pmp.get_order_book_address().await.map_err(Into::into)
 }
 

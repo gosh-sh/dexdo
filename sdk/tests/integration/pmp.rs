@@ -397,7 +397,8 @@ async fn test_delete_stake_via_dex() {
     // decrement `_totalWinPool` and stay closable) and deletes the record on
     // the `onForfeitAccepted` ack. Claiming first would remove the record and
     // a follow-up delete dies with `ERR_STAKE_NOT_EXISTS` (142).
-    let balance_before = pn_nackl(&dex.get_private_note_details(&s.pn_address).await.expect("details"));
+    let balance_before =
+        pn_nackl(&dex.get_private_note_details(&s.pn_address).await.expect("details"));
 
     dex.delete_stake(
         &s.pn_address,
@@ -420,7 +421,8 @@ async fn test_delete_stake_via_dex() {
     // recovers to at most the original deposit, never above it. (With a
     // single staker a claim would return the same total — what forfeit
     // pins here is the record cleanup + no payout beyond pay-in.)
-    let balance_after = pn_nackl(&dex.get_private_note_details(&s.pn_address).await.expect("details"));
+    let balance_after =
+        pn_nackl(&dex.get_private_note_details(&s.pn_address).await.expect("details"));
     assert!(
         balance_after > balance_before,
         "forfeit must return the staked principal (before={balance_before}, after={balance_after})",

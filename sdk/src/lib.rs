@@ -6,9 +6,6 @@ mod modules;
 mod rate_limiter;
 mod services;
 
-pub use client::DexConfig;
-pub use dapp::dex_contract_params;
-
 #[cfg(not(target_arch = "wasm32"))]
 pub use adapters::native::dto::market::MarketInfo;
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,6 +44,8 @@ pub use adapters::native::dto::private_note::ResultOfBlockchainWrite;
 pub use adapters::native::Dex;
 #[cfg(feature = "wasm")]
 pub use adapters::wasm;
+pub use client::DexConfig;
+pub use dapp::dex_contract_params;
 #[cfg(not(target_arch = "wasm32"))]
 pub use services::halo2;
 #[cfg(not(target_arch = "wasm32"))]

@@ -111,8 +111,8 @@ fn pool_path() -> PathBuf {
     if let Ok(env) = std::env::var("OB_POOL_PATH") {
         return PathBuf::from(env);
     }
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR set during cargo test");
+    let manifest =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set during cargo test");
     let manifest = Path::new(&manifest);
     // Try dodex_sdk/ first (where the seeder lands by default when run
     // from dodex_sdk/), then workspace root (when run from workspace root).
@@ -136,9 +136,8 @@ pub fn load() -> ObPool {
             path.display(),
         )
     });
-    let pool: ObPool = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-        panic!("parse {} as ObPool: {e}", path.display())
-    });
+    let pool: ObPool = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("parse {} as ObPool: {e}", path.display()));
 
     assert!(
         !pool.markets.is_empty(),
@@ -189,10 +188,7 @@ pub fn nth_live_market(idx: usize) -> ObMarket {
         .into_iter()
         .filter(|m| now < m.result_start_unix.saturating_sub(SAFETY_MARGIN_SECS))
         .collect();
-    assert!(
-        !live.is_empty(),
-        "ob_pool::load() ensured at least one live market exists",
-    );
+    assert!(!live.is_empty(), "ob_pool::load() ensured at least one live market exists",);
     let pick = idx.min(live.len() - 1);
     if pick != idx {
         eprintln!(
@@ -228,9 +224,8 @@ pub fn load_unfiltered() -> ObPool {
             path.display(),
         )
     });
-    let pool: ObPool = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-        panic!("parse {} as ObPool: {e}", path.display())
-    });
+    let pool: ObPool = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("parse {} as ObPool: {e}", path.display()));
     assert!(
         !pool.markets.is_empty(),
         "ob_pool.json at {} has no markets — re-run mint_ob_pool",

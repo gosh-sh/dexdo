@@ -181,8 +181,9 @@ impl Args {
                     endpoint = argv.next().ok_or("--endpoint requires a value")?;
                 }
                 "--deployer-pn-pool" => {
-                    deployer_pn_pool =
-                        Some(PathBuf::from(argv.next().ok_or("--deployer-pn-pool requires a path")?));
+                    deployer_pn_pool = Some(PathBuf::from(
+                        argv.next().ok_or("--deployer-pn-pool requires a path")?,
+                    ));
                 }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown arg `{other}`\n\n{}", usage())),
@@ -558,8 +559,8 @@ struct PnPoolFile {
 fn load_pn_pool_notes(path: &std::path::Path) -> Result<Vec<PnPoolNote>, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("read pn_pool {}: {e}", path.display()))?;
-    let file: PnPoolFile = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse pn_pool {}: {e}", path.display()))?;
+    let file: PnPoolFile =
+        serde_json::from_str(&raw).map_err(|e| format!("parse pn_pool {}: {e}", path.display()))?;
     Ok(file.notes)
 }
 
@@ -607,10 +608,10 @@ async fn deploy_oracle_with_event(
     context: Arc<ClientContext>,
     dex: &Dex,
 ) -> Result<DeployedOracle, String> {
-    let oracle_keys = generate_random_sign_keys(context.clone())
-        .map_err(|e| format!("oracle keys: {e:?}"))?;
-    let ephemeral_keys = generate_random_sign_keys(context.clone())
-        .map_err(|e| format!("ephemeral keys: {e:?}"))?;
+    let oracle_keys =
+        generate_random_sign_keys(context.clone()).map_err(|e| format!("oracle keys: {e:?}"))?;
+    let ephemeral_keys =
+        generate_random_sign_keys(context.clone()).map_err(|e| format!("ephemeral keys: {e:?}"))?;
     let oracle_name = format!("BeeOB-{:x}", now_unix());
 
     dex.deploy_oracle(
@@ -677,9 +678,7 @@ async fn deploy_oracle_with_event(
         let events =
             dex.get_events(&event_list_address).await.map_err(|e| format!("get_events: {e:?}"))?;
         if let Some((id, _)) = events.events.iter().find(|(_, e)| {
-            e.get("eventName")
-                .or_else(|| e.get("event_name"))
-                .and_then(|v| v.as_str())
+            e.get("eventName").or_else(|| e.get("event_name")).and_then(|v| v.as_str())
                 == Some(event_name.as_str())
         }) {
             event_id = id.clone();
@@ -730,10 +729,7 @@ async fn deploy_one_market(
             deploy_funded_deployer_pn(context.clone(), network_url, paths).await?
         }
     };
-    eprintln!(
-        "        pn={} dih={}",
-        deployer.address, deployer.deposit_identifier_hash_dec
-    );
+    eprintln!("        pn={} dih={}", deployer.address, deployer.deposit_identifier_hash_dec);
 
     // 3. deployPMP + wait approved
     eprintln!("  [3/8] deployPMP + wait approval…");
@@ -779,10 +775,9 @@ async fn deploy_one_market(
     // `submitSetTimings`).
     let mut quorum_details = None;
     for _ in 0..40 {
-        let d = dex.get_pmp_details(&pmp_address).await.map_err(|e| format!("pmp details: {e:?}"))?;
-        if d.number_of_oracle_events > 0
-            && d.approved_oracle_events >= d.number_of_oracle_events
-        {
+        let d =
+            dex.get_pmp_details(&pmp_address).await.map_err(|e| format!("pmp details: {e:?}"))?;
+        if d.number_of_oracle_events > 0 && d.approved_oracle_events >= d.number_of_oracle_events {
             quorum_details = Some(d);
             break;
         }
@@ -816,7 +811,8 @@ async fn deploy_one_market(
     let mut pmp_with_timings = None;
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let d = dex.get_pmp_details(&pmp_address).await.map_err(|e| format!("pmp details: {e:?}"))?;
+        let d =
+            dex.get_pmp_details(&pmp_address).await.map_err(|e| format!("pmp details: {e:?}"))?;
         if d.stake_end > 0 && d.result_start > 0 {
             pmp_with_timings = Some(d);
             break;

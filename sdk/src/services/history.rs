@@ -9,9 +9,8 @@ use ackinacki_kit::tvm_client::ClientContext;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::dapp::account_id_of;
+use crate::dapp::account_query_vars;
 use crate::dapp::dex_contract_params;
-use crate::dapp::dex_dapp_id;
 use crate::errors::AppError;
 use crate::errors::AppResult;
 
@@ -292,20 +291,10 @@ pub async fn get_notes_history(
     for pn_address in pn_addresses {
         let pn_contract = PrivateNote::new(tvm_client.clone(), dex_contract_params(pn_address));
 
-        let variables = if dapp_id_api {
-            json!({
-                "accountId": account_id_of(pn_address),
-                "dappId": dex_dapp_id(),
-                "last": limit,
-                "before": cursor,
-            })
-        } else {
-            json!({
-                "address": pn_address,
-                "last": limit,
-                "before": cursor,
-            })
-        };
+        let mut variables = account_query_vars(dapp_id_api, pn_address);
+        variables.insert("last".to_string(), json!(limit));
+        variables.insert("before".to_string(), json!(cursor));
+        let variables = serde_json::Value::Object(variables);
 
         let result = ackinacki_kit::tvm_client::net::query(
             tvm_client.clone(),

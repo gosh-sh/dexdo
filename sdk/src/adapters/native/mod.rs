@@ -385,19 +385,13 @@ impl Dex {
     /// shutdown; the OB drains its queue and reports back via
     /// `onOrderBookShutdownComplete`, which flips `order_book_done` to
     /// true. `claim()` is gated on this flag.
-    pub async fn get_pmp_shutdown_state(
-        &self,
-        pmp_address: &str,
-    ) -> AppResult<PmpShutdownState> {
+    pub async fn get_pmp_shutdown_state(&self, pmp_address: &str) -> AppResult<PmpShutdownState> {
         self.inner.pmp().get_shutdown_state(pmp_address).await.map(Into::into)
     }
 
     // ── OrderBook ────────────────────────────────────────────────
 
-    pub async fn get_order_book_details(
-        &self,
-        ob_address: &str,
-    ) -> AppResult<OrderBookDetails> {
+    pub async fn get_order_book_details(&self, ob_address: &str) -> AppResult<OrderBookDetails> {
         self.inner.order_book().get_details(ob_address).await.map(Into::into)
     }
 
@@ -448,9 +442,7 @@ impl Dex {
         deposit_identifier_hash: String,
         client_order_id: u128,
     ) -> AppResult<Option<u128>> {
-        let owned = self
-            .get_orders_by_owner(ob_address, deposit_identifier_hash)
-            .await?;
+        let owned = self.get_orders_by_owner(ob_address, deposit_identifier_hash).await?;
         Ok(owned
             .orders
             .into_iter()

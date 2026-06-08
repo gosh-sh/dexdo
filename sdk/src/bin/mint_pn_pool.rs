@@ -389,10 +389,7 @@ async fn deploy_one_pn(
     let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
 
     // 1. Halo2 deposit voucher in the chosen currency.
-    eprintln!(
-        "    halo2 {} deposit voucher (this is the slow step)…",
-        token_type.label()
-    );
+    eprintln!("    halo2 {} deposit voucher (this is the slow step)…", token_type.label());
     let deposit_zk = mint_voucher_via_giver(
         context.clone(),
         network_url.to_string(),

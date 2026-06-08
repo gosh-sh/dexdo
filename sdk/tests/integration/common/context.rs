@@ -33,9 +33,6 @@ pub fn create_context() -> Arc<ClientContext> {
 }
 
 pub fn create_dex() -> Dex {
-    Dex::new(dodex_sdk::DexConfig {
-        endpoints: vec![ENDPOINT.to_string()],
-        ..Default::default()
-    })
-    .expect("create Dex")
+    Dex::new(dodex_sdk::DexConfig { endpoints: vec![ENDPOINT.to_string()], ..Default::default() })
+        .expect("create Dex")
 }

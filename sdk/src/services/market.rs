@@ -15,9 +15,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::dapp::account_id_of;
+use crate::dapp::account_query_vars;
 use crate::dapp::dex_contract_params;
-use crate::dapp::dex_dapp_id;
 use crate::errors::AppError;
 use crate::errors::AppResult;
 
@@ -157,22 +156,11 @@ pub async fn discover_oracles(tvm_client: Arc<ClientContext>) -> AppResult<Vec<O
     let mut cursor: Option<String> = None;
 
     loop {
-        let variables = if dapp_id_api {
-            json!({
-                "accountId": account_id_of(RootOracle::DEFAULT_ADDRESS),
-                "dappId": dex_dapp_id(),
-                "dst": dst_filter,
-                "last": 50,
-                "before": cursor,
-            })
-        } else {
-            json!({
-                "address": RootOracle::DEFAULT_ADDRESS,
-                "dst": dst_filter,
-                "last": 50,
-                "before": cursor,
-            })
-        };
+        let mut variables = account_query_vars(dapp_id_api, RootOracle::DEFAULT_ADDRESS);
+        variables.insert("dst".to_string(), json!(dst_filter));
+        variables.insert("last".to_string(), json!(50));
+        variables.insert("before".to_string(), json!(cursor));
+        let variables = serde_json::Value::Object(variables);
 
         let result = ackinacki_kit::tvm_client::net::query(
             tvm_client.clone(),
