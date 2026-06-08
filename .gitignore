@@ -19,6 +19,6 @@ config/api.stage.supabase.yaml
 .env.prod
 plan.md
 
-# OB market pool carries oracle/deployer secret keys — keep local, never commit.
-# (pn_pool.json holds only throwaway note keys and stays tracked.)
+# OB market / PN pools carry oracle/deployer/note secret keys — keep local, never commit.
 sdk/ob_pool.json
+sdk/pn_pool.json
