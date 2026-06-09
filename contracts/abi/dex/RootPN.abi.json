@@ -105,7 +105,8 @@
 				{"name":"withdrawedValue","type":"uint128"},
 				{"name":"tokenType","type":"uint32"},
 				{"name":"walletAddr","type":"address"},
-				{"name":"initialDataHash","type":"uint256"}
+				{"name":"initialDataHash","type":"uint256"},
+				{"name":"dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -157,6 +158,17 @@
 			"inputs": [
 				{"name":"nullifierAddress","type":"address"},
 				{"name":"value","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "TokensWithdrawn",
+			"inputs": [
+				{"name":"amount","type":"uint128"},
+				{"name":"noteAddress","type":"address"},
+				{"name":"to","type":"address"},
+				{"name":"dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]

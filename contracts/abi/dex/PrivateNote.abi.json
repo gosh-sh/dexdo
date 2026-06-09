@@ -273,7 +273,8 @@
 			"name": "withdrawTokens",
 			"inputs": [
 				{"name":"destWalletAddr","type":"address"},
-				{"name":"tokenType","type":"uint32"}
+				{"name":"tokenType","type":"uint32"},
+				{"name":"dapp_id","type":"uint256"}
 			],
 			"outputs": [
 			]
