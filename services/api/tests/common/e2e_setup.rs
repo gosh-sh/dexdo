@@ -155,7 +155,7 @@ pub async fn upsert_market(
 pub async fn provision_account(pool: &PgPool, kek: &Kek, pn: &TestPn) -> (String, String) {
     let pubkey_dec = pubkey_hex_to_decimal(&pn.owner_public_key_hex);
     let seckey_bytes =
-        hex::decode(&pn.owner_secret_key_hex).expect("test_pns.json: seckey must be hex");
+        hex::decode(&pn.owner_secret_key_hex).expect("seed_notes.json: seckey must be hex");
     let pn_seckey_enc = crypto::seal(kek, &seckey_bytes).expect("seal pn_seckey");
 
     sqlx::query(

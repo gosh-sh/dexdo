@@ -23,4 +23,5 @@ plan.md
 # keep local, never commit. See PRIVATE_NOTE_POOLS.md for what each is.
 sdk/ob_pool.json
 sdk/pn_pool*.json
-tests/fixtures/test_pns.json
+# e2e seed notes (real keys) — fetched from S3 in CI, never commit.
+tests/fixtures/seed_notes.json

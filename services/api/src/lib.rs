@@ -2133,8 +2133,13 @@ pub async fn run() -> anyhow::Result<()> {
     // sqlx::migrate! uses an advisory lock so racing with the indexer
     // on a fresh DB is safe.
     if config.auth.seed_accounts {
+        let notes_path = config
+            .auth
+            .seed_accounts_path
+            .as_deref()
+            .context("auth.seed_accounts=true requires auth.seed_accounts_path")?;
         database::run_migrations(&pool).await?;
-        seed::seed_accounts(&pool, &kek).await?;
+        seed::seed_accounts_from_notes(&pool, &kek, std::path::Path::new(notes_path)).await?;
     }
 
     info!("api running with postgres read-model repository");

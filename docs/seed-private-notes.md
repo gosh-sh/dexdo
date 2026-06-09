@@ -1,217 +1,131 @@
-# Deploying the seed Private Notes
+# Seeding the API's trading accounts
 
-The api seed (`auth.seed_accounts: true`, see
-[deployment.md](deployment.md#generate-a-kek)) inserts a fixed set of test
-accounts into Postgres — `pn_address`, `pn_pubkey`, the KEK-encrypted
-`pn_seckey`, and `pn_dih`, from the `SEED_DATA` literal in
-[`crates/infrastructure/src/seed.rs`](../crates/infrastructure/src/seed.rs).
+The api seeds a set of trading accounts into Postgres on startup — `pn_address`,
+`pn_pubkey`, the KEK-encrypted `pn_seckey`, `pn_dih`, and one derived API key per
+account. It reads them from a **JSON notes file** whose path is given in config,
+not from anything baked into the binary.
 
-**Seeding only writes database rows. It does not create anything on-chain.**
-Each seeded account points at a Private Note (PN) contract by address; that
-contract must already be deployed and funded on the target network. If it is
-not, the read paths still work (the rows exist), but the trading path
-(`POST /order`, `DELETE /order`, batch, `buyFullSet`) fails the moment the api
-submits an external message to a Private Note that does not exist or has no gas.
+**Seeding only writes DB rows; it creates nothing on-chain.** Each account points
+at a Private Note (PN) by address; that PN must already be deployed and funded on
+the target network (see [Producing the notes](#producing-the-notes)). Read paths
+work without it, but the trading path (`POST /order`, …) fails the moment the api
+submits an external message to a PN that does not exist or is out of gas.
 
-So the order of operations is:
+## Turning it on
 
-1. Deploy and fund the Private Notes on-chain (this document).
-2. Record each Private Note's address, keypair, and deposit-identifier hash.
-3. Put those values into `SEED_DATA` (or provision the accounts directly in the
-   database — see [auth.md](tech-specs/auth.md)).
-4. Run the api once with `auth.seed_accounts: true` to insert the rows, then
-   turn the flag back off.
+Two `auth` fields in the api config (see
+[deployment.md](deployment.md#generate-a-kek)):
 
-## What makes a Private Note usable
+```yaml
+auth:
+  seed_accounts: true                          # off by default
+  seed_accounts_path: ./config/seed_notes_list.json # required when seed_accounts is true
+```
 
-A Private Note has to clear three on-chain steps before the trading path can use
-it:
+On startup the api applies migrations, reads the file, and **upserts** every
+account + key in one transaction (`ON CONFLICT DO NOTHING` — idempotent; re-runs
+count under `*_skipped`, never duplicate or overwrite). A missing or malformed
+file aborts startup before the first write — there is no partial state.
 
-1. **Deploy** — `RootPN.deployPrivateNote`. The Private Note is materialized at a
-   deterministic address derived from its **deposit identifier hash (DIH)**.
-2. **SHELL ECC gas** — `RootPN.sendEccShellToPrivateNote` funds the Private
-   Note's gas balance in SHELL.
-3. **Native top-up** — a native vmshell balance so the Private Note can pay for
-   its own internal-message execution. This comes from the **giver** (see below).
+## The notes file
 
-## Deploying a pool of Private Notes: `mint_pn_pool`
+A bare JSON array, one object per PN
+([`NoteEntry`](../crates/infrastructure/src/seed.rs)):
 
-The in-repo CLI
-[`sdk/src/bin/mint_pn_pool.rs`](../sdk/src/bin/mint_pn_pool.rs) runs the full
-per-PN flow — halo2 deposit voucher → `deployPrivateNote` → halo2 SHELL
-voucher → `sendEccShellToPrivateNote` → giver native top-up — and writes the
-result to JSON:
+```json
+[
+  {
+    "pn_address": "0:a554b6d3…",
+    "pn_pubkey_hex": "6a00e7c5…",
+    "pn_seckey_hex": "de0a6632…",
+    "pn_dih_hex": "8416176d…",
+    "tokenType": 1,
+    "value": 10000000000000
+  }
+]
+```
+
+| field | source | note |
+| --- | --- | --- |
+| `pn_address` | deployed PN | `0:…`, copy as-is |
+| `pn_pubkey_hex` | PN owner public key | hex; stored as `numeric(78,0)` |
+| `pn_seckey_hex` | PN owner secret key | hex; KEK-encrypted at rest |
+| `pn_dih_hex` | deposit-identifier hash | hex |
+| `tokenType`, `value` | — | **ignored** — they describe what the note holds, not its identity |
+
+**It carries secret keys — never commit it.** `pn_pubkey_hex` / `pn_dih_hex` must
+fit 256 bits and `pn_seckey_hex` must be valid hex, or startup fails loudly.
+
+## API credentials are derived, not in the file
+
+The file holds no `api_key` / `api_secret`. For the note at array index `i` the
+seeder mints:
+
+- `api_key` = `dk_live_test_{i+1:03}` (e.g. `dk_live_test_001`)
+- `api_secret` = `HMAC-SHA256(KEK, "dodex/api-secret/v1" || u32_be(i))`
+- `permissions` = `[USER_DATA, TRADE]`; `label` = `test-mm-{i+1:03}`
+
+**Why:** the secret never has to be stored anywhere. The same `(KEK, index)`
+always yields the same 32 bytes, and a different environment's KEK yields a
+disjoint secret. To hand a client its secret, derive it from that environment's
+KEK and the note's position — see
+[`crypto::derive_api_secret`](../crates/infrastructure/src/crypto.rs).
+
+## How the file reaches the container (docker-compose / staging)
+
+The api and indexer containers mount the host's `./config` read-only at
+`/app/config` ([docker-compose.yml](../docker-compose.yml)), and
+[.dockerignore](../.dockerignore) excludes `config/seed_notes*.json` from the
+image build. So the secret file is **never baked into the image** — it is
+delivered only at runtime through the mount.
+
+On the target host:
+
+1. Drop the notes file at `./config/seed_notes_list.json` (from your secret
+   store / S3; it is not in the repo).
+2. The env config (`config/api.stage.supabase.yaml`, assembled by CI) sets
+   `auth.seed_accounts: true` and
+   `auth.seed_accounts_path: ./config/seed_notes_list.json`. The path is
+   relative to the container workdir `/app`, so it resolves to the mounted
+   `/app/config/seed_notes_list.json` (and to the repo's `config/` for a local
+   `cargo run`).
+3. `docker compose -f docker-compose.yml -f docker-compose.stage.yml up` — the
+   api reads both files and seeds on first start. Prod is identical with the prod
+   config.
+
+## Producing the notes
+
+[`mint_pn_pool`](../sdk/src/bin/mint_pn_pool.rs) deploys and funds a pool of PNs
+on a network that has a giver (shellnet does; mainnet does not):
 
 ```sh
 cargo run --release --bin mint_pn_pool -- \
-  --count 10 \
-  --nominal N10000 \
-  --token-type nackl \
-  --endpoint shellnet.ackinacki.org \
-  --output pn_pool.json
+  --count 10 --nominal N10000 --token-type nackl \
+  --endpoint shellnet.ackinacki.org --output pn_pool.json
 ```
 
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--count` / `-n` | `5` | number of Private Notes to deploy |
-| `--nominal` | `N10000` | per-PN deposit nominal — `N100`, `N1000`, or `N10000` |
-| `--token-type` / `-t` | `nackl` | deposit currency — `nackl`, `shell`, or `usdc` |
-| `--endpoint` / `-e` | `shellnet.ackinacki.org` | network host |
-| `--output` / `-o` | `pn_pool.json` | output path; re-running against an existing file **appends** `--count` more Private Notes |
+It writes the **pool format** (`address`, `deposit_identifier_hash` as a decimal
+string, `owner_public_key_hex`, `owner_secret_key_hex`, funding flags). Convert
+that to the notes-file format above: rename the fields and turn
+`deposit_identifier_hash` from **decimal to hex** for `pn_dih_hex`. The halo2
+prover prerequisites (SRS, prover cache, release build) live in the binary's
+module doc.
 
-Deployment is sequential by design — each halo2 voucher proof commits to current
-chain state and must be submitted inside its validity window, so Private Notes
-cannot be minted in parallel.
+## Tests
 
-### Prerequisites
-
-`mint_pn_pool` is a maintainer tool with real build- and run-time dependencies:
-
-- **Halo2 prover crates**, pulled over HTTPS in
-  [`sdk/Cargo.toml`](../sdk/Cargo.toml) from public git repos — no SSH key
-  required.
-- **Halo2 artifacts on disk** — a writable prover-cache directory, plus the KZG
-  SRS file `kzg_bn254_19.srs` (~64 MB). The SRS is generated automatically on
-  first run if it is missing — it is reproducible from a fixed seed, so the
-  generated file is identical everywhere and matches the on-chain verifier — and
-  cached on disk afterward (the first run pays a one-time CPU cost). Defaults are
-  `./params`, `./params/halo2_cache`, `./target/halo2_fixtures`; override with
-  `PARAMS_DIR`, `HALO2_PK_CACHE`, `HALO2_FIXTURE_DIR`. See
-  [`sdk/src/services/halo2/paths.rs`](../sdk/src/services/halo2/paths.rs).
-- **A working giver** on the target network. Shellnet has one; Mainnet does not.
-  On Mainnet, deploying and funding Private Notes requires purchasing SHELL
-  tokens.
-- A **release build** — the halo2 prover is CPU-bound.
-
-If you cannot run this tool (no giver on your network, say), deploy and fund the
-Private Notes by whatever means your network provides, then record the same four
-values per Private Note (address, DIH, public key, secret key) by hand.
-
-### Output: `pn_pool.json`
-
-`pn_pool.json` holds one entry per Private Note. **It contains secret keys — keep
-it private and out of any shared store.** Each entry carries `address`,
-`deposit_identifier_hash`, `owner_public_key_hex`, `owner_secret_key_hex`, and
-the funding flags `shell_funded` / `native_funded`. The next section turns these
-into seeder input.
-
-## Putting the Private Notes into the seeder
-
-The seeder reads one JSON literal, `SEED_DATA`, compiled into the api binary
-([`crates/infrastructure/src/seed.rs`](../crates/infrastructure/src/seed.rs)). To
-seed your own Private Notes you edit that literal and rebuild the api image. One
-account looks like this:
-
-```json
-{
-  "accounts": [
-    {
-      "label": "mm-001",
-      "pn_address": "0:20e8f9…",
-      "pn_pubkey_dec": "70969641…",
-      "pn_seckey_hex": "483ee42a…",
-      "pn_dih_dec": "41285154…",
-      "api_keys": [
-        {
-          "api_key": "dk_live_001",
-          "api_secret_hex": "1de6fc5c…",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    }
-  ]
-}
-```
-
-### Fields from the deployed Private Note
-
-Four fields come straight from `pn_pool.json` (or from however you deployed the
-Private Note):
-
-| `pn_pool.json` | `SEED_DATA` | Conversion |
-| --- | --- | --- |
-| `address` | `pn_address` | none — copy as-is (`0:…`) |
-| `deposit_identifier_hash` | `pn_dih_dec` | none — already decimal |
-| `owner_secret_key_hex` | `pn_seckey_hex` | none — already hex |
-| `owner_public_key_hex` | `pn_pubkey_dec` | hex → decimal (see below) |
-
-The public key is the one field that needs converting — the pool writes it as
-hex, but the seeder's `accounts.pn_pubkey` column is `numeric(78,0)`, so it wants
-the decimal form:
-
-```sh
-python3 -c "print(int('<owner_public_key_hex>', 16))"
-```
-
-`label` is free-form and optional — it is only there for humans reading the DB.
-
-### The API credentials
-
-`api_key` and `api_secret_hex` are not produced by the deploy tool — you mint
-them yourself, one or more per account:
-
-- **`api_key`** — the public identifier the client sends in the `X-DODEX-APIKEY`
-  header. Any unique string; the baked-in examples use a `dk_live_…` prefix.
-  Uniqueness is enforced per active key on insert.
-- **`api_secret_hex`** — the shared secret the client signs requests with
-  (HMAC-SHA256). Generate 32 bytes of hex:
-  ```sh
-  openssl rand -hex 32
-  ```
-  It is stored **encrypted under the KEK** — this literal is the only cleartext
-  copy, so hand it to the client and keep it safe.
-- **`permissions`** — a non-empty list; each entry is exactly `USER_DATA` (read
-  account and order data) or `TRADE` (place and cancel orders). Case-sensitive.
-
-### What the seeder rejects at startup
-
-`SEED_DATA` is validated in full before a single row is written — one bad field
-makes the api refuse to start (loud on purpose; there is no partial DB state).
-The checks:
-
-- `pn_pubkey_dec` and `pn_dih_dec` — decimal non-negative integers that fit in
-  256 bits.
-- `pn_seckey_hex` and `api_secret_hex` — valid hex.
-- every `api_keys` entry — at least one permission, each a known label.
-
-### Running the seed
-
-1. In your api config set `auth.seed_accounts: true` (see
-   [deployment.md](deployment.md#generate-a-kek) for where the flag sits).
-2. Start the api once. It applies migrations, then inserts every account and key
-   in one transaction, and logs a line like:
-   ```
-   seeded credentials accounts_inserted=10 accounts_skipped=0 api_keys_inserted=10 api_keys_skipped=0
-   ```
-3. Set `auth.seed_accounts: false` and restart.
-
-Re-running is safe: the insert is idempotent (`ON CONFLICT DO NOTHING`, keyed on
-`pn_address` for accounts and on the active `api_key` for keys), so rows that
-already exist are counted under `*_skipped` rather than duplicated or
-overwritten. To change an already-seeded account, edit it in the database
-directly — re-seeding will not update it.
-
-> **Editing `SEED_DATA` means rebuilding.** It is a compile-time constant, not a
-> file the running container reads, so changes only take effect in a freshly
-> built api image. If you would rather not rebuild, provision the accounts
-> straight into the `accounts` / `api_keys` tables instead — you encrypt
-> `pn_seckey` and `api_secret` under the KEK yourself; see
-> [auth.md](tech-specs/auth.md) for the table contract.
+- **`cargo test` (chain mocked)** seeds through the same code path from the
+  committed dummy fixture
+  [`services/api/tests/fixtures/seed_notes_dummy.json`](../services/api/tests/fixtures/seed_notes_dummy.json)
+  — fake keys, safe to commit, because the chain is faked and `pn_seckey` is
+  never used to sign.
+- **e2e and staging** use real, funded notes kept out of the repo.
 
 ## Funding a Private Note with the giver
 
-On a network that has a giver (such as Shellnet), **the giver tops up a Private
-Note directly by its address** — the same `pn_address` that is in `pn_pool.json`
-and in `SEED_DATA`. `mint_pn_pool` does this automatically at deploy time, but you
-can also top up an already-deployed Private Note later: send SHELL (and native
-gas) from the giver to the Private Note's address.
+On a network with a giver (such as shellnet) the giver tops up a PN directly by
+its `pn_address`. `mint_pn_pool` does this at deploy time, but an already-deployed
+PN can be topped up later by sending SHELL (and native gas) from the giver to its
+address — a PN out of gas stops executing trading messages until refunded.
 
-For getting test SHELL and using the giver on Shellnet, follow the Acki Nacki
-guide:
-
-> https://dev.ackinacki.com/readme/get-test-tokens-in-shellnet#get-shell
-
-A Private Note that runs out of gas stops being able to execute trading messages
-until it is topped up again, so re-funding existing seed Private Notes is the
-normal way to keep a long-running dev/test environment working.
-</content>
+For test SHELL and giver usage on shellnet:
+<https://dev.ackinacki.com/readme/get-test-tokens-in-shellnet#get-shell>

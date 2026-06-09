@@ -11,7 +11,7 @@
 // Marked `#[ignore]` because it needs:
 //   - TEST_DATABASE_URL (test Postgres up — see README.md#test-postgres)
 //   - reachable shellnet endpoint
-//   - the bundled fixture `tests/fixtures/test_pns.json` (PN with
+//   - the bundled fixture `tests/fixtures/seed_notes.json` (PN with
 //     enough NACKL — see `tests/fixtures/README.md` for fixture setup
 //     and topping up via `mint_pn_pool`).
 //
@@ -20,7 +20,7 @@
 //   cargo test -p dodex-api --test e2e_cancel_batch_orders -- --ignored --nocapture
 //
 // === SECURITY NOTE ===
-// `tests/fixtures/test_pns.json` ships plaintext `owner_secret_key_hex`
+// `tests/fixtures/seed_notes.json` ships plaintext `pn_seckey_hex`
 // values for shellnet-only throwaway trading PNs. See the same note
 // at the top of `e2e_batch_orders.rs` and the `[SHELLNET-TESTKEYS]`
 // section in `tests/fixtures/README.md`.
@@ -58,7 +58,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 #[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL + shellnet + tests/fixtures/test_pns.json"]
+#[ignore = "requires TEST_DATABASE_URL + shellnet + tests/fixtures/seed_notes.json"]
 async fn cancel_batch_orders_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -110,6 +110,7 @@ async fn cancel_batch_orders_against_shellnet() {
         default_recv_window_ms: 5_000,
         max_recv_window_ms: 60_000,
         seed_accounts: false,
+        seed_accounts_path: None,
     };
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));

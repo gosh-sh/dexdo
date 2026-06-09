@@ -93,6 +93,12 @@ pub struct AuthSection {
     pub max_recv_window_ms: u64,
     #[serde(default)]
     pub seed_accounts: bool,
+    /// Path to the JSON notes file the seeder reads when `seed_accounts`
+    /// is on. Per-environment: the dev/test file ships dummy custody keys
+    /// and is committed; real staging notes are provided out of band and
+    /// never committed. Required whenever `seed_accounts` is true.
+    #[serde(default)]
+    pub seed_accounts_path: Option<String>,
 }
 
 fn default_recv_window_ms() -> u64 {
@@ -707,6 +713,7 @@ indexer:
             default_recv_window_ms: default_ms,
             max_recv_window_ms: max_ms,
             seed_accounts: false,
+            seed_accounts_path: None,
         }
     }
 
@@ -783,6 +790,7 @@ graphql:
             default_recv_window_ms: 5_000,
             max_recv_window_ms: 60_000,
             seed_accounts: false,
+            seed_accounts_path: None,
         };
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("kek_hex"), "got: {err}");
@@ -796,6 +804,7 @@ graphql:
             default_recv_window_ms: 5_000,
             max_recv_window_ms: 60_000,
             seed_accounts: false,
+            seed_accounts_path: None,
         };
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("kek_hex"), "got: {err}");

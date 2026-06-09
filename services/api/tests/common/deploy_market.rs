@@ -1,7 +1,7 @@
 // Deploy an ephemeral PMP + OrderBook on shellnet for one e2e test
 // run. Mirrors the orchestration in the kit's `mint_ob_pool` reference
 // (steps 1, 3–8) but strips the halo2 voucher path used to fund a
-// fresh deployer-PN — we take a PN out of `tests/fixtures/test_pns.json`
+// fresh deployer-PN — we take a PN out of `tests/fixtures/seed_notes.json`
 // which is already on chain with enough NACKL for the stakes + split
 // collateral.
 //

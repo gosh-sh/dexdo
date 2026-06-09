@@ -25,7 +25,13 @@ auth:
   kek_hex: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
   default_recv_window_ms: 5000
   max_recv_window_ms: 60000
+  # Off by default: seeding reads accounts from a JSON notes file rather
+  # than baked-in credentials. To seed locally, set this true and point
+  # seed_accounts_path at a notes file (real notes are SDK-generated and
+  # never committed). Each account's API secret is derived from its note's
+  # position under the KEK above — see crates/infrastructure/src/seed.rs.
   seed_accounts: true
+  seed_accounts_path: ./config/seed_notes_list.json
 
 chain:
   # Acki Nacki gateway the trading path POSTs external messages to.

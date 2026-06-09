@@ -19,7 +19,7 @@ Operational cutover notes for specific schema/projector changes live in [migrati
 ## Operations
 
 - [deployment.md](deployment.md) — self-hosting `indexer` + `api` with Docker Compose against your own Acki Nacki GraphQL endpoint and your own Postgres / Supabase.
-- [seed-private-notes.md](seed-private-notes.md) — deploying and funding the on-chain PrivateNote contracts the seed accounts point at, and topping them up with the giver.
+- [seed-private-notes.md](seed-private-notes.md) — seeding the api's trading accounts from a JSON notes file (config path, docker-compose delivery, KEK-derived API keys), and deploying/funding the PrivateNotes they point at.
 
 ## Contracts
 

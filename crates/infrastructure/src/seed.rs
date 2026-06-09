@@ -1,11 +1,15 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
-// Idempotent bootstrap-time insert of a fixed set of test credentials.
-// Triggered by `auth.seed_accounts` in the API config; off by default
-// and only flipped on in dev/test environments by devops. When the
-// route is no longer needed the entire module and the `seed_accounts`
-// config field can be removed without touching the rest of the auth
-// pipeline.
+// Idempotent bootstrap-time insert of API credentials read from a JSON
+// notes file. Gated by `auth.seed_accounts` (+ `auth.seed_accounts_path`)
+// in the API config; off by default and only flipped on in dev/test/
+// staging by devops. Each note becomes one account whose API secret is
+// derived from its position via `crypto::derive_api_secret`, so the file
+// carries note custody keys only and never an API secret. When the route
+// is no longer needed the whole module and both config fields can be
+// removed without touching the rest of the auth pipeline.
+
+use std::path::Path;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -24,159 +28,23 @@ use uuid::Uuid;
 use crate::crypto;
 use crate::crypto::Kek;
 
-/// Hard-coded test credentials baked into the binary. In the DB the
-/// `api_secret_hex` and `pn_seckey_hex` are stored encrypted under the
-/// KEK (`crypto::seal`), so recovering them requires that environment's
-/// KEK — this literal is the readable reference for the dev/test secrets.
-const SEED_DATA: &str = r#"{
-  "accounts": [
-    {
-      "label": "test-mm-001",
-      "pn_address": "0:20e8f91330d643c1c7d62f69f29daf0603bda050d3436f7d24096b5f567c0be9",
-      "pn_pubkey_dec": "70969641521947521544907052554963635732660713948458019842077559075920641595863",
-      "pn_seckey_hex": "483ee42add5d95d2fd00bc0b3aec9f25570ba62faf388f4f0b5897838d4baa8b",
-      "pn_dih_dec": "41285154978381328375205393245656689700447731610705637362063089883892566741275",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_001",
-          "api_secret_hex": "1de6fc5cf8899e7f1dacf449fe46c3c88854478b7fcd9dd26c664535ee589966",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-002",
-      "pn_address": "0:0cc78899137e5a1f0a23a65f632dd6324121e5d4008a5b686950592f420ba2c5",
-      "pn_pubkey_dec": "69923806751694534953804229510116762784772903739067523864343460953777067982700",
-      "pn_seckey_hex": "b88c66666b410eef05bfb35018eecb22a48675374ac959fe65ff57807776e963",
-      "pn_dih_dec": "14034034795317689084237356804772214244921992097377417543726221691419373484545",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_002",
-          "api_secret_hex": "0353c808ebdf3f4d5074bc9d9465093acc28cf7ce4ef24d413dd98c4bc4191ef",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-003",
-      "pn_address": "0:6439f06c7f86e08a3f211cb115e22d716f077db6cf4dc2a18e47b29049ab6910",
-      "pn_pubkey_dec": "111364943336038765597784218038152056463510706801151421672678766767429094304839",
-      "pn_seckey_hex": "490ef80c0dad4cbc85cb287ba63b60273732650900ca87651dc3d655c8a5ac5c",
-      "pn_dih_dec": "66829662673953715544742630549865807996682983234744558714375637659475983631403",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_003",
-          "api_secret_hex": "e84ad7681d4c4604948fc94ce40d7e243332b7315a6e631a06f2f128d971668d",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-004",
-      "pn_address": "0:acdc13a1c154e4f9717ee15b6ee529007946a3616097caa1a6872cfab2cdbde5",
-      "pn_pubkey_dec": "104493193872113324458927995886512650143617617567633653425083716267889540151578",
-      "pn_seckey_hex": "3c539f966fb6a1174be4c1cd2bb90f32ebf2d4465d62ef8ebc280bb8a2a59c5f",
-      "pn_dih_dec": "5853573793107541443653972510998809781932122309795273326119028137187770094881",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_004",
-          "api_secret_hex": "fd088668f8bac878564dc1d2a6ec0307c20e9f86ddb4328be457621a0bc291ed",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-005",
-      "pn_address": "0:de7d9b9fc2fd8b30cffddf1d212f8ba6966f6332ebe39cbc79a42f7b5619614c",
-      "pn_pubkey_dec": "96521214283964455061122373050499476900255520915326503684005820516581582658971",
-      "pn_seckey_hex": "ef707d8351435b42a8fa01b1ba60479fe4b9df4d1041f03a8680ab45124ac9b5",
-      "pn_dih_dec": "15531958371531797046693027872107917062798496196966881265973412715290931273997",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_005",
-          "api_secret_hex": "d55f9fe6a9a61fdde23594935ea7587edb7c0d417fb08e8521a9dc2c019f917b",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-006",
-      "pn_address": "0:5d4b94314b2689795ef7075fbe1c50a07e0e93c4dd95eea0b85c1cd17f217c79",
-      "pn_pubkey_dec": "49453966171427435895852250487079109655919413896439524994839794123673610400877",
-      "pn_seckey_hex": "bb9e381bac20c87a4963cd949caf3b2c78645154ea83d8cb3d5ce4574db63300",
-      "pn_dih_dec": "31527730002298787547173368052474382097551904457640528163082865640950886484740",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_006",
-          "api_secret_hex": "958e800c6291aa0f09e60cdd25e18cb70badb847c08759c773a276c9611c5ea2",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-007",
-      "pn_address": "0:b536d8bc5737c910eff8b7bc458b41bc06ddd9044f82ec8d37948cc004c19476",
-      "pn_pubkey_dec": "32140876268313782030789615539966278995440322965981863081060267309715172016955",
-      "pn_seckey_hex": "2f21bc13483862a4322742df049a311832922696a76f93837963bfe3f7d1e776",
-      "pn_dih_dec": "44619256069185850071980031855201858456095594341008969771714892444061499822854",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_007",
-          "api_secret_hex": "236aee6de99e14c223c7e25e251e7587ede5510e80753c6d6115088c5c7cb844",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-008",
-      "pn_address": "0:0f56e796e43062f70f570a69b10f68a4019fb5ef0b39435ed8c7afe65d112f5d",
-      "pn_pubkey_dec": "21638739161140850916985450669329537446936769704953854348749707564285990842092",
-      "pn_seckey_hex": "9d14540a1e483d0f5d70dad044cd6ca60208ab745bb57bbee111e447f7cabf94",
-      "pn_dih_dec": "96359695240202148397281023347167783600879376291101820228698371886669250640393",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_008",
-          "api_secret_hex": "d52b4c47a99929274e25d7f7a709e737cdb1373fbd49d36a71d7ec6bab4b03f6",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-009",
-      "pn_address": "0:e3801de2ab42bf580210e6693f576b0d364f4a67edd467e454cbe86a995a988f",
-      "pn_pubkey_dec": "30364196998626412815632694656262367403557856434407168618533435834350416050423",
-      "pn_seckey_hex": "9688c8fa9af045bca8024120dfb5440cb38f33bf919e3d768cd53eea5d77edc2",
-      "pn_dih_dec": "76450313048673825143239733960146111988268472826174533377596497005692755387660",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_009",
-          "api_secret_hex": "8b9897acae053e918b9ef2371361695de26317249803d26894996503b2746c73",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    },
-    {
-      "label": "test-mm-010",
-      "pn_address": "0:ce0957b062e225af7b4d7f6ca5b629359e9462bd12b95d8c56e3f14aa9bf040c",
-      "pn_pubkey_dec": "46908564887420113469330906518120089191421597309021559778332592679992144811662",
-      "pn_seckey_hex": "84c300b749fede351178a6f1ec08abebf9f84c971a03451193a0fbf03039dd1b",
-      "pn_dih_dec": "77234129791555341448663699467864057445659330270914183380492483871370076311309",
-      "api_keys": [
-        {
-          "api_key": "dk_live_test_010",
-          "api_secret_hex": "a4b455b9c8355e383af377302d3b2179409edcb2d685f4ffeaeaee39d3c2c710",
-          "permissions": ["USER_DATA", "TRADE"]
-        }
-      ]
-    }
-  ]
-}"#;
+/// External wire format of the seed notes file: a bare JSON array of
+/// private-note records. `tokenType` and `value` describe what a note
+/// holds and are intentionally not read here — they are not part of
+/// account identity. The public keys arrive hex-encoded; the `numeric`
+/// columns want decimal, so `note_to_seed_account` converts them.
+#[derive(Debug, Deserialize)]
+pub struct NoteEntry {
+    pub pn_address: String,
+    pub pn_pubkey_hex: String,
+    pub pn_seckey_hex: String,
+    pub pn_dih_hex: String,
+}
 
-// ---- Public shape of the seed payload. Exposed so integration tests
-// can build their own UUID-prefixed fixtures and run them through
-// `apply_seed` without colliding with the baked JSON; production code
-// only uses the no-argument `seed_accounts` entry point. ----
+// ---- Internal shape of the seed payload that `apply_seed` writes.
+// `seed_accounts_from_notes` builds it by mapping each `NoteEntry`;
+// integration tests build their own UUID-prefixed fixtures and run them
+// through `apply_seed` directly. Public so those tests can construct it. ----
 
 #[doc(hidden)]
 #[derive(Debug, Deserialize)]
@@ -212,8 +80,8 @@ pub struct SeedApiKey {
 
 // ---- Validated shape: every field is already normalised into the form
 // the DB writer expects. `validate` is a pure function with no I/O, so
-// any malformed entry in the baked JSON aborts startup before the
-// first INSERT and a partial DB state is impossible. ----
+// any malformed entry aborts startup before the first INSERT and a
+// partial DB state is impossible. ----
 
 #[derive(Debug)]
 struct ValidatedSeedData {
@@ -251,16 +119,60 @@ pub struct SeedReport {
     pub api_keys_skipped: u64,
 }
 
-/// Production entry. Parses the binary-embedded JSON and applies it
-/// through `apply_seed`. The pipeline is documented on `apply_seed`.
-pub async fn seed_accounts(pool: &PgPool, kek: &Kek) -> Result<SeedReport> {
-    let parsed: SeedData =
-        serde_json::from_str(SEED_DATA).context("parse hard-coded seed_data.json")?;
-    apply_seed(pool, kek, parsed).await
+/// Production/staging entry. Reads a JSON array of private-note records
+/// from `path`, maps each to an account with a KEK-derived API credential
+/// (`crypto::derive_api_secret`), and applies them through `apply_seed`.
+/// A note's position in the file is its derivation index, so credential
+/// `N` is stable as long as the file order is.
+///
+/// Fails before any DB write if the file is missing, is not valid JSON,
+/// or carries a malformed field — startup aborts rather than half-seeding.
+pub async fn seed_accounts_from_notes(pool: &PgPool, kek: &Kek, path: &Path) -> Result<SeedReport> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read seed notes file {}", path.display()))?;
+    let notes: Vec<NoteEntry> = serde_json::from_str(&raw)
+        .with_context(|| format!("parse seed notes file {}", path.display()))?;
+
+    let mut accounts = Vec::with_capacity(notes.len());
+    for (index, note) in notes.into_iter().enumerate() {
+        accounts.push(note_to_seed_account(kek, index as u32, note)?);
+    }
+    apply_seed(pool, kek, SeedData { accounts }).await
+}
+
+/// Map one note to the internal `SeedAccount`, deriving its API credential
+/// from `index`. `apply_seed`'s `validate` re-checks every field, so this
+/// only needs to emit well-formed strings.
+fn note_to_seed_account(kek: &Kek, index: u32, note: NoteEntry) -> Result<SeedAccount> {
+    let pn_pubkey_dec = hex_to_dec_uint256(&note.pn_pubkey_hex)
+        .with_context(|| format!("pn_pubkey_hex for {}", note.pn_address))?;
+    let pn_dih_dec = hex_to_dec_uint256(&note.pn_dih_hex)
+        .with_context(|| format!("pn_dih_hex for {}", note.pn_address))?;
+    Ok(SeedAccount {
+        label: Some(format!("test-mm-{:03}", index + 1)),
+        pn_address: note.pn_address,
+        pn_pubkey_dec,
+        pn_seckey_hex: note.pn_seckey_hex,
+        pn_dih_dec,
+        api_keys: vec![SeedApiKey {
+            api_key: format!("dk_live_test_{:03}", index + 1),
+            api_secret_hex: hex::encode(crypto::derive_api_secret(kek, index)),
+            permissions: vec!["USER_DATA".to_string(), "TRADE".to_string()],
+        }],
+    })
+}
+
+/// Convert an optionally `0x`-prefixed hex uint256 into the decimal string
+/// the `numeric(78, 0)` columns expect, rejecting anything over 256 bits.
+fn hex_to_dec_uint256(s: &str) -> Result<String> {
+    let h = s.strip_prefix("0x").unwrap_or(s);
+    let n = BigUint::parse_bytes(h.as_bytes(), 16).context("value must be valid hex")?;
+    anyhow::ensure!(n.bits() <= 256, "value exceeds 256 bits");
+    Ok(n.to_str_radix(10))
 }
 
 /// Apply an arbitrary `SeedData` payload against `pool`. Used by
-/// `seed_accounts` for the production baked-in JSON and by integration
+/// `seed_accounts_from_notes` for the mapped notes file and by integration
 /// tests for UUID-prefixed fixtures.
 ///
 /// Pipeline:
@@ -307,10 +219,10 @@ pub async fn apply_seed(pool: &PgPool, kek: &Kek, data: SeedData) -> Result<Seed
     Ok(report)
 }
 
-/// Walk the parsed JSON and reject any field that cannot be applied.
-/// Pure function — no I/O, no encryption, no DB. The api will refuse
-/// to start if this returns `Err`, which is the loudest possible
-/// signal that someone edited `SEED_DATA` incorrectly.
+/// Walk the parsed seed payload and reject any field that cannot be
+/// applied. Pure function — no I/O, no encryption, no DB. The api will
+/// refuse to start if this returns `Err`, which is the loudest possible
+/// signal that a notes file carried a malformed field.
 fn validate(parsed: SeedData) -> Result<ValidatedSeedData> {
     let mut accounts = Vec::with_capacity(parsed.accounts.len());
     for account in parsed.accounts {
@@ -463,17 +375,6 @@ mod tests {
                 permissions: vec!["USER_DATA".into(), "TRADE".into()],
             }],
         }
-    }
-
-    #[test]
-    fn baked_seed_data_validates() {
-        // The embedded JSON parses into the raw shape and survives the
-        // full validation pipeline. Editing SEED_DATA into something
-        // malformed gets a clear test failure here rather than a
-        // confusing runtime error on first boot.
-        let data: SeedData = serde_json::from_str(SEED_DATA).expect("seed_data.json must parse");
-        let validated = validate(data).expect("seed_data.json must validate");
-        assert_eq!(validated.accounts.len(), 10, "baked seed must contain ten accounts");
     }
 
     #[test]

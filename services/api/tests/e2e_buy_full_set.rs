@@ -23,7 +23,7 @@
 // Marked `#[ignore]` because it needs:
 //   - TEST_DATABASE_URL (test Postgres up — see README.md#test-postgres)
 //   - reachable shellnet endpoint
-//   - `tests/fixtures/test_pns.json` extended to slot 4 (the fifth PN)
+//   - `tests/fixtures/seed_notes.json` extended to slot 4 (the fifth PN)
 //     via `mint_pn_pool` — `TestPnPool::slot(4)` panics with a clear
 //     "top up via mint_pn_pool" message until the pool is extended.
 //
@@ -82,7 +82,7 @@ const COLLATERAL_HUMAN: &str = "10";
 const COLLATERAL_RAW: u128 = 10_000_000_000;
 
 #[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL + shellnet + tests/fixtures/test_pns.json slot 4"]
+#[ignore = "requires TEST_DATABASE_URL + shellnet + tests/fixtures/seed_notes.json slot 4"]
 async fn buy_full_set_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -136,6 +136,7 @@ async fn buy_full_set_against_shellnet() {
         default_recv_window_ms: 5_000,
         max_recv_window_ms: 60_000,
         seed_accounts: false,
+        seed_accounts_path: None,
     };
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));

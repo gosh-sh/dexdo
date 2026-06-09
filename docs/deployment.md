@@ -175,6 +175,7 @@ auth:
   # point at must be deployed and funded on-chain first. See
   # docs/seed-private-notes.md.
   seed_accounts: true
+  seed_accounts_path: ./config/seed_notes_list.json  # required when seed_accounts is on
 
 chain:
   gateway_endpoint: shellnet.ackinacki.org   # your Acki Nacki node host

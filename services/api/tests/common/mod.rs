@@ -2,7 +2,8 @@
 // declares `mod common;` and uses the setup/sign primitives below.
 //
 // The whole suite shares a single test DB (the docker-compose.test.yml
-// Postgres). The seeded credentials baked into `seed::seed_accounts`
+// Postgres). The credentials seeded from `SEED_NOTES_FIXTURE` via
+// `seed::seed_accounts_from_notes`
 // are read-only as far as tests are concerned, so parallel reads are
 // safe. Tests that mutate rows (e.g. the USER_DATA-only permission
 // case) carry their own cleanup.
@@ -53,16 +54,25 @@ use sqlx::PgPool;
 
 pub type HmacSha256 = Hmac<Sha256>;
 
-/// First seeded api_key/secret pair from `seed.rs`. Used as the
-/// "happy path" credential across the auth_http tests.
+/// Credentials the seeder mints for the first two notes of the test
+/// fixture (`SEED_NOTES_FIXTURE`). The api_key is `dk_live_test_{n:03}`;
+/// the secret is `crypto::derive_api_secret(test_kek, index)`, pinned
+/// here so the signing tests need no DB round-trip and guarded against
+/// drift by `seed_secret_consts_match_kek_derivation` in auth_http.rs.
 pub const SEED_API_KEY: &str = "dk_live_test_001";
 pub const SEED_API_SECRET: &str =
-    "1de6fc5cf8899e7f1dacf449fe46c3c88854478b7fcd9dd26c664535ee589966";
+    "86c223a600ce630f9abf62ea2244ca638a2e02bb16d73d74128bf31f5d3e1910";
 
-/// Second seeded api_key/secret pair, used for cross-tenant isolation tests.
+/// Second seeded credential, used for cross-tenant isolation tests.
 pub const SEED_API_KEY_2: &str = "dk_live_test_002";
 pub const SEED_API_SECRET_2: &str =
-    "0353c808ebdf3f4d5074bc9d9465093acc28cf7ce4ef24d413dd98c4bc4191ef";
+    "55ed737c64cf4069c33275745ba96a06a8e9bd7d14b65bf97eadf701a38b2a55";
+
+/// Notes fixture the api test suite seeds from. Dummy custody keys — the
+/// suite mocks the chain, so `pn_seckey` is never used to sign on-chain;
+/// real notes are provided on CI out of band.
+pub const SEED_NOTES_FIXTURE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/seed_notes_dummy.json");
 
 /// Fixed KEK for tests so seeded ciphertexts decrypt across runs.
 pub fn test_kek() -> Arc<Kek> {
@@ -88,7 +98,9 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>, Arc<FakePnStateReader
     database::run_migrations(&pool).await.expect("run migrations");
 
     let kek = test_kek();
-    seed::seed_accounts(&pool, &kek).await.expect("seed credentials");
+    seed::seed_accounts_from_notes(&pool, &kek, std::path::Path::new(SEED_NOTES_FIXTURE))
+        .await
+        .expect("seed credentials");
 
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
     let auth_config = AuthSection {
@@ -96,6 +108,7 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>, Arc<FakePnStateReader
         default_recv_window_ms: 5_000,
         max_recv_window_ms: 60_000,
         seed_accounts: false,
+        seed_accounts_path: None,
     };
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
@@ -129,7 +142,9 @@ pub async fn setup_with_pn_reader(
     database::run_migrations(&pool).await.expect("run migrations");
 
     let kek = test_kek();
-    seed::seed_accounts(&pool, &kek).await.expect("seed credentials");
+    seed::seed_accounts_from_notes(&pool, &kek, std::path::Path::new(SEED_NOTES_FIXTURE))
+        .await
+        .expect("seed credentials");
 
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
     let auth_config = AuthSection {
@@ -137,6 +152,7 @@ pub async fn setup_with_pn_reader(
         default_recv_window_ms: 5_000,
         max_recv_window_ms: 60_000,
         seed_accounts: false,
+        seed_accounts_path: None,
     };
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
