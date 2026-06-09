@@ -12,6 +12,10 @@ RUN cargo build --release -p dodex-indexer
 FROM debian:bookworm-slim
 WORKDIR /app
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/target/release/dodex-indexer /usr/local/bin/dodex-indexer
 COPY config ./config
 
