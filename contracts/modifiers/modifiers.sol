@@ -22,6 +22,8 @@ abstract contract Modifiers is Errors {
     uint128 constant ROOTPN_NULLIFIER_DEPLOYED = 102;
     /// @notice Reserved RootPN external event id for oracle deployment notifications.
     uint128 constant ROOTPN_ORACLE_DEPLOYED = 103;
+    /// @notice External event id for `RootPN.TokensWithdrawn`.
+    uint128 constant ROOTPN_TOKENS_WITHDRAWN = 154;
 
     // Oracle events
     /// @notice External event id for `Oracle.OracleEventListDeployed`.
@@ -197,12 +199,12 @@ abstract contract Modifiers is Errors {
     /// @notice DApp identifier for the PMPRoot ("rootPN") system — RootPN, PrivateNote,
     ///         PMP, and OrderBook all share this dapp_id. Used as `dest_dapp_id` on
     ///         cross-contract message sends targeted at any of these contracts.
-    uint256 constant ROOT_PN_DAPP_ID = 0x0000000000000000000000000000000000000000000000000000000000000004;
+    uint256 constant ROOT_PN_DAPP_ID = 0x0000000000000000000000000000000000000000000000000000000000000000;
 
     /// @notice DApp identifier for the Oracle system — RootOracle, Oracle, and
     ///         OracleEventList all share this dapp_id. Used as `dest_dapp_id` on
     ///         cross-contract message sends targeted at any of these contracts.
-    uint256 constant ORACLE_DAPP_ID = 0x0000000000000000000000000000000000000000000000000000000000000005;
+    uint256 constant ORACLE_DAPP_ID = 0x0000000000000000000000000000000000000000000000000000000000000000;
 
     /// @notice Voting threshold for OracleUnion decisions
     uint32 constant THRESHOLD = 6600; // 66% = 6600

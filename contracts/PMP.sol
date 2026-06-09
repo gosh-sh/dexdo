@@ -43,6 +43,15 @@ contract PMP is Modifiers {
     /// @dev Structure: outcome => betType => poolAmount
     mapping(uint32 => mapping(uint8 => uint128)) _typedOutcomePools;
 
+    /// @notice Abandoned (forfeited) mass per outcome/bet type. Incremented by
+    ///         `forfeitStake` in EVERY lifecycle state; the live pools and the
+    ///         close counters are never decremented by a forfeit. Instead each
+    ///         close condition compares the remaining (unclaimed / un-refunded)
+    ///         mass against this total — forfeited mass can never be claimed
+    ///         (the PN deletes its record), so the remainder asymptotes to it.
+    /// @dev Structure: outcome => betType => forfeitedAmount
+    mapping(uint32 => mapping(uint8 => uint128)) _forfeited;
+
     /// @notice Stake counts separated by bet type
     /// @dev Structure: outcome => betType => stakeCount
     mapping(uint32 => mapping(uint8 => uint128)) _typedOutcomeCounts;
@@ -719,6 +728,14 @@ contract PMP is Modifiers {
             value: 0.1 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
         }(_eventId, _oracleListHash, _tokenType, totalStake, totalCouponRefund);
+
+        // Self-destruct once every non-forfeited stake has been refunded — the
+        // live pools have decayed to exactly the forfeited map, and the only
+        // real balance left (the forfeited principal) is swept to the deployer.
+        // (cancelStake is already gated on `!_frozen || _orderBookDone`.)
+        if (_poolsEqualForfeited()) {
+            _finalizeResidualClose();
+        }
     }
 
 
@@ -1246,16 +1263,10 @@ contract PMP is Modifiers {
             address addrExternRefund = address.makeAddrExtern(PMP_CLAIM_PROCESSED, bitCntAddress);
             emit ClaimProcessed{dest: addrExternRefund}(wallet, debtSum, debtSum > 0);
 
-            if (_debtRefundRemaining == 0) {
-                if (_totalUnclaimedBalance > 0) {
-                    uint128 residual = _totalUnclaimedBalance;
-                    _totalUnclaimedBalance = 0;
-                    PrivateNote(_deployer).acceptFee{
-                        value: 0.1 vmshell,
-                        flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-                    }(residual, _tokenType, _eventId, _oracleListHash);
-                }
-                selfdestruct(_deployer);
+            // Close once the only un-refunded debt left is the forfeited debt
+            // (forfeiters deleted their PN record and can never claim it).
+            if (_debtRefundRemaining <= _forfeitedDebtTotal()) {
+                _finalizeResidualClose();
             }
             return;
         }
@@ -1379,43 +1390,117 @@ contract PMP is Modifiers {
                 _totalWinPool = 0;
             }
         }
-        if (_totalWinPool == 0) {
-            uint128 residual = _totalRewardsClean + _totalRewardsDebt + _totalRewardsCoupon;
-            _totalRewardsClean = 0;
-            _totalRewardsDebt = 0;
-            _totalRewardsCoupon = 0;
-            // Clamp residual sweep to whatever's left in the unclaimed
-            // balance — math-drift safety net (normally `residual` matches
-            // `_totalUnclaimedBalance` at this point).
-            if (residual > _totalUnclaimedBalance) {
-                residual = _totalUnclaimedBalance;
-            }
-            if (residual > 0) {
-                _totalUnclaimedBalance -= residual;
-                PrivateNote(_deployer).acceptFee{
-                    value: 0.1 vmshell,
-                    flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-                }(residual, _tokenType, _eventId, _oracleListHash);
-            }
-            // OrderBook was shut down earlier via `triggerOrderBookShutdown` (gate
-            // for `claim` entry). Here we just finalize the PMP itself.
-            selfdestruct(_deployer);
+        // Close once the only unclaimed winning mass left is the forfeited mass
+        // (forfeiters deleted their PN record and can never claim it). `<=` (not
+        // `==`) so the `_totalWinPool = 0` clamp above can't make us skip it.
+        // OrderBook is already down (gate for `claim` entry).
+        if (_totalWinPool <= _forfeitedWinMass()) {
+            _finalizeWinClose();
         }
     }
 
-    /// @notice Forfeit path: a PrivateNote calls this from `deleteStake`
-    ///         to drop its (potentially winning) stake without claiming
-    ///         a payout. PMP subtracts the PN's win-outcome mass from
-    ///         `_totalWinPool` so that, once every other winner has
-    ///         claimed, the contract can reach `_totalWinPool == 0` and
-    ///         self-destruct — otherwise a PN that quietly abandoned
-    ///         its stake would leave PMP permanently un-closable.
+    /// @notice Forfeited winning-outcome mass (all bet types) for the resolved
+    ///         outcome. The win close fires when `_totalWinPool` has decayed to
+    ///         this (only forfeited winners left unclaimed).
+    function _forfeitedWinMass() private view returns (uint128) {
+        uint32 W = _resolvedOutcome.get();
+        return _forfeited[W][BET_TYPE_CLEAN]
+             + _forfeited[W][BET_TYPE_DEBT]
+             + _forfeited[W][BET_TYPE_COUPON];
+    }
+
+    /// @notice Total forfeited debt across all outcomes (debt-refund close
+    ///         counter — there is no single winning outcome in that mode).
+    function _forfeitedDebtTotal() private view returns (uint128) {
+        uint128 s = 0;
+        for (uint32 i = 0; i < _numOutcomes; i++) {
+            s += _forfeited[i][BET_TYPE_DEBT];
+        }
+        return s;
+    }
+
+    /// @notice True once every non-forfeited stake has been refunded on a
+    ///         cancelled event — i.e. the live pools have decayed to exactly
+    ///         the forfeited map (cancelStake decrements `_typedOutcomePools`).
+    function _poolsEqualForfeited() private view returns (bool) {
+        for (uint32 i = 0; i < _numOutcomes; i++) {
+            if (_typedOutcomePools[i][BET_TYPE_CLEAN]  > _forfeited[i][BET_TYPE_CLEAN])  return false;
+            if (_typedOutcomePools[i][BET_TYPE_DEBT]   > _forfeited[i][BET_TYPE_DEBT])   return false;
+            if (_typedOutcomePools[i][BET_TYPE_COUPON] > _forfeited[i][BET_TYPE_COUPON]) return false;
+        }
+        return true;
+    }
+
+    /// @notice Sweeps the win-path residual (leftover rewards, incl. the
+    ///         forfeited winners' shares) to the deployer and self-destructs.
+    function _finalizeWinClose() private {
+        uint128 residual = _totalRewardsClean + _totalRewardsDebt + _totalRewardsCoupon;
+        _totalRewardsClean  = 0;
+        _totalRewardsDebt   = 0;
+        _totalRewardsCoupon = 0;
+        // Clamp to whatever's left in the unclaimed balance (math-drift net).
+        if (residual > _totalUnclaimedBalance) {
+            residual = _totalUnclaimedBalance;
+        }
+        if (residual > 0) {
+            _totalUnclaimedBalance -= residual;
+            PrivateNote(_deployer).acceptFee{
+                value: 0.1 vmshell,
+                flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+            }(residual, _tokenType, _eventId, _oracleListHash);
+        }
+        selfdestruct(_deployer);
+    }
+
+    /// @notice Sweeps the remaining real balance (the forfeited principal) to
+    ///         the deployer and self-destructs. Used by the debt-refund and
+    ///         cancelled close paths (both leave `_totalUnclaimedBalance` ==
+    ///         forfeited at close).
+    function _finalizeResidualClose() private {
+        if (_totalUnclaimedBalance > 0) {
+            uint128 residual = _totalUnclaimedBalance;
+            _totalUnclaimedBalance = 0;
+            PrivateNote(_deployer).acceptFee{
+                value: 0.1 vmshell,
+                flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+            }(residual, _tokenType, _eventId, _oracleListHash);
+        }
+        selfdestruct(_deployer);
+    }
+
+    /// @notice Closes the PMP if the only unclaimed/un-refunded mass left is the
+    ///         forfeited mass, in whichever lifecycle phase applies. Called
+    ///         after a forfeit and from `onOrderBookShutdownComplete` (deferred
+    ///         close when the counter hit the threshold mid OrderBook drain).
+    function _tryClose() private {
+        if (_resolvedOutcome.hasValue()) {
+            // Don't self-destruct while the OrderBook is still draining.
+            if (!_orderBookDone) return;
+            if (_debtRefundMode) {
+                if (_debtRefundRemaining <= _forfeitedDebtTotal()) {
+                    _finalizeResidualClose();
+                }
+            } else if (_totalWinPool <= _forfeitedWinMass()) {
+                _finalizeWinClose();
+            }
+        } else if (_isCancelled) {
+            if (_frozen && !_orderBookDone) return;
+            if (_poolsEqualForfeited()) {
+                _finalizeResidualClose();
+            }
+        }
+        // Pre-resolve, not cancelled (active market): nothing to close.
+    }
+
+    /// @notice Forfeit path: a PrivateNote calls this from `deleteStake` to drop
+    ///         its stake without claiming a payout. In EVERY lifecycle state the
+    ///         abandoned mass is recorded in `_forfeited` (pools / close counters
+    ///         are never mutated); the close conditions in `claim` / `cancelStake`
+    ///         / `_tryClose` then fire once the remaining mass equals the
+    ///         forfeited total. Forfeited principal/rewards are swept to the
+    ///         deployer at close.
     ///
-    ///         Pre-resolve / debt-refund-mode events are ack'd without
-    ///         touching pool state (no `_totalWinPool` yet / different
-    ///         accounting).
-    ///
-    /// @param stakeAmount   Clean stakes per outcome (must match `_numOutcomes`).
+    /// @param stakeAmount   Clean stakes per outcome.
     /// @param debtAmount    Debt stakes per outcome.
     /// @param couponsAmount Coupon stakes per outcome.
     /// @param depositIdentifierHash Hash that derives the caller's PN address.
@@ -1430,55 +1515,24 @@ contract PMP is Modifiers {
         tvm.accept();
         ensureBalance();
 
-        // Decrement the win-pool by the caller's win-outcome contribution
-        // (only meaningful once `claim` is open: `_approved && _orderBookDone
-        // && _resolvedOutcome.hasValue() && !_debtRefundMode`). For all
-        // other states the ack is a no-op state-wise.
-        bool poolHit = _approved
-            && _orderBookDone
-            && _resolvedOutcome.hasValue()
-            && !_debtRefundMode;
-
-        if (poolHit) {
-            uint32 W = _resolvedOutcome.get();
-            uint128 stakeW   = (uint32(stakeAmount.length)   > W) ? stakeAmount[W]   : 0;
-            uint128 debtW    = (uint32(debtAmount.length)    > W) ? debtAmount[W]    : 0;
-            uint128 couponsW = (uint32(couponsAmount.length) > W) ? couponsAmount[W] : 0;
-            uint128 forfeitedMass = stakeW + debtW + couponsW;
-
-            if (_totalWinPool >= forfeitedMass) {
-                _totalWinPool -= forfeitedMass;
-            } else {
-                _totalWinPool = 0;
-            }
+        uint32 nMax = uint32(stakeAmount.length);
+        if (uint32(debtAmount.length) > nMax) nMax = uint32(debtAmount.length);
+        if (uint32(couponsAmount.length) > nMax) nMax = uint32(couponsAmount.length);
+        for (uint32 i = 0; i < nMax; i++) {
+            if (i < uint32(stakeAmount.length))   _forfeited[i][BET_TYPE_CLEAN]  += stakeAmount[i];
+            if (i < uint32(debtAmount.length))    _forfeited[i][BET_TYPE_DEBT]   += debtAmount[i];
+            if (i < uint32(couponsAmount.length)) _forfeited[i][BET_TYPE_COUPON] += couponsAmount[i];
         }
 
-        // Ack first so PN can clear `_busy` and delete its local stake
-        // before any selfdestruct flushes outbound messages from this tx.
+        // Ack first so PN clears `_busy` / deletes its local stake before any
+        // selfdestruct flushes this tx's outbound messages.
         PrivateNote(wallet).onForfeitAccepted{
             value: 0.05 vmshell,
             flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
         }();
 
-        // If forfeit drained the last winning mass, sweep residual to
-        // deployer and self-destruct (mirrors the `claim` close path).
-        if (poolHit && _totalWinPool == 0) {
-            uint128 residual = _totalRewardsClean + _totalRewardsDebt + _totalRewardsCoupon;
-            _totalRewardsClean  = 0;
-            _totalRewardsDebt   = 0;
-            _totalRewardsCoupon = 0;
-            if (residual > _totalUnclaimedBalance) {
-                residual = _totalUnclaimedBalance;
-            }
-            if (residual > 0) {
-                _totalUnclaimedBalance -= residual;
-                PrivateNote(_deployer).acceptFee{
-                    value: 0.1 vmshell,
-                    flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-                }(residual, _tokenType, _eventId, _oracleListHash);
-            }
-            selfdestruct(_deployer);
-        }
+        // This forfeit may be the action that makes forfeited == remaining.
+        _tryClose();
     }
 
     /// @notice Returns the oracle pubkey from the current message sender.
@@ -1746,6 +1800,10 @@ contract PMP is Modifiers {
         tvm.accept();
         ensureBalance();
         _orderBookDone = true;
+
+        // A forfeit may have driven the closure counter to the forfeited
+        // threshold while the book was still draining (close was deferred).
+        _tryClose();
     }
 
     /// @notice Returns contract name

@@ -1352,7 +1352,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///      (DELETE_IF_EMPTY) abuse paths that drain or destroy RootPN.
     /// @param destWalletAddr Destination wallet address
     /// @param tokenType Token type to withdraw.
-    function withdrawTokens(address destWalletAddr, uint32 tokenType) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+    /// @param dapp_id DApp id forwarded to RootPN.withdrawTokens (accepted there but not used).
+    function withdrawTokens(address destWalletAddr, uint32 tokenType, uint256 dapp_id) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         require(_stakes.empty(), ERR_NOTE_BUSY);
@@ -1368,7 +1369,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         require(_pendingPlaceBuyLock == 0, ERR_NON_ZERO_BALANCE);
         require(_pendingBatchBuyLock == 0, ERR_NON_ZERO_BALANCE);
         require(_openOrderCount == 0, ERR_OPEN_ORDERS_EXIST);
-        RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_balance[tokenType], tokenType, destWalletAddr, _depositIdentifierHash);
+        RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_balance[tokenType], tokenType, destWalletAddr, _depositIdentifierHash, dapp_id);
         _balance[tokenType] = 0;
         _hasWithdrawn = true;
 	}
