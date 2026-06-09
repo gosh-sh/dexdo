@@ -111,11 +111,11 @@ contract RootPN is Modifiers {
     event NullifierDeployed(address nullifierAddress, uint64 value);
 
     /// @notice Emitted when tokens are withdrawn from a PrivateNote to a wallet.
-    /// @param amount — Amount of tokens withdrawn
+    /// @param amounts — Per-token-type amounts withdrawn
     /// @param noteAddress — PrivateNote the tokens were withdrawn from
     /// @param to — Destination wallet address
     /// @param dapp_id — DApp id passed through from the withdraw call
-    event TokensWithdrawn(uint128 amount, address noteAddress, address to, uint256 dapp_id);
+    event TokensWithdrawn(mapping(uint32 => uint128) amounts, address noteAddress, address to, uint256 dapp_id);
 
     /// @notice Root constructor
     constructor() {
@@ -440,13 +440,12 @@ contract RootPN is Modifiers {
     ///      128 (CARRY_ALL_BALANCE) or 32 (DELETE_IF_EMPTY) — draining or
     ///      destroying this RootPN. Since RootPN custodies every PN's ECC,
     ///      that single tx would steal or brick the entire DEX.
-    /// @param withdrawedValue Amount to withdraw
-    /// @param tokenType Type of token to withdraw
+    /// @param amounts Per-token-type amounts to withdraw (the note's full balance)
     /// @param walletAddr Destination wallet address
     /// @param initialDataHash Initial data hash for verification
+    /// @param dapp_id DApp id — drives no logic, only surfaced in the event
     function withdrawTokens(
-        uint128 withdrawedValue,
-        uint32 tokenType,
+        mapping(uint32 => uint128) amounts,
         address walletAddr,
         uint256 initialDataHash,
         uint256 dapp_id
@@ -454,31 +453,35 @@ contract RootPN is Modifiers {
         // `dapp_id` drives no logic here — only surfaced in the TokensWithdrawn
         // event below; kept for forward compatibility / off-chain context.
         ensureBalance();
-        // Verify sufficient balance — both real currency reserves and the
-        // bookkeeping pool must cover the withdrawal. Either gap → revert
-        // the PN-side debit via `revertWithdraw` instead of throwing here
-        // (a plain require would leave PN's `_balance` permanently low).
-        if (address(this).currencies[tokenType] < withdrawedValue
-            || _deployedValues[tokenType] < withdrawedValue) {
-            PrivateNote(msg.sender).revertWithdraw{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
-                tokenType,
-                withdrawedValue
-            );
-            return;
+        // Verify every requested token type up front — both real currency
+        // reserves and the bookkeeping pool must cover it. Any gap → revert the
+        // whole withdraw on the PN side (atomic: nothing is transferred). A
+        // plain require would leave the PN's `_balance` permanently low.
+        for ((uint32 tt, uint128 amt) : amounts) {
+            if (amt > 0 && (address(this).currencies[tt] < amt || _deployedValues[tt] < amt)) {
+                PrivateNote(msg.sender).revertWithdraw{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
+                    amounts
+                );
+                return;
+            }
         }
 
-        // Prepare currency transfer data
+        // Prepare the combined currency transfer and debit the bookkeeping pools.
         mapping(uint32 => varuint32) cc;
-        cc[tokenType] = varuint32(withdrawedValue);
-        _deployedValues[tokenType] -= withdrawedValue;
+        for ((uint32 tt, uint128 amt) : amounts) {
+            if (amt > 0) {
+                cc[tt] = varuint32(amt);
+                _deployedValues[tt] -= amt;
+            }
+        }
 
-        // Transfer tokens to wallet — flag is intentionally hard-coded to 1.
-        walletAddr.transfer(varuint16(withdrawedValue), false, 1, TvmCell(), cc);
+        // Transfer every currency at once — flag is intentionally hard-coded to 1.
+        walletAddr.transfer({value: 0.1 vmshell, bounce: false, flag: 1, currencies: cc});
 
-        // External event: how much was withdrawn, from which PrivateNote
+        // External event: per-token-type amounts, from which PrivateNote
         // (msg.sender) and to which destination wallet.
         address addrExtern = address.makeAddrExtern(ROOTPN_TOKENS_WITHDRAWN, bitCntAddress);
-        emit TokensWithdrawn{dest: addrExtern}(withdrawedValue, msg.sender, walletAddr, dapp_id);
+        emit TokensWithdrawn{dest: addrExtern}(amounts, msg.sender, walletAddr, dapp_id);
     }
 
     /// @notice Returns all global variables

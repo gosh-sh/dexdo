@@ -21,6 +21,7 @@ This codebase uses three modes:
 | `VoucherGenerated` | `skUCommit`, `voucherNominal`, `tokenType` | In `generateVoucher()` after the nominal check and a possible `SHELL -> SHELL_FEE` remap. | `address.makeAddrExtern(VAULT_voucher_GENERATED, bitCntAddress)` = `135` | [RootPN.sol:427](../../contracts/RootPN.sol:427) |
 | `PrivateNoteDeployed` | `depositIdentifierHash`, `noteAddress`, `initialBalance` | In the `privateNoteDeployed()` callback after `_deployedValues[tokenType]` is incremented. | `address.makeAddrExtern(ROOTPN_PRIVATE_NOTE_DEPLOYED, bitCntAddress)` = `101` | [RootPN.sol:339](../../contracts/RootPN.sol:339) |
 | `NullifierDeployed` | `nullifierAddress`, `value` | In `sendEccShellToPrivateNote()` after the zk check succeeds and the `Nullifier` is deployed. | `address.makeAddrExtern(ROOTPN_NULLIFIER_DEPLOYED, bitCntAddress)` = `102` | [RootPN.sol:247](../../contracts/RootPN.sol:247) |
+| `TokensWithdrawn` | `amount`, `noteAddress`, `to`, `dapp_id` | In `withdrawTokens()` after the collateral is transferred to the destination wallet. `noteAddress` is the withdrawing PrivateNote (`msg.sender`); `to` is the destination wallet. | `address.makeAddrExtern(ROOTPN_TOKENS_WITHDRAWN, bitCntAddress)` = `154` | [RootPN.sol:481](../../contracts/RootPN.sol:481) |
 
 ## RootOracle
 

@@ -102,8 +102,7 @@
 		{
 			"name": "withdrawTokens",
 			"inputs": [
-				{"name":"withdrawedValue","type":"uint128"},
-				{"name":"tokenType","type":"uint32"},
+				{"name":"amounts","type":"map(uint32,uint128)"},
 				{"name":"walletAddr","type":"address"},
 				{"name":"initialDataHash","type":"uint256"},
 				{"name":"dapp_id","type":"uint256"}
@@ -165,7 +164,7 @@
 		{
 			"name": "TokensWithdrawn",
 			"inputs": [
-				{"name":"amount","type":"uint128"},
+				{"name":"amounts","type":"map(uint32,uint128)"},
 				{"name":"noteAddress","type":"address"},
 				{"name":"to","type":"address"},
 				{"name":"dapp_id","type":"uint256"}
