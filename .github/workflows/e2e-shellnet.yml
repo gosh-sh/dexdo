@@ -1,11 +1,14 @@
 name: e2e (shellnet)
 
 # Real end-to-end tests against the live shellnet: deploy a market, stake,
-# split, place/cancel orders, buyFullSet. Kept OUT of pr-tests.yml — they
-# are slow (~8-10 min), hit the network, and spend test NACKL, so they run
-# nightly and on demand, not on every PR. The PR `tests` job skips them
-# (nextest does not run `#[ignore]` tests by default).
+# split, place/cancel orders, buyFullSet. Slow (~8-10 min), hit the network,
+# and spend test NACKL. Separate from pr-tests.yml (its `tests` job skips
+# these — nextest does not run `#[ignore]` tests by default).
 on:
+  # Called by pr-tests.yml after its unit/integration jobs pass, so e2e gates
+  # a PR only once everything else is green. Also runs standalone nightly and
+  # on demand.
+  workflow_call:
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * *" # nightly ~03:00 UTC

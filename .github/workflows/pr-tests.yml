@@ -143,3 +143,12 @@ jobs:
             echo "and commit the result."
             exit 1
           fi
+
+  # Gated e2e: only after fmt/clippy, tests and openapi-drift are green.
+  # Delegates to the reusable e2e-shellnet workflow (real shellnet,
+  # single-threaded). Needs the E2E_NOTES_URL secret.
+  e2e:
+    name: e2e (shellnet)
+    needs: [fmt-clippy, tests, openapi-drift]
+    uses: ./.github/workflows/e2e-shellnet.yml
+    secrets: inherit
