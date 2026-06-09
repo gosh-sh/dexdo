@@ -110,6 +110,13 @@ contract RootPN is Modifiers {
     /// @param value — Value linked to the nullifier
     event NullifierDeployed(address nullifierAddress, uint64 value);
 
+    /// @notice Emitted when tokens are withdrawn from a PrivateNote to a wallet.
+    /// @param amount — Amount of tokens withdrawn
+    /// @param noteAddress — PrivateNote the tokens were withdrawn from
+    /// @param to — Destination wallet address
+    /// @param dapp_id — DApp id passed through from the withdraw call
+    event TokensWithdrawn(uint128 amount, address noteAddress, address to, uint256 dapp_id);
+
     /// @notice Root constructor
     constructor() {
         tvm.accept();
@@ -441,8 +448,11 @@ contract RootPN is Modifiers {
         uint128 withdrawedValue,
         uint32 tokenType,
         address walletAddr,
-        uint256 initialDataHash
+        uint256 initialDataHash,
+        uint256 dapp_id
     ) public senderIs(DexLib.computePrivateNoteAddress(_privateNoteCode, initialDataHash)) accept {
+        // `dapp_id` drives no logic here — only surfaced in the TokensWithdrawn
+        // event below; kept for forward compatibility / off-chain context.
         ensureBalance();
         // Verify sufficient balance — both real currency reserves and the
         // bookkeeping pool must cover the withdrawal. Either gap → revert
@@ -464,6 +474,11 @@ contract RootPN is Modifiers {
 
         // Transfer tokens to wallet — flag is intentionally hard-coded to 1.
         walletAddr.transfer(varuint16(withdrawedValue), false, 1, TvmCell(), cc);
+
+        // External event: how much was withdrawn, from which PrivateNote
+        // (msg.sender) and to which destination wallet.
+        address addrExtern = address.makeAddrExtern(ROOTPN_TOKENS_WITHDRAWN, bitCntAddress);
+        emit TokensWithdrawn{dest: addrExtern}(withdrawedValue, msg.sender, walletAddr, dapp_id);
     }
 
     /// @notice Returns all global variables

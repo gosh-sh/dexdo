@@ -338,6 +338,7 @@
 		{"init":false,"name":"_privateNoteCode","type":"cell"},
 		{"init":false,"name":"_totalPool","type":"uint128"},
 		{"init":false,"name":"_typedOutcomePools","type":"map(uint32,map(uint8,uint128))"},
+		{"init":false,"name":"_forfeited","type":"map(uint32,map(uint8,uint128))"},
 		{"init":false,"name":"_typedOutcomeCounts","type":"map(uint32,map(uint8,uint128))"},
 		{"init":false,"name":"_totalCouponPool","type":"uint128"},
 		{"init":false,"name":"_totalCleanPool","type":"uint128"},
