@@ -220,7 +220,8 @@ fn usage() -> String {
          --output      JSON output path (default ./pn_pool.json)\n  \
          --endpoint    network host (default shellnet.ackinacki.org)\n  \
          --nominal     PN deposit nominal (default N10000)\n  \
-         --token-type  deposit currency (default nackl)"
+         --token-type  deposit currency (default nackl)\n\n  \
+         Also writes <output>.seed_notes.json (api seeder / e2e format) beside the pool."
         .to_string()
 }
 
@@ -253,6 +254,36 @@ struct PoolNote {
     native_funded: bool,
 }
 
+/// One note in the seed_notes format the api seeder (`seed_accounts_from_notes`)
+/// and the e2e loader consume. The pool stores `deposit_identifier_hash` as
+/// decimal; here it is hex (`pn_dih_hex`).
+#[derive(Debug, Serialize)]
+struct SeedNote {
+    pn_address: String,
+    pn_pubkey_hex: String,
+    pn_seckey_hex: String,
+    pn_dih_hex: String,
+    #[serde(rename = "tokenType")]
+    token_type: u32,
+    value: u64,
+}
+
+fn pool_to_seed_notes(pool: &Pool) -> Vec<SeedNote> {
+    pool.notes
+        .iter()
+        .map(|n| SeedNote {
+            pn_address: n.address.clone(),
+            pn_pubkey_hex: n.owner_public_key_hex.clone(),
+            pn_seckey_hex: n.owner_secret_key_hex.clone(),
+            pn_dih_hex: num_bigint::BigUint::parse_bytes(n.deposit_identifier_hash.as_bytes(), 10)
+                .expect("deposit_identifier_hash is decimal uint256")
+                .to_str_radix(16),
+            token_type: pool.token_type,
+            value: pool.raw_value_per_pn,
+        })
+        .collect()
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -273,6 +304,20 @@ fn create_tvm_context(endpoint: &str) -> Arc<ClientContext> {
 fn save_pool(pool: &Pool, path: &Path) {
     let json = serde_json::to_string_pretty(pool).expect("serialize pool");
     std::fs::write(path, json).expect("write pool json");
+
+    // Also emit the seed_notes format the api seeder / e2e loader read, as a
+    // sidecar next to the pool. The pool file stays the resumable source (and
+    // the shape `mint_ob_pool --deployer-pn-pool` expects).
+    let seed_path = seed_notes_sidecar(path);
+    let seed_json =
+        serde_json::to_string_pretty(&pool_to_seed_notes(pool)).expect("serialize seed_notes");
+    std::fs::write(&seed_path, seed_json).expect("write seed_notes json");
+}
+
+/// `foo.json` -> `foo.seed_notes.json` (sidecar path for the API format).
+fn seed_notes_sidecar(path: &Path) -> PathBuf {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("pool");
+    path.parent().unwrap_or_else(|| Path::new(".")).join(format!("{stem}.seed_notes.json"))
 }
 
 /// Load an existing pool from `path` if it exists, validating that its
