@@ -1681,6 +1681,96 @@ impl<T: ?Sized + PnStateReader> PnStateReader for Arc<T> {
     }
 }
 
+/// The custody material a client submits to register a trading account:
+/// the same PrivateNote fields the seeder reads from its notes file, but
+/// carried over the wire. The backend takes custody of `pn_seckey_hex`
+/// (sealed at rest under the KEK) so it can sign trades on the note's
+/// behalf — the same custodial model as seeding.
+#[derive(Debug, Clone)]
+pub struct NewAccountNote {
+    pub pn_address: String,
+    pub pn_pubkey_hex: String,
+    pub pn_seckey_hex: String,
+    pub pn_dih_hex: String,
+}
+
+/// The credential minted for a freshly registered account.
+/// `api_secret_hex` is the one point in its lifecycle where the plaintext
+/// secret exists outside the sealed DB column — the caller must surface it
+/// to the client here; it is never retrievable again.
+#[derive(Debug, Clone)]
+pub struct RegisteredAccount {
+    pub account_id: Uuid,
+    pub pn_address: String,
+    pub api_key: String,
+    pub api_secret_hex: String,
+    pub permissions: Vec<Permission>,
+}
+
+/// Persists a new trading account plus its first API credential. The
+/// implementation generates a random secret, seals it under the KEK, and
+/// inserts the account + key in one transaction — secret generation and
+/// sealing live behind this port because the KEK does. Insert-only: a note
+/// whose `pn_address` or `pn_dih` already exists yields
+/// `DomainError::NoteAlreadyRegistered` rather than a second credential or
+/// a re-issued secret.
+#[async_trait]
+pub trait AccountRegistry: Send + Sync {
+    async fn register(&self, note: NewAccountNote) -> Result<RegisteredAccount, DomainError>;
+}
+
+#[async_trait]
+impl<T: ?Sized + AccountRegistry> AccountRegistry for Arc<T> {
+    async fn register(&self, note: NewAccountNote) -> Result<RegisteredAccount, DomainError> {
+        (**self).register(note).await
+    }
+}
+
+/// Orchestrates `POST /api/v1/accounts`: confirms the PrivateNote is
+/// actually deployed on-chain — so a registered account can trade
+/// immediately — then delegates the credential mint + insert to the
+/// `AccountRegistry`. The chain check runs first so a note that is not
+/// deployed fails with `AccountNotDeployed` (-2013) before any row is
+/// written.
+pub struct RegisterAccountUseCase<P, G> {
+    pn: P,
+    registry: G,
+}
+
+impl<P, G> RegisterAccountUseCase<P, G> {
+    pub fn new(pn: P, registry: G) -> Self {
+        Self { pn, registry }
+    }
+}
+
+impl<P, G> RegisterAccountUseCase<P, G>
+where
+    P: PnStateReader,
+    G: AccountRegistry,
+{
+    pub async fn execute(&self, note: NewAccountNote) -> Result<RegisteredAccount, DomainError> {
+        // Existence probe: `get_details` fetches the PN BOC by address and
+        // returns a typed `AccountNotDeployed` when the contract is absent.
+        // The details themselves are discarded — only "is it deployed"
+        // matters. Any other reader failure is a gateway / ABI problem,
+        // surfaced as `MarketInconsistent` (503) exactly as
+        // `GetAccountUseCase` does, so a transient gateway flap during
+        // registration is retryable rather than a hard 500.
+        if let Err(e) = self.pn.get_details(&note.pn_address).await {
+            if let Some(domain) = e.downcast_ref::<DomainError>() {
+                return Err(*domain);
+            }
+            warn!(
+                error = %format_args!("{e:#}"),
+                pn = %note.pn_address,
+                "register: PN existence probe failed",
+            );
+            return Err(DomainError::MarketInconsistent);
+        }
+        self.registry.register(note).await
+    }
+}
+
 /// Orchestrates `POST /api/v1/order`: resolves market, derives status,
 /// validates input per spec §Input validation, encodes flags, builds the
 /// chain payload, dispatches through `ChainOrderSender`, and returns

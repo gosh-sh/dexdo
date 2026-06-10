@@ -23,9 +23,10 @@
 // Marked `#[ignore]` because it needs:
 //   - TEST_DATABASE_URL (test Postgres up — see README.md#test-postgres)
 //   - reachable shellnet endpoint
-//   - `tests/fixtures/seed_notes.json` extended to slot 4 (the fifth PN)
-//     via `mint_pn_pool` — `TestPnPool::slot(4)` panics with a clear
-//     "top up via mint_pn_pool" message until the pool is extended.
+//   - `tests/fixtures/seed_notes.json` with at least one funded PN, shared
+//     across the whole single-threaded e2e suite (see
+//     tests/fixtures/README.md). That note must hold enough NACKL to cover
+//     every test's market deploy + this split.
 //
 // Run explicitly:
 //
@@ -69,11 +70,6 @@ use salvo::Service;
 use serde::Deserialize;
 use serde_json::json;
 
-/// Slot 4 per `tests/fixtures/README.md` — buyFullSet has its own PN
-/// so a parallel `cargo nextest run` does not contend with the four
-/// other e2e tests on `_busy`.
-const BUY_FULL_SET_SLOT: usize = 4;
-
 /// 10 NACKL of collateral at decimals=9. Small enough to leave the PN
 /// solvent after the ~300 NACKL deploy already spent (see
 /// `tests/fixtures/README.md#orderbook-fixture`); large enough to be
@@ -82,7 +78,7 @@ const COLLATERAL_HUMAN: &str = "10";
 const COLLATERAL_RAW: u128 = 10_000_000_000;
 
 #[tokio::test]
-#[ignore = "requires TEST_DATABASE_URL + shellnet + tests/fixtures/seed_notes.json slot 4"]
+#[ignore = "requires TEST_DATABASE_URL + shellnet + tests/fixtures/seed_notes.json"]
 async fn buy_full_set_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -94,8 +90,10 @@ async fn buy_full_set_against_shellnet() {
         return;
     };
 
+    // Shared single note — the suite is single-threaded (see
+    // tests/fixtures/README.md), so the PN `_busy` lock never contends.
     let pn_pool = TestPnPool::load();
-    let trader = pn_pool.slot(BUY_FULL_SET_SLOT).clone();
+    let trader = pn_pool.first().clone();
 
     // `deploy_ephemeral_market` ends with its own splitFullSet, so by
     // the time this returns the market is in TRADING and the trader-PN

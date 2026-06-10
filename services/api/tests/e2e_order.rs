@@ -78,12 +78,14 @@ async fn buy_limit_gtc_against_shellnet() {
     // Deploy a fresh PMP + OrderBook on shellnet. The deployer-PN is
     // the same PN we then trade against — `splitFullSet` primed its
     // outcome-token balance during deploy.
-    // Slot 0 per the slot-ownership table in
-    // `tests/fixtures/README.md#pn-slot-ownership` — every e2e test
-    // claims a unique PN so a parallel `cargo test -- --ignored` run
-    // never contends on the same PN's chain-side `_busy` lock.
+    // All e2e tests share one note. The suite runs single-threaded
+    // (`--test-threads 1`) regardless — every test routes through the same
+    // shellnet root singletons (`RootOracle` / `RootPn`), which a distinct
+    // PN per slot does not deconflict (see tests/fixtures/README.md). With
+    // no parallelism the PN `_busy` lock never contends, so one funded note
+    // covers the whole suite.
     let pn_pool = TestPnPool::load();
-    let trader = pn_pool.slot(0).clone();
+    let trader = pn_pool.first().clone();
     let market = deploy_ephemeral_market(
         vec![SHELLNET_ENDPOINT.to_string()],
         &trader,

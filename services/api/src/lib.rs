@@ -14,6 +14,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
+use dodex_application::AccountRegistry;
 use dodex_application::AuthContext;
 use dodex_application::Authenticator;
 use dodex_application::BatchOrderInputItem;
@@ -38,11 +39,13 @@ use dodex_application::MarketsFilter;
 use dodex_application::MarketsListing;
 use dodex_application::MarketsRequest;
 use dodex_application::MarketsSort;
+use dodex_application::NewAccountNote;
 use dodex_application::NewOrderInput;
 use dodex_application::OraclesFilter;
 use dodex_application::OraclesRequest;
 use dodex_application::OrdersCursor;
 use dodex_application::OrdersMarketFilter;
+use dodex_application::RegisterAccountUseCase;
 use dodex_domain::DomainError;
 use dodex_domain::Market;
 use dodex_domain::MarketAddress;
@@ -57,6 +60,7 @@ use dodex_domain::Symbol;
 use dodex_domain::Terminal;
 use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
+use dodex_infrastructure::account_registry::PostgresAccountRegistry;
 use dodex_infrastructure::auth::PostgresAuthenticator;
 use dodex_infrastructure::chain_sender::DexChainSender;
 use dodex_infrastructure::config::ApiConfig;
@@ -97,6 +101,8 @@ pub type SharedChainSender = Arc<dyn ChainOrderSender>;
 pub type SharedPnReader = Arc<dyn dodex_application::PnStateReader>;
 #[doc(hidden)]
 pub type SharedRefRepo = Arc<dyn dodex_application::ReferenceRepository>;
+#[doc(hidden)]
+pub type SharedRegistry = Arc<dyn AccountRegistry>;
 
 #[doc(hidden)]
 #[derive(Clone)]
@@ -116,6 +122,11 @@ pub struct AppState {
     /// `maxBatchSize`. `AppState::new` defaults it to the config
     /// default; tests pin a different cap via `with_max_batch_size`.
     pub(crate) max_batch_size: u16,
+    /// Write side of `POST /api/v1/accounts`. A builder-set option
+    /// (defaulting to `None`) so the ~20 test call sites that never
+    /// register an account need not construct one; `run` always wires the
+    /// Postgres registry, and the handler 500s if it is somehow absent.
+    pub(crate) registry: Option<SharedRegistry>,
 }
 
 impl AppState {
@@ -141,12 +152,19 @@ impl AppState {
             ref_repo,
             request_timeout: Duration::ZERO,
             max_batch_size: 10,
+            registry: None,
         }
     }
 
     #[doc(hidden)]
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_account_registry(mut self, registry: SharedRegistry) -> Self {
+        self.registry = Some(registry);
         self
     }
 
@@ -505,6 +523,86 @@ impl MarketBalancesResponse {
     }
 }
 
+// Request body for `POST /api/v1/accounts`: the four PrivateNote fields
+// the seeder reads from its notes file, carried over the wire. Every field
+// is `Option` at runtime only so a missing one surfaces as a typed
+// `MissingParameter` (-1102) via the `non_empty(...).ok_or(...)` chain in
+// the handler — all four are required. `deny_unknown_fields` matches the
+// other write surfaces (`buyFullSet`, `batchOrders`): a typo'd key 400s
+// with -1130 rather than silently deserialising to `None`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegisterAccountRequest {
+    pn_address: Option<String>,
+    pn_pubkey_hex: Option<String>,
+    pn_seckey_hex: Option<String>,
+    pn_dih_hex: Option<String>,
+}
+
+// Manual `ToSchema` impl: `#[derive(ToSchema)]` is incompatible with
+// `#[serde(deny_unknown_fields)]` in salvo-oapi-macros 0.74.3 — same
+// reason as `CancelBatchOrdersRequest`. All four fields are required; the
+// `Option` only exists so a missing field surfaces as a typed
+// `MissingParameter` via the handler's `non_empty(...).ok_or(...)` chain.
+impl ToSchema for RegisterAccountRequest {
+    fn to_schema(_components: &mut Components) -> salvo_oapi::RefOr<salvo_oapi::schema::Schema> {
+        use salvo_oapi::schema::AdditionalProperties;
+        use salvo_oapi::BasicType;
+        use salvo_oapi::Object;
+        Object::new()
+            .property(
+                "pnAddress",
+                Object::new()
+                    .schema_type(BasicType::String)
+                    .description("Address of the deployed PrivateNote, `0:…`."),
+            )
+            .property(
+                "pnPubkeyHex",
+                Object::new()
+                    .schema_type(BasicType::String)
+                    .description("Note owner public key, hex (≤256 bits)."),
+            )
+            .property(
+                "pnSeckeyHex",
+                Object::new().schema_type(BasicType::String).description(
+                    "Note owner secret key, 32-byte hex. Sealed under the KEK at rest.",
+                ),
+            )
+            .property(
+                "pnDihHex",
+                Object::new()
+                    .schema_type(BasicType::String)
+                    .description("deposit_identifier_hash, hex (≤256 bits)."),
+            )
+            .required("pnAddress")
+            .required("pnPubkeyHex")
+            .required("pnSeckeyHex")
+            .required("pnDihHex")
+            .additional_properties(AdditionalProperties::FreeForm(false))
+            .into()
+    }
+}
+
+// Response for `POST /api/v1/accounts`. Carries everything a client needs
+// to start signing: the `apiKey` for the `X-DODEX-APIKEY` header and the
+// `apiSecret` for HMAC signing. `apiSecret` is returned exactly once — it
+// is stored only sealed and cannot be retrieved again.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct RegisterAccountResponse {
+    /// UUID of the created account.
+    account_id: String,
+    /// Echo of the registered PrivateNote address.
+    pn_address: String,
+    /// Value for the `X-DODEX-APIKEY` header.
+    api_key: String,
+    /// HMAC-SHA256 signing secret, hex. Returned once; never retrievable
+    /// again.
+    api_secret: String,
+    /// Granted permissions — `["USER_DATA", "TRADE"]`.
+    permissions: Vec<String>,
+}
+
 #[derive(Serialize, ToSchema)]
 struct ErrorBody {
     /// Negative machine-readable error code. See docs/api-spec.md
@@ -533,6 +631,10 @@ impl ApiError {
             DomainError::UnknownOrder
             | DomainError::InvalidMarketOrSymbol
             | DomainError::AccountNotDeployed => StatusCode::NOT_FOUND,
+            // Registration hit an existing note (pn_address/pn_dih taken).
+            // 409 tells the caller the note is taken, distinct from a 400
+            // (malformed) or a 404 (note not deployed).
+            DomainError::NoteAlreadyRegistered => StatusCode::CONFLICT,
             // Transient indexer state — fail closed, client retries when
             // the indexer catches up.
             DomainError::MarketInconsistent => StatusCode::SERVICE_UNAVAILABLE,
@@ -590,7 +692,8 @@ fn map_domain_or_unexpected(err: anyhow::Error, context: &str) -> ApiError {
             | DomainError::RequestTooLarge
             | DomainError::OrderValidationFailed
             | DomainError::PrecisionExceeded
-            | DomainError::OrderPnBusy => {} // client error, no log
+            | DomainError::OrderPnBusy
+            | DomainError::NoteAlreadyRegistered => {} // client error, no log
             DomainError::MarketInconsistent
             | DomainError::RequestTimeout
             | DomainError::Unexpected => {
@@ -1899,6 +2002,61 @@ async fn buy_full_set(
     Ok(Json(BuyFullSetResponse { market_address, transact_time: now_ms }))
 }
 
+/// Register a trading account from a deployed PrivateNote and mint its
+/// first API credential. Public — a client has no key yet, so the note's
+/// custody keys in the body are the capability. The use case confirms the
+/// note is deployed on-chain (so the account can trade immediately) before
+/// any row is written; the response carries the credential, the one and
+/// only time the secret is returned.
+#[endpoint(
+    tags("account"),
+    summary = "Register a trading account",
+    request_body = RegisterAccountRequest,
+    security(()),
+)]
+async fn register_account(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<RegisterAccountResponse>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    // `run` always wires the registry; a miss means a test built an
+    // AppState without it yet routed here — fail closed.
+    let Some(registry) = state.registry.clone() else {
+        error!("register_account: no account registry configured");
+        return Err(ApiError::from(DomainError::Unexpected));
+    };
+
+    let body: RegisterAccountRequest = parse_strict_body(req, "register_account").await?;
+    let note = NewAccountNote {
+        pn_address: non_empty(body.pn_address)
+            .ok_or(ApiError::from(DomainError::MissingParameter))?,
+        pn_pubkey_hex: non_empty(body.pn_pubkey_hex)
+            .ok_or(ApiError::from(DomainError::MissingParameter))?,
+        pn_seckey_hex: non_empty(body.pn_seckey_hex)
+            .ok_or(ApiError::from(DomainError::MissingParameter))?,
+        pn_dih_hex: non_empty(body.pn_dih_hex)
+            .ok_or(ApiError::from(DomainError::MissingParameter))?,
+    };
+
+    let use_case = RegisterAccountUseCase::new(state.pn_reader, registry);
+    let account = use_case.execute(note).await.map_err(ApiError::from)?;
+
+    Ok(Json(RegisterAccountResponse {
+        account_id: account.account_id.to_string(),
+        pn_address: account.pn_address,
+        api_key: account.api_key,
+        api_secret: account.api_secret_hex,
+        permissions: account.permissions.iter().map(|p| p.as_str().to_string()).collect(),
+    }))
+}
+
 /// Account balances aggregated across all markets the authenticated PN holds.
 #[endpoint(
     tags("account"),
@@ -2042,6 +2200,10 @@ pub fn build_router(state: AppState) -> Router {
         .push(Router::with_path("api/v1/markets").get(get_markets))
         .push(Router::with_path("api/v1/depth").get(get_depth))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
+        // Registration is public — a client has no API key yet, so it
+        // lives outside the auth subrouter. Always available (unlike the
+        // config-gated seeder); the note's custody keys are the capability.
+        .push(Router::with_path("api/v1/accounts").post(register_account))
         .push(
             // Subrouter scoped to private endpoints. The auth hoop
             // runs only for routes pushed under this branch, so the
@@ -2082,6 +2244,7 @@ pub fn openapi_doc() -> OpenApi {
         .push(Router::with_path("api/v1/markets").get(get_markets))
         .push(Router::with_path("api/v1/depth").get(get_depth))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
+        .push(Router::with_path("api/v1/accounts").post(register_account))
         .push(Router::with_path("api/v1/order").post(create_order).delete(delete_order))
         .push(Router::with_path("api/v1/orders").get(get_orders))
         .push(
@@ -2144,6 +2307,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     info!("api running with postgres read-model repository");
     let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
+    let registry: SharedRegistry =
+        Arc::new(PostgresAccountRegistry::new(pool.clone(), kek.clone()));
     let authenticator: SharedAuth =
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek, &config.auth));
     let chain_sender: SharedChainSender = Arc::new(DexChainSender::new(
@@ -2165,7 +2330,8 @@ pub async fn run() -> anyhow::Result<()> {
     );
     let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
         .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms))
-        .with_max_batch_size(config.chain.max_batch_size);
+        .with_max_batch_size(config.chain.max_batch_size)
+        .with_account_registry(registry);
 
     // The API is intentionally restart-to-reconfigure. None of the live
     // request paths read runtime config — pool, server bind, request_timeout

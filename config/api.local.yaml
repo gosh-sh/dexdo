@@ -30,7 +30,7 @@ auth:
   # seed_accounts_path at a notes file (real notes are SDK-generated and
   # never committed). Each account's API secret is derived from its note's
   # position under the KEK above — see crates/infrastructure/src/seed.rs.
-  seed_accounts: true
+  seed_accounts: false
   seed_accounts_path: ./config/seed_notes_list.json
 
 chain:

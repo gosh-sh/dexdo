@@ -17,7 +17,7 @@ what to generate and where to drop it.
 | `sdk/pn_pool.json` | General pool of funded PrivateNotes at a fixed nominal. The default `mint_pn_pool` output. | `sdk/src/bin/mint_pn_pool.rs` | source pool for the others / ad-hoc scripts |
 | `sdk/pn_pool_deployers.json` | A `pn_pool.json` used as the **market-deployer** pool. Reusing a funded PN as deployer lets `mint_ob_pool` skip minting a fresh halo2 voucher (~3 min/market). | `mint_pn_pool` | `mint_ob_pool --deployer-pn-pool <path>` |
 | `sdk/ob_pool.json` | Pool of **pre-warmed OrderBook markets** (addresses + oracle/deployer keys), so a script can grab a live market without paying the ~10–15 min deploy. | `sdk/src/bin/mint_ob_pool.rs` | ad-hoc scripts |
-| `tests/fixtures/seed_notes.json` | The **e2e fixture pool**, in the **seed_notes format** (not the pool shape below) — converted from a `mint_pn_pool` run. CI fetches it from S3; each e2e test claims one slot. See `tests/fixtures/README.md`. | `mint_pn_pool` → convert | `services/api/tests` → `TestPnPool::load()` |
+| `tests/fixtures/seed_notes.json` | The **e2e fixture pool**, in the **seed_notes format** (not the pool shape below) — the `.seed_notes.json` sidecar `mint_pn_pool` writes. CI fetches it from S3; each e2e test claims one slot. See `tests/fixtures/README.md`. | `mint_pn_pool` (sidecar) | `services/api/tests` → `TestPnPool::load()` |
 
 ## Format
 
@@ -48,15 +48,21 @@ seeder's seed_notes shape, see
 
 ## Generating one
 
+Pass the endpoint with an explicit `https://` scheme — a bare host makes the
+tvm_client hit the REST `/v2/account` route over plain `http`, which times out
+on shellnet:
+
 ```sh
 # A pool of funded PNs (see the binary's --help for nominal/count flags):
-cargo run --release --bin mint_pn_pool -- --output sdk/pn_pool.json
+cargo run --release --bin mint_pn_pool -- \
+  --endpoint https://shellnet.ackinacki.org --output sdk/pn_pool.json
 ```
 
-The e2e fixture (`tests/fixtures/seed_notes.json`) is the same notes in the
-seed_notes shape: mint a pool, convert it (rename the fields,
-`deposit_identifier_hash` decimal → `pn_dih_hex`), and host it where CI
-fetches it. See [`docs/seed-private-notes.md`](docs/seed-private-notes.md).
+`mint_pn_pool` also writes a sibling `sdk/pn_pool.seed_notes.json` in the api
+seeder / e2e (`seed_notes`) format — no manual conversion. That sidecar is what
+the e2e fixture (`tests/fixtures/seed_notes.json`) and the api `seed_accounts`
+file consume; see [`docs/seed-private-notes.md`](docs/seed-private-notes.md) for
+which slice goes where.
 
 The binaries live in the `sdk` workspace (its own workspace, excluded
 from the repo root — it pulls the heavy halo2/zk graph). Run them from

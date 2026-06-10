@@ -16,6 +16,7 @@ pub mod e2e_setup;
 pub mod test_pns;
 
 use std::collections::HashMap as StdHashMap;
+use std::collections::HashSet as StdHashSet;
 use std::env;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -39,6 +40,7 @@ use dodex_application::PnStateReader;
 use dodex_application::RefToken;
 use dodex_application::ReferenceRepository;
 use dodex_domain::DomainError;
+use dodex_infrastructure::account_registry::PostgresAccountRegistry;
 use dodex_infrastructure::auth::PostgresAuthenticator;
 use dodex_infrastructure::config::AuthSection;
 use dodex_infrastructure::crypto::Kek;
@@ -120,7 +122,10 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>, Arc<FakePnStateReader
     let pn_reader_inner = Arc::new(FakePnStateReader::default());
     let pn_reader: dodex_api::testkit::SharedPnReader = pn_reader_inner.clone();
     let ref_repo: dodex_api::testkit::SharedRefRepo = Arc::new(FakeReferenceRepo::with_seeded());
-    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo);
+    let registry: dodex_api::testkit::SharedRegistry =
+        Arc::new(PostgresAccountRegistry::new(pool.clone(), kek.clone()));
+    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
+        .with_account_registry(registry);
     let service = Service::new(build_router(state));
     Some((service, pool, kek, pn_reader_inner))
 }
@@ -158,7 +163,10 @@ pub async fn setup_with_pn_reader(
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
     let chain_sender: SharedChainSender = Arc::new(NoopChainSender);
     let ref_repo: dodex_api::testkit::SharedRefRepo = Arc::new(FakeReferenceRepo::with_seeded());
-    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo);
+    let registry: dodex_api::testkit::SharedRegistry =
+        Arc::new(PostgresAccountRegistry::new(pool.clone(), kek.clone()));
+    let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
+        .with_account_registry(registry);
     let service = Service::new(build_router(state));
     Some((service, pool, kek))
 }
@@ -224,6 +232,11 @@ pub struct FakePnStateReader {
     stake_err: Mutex<Option<String>>,
     // Per-address overrides.
     details_by_pn: Mutex<StdHashMap<String, Result<PnDetails, String>>>,
+    // Addresses that `get_details` answers with a typed
+    // `DomainError::AccountNotDeployed` (-2013) — distinct from
+    // `fail_details`, which maps to a generic 503. Lets registration tests
+    // drive the "PN not on-chain" path.
+    not_deployed: Mutex<StdHashSet<String>>,
     stake_by_pn: Mutex<StdHashMap<String, Option<PnStake>>>,
     // Hash-keyed overrides. When non-empty, any stake_hash absent from the
     // map returns `None` — this is how tests verify the production hasher
@@ -252,6 +265,13 @@ impl FakePnStateReader {
         self.details_by_pn.lock().unwrap().insert(pn_address.to_string(), Ok(d));
     }
 
+    /// Make `get_details(pn_address)` return a typed
+    /// `DomainError::AccountNotDeployed` so callers exercise the -2013
+    /// path (e.g. registering a note that is not deployed on-chain).
+    pub fn set_not_deployed(&self, pn_address: &str) {
+        self.not_deployed.lock().unwrap().insert(pn_address.to_string());
+    }
+
     pub fn set_stake_for(&self, pn_address: &str, s: Option<PnStake>) {
         self.stake_by_pn.lock().unwrap().insert(pn_address.to_string(), s);
     }
@@ -264,6 +284,9 @@ impl FakePnStateReader {
 #[async_trait]
 impl PnStateReader for FakePnStateReader {
     async fn get_details(&self, pn_address: &str) -> anyhow::Result<PnDetails> {
+        if self.not_deployed.lock().unwrap().contains(pn_address) {
+            return Err(anyhow::Error::from(DomainError::AccountNotDeployed));
+        }
         if let Some(result) = self.details_by_pn.lock().unwrap().get(pn_address).cloned() {
             return match result {
                 Ok(d) => Ok(d),

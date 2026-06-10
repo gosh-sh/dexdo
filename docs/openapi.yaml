@@ -112,6 +112,62 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - apiKey: []
+  /api/v1/accounts:
+    post:
+      tags:
+      - account
+      summary: Register a trading account
+      description: |-
+        first API credential. Public — a client has no key yet, so the note's
+
+        custody keys in the body are the capability. The use case confirms the
+
+        note is deployed on-chain (so the account can trade immediately) before
+
+        any row is written; the response carries the credential, the one and
+
+        only time the secret is returned.
+      operationId: register_account
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - pnAddress
+              - pnPubkeyHex
+              - pnSeckeyHex
+              - pnDihHex
+              properties:
+                pnAddress:
+                  type: string
+                  description: Address of the deployed PrivateNote, `0:…`.
+                pnDihHex:
+                  type: string
+                  description: deposit_identifier_hash, hex (≤256 bits).
+                pnPubkeyHex:
+                  type: string
+                  description: Note owner public key, hex (≤256 bits).
+                pnSeckeyHex:
+                  type: string
+                  description: Note owner secret key, 32-byte hex. Sealed under the KEK at rest.
+              additionalProperties: false
+        required: true
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterAccountResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
   /api/v1/batchOrders:
     post:
       tags:
@@ -1516,6 +1572,34 @@ components:
       - FILLED
       - CANCELED
       - REJECTED
+    RegisterAccountResponse:
+      type: object
+      required:
+      - accountId
+      - pnAddress
+      - apiKey
+      - apiSecret
+      - permissions
+      properties:
+        accountId:
+          type: string
+          description: UUID of the created account.
+        apiKey:
+          type: string
+          description: Value for the `X-DODEX-APIKEY` header.
+        apiSecret:
+          type: string
+          description: |-
+            HMAC-SHA256 signing secret, hex. Returned once; never retrievable
+            again.
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Granted permissions — `["USER_DATA", "TRADE"]`.
+        pnAddress:
+          type: string
+          description: Echo of the registered PrivateNote address.
     TerminalDto:
       type: object
       description: |-

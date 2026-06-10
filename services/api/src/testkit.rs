@@ -18,4 +18,6 @@ pub use crate::SharedPnReader;
 #[doc(hidden)]
 pub use crate::SharedRefRepo;
 #[doc(hidden)]
+pub use crate::SharedRegistry;
+#[doc(hidden)]
 pub use crate::SharedRepo;

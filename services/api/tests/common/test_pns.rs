@@ -73,20 +73,11 @@ impl TestPnPool {
         Self { notes }
     }
 
+    /// The single deployer-PN every e2e test shares. The suite is
+    /// single-threaded (see tests/fixtures/README.md), so one note never
+    /// contends on its `_busy` lock.
     pub fn first(&self) -> &TestPn {
         self.notes.first().expect("e2e seed notes: at least one PN")
-    }
-
-    /// Return PN at slot `idx` (zero-based). Each e2e test claims a
-    /// distinct slot so a parallel run does not contend on the same PN's
-    /// `_busy` lock — every chain op serialises through it.
-    pub fn slot(&self, idx: usize) -> &TestPn {
-        self.notes.get(idx).unwrap_or_else(|| {
-            panic!(
-                "e2e seed notes: PN slot {idx} requested, only {} available — top up the pool",
-                self.notes.len()
-            )
-        })
     }
 }
 

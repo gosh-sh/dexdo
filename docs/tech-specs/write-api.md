@@ -1,6 +1,6 @@
 # Trading Write API Technical Specification
 
-Implementation-facing requirements for the trading write endpoints. The public contract (URLs, field names, parameter rules, error shapes, response examples) lives in [api-spec.md](../api-spec.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md). The on-chain side of order routing is in [../contract-specs/dex-events-routing.md](../contract-specs/dex-events-routing.md); authentication and the trading-PN binding are in [auth.md](auth.md). The read endpoint (`GET /orders`) that surfaces post-confirmation order state is in [read-api.md](read-api.md).
+Implementation-facing requirements for the write endpoints (trading, position, and account registration). The public contract (URLs, field names, parameter rules, error shapes, response examples) lives in [api-spec.md](../api-spec.md). Postgres tables referenced below are documented column-by-column in [data-schema.md](data-schema.md). The on-chain side of order routing is in [../contract-specs/dex-events-routing.md](../contract-specs/dex-events-routing.md); authentication and the trading-PN binding are in [auth.md](auth.md). The read endpoint (`GET /orders`) that surfaces post-confirmation order state is in [read-api.md](read-api.md).
 
 | Endpoint | Method | api-spec section |
 | --- | --- | --- |
@@ -10,6 +10,7 @@ Implementation-facing requirements for the trading write endpoints. The public c
 | `/api/v1/batchOrders` | DELETE | [Cancel Batch Orders](../api-spec.md#cancel-batch-orders) |
 | `/api/v1/openOrders` | DELETE | [Cancel All Open Orders On Symbol](../api-spec.md#cancel-all-open-orders-on-symbol) |
 | `/api/v1/buyFullSet` | POST | [Buy Full Set](../api-spec.md#buy-full-set) |
+| `/api/v1/accounts` | POST | [Register Account](../api-spec.md#register-account) |
 
 ## Glossary
 
@@ -812,3 +813,108 @@ The backend does not store inflight submissions and does not retry on its own. `
 ### Concurrency
 
 `splitFullSet` takes the same per-PN `_busy` lock as placement — see [§Concurrency for POST /order](#concurrency). A buyFullSet that races a placement, cancellation, or another buyFullSet from the same account surfaces as `OrderPnBusy` → 429 / -2014 with the same retry semantics.
+
+## `POST /api/v1/accounts`
+
+Registers a trading account from a client-supplied PrivateNote and mints its first API credential. The self-service counterpart of the operator seeder (`crates/infrastructure/src/seed.rs`, [seed-private-notes.md](../seed-private-notes.md)): one note in, one account plus one api_key out. Public — the caller has no credential yet, so possession of the note's custody keys (sent in the body) is the authorization. Always mounted; unlike the seeder it carries no config gate.
+
+The handler runs three phases: request parsing → on-chain existence probe → credential mint and insert. Each fails closed with its own code (see the Error mapping table in this section).
+
+### Authorization
+
+`NONE`. The route is pushed outside the auth subrouter in `build_router`, so `auth_hoop` never runs for it — a client registering its first credential has nothing to sign with. The submitted `pnSeckeyHex` is the capability: only the note owner holds it, and the backend takes custody of it (sealed under the KEK) to sign that account's trades, exactly as the seeder does. There is no `require_auth` and no `AuthContext`.
+
+### Request parsing
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `pnAddress` | `String` | Mandatory. Deployed PrivateNote address. |
+| `pnPubkeyHex` | `String` | Mandatory. Owner public key, hex (≤256 bits). |
+| `pnSeckeyHex` | `String` | Mandatory. Owner secret key, 32-byte hex. |
+| `pnDihHex` | `String` | Mandatory. `deposit_identifier_hash`, hex (≤256 bits). |
+
+`RegisterAccountRequest` is parsed with `deny_unknown_fields` — manual `ToSchema` impl, the same salvo-oapi-macros constraint as `CancelBatchOrdersRequest`. An unknown key is a serde shape error → `InvalidParameter` → 400 / -1130. Each field is `Option` only so a missing or blank one surfaces as `MissingParameter` → 400 / -1102 via the handler's `non_empty(...).ok_or(...)` chain; all four are required. Field-format validation (hex, bit width, seckey length) happens in the registry, not the handler — see the Input validation section.
+
+### On-chain existence probe
+
+Before any DB write, `RegisterAccountUseCase` runs `PnStateReader::get_details(pnAddress)` against the GraphQL gateway — the same reader `GET /api/v1/account` uses. It exists only to confirm the note is deployed, so a registered account can trade right away:
+
+- BOC absent → the reader returns a typed `AccountNotDeployed` → 404 / -2013, no row written.
+- Any other reader failure (gateway flap, ABI/parse error) → `MarketInconsistent` → 503, matching `GetAccountUseCase`'s reader-failure posture so a transient gateway flap is retryable rather than a hard 500.
+- BOC present → proceed. The returned details are discarded; only existence matters.
+
+Running the probe first means a not-deployed note costs no DB work and a well-formed but undeployed `pnAddress` can never leave an orphan account row.
+
+### Input validation
+
+In `PostgresAccountRegistry` (pure `validate_note`, unit-tested without a DB):
+
+| Rule | Failure |
+| --- | --- |
+| `pnPubkeyHex` valid hex, ≤256 bits | `InvalidParameter` |
+| `pnDihHex` valid hex, ≤256 bits | `InvalidParameter` |
+| `pnSeckeyHex` valid hex | `InvalidParameter` |
+| `pnSeckeyHex` decodes to exactly 32 bytes (ed25519) | `InvalidParameter` |
+
+Hex public-key and dih are converted to the decimal the `numeric(78,0)` columns expect via the shared `seed::hex_to_dec_uint256` (promoted to `pub(crate)`). A wrong-length seckey is rejected here rather than surfacing as a silent on-chain signature failure on the client's first trade.
+
+### Credential mint
+
+`api_secret` is a fresh 32 random bytes from the OS RNG (`crypto::fill_random`), **not** a KEK-derived value. Derivation (`crypto::derive_api_secret`) exists only to reproduce credentials from a notes-file index; a runtime registration has no such index, and the secret is stored sealed regardless, so random is the natural choice. `api_key` is `dk_live_` followed by 16 random bytes as hex (128-bit, unguessable). Both `pn_seckey` and `api_secret` are sealed under the KEK (`crypto::seal`) before insert — the plaintext secret exists only between mint and response.
+
+### Persistence
+
+One transaction in `PostgresAccountRegistry::register`:
+
+1. INSERT into [`accounts`](data-schema.md#accounts) (label `registered`, `pn_address`, `pn_pubkey`, sealed `pn_seckey`, `pn_dih`) `ON CONFLICT DO NOTHING RETURNING id`. **No arbiter target** — `accounts` is unique on both `pn_address` and `pn_dih` (`accounts_pn_dih_key`), so a bare `DO NOTHING` suppresses a conflict on either index and returns no row. No row → roll back → `NoteAlreadyRegistered` → 409 / -2015. Insert-only: an existing note is never re-credentialed and its secret is never re-issued.
+2. INSERT into [`api_keys`](data-schema.md#api_keys) (`account_id`, `api_key`, sealed `api_secret`, `{USER_DATA,TRADE}`) `ON CONFLICT (api_key) WHERE disabled_at IS NULL DO NOTHING`. Zero rows affected means the 128-bit random `api_key` collided with a live key — astronomically unlikely; fail closed with `Unexpected` → 500 (rolling back the account insert) rather than hand back a credential pointing at another account.
+
+A concurrent identical registration blocks on the `accounts` insert until the first commits, then sees the conflict and returns `NoteAlreadyRegistered` too.
+
+### Response
+
+200 with the credential — the only point the plaintext secret leaves the backend:
+
+| Field | Source |
+| --- | --- |
+| `accountId` | `accounts.id` of the inserted row. |
+| `pnAddress` | Echoed from the request. |
+| `apiKey` | The minted `dk_live_…` key. |
+| `apiSecret` | The minted secret, hex. Stored only sealed; never retrievable again. |
+| `permissions` | `["USER_DATA", "TRADE"]`. |
+
+### Failure surface
+
+1. **Pre-write** — body shape (`-1102` / `-1130`) and the chain probe (`-2013` not deployed, `-1500` gateway/parse failure). No row written.
+2. **Conflict** — `pn_address` or `pn_dih` already present (`-2015`). Transaction rolled back.
+3. **Internal** — sealing failure, DB error, or the `api_key` collision (`-1000`), logged at `error`, transaction rolled back.
+
+### Error mapping
+
+| Condition | DomainError | HTTP |
+| --- | --- | --- |
+| A mandatory field missing or blank | `MissingParameter` | 400 |
+| Malformed field (bad hex, >256 bits, wrong seckey length, unknown body key) | `InvalidParameter` | 400 |
+| PrivateNote not deployed on-chain | `AccountNotDeployed` | 404 |
+| Gateway flap or PN BOC parse failure during the probe | `MarketInconsistent` | 503 |
+| `pn_address` or `pn_dih` already registered | `NoteAlreadyRegistered` | 409 |
+| Sealing, DB failure, or `api_key` collision | `Unexpected` | 500 |
+
+### Layering
+
+| Layer | Responsibility |
+| --- | --- |
+| `crates/domain` | New `NoteAlreadyRegistered` variant (`-2015` / 409). |
+| `crates/application` | `NewAccountNote` / `RegisteredAccount`, the `AccountRegistry` port, and `RegisterAccountUseCase` (chain probe, then delegate). |
+| `crates/infrastructure` | `account_registry::PostgresAccountRegistry` (validate, random + sealed credential, insert-only transaction). `crypto::fill_random`. `seed::hex_to_dec_uint256` promoted to `pub(crate)`. |
+| `services/api` | `RegisterAccountRequest` / `RegisterAccountResponse` DTOs, `register_account` handler, public route `Router::with_path("api/v1/accounts").post(register_account)` outside the auth subrouter. `AppState.registry: Option<SharedRegistry>` is builder-set (`with_account_registry`) so the existing test `AppState::new` sites stay unbroken; `run()` always wires the Postgres registry. |
+
+Tests: `register_account_http.rs` drives the full router against the real Postgres registry plus `FakePnStateReader` (success, `-2015`, `-2013`, `-1102`, `-1130`); `account_registry` unit tests cover `validate_note`; `e2e_register_account.rs` (`#[ignore]`) exercises the real `GraphqlPnStateReader` against shellnet.
+
+### Idempotency and retries
+
+Not idempotent, and insert-only. A retry after a successful registration returns `NoteAlreadyRegistered` (`-2015`), not a fresh credential; a client that loses its `apiSecret` cannot recover it by re-registering, because the secret is never re-issued. A retry after a transient `-1500` (gateway flap during the probe) is safe — no row is written until the probe succeeds.
+
+### Concurrency
+
+No per-PN `_busy` lock: registration submits no external chain message, it only reads PN state. Concurrency is bounded by the `accounts` unique indexes — two simultaneous registrations of the same note resolve to one insert plus one `-2015`, as described in the Persistence section.

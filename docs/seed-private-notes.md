@@ -67,9 +67,19 @@ seeder mints:
 
 **Why:** the secret never has to be stored anywhere. The same `(KEK, index)`
 always yields the same 32 bytes, and a different environment's KEK yields a
-disjoint secret. To hand a client its secret, derive it from that environment's
-KEK and the note's position — see
-[`crypto::derive_api_secret`](../crates/infrastructure/src/crypto.rs).
+disjoint secret. To hand a client its credentials, re-derive them from that
+environment's KEK with the
+[`dump_creds`](../services/api/src/bin/dump_creds.rs) helper:
+
+```sh
+cargo run -p dodex-api --bin dump_creds -- --kek <auth.kek_hex> --count <N>
+```
+
+It prints the `api_key` / `api_secret` for the first `N` note slots through the
+production derivation
+([`crypto::derive_api_secret`](../crates/infrastructure/src/crypto.rs)), so the
+output is exactly what clients sign with. Secrets print in cleartext — run it in
+a trusted shell and never log or commit the output.
 
 ## How the file reaches the container (docker-compose / staging)
 
@@ -96,20 +106,40 @@ On the target host:
 ## Producing the notes
 
 [`mint_pn_pool`](../sdk/src/bin/mint_pn_pool.rs) deploys and funds a pool of PNs
-on a network that has a giver (shellnet does; mainnet does not):
+on a network that has a giver (shellnet does; mainnet does not). **Pass the
+endpoint with an explicit `https://` scheme** — with a bare host the tvm_client
+falls back to plain `http` for the REST `/v2/account` route, which times out on
+shellnet (the same applies to the e2e `SHELLNET_ENDPOINT` and the api's
+`chain.gateway_endpoint`):
 
 ```sh
 cargo run --release --bin mint_pn_pool -- \
   --count 10 --nominal N10000 --token-type nackl \
-  --endpoint shellnet.ackinacki.org --output pn_pool.json
+  --endpoint https://shellnet.ackinacki.org --output pn_pool.json
 ```
 
-It writes the **pool format** (`address`, `deposit_identifier_hash` as a decimal
-string, `owner_public_key_hex`, `owner_secret_key_hex`, funding flags). Convert
-that to the notes-file format above: rename the fields and turn
-`deposit_identifier_hash` from **decimal to hex** for `pn_dih_hex`. The halo2
-prover prerequisites (SRS, prover cache, release build) live in the binary's
-module doc.
+It writes two files: `pn_pool.json` (raw pool format — resumable across runs,
+and what `mint_ob_pool --deployer-pn-pool` consumes) **and a sibling
+`pn_pool.seed_notes.json` already in the seed_notes format above** (the api
+seeder / e2e loader format). No manual conversion. The halo2 prover
+prerequisites (SRS, prover cache, release build) live in the binary's module doc.
+
+### Where each note file goes
+
+One minted pool feeds three separate consumers. Give each its own slice (or mint
+a pool per consumer) so they never contend on the same PN on-chain:
+
+| consumer | file | delivered |
+| --- | --- | --- |
+| local API dev (`cargo run` + `seed_accounts: true`) | `config/seed_notes_list.json` | drop locally |
+| local e2e (`cargo nextest … --run-ignored only`) | `tests/fixtures/seed_notes.json` | drop locally |
+| CI e2e | S3, fetched via the `E2E_NOTES_URL` secret | upload the slice; CI `curl`s it into `tests/fixtures/seed_notes.json` |
+
+The e2e slices need **≥ 5 notes** (one per slot — see
+[tests/fixtures/README.md](../tests/fixtures/README.md)), each funded above the
+~300 NACKL a market deploy spends. The `.seed_notes.json` sidecar is already in
+the right format — take the slice and place/upload it; all three files are
+secret (real keys) and git-ignored / never committed.
 
 ## Tests
 
@@ -124,8 +154,9 @@ module doc.
 
 On a network with a giver (such as shellnet) the giver tops up a PN directly by
 its `pn_address`. `mint_pn_pool` does this at deploy time, but an already-deployed
-PN can be topped up later by sending SHELL (and native gas) from the giver to its
-address — a PN out of gas stops executing trading messages until refunded.
+PN can be topped up later by sending SHELL — the gas token — from the giver to its
+address. SHELL is the PN's gas, so a PN out of SHELL stops executing trading
+messages until refunded.
 
 For test SHELL and giver usage on shellnet:
 <https://dev.ackinacki.com/readme/get-test-tokens-in-shellnet#get-shell>

@@ -1022,6 +1022,14 @@ pub enum DomainError {
     /// so clients can offer "deploy your account" rather than retry.
     #[error("account not deployed")]
     AccountNotDeployed,
+    /// Account registration was attempted for a PrivateNote that already
+    /// has an account — a conflict on `accounts.pn_address` or
+    /// `accounts.pn_dih`. Registration is insert-only: an existing note is
+    /// never re-credentialed and its secret is never re-issued. Surfaces
+    /// as 409 so the caller knows the note is taken, not that the request
+    /// was malformed.
+    #[error("private note already registered")]
+    NoteAlreadyRegistered,
     /// The read-model row violates a tech-spec invariant (e.g. RESOLVED with
     /// `frozenAt = null`, CANCELLED with `cancelReason = null`). Per the
     /// invariant-checking contract in `docs/tech-specs/read-api.md`
@@ -1068,6 +1076,7 @@ impl DomainError {
             Self::UnknownOrder => -2011,
             Self::AccountNotDeployed => -2013,
             Self::OrderPnBusy => -2014,
+            Self::NoteAlreadyRegistered => -2015,
         }
     }
 
@@ -1089,6 +1098,7 @@ impl DomainError {
             Self::UnknownOrder => "Unknown order.",
             Self::AccountNotDeployed => "Account not deployed.",
             Self::OrderPnBusy => "Trading note busy with a previous order; retry shortly.",
+            Self::NoteAlreadyRegistered => "Private note already registered.",
         }
     }
 }

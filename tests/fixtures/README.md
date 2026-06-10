@@ -14,29 +14,25 @@ integration tests.
   with the `E2E_SEED_NOTES` env var). Provide it before an e2e run:
   - **CI** fetches it from the `E2E_NOTES_URL` secret — see
     [`.github/workflows/e2e-shellnet.yml`](../../.github/workflows/e2e-shellnet.yml).
-  - **Locally**, drop your own copy here. Produce notes with `mint_pn_pool`
-    (pool format) and convert them to seed_notes format — see
+  - **Locally**, drop your own copy here. `mint_pn_pool` writes a
+    `<output>.seed_notes.json` sidecar in exactly this format (run it with an
+    `https://` endpoint, else its shellnet calls time out) — use that slice; see
     [`docs/seed-private-notes.md`](../../docs/seed-private-notes.md) and
     [`PRIVATE_NOTE_POOLS.md`](../../PRIVATE_NOTE_POOLS.md).
 
-## PN slot ownership
+## One shared note
 
-Every e2e test that calls `TestPnPool::slot(idx)` claims an exclusive
-slot for the duration of its run. Each chain op (`deployPMP`, `setStake`,
-`splitFullSet`, `placeOrder`, `cancelOrder`, …) takes the PN's `_busy`
-lock, so two tests sharing the same slot would race each other to
-`ERR_NOTE_BUSY`. Assignments:
+Every e2e test uses the same note (`TestPnPool::first()`) as its
+deployer-PN. The PN's `_busy` lock — taken by every chain op (`deployPMP`,
+`setStake`, `splitFullSet`, `placeOrder`, `cancelOrder`, …) — would make two
+tests on one note race to `ERR_NOTE_BUSY`, but the suite runs
+single-threaded anyway (next section): no two tests ever execute at once, so
+the lock never contends. A per-test slot split bought nothing.
 
-| slot | purpose               |
-| ---- | --------------------- |
-| 0    | POST `/order`         |
-| 1    | DELETE `/order`       |
-| 2    | POST `/batchOrders`   |
-| 3    | DELETE `/batchOrders` |
-| 4    | POST `/buyFullSet`    |
-
-A new e2e test that needs its own deployer-PN takes the next free slot
-and adds the row here; grow the pool (and the S3 copy) accordingly.
+The single note must hold enough NACKL to cover **every** test's market
+deploy plus its write path — each deploy spends ~300 NACKL, so budget for
+the whole suite, not one test. Top it up via `mint_pn_pool` when the balance
+runs low. The pool needs only one funded PN.
 
 ## Run the e2e suite single-threaded
 
@@ -66,8 +62,8 @@ deploy ephemeral market: deploy_oracle: Kit(KitError { tvm_error: …
 ```
 
 A distinct PN per slot does **not** fix this — the contention is the shared
-root singletons, not the PN. `--test-threads 1` runs the suite
-sequentially. Each test spends ~50 s blocked on `stake_end` plus ~30 s
+root singletons, not the PN, which is why the suite runs on one note rather
+than a slot per test. `--test-threads 1` runs the suite sequentially. Each test spends ~50 s blocked on `stake_end` plus ~30 s
 round-tripping its write path; the per-test budget is fine, only
 across-tests parallelism is poisoned by shared chain state.
 

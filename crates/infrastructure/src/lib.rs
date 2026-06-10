@@ -1,6 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+pub mod account_registry;
 pub mod auth;
 pub mod chain_sender;
 pub mod config;

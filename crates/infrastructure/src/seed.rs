@@ -164,7 +164,7 @@ fn note_to_seed_account(kek: &Kek, index: u32, note: NoteEntry) -> Result<SeedAc
 
 /// Convert an optionally `0x`-prefixed hex uint256 into the decimal string
 /// the `numeric(78, 0)` columns expect, rejecting anything over 256 bits.
-fn hex_to_dec_uint256(s: &str) -> Result<String> {
+pub(crate) fn hex_to_dec_uint256(s: &str) -> Result<String> {
     let h = s.strip_prefix("0x").unwrap_or(s);
     let n = BigUint::parse_bytes(h.as_bytes(), 16).context("value must be valid hex")?;
     anyhow::ensure!(n.bits() <= 256, "value exceeds 256 bits");

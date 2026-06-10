@@ -88,7 +88,12 @@ A `USER_DATA`-only key on a `TRADE` endpoint returns `-1002`. This separation le
 | Issue api_key | Generates an `api_key` and `api_secret` under an account, with chosen permissions. The `api_secret` is shown once at creation and cannot be recovered later. |
 | Disable api_key | Marks the key disabled. Subsequent requests with that key return `-1002`. |
 
-Provisioning is operator-only in this version. The HTTP contract for self-service account management is not yet defined in `api-spec.md`. The trading PN bound at account creation is used by the API for the lifetime of the account; replacing it is operator-only via direct database edit.
+Two provisioning paths land at the same `accounts` + `api_keys` rows:
+
+- **Operator seeding** — `crates/infrastructure/src/seed.rs` inserts accounts from a notes file at boot, gated by `auth.seed_accounts`. The `api_secret` is KEK-derived from the note's file index (`crypto::derive_api_secret`).
+- **Self-service registration** — `POST /api/v1/accounts` (public; see [api-spec §Register Account](../api-spec.md#register-account) and [write-api §POST /api/v1/accounts](write-api.md#post-apiv1accounts)). The caller submits a deployed note's custody keys and receives a credential whose `api_secret` is freshly random (stored sealed, not derived — there is no file index to reproduce). The endpoint is insert-only: a note that already has an account returns `-2015`.
+
+The trading PN bound at account creation is used by the API for the lifetime of the account; replacing it is operator-only via direct database edit.
 
 ## Balance Source
 
@@ -105,7 +110,6 @@ Collateral `free` and `locked` both come from one `getDetails()` call — the AP
 
 ## Not Included
 
-- Self-service account creation and key issuance over HTTP.
 - A public deposit-address endpoint; `/account` does not yet return the trading PN address.
 - A withdrawal endpoint.
 - IP allow-lists per api_key.

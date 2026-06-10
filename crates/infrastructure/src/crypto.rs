@@ -7,6 +7,7 @@
 // the scheme: a future v2 row decrypts under a new KEK while v1 rows
 // keep decrypting under the original.
 
+use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::Aead;
 use aes_gcm::aead::AeadCore;
 use aes_gcm::aead::KeyInit;
@@ -109,6 +110,15 @@ pub fn derive_api_secret(kek: &Kek, index: u32) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&tag);
     out
+}
+
+/// Fill `buf` with cryptographically secure random bytes from the OS RNG.
+/// Account registration mints API secrets and key tokens that are stored
+/// sealed (not derived from a notes-file index), so each must be
+/// independently unpredictable. Same `OsRng` source [`seal`] draws its
+/// nonces from.
+pub fn fill_random(buf: &mut [u8]) {
+    OsRng.fill_bytes(buf);
 }
 
 #[cfg(test)]
