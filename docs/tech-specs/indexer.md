@@ -96,7 +96,7 @@ Event ordering is anchored on `raw_events.chain_order` (set from the GraphQL gat
 
 ## Projection — public trades
 
-The public trade tape behind [`GET /api/v1/trades`](read-api.md) is built from the
+The public trade tape behind [`GET /api/v1/trades`](../api-spec.md#recent-trades) is built from the
 same `OrderBook.OrderFilled` event that drives `live_orders`, written into a separate
 append-only `trades` table. Only the `tradeId` derivation is specified here; the full
 table shape and HTTP layer are the implementer's to detail.

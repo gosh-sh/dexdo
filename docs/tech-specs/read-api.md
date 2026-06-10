@@ -22,6 +22,8 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Depth** — the `/api/v1/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
 
+**Trade tape** — the `/api/v1/trades` response for one market outcome: a newest-first list of maker↔taker matches built from the append-only `trades` table, not by querying the OrderBook contract during the HTTP request.
+
 **DTO** — Data Transfer Object. In this document it means the API response object after the backend has assembled it from database rows, but before it is serialized to JSON and sent to the client.
 
 **Available event** — an `oracle_events` row eligible to surface in `/api/v1/oracles`: `is_deleted = false`, `deadline` strictly in the future relative to request `now`, and metadata-reconciled (`meta_reconciled_at IS NOT NULL`). Event lists and oracles with no available events are omitted from the response.
@@ -312,6 +314,97 @@ Empty string means no OrderBook event has touched this pair yet. The value never
 | Reconciled market with NULL/blank `orderbook_address` | `MarketInconsistent` | 503 |
 | Missing `marketAddress` or `symbol` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
+
+## `/api/v1/trades`
+
+Returns the most recent public trades for one outcome of one market: a newest-first tape of maker↔taker matches, each carrying price, size, quote notional, direction, and chain time. The endpoint never queries the contract at request time — every trade shown is the projection of an indexed `OrderBook.OrderFilled` event into the append-only [`trades`](data-schema.md#trades) read-model (write side in [indexer.md](indexer.md#projection--public-trades)). It is public (`NONE`) and unaffected by market lifecycle status: terminal markets (`RESOLVED` / `CANCELLED` / `EXPIRED`) still serve their tape so history stays readable after the book closes.
+
+### Resolution
+
+Resolve `(marketAddress, symbol)` to `(orderbook_address, outcome_id, price_precision, quantity_precision, decimals)` via [`markets`](data-schema.md#markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes) ⨝ [`ref_tokens`](data-schema.md#ref_tokens) — the quote-asset `decimals` feeds `quoteQty` scaling. The market must already be reconciled at least once (`last_reconciled_at IS NOT NULL`); otherwise the endpoint returns `InvalidMarketOrSymbol` → 404, the same way an unknown pair is reported. A pair that exists in `markets` but has never reconciled cannot be distinguished from one that does not exist, matching [`/api/v1/depth`](#apiv1depth). The symbol identifies one of the market's outcomes — the tape is per-outcome, not per-market.
+
+### Empty-tape contract
+
+A reconciled market with no matched trades yet returns a bare empty array `[]`, not an error — the steady-state shape for a market that has opened but not yet traded, and the trade-tape analogue of depth's empty-book contract. A NULL or blank `orderbook_address` on a reconciled row is `MarketInconsistent` (503), never silently served as an empty tape.
+
+### Query
+
+After resolution, one SQL produces the page in a single round trip:
+
+```sql
+SELECT trade_id, price, qty, is_buyer_maker, chain_time
+  FROM trades
+ WHERE orderbook_address = $1
+   AND outcome_id        = $2
+   AND chain_time IS NOT NULL
+ ORDER BY trade_id DESC
+ LIMIT $limit;
+```
+
+`trades_tape_idx` (`(orderbook_address, outcome_id, trade_id DESC)`) serves this as an index range scan — the top `$limit` rows per outcome, newest first, without loading the full tape. There is no pagination cursor in v1: the public contract exposes only `limit` (see [api-spec §Recent Trades](../api-spec.md#recent-trades)), so the endpoint is a bounded newest-first window, not a keyset walk.
+
+`trade_id` is the taker-side `chain_order` (`msg_chain_order` from the gateway), which is globally unique and lexicographically monotonic by gateway design — the same total-order property `/api/v1/orders` relies on for `placed_chain_order`. The text `ORDER BY trade_id DESC` therefore already yields true chain order with no tie-breaker and no Rust-side numeric re-sort (unlike depth, where price levels of differing length must be re-ranked with exact-numeric comparison).
+
+`chain_time IS NOT NULL` is a heap filter guarding the rare ingestion path where the gateway delivered the `OrderFilled` edge without a parseable `created_at`; such a row would otherwise crash the response decoder mapping `NULL` into the `time` `i64`. This mirrors the `chain_created_at IS NOT NULL` guard on [`/api/v1/orders`](#apiv1orders).
+
+### Field projection
+
+`trades` holds the raw chain integers the contract emitted; the API decodes each field at render (see [api-spec §Recent Trades](../api-spec.md#recent-trades) for the public shapes):
+
+| Response field | Source | Rendering |
+| --- | --- | --- |
+| `tradeId` | `trade_id` | Verbatim. Opaque lex-comparable token; the identical value is the `t` field on the [`orderUpdate`](../api-spec.md#order-updates) fill frame for the same match. |
+| `price` | `price` | ÷ `FULL_PERCENT` (10 000), formatted at `price_precision` — the same price decode as depth / orders. |
+| `qty` | `qty` | ÷ `10^decimals`, formatted at `quantity_precision`. |
+| `quoteQty` | `price`, `qty` | Quote-asset notional, computed as the contract computes it: `notional_atoms = price * qty / FULL_PERCENT` (integer division, `BigUint`), then ÷ `10^decimals` formatted at the quote asset's `decimals`. Deriving from the same two raw integers — rather than storing a column — keeps the value reconciled with the on-chain notional that drove settlement; the chain emits no separate notional field. |
+| `time` | `chain_time` | Extracted to microseconds and truncated to Unix milliseconds — the same convention as `time` / `updateTime` on `/api/v1/orders`. |
+| `isBuyerMaker` | `is_buyer_maker` | Verbatim. `true` ⇒ the resting (maker) side was the buy order and the taker sold (downtick). |
+
+The integer-division order matters: `price * qty / FULL_PERCENT` floors *after* multiplying, exactly as `OrderBook` derives the match notional, so `quoteQty` never drifts from chain by the rounding ulp a `round(price_decimal × qty_decimal)` could introduce.
+
+### Page-size protocol
+
+- `limit` defaults to `20` when omitted.
+- Valid range is `[1, 1000]`. Out-of-range → `-1102` / 400; present but non-numeric → `-1130` / 400. The split (range vs parse) matches `/api/v1/orders`'s `limit` semantics rather than depth's silent clamp — the trade tape is aligned with the paginated-read family even though it carries no cursor.
+
+### Invariants
+
+1. Rows are returned strictly newest-first by `trade_id` (DESC), a total chain order; no duplication or skipping across `limit` boundaries.
+2. Each row is one taker-side fill = one match; the maker-side `OrderFilled` writes no `trades` row, so a single match never double-counts (write-side rule in [indexer.md](indexer.md#projection--public-trades)).
+3. `quoteQty` equals the on-chain match notional under the contract's integer-division rounding.
+
+### Error mapping
+
+| Condition | `DomainError` | API code | HTTP |
+| --- | --- | --- | --- |
+| `marketAddress` or `symbol` missing or blank | `MissingParameter` | `-1102` | 400 |
+| `limit` out of `[1, 1000]` | `MissingParameter` | `-1102` | 400 |
+| `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
+| Pair not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
+| Reconciled market with NULL/blank `orderbook_address`, or an undecodable raw `price` / `qty` | `MarketInconsistent` | `-1500` | 503 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+The endpoint is public, so there are no auth rows. The 503 is deliberate and transient: a blank `orderbook_address` means the reconciler is mid-replay, and the client should retry.
+
+### Indexer changes
+
+The read path depends on one write-side addition (detail in [indexer.md §Projection — public trades](indexer.md#projection--public-trades)):
+
+- **`trades` table + `trades_tape_idx`** — a new append-only table (migration; [`data-schema.md`](data-schema.md#trades) updated synchronously). The existing `OrderBook.OrderFilled` projector that maintains `live_orders` is extended to also insert one `trades` row **on the taker-side event** (`isTaker = true`) and nothing on the maker side, so a match is recorded exactly once. `trade_id` is that taker event's `chain_order`; the insert is `ON CONFLICT (trade_id) DO NOTHING`, so reprojection from `raw_events` is idempotent. An `OrderFilled` observed before its parent `OrderPlaced` is `Deferred` and replayed, exactly as for `live_orders`.
+
+Until this projector extension ships, the `trades` table is empty and every tape reads `[]`; no read-side gate is needed because an empty tape is already the valid steady state.
+
+### Eventual consistency
+
+A just-matched trade briefly lags the fill that produced it: the row appears once the taker-side `OrderFilled` is projected (seconds, or after deferred-replay if the fill edge arrived before its parent `OrderPlaced`). This is the same indexer-backlog window `/api/v1/orders` exposes, surfaced to clients as the eventual-consistency note in [api-spec §Recent Trades](../api-spec.md#recent-trades). The endpoint reads only the indexed `trades` table — it never reaches chain at request time.
+
+### Test coverage
+
+Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
+
+- `crates/infrastructure/tests/trades.rs` (repo) — resolution (unknown / unreconciled pair → the `InvalidMarketOrSymbol` mapping; blank `orderbook_address` → `MarketInconsistent`); per-outcome scoping (a sibling outcome's trades do not leak); DESC-by-`trade_id` order and `limit` default / bounds; empty tape → `[]`; `price` / `qty` / `quoteQty` scaling, including the integer-division notional matching the contract; `isBuyerMaker` passthrough; a `chain_time IS NULL` row excluded.
+- Projector test (alongside the `live_orders` projector scenarios in `crates/infrastructure/tests/reprojection.rs`) — the taker-side event (`isTaker = true`) writes exactly one `trades` row and the maker-side writes none; `trade_id` equals the taker event's `chain_order`; replay is idempotent (`ON CONFLICT`); one taker crossing N makers yields N rows with N distinct `trade_id`s.
+- `services/api/tests/trades_http.rs` — happy path returns a bare JSON array newest-first through the production router; the error shapes (`-1102` missing param, `-1102` limit out of range, `-1130` non-numeric limit, `-1121` unknown pair, `-1500` inconsistent); the route is reachable without an auth envelope (public); a terminal-status market still serves its tape.
 
 ## `/api/v1/orders`
 
