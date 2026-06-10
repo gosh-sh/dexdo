@@ -1351,9 +1351,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///      caller-supplied flag opens TVM flag 128 (CARRY_ALL_BALANCE) and 32
     ///      (DELETE_IF_EMPTY) abuse paths that drain or destroy RootPN.
     /// @param destWalletAddr Destination wallet address
-    /// @param tokenType Token type to withdraw.
-    /// @param dapp_id DApp id forwarded to RootPN.withdrawTokens (accepted there but not used).
-    function withdrawTokens(address destWalletAddr, uint32 tokenType, uint256 dapp_id) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+    /// @param dapp_id DApp id forwarded to RootPN.withdrawTokens (surfaced in the TokensWithdrawn event).
+    function withdrawTokens(address destWalletAddr, uint256 dapp_id) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         require(_stakes.empty(), ERR_NOTE_BUSY);
@@ -1369,17 +1368,20 @@ contract PrivateNote is Modifiers, ReplayProtection {
         require(_pendingPlaceBuyLock == 0, ERR_NON_ZERO_BALANCE);
         require(_pendingBatchBuyLock == 0, ERR_NON_ZERO_BALANCE);
         require(_openOrderCount == 0, ERR_OPEN_ORDERS_EXIST);
-        RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_balance[tokenType], tokenType, destWalletAddr, _depositIdentifierHash, dapp_id);
-        _balance[tokenType] = 0;
+        // Withdraw the ENTIRE balance — pass the full per-token-type map so
+        // RootPN moves every currency the note holds in one transfer.
+        RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_balance, destWalletAddr, _depositIdentifierHash, dapp_id);
+        delete _balance;
         _hasWithdrawn = true;
 	}
 
     /// @notice Reverts a withdraw operation (called by Vault)
-    /// @param tokenType Type of token
-    /// @param value Amount to revert
-    function revertWithdraw(uint32 tokenType, uint128 value) public senderIs(ROOT_PN_ADDRESS) accept {
+    /// @param amounts Per-token-type amounts to restore to the note balance
+    function revertWithdraw(mapping(uint32 => uint128) amounts) public senderIs(ROOT_PN_ADDRESS) accept {
         ensureBalance();
-        _balance[tokenType] += value;
+        for ((uint32 tt, uint128 amt) : amounts) {
+            _balance[tt] += amt;
+        }
         // Clear the withdrawn latch: RootPN.withdrawTokens only calls this
         // path when the withdraw did NOT happen (insufficient RootPN
         // liquidity). Without the reset the PN stays permanently pinned

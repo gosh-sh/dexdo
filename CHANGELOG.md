@@ -2,6 +2,12 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-06-10]
+
+### Added
+
+- OrderBook protocol-fee collection: `OrderBook` reports its accumulated taker-fee share to `RootPN.collectProtocolFee` at shutdown, and the root owner withdraws it via `RootPN.withdrawProtocolFees` (with a `getProtocolFee` getter). `RootPN` tracks `_protocolFees` per token type; the backing real ECC already sits in RootPN reserves. New events `ProtocolFeeCollected` (external id `155`) and `ProtocolFeeWithdrawn` (`156`); `RootPN` ABI and [docs/contract-specs/dex-events-routing.md](docs/contract-specs/dex-events-routing.md) updated. The indexer decodes both new events into `raw_events`; they have no projector and are stored as `Unknown`.
+
 ## [2026-06-05]
 
 ### Added

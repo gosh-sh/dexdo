@@ -24,6 +24,10 @@ abstract contract Modifiers is Errors {
     uint128 constant ROOTPN_ORACLE_DEPLOYED = 103;
     /// @notice External event id for `RootPN.TokensWithdrawn`.
     uint128 constant ROOTPN_TOKENS_WITHDRAWN = 154;
+    /// @notice External event id for `RootPN.ProtocolFeeCollected`.
+    uint128 constant ROOTPN_PROTOCOL_FEE_COLLECTED = 155;
+    /// @notice External event id for `RootPN.ProtocolFeeWithdrawn`.
+    uint128 constant ROOTPN_PROTOCOL_FEE_WITHDRAWN = 156;
 
     // Oracle events
     /// @notice External event id for `Oracle.OracleEventListDeployed`.

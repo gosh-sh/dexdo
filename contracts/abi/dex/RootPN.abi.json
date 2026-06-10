@@ -102,13 +102,43 @@
 		{
 			"name": "withdrawTokens",
 			"inputs": [
-				{"name":"withdrawedValue","type":"uint128"},
-				{"name":"tokenType","type":"uint32"},
+				{"name":"amounts","type":"map(uint32,uint128)"},
 				{"name":"walletAddr","type":"address"},
 				{"name":"initialDataHash","type":"uint256"},
 				{"name":"dapp_id","type":"uint256"}
 			],
 			"outputs": [
+			]
+		},
+		{
+			"name": "collectProtocolFee",
+			"inputs": [
+				{"name":"eventId","type":"uint256"},
+				{"name":"oracleListHash","type":"uint256"},
+				{"name":"tokenType","type":"uint32"},
+				{"name":"amount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "withdrawProtocolFees",
+			"inputs": [
+				{"name":"to","type":"address"},
+				{"name":"dapp_id","type":"uint256"},
+				{"name":"tokenType","type":"uint32"},
+				{"name":"amount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getProtocolFee",
+			"inputs": [
+				{"name":"tokenType","type":"uint32"}
+			],
+			"outputs": [
+				{"name":"value0","type":"uint128"}
 			]
 		},
 		{
@@ -165,10 +195,30 @@
 		{
 			"name": "TokensWithdrawn",
 			"inputs": [
-				{"name":"amount","type":"uint128"},
+				{"name":"amounts","type":"map(uint32,uint128)"},
 				{"name":"noteAddress","type":"address"},
 				{"name":"to","type":"address"},
 				{"name":"dapp_id","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "ProtocolFeeCollected",
+			"inputs": [
+				{"name":"tokenType","type":"uint32"},
+				{"name":"amount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "ProtocolFeeWithdrawn",
+			"inputs": [
+				{"name":"to","type":"address"},
+				{"name":"dapp_id","type":"uint256"},
+				{"name":"tokenType","type":"uint32"},
+				{"name":"amount","type":"uint128"}
 			],
 			"outputs": [
 			]
@@ -185,6 +235,7 @@
 		{"init":false,"name":"_oracleEventListCode","type":"cell"},
 		{"init":false,"name":"_orderBookCode","type":"cell"},
 		{"init":false,"name":"_ownerPubkey","type":"uint256"},
-		{"init":false,"name":"_deployedValues","type":"map(uint32,uint128)"}
+		{"init":false,"name":"_deployedValues","type":"map(uint32,uint128)"},
+		{"init":false,"name":"_protocolFees","type":"map(uint32,uint128)"}
 	]
 }

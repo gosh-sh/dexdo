@@ -5,6 +5,7 @@ pragma AbiHeader pubkey;
 import "./modifiers/modifiers.sol";
 import "./PrivateNote.sol";
 import "./PMP.sol";
+import "./RootPN.sol";
 import "./libraries/DexLib.sol";
 
 /// @title OrderBook — native Solidity dark order book with price-indexed levels.
@@ -1460,6 +1461,15 @@ contract OrderBook is Modifiers {
                 value: 1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
             }();
         } else {
+            // Report accumulated protocol fees to RootPN before teardown. The
+            // backing real ECC is already custodied by RootPN; this only marks
+            // the amount as owner-withdrawable. Sent before the destroy below.
+            if (_totalProtocolFees > 0) {
+                RootPN(ROOT_PN_ADDRESS).collectProtocolFee{
+                    value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+                }(_eventId, _oracleListHash, _tokenType, _totalProtocolFees);
+                _totalProtocolFees = 0;
+            }
             // flag 161 = 128 (carry all remaining balance) + 32 (destroy source
             // once balance hits zero) + 1 (pay msg forward fees separately).
             // Notifies the PMP that the drain is complete and tears down this
