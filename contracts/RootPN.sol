@@ -38,6 +38,13 @@ contract RootPN is Modifiers {
     /// @notice Mapping of deployed PrivateNote values
     mapping(uint32 => uint128) _deployedValues;
 
+    /// @notice Accumulated OrderBook protocol fees per token type. Reported by
+    ///         each OrderBook at shutdown (`collectProtocolFee`) and withdrawable
+    ///         only by the root owner (`withdrawProtocolFees`). The backing real
+    ///         ECC already sits in this contract's reserves / `_deployedValues`
+    ///         (it was the taker-fee share never credited to any note).
+    mapping(uint32 => uint128) _protocolFees;
+
     /// @notice Encode a uint64 into the bn254 Fr representation that halo2
     ///         emits for `voucherNominal` (32 LE bytes, padded with zeros,
     ///         then read as a big-endian uint256).
@@ -116,6 +123,18 @@ contract RootPN is Modifiers {
     /// @param to — Destination wallet address
     /// @param dapp_id — DApp id passed through from the withdraw call
     event TokensWithdrawn(mapping(uint32 => uint128) amounts, address noteAddress, address to, uint256 dapp_id);
+
+    /// @notice Emitted when an OrderBook reports its protocol fees at shutdown.
+    /// @param tokenType — Token type of the collected fee
+    /// @param amount — Amount collected
+    event ProtocolFeeCollected(uint32 tokenType, uint128 amount);
+
+    /// @notice Emitted when the owner withdraws accumulated protocol fees.
+    /// @param to — Destination address
+    /// @param dapp_id — Destination dapp id
+    /// @param tokenType — Token type withdrawn
+    /// @param amount — Amount withdrawn
+    event ProtocolFeeWithdrawn(address to, uint256 dapp_id, uint32 tokenType, uint128 amount);
 
     /// @notice Root constructor
     constructor() {
@@ -482,6 +501,57 @@ contract RootPN is Modifiers {
         // (msg.sender) and to which destination wallet.
         address addrExtern = address.makeAddrExtern(ROOTPN_TOKENS_WITHDRAWN, bitCntAddress);
         emit TokensWithdrawn{dest: addrExtern}(amounts, msg.sender, walletAddr, dapp_id);
+    }
+
+    /// @notice Records an OrderBook's accumulated protocol fees at its shutdown.
+    /// @dev The backing real ECC is already custodied by this RootPN (it was the
+    ///      taker-fee share never credited to any note); this call only marks the
+    ///      amount as owner-withdrawable. The caller is authenticated as the
+    ///      legitimate OrderBook for (eventId, oracleListHash, tokenType).
+    /// @param eventId Event id of the calling OrderBook.
+    /// @param oracleListHash Oracle list hash of the calling OrderBook.
+    /// @param tokenType Token type of the collected protocol fee.
+    /// @param amount Accumulated protocol fee amount.
+    function collectProtocolFee(uint256 eventId, uint256 oracleListHash, uint32 tokenType, uint128 amount)
+        public
+        senderIs(DexLib.computeOrderBookAddress(_privateNoteCode, _orderBookCode, eventId, oracleListHash, tokenType))
+        accept
+    {
+        ensureBalance();
+        _protocolFees[tokenType] += amount;
+        address addrExtern = address.makeAddrExtern(ROOTPN_PROTOCOL_FEE_COLLECTED, bitCntAddress);
+        emit ProtocolFeeCollected{dest: addrExtern}(tokenType, amount);
+    }
+
+    /// @notice Withdraws accumulated OrderBook protocol fees to any address in any
+    ///         dapp. Root-owner only.
+    /// @param to Destination account address.
+    /// @param dapp_id Destination dapp id to route the transfer to.
+    /// @param tokenType Token type to withdraw.
+    /// @param amount Amount to withdraw (must be <= accumulated protocol fees).
+    function withdrawProtocolFees(address to, uint256 dapp_id, uint32 tokenType, uint128 amount)
+        public onlyOwnerPubkey(_ownerPubkey) accept
+    {
+        ensureBalance();
+        require(amount > 0 && amount <= _protocolFees[tokenType], ERR_INVALID_PARAMS);
+        require(
+            address(this).currencies[tokenType] >= amount && _deployedValues[tokenType] >= amount,
+            ERR_INVALID_PARAMS
+        );
+        _protocolFees[tokenType] -= amount;
+        _deployedValues[tokenType] -= amount;
+
+        mapping(uint32 => varuint32) cc;
+        cc[tokenType] = varuint32(amount);
+        to.transfer({value: 0.1 vmshell, bounce: false, flag: 1, currencies: cc, dest_dapp_id: dapp_id});
+
+        address addrExtern = address.makeAddrExtern(ROOTPN_PROTOCOL_FEE_WITHDRAWN, bitCntAddress);
+        emit ProtocolFeeWithdrawn{dest: addrExtern}(to, dapp_id, tokenType, amount);
+    }
+
+    /// @notice Returns accumulated (un-withdrawn) protocol fees for a token type.
+    function getProtocolFee(uint32 tokenType) external view returns (uint128) {
+        return _protocolFees[tokenType];
     }
 
     /// @notice Returns all global variables
