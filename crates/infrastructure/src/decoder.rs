@@ -133,8 +133,8 @@ mod tests {
         }
 
         // 13 PMP + 2 Oracle + 3 OracleEventList + 8 OrderBook + 1 RootOracle
-        // + 4 RootPN + 14 PrivateNote + 0 Nullifier = 44
-        assert_eq!(decoder.known_events(), 45, "unexpected total event count");
+        // + 6 RootPN + 14 PrivateNote + 0 Nullifier = 47
+        assert_eq!(decoder.known_events(), 47, "unexpected total event count");
 
         // sample lookups
         let pmp_event_ids: Vec<_> = decoder
