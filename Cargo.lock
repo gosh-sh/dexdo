@@ -1642,6 +1642,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dodex-domain",
+ "ed25519-dalek",
+ "hex",
  "num-bigint 0.4.6",
  "tokio",
  "tracing",

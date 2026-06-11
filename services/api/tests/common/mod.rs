@@ -319,6 +319,15 @@ impl PnStateReader for FakePnStateReader {
         }
         Ok(self.stake.lock().unwrap().clone().unwrap_or(None))
     }
+
+    async fn owner_pubkey(&self, pn_address: &str) -> anyhow::Result<String> {
+        if self.not_deployed.lock().unwrap().contains(pn_address) {
+            return Err(anyhow::Error::from(DomainError::AccountNotDeployed));
+        }
+        // The fixture note is owned by the canonical test seckey ("00"*32);
+        // a registration submitting a different key fails the binding.
+        Ok(dodex_application::derive_ed25519_pubkey_hex(&"00".repeat(32)).unwrap())
+    }
 }
 
 /// `PnStateReader` that routes the test-supplied payload through the
@@ -374,6 +383,10 @@ impl PnStateReader for RawJsonPnStateReader {
                 anyhow::anyhow!("RawJsonPnStateReader: no stakes for {pn_address}")
             })?;
         dodex_infrastructure::pn_state_reader::stake_from_value(&v, stake_hash)
+    }
+
+    async fn owner_pubkey(&self, _pn_address: &str) -> anyhow::Result<String> {
+        anyhow::bail!("RawJsonPnStateReader: register flow uses FakePnStateReader")
     }
 }
 

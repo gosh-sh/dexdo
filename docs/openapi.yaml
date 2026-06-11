@@ -117,16 +117,6 @@ paths:
       tags:
       - account
       summary: Register a trading account
-      description: |-
-        first API credential. Public — a client has no key yet, so the note's
-
-        custody keys in the body are the capability. The use case confirms the
-
-        note is deployed on-chain (so the account can trade immediately) before
-
-        any row is written; the response carries the credential, the one and
-
-        only time the secret is returned.
       operationId: register_account
       requestBody:
         content:

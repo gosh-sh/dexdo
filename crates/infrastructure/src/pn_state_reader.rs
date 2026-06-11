@@ -24,6 +24,7 @@ use serde_json::Value;
 use tvm_abi::Contract;
 
 use crate::graphql::GraphqlClient;
+use crate::tvm_runner::decode_account_fields;
 use crate::tvm_runner::run_getter;
 
 const PN_ABI: &str = include_str!("../../../contracts/abi/dex/PrivateNote.abi.json");
@@ -74,6 +75,13 @@ impl PnStateReader for GraphqlPnStateReader {
             .with_context(|| format!("_stakes for {pn_address}"))?;
         stake_from_value(&v, stake_hash)
     }
+
+    async fn owner_pubkey(&self, pn_address: &str) -> anyhow::Result<String> {
+        let boc = self.fetch_boc(pn_address).await?;
+        let fields = decode_account_fields(&self.abi, &boc)
+            .with_context(|| format!("decode fields for {pn_address}"))?;
+        owner_pubkey_from_value(&fields)
+    }
 }
 
 /// Parse the detokenized `getDetails()` reply into `PnDetails`. The
@@ -109,6 +117,25 @@ pub fn stake_from_value(v: &Value, stake_hash: &str) -> anyhow::Result<Option<Pn
     let debt = read_uint_array(entry, "debtAmount")?;
     let coupons = read_uint_array(entry, "couponsAmount")?;
     Ok(Some(PnStake { amount, debt_amount: debt, coupons_amount: coupons }))
+}
+
+/// Extract the PrivateNote owner key from decoded storage fields,
+/// normalised to lower-case 64-char hex (no `0x`). The key the note signs
+/// with is `_ephemeralPubkey` (set at deploy from the constructor, rotated
+/// by `changeOwner`); `tvm.pubkey()` / `_pubkey` is 0 because PNs are
+/// deployed internally by RootPN, not by an externally-signed message.
+/// tvm_abi emits `uint256` as `0x` + 64 lower-case hex; any other shape
+/// means the ABI `fields` layout drifted from the deployed contract.
+pub fn owner_pubkey_from_value(v: &Value) -> anyhow::Result<String> {
+    let raw = v
+        .get("_ephemeralPubkey")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("storage fields reply has no string `_ephemeralPubkey`"))?;
+    let hex = raw.strip_prefix("0x").unwrap_or(raw).to_ascii_lowercase();
+    if hex.len() != 64 || hex.bytes().any(|b| !b.is_ascii_hexdigit()) {
+        return Err(anyhow!("`_ephemeralPubkey` is not a 256-bit hex value: {raw}"));
+    }
+    Ok(hex)
 }
 
 fn read_uint_map(v: &Value, key: &str) -> anyhow::Result<Vec<(u32, String)>> {
@@ -261,5 +288,21 @@ mod tests {
         assert_eq!(s.amount, vec!["10", "5"]);
         assert_eq!(s.debt_amount, vec!["0", "0"]);
         assert_eq!(s.coupons_amount, vec!["0", "0"]);
+    }
+
+    #[test]
+    fn owner_pubkey_from_value_normalises_uint256() {
+        // `_pubkey` is 0 on these notes; the owner key is `_ephemeralPubkey`.
+        let v = json!({
+            "_pubkey": format!("0x{}", "00".repeat(32)),
+            "_ephemeralPubkey": format!("0x{}", "AB".repeat(32)),
+        });
+        assert_eq!(owner_pubkey_from_value(&v).unwrap(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn owner_pubkey_from_value_rejects_missing_or_malformed() {
+        assert!(owner_pubkey_from_value(&json!({ "_pubkey": "0x0" })).is_err());
+        assert!(owner_pubkey_from_value(&json!({ "_ephemeralPubkey": "0xdead" })).is_err());
     }
 }

@@ -134,7 +134,7 @@ async fn register_same_note_twice_conflicts() {
 
 #[tokio::test]
 async fn register_undeployed_note_returns_2013() {
-    let Some((service, _pool, _kek, pn)) = common::setup().await else { return };
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
     let (pn_address, _scope, body) = fresh_note();
     pn.set_not_deployed(&pn_address);
 
@@ -144,6 +144,14 @@ async fn register_undeployed_note_returns_2013() {
 
     assert_eq!(status, Some(StatusCode::NOT_FOUND));
     assert_eq!(err.code, -2013);
+
+    // Probe-before-write: an undeployed note must leave no account row.
+    let count: i64 = sqlx::query_scalar("select count(*) from accounts where pn_address = $1")
+        .bind(&pn_address)
+        .fetch_one(&pool)
+        .await
+        .expect("count accounts");
+    assert_eq!(count, 0, "undeployed note must not write an account row");
 }
 
 #[tokio::test]
@@ -155,6 +163,28 @@ async fn register_missing_field_returns_1102() {
     let body = json!({
         "pnAddress": pn_address,
         "pnPubkeyHex": "ab".repeat(32),
+        "pnDihHex": scope,
+    });
+
+    let mut resp = post_register(&service, &body).await;
+    let status = resp.status_code;
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+
+    assert_eq!(status, Some(StatusCode::BAD_REQUEST));
+    assert_eq!(err.code, -1102);
+}
+
+#[tokio::test]
+async fn register_blank_field_returns_1102() {
+    let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
+    let (_pn_address, scope, _body) = fresh_note();
+    // Whitespace-only pnAddress: present in JSON, blank after trim. The
+    // handler's non_empty() guard must reject it (distinct from an omitted
+    // field) before the chain probe ever runs.
+    let body = json!({
+        "pnAddress": "   ",
+        "pnPubkeyHex": "ab".repeat(32),
+        "pnSeckeyHex": "00".repeat(32),
         "pnDihHex": scope,
     });
 
@@ -201,4 +231,34 @@ async fn register_malformed_hex_returns_1130() {
 
     assert_eq!(status, Some(StatusCode::BAD_REQUEST));
     assert_eq!(err.code, -1130);
+}
+
+#[tokio::test]
+async fn register_wrong_key_returns_2016() {
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pn_address, scope, _body) = fresh_note();
+    pn.set_details_for(&pn_address, PnDetails { balance: vec![], locked_in_orders: vec![] });
+    // Deployed note, but a well-formed seckey that is NOT the note's owner
+    // ("11"*32 vs the fixture owner "00"*32): the on-chain binding rejects
+    // before any row is written.
+    let body = json!({
+        "pnAddress": pn_address,
+        "pnPubkeyHex": "ab".repeat(32),
+        "pnSeckeyHex": "11".repeat(32),
+        "pnDihHex": scope,
+    });
+
+    let mut resp = post_register(&service, &body).await;
+    let status = resp.status_code;
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+
+    assert_eq!(status, Some(StatusCode::BAD_REQUEST));
+    assert_eq!(err.code, -2016);
+
+    let count: i64 = sqlx::query_scalar("select count(*) from accounts where pn_address = $1")
+        .bind(&pn_address)
+        .fetch_one(&pool)
+        .await
+        .expect("count accounts");
+    assert_eq!(count, 0, "wrong-key registration must not write an account row");
 }

@@ -25,3 +25,5 @@ sdk/ob_pool.json
 sdk/pn_pool*.json
 # e2e seed notes (real keys) — fetched from S3 in CI, never commit.
 tests/fixtures/seed_notes.json
+# Local-dev API seed notes (real keys) — dropped at runtime, never commit.
+config/seed_notes*.json

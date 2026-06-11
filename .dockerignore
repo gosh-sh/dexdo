@@ -5,3 +5,4 @@ tests
 **/target
 .codex*
 .claude*
+config/seed_notes*.json

@@ -635,6 +635,10 @@ impl ApiError {
             // 409 tells the caller the note is taken, distinct from a 400
             // (malformed) or a 404 (note not deployed).
             DomainError::NoteAlreadyRegistered => StatusCode::CONFLICT,
+            // Submitted key does not derive the note's on-chain owner key — a
+            // client error (wrong/forged credentials), distinct from a 404
+            // (not deployed) or a 409 (already registered).
+            DomainError::KeyDoesNotOwnNote => StatusCode::BAD_REQUEST,
             // Transient indexer state — fail closed, client retries when
             // the indexer catches up.
             DomainError::MarketInconsistent => StatusCode::SERVICE_UNAVAILABLE,
@@ -693,7 +697,8 @@ fn map_domain_or_unexpected(err: anyhow::Error, context: &str) -> ApiError {
             | DomainError::OrderValidationFailed
             | DomainError::PrecisionExceeded
             | DomainError::OrderPnBusy
-            | DomainError::NoteAlreadyRegistered => {} // client error, no log
+            | DomainError::NoteAlreadyRegistered
+            | DomainError::KeyDoesNotOwnNote => {} // client error, no log
             DomainError::MarketInconsistent
             | DomainError::RequestTimeout
             | DomainError::Unexpected => {
@@ -2002,12 +2007,12 @@ async fn buy_full_set(
     Ok(Json(BuyFullSetResponse { market_address, transact_time: now_ms }))
 }
 
-/// Register a trading account from a deployed PrivateNote and mint its
-/// first API credential. Public — a client has no key yet, so the note's
-/// custody keys in the body are the capability. The use case confirms the
-/// note is deployed on-chain (so the account can trade immediately) before
-/// any row is written; the response carries the credential, the one and
-/// only time the secret is returned.
+// Register a trading account from a deployed PrivateNote and mint its
+// first API credential. Public — a client has no key yet, so the note's
+// custody keys in the body are the capability. The use case confirms the
+// note is deployed on-chain (so the account can trade immediately) before
+// any row is written; the response carries the credential, the one and
+// only time the secret is returned.
 #[endpoint(
     tags("account"),
     summary = "Register a trading account",

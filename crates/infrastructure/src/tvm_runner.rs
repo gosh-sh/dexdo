@@ -115,6 +115,24 @@ pub fn run_getter(
         .map_err(|err| anyhow!("detokenize {function_name}: {err}"))
 }
 
+/// Decode the contract's persistent storage fields (the ABI `fields`
+/// section) straight from an account BOC — no getter call, so it can read
+/// state variables that have no getter (e.g. PrivateNote `_pubkey`).
+pub fn decode_account_fields(contract: &Contract, account_boc_base64: &str) -> Result<Value> {
+    let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
+    let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;
+    if account.is_none() {
+        return Err(anyhow!("account is AccountNone — not deployed"));
+    }
+    let data = account.get_data().ok_or_else(|| anyhow!("account has no data"))?;
+    let data_slice = SliceData::load_cell(data).map_err(|err| anyhow!("data slice: {err}"))?;
+    let tokens = contract
+        .decode_storage_fields(data_slice, true)
+        .map_err(|err| anyhow!("decode storage fields: {err}"))?;
+    Detokenizer::detokenize_to_json_value(&tokens)
+        .map_err(|err| anyhow!("detokenize storage fields: {err}"))
+}
+
 fn call_tvm_msg(account: &mut Account, msg: &Message) -> Result<Vec<Message>> {
     let config = BlockchainConfig::default();
 

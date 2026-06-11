@@ -85,13 +85,13 @@ A `USER_DATA`-only key on a `TRADE` endpoint returns `-1002`. This separation le
 | Operation | Effect |
 | --- | --- |
 | Create account | Allocates a new `accountId` and binds the user's trading PN in a single operation. Both are required at creation — trading cannot start until the PN is bound. |
-| Issue api_key | Generates an `api_key` and `api_secret` under an account, with chosen permissions. The `api_secret` is shown once at creation and cannot be recovered later. |
+| Issue api_key | Generates an `api_key` and `api_secret` under an account, with chosen permissions. A self-service (`POST /accounts`) `api_secret` is random and sealed — shown once, unrecoverable afterward. An operator-seeded `api_secret` is KEK-derived and re-derivable from `(KEK, index)` via `dump_creds`. |
 | Disable api_key | Marks the key disabled. Subsequent requests with that key return `-1002`. |
 
 Two provisioning paths land at the same `accounts` + `api_keys` rows:
 
 - **Operator seeding** — `crates/infrastructure/src/seed.rs` inserts accounts from a notes file at boot, gated by `auth.seed_accounts`. The `api_secret` is KEK-derived from the note's file index (`crypto::derive_api_secret`).
-- **Self-service registration** — `POST /api/v1/accounts` (public; see [api-spec §Register Account](../api-spec.md#register-account) and [write-api §POST /api/v1/accounts](write-api.md#post-apiv1accounts)). The caller submits a deployed note's custody keys and receives a credential whose `api_secret` is freshly random (stored sealed, not derived — there is no file index to reproduce). The endpoint is insert-only: a note that already has an account returns `-2015`.
+- **Self-service registration** — `POST /api/v1/accounts` (public; see [api-spec §Register Account](../api-spec.md#register-account) and [write-api §POST /api/v1/accounts](write-api.md#post-apiv1accounts)). The caller submits a deployed note's custody keys and receives a credential whose `api_secret` is freshly random (stored sealed, not derived — there is no file index to reproduce). The endpoint is insert-only: a note that already has an account returns `-2015`. The submitted `pnSeckeyHex` is bound to the note's on-chain owner key (`PrivateNote._ephemeralPubkey`) before any row is written — a key that does not control the note is rejected with `-2016`, so an unauthenticated caller cannot squat a deployed note with an arbitrary key. See [account-registration-key-binding.md](account-registration-key-binding.md).
 
 The trading PN bound at account creation is used by the API for the lifetime of the account; replacing it is operator-only via direct database edit.
 

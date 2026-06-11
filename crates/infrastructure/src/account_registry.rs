@@ -43,9 +43,9 @@ const ED25519_SECKEY_LEN: usize = 32;
 const REGISTERED_LABEL: &str = "registered";
 
 /// Permissions every registered account gets, so it can both read its data
-/// and trade immediately. Written to the `auth_permission[]` column and
-/// echoed in the response.
-const REGISTERED_PERMISSIONS: [&str; 2] = ["USER_DATA", "TRADE"];
+/// and trade immediately. Single source of truth for both the
+/// `auth_permission[]` column and the echoed response.
+const REGISTERED_PERMISSIONS: [Permission; 2] = [Permission::UserData, Permission::Trade];
 
 pub struct PostgresAccountRegistry {
     pool: PgPool,
@@ -153,6 +153,10 @@ impl AccountRegistry for PostgresAccountRegistry {
         };
         let account_id: Uuid = row.try_get("id").map_err(unexpected("read account id"))?;
 
+        // `auth_permission[]` binds as text; derive the wire strings from
+        // the single `Permission` source of truth.
+        let permission_strs: Vec<&str> =
+            REGISTERED_PERMISSIONS.iter().map(Permission::as_str).collect();
         let inserted = sqlx::query(
             r#"insert into api_keys (account_id, api_key, api_secret_enc, permissions)
                values ($1, $2, $3, $4::auth_permission[])
@@ -161,7 +165,7 @@ impl AccountRegistry for PostgresAccountRegistry {
         .bind(account_id)
         .bind(&api_key)
         .bind(&api_secret_enc)
-        .bind(&REGISTERED_PERMISSIONS[..])
+        .bind(&permission_strs[..])
         .execute(&mut *tx)
         .await
         .map_err(unexpected("insert api_key"))?;
@@ -181,7 +185,7 @@ impl AccountRegistry for PostgresAccountRegistry {
             pn_address: valid.pn_address,
             api_key,
             api_secret_hex,
-            permissions: vec![Permission::UserData, Permission::Trade],
+            permissions: REGISTERED_PERMISSIONS.to_vec(),
         })
     }
 }

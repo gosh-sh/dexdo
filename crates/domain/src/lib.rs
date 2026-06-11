@@ -1030,6 +1030,15 @@ pub enum DomainError {
     /// was malformed.
     #[error("private note already registered")]
     NoteAlreadyRegistered,
+    /// Registration supplied a private key that does not control the note's
+    /// on-chain owner: the note is deployed, but the submitted `pn_seckey`
+    /// derives a different public key than the PrivateNote's owner key
+    /// (`_ephemeralPubkey`), so a
+    /// credential minted from it could never sign a valid trade. Rejected
+    /// before any row is written, so a bogus key cannot squat the note's
+    /// unique constraint. Surfaces as 400.
+    #[error("submitted key does not control this private note")]
+    KeyDoesNotOwnNote,
     /// The read-model row violates a tech-spec invariant (e.g. RESOLVED with
     /// `frozenAt = null`, CANCELLED with `cancelReason = null`). Per the
     /// invariant-checking contract in `docs/tech-specs/read-api.md`
@@ -1077,6 +1086,7 @@ impl DomainError {
             Self::AccountNotDeployed => -2013,
             Self::OrderPnBusy => -2014,
             Self::NoteAlreadyRegistered => -2015,
+            Self::KeyDoesNotOwnNote => -2016,
         }
     }
 
@@ -1099,6 +1109,7 @@ impl DomainError {
             Self::AccountNotDeployed => "Account not deployed.",
             Self::OrderPnBusy => "Trading note busy with a previous order; retry shortly.",
             Self::NoteAlreadyRegistered => "Private note already registered.",
+            Self::KeyDoesNotOwnNote => "Submitted key does not control this private note.",
         }
     }
 }

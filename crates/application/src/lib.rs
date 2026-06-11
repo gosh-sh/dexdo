@@ -1664,6 +1664,12 @@ pub trait PnStateReader: Send + Sync {
         pn_address: &str,
         stake_hash: &str,
     ) -> Result<Option<PnStake>, anyhow::Error>;
+
+    /// Return the note's on-chain owner public key (the PrivateNote
+    /// `_ephemeralPubkey`) as lower-case 64-char hex. Used to bind a
+    /// registration to the key that actually controls the note. An absent
+    /// note surfaces the same typed `AccountNotDeployed` as `get_details`.
+    async fn owner_pubkey(&self, pn_address: &str) -> Result<String, anyhow::Error>;
 }
 
 #[async_trait]
@@ -1679,6 +1685,10 @@ impl<T: ?Sized + PnStateReader> PnStateReader for Arc<T> {
     ) -> Result<Option<PnStake>, anyhow::Error> {
         (**self).get_stake(pn_address, stake_hash).await
     }
+
+    async fn owner_pubkey(&self, pn_address: &str) -> Result<String, anyhow::Error> {
+        (**self).owner_pubkey(pn_address).await
+    }
 }
 
 /// The custody material a client submits to register a trading account:
@@ -1686,12 +1696,25 @@ impl<T: ?Sized + PnStateReader> PnStateReader for Arc<T> {
 /// carried over the wire. The backend takes custody of `pn_seckey_hex`
 /// (sealed at rest under the KEK) so it can sign trades on the note's
 /// behalf — the same custodial model as seeding.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NewAccountNote {
     pub pn_address: String,
     pub pn_pubkey_hex: String,
     pub pn_seckey_hex: String,
     pub pn_dih_hex: String,
+}
+
+// `pn_seckey_hex` is a plaintext signing key; a derived `Debug` would leak
+// it through any `?note` / `dbg!`. Mask it, mirroring `Kek`.
+impl std::fmt::Debug for NewAccountNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewAccountNote")
+            .field("pn_address", &self.pn_address)
+            .field("pn_pubkey_hex", &self.pn_pubkey_hex)
+            .field("pn_seckey_hex", &"<redacted>")
+            .field("pn_dih_hex", &self.pn_dih_hex)
+            .finish()
+    }
 }
 
 /// The credential minted for a freshly registered account.
@@ -1726,12 +1749,24 @@ impl<T: ?Sized + AccountRegistry> AccountRegistry for Arc<T> {
     }
 }
 
+/// Derive the ed25519 public key (lower-case 64-char hex) controlled by a
+/// 32-byte secret key supplied as hex. Used to bind a registration to the
+/// note's on-chain owner. A malformed key is `InvalidParameter` — the same
+/// shape the registry's field validation produces.
+pub fn derive_ed25519_pubkey_hex(seckey_hex: &str) -> Result<String, DomainError> {
+    let bytes = hex::decode(seckey_hex.trim()).map_err(|_| DomainError::InvalidParameter)?;
+    let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| DomainError::InvalidParameter)?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    Ok(hex::encode(signing.verifying_key().to_bytes()))
+}
+
 /// Orchestrates `POST /api/v1/accounts`: confirms the PrivateNote is
-/// actually deployed on-chain — so a registered account can trade
-/// immediately — then delegates the credential mint + insert to the
-/// `AccountRegistry`. The chain check runs first so a note that is not
-/// deployed fails with `AccountNotDeployed` (-2013) before any row is
-/// written.
+/// actually deployed on-chain, then binds the submitted secret key to the
+/// note's on-chain owner key (so the minted credential can actually sign,
+/// and an arbitrary key cannot squat a deployed note), then delegates the
+/// credential mint + insert to the `AccountRegistry`. Both chain checks run
+/// first so a not-deployed note fails with `AccountNotDeployed` (-2013) and
+/// a wrong key with `KeyDoesNotOwnNote` (-2016) before any row is written.
 pub struct RegisterAccountUseCase<P, G> {
     pn: P,
     registry: G,
@@ -1767,6 +1802,30 @@ where
             );
             return Err(DomainError::MarketInconsistent);
         }
+
+        // Ownership binding: the submitted secret key must derive the note's
+        // on-chain owner key. Without it an unauthenticated caller could
+        // register a deployed note with any key — useless for trading (the
+        // note rejects its signatures) but enough to squat the note's unique
+        // constraint and block the real owner. Derive locally first so a
+        // malformed key is `InvalidParameter` before the second chain read.
+        let submitted_pubkey = derive_ed25519_pubkey_hex(&note.pn_seckey_hex)?;
+        let owner_pubkey = self.pn.owner_pubkey(&note.pn_address).await.map_err(|e| {
+            if let Some(domain) = e.downcast_ref::<DomainError>() {
+                return *domain;
+            }
+            warn!(
+                error = %format_args!("{e:#}"),
+                pn = %note.pn_address,
+                "register: PN owner-key read failed",
+            );
+            DomainError::MarketInconsistent
+        })?;
+        if submitted_pubkey != owner_pubkey {
+            tracing::debug!(pn = %note.pn_address, "register: submitted key does not own the note");
+            return Err(DomainError::KeyDoesNotOwnNote);
+        }
+
         self.registry.register(note).await
     }
 }
@@ -4820,6 +4879,10 @@ mod get_account_use_case_tests {
         async fn get_stake(&self, _pn: &str, _hash: &str) -> anyhow::Result<Option<PnStake>> {
             unreachable!("get_account never calls get_stake")
         }
+
+        async fn owner_pubkey(&self, _pn_address: &str) -> anyhow::Result<String> {
+            unreachable!("get_account never calls owner_pubkey")
+        }
     }
 
     struct StubRefs {
@@ -5022,6 +5085,10 @@ mod get_account_use_case_tests {
             async fn get_stake(&self, _pn: &str, _hash: &str) -> anyhow::Result<Option<PnStake>> {
                 unreachable!()
             }
+
+            async fn owner_pubkey(&self, _pn_address: &str) -> anyhow::Result<String> {
+                unreachable!()
+            }
         }
         let uc = GetAccountUseCase::new(TypedStubPn, make_refs());
         let err = uc
@@ -5096,6 +5163,184 @@ mod get_account_use_case_tests {
         assert_eq!(scale_decimal("000", 9).unwrap(), "0.000000000");
         assert_eq!(scale_decimal("0001500000000", 9).unwrap(), "1.500000000");
         assert_eq!(scale_decimal("00", 0).unwrap(), "0.0");
+    }
+}
+
+#[cfg(test)]
+mod register_account_use_case_tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    fn note() -> NewAccountNote {
+        NewAccountNote {
+            pn_address: "0:pn".into(),
+            pn_pubkey_hex: "ab".repeat(32),
+            pn_seckey_hex: "00".repeat(32),
+            pn_dih_hex: "cd".repeat(32),
+        }
+    }
+
+    // Records whether the write side ran: the probe-before-write invariant
+    // means `register` stays untouched whenever the chain probe rejects.
+    struct SpyRegistry {
+        calls: AtomicUsize,
+    }
+
+    impl SpyRegistry {
+        fn new() -> Arc<Self> {
+            Arc::new(Self { calls: AtomicUsize::new(0) })
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl AccountRegistry for SpyRegistry {
+        async fn register(&self, note: NewAccountNote) -> Result<RegisteredAccount, DomainError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(RegisteredAccount {
+                account_id: uuid::Uuid::nil(),
+                pn_address: note.pn_address,
+                api_key: "dk_live_test".into(),
+                api_secret_hex: "00".repeat(32),
+                permissions: vec![Permission::UserData, Permission::Trade],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_failure_is_market_inconsistent_and_skips_write() {
+        // An untyped reader error (gateway/ABI fault) must surface as a
+        // retryable 503 and never reach the write side.
+        struct GatewayDownPn;
+        #[async_trait]
+        impl PnStateReader for GatewayDownPn {
+            async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
+                anyhow::bail!("gateway down")
+            }
+
+            async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
+                unreachable!("register never calls get_stake")
+            }
+
+            async fn owner_pubkey(&self, _: &str) -> anyhow::Result<String> {
+                unreachable!("probe fails before the owner-key read")
+            }
+        }
+
+        let registry = SpyRegistry::new();
+        let uc = RegisterAccountUseCase::new(GatewayDownPn, registry.clone());
+        let err = uc.execute(note()).await.unwrap_err();
+        assert!(matches!(err, DomainError::MarketInconsistent));
+        assert_eq!(registry.call_count(), 0, "no row written when the probe fails");
+    }
+
+    #[tokio::test]
+    async fn not_deployed_passes_through_typed_and_skips_write() {
+        // The reader's typed AccountNotDeployed must reach the API as a 404
+        // rather than collapse to 503, and must not write a row.
+        struct NotDeployedPn;
+        #[async_trait]
+        impl PnStateReader for NotDeployedPn {
+            async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
+                Err(anyhow::Error::from(DomainError::AccountNotDeployed))
+            }
+
+            async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
+                unreachable!()
+            }
+
+            async fn owner_pubkey(&self, _: &str) -> anyhow::Result<String> {
+                unreachable!("probe returns AccountNotDeployed before the owner-key read")
+            }
+        }
+
+        let registry = SpyRegistry::new();
+        let uc = RegisterAccountUseCase::new(NotDeployedPn, registry.clone());
+        let err = uc.execute(note()).await.unwrap_err();
+        assert!(matches!(err, DomainError::AccountNotDeployed));
+        assert_eq!(registry.call_count(), 0, "no row written for an undeployed note");
+    }
+
+    #[tokio::test]
+    async fn deployed_note_delegates_to_registry_once() {
+        // The happy path makes the two "skips_write" assertions meaningful:
+        // a deployed note must reach the registry exactly once.
+        struct DeployedPn;
+        #[async_trait]
+        impl PnStateReader for DeployedPn {
+            async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
+                Ok(PnDetails { balance: vec![], locked_in_orders: vec![] })
+            }
+
+            async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
+                unreachable!()
+            }
+
+            async fn owner_pubkey(&self, _: &str) -> anyhow::Result<String> {
+                // The note is owned by the same key `note()` submits.
+                Ok(derive_ed25519_pubkey_hex(&"00".repeat(32)).unwrap())
+            }
+        }
+
+        let registry = SpyRegistry::new();
+        let uc = RegisterAccountUseCase::new(DeployedPn, registry.clone());
+        let account = uc.execute(note()).await.expect("registers a deployed note");
+        assert_eq!(account.pn_address, "0:pn");
+        assert_eq!(registry.call_count(), 1, "delegates to the registry exactly once");
+    }
+
+    #[tokio::test]
+    async fn wrong_key_is_rejected_and_skips_write() {
+        // Deployed note, but its on-chain owner is a different key than the
+        // one `note()` submits — the binding must reject before any write.
+        struct WrongOwnerPn;
+        #[async_trait]
+        impl PnStateReader for WrongOwnerPn {
+            async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
+                Ok(PnDetails { balance: vec![], locked_in_orders: vec![] })
+            }
+
+            async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
+                unreachable!()
+            }
+
+            async fn owner_pubkey(&self, _: &str) -> anyhow::Result<String> {
+                Ok(derive_ed25519_pubkey_hex(&"11".repeat(32)).unwrap())
+            }
+        }
+
+        let registry = SpyRegistry::new();
+        let uc = RegisterAccountUseCase::new(WrongOwnerPn, registry.clone());
+        let err = uc.execute(note()).await.unwrap_err();
+        assert!(matches!(err, DomainError::KeyDoesNotOwnNote));
+        assert_eq!(registry.call_count(), 0, "wrong key writes no row");
+    }
+
+    #[test]
+    fn derive_ed25519_pubkey_hex_matches_rfc8032_vector() {
+        // RFC 8032 §7.1 test 1: a fixed secret seed maps to a fixed public
+        // key. Pins our derivation to standard ed25519 — the same algorithm
+        // the chain uses for a PrivateNote's owner key.
+        let seed = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        let pubkey = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        assert_eq!(derive_ed25519_pubkey_hex(seed).unwrap(), pubkey);
+    }
+
+    #[test]
+    fn derive_ed25519_pubkey_hex_rejects_malformed() {
+        assert!(matches!(derive_ed25519_pubkey_hex("zz"), Err(DomainError::InvalidParameter)));
+        assert!(matches!(
+            derive_ed25519_pubkey_hex(&"00".repeat(16)),
+            Err(DomainError::InvalidParameter)
+        ));
     }
 }
 
@@ -5184,6 +5429,10 @@ mod get_market_balances_use_case_tests {
             }
             *self.last_hash.lock().unwrap() = Some(hash.to_string());
             Ok(self.stake.lock().unwrap().clone())
+        }
+
+        async fn owner_pubkey(&self, _: &str) -> anyhow::Result<String> {
+            unreachable!("balances use case never calls owner_pubkey")
         }
     }
 

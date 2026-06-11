@@ -187,6 +187,7 @@ Recommended common error codes:
 | `-2013` | Account not deployed. | 404 |
 | `-2014` | Trading note busy with a previous order; retry shortly. | 429 |
 | `-2015` | Private note already registered. | 409 |
+| `-2016` | Submitted key does not control this private note. | 400 |
 
 `-1007` means the request did not complete in time. The order may still have been accepted by the exchange. Retry `POST /api/v1/order` with the same `newOrderClientId` — the server will deduplicate so the same order is not placed twice.
 
@@ -195,6 +196,8 @@ Recommended common error codes:
 `-2014` means another order from the same account is still being processed. Retry after a short delay; the in-flight order will appear in `/api/v1/orders` shortly.
 
 `-2015` means `POST /api/v1/accounts` was called for a PrivateNote that already has an account. Registration is one-shot per note: the existing credential is left untouched and no new one is minted. Do not retry — use the credential issued at first registration.
+
+`-2016` means the submitted secret key does not control the note: the backend derived its public key and it did not match the note's on-chain owner. Send the secret key of the note you are registering — a key that cannot sign for the note would never produce valid trades.
 
 Authentication errors are split intentionally: `-1003` signals a malformed
 request envelope (missing or unparseable `X-DODEX-APIKEY`, `timestamp`,
@@ -747,9 +750,9 @@ Response fields:
 | `apiSecret` | STRING | The HMAC signing secret, hex. **Returned only here** — it is stored sealed and cannot be retrieved again, so capture it now. |
 | `permissions` | ARRAY | Granted permissions: `["USER_DATA", "TRADE"]`. |
 
-Each note can be registered once. Registering a note that already has an account returns `-2015` (HTTP 409); the existing credential is left untouched and no second one is minted. Losing an `apiSecret` cannot be undone by re-registering the same note.
+Each note can be registered once. Registering a note that already has an account returns `-2015` (HTTP 409); the existing credential is left untouched and no second one is minted. Losing an `apiSecret` cannot be undone by re-registering the same note. The submitted secret key must be the note's own key — the backend checks it against the note's on-chain owner and returns `-2016` otherwise.
 
-Errors: `-1102` (a mandatory field is missing), `-1130` (a field is malformed — bad hex, over 256 bits, or an unknown body key), `-2013` (the note is not deployed on-chain), `-2015` (the note is already registered).
+Errors: `-1102` (a mandatory field is missing), `-1130` (a field is malformed — bad hex, over 256 bits, or an unknown body key), `-2013` (the note is not deployed on-chain), `-2015` (the note is already registered), `-2016` (the submitted key does not control the note).
 
 ### Account Balance
 

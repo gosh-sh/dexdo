@@ -40,8 +40,8 @@ runs low. The pool needs only one funded PN.
 cargo nextest run -p dodex-api --run-ignored only --test-threads 1
 ```
 
-Slot ownership keeps the **PN-level** `_busy` lock contention-free across
-tests, but the e2e setup in
+Single-threaded execution (above) keeps the **PN-level** `_busy` lock
+contention-free across tests, but the e2e setup in
 [`services/api/tests/common/deploy_market.rs`](../../services/api/tests/common/deploy_market.rs)
 also talks to **shellnet-global** singletons that every test shares:
 

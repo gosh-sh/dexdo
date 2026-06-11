@@ -135,11 +135,12 @@ a pool per consumer) so they never contend on the same PN on-chain:
 | local e2e (`cargo nextest … --run-ignored only`) | `tests/fixtures/seed_notes.json` | drop locally |
 | CI e2e | S3, fetched via the `E2E_NOTES_URL` secret | upload the slice; CI `curl`s it into `tests/fixtures/seed_notes.json` |
 
-The e2e slices need **≥ 5 notes** (one per slot — see
-[tests/fixtures/README.md](../tests/fixtures/README.md)), each funded above the
-~300 NACKL a market deploy spends. The `.seed_notes.json` sidecar is already in
-the right format — take the slice and place/upload it; all three files are
-secret (real keys) and git-ignored / never committed.
+The e2e slice needs **at least one funded note** (the suite shares a single
+deployer-PN — see [tests/fixtures/README.md](../tests/fixtures/README.md)),
+funded to cover every test's ~300 NACKL market deploy across the whole run.
+The `.seed_notes.json` sidecar is already in the right format — take the slice
+and place/upload it; all three files are secret (real keys) and git-ignored /
+never committed.
 
 ## Tests
 
