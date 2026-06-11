@@ -94,9 +94,11 @@ pub struct AuthSection {
     #[serde(default)]
     pub seed_accounts: bool,
     /// Path to the JSON notes file the seeder reads when `seed_accounts`
-    /// is on. Per-environment: the dev/test file ships dummy custody keys
-    /// and is committed; real staging notes are provided out of band and
-    /// never committed. Required whenever `seed_accounts` is true.
+    /// is on. The file holds real note custody keys, so it is supplied out
+    /// of band per environment and never committed (`config/seed_notes*.json`
+    /// is gitignored). The only committed notes file is the cargo test
+    /// fixture `services/api/tests/fixtures/seed_notes_dummy.json`. Required
+    /// whenever `seed_accounts` is true.
     #[serde(default)]
     pub seed_accounts_path: Option<String>,
 }
