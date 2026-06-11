@@ -776,7 +776,7 @@ Errors:
 | --- | --- | --- |
 | `marketAddress` or `symbol` missing or blank | `-1102` | 400 |
 | `limit` present but not an integer | `-1130` | 400 |
-| `limit` outside `[1, 1000]` | `-1130` | 400 |
+| `limit` outside `[1, 1000]` | `-1102` | 400 |
 | `(marketAddress, symbol)` pair not found, or its market has not been reconciled yet | `-1121` | 404 |
 | Trade data is temporarily inconsistent | `-1500` | 503 |
 

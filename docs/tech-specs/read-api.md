@@ -390,9 +390,9 @@ The endpoint is public, so there are no auth rows. The 503 is deliberate and tra
 
 The read path depends on one write-side addition (detail in [indexer.md §Projection — public trades](indexer.md#projection--public-trades)):
 
-- **`trades` table + `trades_tape_idx`** — a new append-only table (migration; [`data-schema.md`](data-schema.md#trades) updated synchronously). The existing `OrderBook.OrderFilled` projector that maintains `live_orders` is extended to also insert one `trades` row **on the taker-side event** (`isTaker = true`) and nothing on the maker side, so a match is recorded exactly once. `trade_id` is that taker event's `chain_order`; the insert is `ON CONFLICT (trade_id) DO NOTHING`, so reprojection from `raw_events` is idempotent. An `OrderFilled` observed before its parent `OrderPlaced` is `Deferred` and replayed, exactly as for `live_orders`.
+- **`trades` table + `trades_tape_idx`** — a new append-only table (migration; [`data-schema.md`](data-schema.md#trades) updated synchronously). The existing `OrderBook.OrderFilled` projector that maintains `live_orders` is extended to also insert one `trades` row **on the taker-side event** (`isTaker = true`) and nothing on the maker side, so a match is recorded exactly once. `trade_id` is that taker event's `chain_order`; a replayed insert conflicts on it and only coalesces a `NULL` `chain_time` (first-write-wins), so reprojection from `raw_events` is idempotent. An `OrderFilled` observed before its parent `OrderPlaced` is `Deferred` and replayed, exactly as for `live_orders`.
 
-Until this projector extension ships, the `trades` table is empty and every tape reads `[]`; no read-side gate is needed because an empty tape is already the valid steady state.
+No read-side gate guards the projector: an empty `trades` table simply reads `[]`, already the valid steady state for a market that has opened but not yet traded.
 
 ### Eventual consistency
 

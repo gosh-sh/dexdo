@@ -282,7 +282,12 @@ derivation in [indexer.md](indexer.md#projection--public-trades); read side in
 | `chain_time` | `timestamptz` | On-chain block time of the taker `OrderFilled` event ([`raw_events.created_at_chain`](#raw_events)). Drives `time` (Unix ms) in trade responses. NULL when the gateway omitted `created_at`; such rows are filtered out of the read query, matching `live_orders` / `/api/v1/orders`. |
 | `created_at` | `timestamptz` | Bookkeeping (indexer ingestion wall-clock). |
 
-Index: `trades_tape_idx` — `(orderbook_address, outcome_id, trade_id DESC)`. Backs the newest-first per-outcome read (`ORDER BY trade_id DESC LIMIT $limit`) as an index range scan. `trades` is insert-only with `ON CONFLICT (trade_id) DO NOTHING`, so reprojection from `raw_events` is idempotent.
+Index: `trades_tape_idx` — `(orderbook_address, outcome_id, trade_id DESC)`. Backs the newest-first per-outcome read (`ORDER BY trade_id DESC LIMIT $limit`) as an index range scan. `trades` is insert-only; a replayed insert conflicts on `trade_id` and only coalesces a `NULL` `chain_time` (first-write-wins), so reprojection from `raw_events` is idempotent.
+
+Recovery notes for on-call:
+
+- **Row hidden by `chain_time IS NULL`** (gateway delivered the fill without `created_at`): repair `raw_events.created_at_chain` for the taker event, clear its `processed_at`, and the next reprojection sweep heals `chain_time` in place via the conflict-arm coalesce.
+- **Tape 503s for one outcome** (`MarketInconsistent` from an undecodable `price`/`qty`): the table is append-only and the read is newest-first, so one corrupt row inside the newest `limit` rows fails every request for that `(orderbook_address, outcome_id)` until it is fixed. The failing `trade_id`/axis/raw value is logged by the read path; verify against the originating `raw_events` row, then correct or delete the corrupt `trades` row manually.
 
 ### `order_book_snapshots`
 

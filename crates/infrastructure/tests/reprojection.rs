@@ -365,6 +365,7 @@ async fn orderfilled_deferred_replays_after_orderplaced() {
     let decoded = json!({
         "orderId": order_id,
         "filledAmount": "30",
+        "isTaker": false,
     });
     insert_raw(&pool, &msg_id, &orderbook_addr, "OrderBook.OrderFilled", &decoded).await;
 
@@ -858,7 +859,7 @@ async fn orderfilled_advances_chain_updated_at() {
     .bind(format!("5f80{msg_id_fill:0>28}"))
     .bind(fill_seconds)
     .bind(&orderbook_addr)
-    .bind(json!({ "orderId": order_id, "filledAmount": "10" }))
+    .bind(json!({ "orderId": order_id, "filledAmount": "10", "isTaker": false }))
     .execute(&pool)
     .await
     .expect("insert fill");
@@ -1009,7 +1010,7 @@ async fn orderplaced_fill_cancel_pipeline_reports_partial_executed_qty() {
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
-        &json!({ "orderId": order_id, "filledAmount": "3000000" }),
+        &json!({ "orderId": order_id, "filledAmount": "3000000", "isTaker": false }),
     )
     .await;
     insert_raw(
@@ -1115,7 +1116,7 @@ async fn orderplaced_full_fill_then_cancel_keeps_filled_status() {
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
-        &json!({ "orderId": order_id, "filledAmount": "10000000" }),
+        &json!({ "orderId": order_id, "filledAmount": "10000000", "isTaker": false }),
     )
     .await;
     // OrderCancelled arrives after the full fill — must NOT regress
@@ -1223,7 +1224,7 @@ async fn orderplaced_cancel_then_fill_keeps_canceled_status_and_remainder() {
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
-        &json!({ "orderId": order_id, "filledAmount": "10000000" }),
+        &json!({ "orderId": order_id, "filledAmount": "10000000", "isTaker": false }),
     )
     .await;
     insert_raw(
@@ -1326,7 +1327,7 @@ async fn orderfilled_on_filled_row_preserves_remainder() {
         &orderbook_addr,
         "OrderBook.OrderFilled",
         1_700_001_000,
-        &json!({ "orderId": order_id, "filledAmount": "100" }),
+        &json!({ "orderId": order_id, "filledAmount": "100", "isTaker": false }),
     )
     .await;
 
@@ -1668,7 +1669,7 @@ async fn orderfilled_does_not_rewrite_rejected_row() {
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
-        &json!({ "orderId": order_id, "filledAmount": "100" }),
+        &json!({ "orderId": order_id, "filledAmount": "100", "isTaker": false }),
     )
     .await;
 
@@ -1907,7 +1908,7 @@ async fn orderfilled_does_not_auto_heal_sentinel_row() {
         &msg_id_fill,
         &orderbook_addr,
         "OrderBook.OrderFilled",
-        &json!({ "orderId": order_id, "filledAmount": "60" }),
+        &json!({ "orderId": order_id, "filledAmount": "60", "isTaker": false }),
     )
     .await;
 
@@ -2169,4 +2170,709 @@ async fn orderplaced_rejects_non_string_client_order_id() {
 
     assert_eq!(stats.failed, 1, "non-string clientOrderId must be reported as a failed projection");
     assert_eq!(row_count, 0, "no live_orders row may materialise when clientOrderId is non-string",);
+}
+
+/// On a taker-side OrderFilled (`isTaker = true`) the projector writes exactly
+/// one `trades` row. `trade_id` is the event's chain_order; `price`/`qty` come
+/// from the event (`clearingPrice`/`filledAmount`), while `outcome_id` and
+/// direction are recovered from the order's `live_orders` row — the deployed
+/// event carries neither. The parent is a SELL, so a taker fill means the
+/// buyer is the maker => `is_buyer_maker = true`.
+#[tokio::test]
+async fn taker_orderfilled_writes_one_trade_row() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_taker_trade";
+    let book = format!("0:{test}_book");
+    let order_id = "42";
+    let msg_id = format!("{test}-fill-msg");
+    let chain_order = format!("5f80{msg_id:0>28}");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    // Parent order price (5000) differs from the fill's clearingPrice (6150)
+    // so the assertion proves the trade price is the clearing price, not the
+    // resting order's price.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 7, false, 5000::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "clearingPrice": "6150",
+        "isTaker": true,
+    });
+    insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let row: (String, i32, bool, String, String, bool) = sqlx::query_as(
+        "select trade_id, outcome_id, is_buyer_maker, price::text, qty::text, \
+                chain_time is not null \
+           from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_one(&pool)
+    .await
+    .expect("exactly one trade row");
+    assert_eq!(row.0, chain_order, "trade_id is the taker event's chain_order");
+    assert_eq!(row.1, 7, "outcome_id recovered from the order row");
+    assert!(row.2, "SELL taker => buyer is the maker => is_buyer_maker = true");
+    assert_eq!(row.3, "6150", "price comes from clearingPrice, not the order");
+    assert_eq!(row.4, "30", "qty comes from filledAmount");
+    assert!(row.5, "chain_time populated from the event");
+
+    let count: i64 = sqlx::query_scalar("select count(*) from trades where orderbook_address = $1")
+        .bind(&book)
+        .fetch_one(&pool)
+        .await
+        .expect("count trades");
+    assert_eq!(count, 1, "exactly one trade per taker fill");
+
+    purge(&pool, cleanup).await;
+}
+
+/// A maker-side OrderFilled (`isTaker = false`) decrements its `live_orders`
+/// row but writes no `trades` row, so a match is never double-counted.
+#[tokio::test]
+async fn maker_orderfilled_writes_no_trade_row() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_maker_no_trade";
+    let book = format!("0:{test}_book");
+    let order_id = "43";
+    let msg_id = format!("{test}-fill-msg");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "clearingPrice": "6150",
+        "isTaker": false,
+    });
+    insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let trade_count: i64 =
+        sqlx::query_scalar("select count(*) from trades where orderbook_address = $1")
+            .bind(&book)
+            .fetch_one(&pool)
+            .await
+            .expect("count trades");
+    assert_eq!(trade_count, 0, "maker-side fill writes no trades row");
+
+    // The maker path still mutates live_orders: amount_remaining 100 - 30 = 70.
+    let remaining: String = sqlx::query_scalar(
+        "select amount_remaining::text from live_orders \
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&book)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read live_orders");
+    assert_eq!(remaining, "70", "maker fill still decrements amount_remaining");
+
+    purge(&pool, cleanup).await;
+}
+
+/// Re-projecting the same taker OrderFilled must not duplicate the trade:
+/// `INSERT ... ON CONFLICT (trade_id) DO NOTHING` makes replay from raw_events
+/// idempotent.
+#[tokio::test]
+async fn taker_trade_insert_is_idempotent_on_replay() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_taker_idempotent";
+    let book = format!("0:{test}_book");
+    let order_id = "55";
+    let msg_id = format!("{test}-fill-msg");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   1000::numeric, 1000::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "clearingPrice": "6150",
+        "isTaker": true,
+    });
+    insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
+    repo.reproject_pending(1000).await.expect("reproject pass 1");
+
+    // Force a second projection of the very same event.
+    sqlx::query("update raw_events set processed_at = null where msg_id = $1")
+        .bind(&msg_id)
+        .execute(&pool)
+        .await
+        .expect("reset processed_at");
+    repo.reproject_pending(1000).await.expect("reproject pass 2");
+
+    let (count, any_buyer_maker): (i64, bool) = sqlx::query_as(
+        "select count(*), bool_or(is_buyer_maker) from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_one(&pool)
+    .await
+    .expect("count trades");
+    assert_eq!(count, 1, "replaying the same OrderFilled must not duplicate the trade");
+    // The parent order is a BUY, so its taker fill means the maker sold: the
+    // buyer is NOT the maker. Complements the SELL-taker => true direction in
+    // taker_orderfilled_writes_one_trade_row.
+    assert!(!any_buyer_maker, "BUY taker => is_buyer_maker = false");
+
+    purge(&pool, cleanup).await;
+}
+
+/// A taker OrderFilled observed before its parent OrderPlaced defers without
+/// writing a trade, and the replay — once the live_orders row exists — writes
+/// exactly one. The tape's whole write path rides on this deferral mechanism:
+/// a regression here means silently missing trades, not an error.
+#[tokio::test]
+async fn deferred_taker_orderfilled_writes_trade_on_replay() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_deferred_taker_trade";
+    let book = format!("0:{test}_book");
+    let order_id = "88";
+    let msg_id = format!("{test}-fill-msg");
+    let chain_order = format!("5f80{msg_id:0>28}");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "clearingPrice": "6150",
+        "isTaker": true,
+    });
+    insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
+
+    // Pass 1: no parent row -> Deferred, and no trade may leak out early.
+    repo.reproject_pending(1000).await.expect("reproject pass 1");
+    assert!(
+        !processed_at_is_set(&pool, &msg_id).await,
+        "deferred taker OrderFilled must keep processed_at null"
+    );
+    let early: i64 = sqlx::query_scalar("select count(*) from trades where orderbook_address = $1")
+        .bind(&book)
+        .fetch_one(&pool)
+        .await
+        .expect("count trades pass 1");
+    assert_eq!(early, 0, "no trade row may exist before the parent OrderPlaced lands");
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 3, false, 5000::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    // Pass 2: parent exists -> the replayed fill writes exactly one trade.
+    repo.reproject_pending(1000).await.expect("reproject pass 2");
+    assert!(processed_at_is_set(&pool, &msg_id).await, "replay must stamp processed_at");
+
+    let rows: Vec<(String, i32, bool)> = sqlx::query_as(
+        "select trade_id, outcome_id, is_buyer_maker from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_all(&pool)
+    .await
+    .expect("read trades");
+    assert_eq!(rows.len(), 1, "replay writes exactly one trade row");
+    assert_eq!(rows[0].0, chain_order, "trade_id is the taker event's chain_order");
+    assert_eq!(rows[0].1, 3, "outcome_id recovered from the replayed parent row");
+    assert!(rows[0].2, "SELL parent => taker fill => buyer is the maker");
+
+    purge(&pool, cleanup).await;
+}
+
+/// One taker order crossing N makers emits N taker-side OrderFilled events
+/// (distinct chain_orders) and therefore N trades with N distinct trade_ids.
+#[tokio::test]
+async fn one_taker_over_n_makers_yields_n_distinct_trades() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_taker_n_fills";
+    let book = format!("0:{test}_book");
+    let order_id = "99";
+
+    let mut cleanup: Vec<(String, String)> = vec![
+        ("delete from trades where orderbook_address = $1".into(), book.clone()),
+        ("delete from live_orders where orderbook_address = $1".into(), book.clone()),
+    ];
+    for i in 0..3 {
+        cleanup
+            .push(("delete from raw_events where msg_id = $1".into(), format!("{test}-fill-{i}")));
+    }
+    let cleanup_refs: Vec<(&str, &str)> =
+        cleanup.iter().map(|(s, k)| (s.as_str(), k.as_str())).collect();
+    purge(&pool, &cleanup_refs).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   1000::numeric, 1000::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    for i in 0..3 {
+        let msg_id = format!("{test}-fill-{i}");
+        let decoded = json!({
+            "orderId": order_id,
+            "filledAmount": "10",
+            "clearingPrice": "6150",
+            "isTaker": true,
+        });
+        insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
+    }
+    repo.reproject_pending(1000).await.expect("reproject");
+
+    let (count, distinct): (i64, i64) = sqlx::query_as(
+        "select count(*), count(distinct trade_id) from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_one(&pool)
+    .await
+    .expect("count trades");
+    assert_eq!(count, 3, "one taker over 3 makers yields 3 trades");
+    assert_eq!(distinct, 3, "each fill has its own chain_order as trade_id");
+
+    purge(&pool, &cleanup_refs).await;
+}
+
+/// An `isTaker` that is missing, JSON-null, or not a bool (ABI drift, decode
+/// regression) must surface as a failed projection — not collapse into the
+/// maker path, which would silently drop the public trade with no log and,
+/// once `processed_at` is stamped, no replay able to heal it. The ABI
+/// declares `isTaker` on every OrderFilled, so absence is the same drift as
+/// a wrong type. Mirrors the loud failure on a malformed `isBuy` in
+/// OrderPlaced.
+#[tokio::test]
+async fn malformed_is_taker_fails_projection_loudly() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_malformed_istaker";
+    let book = format!("0:{test}_book");
+    let order_id = "77";
+    // One event per drift shape: wrong type, JSON null, absent field.
+    let variants: &[(&str, serde_json::Value)] = &[
+        (
+            "string",
+            json!({"orderId": order_id, "filledAmount": "30",
+                          "clearingPrice": "6150", "isTaker": "yes"}),
+        ),
+        (
+            "null",
+            json!({"orderId": order_id, "filledAmount": "30",
+                        "clearingPrice": "6150", "isTaker": null}),
+        ),
+        (
+            "absent",
+            json!({"orderId": order_id, "filledAmount": "30",
+                          "clearingPrice": "6150"}),
+        ),
+    ];
+    let msg_ids: Vec<String> = variants.iter().map(|(k, _)| format!("{test}-{k}-msg")).collect();
+
+    let mut cleanup: Vec<(String, String)> = vec![
+        ("delete from trades where orderbook_address = $1".into(), book.clone()),
+        ("delete from live_orders where orderbook_address = $1".into(), book.clone()),
+    ];
+    for msg_id in &msg_ids {
+        cleanup.push(("delete from raw_events where msg_id = $1".into(), msg_id.clone()));
+    }
+    let cleanup_refs: Vec<(&str, &str)> =
+        cleanup.iter().map(|(s, k)| (s.as_str(), k.as_str())).collect();
+    purge(&pool, &cleanup_refs).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    for ((_, decoded), msg_id) in variants.iter().zip(&msg_ids) {
+        insert_raw(&pool, msg_id, &book, "OrderBook.OrderFilled", decoded).await;
+    }
+
+    let stats = repo.reproject_pending(1000).await.expect("reproject");
+    assert_eq!(
+        stats.failed, 3,
+        "missing / null / non-bool isTaker must each be reported as a failed projection"
+    );
+    for ((kind, _), msg_id) in variants.iter().zip(&msg_ids) {
+        assert!(
+            !processed_at_is_set(&pool, msg_id).await,
+            "isTaker={kind}: a failed projection must keep processed_at null \
+             so a fixed decoder can replay it"
+        );
+    }
+
+    let trade_count: i64 =
+        sqlx::query_scalar("select count(*) from trades where orderbook_address = $1")
+            .bind(&book)
+            .fetch_one(&pool)
+            .await
+            .expect("count trades");
+    assert_eq!(trade_count, 0, "no trade row may materialise from a malformed event");
+
+    purge(&pool, &cleanup_refs).await;
+}
+
+/// A taker OrderFilled with no `clearingPrice` fails the projection
+/// atomically: the live_orders mutation issued earlier in the same
+/// transaction rolls back with the trade insert, no trade row appears, and
+/// `processed_at` stays null so a fixed payload can replay. A partial apply
+/// would decrement the order while writing no trade — a silent divergence
+/// between /api/v1/orders and /api/v1/trades.
+#[tokio::test]
+async fn taker_orderfilled_without_clearing_price_rolls_back_atomically() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_no_clearing_price";
+    let book = format!("0:{test}_book");
+    let order_id = "91";
+    let msg_id = format!("{test}-fill-msg");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "isTaker": true,
+    });
+    insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
+
+    let stats = repo.reproject_pending(1000).await.expect("reproject");
+    assert_eq!(stats.failed, 1, "missing clearingPrice on a taker fill is a failed projection");
+    assert!(
+        !processed_at_is_set(&pool, &msg_id).await,
+        "a failed projection must keep processed_at null so a fixed payload can replay it"
+    );
+
+    let remaining: String = sqlx::query_scalar(
+        "select amount_remaining::text from live_orders \
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&book)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read live_orders");
+    assert_eq!(remaining, "100", "the live_orders mutation must roll back with the trade insert");
+
+    let trade_count: i64 =
+        sqlx::query_scalar("select count(*) from trades where orderbook_address = $1")
+            .bind(&book)
+            .fetch_one(&pool)
+            .await
+            .expect("count trades");
+    assert_eq!(trade_count, 0, "no trade row may survive the rolled-back transaction");
+
+    purge(&pool, cleanup).await;
+}
+
+/// A taker OrderFilled whose raw event carries no chain timestamp still
+/// records the trade, but with `chain_time = NULL`: the /api/v1/trades read
+/// query filters `chain_time IS NOT NULL`, so the row is invisible to the
+/// public tape until the timestamp is healed. The projection itself applies —
+/// `processed_at` is stamped and live_orders advances.
+#[tokio::test]
+async fn taker_orderfilled_without_chain_time_writes_hidden_trade_row() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_taker_null_chain_time";
+    let book = format!("0:{test}_book");
+    let order_id = "92";
+    let msg_id = format!("{test}-fill-msg");
+    let chain_order = format!("5f80{msg_id:0>28}");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "clearingPrice": "6150",
+        "isTaker": true,
+    });
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, null, $3, $3, 'OrderBook.OrderFilled', '{}'::jsonb, $4)"#,
+    )
+    .bind(&msg_id)
+    .bind(&chain_order)
+    .bind(&book)
+    .bind(&decoded)
+    .execute(&pool)
+    .await
+    .expect("insert raw_events without chain timestamp");
+
+    repo.reproject_pending(1000).await.expect("reproject");
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "a missing chain timestamp must not block the projection"
+    );
+
+    let row: (String, bool) = sqlx::query_as(
+        "select trade_id, chain_time is null from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_one(&pool)
+    .await
+    .expect("exactly one trade row");
+    assert_eq!(row.0, chain_order, "trade_id is the taker event's chain_order");
+    assert!(row.1, "the trade lands with NULL chain_time, hidden from the tape read");
+
+    // Recovery path: an operator fixes the raw event's timestamp and re-queues
+    // it. The replayed insert must heal the NULL chain_time in place
+    // (first-write-wins coalesce) instead of being swallowed whole by the
+    // conflict arm. Fractional seconds also pin sub-second precision through
+    // to_timestamp.
+    sqlx::query(
+        "update raw_events set created_at_chain = to_timestamp(1700000000.5), \
+                               processed_at = null \
+          where msg_id = $1",
+    )
+    .bind(&msg_id)
+    .execute(&pool)
+    .await
+    .expect("repair raw event timestamp");
+    repo.reproject_pending(1000).await.expect("reproject heal pass");
+
+    let healed: Vec<(i64,)> = sqlx::query_as(
+        "select (extract(epoch from chain_time) * 1000)::bigint \
+           from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_all(&pool)
+    .await
+    .expect("read healed trade");
+    assert_eq!(healed.len(), 1, "healing must update the row, not duplicate it");
+    assert_eq!(
+        healed[0].0, 1_700_000_000_500,
+        "replay after repairing raw_events must heal chain_time (sub-second preserved)"
+    );
+
+    purge(&pool, cleanup).await;
+}
+
+/// A taker OrderFilled against an already-terminal order: the SQL CASE guards
+/// hold every live_orders mutation (and warn loudly), but the tape insert is
+/// deliberately not gated on the prior status — the chain emitted the fill,
+/// and the public tape mirrors chain events one-to-one. Pinned so a future
+/// change to the terminal guard cannot silently change what the tape records.
+#[tokio::test]
+async fn taker_orderfilled_on_terminal_order_still_records_trade() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_terminal_taker_trade";
+    let book = format!("0:{test}_book");
+    let order_id = "94";
+    let msg_id = format!("{test}-fill-msg");
+    let chain_order = format!("5f80{msg_id:0>28}");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    // Terminal prior row: FILLED with 0 remaining.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   100::numeric, 0::numeric, 'FILLED',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert terminal live_orders row");
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "clearingPrice": "6150",
+        "isTaker": true,
+    });
+    insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+    assert!(processed_at_is_set(&pool, &msg_id).await, "the event still projects as Applied");
+
+    let trade: (String, String) =
+        sqlx::query_as("select trade_id, qty::text from trades where orderbook_address = $1")
+            .bind(&book)
+            .fetch_one(&pool)
+            .await
+            .expect("post-terminal taker fill still lands on the tape");
+    assert_eq!(trade.0, chain_order);
+    assert_eq!(trade.1, "30");
+
+    let row: (String, String, String) = sqlx::query_as(
+        "select status, amount_remaining::text, last_chain_order from live_orders \
+          where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&book)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read live_orders");
+    assert_eq!(row.0, "FILLED", "terminal status is held");
+    assert_eq!(row.1, "0", "amount_remaining is held");
+    assert_eq!(row.2, "5f800000000000000000", "last_chain_order is held");
+
+    purge(&pool, cleanup).await;
 }

@@ -33,6 +33,8 @@ use dodex_application::GetMarketsUseCase;
 use dodex_application::GetOraclesUseCase;
 use dodex_application::GetOrdersInput;
 use dodex_application::GetOrdersUseCase;
+use dodex_application::GetTradesInput;
+use dodex_application::GetTradesUseCase;
 use dodex_application::MarketReadRepository;
 use dodex_application::MarketsFilter;
 use dodex_application::MarketsListing;
@@ -57,6 +59,7 @@ use dodex_domain::Symbol;
 use dodex_domain::Terminal;
 use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
+use dodex_domain::Trade;
 use dodex_infrastructure::auth::PostgresAuthenticator;
 use dodex_infrastructure::chain_sender::DexChainSender;
 use dodex_infrastructure::config::ApiConfig;
@@ -424,6 +427,28 @@ struct OrdersPageResponse {
     /// Opaque pagination cursor. Pass back verbatim to fetch the next
     /// page; `null` when the last page has been returned.
     next_cursor: Option<String>,
+}
+
+/// One public trade in the `GET /api/v1/trades` tape. The endpoint returns a
+/// bare JSON array of these, newest first.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct TradeResponse {
+    /// Opaque, lex-comparable id for the match. The `orderUpdate` stream is
+    /// specified to surface this value as its `t` field (docs/api-spec.md).
+    trade_id: String,
+    /// Match (clearing) price, scaled by the outcome price precision.
+    price: String,
+    /// Matched quantity, scaled by the outcome quantity precision.
+    qty: String,
+    /// Quote-asset notional (`price × qty`), scaled by the quote asset's
+    /// on-chain `decimals`.
+    quote_qty: String,
+    /// Unix milliseconds. On-chain match time.
+    time: i64,
+    /// `true` when the resting (maker) side was the buy order and the taker
+    /// sold (downtick); `false` when the taker bought.
+    is_buyer_maker: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -936,6 +961,59 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
         bids: snapshot.bids.into_iter().map(|level| [level.price, level.quantity]).collect(),
         asks: snapshot.asks.into_iter().map(|level| [level.price, level.quantity]).collect(),
     }))
+}
+
+/// Most recent public trades for a (marketAddress, symbol) outcome.
+#[endpoint(
+    tags("market-data"),
+    summary = "Recent trades",
+    parameters(
+        ("marketAddress" = String, Query, description = "Market address."),
+        ("symbol" = String, Query, description = "Outcome-token symbol."),
+        ("limit" = Option<i64>, Query, minimum = 1, maximum = 1000, description = "Number of trades, newest first. Default 20, max 1000."),
+    ),
+    security(()),
+)]
+async fn get_trades(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<Vec<TradeResponse>>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+
+    // marketAddress / symbol are mandatory: missing or blank is -1102, the
+    // same contract as depth applies via `non_empty_query`.
+    let market_address = non_empty_query(req, "marketAddress")
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let symbol =
+        non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
+
+    // A present-but-non-numeric `limit` (e.g. `limit=abc`) is -1130 here;
+    // out-of-range numeric inputs come back as -1102 from the use case's
+    // [1, TRADES_MAX_LIMIT] bound check — matching /api/v1/orders' split.
+    let limit = optional_typed_query::<i64>(req, "limit")?;
+
+    let use_case = GetTradesUseCase::new(state.repo);
+    let trades = use_case
+        .execute(GetTradesInput {
+            market_address: MarketAddress(market_address),
+            symbol: Symbol(symbol),
+            limit,
+        })
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "get_trades"))?;
+
+    Ok(Json(trades.into_iter().map(trade_to_dto).collect()))
+}
+
+fn trade_to_dto(trade: Trade) -> TradeResponse {
+    let Trade { trade_id, price, qty, quote_qty, time, is_buyer_maker } = trade;
+    TradeResponse { trade_id, price, qty, quote_qty, time, is_buyer_maker }
 }
 
 /// List orders for the authenticated trading PN, with optional filters.
@@ -2042,6 +2120,7 @@ pub fn build_router(state: AppState) -> Router {
         .push(Router::with_path("api/v1/markets").get(get_markets))
         .push(Router::with_path("api/v1/depth").get(get_depth))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
+        .push(Router::with_path("api/v1/trades").get(get_trades))
         .push(
             // Subrouter scoped to private endpoints. The auth hoop
             // runs only for routes pushed under this branch, so the
@@ -2082,6 +2161,7 @@ pub fn openapi_doc() -> OpenApi {
         .push(Router::with_path("api/v1/markets").get(get_markets))
         .push(Router::with_path("api/v1/depth").get(get_depth))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
+        .push(Router::with_path("api/v1/trades").get(get_trades))
         .push(Router::with_path("api/v1/order").post(create_order).delete(delete_order))
         .push(Router::with_path("api/v1/orders").get(get_orders))
         .push(

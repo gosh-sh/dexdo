@@ -1,3 +1,6 @@
+// 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
+//
+
 // HTTP-level integration tests for `POST /api/v1/buyFullSet` that
 // exercise the handler + use case end to end **without** a database or
 // a real chain. Mirrors the triad in `cancel_order_http.rs`: a fake
@@ -37,6 +40,7 @@ use dodex_application::OrderForCancel;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
 use dodex_application::SplitFullSetPayload;
+use dodex_application::TradesLimit;
 use dodex_application::TradingPn;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
@@ -46,6 +50,7 @@ use dodex_domain::MarketsPage;
 use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
+use dodex_domain::Trade;
 use salvo::http::StatusCode;
 use salvo::test::ResponseExt;
 use salvo::test::TestClient;
@@ -123,6 +128,15 @@ impl MarketReadRepository for FakeRepo {
         _: u16,
     ) -> Result<DepthSnapshot, anyhow::Error> {
         unimplemented!("get_depth is not exercised by buy_full_set_http tests")
+    }
+
+    async fn get_trades(
+        &self,
+        _: &MarketAddress,
+        _: &Symbol,
+        _: TradesLimit,
+    ) -> Result<Vec<Trade>, anyhow::Error> {
+        unimplemented!("get_trades is not exercised by buy_full_set_http tests")
     }
 
     async fn resolve_for_new_order(

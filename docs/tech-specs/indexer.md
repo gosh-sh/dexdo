@@ -123,10 +123,14 @@ No pairing of the two per-side events is required for the tape: each taker-side 
 exactly one trade. One taker order crossing N makers produces N taker-side `OrderFilled`
 events and therefore N trades, each with its own `chain_order` as `tradeId`.
 
-Idempotency follows from the key: `tradeId` is unique, so the insert is
-`ON CONFLICT (tradeId) DO NOTHING`, making reprojection from `raw_events` safe. As with
-`OrderFilled` on `live_orders`, an event observed before its parent `OrderPlaced` is
-`Deferred` and retried.
+Idempotency follows from the key: `tradeId` is unique, so a replayed insert conflicts on
+it and leaves every immutable column alone — the conflict arm's only action is
+`chain_time = coalesce(trades.chain_time, excluded.chain_time)`, a first-write-wins fill
+of a `NULL` chain time (the recovery path for a row hidden from the tape because the
+gateway delivered the event without `created_at`: repair `raw_events.created_at_chain`,
+clear `processed_at`, and the next sweep heals the row in place). As with `OrderFilled`
+on `live_orders`, an event observed before its parent `OrderPlaced` is `Deferred` and
+retried.
 
 The same canonical `tradeId` is the value the private `orderUpdate` WebSocket frame must
 surface as `t` (see [api-spec.md](../api-spec.md#recent-trades)); associating it with the

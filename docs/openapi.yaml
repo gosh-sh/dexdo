@@ -734,6 +734,53 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - apiKey: []
+  /api/v1/trades:
+    get:
+      tags:
+      - market-data
+      summary: Recent trades
+      operationId: get_trades
+      parameters:
+      - name: marketAddress
+        in: query
+        description: Market address.
+        required: true
+        schema:
+          type: string
+      - name: symbol
+        in: query
+        description: Outcome-token symbol.
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Number of trades, newest first. Default 20, max 1000.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          maximum: 1000.0
+          minimum: 1.0
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TradeResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
   /readiness:
     get:
       tags:
@@ -1591,6 +1638,44 @@ components:
         stakeStart:
           type: integer
           format: int64
+    TradeResponse:
+      type: object
+      description: |-
+        One public trade in the `GET /api/v1/trades` tape. The endpoint returns a
+        bare JSON array of these, newest first.
+      required:
+      - tradeId
+      - price
+      - qty
+      - quoteQty
+      - time
+      - isBuyerMaker
+      properties:
+        isBuyerMaker:
+          type: boolean
+          description: |-
+            `true` when the resting (maker) side was the buy order and the taker
+            sold (downtick); `false` when the taker bought.
+        price:
+          type: string
+          description: Match (clearing) price, scaled by the outcome price precision.
+        qty:
+          type: string
+          description: Matched quantity, scaled by the outcome quantity precision.
+        quoteQty:
+          type: string
+          description: |-
+            Quote-asset notional (`price × qty`), scaled by the quote asset's
+            on-chain `decimals`.
+        time:
+          type: integer
+          format: int64
+          description: Unix milliseconds. On-chain match time.
+        tradeId:
+          type: string
+          description: |-
+            Opaque, lex-comparable id for the match. The `orderUpdate` stream is
+            specified to surface this value as its `t` field (docs/api-spec.md).
   securitySchemes:
     apiKey:
       type: apiKey
