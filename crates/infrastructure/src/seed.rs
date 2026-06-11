@@ -15,6 +15,7 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use dodex_domain::Permission;
+use dodex_domain::PN_SECKEY_BYTE_LEN;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -25,7 +26,6 @@ use tracing::debug;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::account_registry::ED25519_SECKEY_LEN;
 use crate::crypto;
 use crate::crypto::Kek;
 
@@ -241,8 +241,8 @@ fn validate(parsed: SeedData) -> Result<ValidatedSeedData> {
         let pn_seckey = hex::decode(&account.pn_seckey_hex)
             .with_context(|| format!("pn_seckey_hex for {pn_address} must be valid hex"))?;
         anyhow::ensure!(
-            pn_seckey.len() == ED25519_SECKEY_LEN,
-            "pn_seckey_hex for {pn_address} must be {ED25519_SECKEY_LEN} bytes (got {})",
+            pn_seckey.len() == PN_SECKEY_BYTE_LEN,
+            "pn_seckey_hex for {pn_address} must be {PN_SECKEY_BYTE_LEN} bytes (got {})",
             pn_seckey.len(),
         );
 

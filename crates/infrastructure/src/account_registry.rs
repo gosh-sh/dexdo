@@ -22,6 +22,7 @@ use dodex_application::NewAccountNote;
 use dodex_application::RegisteredAccount;
 use dodex_domain::DomainError;
 use dodex_domain::Permission;
+use dodex_domain::SensitiveBytes;
 use sqlx::PgPool;
 use sqlx::Row;
 use tracing::debug;
@@ -32,12 +33,6 @@ use zeroize::Zeroize;
 use crate::crypto;
 use crate::crypto::Kek;
 use crate::seed::hex_to_dec_uint256;
-
-/// ed25519 secret key length. A wrong length is rejected on every
-/// custody-write path (registration here and the seed notes file) so a
-/// truncated/typo'd key surfaces at write time, not as a silent on-chain
-/// signature failure on the account's first trade.
-pub(crate) const ED25519_SECKEY_LEN: usize = 32;
 
 /// Tags self-registered accounts in `accounts.label`, distinct from the
 /// seeder's `test-mm-NNN`. Informational only — `label` carries no
@@ -62,13 +57,14 @@ impl PostgresAccountRegistry {
 
 /// A note whose fields are already normalised into the form the DB writer
 /// expects: hex public-key / dih converted to the decimal the
-/// `numeric(78,0)` columns want, secret key hex-decoded. Produced by the
-/// pure [`validate_note`] so a malformed field is a typed
+/// `numeric(78,0)` columns want, secret key hex-decoded into a zeroizing
+/// [`SensitiveBytes`] (length-checked at construction, wiped on drop).
+/// Produced by the pure [`validate_note`] so a malformed field is a typed
 /// `InvalidParameter` before any DB statement runs.
 struct ValidatedNote {
     pn_address: String,
     pn_pubkey_dec: String,
-    pn_seckey: Vec<u8>,
+    pn_seckey: SensitiveBytes,
     pn_dih_dec: String,
 }
 
@@ -85,14 +81,18 @@ fn validate_note(note: &NewAccountNote) -> Result<ValidatedNote, DomainError> {
         debug!(error = %format!("{e:#}"), "register: invalid pn_dih_hex");
         DomainError::InvalidParameter
     })?;
-    let pn_seckey = hex::decode(note.pn_seckey_hex.trim()).map_err(|_| {
+    let pn_seckey_bytes = hex::decode(note.pn_seckey_hex.trim()).map_err(|_| {
         debug!("register: pn_seckey_hex is not valid hex");
         DomainError::InvalidParameter
     })?;
-    if pn_seckey.len() != ED25519_SECKEY_LEN {
-        debug!(len = pn_seckey.len(), "register: pn_seckey wrong length");
-        return Err(DomainError::InvalidParameter);
-    }
+    // `SensitiveBytes::seckey` enforces the 32-byte length and zeroizes on
+    // drop. Its own wrong-length error is `Unexpected` (the read path treats
+    // a corrupt DB row as a 500); here the bytes are client-supplied, so a
+    // wrong length is a 400 — remap to `InvalidParameter`.
+    let pn_seckey = SensitiveBytes::seckey(pn_seckey_bytes).map_err(|_| {
+        debug!("register: pn_seckey wrong length");
+        DomainError::InvalidParameter
+    })?;
     Ok(ValidatedNote { pn_address: note.pn_address.clone(), pn_pubkey_dec, pn_seckey, pn_dih_dec })
 }
 
@@ -120,8 +120,8 @@ impl AccountRegistry for PostgresAccountRegistry {
         let api_key = format!("dk_live_{}", hex::encode(key_rand));
         let api_secret_hex = hex::encode(secret);
 
-        let pn_seckey_enc =
-            crypto::seal(&self.kek, &valid.pn_seckey).map_err(unexpected("seal pn_seckey"))?;
+        let pn_seckey_enc = crypto::seal(&self.kek, valid.pn_seckey.as_slice())
+            .map_err(unexpected("seal pn_seckey"))?;
         let api_secret_enc =
             crypto::seal(&self.kek, &secret).map_err(unexpected("seal api_secret"))?;
 
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn validate_accepts_well_formed_note() {
         let v = validate_note(&good_note()).expect("valid note");
-        assert_eq!(v.pn_seckey.len(), ED25519_SECKEY_LEN);
+        assert_eq!(v.pn_seckey.len(), dodex_domain::PN_SECKEY_BYTE_LEN);
         // hex -> decimal conversion produced a non-empty decimal string.
         assert!(v.pn_pubkey_dec.bytes().all(|b| b.is_ascii_digit()));
         assert!(v.pn_dih_dec.bytes().all(|b| b.is_ascii_digit()));
