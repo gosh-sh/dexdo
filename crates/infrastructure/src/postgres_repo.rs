@@ -22,6 +22,7 @@ use dodex_application::OrdersCursor;
 use dodex_application::OrdersPage;
 use dodex_application::OrdersQuery;
 use dodex_application::QueryableOrderStatus;
+use dodex_application::TradesLimit;
 use dodex_domain::decimal_string_is_zero;
 use dodex_domain::descale_pow10;
 use dodex_domain::CancelReason;
@@ -52,6 +53,7 @@ use dodex_domain::Terminal;
 use dodex_domain::TerminalKind;
 use dodex_domain::TimeInForce;
 use dodex_domain::Timings;
+use dodex_domain::Trade;
 use dodex_domain::PRICE_BPS_DECIMALS;
 use num_bigint::BigUint;
 use sqlx::PgPool;
@@ -405,6 +407,189 @@ impl MarketReadRepository for PostgresReadModelRepository {
             bids,
             asks,
         })
+    }
+
+    async fn get_trades(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        limit: TradesLimit,
+    ) -> Result<Vec<Trade>, anyhow::Error> {
+        // Resolution mirrors `get_depth`: the quote-asset `decimals` (joined
+        // from ref_tokens) feeds `quoteQty` scaling, and a reconciled row is
+        // gated on `last_reconciled_at IS NOT NULL` so an unknown pair and a
+        // never-reconciled one collapse to the same `InvalidMarketOrSymbol`.
+        let target: Option<(Option<String>, i32, i32, i32, i32)> = sqlx::query_as(
+            r#"select m.orderbook_address,
+                      mo.outcome_id,
+                      mo.price_precision,
+                      mo.quantity_precision,
+                      rt.decimals
+                 from markets m
+                 join market_outcomes mo on mo.market_id_fk = m.id
+                 join ref_tokens rt on rt.token_type = m.token_type
+                where m.pmp_address = $1
+                  and mo.symbol = $2
+                  and m.last_reconciled_at is not null"#,
+        )
+        .bind(market_address.0.as_str())
+        .bind(symbol.0.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("resolve orderbook_address from (marketAddress, symbol)")?;
+
+        let Some((orderbook_address, outcome_id, price_precision, quantity_precision, decimals)) =
+            target
+        else {
+            return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
+        };
+        let Some(orderbook_address) = orderbook_address.and_then(filter_orderbook) else {
+            // Reconciled market mid-replay (blank orderbook). Fail closed
+            // (503) so the client retries, never an empty tape.
+            tracing::warn!(
+                market = %market_address.0,
+                symbol = %symbol.0,
+                "reconciled market has a NULL/blank orderbook_address; trades fails closed",
+            );
+            return Err(anyhow!(DomainError::MarketInconsistent));
+        };
+
+        // Scales bound by the NUMERIC(38, …) ceiling, exactly as in depth: a
+        // value above the cap would let scale_uint_to_decimal's "0".repeat
+        // detonate the allocator. price/quantity render at the outcome's
+        // precision; quote_qty renders at the quote asset's decimals. Each
+        // guard logs its own axis: a bare 503 with nothing greppable would
+        // leave the poisoned outcome unattributable.
+        let bad_scale = |axis: &'static str, raw: i32| {
+            tracing::warn!(
+                orderbook = %orderbook_address,
+                outcome_id,
+                axis,
+                raw,
+                max = MAX_DECIMAL_PRECISION,
+                "trades decimal scale out of range",
+            );
+            anyhow!(DomainError::MarketInconsistent)
+        };
+        let price_scale = validate_decimal_scale(price_precision)
+            .map_err(|_| bad_scale("price", price_precision))?;
+        let quantity_scale = validate_decimal_scale(quantity_precision)
+            .map_err(|_| bad_scale("quantity", quantity_precision))?;
+        let quote_scale =
+            validate_decimal_scale(decimals).map_err(|_| bad_scale("quote", decimals))?;
+
+        // Step price (basis points) and qty (token atoms) down to their display
+        // grids before formatting. A display precision finer than the chain
+        // scale is read-model misconfiguration, caught here as a negative drop.
+        let price_drop =
+            usize::try_from(i32::from(PRICE_BPS_DECIMALS) - price_precision).map_err(|_| {
+                tracing::warn!(
+                    orderbook = %orderbook_address,
+                    outcome_id,
+                    price_precision,
+                    "trades price_precision exceeds the basis-point scale",
+                );
+                anyhow!(DomainError::MarketInconsistent)
+            })?;
+        let amount_drop = usize::try_from(decimals - quantity_precision).map_err(|_| {
+            tracing::warn!(
+                orderbook = %orderbook_address,
+                outcome_id,
+                quantity_precision,
+                decimals,
+                "trades quantity_precision exceeds the quote-asset decimals",
+            );
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
+
+        // TradesLimit's [1, TRADES_MAX_LIMIT] invariant arrives by type — no
+        // clamp here, because the public trades contract rejects out-of-range
+        // limits upstream instead of silently clamping like depth.
+        let limit = i64::from(limit.get());
+
+        // `trade_id` is the lex-monotonic taker chain-order, so `ORDER BY
+        // trade_id DESC` already yields true newest-first chain order with no
+        // Rust-side re-sort. The plain (non-partial) `trades_tape_idx` serves
+        // it as a range scan. `chain_time IS NOT NULL` guards the rare row the
+        // gateway delivered without a parseable time, matching /api/v1/orders.
+        let rows: Vec<TradeRow> = sqlx::query_as(
+            r#"select trade_id,
+                      price::text as price,
+                      qty::text as qty,
+                      is_buyer_maker,
+                      (extract(epoch from chain_time) * 1000000)::bigint as chain_time_us
+                 from trades
+                where orderbook_address = $1
+                  and outcome_id = $2
+                  and chain_time is not null
+                order by trade_id desc
+                limit $3"#,
+        )
+        .bind(&orderbook_address)
+        .bind(outcome_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("read trades tape")?;
+
+        // FULL_PERCENT = 10^PRICE_BPS_DECIMALS (= 10_000). quoteQty is derived
+        // from the same two raw integers the contract used —
+        // notional_atoms = price * qty / FULL_PERCENT, integer division — so it
+        // never drifts from the on-chain notional by a rounding ulp.
+        let full_percent = BigUint::from(10u32).pow(u32::from(PRICE_BPS_DECIMALS));
+
+        let mut trades = Vec::with_capacity(rows.len());
+        for row in rows {
+            let parse_uint = |raw: &str, axis: &str| {
+                BigUint::parse_bytes(raw.as_bytes(), 10).ok_or_else(|| {
+                    tracing::warn!(
+                        orderbook = %orderbook_address,
+                        outcome_id,
+                        trade_id = %row.trade_id,
+                        axis,
+                        raw,
+                        "trades raw value is not a non-negative integer",
+                    );
+                    anyhow!(DomainError::MarketInconsistent)
+                })
+            };
+            let price_uint = parse_uint(&row.price, "price")?;
+            let qty_uint = parse_uint(&row.qty, "qty")?;
+
+            let notional = (&price_uint * &qty_uint) / &full_percent;
+
+            let log_off_grid = |axis: &'static str, raw: &str| {
+                tracing::warn!(
+                    orderbook = %orderbook_address,
+                    outcome_id,
+                    trade_id = %row.trade_id,
+                    axis,
+                    raw,
+                    "trade value cannot be descaled to the display grid",
+                );
+            };
+            let price_grid = descale_pow10(&row.price, price_drop).map_err(|e| {
+                log_off_grid("price", &row.price);
+                anyhow!(e)
+            })?;
+            let qty_grid = descale_pow10(&row.qty, amount_drop).map_err(|e| {
+                log_off_grid("qty", &row.qty);
+                anyhow!(e)
+            })?;
+
+            trades.push(Trade {
+                trade_id: row.trade_id,
+                price: scale_uint_to_decimal(&price_grid, price_scale),
+                qty: scale_uint_to_decimal(&qty_grid, quantity_scale),
+                quote_qty: scale_uint_to_decimal(&notional.to_str_radix(10), quote_scale),
+                // Microseconds → Unix milliseconds, the same truncation as
+                // `time` / `updateTime` on /api/v1/orders.
+                time: row.chain_time_us / 1_000,
+                is_buyer_maker: row.is_buyer_maker,
+            });
+        }
+
+        Ok(trades)
     }
 
     async fn resolve_for_new_order(
@@ -1506,6 +1691,20 @@ struct DepthLevelRow {
     is_buy: bool,
     price: String,
     quantity: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct TradeRow {
+    trade_id: String,
+    // Raw contract integers as text: price in basis points, qty in token
+    // atoms. Decoded to the display grid at render (see get_trades).
+    price: String,
+    qty: String,
+    is_buyer_maker: bool,
+    // Microseconds since the epoch, from chain_time. This is intentionally
+    // non-Option: the read query's `chain_time IS NOT NULL` predicate is the
+    // safety guard that keeps sqlx from decoding NULL into an i64.
+    chain_time_us: i64,
 }
 
 #[derive(Debug, sqlx::FromRow)]

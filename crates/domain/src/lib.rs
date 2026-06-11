@@ -233,6 +233,24 @@ pub struct DepthSnapshot {
     pub asks: Vec<PriceLevel>,
 }
 
+/// One public trade: a maker↔taker match projected from an
+/// `OrderBook.OrderFilled` event, as served by `GET /api/v1/trades`.
+/// All money fields are pre-rendered decimal strings at API-render scale
+/// (`price` at `price_precision`, `qty` at `quantity_precision`, `quote_qty`
+/// at the quote asset's `decimals`); `time` is Unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trade {
+    /// Opaque, lex-comparable id for the match (the taker event's chain order).
+    pub trade_id: String,
+    pub price: String,
+    pub qty: String,
+    pub quote_qty: String,
+    pub time: i64,
+    /// `true` when the resting (maker) side was the buy order and the taker
+    /// sold (downtick); `false` when the taker bought.
+    pub is_buyer_maker: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderIdentity {
     Chain(String),

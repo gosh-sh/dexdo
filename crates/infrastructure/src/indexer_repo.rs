@@ -131,6 +131,15 @@ impl IndexerRepository {
 
             let event_type = decoded.as_ref().map(|d| d.event_type.clone());
             let decoded_value = decoded.as_ref().map(|d| d.value.clone());
+            let created_at_chain = parse_unix_seconds(edge.node.created_at.as_ref());
+            if should_warn_unparseable_created_at(edge.node.created_at.as_ref(), created_at_chain) {
+                warn!(
+                    msg_id = %edge.node.msg_id,
+                    chain_order,
+                    created_at = ?edge.node.created_at,
+                    "GraphQL event edge has unparseable created_at; storing raw_events.created_at_chain as NULL"
+                );
+            }
 
             let affected = sqlx::query(
                 r#"insert into raw_events
@@ -141,7 +150,7 @@ impl IndexerRepository {
             )
             .bind(&edge.node.msg_id)
             .bind(chain_order)
-            .bind(parse_unix_seconds(edge.node.created_at.as_ref()))
+            .bind(created_at_chain)
             .bind(edge.node.src.as_deref())
             .bind(edge.node.dst.as_deref())
             .bind(event_type)
@@ -408,17 +417,24 @@ pub(crate) fn parse_unix_seconds(value: Option<&Value>) -> Option<f64> {
         return Some(n as f64);
     }
     if let Some(n) = value.as_f64() {
-        return Some(n);
+        return n.is_finite().then_some(n);
     }
     if let Some(s) = value.as_str() {
         if let Ok(n) = s.parse::<i64>() {
             return Some(n as f64);
         }
+        // is_finite: "inf"/"NaN" parse as f64 but are not timestamps —
+        // to_timestamp('infinity') would pass IS NOT NULL read filters and
+        // crash the epoch ::bigint cast, 500ing the whole page.
         if let Ok(n) = s.parse::<f64>() {
-            return Some(n);
+            return n.is_finite().then_some(n);
         }
     }
     None
+}
+
+fn should_warn_unparseable_created_at(value: Option<&Value>, parsed: Option<f64>) -> bool {
+    value.is_some() && parsed.is_none()
 }
 
 #[cfg(test)]
@@ -450,6 +466,30 @@ mod tests {
     fn handles_missing_value() {
         assert_eq!(parse_unix_seconds(None), None);
         assert_eq!(parse_unix_seconds(Some(&Value::Null)), None);
+    }
+
+    #[test]
+    fn warns_only_for_present_unparseable_created_at() {
+        assert!(should_warn_unparseable_created_at(Some(&Value::from("NaN")), None));
+        assert!(should_warn_unparseable_created_at(Some(&Value::from("not-a-time")), None));
+        assert!(should_warn_unparseable_created_at(Some(&Value::Null), None));
+
+        assert!(!should_warn_unparseable_created_at(None, None));
+        assert!(!should_warn_unparseable_created_at(
+            Some(&Value::from("1710000000")),
+            Some(1_710_000_000.0)
+        ));
+    }
+
+    /// A non-finite string parses as f64 but is not a timestamp: letting it
+    /// through lands `to_timestamp('infinity')` in chain-time columns, which
+    /// passes `IS NOT NULL` read filters and then blows up the epoch
+    /// `::bigint` cast — a permanent 500 for the whole page.
+    #[test]
+    fn rejects_non_finite_values() {
+        for bad in ["inf", "-inf", "Infinity", "NaN", "nan"] {
+            assert_eq!(parse_unix_seconds(Some(&Value::from(bad))), None, "string {bad:?}");
+        }
     }
 
     fn pending_row_with(

@@ -714,6 +714,23 @@ async fn apply_order_placed_confirmed(
     }
 }
 
+/// Prior-state snapshot returned by `apply_order_filled`'s UPDATE…RETURNING.
+/// Named fields rather than a positional tuple because three of them are
+/// bools: a silent transposition of `is_buy` with `overshoot` / `sentinel`
+/// would invert the public `is_buyer_maker` on every tape row.
+#[derive(sqlx::FromRow)]
+struct FilledOrderPrior {
+    /// The row's status *before* this fill applied.
+    status: String,
+    /// `filledAmount` exceeded the (positive) remaining quantity on a
+    /// non-terminal row; terminal rows ignore the fill instead.
+    overshoot: bool,
+    /// Corrupt prior shape: `OPEN` with `amount_remaining = 0`.
+    sentinel: bool,
+    outcome_id: i32,
+    is_buy: bool,
+}
+
 async fn apply_order_filled(
     tx: &mut Transaction<'_, Postgres>,
     event: &DecodedEvent,
@@ -725,23 +742,43 @@ async fn apply_order_filled(
     let filled_amount = uint_field_to_decimal(&event.value, "filledAmount")?;
     let chain_order = node_chain_order(node, "OrderFilled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    // A single match emits two OrderFilled events; the taker-side one
+    // (`isTaker = true`) is canonicalised into a public `trades` row below,
+    // while the maker side only mutates its live_orders row, so a match is
+    // recorded once. The ABI declares `isTaker: bool` on every OrderFilled
+    // (the maker side carries `false`), so a missing, null, or non-bool value
+    // is schema drift, not "maker": fail the projection loudly (mirroring
+    // OrderPlaced.isBuy) rather than let the public trade silently vanish —
+    // once processed_at were stamped, no replay could heal the dropped row,
+    // while a failed projection stays unprocessed and replays once the
+    // stored payload (raw_events.decoded) is repaired; reprojection reuses
+    // that jsonb and does not re-decode bodies.
+    let is_taker = event
+        .value
+        .get("isTaker")
+        .and_then(Value::as_bool)
+        .context("OrderFilled: missing or non-bool field `isTaker`")?;
     if chain_seconds.is_none() {
         // For a non-terminal row this event advances `amount_remaining`,
         // `status`, and `last_chain_order`; `chain_updated_at` is left
         // alone because the gateway time is unparseable, so public
         // `updateTime` can lag behind the cursor state. For a terminal
-        // prior row the SQL CASE guards below ignore the event entirely
-        // (all four mutation columns are held).
+        // prior row the SQL CASE guards below ignore the event entirely (all
+        // four mutation columns are held). A taker event logs its hidden
+        // trade-row consequence only after the parent row exists; otherwise
+        // this projection may still defer without writing the tape row.
         warn!(
             orderbook_address,
             order_id = %order_id,
             msg_id = %node.msg_id,
+            chain_order = %chain_order,
+            is_taker,
             created_at = ?node.created_at,
-            "OrderFilled has no parseable chain time; public updateTime will remain stale on a non-terminal mutation",
+            "OrderFilled has no parseable chain time; if applied to a non-terminal row, public updateTime will remain stale",
         );
     }
 
-    let prior: Option<(String, bool, bool)> = sqlx::query_as(
+    let prior: Option<FilledOrderPrior> = sqlx::query_as(
         r#"with prior as (
               select status, amount_remaining
                 from live_orders
@@ -786,7 +823,9 @@ async fn apply_order_filled(
                 (prior.status not in ('FILLED', 'CANCELLED', 'REJECTED')
                  and prior.amount_remaining > 0
                  and $3::numeric > prior.amount_remaining) as overshoot,
-                (prior.status = 'OPEN' and prior.amount_remaining = 0) as sentinel"#,
+                (prior.status = 'OPEN' and prior.amount_remaining = 0) as sentinel,
+                lo.outcome_id,
+                lo.is_buy"#,
     )
     .bind(orderbook_address)
     .bind(&order_id)
@@ -797,7 +836,9 @@ async fn apply_order_filled(
     .await
     .context("apply OrderFilled")?;
 
-    let Some((prior_status, overshoot, sentinel)) = prior else {
+    let Some(FilledOrderPrior { status: prior_status, overshoot, sentinel, outcome_id, is_buy }) =
+        prior
+    else {
         warn!(
             orderbook_address,
             order_id = %order_id,
@@ -846,6 +887,89 @@ async fn apply_order_filled(
             "OrderFilled exceeded amount_remaining; clamping to FILLED and dropping excess"
         );
     }
+
+    // Canonicalise the public trade on the taker-side event only. `outcome_id`
+    // and the taker order's side come from the live_orders row recovered above
+    // (`OrderFilled` in contracts/OrderBook.sol carries neither field);
+    // `price`/`qty` come from the event. `feeAmount` is intentionally not
+    // projected into the public tape. A SELL taker means the buyer is the maker, hence
+    // `is_buyer_maker = !is_buy`. `trade_id` is the event's chain_order, so
+    // this INSERT is replay-safe: on conflict, every immutable column keeps
+    // its first write and the only action is filling a NULL `chain_time`
+    // (first-write-wins coalesce, like chain_created_at on live_orders) —
+    // and even that fires only when the replayed payload MATCHES the
+    // recorded row on every immutable column. chain_time itself is not
+    // guarded: a replay differing only in timestamp passes and the coalesce
+    // silently keeps the first value. A divergent conflict (drifted /
+    // mis-repaired payload, or a gateway bug duplicating msg_chain_order)
+    // skips the arm entirely and is error!-logged below: first write wins,
+    // but never silently. That safety
+    // is local to the trades write — replaying the event re-runs the
+    // live_orders fill arm above, which re-subtracts on a non-terminal
+    // order, so the recovery for a tape-hidden row is a direct trades UPDATE
+    // (data-schema.md#trades).
+    // The maker-side event (is_taker = false) writes nothing here.
+    // The insert is deliberately NOT gated on the prior row's status: a fill
+    // the chain emitted against an already-terminal order is held off
+    // live_orders (CASE guards above) but still recorded on the tape, which
+    // mirrors chain events one-to-one.
+    if is_taker {
+        let clearing_price = uint_field_to_decimal(&event.value, "clearingPrice")?;
+        if chain_seconds.is_none() {
+            // error!, not warn!: the public trade will be invisible until an
+            // operator intervenes — a stale updateTime heals itself on the
+            // next event, this does not.
+            error!(
+                orderbook_address,
+                order_id = %order_id,
+                msg_id = %node.msg_id,
+                chain_order = %chain_order,
+                created_at = ?node.created_at,
+                "taker OrderFilled has no parseable chain time; the trade row lands with NULL chain_time, hidden from /api/v1/trades until repaired (data-schema.md#trades)",
+            );
+        }
+        let result = sqlx::query(
+            r#"insert into trades
+                   (trade_id, orderbook_address, outcome_id, price, qty,
+                    is_buyer_maker, chain_time)
+               values ($1, $2, $3, $4::numeric, $5::numeric, $6,
+                       to_timestamp($7::double precision))
+               on conflict (trade_id) do update
+                   set chain_time = coalesce(trades.chain_time, excluded.chain_time)
+                 where trades.orderbook_address = excluded.orderbook_address
+                   and trades.outcome_id = excluded.outcome_id
+                   and trades.price = excluded.price
+                   and trades.qty = excluded.qty
+                   and trades.is_buyer_maker = excluded.is_buyer_maker"#,
+        )
+        .bind(&chain_order)
+        .bind(orderbook_address)
+        .bind(outcome_id)
+        .bind(&clearing_price)
+        .bind(&filled_amount)
+        .bind(!is_buy)
+        .bind(chain_seconds)
+        .execute(&mut **tx)
+        .await
+        .context("insert taker-side trade")?;
+        if result.rows_affected() == 0 {
+            // Log every attempted immutable value: this is the only place
+            // they exist (the function returns right after), and a
+            // forensics diff against the recorded row needs all five.
+            error!(
+                orderbook_address,
+                trade_id = %chain_order,
+                order_id = %order_id,
+                msg_id = %node.msg_id,
+                outcome_id,
+                clearing_price = %clearing_price,
+                filled_amount = %filled_amount,
+                is_buyer_maker = !is_buy,
+                "OrderFilled conflicts with an existing trade but diverges on an immutable column (book/outcome/price/qty/side); first write kept, replay ignored",
+            );
+        }
+    }
+
     Ok(ProjectionOutcome::Applied)
 }
 

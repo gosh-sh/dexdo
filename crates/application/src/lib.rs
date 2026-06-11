@@ -26,6 +26,7 @@ use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
 use dodex_domain::Symbol;
 use dodex_domain::TimeInForce;
+use dodex_domain::Trade;
 use dodex_domain::PRICE_BPS_DECIMALS;
 use num_bigint::BigUint;
 use tracing::error;
@@ -260,6 +261,23 @@ pub trait MarketReadRepository: Send + Sync {
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error>;
 
+    /// Newest-first public trade tape for one `(marketAddress, symbol)`
+    /// outcome, capped at `limit` rows. The typed [`TradesLimit`] carries the
+    /// `[1, TRADES_MAX_LIMIT]` invariant through the boundary — unlike
+    /// `get_depth`'s raw `u16`, whose public contract is a silent clamp, the
+    /// trades contract rejects out-of-range limits upstream, so no impl may
+    /// clamp. Resolution and error mapping mirror
+    /// [`get_depth`](Self::get_depth): an unknown / unreconciled pair is
+    /// `InvalidMarketOrSymbol`, a reconciled row with a blank
+    /// `orderbook_address` (or an undecodable raw `price`/`qty`) is
+    /// `MarketInconsistent`. An empty tape is `Ok(vec![])`, not an error.
+    async fn get_trades(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        limit: TradesLimit,
+    ) -> Result<Vec<Trade>, anyhow::Error>;
+
     /// Resolve the `(marketAddress, symbol)` pair the trading path needs
     /// in a single SELECT — no oracle/event aggregation, no second
     /// outcome fetch. `now` lets the implementation compute the
@@ -388,6 +406,15 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
         (**self).get_depth(market_address, symbol, limit).await
     }
 
+    async fn get_trades(
+        &self,
+        market_address: &MarketAddress,
+        symbol: &Symbol,
+        limit: TradesLimit,
+    ) -> Result<Vec<Trade>, anyhow::Error> {
+        (**self).get_trades(market_address, symbol, limit).await
+    }
+
     async fn resolve_for_new_order(
         &self,
         market_address: &MarketAddress,
@@ -462,6 +489,9 @@ pub struct GetDepthQuery {
 
 pub const ORDERS_DEFAULT_LIMIT: u16 = 100;
 pub const ORDERS_MAX_LIMIT: u16 = 500;
+
+pub const TRADES_DEFAULT_LIMIT: u16 = 20;
+pub const TRADES_MAX_LIMIT: u16 = 1000;
 
 /// Order statuses queryable through `GET /api/v1/orders`. This deliberately
 /// excludes write-side synthetic states (`PENDING_NEW`, `PENDING_CANCEL`) so
@@ -675,6 +705,49 @@ impl OrdersLimit {
     }
 }
 
+/// Page-size cap for `/api/v1/trades`. Mirrors [`OrdersLimit`] — out-of-range
+/// values surface as `MissingParameter` (the public `-1102`) so the trade
+/// tape shares the paginated-read family's limit semantics rather than
+/// depth's silent clamp. See read-api.md §Page-size protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TradesLimit(u16);
+
+impl TradesLimit {
+    /// Default page size when `limit` is absent on the request.
+    /// Routes through `from_const` so the validating `assert!` runs at
+    /// compile time — a future bump of `TRADES_DEFAULT_LIMIT` above
+    /// `TRADES_MAX_LIMIT` would fail to build rather than producing an
+    /// out-of-range default that bypasses the runtime guard in `new`.
+    pub const DEFAULT: Self = Self::from_const(TRADES_DEFAULT_LIMIT);
+
+    /// Validating constructor for runtime input. Out-of-range values
+    /// surface as `MissingParameter` — matches the public `-1102` error
+    /// the HTTP handler emits.
+    pub fn new(value: u16) -> Result<Self, DomainError> {
+        if value == 0 || value > TRADES_MAX_LIMIT {
+            return Err(DomainError::MissingParameter);
+        }
+        Ok(Self(value))
+    }
+
+    /// Const constructor for statically-known values (default, test
+    /// fixtures). The validating `assert!` is evaluated at compile time only
+    /// when the call site is itself in a const context; a non-const call
+    /// site evaluates it at runtime and panics on out-of-range input. Use
+    /// [`TradesLimit::new`] for runtime construction with a typed error.
+    pub const fn from_const(value: u16) -> Self {
+        assert!(
+            value >= 1 && value <= TRADES_MAX_LIMIT,
+            "TradesLimit must be within 1..=TRADES_MAX_LIMIT",
+        );
+        Self(value)
+    }
+
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OrdersQuery {
     pub owner_pn_address: String,
@@ -785,6 +858,47 @@ where
 {
     pub async fn execute(&self, query: GetDepthQuery) -> Result<DepthSnapshot, anyhow::Error> {
         self.repo.get_depth(&query.market_address, &query.symbol, query.limit).await
+    }
+}
+
+/// Inputs to [`GetTradesUseCase::execute`]. `marketAddress` / `symbol` are
+/// required and enforced non-blank at the HTTP boundary; `limit` is the raw
+/// request value (absent → default), validated inside `execute`.
+pub struct GetTradesInput {
+    pub market_address: MarketAddress,
+    pub symbol: Symbol,
+    pub limit: Option<i64>,
+}
+
+pub struct GetTradesUseCase<R> {
+    repo: R,
+}
+
+impl<R> GetTradesUseCase<R> {
+    pub fn new(repo: R) -> Self {
+        Self { repo }
+    }
+}
+
+impl<R> GetTradesUseCase<R>
+where
+    R: MarketReadRepository,
+{
+    pub async fn execute(&self, input: GetTradesInput) -> Result<Vec<Trade>, anyhow::Error> {
+        let limit = match input.limit {
+            None => TradesLimit::DEFAULT,
+            Some(v) => {
+                // u16::try_from rejects negative / over-u16 inputs; TradesLimit::new
+                // then enforces the [1, TRADES_MAX_LIMIT] bound. Both failure modes
+                // collapse to MissingParameter (the public -1102). A present-but
+                // non-numeric `limit` is caught earlier at the HTTP boundary (-1130).
+                let raw =
+                    u16::try_from(v).map_err(|_| anyhow::anyhow!(DomainError::MissingParameter))?;
+                TradesLimit::new(raw).map_err(|err| anyhow::anyhow!(err))?
+            }
+        };
+
+        self.repo.get_trades(&input.market_address, &input.symbol, limit).await
     }
 }
 
@@ -2830,6 +2944,10 @@ mod tests {
         cancel_batch_rogue_key: Option<u64>,
         orders_response: OrdersPage,
         recorded_orders_queries: Mutex<Vec<OrdersQuery>>,
+        /// Records each `get_trades` call as `(marketAddress, symbol, limit)`
+        /// so a test can assert the limit the use case forwarded.
+        recorded_trades_calls: Mutex<Vec<(String, String, u16)>>,
+        trades_response: Vec<Trade>,
     }
 
     fn empty_orders_page() -> OrdersPage {
@@ -2846,6 +2964,8 @@ mod tests {
                 cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
+                recorded_trades_calls: Mutex::new(Vec::new()),
+                trades_response: Vec::new(),
             }
         }
 
@@ -2858,6 +2978,8 @@ mod tests {
                 cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
+                recorded_trades_calls: Mutex::new(Vec::new()),
+                trades_response: Vec::new(),
             }
         }
 
@@ -2870,6 +2992,8 @@ mod tests {
                 cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
+                recorded_trades_calls: Mutex::new(Vec::new()),
+                trades_response: Vec::new(),
             }
         }
 
@@ -2882,6 +3006,8 @@ mod tests {
                 cancel_batch_rogue_key: None,
                 orders_response: empty_orders_page(),
                 recorded_orders_queries: Mutex::new(Vec::new()),
+                recorded_trades_calls: Mutex::new(Vec::new()),
+                trades_response: Vec::new(),
             }
         }
 
@@ -2900,6 +3026,15 @@ mod tests {
 
         fn recorded_orders_queries(&self) -> Vec<OrdersQuery> {
             self.recorded_orders_queries.lock().unwrap().clone()
+        }
+
+        fn with_trades_response(mut self, trades: Vec<Trade>) -> Self {
+            self.trades_response = trades;
+            self
+        }
+
+        fn recorded_trades_calls(&self) -> Vec<(String, String, u16)> {
+            self.recorded_trades_calls.lock().unwrap().clone()
         }
     }
 
@@ -2920,6 +3055,20 @@ mod tests {
             _: u16,
         ) -> Result<DepthSnapshot, anyhow::Error> {
             unimplemented!("get_depth is not exercised by the order use case")
+        }
+
+        async fn get_trades(
+            &self,
+            market_address: &MarketAddress,
+            symbol: &Symbol,
+            limit: TradesLimit,
+        ) -> Result<Vec<Trade>, anyhow::Error> {
+            self.recorded_trades_calls.lock().unwrap().push((
+                market_address.0.clone(),
+                symbol.0.clone(),
+                limit.get(),
+            ));
+            Ok(self.trades_response.clone())
         }
 
         async fn resolve_for_new_order(
@@ -4115,6 +4264,95 @@ mod tests {
             assert!(
                 repo.recorded_orders_queries().is_empty(),
                 "repo must not be touched for invalid limit={bad_limit}",
+            );
+        }
+    }
+
+    /// `TradesLimit` carries the trades page-size contract from
+    /// read-api.md §Page-size protocol: default 20, valid range
+    /// `[1, TRADES_MAX_LIMIT]`, out-of-range → `MissingParameter` (the
+    /// public `-1102`). The non-numeric case is caught one layer up at the
+    /// HTTP boundary, exactly as for `OrdersLimit`.
+    #[test]
+    fn trades_limit_enforces_bounds_and_default() {
+        assert_eq!(TRADES_DEFAULT_LIMIT, 20);
+        assert_eq!(TRADES_MAX_LIMIT, 1000);
+        assert_eq!(TradesLimit::DEFAULT.get(), TRADES_DEFAULT_LIMIT);
+
+        assert_eq!(TradesLimit::new(1).expect("min in range").get(), 1);
+        assert_eq!(
+            TradesLimit::new(TRADES_MAX_LIMIT).expect("max in range").get(),
+            TRADES_MAX_LIMIT,
+        );
+
+        for bad in [0, TRADES_MAX_LIMIT + 1, u16::MAX] {
+            assert_eq!(
+                TradesLimit::new(bad).expect_err("out of range must fail"),
+                DomainError::MissingParameter,
+                "limit={bad}",
+            );
+        }
+    }
+
+    fn trades_input(limit: Option<i64>) -> GetTradesInput {
+        GetTradesInput {
+            market_address: MarketAddress("0:trades_uc".into()),
+            symbol: Symbol("TRADES_UC_YES".into()),
+            limit,
+        }
+    }
+
+    /// Absent `limit` must reach the repository as `TRADES_DEFAULT_LIMIT`.
+    #[tokio::test]
+    async fn get_trades_defaults_limit_when_absent() {
+        let repo = Arc::new(FakeRepo::empty());
+        let uc = GetTradesUseCase::new(repo.clone());
+        uc.execute(trades_input(None)).await.expect("default limit must succeed");
+        let calls = repo.recorded_trades_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], ("0:trades_uc".into(), "TRADES_UC_YES".into(), TRADES_DEFAULT_LIMIT));
+    }
+
+    /// A valid `limit` and the `(marketAddress, symbol)` pair must be
+    /// forwarded verbatim, and the repository's tape returned unchanged.
+    #[tokio::test]
+    async fn get_trades_forwards_pair_and_valid_limit() {
+        let canned = vec![Trade {
+            trade_id: "t-1".into(),
+            price: "0.615".into(),
+            qty: "1.00".into(),
+            quote_qty: "0.615000".into(),
+            time: 1_710_000_008_000,
+            is_buyer_maker: true,
+        }];
+        let repo = Arc::new(FakeRepo::empty().with_trades_response(canned.clone()));
+        let uc = GetTradesUseCase::new(repo.clone());
+        let tape = uc.execute(trades_input(Some(50))).await.expect("valid limit must succeed");
+        assert_eq!(tape, canned, "the repository's tape is returned unchanged");
+        let calls = repo.recorded_trades_calls();
+        assert_eq!(calls, vec![("0:trades_uc".into(), "TRADES_UC_YES".into(), 50_u16)]);
+    }
+
+    /// Out-of-range `limit` (0, negative, > `TRADES_MAX_LIMIT`, overflow)
+    /// must trip `MissingParameter` before the repository is touched —
+    /// mirrors `get_orders_rejects_limit_out_of_range`.
+    #[tokio::test]
+    async fn get_trades_rejects_limit_out_of_range() {
+        for bad in [0_i64, -1, i64::from(TRADES_MAX_LIMIT) + 1, i64::MAX] {
+            let repo = Arc::new(FakeRepo::empty());
+            let uc = GetTradesUseCase::new(repo.clone());
+            let err = uc
+                .execute(trades_input(Some(bad)))
+                .await
+                .expect_err("out-of-range limit must fail");
+            assert_eq!(
+                *err.downcast_ref::<DomainError>().expect("typed DomainError"),
+                DomainError::MissingParameter,
+                "limit={bad}",
+            );
+            assert!(
+                repo.recorded_trades_calls().is_empty(),
+                "repo must not be touched for invalid limit={bad}",
             );
         }
     }
@@ -5552,6 +5790,15 @@ mod get_market_balances_use_case_tests {
             unreachable!()
         }
 
+        async fn get_trades(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: TradesLimit,
+        ) -> anyhow::Result<Vec<Trade>> {
+            unreachable!()
+        }
+
         async fn resolve_for_new_order(
             &self,
             _: &MarketAddress,
@@ -5625,6 +5872,15 @@ mod get_market_balances_use_case_tests {
             _: &Symbol,
             _: u16,
         ) -> anyhow::Result<DepthSnapshot> {
+            unimplemented!()
+        }
+
+        async fn get_trades(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: TradesLimit,
+        ) -> anyhow::Result<Vec<Trade>> {
             unimplemented!()
         }
 
@@ -6126,6 +6382,15 @@ mod buy_full_set_use_case_tests {
             _: &Symbol,
             _: u16,
         ) -> anyhow::Result<DepthSnapshot> {
+            unreachable!()
+        }
+
+        async fn get_trades(
+            &self,
+            _: &MarketAddress,
+            _: &Symbol,
+            _: TradesLimit,
+        ) -> anyhow::Result<Vec<Trade>> {
             unreachable!()
         }
 

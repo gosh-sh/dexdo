@@ -94,6 +94,57 @@ events are observability-only.
 
 Event ordering is anchored on `raw_events.chain_order` (set from the GraphQL gateway’s `msg_chain_order`). The GraphQL events connection already returns edges in strict `msg_chain_order` order, and pagination preserves that order across pages; the live persist path therefore projects newly fetched edges in the received order. The reproject loop sorts deferred rows by `chain_order ASC` because it reads from Postgres rather than directly from the ordered GraphQL page. Together, these rules ensure that `OrderPlaced → OrderFilled → OrderCancelled` preserves the correct natural sequence: fills reduce `amount_remaining`, and cancellation then closes the order without erasing the unfilled remainder. `greatest(existing, new)` on `last_chain_order` is a belt-and-suspenders monotonicity guard for the row’s column, not the primary correctness mechanism.
 
+## Projection — public trades
+
+The public trade tape behind [`GET /api/v1/trades`](../api-spec.md#recent-trades) is built from the
+same `OrderBook.OrderFilled` event that drives `live_orders`, written into a separate
+append-only `trades` table. Only the `tradeId` derivation is specified here; the table
+shape lives in [data-schema.md](data-schema.md#trades) and the HTTP layer in
+[read-api.md](read-api.md#apiv1trades).
+
+A single match emits **two** `OrderFilled` events — one for the resting (maker) order
+and one for the aggressor (taker) order, distinguished by the boolean `isTaker` field.
+Recording a trade row on both would double-count the match, and the two events carry
+different `msg_chain_order` values, so the algorithm canonicalises on one side:
+
+1. On `OrderFilled` with **`isTaker == true`**, insert one `trades` row. On
+   `isTaker == false`, do not write to `trades` (the maker-side event only mutates its
+   `live_orders` row). Selection is by the explicit `isTaker` flag, not by
+   observed emission order — the flag is authoritative and independent of how the pair
+   landed in the stream.
+2. `tradeId` is the **`chain_order` of that taker-side event** (`raw_events.chain_order`,
+   the gateway's `msg_chain_order`). It is globally unique per match and lex-comparable,
+   matching the cursor convention used elsewhere in the read-model.
+3. Trade fields come from the same event: `price` from `clearingPrice`, `qty` from
+   `filledAmount`, `time` from the event's chain time. `feeAmount` is deliberately not
+   projected into the public tape. `isBuyerMaker` is derived from the taker order's side
+   — taker selling ⇒ buyer is the maker ⇒ `true`; taker buying ⇒ `false`.
+
+No pairing of the two per-side events is required for the tape: each taker-side fill is
+exactly one trade. One taker order crossing N makers produces N taker-side `OrderFilled`
+events and therefore N trades, each with its own `chain_order` as `tradeId`.
+
+Idempotency follows from the key: `tradeId` is unique, so a replayed insert conflicts on
+it and leaves every immutable column alone — the conflict arm's only action is
+`chain_time = coalesce(trades.chain_time, excluded.chain_time)`, a first-write-wins fill
+of a `NULL` chain time, and even that fires only when the replayed values match the
+recorded row on every immutable column (a divergent conflict — drifted payload or
+duplicate `msg_chain_order` — skips the arm and is logged at `error!`; first write wins,
+never silently). `chain_time` itself is not guarded: a replay differing only in
+timestamp passes the guard and the coalesce silently keeps the first value. This makes
+the *trades* write replay-safe; the surrounding
+`OrderFilled` projection as a whole is not (the `live_orders` fill arm re-subtracts
+`filledAmount` on a non-terminal order — see `reproject_pending`'s doc), so a hidden
+`NULL`-`chain_time` row on a live order is recovered by updating the `trades` row
+directly, never by clearing `processed_at`; see the recovery notes in
+[`data-schema.md`](data-schema.md#trades). As with `OrderFilled` on `live_orders`, an
+event observed before its parent `OrderPlaced` is `Deferred` and retried.
+
+The same canonical `tradeId` is the value the private `orderUpdate` WebSocket frame must
+surface as `t` (see [api-spec.md](../api-spec.md#recent-trades)); associating it with the
+maker side's frame as well is part of that stream's implementation and is out of scope
+here.
+
 ## Reconciliation
 
 Two reconcilers fill metadata that the event stream alone does not carry. Both run on a fixed cadence (`reconciliation_interval_ms`, `oracle_event_list_reconciliation_interval_ms` in `config/indexer.*.yaml`) and share a failure-backoff pattern (`last_reconcile_failed_at`, `reconcile_attempts` on the parent row) so a permanently broken contract cannot starve the queue.

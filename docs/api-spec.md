@@ -23,6 +23,7 @@
         - [OracleEvent](#oracleevent)
         - [OracleOutcome](#oracleoutcome)
     - [Order Book](#order-book)
+    - [Recent Trades](#recent-trades)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
     - [Market Outcome Balances](#market-outcome-balances)
@@ -214,6 +215,7 @@ envelope field failed or why a credential was rejected.
 | List markets | `GET` | `/api/v1/markets` | `NONE` |
 | List oracles and their available events | `GET` | `/api/v1/oracles` | `NONE` |
 | Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
+| Fetch recent trades | `GET` | `/api/v1/trades` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
@@ -674,7 +676,7 @@ Response:
 {
   "marketAddress": "0:market-address",
   "symbol": "PM-2026-ELECTION-YES",
-  "lastUpdateId": "5f8000000000017c5a",
+  "lastUpdateId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000002",
   "bids": [
     ["0.614", "100.00"],
     ["0.613", "25.50"]
@@ -695,6 +697,95 @@ Each bid or ask item is:
 ```text
 [price, quantity]
 ```
+
+### Recent Trades
+
+```http
+GET /api/v1/trades
+```
+
+Security: `NONE`
+
+Fetch the most recent public trades for one symbol in one market. A trade is a
+single maker↔taker match produced by the order book — the public, account-agnostic
+view of the fills that surface privately as `x: "TRADE"` frames on the
+[`orderUpdate`](#order-updates) WebSocket stream. No authentication is required and
+no owner information is returned; the endpoint exposes only price, size, direction,
+and time.
+
+This endpoint is unaffected by market lifecycle status: trades are returned for any
+market that has been reconciled at least once, including terminal phases
+(`RESOLVED`, `CANCELLED`, `EXPIRED`), so the trade tape remains readable after the
+book closes. It is eventually consistent — a just-matched trade may briefly lag the
+fill that produced it until the indexer projects the match.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
+| `limit` | INT | NO | Number of trades to return, newest first. Default: `20`. Max: `1000`. |
+
+Response:
+
+```json
+[
+  {
+    "tradeId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000005",
+    "price": "0.615",
+    "qty": "1.00",
+    "quoteQty": "0.615000",
+    "time": 1710000008980,
+    "isBuyerMaker": true
+  },
+  {
+    "tradeId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000004",
+    "price": "0.615",
+    "qty": "0.50",
+    "quoteQty": "0.307500",
+    "time": 1710000004980,
+    "isBuyerMaker": true
+  }
+]
+```
+
+The response is a bare JSON array, newest trade first, ordered by the same
+server-internal chain-order key used by [`GET /api/v1/orders`](#orders) (descending).
+An empty array means no trade has matched on this symbol yet.
+
+Trade fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `tradeId` | STRING | Opaque, lex-comparable id for one maker↔taker match. The identical value is carried by the WebSocket [`orderUpdate`](#order-updates) fill frame as field `t`, on both sides of the match — so a client can correlate a public trade with its own private fills and deduplicate across the two feeds. Treat it as an opaque token; do not parse it. |
+| `price` | DECIMAL | Match (clearing) price, scaled by the outcome price precision. |
+| `qty` | DECIMAL | Matched outcome-token quantity, scaled by the outcome quantity precision. |
+| `quoteQty` | DECIMAL | Quote-asset notional of the match (`price × qty`), scaled by the quote asset's on-chain `decimals`. |
+| `time` | LONG | On-chain match time in Unix milliseconds, truncated from the indexed microsecond timestamp — same convention as `time` / `updateTime` on [`GET /api/v1/orders`](#orders). |
+| `isBuyerMaker` | BOOLEAN | `true` when the resting (maker) side was the buy order and the taker was selling; `false` when the taker was buying. Determines display direction: `true` = taker sold (downtick), `false` = taker bought (uptick). Matches Binance `isBuyerMaker` semantics. |
+
+Each public trade is the account-agnostic view of a fill that also appears on the
+private [`orderUpdate`](#order-updates) stream (`x: "TRADE"`). The fields line up
+one-to-one, so a client subscribed to both feeds can match them by `tradeId` / `t`:
+
+| `/api/v1/trades` field | `orderUpdate` fill field | Note |
+| --- | --- | --- |
+| `tradeId` | `t` | Same opaque match id on both feeds, and on both sides of the match. |
+| `price` | `L` | Last fill price. |
+| `qty` | `l` | Last fill quantity. |
+| `time` | `T` | On-chain match / transaction time. |
+| `isBuyerMaker` | `S` + `m` | Public trade carries the side-agnostic direction; the `orderUpdate` frame carries the recipient's own side (`S`) and maker flag (`m`). |
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `marketAddress` or `symbol` missing or blank | `-1102` | 400 |
+| `limit` present but not an integer | `-1130` | 400 |
+| `limit` outside `[1, 1000]` | `-1102` | 400 |
+| `(marketAddress, symbol)` pair not found, or its market has not been reconciled yet | `-1121` | 404 |
+| Trade data is temporarily inconsistent | `-1500` | 503 |
 
 ## Account Endpoints
 
@@ -1413,7 +1504,7 @@ Response:
       "updateTime": 1710000001000
     }
   ],
-  "nextCursor": "5f8000000000017c5a",
+  "nextCursor": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000003",
   "lastSq": 4289
 }
 ```
@@ -1610,7 +1701,7 @@ Example — partial fill:
   "z": "0.50",
   "n": "0.000138",
   "N": "USDC",
-  "t": "t-99001",
+  "t": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000004",
   "m": true,
   "O": 1710000000100,
   "T": 1710000004980,
@@ -1641,7 +1732,7 @@ Example — full fill:
   "z": "1.50",
   "n": "0.000276",
   "N": "USDC",
-  "t": "t-99002",
+  "t": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000005",
   "m": true,
   "O": 1710000000100,
   "T": 1710000008980,
@@ -1672,7 +1763,7 @@ Field reference:
 | `z` | DECIMAL | Cumulative filled quantity over the life of the order. |
 | `n` | DECIMAL | Commission for the last fill, as a signed decimal string. Negative values are rebates **credited** to the account (see `makerComission` on [`/api/v1/markets`](#markets)). `"0"` on non-trade events. |
 | `N` | STRING \| null | Commission asset symbol. `null` on non-trade events. |
-| `t` | STRING \| null | Trade id for the last fill. `null` on non-trade events. |
+| `t` | STRING \| null | Trade id for the last fill. Identical to `tradeId` in [`GET /api/v1/trades`](#recent-trades) for the same match, so the private fill can be correlated with the public trade tape. `null` on non-trade events. |
 | `m` | BOOLEAN \| null | `true` if this fill was on the maker side, `false` for taker, `null` on non-trade events. |
 | `O` | LONG | Order creation time, Unix ms. Stable across all events for the same order. |
 | `T` | LONG | Transaction time — when this specific event was produced on-chain, Unix ms. |
