@@ -144,6 +144,31 @@ async fn happy_path_returns_bare_array_newest_first_without_auth() {
 }
 
 #[tokio::test]
+async fn happy_path_respects_limit_newest_first() {
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
+    let pmp = "0:trades_http_limit_pmp";
+    let book = "0:trades_http_limit_book";
+    let symbol = "TRADES_HTTP_LIMIT_YES";
+    purge(&pool, pmp, book).await;
+    seed_market(&pool, pmp, symbol, book, false).await;
+    seed_trade(&pool, "http-limit-1", book, "6150", "1000000", true, 1_710_000_001.0).await;
+    seed_trade(&pool, "http-limit-3", book, "6150", "1000000", true, 1_710_000_003.0).await;
+    seed_trade(&pool, "http-limit-2", book, "6150", "1000000", true, 1_710_000_002.0).await;
+
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/trades?marketAddress={pmp}&symbol={symbol}&limit=2"
+    ))
+    .send(&service)
+    .await;
+    assert_eq!(resp.status_code, Some(StatusCode::OK), "valid limit returns 200");
+    let trades: Vec<TradeBody> = resp.take_json().await.expect("bare JSON array");
+    let ids: Vec<&str> = trades.iter().map(|t| t.trade_id.as_str()).collect();
+    assert_eq!(ids, ["http-limit-3", "http-limit-2"], "limit keeps the newest N");
+
+    purge(&pool, pmp, book).await;
+}
+
+#[tokio::test]
 async fn empty_tape_is_bare_empty_array() {
     let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
     let pmp = "0:trades_http_empty_pmp";

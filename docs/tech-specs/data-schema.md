@@ -267,7 +267,8 @@ Data-bearing cutover guidance lives in
 Append-only public trade tape backing `GET /api/v1/trades`. One row per maker↔taker
 match, written by the `OrderBook.OrderFilled` projector on the **taker-side** event only
 (`isTaker = true`) — the maker-side event mutates `live_orders` but writes no `trades`
-row, so a match is recorded exactly once. Rows are never updated or deleted. Write-side
+row, so a match is recorded exactly once. Rows are immutable once written, except a
+first-write-wins fill of a `NULL` `chain_time` on replay; never deleted. Write-side
 derivation in [indexer.md](indexer.md#projection--public-trades); read side in
 [read-api.md](read-api.md#apiv1trades).
 

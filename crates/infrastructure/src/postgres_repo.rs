@@ -446,6 +446,11 @@ impl MarketReadRepository for PostgresReadModelRepository {
         let Some(orderbook_address) = orderbook_address.and_then(filter_orderbook) else {
             // Reconciled market mid-replay (blank orderbook). Fail closed
             // (503) so the client retries, never an empty tape.
+            tracing::warn!(
+                market = %market_address.0,
+                symbol = %symbol.0,
+                "reconciled market has a NULL/blank orderbook_address; trades fails closed",
+            );
             return Err(anyhow!(DomainError::MarketInconsistent));
         };
 
@@ -1696,8 +1701,9 @@ struct TradeRow {
     price: String,
     qty: String,
     is_buyer_maker: bool,
-    // Microseconds since the epoch, from chain_time. The read query filters
-    // `chain_time IS NOT NULL`, so this is always present.
+    // Microseconds since the epoch, from chain_time. This is intentionally
+    // non-Option: the read query's `chain_time IS NOT NULL` predicate is the
+    // safety guard that keeps sqlx from decoding NULL into an i64.
     chain_time_us: i64,
 }
 

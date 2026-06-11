@@ -714,6 +714,10 @@ pub struct TradesLimit(u16);
 
 impl TradesLimit {
     /// Default page size when `limit` is absent on the request.
+    /// Routes through `from_const` so the validating `assert!` runs at
+    /// compile time — a future bump of `TRADES_DEFAULT_LIMIT` above
+    /// `TRADES_MAX_LIMIT` would fail to build rather than producing an
+    /// out-of-range default that bypasses the runtime guard in `new`.
     pub const DEFAULT: Self = Self::from_const(TRADES_DEFAULT_LIMIT);
 
     /// Validating constructor for runtime input. Out-of-range values

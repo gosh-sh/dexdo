@@ -366,22 +366,33 @@ async fn decodes_price_qty_quote_qty_time_and_direction() {
     insert_trade(&pool, "dec-2", book, 1, "6150", "1000000", true, Some(1_710_000_008.0)).await;
     // qty 500_000 -> 0.50; quoteQty = 6150 * 500_000 / 10_000 = 307_500 -> 0.307500.
     insert_trade(&pool, "dec-1", book, 1, "6150", "500000", false, Some(1_710_000_004.0)).await;
+    // Fractional chain seconds: `time` must truncate the microsecond store
+    // to whole milliseconds, not round or pass sub-ms digits through.
+    insert_trade(&pool, "dec-3", book, 1, "6150", "1000000", true, Some(1_710_000_009.123_456))
+        .await;
 
     let tape = repo
         .get_trades(&MarketAddress(pmp.into()), &Symbol(symbol.into()), TradesLimit::from_const(20))
         .await
         .expect("get_trades");
-    assert_eq!(tape.len(), 2);
+    assert_eq!(tape.len(), 3);
 
-    let newest = &tape[0];
-    assert_eq!(newest.trade_id, "dec-2");
-    assert_eq!(newest.price, "0.615");
-    assert_eq!(newest.qty, "1.00");
-    assert_eq!(newest.quote_qty, "0.615000");
-    assert_eq!(newest.time, 1_710_000_008_000);
-    assert!(newest.is_buyer_maker, "is_buyer_maker passes through verbatim");
+    let fractional = &tape[0];
+    assert_eq!(fractional.trade_id, "dec-3");
+    assert_eq!(
+        fractional.time, 1_710_000_009_123,
+        "sub-second chain time truncates to milliseconds"
+    );
 
-    let older = &tape[1];
+    let whole = &tape[1];
+    assert_eq!(whole.trade_id, "dec-2");
+    assert_eq!(whole.price, "0.615");
+    assert_eq!(whole.qty, "1.00");
+    assert_eq!(whole.quote_qty, "0.615000");
+    assert_eq!(whole.time, 1_710_000_008_000);
+    assert!(whole.is_buyer_maker, "is_buyer_maker passes through verbatim");
+
+    let older = &tape[2];
     assert_eq!(older.qty, "0.50");
     assert_eq!(older.quote_qty, "0.307500");
     assert!(!older.is_buyer_maker, "false direction passes through verbatim");
@@ -414,6 +425,34 @@ async fn quote_qty_floors_after_multiplying() {
     assert_eq!(tape[0].price, "0.6150");
     assert_eq!(tape[0].qty, "0.000001");
     assert_eq!(tape[0].quote_qty, "0.000000", "notional floors after multiplying");
+    purge(&pool, pmp, book).await;
+}
+
+#[tokio::test]
+async fn quote_qty_handles_large_notional_exactly() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let pmp = "0:trades_large_notional_pmp";
+    let book = "0:trades_large_notional_book";
+    let symbol = "TRADES_LARGE_NOTIONAL_YES";
+    purge(&pool, pmp, book).await;
+    let market_id = insert_market(&pool, pmp, book, true).await;
+    insert_outcome(&pool, market_id, pmp, 1, symbol, 4, 6).await;
+
+    let qty = "1000000000000000000000000000000";
+    insert_trade(&pool, "large-1", book, 1, "9999", qty, true, Some(1_700_000_001.0)).await;
+
+    let tape = repo
+        .get_trades(&MarketAddress(pmp.into()), &Symbol(symbol.into()), TradesLimit::from_const(20))
+        .await
+        .expect("get_trades");
+    assert_eq!(tape.len(), 1);
+    assert_eq!(tape[0].price, "0.9999");
+    assert_eq!(tape[0].qty, "1000000000000000000000000.000000");
+    assert_eq!(
+        tape[0].quote_qty, "999900000000000000000000.000000",
+        "large notional must stay in integer arithmetic"
+    );
     purge(&pool, pmp, book).await;
 }
 

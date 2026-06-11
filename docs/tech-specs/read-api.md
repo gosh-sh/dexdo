@@ -332,7 +332,11 @@ A reconciled market with no matched trades yet returns a bare empty array `[]`, 
 After resolution, one SQL produces the page in a single round trip:
 
 ```sql
-SELECT trade_id, price, qty, is_buyer_maker, chain_time
+SELECT trade_id,
+       price::text AS price,
+       qty::text AS qty,
+       is_buyer_maker,
+       (extract(epoch FROM chain_time) * 1000000)::bigint AS chain_time_us
   FROM trades
  WHERE orderbook_address = $1
    AND outcome_id        = $2
@@ -384,7 +388,7 @@ The integer-division order matters: `price * qty / FULL_PERCENT` floors *after* 
 | Reconciled market with NULL/blank `orderbook_address`, or an undecodable raw `price` / `qty` | `MarketInconsistent` | `-1500` | 503 |
 | Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
 
-The endpoint is public, so there are no auth rows. The 503 is deliberate and transient: a blank `orderbook_address` means the reconciler is mid-replay, and the client should retry.
+The endpoint is public, so there are no auth rows. The 503 is deliberate but its two triggers differ in lifetime: a blank `orderbook_address` is transient (the reconciler is mid-replay; the client should retry), while an undecodable raw `price`/`qty` persists until an operator repairs the corrupt row — see the recovery notes in [data-schema.md](data-schema.md#trades).
 
 ### Write side
 
@@ -402,7 +406,7 @@ A just-matched trade briefly lags the fill that produced it: the row appears onc
 
 Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
 
-- `crates/infrastructure/tests/trades.rs` (repo) — resolution (unknown / unreconciled pair → the `InvalidMarketOrSymbol` mapping; blank `orderbook_address` → `MarketInconsistent`); per-outcome scoping (a sibling outcome's trades do not leak); DESC-by-`trade_id` order and `limit` default / bounds; empty tape → `[]`; `price` / `qty` / `quoteQty` scaling, including the integer-division notional matching the contract; `isBuyerMaker` passthrough; a `chain_time IS NULL` row excluded.
+- `crates/infrastructure/tests/trades.rs` (repo) — resolution (unknown / unreconciled pair → the `InvalidMarketOrSymbol` mapping; blank `orderbook_address` → `MarketInconsistent`); per-outcome and per-orderbook scoping (neither a sibling outcome's trades nor another book's same-id outcome leaks); DESC-by-`trade_id` order and the `LIMIT` cut; empty tape → `[]`; `price` / `qty` / `quoteQty` scaling, including the integer-division notional matching the contract; `isBuyerMaker` passthrough; a `chain_time IS NULL` row excluded before `LIMIT`. The `limit` default and `[1, 1000]` bounds live one layer up, in the `GetTradesUseCase` / `TradesLimit` unit tests in `crates/application`.
 - Projector test (alongside the `live_orders` projector scenarios in `crates/infrastructure/tests/reprojection.rs`) — the taker-side event (`isTaker = true`) writes exactly one `trades` row and the maker-side writes none; `trade_id` equals the taker event's `chain_order`; replay is idempotent (`ON CONFLICT`); one taker crossing N makers yields N rows with N distinct `trade_id`s.
 - `services/api/tests/trades_http.rs` — happy path returns a bare JSON array newest-first through the production router; the error shapes (`-1102` missing param, `-1102` limit out of range, `-1130` non-numeric limit, `-1121` unknown pair, `-1500` inconsistent); the route is reachable without an auth envelope (public); a terminal-status market still serves its tape.
 

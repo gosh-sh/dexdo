@@ -2175,8 +2175,8 @@ async fn orderplaced_rejects_non_string_client_order_id() {
 /// On a taker-side OrderFilled (`isTaker = true`) the projector writes exactly
 /// one `trades` row. `trade_id` is the event's chain_order; `price`/`qty` come
 /// from the event (`clearingPrice`/`filledAmount`), while `outcome_id` and
-/// direction are recovered from the order's `live_orders` row — the deployed
-/// event carries neither. The parent is a SELL, so a taker fill means the
+/// direction are recovered from the order's `live_orders` row — the on-chain
+/// event (`OrderFilled` in contracts/OrderBook.sol) carries neither field. The parent is a SELL, so a taker fill means the
 /// buyer is the maker => `is_buyer_maker = true`.
 #[tokio::test]
 async fn taker_orderfilled_writes_one_trade_row() {
@@ -2285,10 +2285,12 @@ async fn maker_orderfilled_writes_no_trade_row() {
     .await
     .expect("insert parent live_orders");
 
+    // No clearingPrice on purpose: only the taker-side trade insert decodes
+    // it, so its absence here is load-bearing — a refactor that hoists the
+    // decode out of the taker branch fails this test.
     let decoded = json!({
         "orderId": order_id,
         "filledAmount": "30",
-        "clearingPrice": "6150",
         "isTaker": false,
     });
     insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
@@ -2317,21 +2319,26 @@ async fn maker_orderfilled_writes_no_trade_row() {
     purge(&pool, cleanup).await;
 }
 
-/// Re-projecting the same taker OrderFilled must not duplicate the trade, and
-/// the conflict arm must not behave like an upsert: every immutable column
-/// (price, qty, direction) keeps its first write, and a non-NULL `chain_time`
-/// is never overwritten (first-write-wins coalesce). The replay payload is
-/// deliberately mutated before pass 2 so a future widening of the conflict
-/// arm to a full upsert — or a flip of the coalesce to last-write-wins —
-/// fails this test instead of passing silently. (The live_orders twin of the
-/// first-write-wins pin is orderplaced_chain_created_at_is_first_write_wins.)
+/// Re-projecting the same taker OrderFilled must not duplicate the trade or
+/// mutate it, exercised in two distinct replay shapes:
+///
+/// * pass 2 — DIVERGENT payload (different clearingPrice): the conflict arm's
+///   WHERE guard skips the row entirely, so nothing changes (and the
+///   projector error!-logs the divergence). A widening of the conflict arm
+///   to a full upsert fails the price assert.
+/// * pass 3 — MATCHING payload with a shifted timestamp: the guard passes,
+///   the arm fires, and the coalesce keeps the FIRST chain_time. A flip of
+///   `coalesce(trades.chain_time, excluded.chain_time)` to last-write-wins
+///   fails the chain_time assert. (The live_orders twin of this pin is
+///   orderplaced_chain_created_at_is_first_write_wins; the guard-skip-on-NULL
+///   twin is divergent_replay_never_heals_null_chain_time.)
 ///
 /// The live_orders side is asserted too: OrderBook fill arms are deliberately
 /// NOT replay-idempotent (`reproject_pending`'s doc: a replayed OrderFilled
-/// re-subtracts `filledAmount`), so the second pass drains another 30 from
-/// the resting order. That is why an operator must never clear
-/// `processed_at` on a fill whose order is still live — pinned here so the
-/// corruption mode stays visible instead of hiding behind trade-only asserts.
+/// re-subtracts `filledAmount`), so each pass drains another 30 from the
+/// resting order. That is why an operator must never clear `processed_at` on
+/// a fill whose order is still live — pinned here so the corruption mode
+/// stays visible instead of hiding behind trade-only asserts.
 #[tokio::test]
 async fn taker_trade_insert_is_idempotent_on_replay() {
     let _guard = REPROJECTION_LOCK.lock().await;
@@ -2374,10 +2381,9 @@ async fn taker_trade_insert_is_idempotent_on_replay() {
     insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
     repo.reproject_pending(1000).await.expect("reproject pass 1");
 
-    // Force a second projection of the same trade_id with a HOSTILE payload:
-    // a different clearing price and a later chain timestamp. Neither may
-    // reach the existing row — the conflict arm only coalesces a NULL
-    // chain_time, and ours is already set.
+    // Pass 2: replay the same trade_id with a DIVERGENT payload — a different
+    // clearing price and a later chain timestamp. The WHERE guard on the
+    // conflict arm sees price diverge and skips the row entirely.
     sqlx::query(
         r#"update raw_events
               set processed_at = null,
@@ -2401,18 +2407,48 @@ async fn taker_trade_insert_is_idempotent_on_replay() {
     .await
     .expect("count trades");
     assert_eq!(count, 1, "replaying the same OrderFilled must not duplicate the trade");
-    assert_eq!(price, "6150", "the replayed clearingPrice must not clobber the first write");
+    assert_eq!(price, "6150", "a divergent replay must not clobber the first-write price");
     assert_eq!(
         chain_time_ms, 1_700_000_000_000,
-        "a non-NULL chain_time must keep its first write (coalesce, not last-write-wins)"
+        "a divergent replay is guard-skipped and must leave chain_time untouched"
     );
     // The parent order is a BUY, so its taker fill means the maker sold: the
     // buyer is NOT the maker. Complements the SELL-taker => true direction in
     // taker_orderfilled_writes_one_trade_row.
     assert!(!any_buyer_maker, "BUY taker => is_buyer_maker = false");
 
-    // The fill arm is not replay-safe: pass 2 subtracted another 30 from the
-    // still-OPEN order (1000 - 30 - 30). Deliberate pin of the documented
+    // Pass 3: restore the original clearingPrice but keep the shifted
+    // timestamp — a MATCHING replay. The guard passes and the conflict arm
+    // fires; the coalesce must still keep the FIRST chain_time.
+    sqlx::query(
+        r#"update raw_events
+              set processed_at = null,
+                  decoded = jsonb_set(decoded, '{clearingPrice}', '"6150"')
+            where msg_id = $1"#,
+    )
+    .bind(&msg_id)
+    .execute(&pool)
+    .await
+    .expect("reset processed_at with restored payload");
+    repo.reproject_pending(1000).await.expect("reproject pass 3");
+
+    let (count, chain_time_ms): (i64, i64) = sqlx::query_as(
+        "select count(*), min((extract(epoch from chain_time) * 1000)::bigint) \
+           from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_one(&pool)
+    .await
+    .expect("read trades after matching replay");
+    assert_eq!(count, 1, "a matching replay must not duplicate the trade either");
+    assert_eq!(
+        chain_time_ms, 1_700_000_000_000,
+        "a matching replay fires the conflict arm, and the coalesce must keep \
+         the first chain_time (first-write-wins, not last-write-wins)"
+    );
+
+    // The fill arm is not replay-safe: each pass subtracted another 30 from
+    // the still-OPEN order (1000 - 3 * 30). Deliberate pin of the documented
     // corruption mode, not an endorsement — see the test doc above.
     let remaining: String = sqlx::query_scalar(
         "select amount_remaining::text from live_orders \
@@ -2423,7 +2459,7 @@ async fn taker_trade_insert_is_idempotent_on_replay() {
     .fetch_one(&pool)
     .await
     .expect("read live_orders");
-    assert_eq!(remaining, "940", "a replayed fill re-subtracts on a non-terminal order");
+    assert_eq!(remaining, "910", "every replayed fill re-subtracts on a non-terminal order");
 
     purge(&pool, cleanup).await;
 }
@@ -2940,6 +2976,106 @@ async fn taker_orderfilled_on_terminal_order_still_records_trade() {
     assert_eq!(row.0, "FILLED", "terminal status is held");
     assert_eq!(row.1, "0", "amount_remaining is held");
     assert_eq!(row.2, "5f800000000000000000", "last_chain_order is held");
+
+    purge(&pool, cleanup).await;
+}
+
+/// The WHERE guard's only observable delta over the bare coalesce: a
+/// DIVERGENT replay must not heal a NULL chain_time. Without the guard, a
+/// replay whose immutables drifted (here: clearingPrice) would still coalesce
+/// its timestamp into the hidden row — quietly blessing a row whose recorded
+/// values no longer match the event that produced it. The divergence is
+/// Applied + error!-logged, not a stuck projection. The parent order is
+/// terminalised by the first fill, so the replay leaves live_orders alone.
+#[tokio::test]
+async fn divergent_replay_never_heals_null_chain_time() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_divergent_no_heal";
+    let book = format!("0:{test}_book");
+    let order_id = "96";
+    let msg_id = format!("{test}-fill-msg");
+    let chain_order = format!("5f80{msg_id:0>28}");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   30::numeric, 30::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "clearingPrice": "6150",
+        "isTaker": true,
+    });
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, null, $3, $3, 'OrderBook.OrderFilled', '{}'::jsonb, $4)"#,
+    )
+    .bind(&msg_id)
+    .bind(&chain_order)
+    .bind(&book)
+    .bind(&decoded)
+    .execute(&pool)
+    .await
+    .expect("insert raw_events without chain timestamp");
+
+    repo.reproject_pending(1000).await.expect("reproject pass 1");
+
+    // Replay with a parseable timestamp AND a divergent clearingPrice: the
+    // guard must refuse the row wholesale, timestamp included.
+    sqlx::query(
+        r#"update raw_events
+              set processed_at = null,
+                  created_at_chain = to_timestamp(1700000000.5),
+                  decoded = jsonb_set(decoded, '{clearingPrice}', '"9999"')
+            where msg_id = $1"#,
+    )
+    .bind(&msg_id)
+    .execute(&pool)
+    .await
+    .expect("reset processed_at with divergent payload");
+    repo.reproject_pending(1000).await.expect("reproject pass 2");
+
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "a divergent replay is Applied (and error!-logged), not a stuck projection"
+    );
+
+    let row: (String, bool) = sqlx::query_as(
+        "select price::text, chain_time is null from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_one(&pool)
+    .await
+    .expect("exactly one trade row");
+    assert_eq!(row.0, "6150", "the divergent price must not reach the row");
+    assert!(
+        row.1,
+        "a divergent replay must not heal the NULL chain_time — the guard \
+         refuses the row wholesale, timestamp included"
+    );
 
     purge(&pool, cleanup).await;
 }

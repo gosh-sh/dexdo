@@ -2,7 +2,8 @@
 -- maker↔taker match, written by the OrderBook.OrderFilled projector on the
 -- taker-side event only (isTaker = true); the maker-side event mutates
 -- live_orders but writes no trades row, so a match is recorded exactly once.
--- Rows are never updated or deleted. See docs/tech-specs/data-schema.md#trades.
+-- Rows are immutable once written, except a first-write-wins fill of a NULL
+-- chain_time on replay; never deleted. See docs/tech-specs/data-schema.md#trades.
 create table trades (
     -- Taker-side OrderFilled event's chain-order key (gateway msg_chain_order,
     -- copied from raw_events.chain_order). Globally unique per match and
