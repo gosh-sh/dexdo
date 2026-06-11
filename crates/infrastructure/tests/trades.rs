@@ -186,7 +186,7 @@ async fn blank_orderbook_address_fails_closed() {
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
     let pmp = "0:trades_blank_book_pmp";
-    let blank = "   ";
+    let blank = " \t ";
     let symbol = "TRADES_BLANK_BOOK_YES";
     purge(&pool, pmp, blank).await;
     sqlx::query("delete from markets where orderbook_address = $1")
@@ -235,9 +235,10 @@ async fn returns_trades_newest_first_and_respects_limit() {
     let market_id = insert_market(&pool, pmp, book, true).await;
     insert_outcome(&pool, market_id, pmp, 1, symbol, 3, 2).await;
     // Lex-sortable chain-order keys; insertion order is deliberately not the
-    // sort order, so a missing ORDER BY would surface.
+    // sort order, and ord-0004 carries the smallest chain_time so accidental
+    // ORDER BY chain_time DESC would put it last.
     insert_trade(&pool, "ord-0002", book, 1, "6150", "1000000", true, Some(1_700_000_002.0)).await;
-    insert_trade(&pool, "ord-0004", book, 1, "6150", "1000000", true, Some(1_700_000_004.0)).await;
+    insert_trade(&pool, "ord-0004", book, 1, "6150", "1000000", true, Some(1_700_000_000.0)).await;
     insert_trade(&pool, "ord-0001", book, 1, "6150", "1000000", true, Some(1_700_000_001.0)).await;
     insert_trade(&pool, "ord-0003", book, 1, "6150", "1000000", true, Some(1_700_000_003.0)).await;
 

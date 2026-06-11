@@ -763,36 +763,19 @@ async fn apply_order_filled(
         // `status`, and `last_chain_order`; `chain_updated_at` is left
         // alone because the gateway time is unparseable, so public
         // `updateTime` can lag behind the cursor state. For a terminal
-        // prior row the SQL CASE guards below ignore the event entirely
-        // (all four mutation columns are held). On a taker event the
-        // `trades` row below additionally lands with `chain_time = NULL`,
-        // which the /api/v1/trades read query filters out — the trade stays
-        // off the public tape until an operator fixes the trades row
-        // directly (recovery notes in data-schema.md#trades; re-queueing the
-        // event is only safe once the order is terminal, because this whole
-        // projection re-runs on replay and the fill arm re-subtracts).
-        if is_taker {
-            // error!, not warn!: the public trade will be invisible until an
-            // operator intervenes — a stale updateTime heals itself on the
-            // next event, this does not.
-            error!(
-                orderbook_address,
-                order_id = %order_id,
-                msg_id = %node.msg_id,
-                chain_order = %chain_order,
-                created_at = ?node.created_at,
-                "taker OrderFilled has no parseable chain time; the trade row lands with NULL chain_time, hidden from /api/v1/trades until repaired (data-schema.md#trades)",
-            );
-        } else {
-            warn!(
-                orderbook_address,
-                order_id = %order_id,
-                msg_id = %node.msg_id,
-                chain_order = %chain_order,
-                created_at = ?node.created_at,
-                "OrderFilled has no parseable chain time; public updateTime will remain stale on a non-terminal mutation",
-            );
-        }
+        // prior row the SQL CASE guards below ignore the event entirely (all
+        // four mutation columns are held). A taker event logs its hidden
+        // trade-row consequence only after the parent row exists; otherwise
+        // this projection may still defer without writing the tape row.
+        warn!(
+            orderbook_address,
+            order_id = %order_id,
+            msg_id = %node.msg_id,
+            chain_order = %chain_order,
+            is_taker,
+            created_at = ?node.created_at,
+            "OrderFilled has no parseable chain time; if applied to a non-terminal row, public updateTime will remain stale",
+        );
     }
 
     let prior: Option<FilledOrderPrior> = sqlx::query_as(
@@ -932,6 +915,19 @@ async fn apply_order_filled(
     // mirrors chain events one-to-one.
     if is_taker {
         let clearing_price = uint_field_to_decimal(&event.value, "clearingPrice")?;
+        if chain_seconds.is_none() {
+            // error!, not warn!: the public trade will be invisible until an
+            // operator intervenes — a stale updateTime heals itself on the
+            // next event, this does not.
+            error!(
+                orderbook_address,
+                order_id = %order_id,
+                msg_id = %node.msg_id,
+                chain_order = %chain_order,
+                created_at = ?node.created_at,
+                "taker OrderFilled has no parseable chain time; the trade row lands with NULL chain_time, hidden from /api/v1/trades until repaired (data-schema.md#trades)",
+            );
+        }
         let result = sqlx::query(
             r#"insert into trades
                    (trade_id, orderbook_address, outcome_id, price, qty,

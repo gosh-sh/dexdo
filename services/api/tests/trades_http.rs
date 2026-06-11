@@ -152,7 +152,7 @@ async fn happy_path_respects_limit_newest_first() {
     purge(&pool, pmp, book).await;
     seed_market(&pool, pmp, symbol, book, false).await;
     seed_trade(&pool, "http-limit-1", book, "6150", "1000000", true, 1_710_000_001.0).await;
-    seed_trade(&pool, "http-limit-3", book, "6150", "1000000", true, 1_710_000_003.0).await;
+    seed_trade(&pool, "http-limit-3", book, "6150", "1000000", true, 1_710_000_000.0).await;
     seed_trade(&pool, "http-limit-2", book, "6150", "1000000", true, 1_710_000_002.0).await;
 
     let mut resp = TestClient::get(format!(
