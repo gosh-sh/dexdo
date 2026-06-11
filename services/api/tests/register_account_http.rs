@@ -159,7 +159,7 @@ async fn register_undeployed_note_returns_2013() {
 
 #[tokio::test]
 async fn register_missing_field_returns_1102() {
-    let Some((service, _pool, _kek, pn)) = common::setup().await else { return };
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
     let (pn_address, scope, _body) = fresh_note();
     pn.set_details_for(&pn_address, PnDetails { balance: vec![], locked_in_orders: vec![] });
     // Omit pnSeckeyHex.
@@ -175,11 +175,18 @@ async fn register_missing_field_returns_1102() {
 
     assert_eq!(status, Some(StatusCode::BAD_REQUEST));
     assert_eq!(err.code, -1102);
+
+    let count: i64 = sqlx::query_scalar("select count(*) from accounts where pn_address = $1")
+        .bind(&pn_address)
+        .fetch_one(&pool)
+        .await
+        .expect("count accounts");
+    assert_eq!(count, 0, "a missing field must not write an account row");
 }
 
 #[tokio::test]
 async fn register_blank_field_returns_1102() {
-    let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
     let (_pn_address, scope, _body) = fresh_note();
     // Whitespace-only pnAddress: present in JSON, blank after trim. The
     // handler's non_empty() guard must reject it (distinct from an omitted
@@ -197,12 +204,19 @@ async fn register_blank_field_returns_1102() {
 
     assert_eq!(status, Some(StatusCode::BAD_REQUEST));
     assert_eq!(err.code, -1102);
+
+    let count: i64 = sqlx::query_scalar("select count(*) from accounts where pn_address = $1")
+        .bind("   ")
+        .fetch_one(&pool)
+        .await
+        .expect("count accounts");
+    assert_eq!(count, 0, "a blank field must not write an account row");
 }
 
 #[tokio::test]
 async fn register_unknown_field_returns_1130() {
-    let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    let (_pn_address, scope, mut body) = fresh_note();
+    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
+    let (pn_address, scope, mut body) = fresh_note();
     body["surprise"] = json!("unexpected");
     let _ = scope;
 
@@ -212,6 +226,13 @@ async fn register_unknown_field_returns_1130() {
 
     assert_eq!(status, Some(StatusCode::BAD_REQUEST));
     assert_eq!(err.code, -1130);
+
+    let count: i64 = sqlx::query_scalar("select count(*) from accounts where pn_address = $1")
+        .bind(&pn_address)
+        .fetch_one(&pool)
+        .await
+        .expect("count accounts");
+    assert_eq!(count, 0, "an unknown field must not write an account row");
 }
 
 #[tokio::test]

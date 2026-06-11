@@ -25,6 +25,7 @@ use tracing::debug;
 use tracing::info;
 use uuid::Uuid;
 
+use crate::account_registry::ED25519_SECKEY_LEN;
 use crate::crypto;
 use crate::crypto::Kek;
 
@@ -233,6 +234,11 @@ fn validate(parsed: SeedData) -> Result<ValidatedSeedData> {
             .with_context(|| format!("pn_dih_dec for {pn_address} must fit numeric(78,0)"))?;
         let pn_seckey = hex::decode(&account.pn_seckey_hex)
             .with_context(|| format!("pn_seckey_hex for {pn_address} must be valid hex"))?;
+        anyhow::ensure!(
+            pn_seckey.len() == ED25519_SECKEY_LEN,
+            "pn_seckey_hex for {pn_address} must be {ED25519_SECKEY_LEN} bytes (got {})",
+            pn_seckey.len(),
+        );
 
         let mut api_keys = Vec::with_capacity(account.api_keys.len());
         for key in account.api_keys {
@@ -399,6 +405,17 @@ mod tests {
         acc.pn_seckey_hex = "not-hex-at-all".into();
         let err = validate(SeedData { accounts: vec![acc] }).unwrap_err();
         assert!(format!("{err:#}").contains("pn_seckey_hex"), "got: {err:#}");
+    }
+
+    #[test]
+    fn validate_rejects_wrong_length_seckey() {
+        // Valid hex but not 32 bytes: would seed "successfully" and only
+        // fail on the account's first on-chain signature. Must reject at
+        // seed time, matching the registration path.
+        let mut acc = one_good_account();
+        acc.pn_seckey_hex = "00".repeat(16);
+        let err = validate(SeedData { accounts: vec![acc] }).unwrap_err();
+        assert!(format!("{err:#}").contains("32 bytes"), "got: {err:#}");
     }
 
     #[test]

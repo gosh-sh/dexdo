@@ -27,15 +27,17 @@ use sqlx::Row;
 use tracing::debug;
 use tracing::error;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::crypto;
 use crate::crypto::Kek;
 use crate::seed::hex_to_dec_uint256;
 
-/// ed25519 secret key length. A wrong length is rejected at registration
-/// so a truncated/typo'd key surfaces here, not as a silent on-chain
-/// signature failure on the client's first trade.
-const ED25519_SECKEY_LEN: usize = 32;
+/// ed25519 secret key length. A wrong length is rejected on every
+/// custody-write path (registration here and the seed notes file) so a
+/// truncated/typo'd key surfaces at write time, not as a silent on-chain
+/// signature failure on the account's first trade.
+pub(crate) const ED25519_SECKEY_LEN: usize = 32;
 
 /// Tags self-registered accounts in `accounts.label`, distinct from the
 /// seeder's `test-mm-NNN`. Informational only — `label` carries no
@@ -122,6 +124,14 @@ impl AccountRegistry for PostgresAccountRegistry {
             crypto::seal(&self.kek, &valid.pn_seckey).map_err(unexpected("seal pn_seckey"))?;
         let api_secret_enc =
             crypto::seal(&self.kek, &secret).map_err(unexpected("seal api_secret"))?;
+
+        // The raw secret now lives sealed (`api_secret_enc`) and hex-encoded
+        // for the one-time response (`api_secret_hex`); the plaintext arrays
+        // are no longer read, so wipe them rather than leave the long-lived
+        // signing-key material resident until the frame unwinds. The response
+        // String copy is out of reach here — defense in depth, not a seal.
+        secret.zeroize();
+        key_rand.zeroize();
 
         let mut tx = self.pool.begin().await.map_err(unexpected("begin tx"))?;
 
