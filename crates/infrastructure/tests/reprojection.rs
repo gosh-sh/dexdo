@@ -2317,9 +2317,21 @@ async fn maker_orderfilled_writes_no_trade_row() {
     purge(&pool, cleanup).await;
 }
 
-/// Re-projecting the same taker OrderFilled must not duplicate the trade:
-/// `INSERT ... ON CONFLICT (trade_id) DO NOTHING` makes replay from raw_events
-/// idempotent.
+/// Re-projecting the same taker OrderFilled must not duplicate the trade, and
+/// the conflict arm must not behave like an upsert: every immutable column
+/// (price, qty, direction) keeps its first write, and a non-NULL `chain_time`
+/// is never overwritten (first-write-wins coalesce). The replay payload is
+/// deliberately mutated before pass 2 so a future widening of the conflict
+/// arm to a full upsert — or a flip of the coalesce to last-write-wins —
+/// fails this test instead of passing silently. (The live_orders twin of the
+/// first-write-wins pin is orderplaced_chain_created_at_is_first_write_wins.)
+///
+/// The live_orders side is asserted too: OrderBook fill arms are deliberately
+/// NOT replay-idempotent (`reproject_pending`'s doc: a replayed OrderFilled
+/// re-subtracts `filledAmount`), so the second pass drains another 30 from
+/// the resting order. That is why an operator must never clear
+/// `processed_at` on a fill whose order is still live — pinned here so the
+/// corruption mode stays visible instead of hiding behind trade-only asserts.
 #[tokio::test]
 async fn taker_trade_insert_is_idempotent_on_replay() {
     let _guard = REPROJECTION_LOCK.lock().await;
@@ -2362,26 +2374,56 @@ async fn taker_trade_insert_is_idempotent_on_replay() {
     insert_raw(&pool, &msg_id, &book, "OrderBook.OrderFilled", &decoded).await;
     repo.reproject_pending(1000).await.expect("reproject pass 1");
 
-    // Force a second projection of the very same event.
-    sqlx::query("update raw_events set processed_at = null where msg_id = $1")
-        .bind(&msg_id)
-        .execute(&pool)
-        .await
-        .expect("reset processed_at");
+    // Force a second projection of the same trade_id with a HOSTILE payload:
+    // a different clearing price and a later chain timestamp. Neither may
+    // reach the existing row — the conflict arm only coalesces a NULL
+    // chain_time, and ours is already set.
+    sqlx::query(
+        r#"update raw_events
+              set processed_at = null,
+                  created_at_chain = to_timestamp(1700000999),
+                  decoded = jsonb_set(decoded, '{clearingPrice}', '"9999"')
+            where msg_id = $1"#,
+    )
+    .bind(&msg_id)
+    .execute(&pool)
+    .await
+    .expect("reset processed_at with mutated payload");
     repo.reproject_pending(1000).await.expect("reproject pass 2");
 
-    let (count, any_buyer_maker): (i64, bool) = sqlx::query_as(
-        "select count(*), bool_or(is_buyer_maker) from trades where orderbook_address = $1",
+    let (count, any_buyer_maker, price, chain_time_ms): (i64, bool, String, i64) = sqlx::query_as(
+        "select count(*), bool_or(is_buyer_maker), min(price::text), \
+                min((extract(epoch from chain_time) * 1000)::bigint) \
+           from trades where orderbook_address = $1",
     )
     .bind(&book)
     .fetch_one(&pool)
     .await
     .expect("count trades");
     assert_eq!(count, 1, "replaying the same OrderFilled must not duplicate the trade");
+    assert_eq!(price, "6150", "the replayed clearingPrice must not clobber the first write");
+    assert_eq!(
+        chain_time_ms, 1_700_000_000_000,
+        "a non-NULL chain_time must keep its first write (coalesce, not last-write-wins)"
+    );
     // The parent order is a BUY, so its taker fill means the maker sold: the
     // buyer is NOT the maker. Complements the SELL-taker => true direction in
     // taker_orderfilled_writes_one_trade_row.
     assert!(!any_buyer_maker, "BUY taker => is_buyer_maker = false");
+
+    // The fill arm is not replay-safe: pass 2 subtracted another 30 from the
+    // still-OPEN order (1000 - 30 - 30). Deliberate pin of the documented
+    // corruption mode, not an endorsement — see the test doc above.
+    let remaining: String = sqlx::query_scalar(
+        "select amount_remaining::text from live_orders \
+          where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&book)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read live_orders");
+    assert_eq!(remaining, "940", "a replayed fill re-subtracts on a non-terminal order");
 
     purge(&pool, cleanup).await;
 }
@@ -2603,7 +2645,7 @@ async fn malformed_is_taker_fails_projection_loudly() {
         assert!(
             !processed_at_is_set(&pool, msg_id).await,
             "isTaker={kind}: a failed projection must keep processed_at null \
-             so a fixed decoder can replay it"
+             so the repaired payload can replay"
         );
     }
 
@@ -2698,6 +2740,15 @@ async fn taker_orderfilled_without_clearing_price_rolls_back_atomically() {
 /// query filters `chain_time IS NOT NULL`, so the row is invisible to the
 /// public tape until the timestamp is healed. The projection itself applies —
 /// `processed_at` is stamped and live_orders advances.
+///
+/// The heal phase models the only replay-safe recovery: the fill here
+/// terminalises its order (30 of 30), so re-running `apply_order_filled` is
+/// held off live_orders by the terminal CASE guards while the trades conflict
+/// arm coalesces the NULL chain_time. For an order that is still live the
+/// fill arm is NOT replay-idempotent (it would re-subtract `filledAmount` —
+/// pinned in taker_trade_insert_is_idempotent_on_replay), which is why the
+/// documented recovery for that case is a direct UPDATE of the trades row,
+/// never a `processed_at` reset.
 #[tokio::test]
 async fn taker_orderfilled_without_chain_time_writes_hidden_trade_row() {
     let _guard = REPROJECTION_LOCK.lock().await;
@@ -2717,13 +2768,15 @@ async fn taker_orderfilled_without_chain_time_writes_hidden_trade_row() {
     ];
     purge(&pool, cleanup).await;
 
+    // amount_initial == filledAmount: the fill terminalises the order, which
+    // is what makes the heal-phase replay below safe for live_orders.
     sqlx::query(
         r#"insert into live_orders
                (orderbook_address, order_id, outcome_id, is_buy, price,
                 amount_initial, amount_remaining, status,
                 last_chain_order, placed_chain_order)
            values ($1, $2::numeric, 1, true, 6150::numeric,
-                   100::numeric, 100::numeric, 'OPEN',
+                   30::numeric, 30::numeric, 'OPEN',
                    '5f800000000000000000', '5f800000000000000000')"#,
     )
     .bind(&book)
@@ -2768,11 +2821,11 @@ async fn taker_orderfilled_without_chain_time_writes_hidden_trade_row() {
     assert_eq!(row.0, chain_order, "trade_id is the taker event's chain_order");
     assert!(row.1, "the trade lands with NULL chain_time, hidden from the tape read");
 
-    // Recovery path: an operator fixes the raw event's timestamp and re-queues
-    // it. The replayed insert must heal the NULL chain_time in place
-    // (first-write-wins coalesce) instead of being swallowed whole by the
-    // conflict arm. Fractional seconds also pin sub-second precision through
-    // to_timestamp.
+    // Heal phase — safe here ONLY because the order is now terminal: replay
+    // re-runs the whole apply_order_filled, and on a terminal row the CASE
+    // guards hold live_orders while the trades conflict arm coalesces the
+    // NULL chain_time. Fractional seconds also pin sub-second precision
+    // through to_timestamp.
     sqlx::query(
         "update raw_events set created_at_chain = to_timestamp(1700000000.5), \
                                processed_at = null \
@@ -2797,6 +2850,20 @@ async fn taker_orderfilled_without_chain_time_writes_hidden_trade_row() {
         healed[0].0, 1_700_000_000_500,
         "replay after repairing raw_events must heal chain_time (sub-second preserved)"
     );
+
+    // The terminal CASE guards held the live_orders row through the replay:
+    // no double-subtraction, status and remainder untouched.
+    let order: (String, String) = sqlx::query_as(
+        "select status, amount_remaining::text from live_orders \
+          where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(&book)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read live_orders after heal");
+    assert_eq!(order.0, "FILLED", "heal replay must not touch a terminal order's status");
+    assert_eq!(order.1, "0", "heal replay must not re-subtract the fill");
 
     purge(&pool, cleanup).await;
 }

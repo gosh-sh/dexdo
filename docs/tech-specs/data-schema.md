@@ -273,7 +273,7 @@ derivation in [indexer.md](indexer.md#projection--public-trades); read side in
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `trade_id` | `text` PK | The taker-side `OrderFilled` event's chain-order key (`msg_chain_order` from the gateway, copied from [`raw_events.chain_order`](#raw_events)). Globally unique per match and lex-sortable — the sole sort key and identity for `/api/v1/trades` (DESC). The identical value is surfaced as `orderUpdate`'s `t` field for the same fill. |
+| `trade_id` | `text` PK | The taker-side `OrderFilled` event's chain-order key (`msg_chain_order` from the gateway, copied from [`raw_events.chain_order`](#raw_events)). Globally unique per match and lex-sortable — the sole sort key and identity for `/api/v1/trades` (DESC). The identical value is specified to surface as `orderUpdate`'s `t` field for the same fill ([api-spec.md](../api-spec.md#recent-trades)). |
 | `orderbook_address` | `text` NOT NULL | OrderBook contract address. With `outcome_id`, scopes the tape to one market outcome. |
 | `outcome_id` | `integer` NOT NULL | Which outcome the match is on. |
 | `price` | `numeric(78,0)` NOT NULL | Match (clearing) price from `OrderFilled.clearingPrice` — raw uint256 **basis points** (probability × `FULL_PERCENT` = 10 000). Decoded ÷ `FULL_PERCENT`, formatted at `price_precision`, at API render. |
@@ -286,7 +286,7 @@ Index: `trades_tape_idx` — `(orderbook_address, outcome_id, trade_id DESC)`. B
 
 Recovery notes for on-call:
 
-- **Row hidden by `chain_time IS NULL`** (gateway delivered the fill without `created_at`): repair `raw_events.created_at_chain` for the taker event, clear its `processed_at`, and the next reprojection sweep heals `chain_time` in place via the conflict-arm coalesce.
+- **Row hidden by `chain_time IS NULL`** (gateway delivered the fill without `created_at`): fix the `trades` row directly — `UPDATE trades SET chain_time = to_timestamp(...) WHERE trade_id = ...`, sourcing the timestamp from the repaired `raw_events.created_at_chain`. Do **not** clear the event's `processed_at` while its order is still live: replay re-runs the whole `OrderFilled` projection, and the `live_orders` fill arm is not replay-idempotent (`filledAmount` would be subtracted again — see `reproject_pending`'s doc). A replay-based heal via the conflict-arm coalesce is safe only when the order row is already terminal, or during a wholesale reprojection that rebuilds `live_orders` from scratch.
 - **Tape 503s for one outcome** (`MarketInconsistent` from an undecodable `price`/`qty`): the table is append-only and the read is newest-first, so one corrupt row inside the newest `limit` rows fails every request for that `(orderbook_address, outcome_id)` until it is fixed. The failing `trade_id`/axis/raw value is logged by the read path; verify against the originating `raw_events` row, then correct or delete the corrupt `trades` row manually.
 
 ### `order_book_snapshots`

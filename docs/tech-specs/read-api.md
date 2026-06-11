@@ -386,11 +386,11 @@ The integer-division order matters: `price * qty / FULL_PERCENT` floors *after* 
 
 The endpoint is public, so there are no auth rows. The 503 is deliberate and transient: a blank `orderbook_address` means the reconciler is mid-replay, and the client should retry.
 
-### Indexer changes
+### Write side
 
-The read path depends on one write-side addition (detail in [indexer.md §Projection — public trades](indexer.md#projection--public-trades)):
+The read path depends on one write-side projection (detail in [indexer.md §Projection — public trades](indexer.md#projection--public-trades)):
 
-- **`trades` table + `trades_tape_idx`** — a new append-only table (migration; [`data-schema.md`](data-schema.md#trades) updated synchronously). The existing `OrderBook.OrderFilled` projector that maintains `live_orders` is extended to also insert one `trades` row **on the taker-side event** (`isTaker = true`) and nothing on the maker side, so a match is recorded exactly once. `trade_id` is that taker event's `chain_order`; a replayed insert conflicts on it and only coalesces a `NULL` `chain_time` (first-write-wins), so reprojection from `raw_events` is idempotent. An `OrderFilled` observed before its parent `OrderPlaced` is `Deferred` and replayed, exactly as for `live_orders`.
+- **`trades` table + `trades_tape_idx`** — an append-only table ([`data-schema.md`](data-schema.md#trades)). The `OrderBook.OrderFilled` projector that maintains `live_orders` also inserts one `trades` row **on the taker-side event** (`isTaker = true`) and nothing on the maker side, so a match is recorded exactly once. `trade_id` is that taker event's `chain_order`; a replayed insert conflicts on it and only coalesces a `NULL` `chain_time` (first-write-wins), so reprojection from `raw_events` is idempotent. An `OrderFilled` observed before its parent `OrderPlaced` is `Deferred` and replayed, the same deferral contract as `live_orders`.
 
 No read-side gate guards the projector: an empty `trades` table simply reads `[]`, already the valid steady state for a market that has opened but not yet traded.
 

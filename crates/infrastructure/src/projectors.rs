@@ -733,8 +733,9 @@ async fn apply_order_filled(
     // is schema drift, not "maker": fail the projection loudly (mirroring
     // OrderPlaced.isBuy) rather than let the public trade silently vanish —
     // once processed_at were stamped, no replay could heal the dropped row,
-    // while a failed projection stays unprocessed and replays after a
-    // decoder fix.
+    // while a failed projection stays unprocessed and replays once the
+    // stored payload (raw_events.decoded) is repaired; reprojection reuses
+    // that jsonb and does not re-decode bodies.
     let is_taker = event
         .value
         .get("isTaker")
@@ -749,9 +750,10 @@ async fn apply_order_filled(
         // (all four mutation columns are held). On a taker event the
         // `trades` row below additionally lands with `chain_time = NULL`,
         // which the /api/v1/trades read query filters out — the trade stays
-        // off the public tape unless an operator repairs
-        // raw_events.created_at_chain and re-queues the event, whose replay
-        // coalesces the NULL in place (see the trades insert below).
+        // off the public tape until an operator fixes the trades row
+        // directly (recovery notes in data-schema.md#trades; re-queueing the
+        // event is only safe once the order is terminal, because this whole
+        // projection re-runs on replay and the fill arm re-subtracts).
         let consequence = if is_taker {
             "; the taker-side trade row lands with NULL chain_time, hidden from /api/v1/trades"
         } else {
@@ -881,12 +883,13 @@ async fn apply_order_filled(
     // (`OrderFilled` in contracts/OrderBook.sol carries neither field);
     // `price`/`qty` come from the event. A SELL taker means the buyer is the maker, hence
     // `is_buyer_maker = !is_buy`. `trade_id` is the event's chain_order, so
-    // replay from raw_events is idempotent: the conflict arm leaves every
-    // immutable column alone and only fills a NULL `chain_time`
-    // (first-write-wins coalesce, like chain_created_at on live_orders) — the
-    // recovery path for a row hidden from the tape by a missing gateway
-    // timestamp is repairing raw_events.created_at_chain and re-queueing the
-    // event. The maker-side event (is_taker = false) writes nothing here.
+    // this INSERT is replay-safe: the conflict arm leaves every immutable
+    // column alone and only fills a NULL `chain_time` (first-write-wins
+    // coalesce, like chain_created_at on live_orders). That safety is local
+    // to the trades write — replaying the event re-runs the live_orders fill
+    // arm above, which re-subtracts on a non-terminal order, so the recovery
+    // for a tape-hidden row is a direct trades UPDATE (data-schema.md#trades).
+    // The maker-side event (is_taker = false) writes nothing here.
     // The insert is deliberately NOT gated on the prior row's status: a fill
     // the chain emitted against an already-terminal order is held off
     // live_orders (CASE guards above) but still recorded on the tape, which

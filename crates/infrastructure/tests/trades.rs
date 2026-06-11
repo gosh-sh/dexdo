@@ -297,8 +297,10 @@ async fn tape_is_scoped_to_one_outcome_and_one_orderbook() {
     purge(&pool, other_pmp, other_book).await;
 }
 
-/// Price-axis twins of the qty fail-closed tests below: the price drop is
-/// computed from `PRICE_BPS_DECIMALS - price_precision` (a different input
+/// Price-axis twins of the qty fail-closed tests
+/// (quantity_precision_above_quote_decimals_fails_closed,
+/// negative_raw_qty_fails_closed, off_grid_qty_fails_closed): the price drop
+/// is computed from `PRICE_BPS_DECIMALS - price_precision` (a different input
 /// pair than the qty drop), so a sign or operand error in one axis would not
 /// surface through the other's test.
 #[tokio::test]
@@ -426,7 +428,11 @@ async fn rows_without_chain_time_are_excluded() {
     let market_id = insert_market(&pool, pmp, book, true).await;
     insert_outcome(&pool, market_id, pmp, 1, symbol, 3, 2).await;
     insert_trade(&pool, "nt-keep", book, 1, "6150", "1000000", true, Some(1_700_000_002.0)).await;
-    insert_trade(&pool, "nt-drop", book, 1, "6150", "1000000", true, None).await;
+    // "nt-z-drop" sorts lexicographically AFTER "nt-keep", so the NULL row is
+    // the newest on the tape. This pins the filter into the SQL itself: a
+    // "fetch `limit` rows, then filter in Rust" refactor would return nothing
+    // for the limit=1 probe below.
+    insert_trade(&pool, "nt-z-drop", book, 1, "6150", "1000000", true, None).await;
 
     let tape = repo
         .get_trades(&MarketAddress(pmp.into()), &Symbol(symbol.into()), TradesLimit::from_const(20))
@@ -434,6 +440,17 @@ async fn rows_without_chain_time_are_excluded() {
         .expect("get_trades");
     let ids: Vec<&str> = tape.iter().map(|t| t.trade_id.as_str()).collect();
     assert_eq!(ids, ["nt-keep"], "a row with NULL chain_time is filtered out of the tape");
+
+    let probe = repo
+        .get_trades(&MarketAddress(pmp.into()), &Symbol(symbol.into()), TradesLimit::from_const(1))
+        .await
+        .expect("get_trades limit=1");
+    let probe_ids: Vec<&str> = probe.iter().map(|t| t.trade_id.as_str()).collect();
+    assert_eq!(
+        probe_ids,
+        ["nt-keep"],
+        "the NULL-chain_time filter must apply before LIMIT, not after the fetch"
+    );
     purge(&pool, pmp, book).await;
 }
 
