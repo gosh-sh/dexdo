@@ -2298,9 +2298,9 @@ pub async fn run() -> anyhow::Result<()> {
     // Migrations + seeding are gated on `auth.seed_accounts`. With the
     // flag off the api stays read-only against the schema (the indexer
     // applies migrations as today). With the flag on the api applies
-    // migrations itself before inserting the hard-coded credentials —
-    // sqlx::migrate! uses an advisory lock so racing with the indexer
-    // on a fresh DB is safe.
+    // migrations itself before inserting the credentials read from
+    // `auth.seed_accounts_path` — sqlx::migrate! uses an advisory lock so
+    // racing with the indexer on a fresh DB is safe.
     if config.auth.seed_accounts {
         let notes_path = config
             .auth

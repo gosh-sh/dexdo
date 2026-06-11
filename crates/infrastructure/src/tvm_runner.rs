@@ -117,7 +117,7 @@ pub fn run_getter(
 
 /// Decode the contract's persistent storage fields (the ABI `fields`
 /// section) straight from an account BOC — no getter call, so it can read
-/// state variables that have no getter (e.g. PrivateNote `_pubkey`).
+/// state variables that have no getter (e.g. PrivateNote `_ephemeralPubkey`).
 pub fn decode_account_fields(contract: &Contract, account_boc_base64: &str) -> Result<Value> {
     let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
     let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;

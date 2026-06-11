@@ -818,7 +818,7 @@ The backend does not store inflight submissions and does not retry on its own. `
 
 Registers a trading account from a client-supplied PrivateNote and mints its first API credential. The self-service counterpart of the operator seeder (`crates/infrastructure/src/seed.rs`, [seed-private-notes.md](../seed-private-notes.md)): one note in, one account plus one api_key out. Public — the caller has no credential yet, so possession of the note's custody keys (sent in the body) is the authorization. Always mounted; unlike the seeder it carries no config gate.
 
-The handler runs three phases: request parsing → on-chain existence probe → credential mint and insert. Each fails closed with its own code (see the Error mapping table in this section).
+The handler runs four phases: request parsing → on-chain existence probe → owner-key binding → credential mint and insert. Each fails closed with its own code (see the Error mapping table in this section).
 
 ### Authorization
 
@@ -844,6 +844,15 @@ Before any DB write, `RegisterAccountUseCase` runs `PnStateReader::get_details(p
 - BOC present → proceed. The returned details are discarded; only existence matters.
 
 Running the probe first means a not-deployed note costs no DB work and a well-formed but undeployed `pnAddress` can never leave an orphan account row.
+
+### Owner-key binding
+
+The route is public, so possession of the note's keys is the only authorization. `RegisterAccountUseCase` proves that possession with two fail-closed checks, both after the existence probe and before any DB write (full rationale in [account-registration-key-binding.md](account-registration-key-binding.md)):
+
+1. **Pubkey/seckey consistency** — the ed25519 public key is derived from `pnSeckeyHex` (`derive_ed25519_pubkey_hex`) and compared to the submitted `pnPubkeyHex` (`uint256_hex_eq`). The submitted `pnPubkeyHex` is stored verbatim as `accounts.pn_pubkey` and later paired with the sealed seckey to build the chain signer; a pair whose public is not the key the secret derives could never sign a valid trade, so an inconsistent pair is rejected as `InvalidParameter` → 400 / -1130 rather than minting a dead credential. Local check, no chain read.
+2. **On-chain owner binding** — the derived key is compared to the note's on-chain owner, read via `PnStateReader::owner_pubkey` (the `_ephemeralPubkey` storage field decoded straight from the PN BOC; `PrivateNote` exposes no getter for it). A key that does not control the note is rejected as `KeyDoesNotOwnNote` → 400 / -2016. Without this an unauthenticated caller who learns a deployed `pnAddress` / `pnDih` (both on-chain readable) could squat the note's unique constraint with an arbitrary key and block the real owner.
+
+Neither reject writes a row — both run before `registry.register`.
 
 ### Input validation
 
@@ -885,7 +894,7 @@ A concurrent identical registration blocks on the `accounts` insert until the fi
 
 ### Failure surface
 
-1. **Pre-write** — body shape (`-1102` / `-1130`) and the chain probe (`-2013` not deployed, `-1500` gateway/parse failure). No row written.
+1. **Pre-write** — body shape (`-1102` / `-1130`), the chain probe (`-2013` not deployed, `-1500` gateway/parse failure), and the owner-key binding (`-1130` pubkey/seckey mismatch, `-2016` key does not own the note, `-1500` if the owner-key read flaps). No row written.
 2. **Conflict** — `pn_address` or `pn_dih` already present (`-2015`). Transaction rolled back.
 3. **Internal** — sealing failure, DB error, or the `api_key` collision (`-1000`), logged at `error`, transaction rolled back.
 
@@ -894,9 +903,10 @@ A concurrent identical registration blocks on the `accounts` insert until the fi
 | Condition | DomainError | HTTP |
 | --- | --- | --- |
 | A mandatory field missing or blank | `MissingParameter` | 400 |
-| Malformed field (bad hex, >256 bits, wrong seckey length, unknown body key) | `InvalidParameter` | 400 |
+| Malformed field (bad hex, >256 bits, wrong seckey length, unknown body key), or `pnPubkeyHex` is not the key `pnSeckeyHex` derives | `InvalidParameter` | 400 |
 | PrivateNote not deployed on-chain | `AccountNotDeployed` | 404 |
-| Gateway flap or PN BOC parse failure during the probe | `MarketInconsistent` | 503 |
+| Gateway flap or PN BOC parse failure during the probe or owner-key read | `MarketInconsistent` | 503 |
+| Submitted key does not control the note (derived key ≠ on-chain `_ephemeralPubkey`) | `KeyDoesNotOwnNote` | 400 |
 | `pn_address` or `pn_dih` already registered | `NoteAlreadyRegistered` | 409 |
 | Sealing, DB failure, or `api_key` collision | `Unexpected` | 500 |
 
@@ -905,11 +915,11 @@ A concurrent identical registration blocks on the `accounts` insert until the fi
 | Layer | Responsibility |
 | --- | --- |
 | `crates/domain` | New `NoteAlreadyRegistered` variant (`-2015` / 409). |
-| `crates/application` | `NewAccountNote` / `RegisteredAccount`, the `AccountRegistry` port, and `RegisterAccountUseCase` (chain probe, then delegate). |
-| `crates/infrastructure` | `account_registry::PostgresAccountRegistry` (validate, random + sealed credential, insert-only transaction). `crypto::fill_random`. `seed::hex_to_dec_uint256` promoted to `pub(crate)`. |
+| `crates/application` | `NewAccountNote` / `RegisteredAccount`, the `AccountRegistry` and `PnStateReader` ports, and `RegisterAccountUseCase` (chain probe → pubkey/seckey consistency → on-chain owner binding, then delegate). `derive_ed25519_pubkey_hex` and `uint256_hex_eq` live here. |
+| `crates/infrastructure` | `account_registry::PostgresAccountRegistry` (validate, random + sealed credential, insert-only transaction). `crypto::fill_random`. `seed::hex_to_dec_uint256` promoted to `pub(crate)`. `GraphqlPnStateReader::owner_pubkey` decodes the note's `_ephemeralPubkey` straight from its BOC (`tvm_runner::decode_account_fields`). |
 | `services/api` | `RegisterAccountRequest` / `RegisterAccountResponse` DTOs, `register_account` handler, public route `Router::with_path("api/v1/accounts").post(register_account)` outside the auth subrouter. `AppState.registry: Option<SharedRegistry>` is builder-set (`with_account_registry`) so the existing test `AppState::new` sites stay unbroken; `run()` always wires the Postgres registry. |
 
-Tests: `register_account_http.rs` drives the full router against the real Postgres registry plus `FakePnStateReader` (success, `-2015`, `-2013`, `-1102`, `-1130`); `account_registry` unit tests cover `validate_note`; `e2e_register_account.rs` (`#[ignore]`) exercises the real `GraphqlPnStateReader` against shellnet.
+Tests: `register_account_http.rs` drives the full router against the real Postgres registry plus `FakePnStateReader` (success, `-2015`, `-2013`, `-1102`, `-1130` — covering both the pubkey/seckey-mismatch and the unknown/malformed-field cases — and `-2016` for the wrong-owner binding); `account_registry` unit tests cover `validate_note` and the application suite pins `derive_ed25519_pubkey_hex` to its RFC 8032 vector; `e2e_register_account.rs` (`#[ignore]`) exercises the real `GraphqlPnStateReader` against shellnet, including the `_ephemeralPubkey` owner read.
 
 ### Idempotency and retries
 

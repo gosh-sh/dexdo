@@ -18,13 +18,14 @@
 // Marked `#[ignore]` because it needs:
 //   - TEST_DATABASE_URL (test Postgres up — see README.md#test-postgres)
 //   - reachable shellnet endpoint
-//   - `tests/fixtures/seed_notes.json` with at least one PN (slot 0).
-//     Registration is chain-read-only (it never takes the PN `_busy`
-//     lock — only a `get_details` getter) and clears its own `accounts`
-//     row before and after, so it can reuse slot 0 even though the
-//     trading e2e tests also claim it. Run e2e sequentially
-//     (`--test-threads=1`) so its account-row delete cannot race a
-//     trading test's `provision_account` on the same note.
+//   - `tests/fixtures/seed_notes.json` with at least one PN — the test
+//     uses the shared deployer note (`TestPnPool::first()`). Registration
+//     is chain-read-only (it never takes the PN `_busy` lock — only
+//     `get_details` and the `_ephemeralPubkey` owner read) and clears its
+//     own `accounts` row before and after, so it can reuse that shared
+//     note even though the trading e2e tests also use it. Run e2e
+//     sequentially (`--test-threads=1`) so its account-row delete cannot
+//     race a trading test's `provision_account` on the same note.
 //
 // Run explicitly:
 //
@@ -140,10 +141,10 @@ async fn register_deployed_pn_against_shellnet() {
     };
     let service = build_service(&pool, kek);
 
-    // Any deployed PN works — registration only reads it. Slot 0 is fine
-    // even though trading tests claim it: clearing the account row first
-    // makes the insert-only registration start clean, and the read-only
-    // path never touches the PN `_busy` lock.
+    // Any deployed PN works — registration only reads it. The shared
+    // `first()` note is fine even though trading tests use it too: clearing
+    // the account row first makes the insert-only registration start clean,
+    // and the read-only path never touches the PN `_busy` lock.
     let pn = TestPnPool::load().first().clone();
     delete_account(&pool, &pn.address).await;
 
