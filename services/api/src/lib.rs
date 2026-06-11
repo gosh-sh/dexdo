@@ -1101,8 +1101,10 @@ async fn get_trades(
     let symbol =
         non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
 
-    // A present-but-non-numeric `limit` (e.g. `limit=abc`) is -1130 here;
-    // out-of-range numeric inputs come back as -1102 from the use case's
+    // `limit` splits three ways through `optional_typed_query`: absent or
+    // blank (`limit=`) falls through to the use case's default page size;
+    // present-but-unparseable (e.g. `limit=abc`) is -1130 here; an
+    // out-of-range number comes back as -1102 from the use case's
     // [1, TRADES_MAX_LIMIT] bound check — matching /api/v1/orders' split.
     let limit = optional_typed_query::<i64>(req, "limit")?;
 

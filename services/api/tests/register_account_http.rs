@@ -9,10 +9,18 @@
 
 mod common;
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use common::canonical_query;
 use common::now_ms;
 use common::sign;
+use dodex_api::testkit::build_router;
+use dodex_api::testkit::AppState;
+use dodex_application::Authenticator;
+use dodex_application::MarketReadRepository;
 use dodex_application::PnDetails;
+use dodex_domain::DomainError;
 use salvo::http::StatusCode;
 use salvo::test::ResponseExt;
 use salvo::test::TestClient;
@@ -111,6 +119,28 @@ async fn register_returns_usable_credentials() {
         auth_resp.status_code,
         Some(StatusCode::OK),
         "freshly minted credential must authenticate on a USER_DATA route"
+    );
+
+    // The credential the client received round-trips above; this pins that
+    // what landed in the DB is the SEALED form, not the plaintext. A
+    // regression to storing the raw secret would still authenticate, so the
+    // round-trip alone can't catch it — only a column-vs-plaintext check can.
+    let (secret_enc, seckey_enc): (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "select ak.api_secret_enc, a.pn_seckey_enc
+           from api_keys ak join accounts a on ak.account_id = a.id
+          where a.pn_address = $1",
+    )
+    .bind(&pn_address)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch stored ciphertexts");
+    let raw_secret = hex::decode(&reg.api_secret).expect("api_secret hex");
+    let raw_seckey = hex::decode("00".repeat(32)).expect("seckey hex");
+    assert_ne!(secret_enc, raw_secret, "api_secret must be stored sealed, not raw");
+    assert_ne!(seckey_enc, raw_seckey, "pn_seckey must be stored sealed, not raw");
+    assert!(
+        !secret_enc.windows(raw_secret.len()).any(|w| w == raw_secret.as_slice()),
+        "raw api_secret bytes must not appear anywhere inside the stored ciphertext"
     );
 
     cleanup_account(&pool, &pn_address).await;
@@ -425,4 +455,129 @@ async fn register_reused_dih_fresh_address_conflicts() {
     assert_eq!(status, Some(StatusCode::CONFLICT));
     assert_eq!(err.code, -2015);
     assert_eq!(count_b, 0, "a fresh address reusing a taken pn_dih writes no row");
+}
+
+// ---- No-registry guard (no database) ------------------------------------
+//
+// `register_account` fails closed when its AppState carries no registry.
+// Production `run` always wires one, so the only way to reach the guard is
+// an AppState built without it — a test, or a future caller that skips the
+// builder step. Pinning it keeps that path a deliberate 500/-1000 rather
+// than a panic or a silent success. This test needs no database: the
+// handler returns at the registry check before it touches the repo,
+// authenticator, reader, or chain sender, so the doubles below never run.
+
+struct UnusedRepo;
+
+#[async_trait]
+impl MarketReadRepository for UnusedRepo {
+    async fn list_markets(
+        &self,
+        _: &dodex_application::MarketsRequest,
+    ) -> Result<dodex_domain::MarketsPage, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn get_depth(
+        &self,
+        _: &dodex_domain::MarketAddress,
+        _: &dodex_domain::Symbol,
+        _: u16,
+    ) -> Result<dodex_domain::DepthSnapshot, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn get_trades(
+        &self,
+        _: &dodex_domain::MarketAddress,
+        _: &dodex_domain::Symbol,
+        _: dodex_application::TradesLimit,
+    ) -> Result<Vec<dodex_domain::Trade>, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn resolve_for_new_order(
+        &self,
+        _: &dodex_domain::MarketAddress,
+        _: &dodex_domain::Symbol,
+        _: i64,
+    ) -> Result<dodex_application::MarketForPlacement, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn resolve_for_cancel(
+        &self,
+        _: &dodex_domain::MarketAddress,
+        _: &dodex_domain::Symbol,
+        _: u64,
+        _: &str,
+        _: i64,
+    ) -> Result<dodex_application::OrderForCancel, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn resolve_for_cancel_batch(
+        &self,
+        _: &dodex_domain::MarketAddress,
+        _: &dodex_domain::Symbol,
+        _: &[u64],
+        _: &str,
+        _: i64,
+    ) -> Result<Option<dodex_application::CancelBatchResolution>, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn list_orders(
+        &self,
+        _: &dodex_application::OrdersQuery,
+    ) -> Result<dodex_application::OrdersPage, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn resolve_market_for_balances(
+        &self,
+        _: &dodex_domain::MarketAddress,
+    ) -> Result<dodex_application::MarketBalancesResolution, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn resolve_for_buy_full_set(
+        &self,
+        _: &dodex_domain::MarketAddress,
+        _: i64,
+    ) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+    async fn sum_open_sell_remaining(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<std::collections::HashMap<u32, String>, anyhow::Error> {
+        unreachable!("no-registry guard returns before the repo is read")
+    }
+}
+
+struct UnusedAuth;
+
+#[async_trait]
+impl Authenticator for UnusedAuth {
+    async fn authenticate(
+        &self,
+        _: dodex_application::AuthenticateRequest,
+    ) -> Result<dodex_application::AuthContext, DomainError> {
+        unreachable!("the /accounts route is public; the auth hoop never runs")
+    }
+}
+
+#[tokio::test]
+async fn register_without_registry_returns_500() {
+    // No `.with_account_registry(...)`: the builder leaves `registry: None`.
+    let state = AppState::new(
+        Arc::new(UnusedRepo),
+        Arc::new(UnusedAuth),
+        Arc::new(common::NoopChainSender),
+        Arc::new(common::FakePnStateReader::default()),
+        Arc::new(common::FakeReferenceRepo::with_seeded()),
+    );
+    let service = Service::new(build_router(state));
+
+    let (_pn_address, _scope, body) = fresh_note();
+    let mut resp = post_register(&service, &body).await;
+    let status = resp.status_code;
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+
+    assert_eq!(status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+    assert_eq!(err.code, -1000);
 }
