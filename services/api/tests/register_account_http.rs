@@ -136,6 +136,79 @@ async fn register_same_note_twice_conflicts() {
 }
 
 #[tokio::test]
+async fn register_dup_does_not_recredential() {
+    // Insert-only: a duplicate registration must 409 without minting a
+    // second credential or rotating the first. Guards against a regression
+    // to `on conflict do update`.
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pn_address, _scope, body) = fresh_note();
+    pn.set_details_for(&pn_address, PnDetails { balance: vec![], locked_in_orders: vec![] });
+
+    let mut first = post_register(&service, &body).await;
+    assert_eq!(first.status_code, Some(StatusCode::OK));
+    let reg: RegisterBody = first.take_json().await.expect("first register body");
+
+    let second = post_register(&service, &body).await;
+    assert_eq!(second.status_code, Some(StatusCode::CONFLICT));
+
+    // Exactly one credential exists for the account...
+    let key_count: i64 = sqlx::query_scalar(
+        "select count(*) from api_keys ak
+           join accounts a on ak.account_id = a.id
+          where a.pn_address = $1",
+    )
+    .bind(&pn_address)
+    .fetch_one(&pool)
+    .await
+    .expect("count api_keys");
+    assert_eq!(key_count, 1, "a duplicate registration must not mint a second credential");
+
+    // ...and it is still the FIRST one, which must keep authenticating.
+    let ts = now_ms();
+    let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
+    let sig = sign(&reg.api_secret, &canonical, b"");
+    let auth_resp = TestClient::get("http://test/api/v1/account")
+        .add_header("X-DODEX-APIKEY", reg.api_key.as_str(), true)
+        .query("recvWindow", "5000")
+        .query("timestamp", ts.to_string())
+        .query("signature", sig)
+        .send(&service)
+        .await;
+
+    cleanup_account(&pool, &pn_address).await;
+
+    assert_eq!(
+        auth_resp.status_code,
+        Some(StatusCode::OK),
+        "the original credential must still authenticate after the rejected duplicate"
+    );
+}
+
+#[tokio::test]
+async fn register_gateway_flap_returns_503() {
+    // A transient reader fault on the existence probe is retryable, not a
+    // hard 500: it must map to MarketInconsistent (503, -1500) and write
+    // no account row.
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pn_address, _scope, body) = fresh_note();
+    pn.fail_details("simulated transient gateway error");
+
+    let mut resp = post_register(&service, &body).await;
+    let status = resp.status_code;
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+
+    assert_eq!(status, Some(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(err.code, -1500);
+
+    let count: i64 = sqlx::query_scalar("select count(*) from accounts where pn_address = $1")
+        .bind(&pn_address)
+        .fetch_one(&pool)
+        .await
+        .expect("count accounts");
+    assert_eq!(count, 0, "a gateway flap during the probe must not write an account row");
+}
+
+#[tokio::test]
 async fn register_undeployed_note_returns_2013() {
     let Some((service, pool, _kek, pn)) = common::setup().await else { return };
     let (pn_address, _scope, body) = fresh_note();

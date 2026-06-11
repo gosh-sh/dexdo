@@ -365,6 +365,10 @@ impl AuthSection {
             self.default_recv_window_ms,
             self.max_recv_window_ms,
         );
+        anyhow::ensure!(
+            !self.seed_accounts || self.seed_accounts_path.is_some(),
+            "auth.seed_accounts=true requires auth.seed_accounts_path",
+        );
         Ok(())
     }
 }
@@ -808,6 +812,25 @@ graphql:
         };
         let err = s.validate().unwrap_err();
         assert!(err.to_string().contains("kek_hex"), "got: {err}");
+    }
+
+    #[test]
+    fn auth_validate_rejects_seed_accounts_without_path() {
+        // A misconfig must fail at config load, not later when the seeder
+        // aborts after migrations have already run.
+        let mut s = valid_auth_section(5_000, 60_000);
+        s.seed_accounts = true;
+        s.seed_accounts_path = None;
+        let err = s.validate().unwrap_err();
+        assert!(err.to_string().contains("seed_accounts_path"), "got: {err}");
+    }
+
+    #[test]
+    fn auth_validate_accepts_seed_accounts_with_path() {
+        let mut s = valid_auth_section(5_000, 60_000);
+        s.seed_accounts = true;
+        s.seed_accounts_path = Some("/etc/dodex/seed_notes.json".to_string());
+        s.validate().unwrap();
     }
 
     #[test]

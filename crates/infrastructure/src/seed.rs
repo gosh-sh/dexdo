@@ -5,9 +5,9 @@
 // in the API config; off by default and only flipped on in dev/test/
 // staging by devops. Each note becomes one account whose API secret is
 // derived from its position via `crypto::derive_api_secret`, so the file
-// carries note custody keys only and never an API secret. When the route
-// is no longer needed the whole module and both config fields can be
-// removed without touching the rest of the auth pipeline.
+// carries note custody keys only and never an API secret. When this
+// seeding path is no longer needed the whole module and both config fields
+// can be removed without touching the rest of the auth pipeline.
 
 use std::path::Path;
 
@@ -129,16 +129,22 @@ pub struct SeedReport {
 /// Fails before any DB write if the file is missing, is not valid JSON,
 /// or carries a malformed field — startup aborts rather than half-seeding.
 pub async fn seed_accounts_from_notes(pool: &PgPool, kek: &Kek, path: &Path) -> Result<SeedReport> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read seed notes file {}", path.display()))?;
-    let notes: Vec<NoteEntry> = serde_json::from_str(&raw)
-        .with_context(|| format!("parse seed notes file {}", path.display()))?;
+    let notes = read_notes_file(path)?;
 
     let mut accounts = Vec::with_capacity(notes.len());
     for (index, note) in notes.into_iter().enumerate() {
         accounts.push(note_to_seed_account(kek, index as u32, note)?);
     }
     apply_seed(pool, kek, SeedData { accounts }).await
+}
+
+/// Read and parse the notes file. Split out from
+/// [`seed_accounts_from_notes`] so the two startup-gating failure modes
+/// (file missing / malformed JSON) are unit-testable without a database.
+fn read_notes_file(path: &Path) -> Result<Vec<NoteEntry>> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read seed notes file {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parse seed notes file {}", path.display()))
 }
 
 /// Map one note to the internal `SeedAccount`, deriving its API credential
@@ -381,6 +387,25 @@ mod tests {
                 permissions: vec!["USER_DATA".into(), "TRADE".into()],
             }],
         }
+    }
+
+    #[test]
+    fn read_notes_file_rejects_missing_file() {
+        // Startup gates on this read; a missing file must abort with a
+        // clear cause before any DB work.
+        let path = Path::new("/nonexistent/dodex-seed-notes-missing.json");
+        let err = read_notes_file(path).unwrap_err();
+        assert!(format!("{err:#}").contains("read seed notes file"), "got: {err:#}");
+    }
+
+    #[test]
+    fn read_notes_file_rejects_malformed_json() {
+        let path = std::env::temp_dir().join("dodex_seed_notes_malformed.json");
+        std::fs::write(&path, b"{ not valid json ]").expect("write temp notes file");
+        let result = read_notes_file(&path);
+        let _ = std::fs::remove_file(&path);
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("parse seed notes file"), "got: {err:#}");
     }
 
     #[test]
