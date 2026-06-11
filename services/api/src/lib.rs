@@ -2010,9 +2010,10 @@ async fn buy_full_set(
 // Register a trading account from a deployed PrivateNote and mint its
 // first API credential. Public — a client has no key yet, so the note's
 // custody keys in the body are the capability. The use case confirms the
-// note is deployed on-chain (so the account can trade immediately) before
-// any row is written; the response carries the credential, the one and
-// only time the secret is returned.
+// note is deployed on-chain and that the submitted secret key owns it (it
+// must derive the note's on-chain owner key, else -2016) before any row is
+// written, so the minted credential can trade immediately; the response
+// carries the credential, the one and only time the secret is returned.
 #[endpoint(
     tags("account"),
     summary = "Register a trading account",

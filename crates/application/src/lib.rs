@@ -1721,13 +1721,28 @@ impl std::fmt::Debug for NewAccountNote {
 /// `api_secret_hex` is the one point in its lifecycle where the plaintext
 /// secret exists outside the sealed DB column — the caller must surface it
 /// to the client here; it is never retrievable again.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegisteredAccount {
     pub account_id: Uuid,
     pub pn_address: String,
     pub api_key: String,
     pub api_secret_hex: String,
     pub permissions: Vec<Permission>,
+}
+
+// `api_secret_hex` is the live plaintext HMAC secret — the one plaintext
+// secret in the system. A derived `Debug` would leak it through any
+// `?account` / `dbg!`. Mask it, mirroring `NewAccountNote` and `Kek`.
+impl std::fmt::Debug for RegisteredAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredAccount")
+            .field("account_id", &self.account_id)
+            .field("pn_address", &self.pn_address)
+            .field("api_key", &self.api_key)
+            .field("api_secret_hex", &"<redacted>")
+            .field("permissions", &self.permissions)
+            .finish()
+    }
 }
 
 /// Persists a new trading account plus its first API credential. The
@@ -1760,13 +1775,32 @@ pub fn derive_ed25519_pubkey_hex(seckey_hex: &str) -> Result<String, DomainError
     Ok(hex::encode(signing.verifying_key().to_bytes()))
 }
 
+/// Compare two hex uint256 values for numeric equality, tolerating the
+/// representational freedom the wire allows: an optional `0x` prefix, either
+/// case, and any leading-zero width. This mirrors the equality
+/// `infrastructure`'s `hex_to_dec_uint256` imposes when it folds the value
+/// into the `numeric(78,0)` column — so a public key that matches here is
+/// stored identically to the seckey-derived one — without this layer
+/// depending on infrastructure. A non-hex side simply never matches.
+fn uint256_hex_eq(a: &str, b: &str) -> bool {
+    fn norm(s: &str) -> &str {
+        let t = s.trim();
+        let h = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+        h.trim_start_matches('0')
+    }
+    norm(a).eq_ignore_ascii_case(norm(b))
+}
+
 /// Orchestrates `POST /api/v1/accounts`: confirms the PrivateNote is
-/// actually deployed on-chain, then binds the submitted secret key to the
-/// note's on-chain owner key (so the minted credential can actually sign,
-/// and an arbitrary key cannot squat a deployed note), then delegates the
-/// credential mint + insert to the `AccountRegistry`. Both chain checks run
-/// first so a not-deployed note fails with `AccountNotDeployed` (-2013) and
-/// a wrong key with `KeyDoesNotOwnNote` (-2016) before any row is written.
+/// actually deployed on-chain, checks the submitted public key is the one
+/// the submitted secret derives (an inconsistent pair would mint a
+/// credential that cannot sign — `InvalidParameter`/-1130), then binds the
+/// submitted secret key to the note's on-chain owner key (so the minted
+/// credential can actually sign, and an arbitrary key cannot squat a
+/// deployed note), then delegates the credential mint + insert to the
+/// `AccountRegistry`. The checks run first so a not-deployed note fails with
+/// `AccountNotDeployed` (-2013) and a wrong key with `KeyDoesNotOwnNote`
+/// (-2016) before any row is written.
 pub struct RegisterAccountUseCase<P, G> {
     pn: P,
     registry: G,
@@ -1810,6 +1844,19 @@ where
         // constraint and block the real owner. Derive locally first so a
         // malformed key is `InvalidParameter` before the second chain read.
         let submitted_pubkey = derive_ed25519_pubkey_hex(&note.pn_seckey_hex)?;
+
+        // The submitted `pn_pubkey_hex` is stored verbatim as
+        // `accounts.pn_pubkey` and later paired with the sealed seckey to
+        // build the chain signer (`KeyPair { public, secret }`). A pair whose
+        // public is not the key the secret derives can never produce a valid
+        // signature, so the credential could not trade — reject the
+        // inconsistent pair rather than mint a dead credential. Local check,
+        // before the second chain read.
+        if !uint256_hex_eq(&note.pn_pubkey_hex, &submitted_pubkey) {
+            tracing::debug!(pn = %note.pn_address, "register: submitted pn_pubkey does not match the seckey");
+            return Err(DomainError::InvalidParameter);
+        }
+
         let owner_pubkey = self.pn.owner_pubkey(&note.pn_address).await.map_err(|e| {
             if let Some(domain) = e.downcast_ref::<DomainError>() {
                 return *domain;
@@ -5179,7 +5226,10 @@ mod register_account_use_case_tests {
     fn note() -> NewAccountNote {
         NewAccountNote {
             pn_address: "0:pn".into(),
-            pn_pubkey_hex: "ab".repeat(32),
+            // The public key must be the one the seckey derives — the use
+            // case rejects an inconsistent pair (-1130) before the owner
+            // binding, so every fixture that reaches the binding matches here.
+            pn_pubkey_hex: derive_ed25519_pubkey_hex(&"00".repeat(32)).unwrap(),
             pn_seckey_hex: "00".repeat(32),
             pn_dih_hex: "cd".repeat(32),
         }
@@ -5322,6 +5372,52 @@ mod register_account_use_case_tests {
         let err = uc.execute(note()).await.unwrap_err();
         assert!(matches!(err, DomainError::KeyDoesNotOwnNote));
         assert_eq!(registry.call_count(), 0, "wrong key writes no row");
+    }
+
+    #[tokio::test]
+    async fn pubkey_seckey_mismatch_is_rejected_and_skips_write() {
+        // Deployed note whose owner IS the submitted seckey ("00"*32) — the
+        // binding would pass — but the submitted public key is a different
+        // valid key. The pair could never sign, so the use case rejects it
+        // (-1130) before any write, without even reaching the owner read.
+        struct DeployedPn;
+        #[async_trait]
+        impl PnStateReader for DeployedPn {
+            async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
+                Ok(PnDetails { balance: vec![], locked_in_orders: vec![] })
+            }
+
+            async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
+                unreachable!()
+            }
+
+            async fn owner_pubkey(&self, _: &str) -> anyhow::Result<String> {
+                unreachable!("the key-pair check rejects before the owner read")
+            }
+        }
+
+        let mut n = note();
+        n.pn_pubkey_hex = derive_ed25519_pubkey_hex(&"11".repeat(32)).unwrap();
+        let registry = SpyRegistry::new();
+        let uc = RegisterAccountUseCase::new(DeployedPn, registry.clone());
+        let err = uc.execute(n).await.unwrap_err();
+        assert!(matches!(err, DomainError::InvalidParameter));
+        assert_eq!(registry.call_count(), 0, "an inconsistent key pair writes no row");
+    }
+
+    #[test]
+    fn uint256_hex_eq_ignores_case_prefix_and_leading_zeros() {
+        assert!(uint256_hex_eq("ABCD", "abcd"));
+        assert!(uint256_hex_eq("0xabcd", "abcd"));
+        assert!(uint256_hex_eq("0x00ABcd", "abcd"));
+        assert!(uint256_hex_eq("00abcd", "abcd"));
+    }
+
+    #[test]
+    fn uint256_hex_eq_rejects_different_values_and_non_hex() {
+        assert!(!uint256_hex_eq("abcd", "abce"));
+        let derived = derive_ed25519_pubkey_hex(&"00".repeat(32)).unwrap();
+        assert!(!uint256_hex_eq(&"zz".repeat(32), &derived));
     }
 
     #[test]

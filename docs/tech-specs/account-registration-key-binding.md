@@ -38,10 +38,19 @@ exercised by the `#[ignore]d`
 (`register_deployed_pn_against_shellnet`), which registers a live note and
 must get 200.
 
-## Not covered
+## Stored public key
 
-The submitted `pnPubkeyHex` is still stored as-is (the binding compares the
-**seckey-derived** key against the chain, not the submitted pubkey). A
-caller that submits a correct seckey but a wrong `pnPubkeyHex` only breaks
-its own future signing — it is not a squatting vector — so this is left as
-pre-existing behaviour.
+Before the on-chain binding, the use case also checks the submitted
+`pnPubkeyHex` is the key the submitted `pnSeckeyHex` derives — comparing as
+uint256 values, so case, an optional `0x` prefix, and leading-zero width do
+not matter (`uint256_hex_eq`). A mismatch is `InvalidParameter` (-1130), and
+the registry is never called. The stored `accounts.pn_pubkey` is later paired
+with the sealed seckey to build the chain signer (`KeyPair { public, secret }`);
+a pair whose public is not the seckey's key can never sign, so without this
+check a correct seckey plus a wrong `pnPubkeyHex` would mint a 200-OK
+credential that could never trade. A registration that succeeds therefore has
+a public key consistent with both its seckey and the note's on-chain owner.
+
+The unit test `pubkey_seckey_mismatch_is_rejected_and_skips_write` and the
+HTTP test `register_pubkey_seckey_mismatch_returns_1130` pin the reject path
+(no write); `uint256_hex_eq_*` pin the canonical comparison.

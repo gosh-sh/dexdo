@@ -4,9 +4,8 @@
 // per-run prefix and feeds `apply_seed` a synthetic `SeedData` with
 // that prefix, so concurrent tests (even within a binary running with
 // parallel threads) never share rows and never need cross-test
-// cleanup coordination. The hardcoded production `SEED_DATA` and
-// `seed::seed_accounts` are covered by unit tests in `seed.rs`; here
-// we exercise the DB-side pipeline.
+// cleanup coordination. The field validators are covered by unit tests
+// in `seed.rs`; here we exercise the DB-side `apply_seed` pipeline.
 //
 // Gated on TEST_DATABASE_URL — see
 // crates/infrastructure/tests/reprojection.rs for the docker-compose

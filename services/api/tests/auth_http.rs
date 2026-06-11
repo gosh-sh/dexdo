@@ -1,7 +1,7 @@
 // HTTP-level integration tests for the auth hoop and the permission
 // gate on `POST /api/v1/order`. Each test sends a real request through
 // the production router (constructed by `dodex_api::build_router`)
-// against the test DB seeded with `seed::seed_accounts`, then asserts
+// against the test DB seeded via `seed::seed_accounts_from_notes`, then asserts
 // on status + spec error body.
 //
 // The seeded test DB has no `markets` rows, so a fully-authorised

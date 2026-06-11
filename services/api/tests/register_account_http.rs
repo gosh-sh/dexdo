@@ -42,15 +42,18 @@ struct ErrorBody {
 }
 
 /// A fresh note with a UUID-unique `pn_address` and `pn_dih` so concurrent
-/// tests never contend on the `accounts` unique indexes. The public key is
-/// fixed (no unique constraint) and the secret key is a valid 32-byte hex.
+/// tests never contend on the `accounts` unique indexes. The secret is the
+/// canonical test owner key (`"00"*32`) the fake reader reports as the note's
+/// on-chain owner, and the public key is the one that secret derives — the
+/// use case rejects a mismatched pair (-1130).
 fn fresh_note() -> (String, String, serde_json::Value) {
     let scope = uuid::Uuid::new_v4().simple().to_string(); // 32 hex chars
     let pn_address = format!("0:reg-{scope}");
     let pn_dih_hex = scope.clone(); // 128-bit, unique, fits numeric(78,0)
+    let pn_pubkey_hex = dodex_application::derive_ed25519_pubkey_hex(&"00".repeat(32)).unwrap();
     let body = json!({
         "pnAddress": pn_address,
-        "pnPubkeyHex": "ab".repeat(32),
+        "pnPubkeyHex": pn_pubkey_hex,
         "pnSeckeyHex": "00".repeat(32),
         "pnDihHex": pn_dih_hex,
     });
@@ -215,8 +218,9 @@ async fn register_unknown_field_returns_1130() {
 async fn register_malformed_hex_returns_1130() {
     let Some((service, _pool, _kek, pn)) = common::setup().await else { return };
     let (pn_address, scope, _body) = fresh_note();
-    // Note is deployed, so the chain probe passes and the registry's field
-    // validation is what rejects the malformed public key.
+    // Note is deployed, so the chain probe passes; the malformed public key
+    // is not the key the seckey derives, so the use case's key-pair check
+    // rejects it (-1130) before any write.
     pn.set_details_for(&pn_address, PnDetails { balance: vec![], locked_in_orders: vec![] });
     let body = json!({
         "pnAddress": pn_address,
@@ -239,11 +243,12 @@ async fn register_wrong_key_returns_2016() {
     let (pn_address, scope, _body) = fresh_note();
     pn.set_details_for(&pn_address, PnDetails { balance: vec![], locked_in_orders: vec![] });
     // Deployed note, but a well-formed seckey that is NOT the note's owner
-    // ("11"*32 vs the fixture owner "00"*32): the on-chain binding rejects
-    // before any row is written.
+    // ("11"*32 vs the fixture owner "00"*32). Its public key matches that
+    // seckey, so the key-pair check passes; the on-chain binding then rejects
+    // it (-2016) before any row is written.
     let body = json!({
         "pnAddress": pn_address,
-        "pnPubkeyHex": "ab".repeat(32),
+        "pnPubkeyHex": dodex_application::derive_ed25519_pubkey_hex(&"11".repeat(32)).unwrap(),
         "pnSeckeyHex": "11".repeat(32),
         "pnDihHex": scope,
     });
@@ -261,4 +266,69 @@ async fn register_wrong_key_returns_2016() {
         .await
         .expect("count accounts");
     assert_eq!(count, 0, "wrong-key registration must not write an account row");
+}
+
+#[tokio::test]
+async fn register_pubkey_seckey_mismatch_returns_1130() {
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (pn_address, scope, _body) = fresh_note();
+    pn.set_details_for(&pn_address, PnDetails { balance: vec![], locked_in_orders: vec![] });
+    // The seckey IS the note's owner ("00"*32 — the binding would pass), but
+    // the public key is a different well-formed key. The pair could never
+    // sign, so the credential would be dead on arrival: the backend rejects
+    // it (-1130) and writes no row.
+    let body = json!({
+        "pnAddress": pn_address,
+        "pnPubkeyHex": dodex_application::derive_ed25519_pubkey_hex(&"11".repeat(32)).unwrap(),
+        "pnSeckeyHex": "00".repeat(32),
+        "pnDihHex": scope,
+    });
+
+    let mut resp = post_register(&service, &body).await;
+    let status = resp.status_code;
+    let err = resp.take_json::<ErrorBody>().await.expect("error body");
+
+    let count: i64 = sqlx::query_scalar("select count(*) from accounts where pn_address = $1")
+        .bind(&pn_address)
+        .fetch_one(&pool)
+        .await
+        .expect("count accounts");
+    cleanup_account(&pool, &pn_address).await;
+
+    assert_eq!(status, Some(StatusCode::BAD_REQUEST));
+    assert_eq!(err.code, -1130);
+    assert_eq!(count, 0, "an inconsistent key pair must not write an account row");
+}
+
+#[tokio::test]
+async fn register_reused_dih_fresh_address_conflicts() {
+    let Some((service, pool, _kek, pn)) = common::setup().await else { return };
+    let (addr_a, dih, body_a) = fresh_note();
+    let (addr_b, _scope_b, mut body_b) = fresh_note();
+    // Note B is a wholly different note (fresh `pn_address`) carrying A's
+    // deposit-identifier hash — the anti-squat case the `pn_dih` unique index
+    // guards, distinct from the both-indexes collision of the twice-same-note
+    // test. The second registration must conflict (-2015), not mint a row.
+    body_b["pnDihHex"] = serde_json::Value::String(dih);
+    pn.set_details_for(&addr_a, PnDetails { balance: vec![], locked_in_orders: vec![] });
+    pn.set_details_for(&addr_b, PnDetails { balance: vec![], locked_in_orders: vec![] });
+
+    let first = post_register(&service, &body_a).await;
+    assert_eq!(first.status_code, Some(StatusCode::OK));
+
+    let mut second = post_register(&service, &body_b).await;
+    let status = second.status_code;
+    let err = second.take_json::<ErrorBody>().await.expect("error body");
+
+    let count_b: i64 = sqlx::query_scalar("select count(*) from accounts where pn_address = $1")
+        .bind(&addr_b)
+        .fetch_one(&pool)
+        .await
+        .expect("count accounts b");
+    cleanup_account(&pool, &addr_a).await;
+    cleanup_account(&pool, &addr_b).await;
+
+    assert_eq!(status, Some(StatusCode::CONFLICT));
+    assert_eq!(err.code, -2015);
+    assert_eq!(count_b, 0, "a fresh address reusing a taken pn_dih writes no row");
 }

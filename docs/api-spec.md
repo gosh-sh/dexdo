@@ -715,7 +715,7 @@ Request body:
 | Field | Type | Mandatory | Description |
 | --- | --- | --- | --- |
 | `pnAddress` | STRING | YES | Address of the deployed PrivateNote (`0:…`). |
-| `pnPubkeyHex` | STRING | YES | Note owner public key, hex (up to 256 bits). |
+| `pnPubkeyHex` | STRING | YES | Note owner public key, hex (up to 256 bits). Must be the key `pnSeckeyHex` derives. |
 | `pnSeckeyHex` | STRING | YES | Note owner secret key, 32-byte hex. Held in custody, sealed under the backend key, and used to sign your trades. |
 | `pnDihHex` | STRING | YES | Deposit-identifier hash of the note, hex (up to 256 bits). |
 
@@ -752,7 +752,7 @@ Response fields:
 
 Each note can be registered once. Registering a note that already has an account returns `-2015` (HTTP 409); the existing credential is left untouched and no second one is minted. Losing an `apiSecret` cannot be undone by re-registering the same note. The submitted secret key must be the note's own key — the backend checks it against the note's on-chain owner and returns `-2016` otherwise.
 
-Errors: `-1102` (a mandatory field is missing), `-1130` (a field is malformed — bad hex, over 256 bits, or an unknown body key), `-2013` (the note is not deployed on-chain), `-2015` (the note is already registered), `-2016` (the submitted key does not control the note).
+Errors: `-1102` (a mandatory field is missing), `-1130` (a field is malformed — bad hex, over 256 bits, an unknown body key, or `pnPubkeyHex` is not the key `pnSeckeyHex` derives), `-1500` (the backend could not read the note's on-chain state; transient — retry), `-2013` (the note is not deployed on-chain), `-2015` (the note is already registered), `-2016` (the submitted key does not control the note).
 
 ### Account Balance
 
