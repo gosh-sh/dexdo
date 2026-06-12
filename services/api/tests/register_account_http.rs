@@ -478,6 +478,7 @@ impl MarketReadRepository for UnusedRepo {
     ) -> Result<dodex_domain::MarketsPage, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn get_depth(
         &self,
         _: &dodex_domain::MarketAddress,
@@ -486,6 +487,7 @@ impl MarketReadRepository for UnusedRepo {
     ) -> Result<dodex_domain::DepthSnapshot, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn get_trades(
         &self,
         _: &dodex_domain::MarketAddress,
@@ -494,6 +496,7 @@ impl MarketReadRepository for UnusedRepo {
     ) -> Result<Vec<dodex_domain::Trade>, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn resolve_for_new_order(
         &self,
         _: &dodex_domain::MarketAddress,
@@ -502,6 +505,7 @@ impl MarketReadRepository for UnusedRepo {
     ) -> Result<dodex_application::MarketForPlacement, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn resolve_for_cancel(
         &self,
         _: &dodex_domain::MarketAddress,
@@ -512,6 +516,7 @@ impl MarketReadRepository for UnusedRepo {
     ) -> Result<dodex_application::OrderForCancel, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn resolve_for_cancel_batch(
         &self,
         _: &dodex_domain::MarketAddress,
@@ -522,18 +527,21 @@ impl MarketReadRepository for UnusedRepo {
     ) -> Result<Option<dodex_application::CancelBatchResolution>, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn list_orders(
         &self,
         _: &dodex_application::OrdersQuery,
     ) -> Result<dodex_application::OrdersPage, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn resolve_market_for_balances(
         &self,
         _: &dodex_domain::MarketAddress,
     ) -> Result<dodex_application::MarketBalancesResolution, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn resolve_for_buy_full_set(
         &self,
         _: &dodex_domain::MarketAddress,
@@ -541,6 +549,7 @@ impl MarketReadRepository for UnusedRepo {
     ) -> Result<dodex_application::MarketForBuyFullSet, anyhow::Error> {
         unreachable!("no-registry guard returns before the repo is read")
     }
+
     async fn sum_open_sell_remaining(
         &self,
         _: &str,
