@@ -138,7 +138,9 @@
 				{"name":"flags","type":"uint8"},
 				{"name":"price","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"clientOrderId","type":"uint128"}
+				{"name":"clientOrderId","type":"uint128"},
+				{"name":"depositHash","type":"uint256"},
+				{"name":"opNonce","type":"uint64"}
 			],
 			"outputs": [
 			]
@@ -159,7 +161,9 @@
 				{"name":"filledAmount","type":"uint128"},
 				{"name":"clearingPrice","type":"uint256"},
 				{"name":"feeAmount","type":"uint128"},
-				{"name":"isTaker","type":"bool"}
+				{"name":"isTaker","type":"bool"},
+				{"name":"matchId","type":"uint64"},
+				{"name":"depositHash","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -236,6 +240,7 @@
 		{"init":false,"name":"_shutdownCursor","type":"uint128"},
 		{"init":false,"name":"_totalMakerRebatesPaid","type":"uint128"},
 		{"init":false,"name":"_totalProtocolFees","type":"uint128"},
+		{"init":false,"name":"_matchSeq","type":"uint64"},
 		{"components":[{"name":"entryType","type":"uint8"},{"name":"queueId","type":"uint32"},{"name":"depositHash","type":"uint256"},{"name":"outcomeId","type":"uint32"},{"name":"isBuy","type":"bool"},{"name":"flags","type":"uint8"},{"name":"price","type":"uint256"},{"name":"amount","type":"uint128"},{"name":"minAmount","type":"uint128"},{"name":"epochId","type":"uint64"},{"name":"clientOrderId","type":"uint128"},{"name":"targetOrderId","type":"uint128"},{"name":"filledAccum","type":"uint128"},{"name":"precheckDone","type":"bool"},{"name":"precheckAccum","type":"uint128"},{"name":"precheckLastPrice","type":"uint256"},{"name":"isBatchEnd","type":"bool"},{"name":"opNonce","type":"uint64"}],"init":false,"name":"_queue","type":"map(uint8,tuple)"},
 		{"init":false,"name":"_queueHead","type":"uint8"},
 		{"init":false,"name":"_queueTail","type":"uint8"},

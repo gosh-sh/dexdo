@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use ackinacki_kit::contracts::dapp::SystemDapp;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfWithdrawTokens;
 use ackinacki_kit::contracts::dex::private_note::PrivateNote;
 use ackinacki_kit::contracts::dex::root_pn::ParamsOfDeployPrivateNote;
@@ -265,7 +266,7 @@ async fn test_discover_10_notes_some_withdrawn() {
             addr,
             ParamsOfWithdrawTokens {
                 dest_wallet_addr: GIVER_ADDRESS.to_string(),
-                token_type: TOKEN_TYPE_NACKL,
+                dapp_id: SystemDapp::System.dapp_id().to_string(),
             },
             Signer::Keys { keys: all_keys[i].clone() },
         )

@@ -17,7 +17,7 @@ dependencies = [
 [[package]]
 name = "ackinacki-kit"
 version = "2.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.0.0#a79306de5a29b1cca379df10ad5fb706144ecbcf"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dev#5c55d443fe017dddf93217760d53ec1fd2c4bd3c"
 dependencies = [
  "contracts",
  "shared",
@@ -1044,7 +1044,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "2.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.0.0#a79306de5a29b1cca379df10ad5fb706144ecbcf"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dev#5c55d443fe017dddf93217760d53ec1fd2c4bd3c"
 dependencies = [
  "base64",
  "chrono",
@@ -1055,6 +1055,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shared",
+ "time",
  "tokio",
  "tracing",
  "tvm_block 3.0.0",
@@ -4588,7 +4589,7 @@ dependencies = [
 [[package]]
 name = "shared"
 version = "2.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.0.0#a79306de5a29b1cca379df10ad5fb706144ecbcf"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dev#5c55d443fe017dddf93217760d53ec1fd2c4bd3c"
 dependencies = [
  "gloo-timers",
  "tokio",

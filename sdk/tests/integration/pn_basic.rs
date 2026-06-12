@@ -2,6 +2,7 @@
 //! full lifecycle (deploy → stake → claim → withdraw → dead-note rejects
 //! further stakes).
 
+use ackinacki_kit::contracts::dapp::SystemDapp;
 use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
 use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
 use ackinacki_kit::contracts::dex::private_note::ParamsOfChangeOwner;
@@ -128,7 +129,7 @@ async fn test_withdraw_via_dex() {
         &pn_address,
         ParamsOfWithdrawTokens {
             dest_wallet_addr: GIVER_ADDRESS.to_string(),
-            token_type: TOKEN_TYPE_NACKL,
+            dapp_id: SystemDapp::System.dapp_id().to_string(),
         },
         Signer::Keys { keys },
     )
@@ -208,7 +209,7 @@ async fn test_pn_full_lifecycle_via_dex() {
         &s.pn_address,
         ParamsOfWithdrawTokens {
             dest_wallet_addr: GIVER_ADDRESS.to_string(),
-            token_type: TOKEN_TYPE_NACKL,
+            dapp_id: SystemDapp::System.dapp_id().to_string(),
         },
         Signer::Keys { keys: s.pn_keys.clone() },
     )
