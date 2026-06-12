@@ -818,7 +818,7 @@ The backend does not store inflight submissions and does not retry on its own. `
 
 Registers a trading account from a client-supplied PrivateNote and mints its first API credential. The self-service counterpart of the operator seeder (`crates/infrastructure/src/seed.rs`, [seed-private-notes.md](../seed-private-notes.md)): one note in, one account plus one api_key out. Public — the caller has no credential yet, so possession of the note's custody keys (sent in the body) is the authorization. Always mounted; unlike the seeder it carries no config gate.
 
-The handler runs four phases: request parsing → on-chain existence probe → owner-key binding → credential mint and insert. Each fails closed with its own code (see the Error mapping table in this section).
+The handler runs three phases: request parsing → owner-key binding (a local key-pair check, then a single on-chain owner-key read that doubles as the deployment probe) → credential mint and insert. Each fails closed with its own code (see the Error mapping table in this section).
 
 ### Authorization
 
@@ -835,24 +835,17 @@ The handler runs four phases: request parsing → on-chain existence probe → o
 
 `RegisterAccountRequest` is parsed with `deny_unknown_fields` — manual `ToSchema` impl, the same salvo-oapi-macros constraint as `CancelBatchOrdersRequest`. An unknown key is a serde shape error → `InvalidParameter` → 400 / -1130. Each field is `Option` only so a missing or blank one surfaces as `MissingParameter` → 400 / -1102 via the handler's `non_empty(...).ok_or(...)` chain; all four are required. Field-format validation (hex, bit width, seckey length) happens in the registry, not the handler — see the Input validation section.
 
-### On-chain existence probe
+### Owner-key binding and deployment probe
 
-Before any DB write, `RegisterAccountUseCase` runs `PnStateReader::get_details(pnAddress)` against the GraphQL gateway — the same reader `GET /api/v1/account` uses. It exists only to confirm the note is deployed, so a registered account can trade right away:
+The route is public, so possession of the note's keys is the only authorization. `RegisterAccountUseCase` proves it with two fail-closed checks before any DB write (full rationale in [account-registration-key-binding.md](account-registration-key-binding.md)):
 
-- BOC absent → the reader returns a typed `AccountNotDeployed` → 404 / -2013, no row written.
-- Any other reader failure (gateway flap, ABI/parse error) → `MarketInconsistent` → 503, matching `GetAccountUseCase`'s reader-failure posture so a transient gateway flap is retryable rather than a hard 500.
-- BOC present → proceed. The returned details are discarded; only existence matters.
+1. **Pubkey/seckey consistency (local, no chain read).** The ed25519 public key is derived from `pnSeckeyHex` (`derive_ed25519_pubkey_hex`) and compared to the submitted `pnPubkeyHex` (`uint256_hex_eq`). The submitted `pnPubkeyHex` is stored verbatim as `accounts.pn_pubkey` and later paired with the sealed seckey to build the chain signer; a pair whose public is not the key the secret derives could never sign a valid trade, so an inconsistent pair is `InvalidParameter` → 400 / -1130 rather than a dead credential. Running first means a malformed request is rejected before any gateway round-trip — relevant on a public, unauthenticated route.
+2. **On-chain owner binding (single chain read).** The derived key is compared to the note's on-chain owner, read via `PnStateReader::owner_pubkey` (the `_ephemeralPubkey` storage field decoded straight from the PN BOC; `PrivateNote` exposes no getter for it). This one read doubles as the deployment probe — there is no separate `get_details` round-trip:
+   - BOC absent → the reader returns a typed `AccountNotDeployed` → 404 / -2013, no row written.
+   - Any other reader failure (gateway flap, ABI/parse error) → `MarketInconsistent` → 503, matching `GetAccountUseCase`'s reader-failure posture so a transient gateway flap is retryable rather than a hard 500.
+   - A key that does not control the deployed note → `KeyDoesNotOwnNote` → 400 / -2016. Without this an unauthenticated caller who learns a deployed `pnAddress` / `pnDih` (both on-chain readable) could squat the note's unique constraint with an arbitrary key and block the real owner.
 
-Running the probe first means a not-deployed note costs no DB work and a well-formed but undeployed `pnAddress` can never leave an orphan account row.
-
-### Owner-key binding
-
-The route is public, so possession of the note's keys is the only authorization. `RegisterAccountUseCase` proves that possession with two fail-closed checks, both after the existence probe and before any DB write (full rationale in [account-registration-key-binding.md](account-registration-key-binding.md)):
-
-1. **Pubkey/seckey consistency** — the ed25519 public key is derived from `pnSeckeyHex` (`derive_ed25519_pubkey_hex`) and compared to the submitted `pnPubkeyHex` (`uint256_hex_eq`). The submitted `pnPubkeyHex` is stored verbatim as `accounts.pn_pubkey` and later paired with the sealed seckey to build the chain signer; a pair whose public is not the key the secret derives could never sign a valid trade, so an inconsistent pair is rejected as `InvalidParameter` → 400 / -1130 rather than minting a dead credential. Local check, no chain read.
-2. **On-chain owner binding** — the derived key is compared to the note's on-chain owner, read via `PnStateReader::owner_pubkey` (the `_ephemeralPubkey` storage field decoded straight from the PN BOC; `PrivateNote` exposes no getter for it). A key that does not control the note is rejected as `KeyDoesNotOwnNote` → 400 / -2016. Without this an unauthenticated caller who learns a deployed `pnAddress` / `pnDih` (both on-chain readable) could squat the note's unique constraint with an arbitrary key and block the real owner.
-
-Neither reject writes a row — both run before `registry.register`.
+Neither reject writes a row — both run before `registry.register`, so a well-formed but undeployed `pnAddress` can never leave an orphan account row.
 
 ### Input validation
 

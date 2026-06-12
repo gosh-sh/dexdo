@@ -3079,3 +3079,108 @@ async fn divergent_replay_never_heals_null_chain_time() {
 
     purge(&pool, cleanup).await;
 }
+
+/// Sibling of `divergent_replay_never_heals_null_chain_time` for the `qty`
+/// column of the conflict guard. That test diverges on `clearingPrice`
+/// (→ `price`); this one keeps the price matching and diverges only on
+/// `filledAmount` (→ `qty`). The guard checks five immutable columns, but
+/// the price-divergence tests would still pass a regression that narrowed
+/// it to drop `qty`/`outcome_id`/`is_buyer_maker` — only a non-price
+/// divergence pins those. With `qty` in the guard the replay is refused
+/// wholesale (chain_time stays NULL); a guard missing `qty` would see the
+/// matching price, fire the conflict arm, and coalesce the timestamp in.
+#[tokio::test]
+async fn divergent_qty_replay_never_heals_null_chain_time() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_divergent_qty_no_heal";
+    let book = format!("0:{test}_book");
+    let order_id = "97";
+    let msg_id = format!("{test}-fill-msg");
+    let chain_order = format!("5f80{msg_id:0>28}");
+
+    let cleanup: &[(&str, &str)] = &[
+        ("delete from trades where orderbook_address = $1", book.as_str()),
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+    ];
+    purge(&pool, cleanup).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   30::numeric, 30::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    let decoded = json!({
+        "orderId": order_id,
+        "filledAmount": "30",
+        "clearingPrice": "6150",
+        "isTaker": true,
+    });
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, null, $3, $3, 'OrderBook.OrderFilled', '{}'::jsonb, $4)"#,
+    )
+    .bind(&msg_id)
+    .bind(&chain_order)
+    .bind(&book)
+    .bind(&decoded)
+    .execute(&pool)
+    .await
+    .expect("insert raw_events without chain timestamp");
+
+    repo.reproject_pending(1000).await.expect("reproject pass 1");
+
+    // Replay with a parseable timestamp and a MATCHING clearingPrice but a
+    // divergent filledAmount: only the `qty` immutable drifts. The guard must
+    // still refuse the row wholesale, timestamp included.
+    sqlx::query(
+        r#"update raw_events
+              set processed_at = null,
+                  created_at_chain = to_timestamp(1700000000.5),
+                  decoded = jsonb_set(decoded, '{filledAmount}', '"31"')
+            where msg_id = $1"#,
+    )
+    .bind(&msg_id)
+    .execute(&pool)
+    .await
+    .expect("reset processed_at with divergent qty payload");
+    repo.reproject_pending(1000).await.expect("reproject pass 2");
+
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "a divergent replay is Applied (and error!-logged), not a stuck projection"
+    );
+
+    let (count, qty, time_is_null): (i64, String, bool) = sqlx::query_as(
+        "select count(*), min(qty::text), bool_and(chain_time is null) \
+           from trades where orderbook_address = $1",
+    )
+    .bind(&book)
+    .fetch_one(&pool)
+    .await
+    .expect("read trades after divergent qty replay");
+    assert_eq!(count, 1, "a divergent-qty replay must not duplicate the trade");
+    assert_eq!(qty, "30", "the divergent qty must not reach the row");
+    assert!(
+        time_is_null,
+        "a qty-divergent replay must not heal the NULL chain_time — a guard \
+         that dropped `qty` would see the matching price and coalesce it in"
+    );
+
+    purge(&pool, cleanup).await;
+}

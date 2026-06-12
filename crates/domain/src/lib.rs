@@ -5,6 +5,7 @@ use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
+use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -996,6 +997,50 @@ impl std::fmt::Debug for SensitiveBytes {
 impl From<Vec<u8>> for SensitiveBytes {
     fn from(bytes: Vec<u8>) -> Self {
         Self::new(bytes)
+    }
+}
+
+/// A plaintext secret held as text — the string analogue of
+/// [`SensitiveBytes`], for a secret that must stay textual at a boundary
+/// (a hex key carried over the wire, the one-time `api_secret` echo) rather
+/// than decode to bytes. Suppresses `Debug` and wipes its buffer on drop,
+/// so a struct embedding it can `#[derive(Debug)]` without leaking the
+/// secret and need not hand-write a redacting `Debug` that a later field
+/// could silently slip past.
+pub struct SensitiveString(String);
+
+impl SensitiveString {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the wrapper and surface the plaintext. The only way out: a
+    /// caller must opt in explicitly (e.g. to serialise the one-time
+    /// `api_secret`), and the wrapper — with its on-drop wipe — is gone
+    /// afterwards.
+    pub fn into_inner(mut self) -> String {
+        // `mem::take` leaves an empty String for our `Drop` to wipe (a
+        // no-op) and moves the live buffer out — a plain field move is
+        // forbidden while `Drop` is implemented.
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl From<String> for SensitiveString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl Drop for SensitiveString {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl std::fmt::Debug for SensitiveString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SensitiveString(<redacted, {} chars>)", self.0.len())
     }
 }
 

@@ -24,6 +24,7 @@ use dodex_domain::OrderType;
 use dodex_domain::Outcome;
 use dodex_domain::Permission;
 use dodex_domain::SensitiveBytes;
+use dodex_domain::SensitiveString;
 use dodex_domain::Symbol;
 use dodex_domain::TimeInForce;
 use dodex_domain::Trade;
@@ -1810,53 +1811,32 @@ impl<T: ?Sized + PnStateReader> PnStateReader for Arc<T> {
 /// carried over the wire. The backend takes custody of `pn_seckey_hex`
 /// (sealed at rest under the KEK) so it can sign trades on the note's
 /// behalf — the same custodial model as seeding.
-#[derive(Clone)]
+// `pn_seckey_hex` is a plaintext signing key: typing it as `SensitiveString`
+// (zeroized on drop, `Debug`-redacted) keeps the derived `Debug` safe and
+// the buffer wiped without a hand-written `Debug` a later field could slip
+// past. Not `Clone` — the secret must not be silently multiplied.
+#[derive(Debug)]
 pub struct NewAccountNote {
     pub pn_address: String,
     pub pn_pubkey_hex: String,
-    pub pn_seckey_hex: String,
+    pub pn_seckey_hex: SensitiveString,
     pub pn_dih_hex: String,
-}
-
-// `pn_seckey_hex` is a plaintext signing key; a derived `Debug` would leak
-// it through any `?note` / `dbg!`. Mask it, mirroring `Kek`.
-impl std::fmt::Debug for NewAccountNote {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NewAccountNote")
-            .field("pn_address", &self.pn_address)
-            .field("pn_pubkey_hex", &self.pn_pubkey_hex)
-            .field("pn_seckey_hex", &"<redacted>")
-            .field("pn_dih_hex", &self.pn_dih_hex)
-            .finish()
-    }
 }
 
 /// The credential minted for a freshly registered account.
 /// `api_secret_hex` is the one point in its lifecycle where the plaintext
-/// secret exists outside the sealed DB column — the caller must surface it
-/// to the client here; it is never retrievable again.
-#[derive(Clone)]
+/// secret exists outside the sealed DB column — the caller surfaces it to
+/// the client once via [`SensitiveString::into_inner`]; it is never
+/// retrievable again. The `SensitiveString` keeps the derived `Debug` safe
+/// and wipes the held copy on drop. Not `Clone` — the secret must not be
+/// silently multiplied.
+#[derive(Debug)]
 pub struct RegisteredAccount {
     pub account_id: Uuid,
     pub pn_address: String,
     pub api_key: String,
-    pub api_secret_hex: String,
+    pub api_secret_hex: SensitiveString,
     pub permissions: Vec<Permission>,
-}
-
-// `api_secret_hex` is the live plaintext HMAC secret — the one plaintext
-// secret in the system. A derived `Debug` would leak it through any
-// `?account` / `dbg!`. Mask it, mirroring `NewAccountNote` and `Kek`.
-impl std::fmt::Debug for RegisteredAccount {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RegisteredAccount")
-            .field("account_id", &self.account_id)
-            .field("pn_address", &self.pn_address)
-            .field("api_key", &self.api_key)
-            .field("api_secret_hex", &"<redacted>")
-            .field("permissions", &self.permissions)
-            .finish()
-    }
 }
 
 /// Persists a new trading account plus its first API credential. The
@@ -1905,16 +1885,18 @@ fn uint256_hex_eq(a: &str, b: &str) -> bool {
     norm(a).eq_ignore_ascii_case(norm(b))
 }
 
-/// Orchestrates `POST /api/v1/accounts`: confirms the PrivateNote is
-/// actually deployed on-chain, checks the submitted public key is the one
-/// the submitted secret derives (an inconsistent pair would mint a
-/// credential that cannot sign — `InvalidParameter`/-1130), then binds the
-/// submitted secret key to the note's on-chain owner key (so the minted
-/// credential can actually sign, and an arbitrary key cannot squat a
+/// Orchestrates `POST /api/v1/accounts`: checks the submitted public key is
+/// the one the submitted secret derives (an inconsistent pair would mint a
+/// credential that cannot sign — `InvalidParameter`/-1130), then reads the
+/// note's on-chain owner key and binds the submitted secret to it (so the
+/// minted credential can actually sign, and an arbitrary key cannot squat a
 /// deployed note), then delegates the credential mint + insert to the
-/// `AccountRegistry`. The checks run first so a not-deployed note fails with
-/// `AccountNotDeployed` (-2013) and a wrong key with `KeyDoesNotOwnNote`
-/// (-2016) before any row is written.
+/// `AccountRegistry`. The local key checks run first, so a malformed request
+/// is rejected before any chain read; the owner-key read doubles as the
+/// existence probe (an absent contract surfaces `AccountNotDeployed`/-2013),
+/// so registration costs a single gateway round-trip — relevant on a public,
+/// unauthenticated endpoint. A wrong key is `KeyDoesNotOwnNote` (-2016); all
+/// rejections precede any row write.
 pub struct RegisterAccountUseCase<P, G> {
     pn: P,
     registry: G,
@@ -1932,32 +1914,14 @@ where
     G: AccountRegistry,
 {
     pub async fn execute(&self, note: NewAccountNote) -> Result<RegisteredAccount, DomainError> {
-        // Existence probe: `get_details` fetches the PN BOC by address and
-        // returns a typed `AccountNotDeployed` when the contract is absent.
-        // The details themselves are discarded — only "is it deployed"
-        // matters. Any other reader failure is a gateway / ABI problem,
-        // surfaced as `MarketInconsistent` (503) exactly as
-        // `GetAccountUseCase` does, so a transient gateway flap during
-        // registration is retryable rather than a hard 500.
-        if let Err(e) = self.pn.get_details(&note.pn_address).await {
-            if let Some(domain) = e.downcast_ref::<DomainError>() {
-                return Err(*domain);
-            }
-            warn!(
-                error = %format_args!("{e:#}"),
-                pn = %note.pn_address,
-                "register: PN existence probe failed",
-            );
-            return Err(DomainError::MarketInconsistent);
-        }
-
-        // Ownership binding: the submitted secret key must derive the note's
-        // on-chain owner key. Without it an unauthenticated caller could
-        // register a deployed note with any key — useless for trading (the
-        // note rejects its signatures) but enough to squat the note's unique
-        // constraint and block the real owner. Derive locally first so a
-        // malformed key is `InvalidParameter` before the second chain read.
-        let submitted_pubkey = derive_ed25519_pubkey_hex(&note.pn_seckey_hex)?;
+        // Ownership binding, step 1 (local): the submitted secret key must
+        // derive the note's on-chain owner key. Without it an unauthenticated
+        // caller could register a deployed note with any key — useless for
+        // trading (the note rejects its signatures) but enough to squat the
+        // note's unique constraint and block the real owner. Derive locally
+        // first so a malformed key is `InvalidParameter` before any chain
+        // read — a garbage request never costs a gateway round-trip.
+        let submitted_pubkey = derive_ed25519_pubkey_hex(note.pn_seckey_hex.as_str())?;
 
         // The submitted `pn_pubkey_hex` is stored verbatim as
         // `accounts.pn_pubkey` and later paired with the sealed seckey to
@@ -1965,12 +1929,19 @@ where
         // public is not the key the secret derives can never produce a valid
         // signature, so the credential could not trade — reject the
         // inconsistent pair rather than mint a dead credential. Local check,
-        // before the second chain read.
+        // before the chain read.
         if !uint256_hex_eq(&note.pn_pubkey_hex, &submitted_pubkey) {
             tracing::debug!(pn = %note.pn_address, "register: submitted pn_pubkey does not match the seckey");
             return Err(DomainError::InvalidParameter);
         }
 
+        // Step 2 (chain): read the note's on-chain owner key. `owner_pubkey`
+        // fetches the PN BOC and returns the typed `AccountNotDeployed`
+        // (-2013) when the contract is absent, so it doubles as the existence
+        // probe — no separate `get_details` round-trip. Any other reader
+        // failure is a gateway / ABI problem, surfaced as `MarketInconsistent`
+        // (503) exactly as `GetAccountUseCase` does, so a transient flap is
+        // retryable rather than a hard 500.
         let owner_pubkey = self.pn.owner_pubkey(&note.pn_address).await.map_err(|e| {
             if let Some(domain) = e.downcast_ref::<DomainError>() {
                 return *domain;
@@ -5468,7 +5439,7 @@ mod register_account_use_case_tests {
             // case rejects an inconsistent pair (-1130) before the owner
             // binding, so every fixture that reaches the binding matches here.
             pn_pubkey_hex: derive_ed25519_pubkey_hex(&"00".repeat(32)).unwrap(),
-            pn_seckey_hex: "00".repeat(32),
+            pn_seckey_hex: "00".repeat(32).into(),
             pn_dih_hex: "cd".repeat(32),
         }
     }
@@ -5497,7 +5468,7 @@ mod register_account_use_case_tests {
                 account_id: uuid::Uuid::nil(),
                 pn_address: note.pn_address,
                 api_key: "dk_live_test".into(),
-                api_secret_hex: "00".repeat(32),
+                api_secret_hex: "00".repeat(32).into(),
                 permissions: vec![Permission::UserData, Permission::Trade],
             })
         }
@@ -5505,13 +5476,14 @@ mod register_account_use_case_tests {
 
     #[tokio::test]
     async fn probe_failure_is_market_inconsistent_and_skips_write() {
-        // An untyped reader error (gateway/ABI fault) must surface as a
-        // retryable 503 and never reach the write side.
+        // An untyped reader error (gateway/ABI fault) on the owner-key read —
+        // the single chain round-trip, which doubles as the existence probe —
+        // must surface as a retryable 503 and never reach the write side.
         struct GatewayDownPn;
         #[async_trait]
         impl PnStateReader for GatewayDownPn {
             async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
-                anyhow::bail!("gateway down")
+                unreachable!("register no longer reads get_details")
             }
 
             async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
@@ -5519,7 +5491,7 @@ mod register_account_use_case_tests {
             }
 
             async fn owner_pubkey(&self, _: &str) -> anyhow::Result<String> {
-                unreachable!("probe fails before the owner-key read")
+                anyhow::bail!("gateway down")
             }
         }
 
@@ -5532,13 +5504,14 @@ mod register_account_use_case_tests {
 
     #[tokio::test]
     async fn not_deployed_passes_through_typed_and_skips_write() {
-        // The reader's typed AccountNotDeployed must reach the API as a 404
-        // rather than collapse to 503, and must not write a row.
+        // The owner-key read surfaces the typed AccountNotDeployed for an
+        // absent contract; it must reach the API as a 404 rather than collapse
+        // to 503, and must not write a row.
         struct NotDeployedPn;
         #[async_trait]
         impl PnStateReader for NotDeployedPn {
             async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
-                Err(anyhow::Error::from(DomainError::AccountNotDeployed))
+                unreachable!("register no longer reads get_details")
             }
 
             async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
@@ -5546,7 +5519,7 @@ mod register_account_use_case_tests {
             }
 
             async fn owner_pubkey(&self, _: &str) -> anyhow::Result<String> {
-                unreachable!("probe returns AccountNotDeployed before the owner-key read")
+                Err(anyhow::Error::from(DomainError::AccountNotDeployed))
             }
         }
 
@@ -5565,7 +5538,7 @@ mod register_account_use_case_tests {
         #[async_trait]
         impl PnStateReader for DeployedPn {
             async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
-                Ok(PnDetails { balance: vec![], locked_in_orders: vec![] })
+                unreachable!("register no longer reads get_details")
             }
 
             async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
@@ -5593,7 +5566,7 @@ mod register_account_use_case_tests {
         #[async_trait]
         impl PnStateReader for WrongOwnerPn {
             async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
-                Ok(PnDetails { balance: vec![], locked_in_orders: vec![] })
+                unreachable!("register no longer reads get_details")
             }
 
             async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {
@@ -5622,7 +5595,7 @@ mod register_account_use_case_tests {
         #[async_trait]
         impl PnStateReader for DeployedPn {
             async fn get_details(&self, _: &str) -> anyhow::Result<PnDetails> {
-                Ok(PnDetails { balance: vec![], locked_in_orders: vec![] })
+                unreachable!("register no longer reads get_details")
             }
 
             async fn get_stake(&self, _: &str, _: &str) -> anyhow::Result<Option<PnStake>> {

@@ -218,10 +218,11 @@ async fn register_dup_does_not_recredential() {
 async fn register_gateway_flap_returns_503() {
     // A transient reader fault on the existence probe is retryable, not a
     // hard 500: it must map to MarketInconsistent (503, -1500) and write
-    // no account row.
+    // no account row. The probe is the on-chain owner-key read — the single
+    // chain round-trip registration makes — so the flap is forced there.
     let Some((service, pool, _kek, pn)) = common::setup().await else { return };
     let (pn_address, _scope, body) = fresh_note();
-    pn.fail_details("simulated transient gateway error");
+    pn.fail_owner_pubkey("simulated transient gateway error");
 
     let mut resp = post_register(&service, &body).await;
     let status = resp.status_code;

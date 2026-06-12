@@ -230,6 +230,10 @@ pub struct FakePnStateReader {
     details: Mutex<Option<Result<PnDetails, String>>>,
     stake: Mutex<Option<Option<PnStake>>>,
     stake_err: Mutex<Option<String>>,
+    // Untyped fault for `owner_pubkey` — the single chain read registration
+    // uses as its existence probe. Maps to a retryable 503 (-1500), distinct
+    // from `not_deployed`'s typed -2013.
+    owner_err: Mutex<Option<String>>,
     // Per-address overrides.
     details_by_pn: Mutex<StdHashMap<String, Result<PnDetails, String>>>,
     // Addresses that `get_details` answers with a typed
@@ -251,6 +255,13 @@ impl FakePnStateReader {
 
     pub fn fail_details(&self, msg: &str) {
         *self.details.lock().unwrap() = Some(Err(msg.into()));
+    }
+
+    /// Make `owner_pubkey(pn_address)` fail with an untyped (gateway/ABI)
+    /// error so callers exercise the retryable 503 path on registration's
+    /// chain read.
+    pub fn fail_owner_pubkey(&self, msg: &str) {
+        *self.owner_err.lock().unwrap() = Some(msg.into());
     }
 
     pub fn set_stake(&self, s: Option<PnStake>) {
@@ -321,6 +332,9 @@ impl PnStateReader for FakePnStateReader {
     }
 
     async fn owner_pubkey(&self, pn_address: &str) -> anyhow::Result<String> {
+        if let Some(msg) = self.owner_err.lock().unwrap().clone() {
+            return Err(anyhow::anyhow!(msg));
+        }
         if self.not_deployed.lock().unwrap().contains(pn_address) {
             return Err(anyhow::Error::from(DomainError::AccountNotDeployed));
         }

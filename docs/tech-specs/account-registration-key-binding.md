@@ -9,12 +9,15 @@ constraint and block the real owner until an operator cleared it.
 
 ## What the check does
 
-[`RegisterAccountUseCase`](../../crates/application/src/lib.rs), after the
-deployment probe and before any write:
+[`RegisterAccountUseCase`](../../crates/application/src/lib.rs), before any
+write and with the local steps ordered first so a malformed request never
+costs a gateway round-trip:
 
 1. Derives the ed25519 public key from the submitted `pnSeckeyHex`
    (`derive_ed25519_pubkey_hex`, standard ed25519 — pinned to the RFC 8032
-   vector in a unit test).
+   vector in a unit test), and checks it against the submitted `pnPubkeyHex`
+   (see [Stored public key](#stored-public-key)). Both are local — no chain
+   read — so a malformed key or inconsistent pair is rejected first.
 2. Reads the note's on-chain owner key via
    `PnStateReader::owner_pubkey`, which decodes the `_ephemeralPubkey`
    storage field straight from the account BOC
@@ -23,7 +26,10 @@ deployment probe and before any write:
    directly. The owner key is `_ephemeralPubkey` — not `tvm.pubkey()` /
    `_pubkey`, which is 0 because PNs are deployed internally by RootPN — set
    in the constructor and rotated by `changeOwner`; reading the live field
-   means a `changeOwner` is reflected automatically.
+   means a `changeOwner` is reflected automatically. This is the only chain
+   read the handler makes, so it doubles as the deployment probe: an absent
+   BOC surfaces the typed `AccountNotDeployed` (-2013, HTTP 404) and a
+   transient reader failure surfaces `MarketInconsistent` (-1500, HTTP 503).
 3. Mismatch ⇒ `DomainError::KeyDoesNotOwnNote` (-2016, HTTP 400). The
    registry is never called, so no row is written.
 

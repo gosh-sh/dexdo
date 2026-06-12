@@ -34,12 +34,25 @@ use crate::crypto::Kek;
 /// holds and are intentionally not read here — they are not part of
 /// account identity. The public keys arrive hex-encoded; the `numeric`
 /// columns want decimal, so `note_to_seed_account` converts them.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct NoteEntry {
     pub pn_address: String,
     pub pn_pubkey_hex: String,
     pub pn_seckey_hex: String,
     pub pn_dih_hex: String,
+}
+
+// `pn_seckey_hex` is a plaintext signing key; a derived `Debug` would leak
+// it through any `?entry` / `dbg!`. Mask it, mirroring `NewAccountNote`.
+impl std::fmt::Debug for NoteEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoteEntry")
+            .field("pn_address", &self.pn_address)
+            .field("pn_pubkey_hex", &self.pn_pubkey_hex)
+            .field("pn_seckey_hex", &"<redacted>")
+            .field("pn_dih_hex", &self.pn_dih_hex)
+            .finish()
+    }
 }
 
 // ---- Internal shape of the seed payload that `apply_seed` writes.

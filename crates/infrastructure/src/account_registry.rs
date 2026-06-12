@@ -81,7 +81,7 @@ fn validate_note(note: &NewAccountNote) -> Result<ValidatedNote, DomainError> {
         debug!(error = %format!("{e:#}"), "register: invalid pn_dih_hex");
         DomainError::InvalidParameter
     })?;
-    let pn_seckey_bytes = hex::decode(note.pn_seckey_hex.trim()).map_err(|_| {
+    let pn_seckey_bytes = hex::decode(note.pn_seckey_hex.as_str().trim()).map_err(|_| {
         debug!("register: pn_seckey_hex is not valid hex");
         DomainError::InvalidParameter
     })?;
@@ -194,7 +194,7 @@ impl AccountRegistry for PostgresAccountRegistry {
             account_id,
             pn_address: valid.pn_address,
             api_key,
-            api_secret_hex,
+            api_secret_hex: api_secret_hex.into(),
             permissions: REGISTERED_PERMISSIONS.to_vec(),
         })
     }
@@ -208,7 +208,7 @@ mod tests {
         NewAccountNote {
             pn_address: "0:fixture".into(),
             pn_pubkey_hex: "ab".repeat(32),
-            pn_seckey_hex: "00".repeat(32),
+            pn_seckey_hex: "00".repeat(32).into(),
             pn_dih_hex: "cd".repeat(32),
         }
     }
@@ -243,14 +243,14 @@ mod tests {
     #[test]
     fn validate_rejects_non_hex_seckey() {
         let mut n = good_note();
-        n.pn_seckey_hex = "zz".repeat(32);
+        n.pn_seckey_hex = "zz".repeat(32).into();
         assert!(matches!(validate_note(&n), Err(DomainError::InvalidParameter)));
     }
 
     #[test]
     fn validate_rejects_wrong_length_seckey() {
         let mut n = good_note();
-        n.pn_seckey_hex = "00".repeat(16); // 16 bytes, not 32
+        n.pn_seckey_hex = "00".repeat(16).into(); // 16 bytes, not 32
         assert!(matches!(validate_note(&n), Err(DomainError::InvalidParameter)));
     }
 }

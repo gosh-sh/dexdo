@@ -2126,7 +2126,8 @@ async fn register_account(
         pn_pubkey_hex: non_empty(body.pn_pubkey_hex)
             .ok_or(ApiError::from(DomainError::MissingParameter))?,
         pn_seckey_hex: non_empty(body.pn_seckey_hex)
-            .ok_or(ApiError::from(DomainError::MissingParameter))?,
+            .ok_or(ApiError::from(DomainError::MissingParameter))?
+            .into(),
         pn_dih_hex: non_empty(body.pn_dih_hex)
             .ok_or(ApiError::from(DomainError::MissingParameter))?,
     };
@@ -2138,7 +2139,7 @@ async fn register_account(
         account_id: account.account_id.to_string(),
         pn_address: account.pn_address,
         api_key: account.api_key,
-        api_secret: account.api_secret_hex,
+        api_secret: account.api_secret_hex.into_inner(),
         permissions: account.permissions.iter().map(|p| p.as_str().to_string()).collect(),
     }))
 }
@@ -2379,7 +2380,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     // Migrations + seeding are gated on `auth.seed_accounts`. With the
     // flag off the api stays read-only against the schema (the indexer
-    // applies migrations as today). With the flag on the api applies
+    // remains the migration applier). With the flag on the api applies
     // migrations itself before inserting the credentials read from
     // `auth.seed_accounts_path` — sqlx::migrate! uses an advisory lock so
     // racing with the indexer on a fresh DB is safe.
