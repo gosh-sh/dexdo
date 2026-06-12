@@ -35,9 +35,9 @@ use common::deploy_market::deploy_ephemeral_market;
 use common::deploy_market::DeployOptions;
 use common::e2e_setup::db_pool;
 use common::e2e_setup::fresh_coid;
+use common::e2e_setup::network_endpoint;
 use common::e2e_setup::provision_account;
 use common::e2e_setup::upsert_market;
-use common::e2e_setup::SHELLNET_ENDPOINT;
 use common::now_ms;
 use common::sign;
 use common::test_pns::TestPnPool;
@@ -78,13 +78,10 @@ async fn cancel_batch_orders_against_shellnet() {
     // covers the whole suite.
     let pn_pool = TestPnPool::load();
     let trader = pn_pool.first().clone();
-    let market = deploy_ephemeral_market(
-        vec![SHELLNET_ENDPOINT.to_string()],
-        &trader,
-        DeployOptions::default(),
-    )
-    .await
-    .expect("deploy ephemeral market");
+    let market =
+        deploy_ephemeral_market(vec![network_endpoint()], &trader, DeployOptions::default())
+            .await
+            .expect("deploy ephemeral market");
 
     let outcome_for_symbol = market.outcome_name.replace(' ', "-");
     let pmp_short = &market.pmp_address[..16.min(market.pmp_address.len())];
@@ -94,7 +91,7 @@ async fn cancel_batch_orders_against_shellnet() {
 
     let chain_sender: SharedChainSender = Arc::new(
         DexChainSender::new(
-            vec![SHELLNET_ENDPOINT.to_string()],
+            vec![network_endpoint()],
             Duration::from_secs(30),
             Duration::from_secs(30),
             Duration::from_secs(30),
@@ -179,8 +176,7 @@ async fn cancel_batch_orders_against_shellnet() {
     let coid_a_u128: u128 = coid_a.parse().expect("coid_a u128");
     let coid_b_u128: u128 = coid_b.parse().expect("coid_b u128");
     use dodex_chain::Dex as RawDex;
-    let raw_dex = RawDex::from_endpoints(vec![SHELLNET_ENDPOINT.to_string()])
-        .expect("RawDex::from_endpoints");
+    let raw_dex = RawDex::from_endpoints(vec![network_endpoint()]).expect("RawDex::from_endpoints");
 
     // From this point on we have live orders on the chain. Failures
     // accumulate; cleanup runs unconditionally; a single combined panic

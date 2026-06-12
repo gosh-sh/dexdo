@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use common::canonical_query;
 use common::e2e_setup::db_pool;
-use common::e2e_setup::SHELLNET_ENDPOINT;
+use common::e2e_setup::network_endpoint;
 use common::now_ms;
 use common::sign;
 use common::test_pns::TestPnPool;
@@ -103,7 +103,7 @@ fn build_service(pool: &PgPool, kek: Arc<dodex_infrastructure::crypto::Kek>) -> 
         Arc::new(PostgresAuthenticator::new(pool.clone(), kek.clone(), &auth_config));
     let chain_sender: SharedChainSender = Arc::new(common::NoopChainSender);
     let graphql = Arc::new(
-        GraphqlClient::new(format!("{SHELLNET_ENDPOINT}/graphql"), Duration::from_secs(30))
+        GraphqlClient::new(format!("{}/graphql", network_endpoint()), Duration::from_secs(30))
             .expect("GraphqlClient::new"),
     );
     let pn_reader: SharedPnReader =
@@ -207,21 +207,26 @@ async fn register_undeployed_pn_returns_2013_against_shellnet() {
     };
     let service = build_service(&pool, kek);
 
-    // A well-formed address with no PrivateNote behind it. The chain probe
+    // A well-formed address with no PrivateNote behind it. The owner-key read
+    // — the single chain round-trip, which doubles as the deployment probe —
     // can reject it two ways, both of which must block registration:
     //   - the gateway returns no BOC at all -> AccountNotDeployed (404 / -2013);
-    //   - the gateway returns an uninitialized account whose `getDetails`
-    //     getter traps (TVM code 60) -> MarketInconsistent (503 / -1500),
-    //     the same reader-failure posture as `GET /api/v1/account`.
+    //   - the gateway returns an uninitialized account whose field decode
+    //     traps -> MarketInconsistent (503 / -1500), the same reader-failure
+    //     posture as `GET /api/v1/account`.
     // Which one fires depends on live chain state for the address, so the
     // assertion accepts either. The deterministic -2013 mapping is pinned by
     // `register_account_http.rs::register_undeployed_note_returns_2013`. What
     // matters here is the real-network invariant: a note with nothing behind
     // it is rejected and writes no account row.
+    //
+    // The submitted pair must be self-consistent (`pnPubkeyHex` = the key
+    // `pnSeckeyHex` derives), or the local pair check short-circuits to -1130
+    // before the chain read ever runs — the order checks run is local first.
     let bogus_addr = format!("0:{}", "ab".repeat(32));
     let body = json!({
         "pnAddress": bogus_addr,
-        "pnPubkeyHex": "ab".repeat(32),
+        "pnPubkeyHex": dodex_application::derive_ed25519_pubkey_hex(&"00".repeat(32)).unwrap(),
         "pnSeckeyHex": "00".repeat(32),
         "pnDihHex": "cd".repeat(32),
     });

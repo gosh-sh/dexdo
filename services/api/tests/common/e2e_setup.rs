@@ -27,12 +27,20 @@ use super::test_kek;
 use super::test_pns::TestPn;
 use super::HmacSha256;
 
-/// Reachable shellnet endpoint. Hard-coded — the e2e flow is anchored
-/// to this network's RootOracle / RootPN addresses and a different
-/// endpoint would need its own fixture pool. Keep the explicit `https://`
-/// scheme: with a bare host the tvm_client hits the REST `/v2/account`
-/// route over plain `http`, which has been timing out on shellnet.
-pub const SHELLNET_ENDPOINT: &str = "https://shellnet.ackinacki.org";
+/// e2e network endpoint. Defaults to shellnet; override with the
+/// `E2E_NETWORK_ENDPOINT` env var — the sibling of `E2E_SEED_NOTES`
+/// ([`TestPnPool::load`](super::test_pns)). Pair the two: a different
+/// network needs its own funded-note fixtures, and its RootOracle / RootPN
+/// addresses must match what the flow expects, so swapping the endpoint
+/// alone is not enough. Keep the explicit `https://` scheme: with a bare
+/// host the tvm_client hits the REST `/v2/account` route over plain `http`,
+/// which has been timing out on shellnet.
+pub fn network_endpoint() -> String {
+    env::var("E2E_NETWORK_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://shellnet.ackinacki.org".to_string())
+}
 
 // On-chain constants for NACKL (token_type=1), from
 // `contracts/modifiers/modifiers.sol`. The `market_outcomes` row we
