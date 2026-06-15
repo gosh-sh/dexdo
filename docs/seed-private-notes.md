@@ -112,7 +112,12 @@ falls back to plain `http` for the REST `/v2/account` route, which times out on
 shellnet (the same applies to the e2e `SHELLNET_ENDPOINT` and the api's
 `chain.gateway_endpoint`):
 
+Run it **from the `sdk/` directory** — the SDK is its own Cargo workspace (the
+bin is not reachable from the repo root), and the halo2 SRS / prover cache plus
+the `--output` path resolve relative to the cwd (`sdk/params`, `sdk/pn_pool.json`):
+
 ```sh
+cd sdk
 cargo run --release --bin mint_pn_pool -- \
   --count 10 --nominal N10000 --token-type nackl \
   --endpoint https://shellnet.ackinacki.org --output pn_pool.json
