@@ -17,7 +17,7 @@ dependencies = [
 [[package]]
 name = "ackinacki-kit"
 version = "2.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dev#5c55d443fe017dddf93217760d53ec1fd2c4bd3c"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dexdo-agent-integration#dd32e8517065b214b7b170abbe011b8d5d6f8835"
 dependencies = [
  "contracts",
  "shared",
@@ -1044,7 +1044,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "2.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dev#5c55d443fe017dddf93217760d53ec1fd2c4bd3c"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dexdo-agent-integration#dd32e8517065b214b7b170abbe011b8d5d6f8835"
 dependencies = [
  "base64",
  "chrono",
@@ -4589,7 +4589,7 @@ dependencies = [
 [[package]]
 name = "shared"
 version = "2.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dev#5c55d443fe017dddf93217760d53ec1fd2c4bd3c"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?branch=dexdo-agent-integration#dd32e8517065b214b7b170abbe011b8d5d6f8835"
 dependencies = [
  "gloo-timers",
  "tokio",

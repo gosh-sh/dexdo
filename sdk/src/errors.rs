@@ -211,6 +211,7 @@ fn module_prefix(module: KitModule) -> &'static str {
         KitModule::Giver(_) => "giver",
         KitModule::Accumulator(_) => "accumulator",
         KitModule::Exchange(_) => "exchange",
+        KitModule::Multisig => "multisig",
     }
 }
 

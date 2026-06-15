@@ -16,6 +16,7 @@
 pub mod cache;
 pub mod giver_voucher;
 pub mod live;
+pub mod multisig_voucher;
 pub mod paths;
 pub mod proof;
 pub mod sk_commit;
