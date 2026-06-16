@@ -168,10 +168,11 @@ mod tests {
     fn decodes_multicell_order_placed() {
         let decoder = Decoder::new().unwrap();
 
-        // Real OrderBook.OrderPlaced body, from event message
-        // 65d552e6cecf8ac725fbea4a24e8fd054e2ab11f31251e188523ded2fdc4456e
-        // on shellnet.ackinacki.org — re-fetchable via blockchain.message(hash)
-        // should the ABI shift.
+        // Real OrderBook.OrderPlaced body, captured from event message
+        // 65d552e6cecf8ac725fbea4a24e8fd054e2ab11f31251e188523ded2fdc4456e on
+        // shellnet — a historical reference that a shellnet redeploy may retire;
+        // the base64 fixture is self-contained regardless. The field layout is
+        // derived from the OrderPlaced event in OrderBook.abi.json.
         //
         // A TVM cell holds at most 1023 data bits. With the 32-bit event-id
         // prefix, the fields fill the first cell through depositHash at 969
