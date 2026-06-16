@@ -55,7 +55,7 @@ Target layout after setup:
 
 `multisig/` and `notes/` are the universal layout (same on mainnet); `giver/` is network-specific (shellnet). Secrecy is per-file: recovery-critical are `Multisig.keys.json`, `Multisig.seed`, and all `pn_state.*.json` (they go into the back-up checklist in Step 7); `*.abi.json`/`*.tvc` are disposable and re-downloadable.
 
-The dexdo SDK pulls `ackinacki-kit` as a git dependency (branch `dexdo-agent-integration`) — cargo clones the kit into its own cache at build time. We do **not** clone the kit locally: the three ABI/TVC artifacts are downloaded straight from `raw.githubusercontent` of that branch (Step 1).
+The dexdo SDK pulls `ackinacki-kit` as a git dependency (tag `v2.1.0`) — cargo clones the kit into its own cache at build time. We do **not** clone the kit locally: the three ABI/TVC artifacts are downloaded straight from `raw.githubusercontent` of that tag (Step 1).
 
 ### Setup 0.1 — Working directory
 
@@ -158,7 +158,7 @@ cd "$WORKSPACE/dexdo/sdk" && cargo build --release --bin onboard_user_shellnet
 
 First build — 5–15 minutes on a clean machine (heavy halo2 stack). Subsequent builds are fast.
 
-If the build fails resolving `ackinacki-kit` — check that the repo's `dexdo-agent-integration` branch is pushed to origin (the dexdo SDK pulls it as a git dependency). When the kit branch changes, refresh the lock: `cargo update -p ackinacki-kit`.
+If the build fails resolving `ackinacki-kit` — check that the kit's `v2.1.0` tag exists on origin (the dexdo SDK pulls it as a git dependency). When the kit ref changes, refresh the lock: `cargo update -p ackinacki-kit`.
 
 After setup the body of the skill operates on:
 - `$WORKSPACE/dexdo` — for the repo,
@@ -191,10 +191,10 @@ The skill writes user-owned secrets to disk and submits real transactions. Run t
 
 ## Step 1 — Prepare artifacts
 
-The Multisig (ABI + TVC) and the GiverV3 ABI are vendored in `ackinacki-kit` — download the three files straight from raw of that branch (`dexdo-agent-integration`), without cloning the repo:
+The Multisig (ABI + TVC) and the GiverV3 ABI are vendored in `ackinacki-kit` — download the three files straight from raw of that tag (`v2.1.0`), without cloning the repo:
 
 ```sh
-KIT_RAW="https://raw.githubusercontent.com/gosh-sh/ackinacki-kit/dexdo-agent-integration"
+KIT_RAW="https://raw.githubusercontent.com/gosh-sh/ackinacki-kit/v2.1.0"
 curl -fL -o "$WORKSPACE/multisig/Multisig.abi.json" "$KIT_RAW/contracts/abi/multisig/Multisig.abi.json"
 curl -fL -o "$WORKSPACE/multisig/Multisig.tvc"      "$KIT_RAW/contracts/abi/multisig/Multisig.tvc"
 curl -fL -o "$WORKSPACE/giver/GiverV3.abi.json"     "$KIT_RAW/contracts/abi/giver/GiverV3.abi.json"

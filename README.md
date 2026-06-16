@@ -50,6 +50,7 @@ Files under `multisig/` and `notes/` carry secret keys — back them up, never c
 - [docs/openapi.yaml](docs/openapi.yaml) — OpenAPI 3.1 contract, generated from the Rust handlers. See [openapi/README.md](openapi/README.md) for the regen workflow and the GitHub Pages deployment.
 - [docs/README.md](docs/README.md) — documentation map and file ownership.
 - [docs/deployment.md](docs/deployment.md) — self-hosting the `indexer` and `api` on your own server, wired to your own Acki Nacki GraphQL endpoint and your own Postgres / Supabase.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — where code and docs go (libs / services / tools), test and documentation rules, PR checklist. For humans and agents.
 - [AGENT_REQUIREMENTS.md](AGENT_REQUIREMENTS.md) — rules for any agent making repository changes.
 
 ## Repository layout
@@ -65,6 +66,7 @@ services/
 contracts/           # on-chain DEX.DO contracts (TVM)
 sdk/                 # dodex-sdk: write-side DEX facade + halo2 voucher pipeline
                      # (separate workspace, excluded from the root build)
+tools/               # end-user CLIs (separate workspace; see tools/README.md)
 docs/                # specs and plans (see docs/README.md)
 migrations/          # SQL migrations applied by sqlx::migrate! at startup
 config/              # service config files (api.<env>.yaml, indexer.<env>.yaml)
