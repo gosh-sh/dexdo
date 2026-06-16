@@ -189,6 +189,31 @@ cargo run -p dodex-api --bin gen-openapi -- --out docs/openapi.yaml
 `sdk/` and `tools/` are separate workspaces — build and test them from their own
 directory (`cargo build` / `cargo test` inside `sdk/`, inside `tools/`).
 
+### Make sure CI actually runs your new test
+
+Adding a test file is not enough — CI only runs tests its jobs reach. Check which
+case you're in:
+
+- **Unit / DB-integration test in an existing root-workspace crate** (`crates/*`,
+  `services/*`) → **nothing to wire.** `cargo nextest run --workspace` and the
+  doctest step auto-discover it. This is the common case.
+- **New crate in the root workspace** → it's covered the moment it's in `members`
+  in the root [`Cargo.toml`](Cargo.toml) (see *Adding a service*). No new crate,
+  no coverage.
+- **A `#[ignore]`d e2e (chain) test** → the gated job runs **only `dodex-api`**
+  (`cargo nextest run -p dodex-api --run-ignored only --test-threads 1`). Put the
+  test in `services/api/tests/` as `e2e_*`, or it never runs. If it needs new
+  fixtures/secrets (e.g. seed notes), wire them into
+  [`.github/workflows/e2e-shellnet.yml`](.github/workflows/e2e-shellnet.yml). New
+  on-chain flows are single-threaded and spend test tokens — keep them `#[ignore]`d
+  so they stay out of the fast PR job.
+- **Any test in a separate workspace (`sdk/`, `tools/`)** → **no CI job runs these
+  today** — `--workspace` excludes them, and `sdk/`'s only tests are the live,
+  `#[ignore]`d Shellnet integration suite. If you add a test there that *should*
+  gate PRs (hermetic, no network — e.g. an HTTP-boundary-mocked test), you must add
+  a CI step that runs it from that workspace's directory. A test that doesn't run
+  in CI is documentation, not a gate — say so in the PR if you leave it manual.
+
 ## Documentation
 
 Where each kind of documentation lives — keep them from drifting into each other:
