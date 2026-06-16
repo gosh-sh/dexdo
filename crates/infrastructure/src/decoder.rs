@@ -168,10 +168,11 @@ mod tests {
     fn decodes_multicell_order_placed() {
         let decoder = Decoder::new().unwrap();
 
-        // Real OrderBook.OrderPlaced body observed on chain. Its nine fields
-        // (two uint256 plus several uint128) overflow one cell, so the body
-        // spans two cells — the continuation cell is what the decoder must
-        // walk into to read the trailing fields.
+        // Real OrderBook.OrderPlaced body observed on chain. Its fields fill
+        // the first cell through depositHash (969 bits); opNonce no longer
+        // fits and moves to a continuation cell. The off-by-32 bug mis-counted
+        // the 32-bit event-id prefix when descending into that continuation
+        // cell, so opNonce is the field that actually exercises the fix.
         let body = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAACAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJGgAAAAAAAAAAAAAAAn+OzoAAAAAAAAAAAFcScEalnJSVsVKAm0LrR0TbuPbU18Mkb7ENEBG22bNzhvrIubdt2wtAAQAQAAAAAAAAAXM=";
 
         let decoded = decoder.decode_event_body(body).unwrap().expect("event id is known");
@@ -179,14 +180,16 @@ mod tests {
         assert_eq!(decoded.event_type, "OrderBook.OrderPlaced");
         assert_eq!(decoded.value["orderId"], "2");
         assert_eq!(decoded.value["isBuy"], true);
-        // clientOrderId, depositHash and opNonce are the trailing fields that
-        // spill past the first cell — asserting them pins that the decoder
-        // reads the continuation cell at the right bit offset.
+        // amount, clientOrderId and depositHash are the last fields in the
+        // first cell — they pin the read position right up to the boundary.
+        assert_eq!(decoded.value["amount"], "21460000000");
         assert_eq!(decoded.value["clientOrderId"], "12548401359218092331");
         assert_eq!(
             decoded.value["depositHash"],
             "0x62a5013685d68e89b771eda9af8648df621a20236db366e70df591736edbb616"
         );
+        // opNonce is the sole field in the continuation cell: the load-bearing
+        // assertion for the multi-cell decode — do not drop it.
         assert_eq!(decoded.value["opNonce"], "371");
     }
 }
