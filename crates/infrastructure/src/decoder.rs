@@ -163,4 +163,30 @@ mod tests {
         let decoder = Decoder::new().unwrap();
         assert!(decoder.decode_event_body("not_a_boc!!!").is_err());
     }
+
+    #[test]
+    fn decodes_multicell_order_placed() {
+        let decoder = Decoder::new().unwrap();
+
+        // Real OrderBook.OrderPlaced body observed on chain. Its nine fields
+        // (two uint256 plus several uint128) overflow one cell, so the body
+        // spans two cells — the continuation cell is what the decoder must
+        // walk into to read the trailing fields.
+        let body = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAACAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJGgAAAAAAAAAAAAAAAn+OzoAAAAAAAAAAAFcScEalnJSVsVKAm0LrR0TbuPbU18Mkb7ENEBG22bNzhvrIubdt2wtAAQAQAAAAAAAAAXM=";
+
+        let decoded = decoder.decode_event_body(body).unwrap().expect("event id is known");
+
+        assert_eq!(decoded.event_type, "OrderBook.OrderPlaced");
+        assert_eq!(decoded.value["orderId"], "2");
+        assert_eq!(decoded.value["isBuy"], true);
+        // clientOrderId, depositHash and opNonce are the trailing fields that
+        // spill past the first cell — asserting them pins that the decoder
+        // reads the continuation cell at the right bit offset.
+        assert_eq!(decoded.value["clientOrderId"], "12548401359218092331");
+        assert_eq!(
+            decoded.value["depositHash"],
+            "0x62a5013685d68e89b771eda9af8648df621a20236db366e70df591736edbb616"
+        );
+        assert_eq!(decoded.value["opNonce"], "371");
+    }
 }

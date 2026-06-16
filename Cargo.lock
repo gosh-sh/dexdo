@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "ackinacki-kit"
-version = "2.0.1"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.0.1#2ecd4683d287438722c39ea52724923645a610ee"
+version = "2.1.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.1.0#5b8a6909dc8bd66d6aaea6541839abd7a1a0083c"
 dependencies = [
  "contracts",
  "shared",
@@ -1029,8 +1029,8 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "contracts"
-version = "2.0.1"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.0.1#2ecd4683d287438722c39ea52724923645a610ee"
+version = "2.1.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.1.0#5b8a6909dc8bd66d6aaea6541839abd7a1a0083c"
 dependencies = [
  "base64",
  "chrono",
@@ -1044,7 +1044,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
- "tvm_block 3.0.2",
+ "tvm_block",
  "tvm_client",
 ]
 
@@ -1710,11 +1710,11 @@ dependencies = [
  "subtle",
  "tokio",
  "tracing",
- "tvm_abi 3.0.0",
- "tvm_block 3.0.0",
- "tvm_executor 3.0.0",
- "tvm_types 3.0.0",
- "tvm_vm 3.0.0",
+ "tvm_abi",
+ "tvm_block",
+ "tvm_executor",
+ "tvm_types",
+ "tvm_vm",
  "uuid",
  "zeroize",
 ]
@@ -5232,8 +5232,8 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "2.0.1"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.0.1#2ecd4683d287438722c39ea52724923645a610ee"
+version = "2.1.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.1.0#5b8a6909dc8bd66d6aaea6541839abd7a1a0083c"
 dependencies = [
  "tokio",
 ]
@@ -6285,23 +6285,6 @@ dependencies = [
 
 [[package]]
 name = "tvm_abi"
-version = "3.0.0"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0.an#4841c292889a232445a4495d61bb012bac5a3ead"
-dependencies = [
- "anyhow",
- "chrono",
- "hex",
- "num-bigint 0.4.6",
- "num-traits",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tvm_block 3.0.0",
- "tvm_types 3.0.0",
-]
-
-[[package]]
-name = "tvm_abi"
 version = "3.0.2"
 source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.2.an#3b6a038067fa162c5ab11ef28851d2cc9655a705"
 dependencies = [
@@ -6313,27 +6296,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tvm_block 3.0.2",
- "tvm_types 3.0.2",
-]
-
-[[package]]
-name = "tvm_block"
-version = "3.0.0"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0.an#4841c292889a232445a4495d61bb012bac5a3ead"
-dependencies = [
- "anyhow",
- "base64",
- "crc",
- "ed25519",
- "ed25519-dalek",
- "hex",
- "log",
- "num",
- "num-traits",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tvm_types 3.0.0",
+ "tvm_block",
+ "tvm_types",
 ]
 
 [[package]]
@@ -6352,7 +6316,7 @@ dependencies = [
  "num-traits",
  "sha2 0.10.9",
  "thiserror 2.0.18",
- "tvm_types 3.0.2",
+ "tvm_types",
 ]
 
 [[package]]
@@ -6371,8 +6335,8 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "thiserror 2.0.18",
- "tvm_block 3.0.2",
- "tvm_types 3.0.2",
+ "tvm_block",
+ "tvm_types",
 ]
 
 [[package]]
@@ -6423,15 +6387,15 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.28.0",
- "tvm_abi 3.0.2",
- "tvm_block 3.0.2",
+ "tvm_abi",
+ "tvm_block",
  "tvm_block_json",
  "tvm_client_processing",
- "tvm_executor 3.0.2",
+ "tvm_executor",
  "tvm_sdk",
  "tvm_struct",
- "tvm_types 3.0.2",
- "tvm_vm 3.0.2",
+ "tvm_types",
+ "tvm_vm",
  "url",
  "zeroize",
  "zstd",
@@ -6453,24 +6417,8 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "tokio",
- "tvm_block 3.0.2",
- "tvm_types 3.0.2",
-]
-
-[[package]]
-name = "tvm_executor"
-version = "3.0.0"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0.an#4841c292889a232445a4495d61bb012bac5a3ead"
-dependencies = [
- "anyhow",
- "lazy_static",
- "log",
- "semver",
- "thiserror 2.0.18",
- "tvm_block 3.0.0",
- "tvm_types 3.0.0",
- "tvm_vm 3.0.0",
- "wasmtime",
+ "tvm_block",
+ "tvm_types",
 ]
 
 [[package]]
@@ -6483,9 +6431,9 @@ dependencies = [
  "log",
  "semver",
  "thiserror 2.0.18",
- "tvm_block 3.0.2",
- "tvm_types 3.0.2",
- "tvm_vm 3.0.2",
+ "tvm_block",
+ "tvm_types",
+ "tvm_vm",
  "wasmtime",
 ]
 
@@ -6509,9 +6457,9 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
- "tvm_abi 3.0.2",
- "tvm_block 3.0.2",
- "tvm_types 3.0.2",
+ "tvm_abi",
+ "tvm_block",
+ "tvm_types",
 ]
 
 [[package]]
@@ -6520,39 +6468,8 @@ version = "3.0.2"
 source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.2.an#3b6a038067fa162c5ab11ef28851d2cc9655a705"
 dependencies = [
  "thiserror 2.0.18",
- "tvm_block 3.0.2",
- "tvm_types 3.0.2",
-]
-
-[[package]]
-name = "tvm_types"
-version = "3.0.0"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0.an#4841c292889a232445a4495d61bb012bac5a3ead"
-dependencies = [
- "aes",
- "anyhow",
- "base64",
- "blst",
- "crc",
- "ctr",
- "curve25519-dalek",
- "ed25519",
- "ed25519-dalek",
- "fastbloom",
- "hex",
- "lazy_static",
- "lockfree",
- "log",
- "num",
- "num-derive",
- "num-traits",
- "parking_lot",
- "rand 0.8.6",
- "serde",
- "sha2 0.10.9",
- "smallvec",
- "thiserror 2.0.18",
- "x25519-dalek",
+ "tvm_block",
+ "tvm_types",
 ]
 
 [[package]]
@@ -6584,67 +6501,6 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.18",
  "x25519-dalek",
-]
-
-[[package]]
-name = "tvm_vm"
-version = "3.0.0"
-source = "git+https://github.com/tvmlabs/tvm-sdk.git?tag=v3.0.0.an#4841c292889a232445a4495d61bb012bac5a3ead"
-dependencies = [
- "anyhow",
- "ark-bls12-381",
- "ark-bn254",
- "ark-crypto-primitives",
- "ark-ec",
- "ark-ff",
- "ark-groth16",
- "ark-r1cs-std",
- "ark-relations",
- "ark-serialize",
- "ark-snark",
- "ark-std 0.4.0",
- "base64ct",
- "bls12_381",
- "byte-slice-cast",
- "chrono",
- "derive_more",
- "diffy",
- "ed25519",
- "ed25519-dalek",
- "fastcrypto",
- "ff",
- "halo2-base",
- "hex",
- "itertools 0.13.0",
- "lazy_static",
- "log",
- "neptune",
- "num",
- "num-bigint 0.4.6",
- "num-traits",
- "once_cell",
- "pse-poseidon",
- "rand 0.8.6",
- "rand_chacha 0.2.2",
- "regex",
- "reqwest 0.13.3",
- "schemars",
- "semver",
- "serde",
- "serde_derive",
- "serde_json",
- "similar",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tvm_abi 3.0.0",
- "tvm_block 3.0.0",
- "tvm_types 3.0.0",
- "typenum",
- "wasmtime",
- "wasmtime-wasi",
- "wasmtime-wasi-io",
- "zstd",
 ]
 
 [[package]]
@@ -6698,9 +6554,9 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tvm_abi 3.0.2",
- "tvm_block 3.0.2",
- "tvm_types 3.0.2",
+ "tvm_abi",
+ "tvm_block",
+ "tvm_types",
  "typenum",
  "wasmtime",
  "wasmtime-wasi",
