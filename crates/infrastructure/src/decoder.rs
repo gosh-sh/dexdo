@@ -168,28 +168,37 @@ mod tests {
     fn decodes_multicell_order_placed() {
         let decoder = Decoder::new().unwrap();
 
-        // Real OrderBook.OrderPlaced body observed on chain. Its fields fill
-        // the first cell through depositHash (969 bits); opNonce no longer
-        // fits and moves to a continuation cell. The off-by-32 bug mis-counted
-        // the 32-bit event-id prefix when descending into that continuation
-        // cell, so opNonce is the field that actually exercises the fix.
+        // Real OrderBook.OrderPlaced body, from event message
+        // 65d552e6cecf8ac725fbea4a24e8fd054e2ab11f31251e188523ded2fdc4456e
+        // on shellnet.ackinacki.org — re-fetchable via blockchain.message(hash)
+        // should the ABI shift.
+        //
+        // A TVM cell holds at most 1023 data bits. With the 32-bit event-id
+        // prefix, the fields fill the first cell through depositHash at 969
+        // bits; the 64-bit opNonce no longer fits and lands in a continuation
+        // cell. opNonce is therefore the field that exercises the multi-cell
+        // descent, where the prefix offset has to be carried into the next cell.
         let body = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAACAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJGgAAAAAAAAAAAAAAAn+OzoAAAAAAAAAAAFcScEalnJSVsVKAm0LrR0TbuPbU18Mkb7ENEBG22bNzhvrIubdt2wtAAQAQAAAAAAAAAXM=";
 
         let decoded = decoder.decode_event_body(body).unwrap().expect("event id is known");
 
         assert_eq!(decoded.event_type, "OrderBook.OrderPlaced");
         assert_eq!(decoded.value["orderId"], "2");
+        assert_eq!(decoded.value["outcomeId"], "0");
         assert_eq!(decoded.value["isBuy"], true);
-        // amount, clientOrderId and depositHash are the last fields in the
-        // first cell — they pin the read position right up to the boundary.
+        // price, amount, clientOrderId and depositHash sit in the first cell,
+        // which ends after depositHash at the 969-bit boundary.
+        assert_eq!(
+            decoded.value["price"],
+            "0x0000000000000000000000000000000000000000000000000000000000001234"
+        );
         assert_eq!(decoded.value["amount"], "21460000000");
         assert_eq!(decoded.value["clientOrderId"], "12548401359218092331");
         assert_eq!(
             decoded.value["depositHash"],
             "0x62a5013685d68e89b771eda9af8648df621a20236db366e70df591736edbb616"
         );
-        // opNonce is the sole field in the continuation cell: the load-bearing
-        // assertion for the multi-cell decode — do not drop it.
+        // opNonce is the sole field in the continuation cell.
         assert_eq!(decoded.value["opNonce"], "371");
     }
 }
