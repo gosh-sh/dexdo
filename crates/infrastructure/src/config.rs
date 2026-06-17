@@ -232,6 +232,12 @@ pub struct IndexerSection {
     /// (system / null-route addresses) without polluting the read-model.
     #[serde(default)]
     pub ignored_addresses: Vec<String>,
+    /// Decoded `event_type` values to drop at ingest, before the `raw_events`
+    /// insert and projection. The page cursor still advances past them. Used
+    /// to shed observability-only floods (e.g. `OrderBook.Queued`). Must not
+    /// contain a type consumed downstream — see `IndexerConfig::validate`.
+    #[serde(default)]
+    pub ignored_event_types: Vec<String>,
 }
 
 fn default_reprojection_interval_ms() -> u64 {
@@ -412,6 +418,17 @@ impl IndexerConfig {
             i.oracle_event_list_reconciliation_interval_ms > 0,
             "indexer.oracle_event_list_reconciliation_interval_ms must be > 0"
         );
+        // Types whose raw_events rows are counted by the OTLP metrics refresh
+        // loop (services/indexer/src/metrics_refresh.rs). Dropping them at
+        // ingest would silently undercount orders_created_event_cnt /
+        // order_partially_filled_event_cnt, so refuse the config.
+        const METRIC_CRITICAL: [&str; 2] = ["OrderBook.OrderPlaced", "OrderBook.PartialFill"];
+        for t in &i.ignored_event_types {
+            anyhow::ensure!(
+                !METRIC_CRITICAL.contains(&t.as_str()),
+                "indexer.ignored_event_types must not contain metric-critical type {t}"
+            );
+        }
         Ok(())
     }
 }
@@ -1322,5 +1339,47 @@ indexer:
         let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("graphql.endpoint"), "got: {err}");
+    }
+
+    #[test]
+    fn indexer_validate_rejects_metric_critical_ignored_event_type() {
+        let raw = format!(
+            "{COMMON}
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
+indexer:
+  polling_interval_ms: 3000
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+  ignored_event_types:
+    - \"OrderBook.PartialFill\"
+"
+        );
+        let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("metric-critical"), "got: {err}");
+    }
+
+    #[test]
+    fn indexer_validate_accepts_queued_ignored_event_type() {
+        let raw = format!(
+            "{COMMON}
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
+indexer:
+  polling_interval_ms: 3000
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+  ignored_event_types:
+    - \"OrderBook.Queued\"
+"
+        );
+        let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
+        cfg.validate().expect("validate");
+        assert_eq!(cfg.indexer.ignored_event_types, vec!["OrderBook.Queued".to_string()]);
     }
 }
