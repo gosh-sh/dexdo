@@ -2198,3 +2198,25 @@ async fn test_ob_demo_deployer_staked_and_trades() {
         deployer_fill.clearing_price,
     );
 }
+
+/// Empirical decode check (NOT ignored): fetch the REAL `OrderPlaced`
+/// event already on shellnet (OrderBook `0:9175faed…`, order_id=1,
+/// client_order_id below — the event we hand-decoded as 9-field) and
+/// decode it through the SDK's actual kit path. Proves the current ABI
+/// (deposit_hash + op_nonce) matches the on-chain event.
+#[tokio::test]
+async fn decode_real_orderplaced_from_shellnet() {
+    let dex = create_dex();
+    let ob = "0:9175faed606d02d9347ad3718663e55ff4efcb31341b5ed9bd68fed734e5a824";
+    let coid: u128 = 7650491958644707233;
+    let res =
+        dex.wait_for_order_placed(ob, coid, 0, std::time::Duration::from_secs(40)).await;
+    eprintln!("=== OrderPlaced decode result ===\n{res:#?}");
+    let d = res.expect("OrderPlaced decode FAILED (ABI mismatch?)");
+    assert_eq!(d.order_id, 1, "order_id");
+    assert_eq!(d.client_order_id, coid, "client_order_id");
+    eprintln!(
+        "[decode-check] OK — order_id={} coid={} (decoded with 9-field ABI)",
+        d.order_id, d.client_order_id
+    );
+}

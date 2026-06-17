@@ -353,3 +353,77 @@ struct GqlNode {
     dst: String,
     created_at: Option<u64>,
 }
+
+#[cfg(test)]
+mod cell_decode_experiment {
+    use super::*;
+    use ackinacki_kit::contracts::dex::order_book_events::QueuedData;
+    use ackinacki_kit::tvm_client::ClientConfig;
+    use std::sync::Arc;
+
+    // Real ext-out bodies from OrderBook 0:9175faed… on shellnet:
+    //   Queued      = 1 cell  (small)
+    //   OrderPlaced = 2 cells (9 fields = 1033 bits > 1023; opNonce spills to a ref)
+    const QUEUED_BODY: &str = "te6ccgEBAQEADAAAFBAd88cAAAAAAQE=";
+    const ORDERPLACED_BODY: &str = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAABAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJxAAAAAAAAAAAAAAAA34R1gAAAAAAAAAAADUWAPOAAAfQ5a/DxBF+SmrdO5oXyLM+jKFg9ytsUGhHlk2qac6wCgvAAQAQAAAAAAAAAAE=";
+    const OB: &str = "0:9175faed606d02d9347ad3718663e55ff4efcb31341b5ed9bd68fed734e5a824";
+
+    fn msg(body: &str, kind: OrderBookEvent) -> OrderBookExtoutMessage {
+        OrderBookExtoutMessage {
+            id: "x".into(),
+            body: body.into(),
+            dst: String::new(),
+            created_at: 0,
+            kind,
+        }
+    }
+
+    #[test]
+    fn one_cell_vs_two_cell_decode() {
+        let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+        let ob = OrderBook::new(ctx, dex_contract_params(OB));
+
+        // `kind` is metadata only — decode matches by the body's event-id.
+        let q = decode::<QueuedData>(&msg(QUEUED_BODY, OrderBookEvent::OrderPlaced), &ob);
+        let p =
+            decode::<OrderPlacedData>(&msg(ORDERPLACED_BODY, OrderBookEvent::OrderPlaced), &ob);
+
+        eprintln!("Queued      (1 cell): ok={} -> {q:?}", q.is_ok());
+        eprintln!("OrderPlaced (2 cell): ok={} -> {p:?}", p.is_ok());
+
+        assert!(matches!(q, Ok(Some(_))), "1-cell Queued must decode");
+        // Documenting the observed behaviour, not asserting it as desired:
+        eprintln!(
+            "RESULT: 1-cell decodes={}, 2-cell decodes={}",
+            matches!(q, Ok(Some(_))),
+            matches!(p, Ok(Some(_)))
+        );
+    }
+
+    #[test]
+    fn try_all_data_layouts_on_2cell() {
+        use ackinacki_kit::tvm_client::abi::{
+            decode_message_body, Abi, DataLayout, ParamsOfDecodeMessageBody,
+        };
+        let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+        let abi = Abi::Json(
+            std::fs::read_to_string("../contracts/abi/dex/OrderBook.abi.json").unwrap(),
+        );
+        for dl in [None, Some(DataLayout::Input), Some(DataLayout::Output)] {
+            let r = decode_message_body(
+                ctx.clone(),
+                ParamsOfDecodeMessageBody {
+                    abi: abi.clone(),
+                    body: ORDERPLACED_BODY.to_string(),
+                    is_internal: false,
+                    allow_partial: true,
+                    function_name: None,
+                    data_layout: dl.clone(),
+                },
+            );
+            let ok = r.is_ok();
+            let name = r.ok().map(|x| x.name);
+            eprintln!("data_layout={dl:?} -> ok={ok} name={name:?}");
+        }
+    }
+}

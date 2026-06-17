@@ -219,8 +219,8 @@ abstract contract Modifiers is Errors {
     /// @notice Grace period for oracle resolve (24 hours in seconds)
     uint64 constant GRACE_PERIOD = 86400;
 
-    /// @notice Minimum lead time from now to resultStart on first setTimings call (10 hours).
-    uint64 constant MIN_RESULT_GAP = 60;
+    /// @notice Minimum lead time from now to resultStart on first setTimings call.
+    uint64 constant MIN_RESULT_GAP = 36_000;
 
     /// @notice Fee percentage for staking operations
     uint128 constant FEE_PERCENT = 1; // 0.01% = 1

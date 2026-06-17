@@ -212,4 +212,8 @@ abstract contract Errors {
     ///         `confirmRefundReceived`. Split/merge are gated until then to
     ///         prevent stale-stake races.
     uint16 constant ERR_NORM_REFUND_PENDING = 404;
+
+    /// @notice An inference-market stream/dispute lock is held; withdraw / split
+    ///         / merge are gated until the deal releases it (spec §4.3).
+    uint16 constant ERR_STREAM_LOCKED = 405;
 }

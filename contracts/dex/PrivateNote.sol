@@ -8,12 +8,26 @@ import "./PMP.sol";
 import "./RootPN.sol";
 import "./OrderBook.sol";
 import "./libraries/DexLib.sol";
+import "../airegistry/InferenceOrderBook.sol";
+
+/// @notice Buyer-side calls into an inference streaming deal (TokenContract).
+///         Both are gated on `msg.sender == _buyer` in TokenContract, so this
+///         note must be the bound buyer note (spec §4.1/§4.2).
+interface IInferenceDeal {
+    function stop() external;
+    function dispute() external;
+}
 
 /// @notice Wallet that can deploy and interact with PMP contracts
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "1.4.0";
+    string constant version = "1.5.0";
+
+    /// @notice Owner escape hatch: stale stream/dispute locks can be force
+    ///         cleared after this many seconds since the last lock change, so a
+    ///         buggy/malicious deal cannot brick the note's withdraw forever.
+    uint64 constant STREAM_LOCK_MAX = 7 days;
 
     /// @notice Unique deposit identifier hash (static)
     uint256 public static _depositIdentifierHash;
@@ -202,6 +216,20 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @notice Coupon type (used for tracking which token type the coupon is for)
     uint32 _couponsTokenType;
 
+    // ── Inference-market stream locks (spec §4.3) ───────────────────────────
+    // A `token_contract` (streaming deal) that this note is party to can lock
+    // the note while a stream is live, and dispute-lock it while a dispute is
+    // open. While any lock is held the note cannot withdraw / split / merge —
+    // this caps demand-side hopping and stops a party fleeing mid-dispute.
+    // Auth is locker-only: only the deal that set a lock can clear it, so a
+    // griefer can at most freeze withdraw (never touch funds); an owner escape
+    // hatch clears stale locks after `STREAM_LOCK_MAX`.
+    mapping(address => bool) _streamLocks;   // deal => stream lock held
+    mapping(address => bool) _disputeLocks;  // deal => dispute lock held
+    uint32 _streamLockCount;
+    uint32 _disputeLockCount;
+    uint64 _lastStreamLockChange;
+
     // Events
 
     /// @notice Emitted when owner pubkey is changed
@@ -337,6 +365,185 @@ contract PrivateNote is Modifiers, ReplayProtection {
     function ensureBalance() private pure {
         if (address(this).balance > MIN_BALANCE) return;
         gosh.mintshellq(MIN_BALANCE);
+    }
+
+    // ── Inference-market stream locks (spec §4.3) ───────────────────────────
+
+    /// @notice Reverts if any stream/dispute lock is held — gate for value-
+    ///         extracting / state-restructuring ops (withdraw, split, merge).
+    function _requireNotStreamLocked() private view {
+        require(_streamLockCount == 0 && _disputeLockCount == 0, ERR_STREAM_LOCKED);
+    }
+
+    /// @notice A streaming deal locks this note while its stream is live.
+    ///         Auth: the caller IS the deal (locker-only unlock).
+    function streamLock(address deal) public accept {
+        require(msg.sender == deal, ERR_INVALID_SENDER);
+        ensureBalance();
+        if (!_streamLocks[deal]) { _streamLocks[deal] = true; _streamLockCount += 1; }
+        _lastStreamLockChange = uint64(block.timestamp);
+    }
+
+    /// @notice The deal releases its stream lock (amicable close / timeout).
+    function streamUnlock(address deal) public accept {
+        require(msg.sender == deal, ERR_INVALID_SENDER);
+        ensureBalance();
+        if (_streamLocks[deal]) { delete _streamLocks[deal]; _streamLockCount -= 1; }
+        _lastStreamLockChange = uint64(block.timestamp);
+    }
+
+    /// @notice The deal escalates to a dispute — both notes get dispute-locked.
+    function streamDisputeLock(address deal) public accept {
+        require(msg.sender == deal, ERR_INVALID_SENDER);
+        ensureBalance();
+        if (!_disputeLocks[deal]) { _disputeLocks[deal] = true; _disputeLockCount += 1; }
+        _lastStreamLockChange = uint64(block.timestamp);
+    }
+
+    /// @notice The deal resolves the dispute — dispute lock released.
+    function streamDisputeUnlock(address deal) public accept {
+        require(msg.sender == deal, ERR_INVALID_SENDER);
+        ensureBalance();
+        if (_disputeLocks[deal]) { delete _disputeLocks[deal]; _disputeLockCount -= 1; }
+        _lastStreamLockChange = uint64(block.timestamp);
+    }
+
+    /// @notice Owner escape hatch — clear ALL stale locks after STREAM_LOCK_MAX
+    ///         (deal escrow lives in the `token_contract`, untouched by this).
+    function forceClearStreamLocks() public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+        ensureBalance();
+        require(_streamLockCount != 0 || _disputeLockCount != 0, ERR_INVALID_STATE);
+        require(uint64(block.timestamp) > _lastStreamLockChange + STREAM_LOCK_MAX, ERR_INVALID_STATE);
+        delete _streamLocks;
+        delete _disputeLocks;
+        _streamLockCount = 0;
+        _disputeLockCount = 0;
+    }
+
+    /// @notice Lock state (for off-chain monitoring / tests).
+    function getStreamLocks() external view returns (uint32 streamCount, uint32 disputeCount, uint64 lastChange) {
+        return (_streamLockCount, _disputeLockCount, _lastStreamLockChange);
+    }
+
+    // ── Inference market: deploy an InferenceOrderBook FROM this note (§2/§8) ──
+
+    /// @notice Deploy an InferenceOrderBook from this note. The caller supplies
+    ///         the canonical OB code; the address derives from the salted note
+    ///         code + (model, tick size) (spec §8), so a given (model, tick)
+    ///         maps to exactly one book. Permissionless: any note holder may
+    ///         (re)deploy the canonical book at its deterministic address.
+    function deployInferenceOrderBook(TvmCell inferenceOrderBookCode, uint256 modelHash, uint128 tickSize)
+        public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
+    {
+        ensureBalance();
+        TvmCell stateInit = DexLib.buildInferenceOrderBookStateInit(inferenceOrderBookCode, modelHash, tickSize);
+        // The book's ctor verifies the deployer is a genuine note by recomputing
+        // this address from its pinned NOTE_CODE_HASH + our depositHash.
+        new InferenceOrderBook{stateInit: stateInit, value: 5 vmshell, flag: 1, bounce: false}(_depositIdentifierHash);
+    }
+
+    /// @notice Deterministic address of the InferenceOrderBook for the given
+    ///         OB code + params (model + tick size).
+    function getInferenceOrderBookAddress(TvmCell inferenceOrderBookCode, uint256 modelHash, uint128 tickSize)
+        external view returns (address)
+    {
+        return DexLib.computeInferenceOrderBookAddress(inferenceOrderBookCode, modelHash, tickSize);
+    }
+
+    // ── Inference market: note as active participant (spec §2-4) ────────────
+    // Inference settles in SHELL (ECC[2], §1) — held physically by the note
+    // (like the PMP network fee), NOT in the RootPN-custodied `_balance`. These
+    // methods forward that physical SHELL, so the note itself is the market
+    // participant (no external multisig). SHELL id: CURRENCIES_ID_SHELL == 2.
+
+    /// @notice Post a SELL offer to an `orderBook` from this note, attaching the
+    ///         platform fee in SHELL (spec §2.1). The fee becomes irrevocable on
+    ///         match (no-show penalty); this note is recorded as the sellerNote
+    ///         (fee refund target on cancel, dispute-lock target). `sellerPubkey`
+    ///         is the key that will drive the deal's TokenContract (open/advance).
+    function postSellOffer(
+        address orderBook,
+        uint128 pricePerTick,
+        uint128 maxTicks,
+        address tokenContract,
+        uint8   flags
+    ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+        // No fee attached: the platform fee is buyer-side & by-fact (§5.1); the
+        // seller posts fee-free (§2.1, no no-show penalty). Owner = this note
+        // (the OB uses msg.sender for ownership/handover).
+        ensureBalance();
+        InferenceOrderBook(orderBook).placeSellOffer{value: 1 vmshell, flag: 1, bounce: false}(
+            pricePerTick, maxTicks, tokenContract, flags);
+    }
+
+    /// @notice Send a BUY order from this note with SHELL escrow (spec §2.3).
+    ///         This note is bound as the buyer; on a match the OB forwards the
+    ///         cost to the offer's token_contract and binds this note there, so
+    ///         the same note can later `streamStop`/`streamDispute` the deal.
+    function placeInferenceBuy(
+        address orderBook,
+        uint128 maxPricePerTick,
+        uint128 ticks,
+        uint128 escrow,
+        uint8   flags,
+        uint64  deadline
+    ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+        // §8 limit buy on inference: budget = escrow (held in the OB), ceiling =
+        // maxPricePerTick, TIF = deadline (0 = GTC), flags = IOC/FOK/MARKET/POST_ONLY.
+        // Owner/buyer = this note (OB uses msg.sender).
+        ensureBalance();
+        mapping(uint32 => varuint32) ecc;
+        ecc[CURRENCIES_ID_SHELL] = varuint32(escrow);
+        InferenceOrderBook(orderBook).placeBuyOrder{value: 2 vmshell, flag: 1, bounce: false, currencies: ecc}(
+            maxPricePerTick, ticks, flags, deadline);
+    }
+
+    /// @notice Place a §8 subscription (semantic order) from this note: budget
+    ///         (escrow) throttled into weekly cycles, unspent forfeited by-fact to
+    ///         sellers. `autoRenew` is a client hint (renewal = re-place, §8.2).
+    function placeInferenceSubscription(
+        address orderBook,
+        uint128 maxPricePerTick,
+        uint128 ticks,
+        uint128 escrow,
+        bool    autoRenew
+    ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+        ensureBalance();
+        mapping(uint32 => varuint32) ecc;
+        ecc[CURRENCIES_ID_SHELL] = varuint32(escrow);
+        InferenceOrderBook(orderBook).placeSubscription{value: 2 vmshell, flag: 1, bounce: false, currencies: ecc}(
+            maxPricePerTick, ticks, autoRenew);
+    }
+
+    /// @notice Cancel one resting inference order owned by this note (refunds any
+    ///         held BUY escrow back to this note).
+    function cancelInferenceOrder(address orderBook, uint128 orderId)
+        public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
+    {
+        ensureBalance();
+        InferenceOrderBook(orderBook).cancelOrder{value: 1 vmshell, flag: 1, bounce: false}(orderId);
+    }
+
+    /// @notice Cancel all resting inference orders owned by this note.
+    function cancelAllInferenceOrders(address orderBook)
+        public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
+    {
+        ensureBalance();
+        InferenceOrderBook(orderBook).cancelAllOrders{value: 1 vmshell, flag: 1, bounce: false}();
+    }
+
+    /// @notice Buyer note stops the stream — amicable exit (spec §4.1). Max loss
+    ///         is the two in-flight ticks; refund returns to this note.
+    function streamStop(address tokenContract) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+        ensureBalance();
+        IInferenceDeal(tokenContract).stop{value: 1 vmshell, flag: 1, bounce: false}();
+    }
+
+    /// @notice Buyer note disputes the current ≤2 ticks (spec §4.2). Locks both
+    ///         this note and the seller note until resolved/timed out.
+    function streamDispute(address tokenContract) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+        ensureBalance();
+        IInferenceDeal(tokenContract).dispute{value: 1 vmshell, flag: 1, bounce: false}();
     }
 
     /// @notice Deploys a new PMP contract for a prediction market event.
@@ -662,6 +869,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
+        require(!_hasWithdrawn, ERR_INVALID_STATE);
+        _requireNotStreamLocked();
         require(collateral > 0, ERR_LOW_VALUE);
         // No lotSize check here: the minimal mintable basket (derived from
         // per-outcome unit sizes `u_k`) can be a large prime that exceeds
@@ -756,6 +965,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
+        require(!_hasWithdrawn, ERR_INVALID_STATE);
+        _requireNotStreamLocked();
         require(amount.length > 0, ERR_INVALID_PARAMS);
         require(_debt == 0, ERR_DEBT_NON_ZERO);
 
@@ -1047,6 +1258,11 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @param oracleListHash Oracle set hash of the source PMP.
     function acceptFee(uint128 fee, uint32 tokenType, uint256 eventId, uint256 oracleListHash) public senderIs(DexLib.computePMPAddress(_privateNoteCode, _pmpCode, eventId, oracleListHash, tokenType)) accept {
         ensureBalance();
+        // A withdrawn note is finalized — ignore tokens arriving from a PMP
+        // close (residual / creator fee) so they can't re-credit a drained note.
+        if (_hasWithdrawn) {
+            return;
+        }
         _balance[tokenType] += fee;
     }
 
@@ -1354,6 +1570,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @param dapp_id DApp id forwarded to RootPN.withdrawTokens (surfaced in the TokensWithdrawn event).
     function withdrawTokens(address destWalletAddr, uint256 dapp_id) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
+        require(!_hasWithdrawn, ERR_INVALID_STATE);
+        _requireNotStreamLocked();
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         require(_stakes.empty(), ERR_NOTE_BUSY);
         require(_debt == 0, ERR_DEBT_NON_ZERO);
