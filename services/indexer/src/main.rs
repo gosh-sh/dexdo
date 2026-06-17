@@ -138,12 +138,15 @@ async fn main() -> anyhow::Result<()> {
         if let Some(client) = client.as_ref() {
             let ignored: HashSet<&str> =
                 cfg.indexer.ignored_addresses.iter().map(String::as_str).collect();
+            let ignored_event_types: HashSet<&str> =
+                cfg.indexer.ignored_event_types.iter().map(String::as_str).collect();
             match drain_events(
                 client,
                 &repo,
                 &decoder,
                 cfg.graphql.page_size,
                 &ignored,
+                &ignored_event_types,
                 &mut cursor,
             )
             .await
@@ -159,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
                         projected = stats.projected,
                         projection_deferred = stats.projection_deferred,
                         projection_failed = stats.projection_failed,
+                        type_ignored = stats.type_ignored,
                         pages = stats.pages,
                         cursor = cursor.as_deref().unwrap_or(""),
                         "indexer tick"
@@ -185,6 +189,7 @@ struct DrainStats {
     projected: u64,
     projection_deferred: u64,
     projection_failed: u64,
+    type_ignored: u64,
     pages: u32,
 }
 
@@ -194,6 +199,7 @@ async fn drain_events(
     decoder: &Decoder,
     page_size: u32,
     ignored_src: &HashSet<&str>,
+    ignored_event_types: &HashSet<&str>,
     cursor: &mut Option<String>,
 ) -> anyhow::Result<DrainStats> {
     let mut stats = DrainStats::default();
@@ -216,7 +222,9 @@ async fn drain_events(
         stats.ignored += (edges_seen - page.edges.len()) as u64;
 
         let end_cursor = page.page_info.end_cursor.as_deref();
-        let persisted = repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder).await?;
+        let persisted = repo
+            .persist_page(STREAM_NAME, &page.edges, end_cursor, decoder, ignored_event_types)
+            .await?;
         stats.inserted += persisted.inserted;
         stats.skipped += persisted.skipped;
         stats.decoded += persisted.decoded;
@@ -224,6 +232,7 @@ async fn drain_events(
         stats.projected += persisted.projected;
         stats.projection_deferred += persisted.projection_deferred;
         stats.projection_failed += persisted.projection_failed;
+        stats.type_ignored += persisted.type_ignored;
 
         if let Some(end) = page.page_info.end_cursor.clone() {
             *cursor = Some(end);

@@ -1,6 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -35,6 +36,7 @@ pub struct PagePersistResult {
     pub projected: u64,
     pub projection_deferred: u64,
     pub projection_failed: u64,
+    pub type_ignored: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -101,6 +103,7 @@ impl IndexerRepository {
         edges: &[EventEdge],
         end_cursor: Option<&str>,
         decoder: &Decoder,
+        ignored_event_types: &HashSet<&str>,
     ) -> anyhow::Result<PagePersistResult> {
         let mut tx: Transaction<'_, Postgres> = self.pool.begin().await.context("begin tx")?;
         let mut result = PagePersistResult::default();
@@ -123,6 +126,17 @@ impl IndexerRepository {
 
             let body_value = edge.node.body.clone().unwrap_or(Value::Null);
             let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref());
+            // Drop configured no-op event types before they cost a raw_events
+            // insert + projection + mark_processed. The page-level cursor
+            // upsert after the loop still runs, so the cursor advances past
+            // them. event_type is only known post-decode, which is why this
+            // lives here and not in drain_events' src-based filter.
+            if let Some(d) = decoded.as_ref() {
+                if ignored_event_types.contains(d.event_type.as_str()) {
+                    result.type_ignored += 1;
+                    continue;
+                }
+            }
             if decoded.is_some() {
                 result.decoded += 1;
             } else {
