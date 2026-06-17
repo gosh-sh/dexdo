@@ -54,6 +54,8 @@ The indexer follows a GraphQL message-edge stream. Every edge becomes one row in
 
 The startup guard refuses any entry that is metric-critical (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`) — those must always land in `raw_events` for the OTLP counters to be accurate. The guard fires at startup, not at ingest time, so a bad list prevents the service from starting rather than silently corrupting metrics.
 
+The guard checks **only** those two metric-critical types; it does not validate the rest of the list. Listing a state-changing type (anything the projector routes to a real handler, e.g. `OrderBook.OrderFilled`) passes validation and silently corrupts `live_orders`. Restricting the list to genuine no-op types (`OrderBook.Queued` / `FullyFilled` / `Rejected` / `CallbackBounced`) is the operator's responsibility, not the guard's.
+
 Each indexer-tick log line includes a `type_ignored` count: the number of edges skipped by the type ignore list during that page fetch (`type_ignored=0` when nothing was skipped).
 
 Intended use: shed confirmed observability-only floods (e.g. `OrderBook.Queued`, which fires at queue entry before any order ID exists and has no read-model effect) without writing or projecting them.
@@ -68,7 +70,7 @@ Intended use: shed confirmed observability-only floods (e.g. `OrderBook.Queued`,
 
 ### Noise log
 
-When `LOG_DIR` is set, the projector's "no handler for event type" warnings are written to `<service>.noise.log` (a separate daily-rotating file in `LOG_DIR`, like the main log) rather than the main log or stdout. The routing uses the `dodex::event_noise` tracing target, configured by the `dodex-logging` crate (`EVENT_NOISE_TARGET`). When `LOG_DIR` is not set, those warnings appear on stdout alongside the rest of the log output.
+When `LOG_DIR` is set, the projector's "no handler for event type" warnings are split by novelty. The **first** time the process sees a given unhandled `event_type` (from either the fetch loop or the reprojection sweep — they share one in-process set), the warning is emitted at the normal target, so it reaches stdout and the main `<service>.log` — this is the operator's signal that a deployed contract emits an event the indexer does not yet handle. Every **later** repeat of that same type is written to `<service>.noise.log` (a separate daily-rotating file in `LOG_DIR`, like the main log) via the `dodex::event_noise` tracing target, configured by the `dodex-logging` crate (`EVENT_NOISE_TARGET`), so a steady flood does not drown the main log. When `LOG_DIR` is not set, all of these warnings appear on stdout alongside the rest of the log output.
 
 ## Projection — lifecycle events
 

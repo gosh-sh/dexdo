@@ -93,9 +93,9 @@ Notable indexer config keys under `indexer:`:
 Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
 (optional) makes each service also write rotated log files into a directory —
 the Compose deployment bind-mounts these to `./logs/<service>`. When `LOG_DIR`
-is set, the indexer additionally writes projector "no handler" warnings to a
-separate `<service>.noise.log` file instead of the main log. See
-[docs/deployment.md](docs/deployment.md#logs) and
+is set, the indexer logs the first sighting of each unhandled-event-type warning
+to the main log and diverts the repeats to a separate `<service>.noise.log` file.
+See [docs/deployment.md](docs/deployment.md#logs) and
 [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#noise-log).
 
 Metrics are OpenTelemetry/OTLP: the indexer exports event counters when

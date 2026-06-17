@@ -358,7 +358,16 @@ Each service writes to **both** stdout and a host-mounted directory. The base
 to `/app/logs` (in each container) and sets `LOG_DIR=/app/logs`. With `LOG_DIR`
 set, the service writes daily-rotated, human-readable files named
 `<service>.log.<YYYY-MM-DD>` into that directory, keeping at most `LOG_MAX_FILES`
-of them (default 14):
+of them (default 14).
+
+The indexer additionally writes a second daily-rotated file,
+`indexer.noise.log.<YYYY-MM-DD>` (same `LOG_MAX_FILES` retention), carrying the
+high-volume, low-value "projector has no handler for event type" repeats. The
+first sighting of each unseen type still goes to stdout and `indexer.log`; only
+the repeats are diverted here, so this file stays quiet unless a deployed
+contract is steadily emitting an event the indexer does not yet handle. Other
+services build the appender lazily but never write to it, so no `*.noise.log`
+appears for them.
 
 ```sh
 # tail the live stdout stream (unchanged)
@@ -366,6 +375,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f api inde
 
 # the persisted files on the host (survive container removal / redeploy)
 tail -f logs/api/api.log.*
+tail -f logs/indexer/indexer.noise.log.*   # diverted "no handler" repeats
 ls -1 logs/indexer/
 ```
 

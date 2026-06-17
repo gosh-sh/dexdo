@@ -33,9 +33,12 @@ indexer:
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
   # Decoded event types dropped before raw_events insert and projector dispatch.
-  # The cursor still advances past ignored types. Keep this list narrow — only
-  # types confirmed to be observability-only noise (metric-critical types such
-  # as OrderBook.OrderPlaced and OrderBook.PartialFill are rejected by the
-  # startup guard).
+  # The cursor still advances past ignored types. List ONLY genuine no-op types
+  # (the projector maps them to Applied without touching the read model):
+  # OrderBook.Queued / FullyFilled / Rejected / CallbackBounced. The startup
+  # guard rejects only the two metric-critical types (OrderBook.OrderPlaced,
+  # OrderBook.PartialFill); it does NOT catch a state-changing type such as
+  # OrderBook.OrderFilled, which would pass validation and silently corrupt
+  # live_orders.
   ignored_event_types:
     - "OrderBook.Queued"

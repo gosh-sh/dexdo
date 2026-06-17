@@ -234,8 +234,17 @@ pub struct IndexerSection {
     pub ignored_addresses: Vec<String>,
     /// Decoded `event_type` values to drop at ingest, before the `raw_events`
     /// insert and projection. The page cursor still advances past them. Used
-    /// to shed observability-only floods (e.g. `OrderBook.Queued`). Must not
-    /// contain a type consumed downstream — see `IndexerConfig::validate`.
+    /// to shed observability-only floods (e.g. `OrderBook.Queued`).
+    ///
+    /// Only genuine no-op types belong here — those `projectors::project_event`
+    /// maps to `ProjectionOutcome::Applied` without touching a read-model table
+    /// (`OrderBook.FullyFilled`/`Queued`/`Rejected`/`CallbackBounced`).
+    /// `IndexerConfig::validate` rejects ONLY the two metric-critical types
+    /// (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`); it does not verify
+    /// the rest. Listing a state-changing type here (e.g.
+    /// `OrderBook.OrderFilled`) therefore passes validation and silently
+    /// corrupts `live_orders` — the operator, not the guard, is responsible for
+    /// keeping this list to no-op types.
     #[serde(default)]
     pub ignored_event_types: Vec<String>,
 }
@@ -381,6 +390,18 @@ impl AuthSection {
     }
 }
 
+/// `raw_events.event_type` values whose row counts back OTLP metric counters
+/// in the indexer's metrics-refresh loop (`services/indexer/src/metrics_refresh.rs`).
+/// Dropping any of these at ingest would silently undercount
+/// `orders_created_event_cnt` / `order_partially_filled_event_cnt`, so
+/// [`IndexerConfig::validate`] refuses a config that lists one.
+///
+/// This set must stay a superset of the types `metrics_refresh` actually
+/// tracks; a unit test there (`metric_critical_covers_tracked_types`) fails
+/// loudly if a new tracked type is added without updating this list.
+pub const METRIC_CRITICAL_EVENT_TYPES: [&str; 2] =
+    ["OrderBook.OrderPlaced", "OrderBook.PartialFill"];
+
 impl IndexerConfig {
     pub fn load_from_path(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let cfg: Self = load_yaml(path)?;
@@ -418,14 +439,14 @@ impl IndexerConfig {
             i.oracle_event_list_reconciliation_interval_ms > 0,
             "indexer.oracle_event_list_reconciliation_interval_ms must be > 0"
         );
-        // Types whose raw_events rows are counted by the OTLP metrics refresh
-        // loop (services/indexer/src/metrics_refresh.rs). Dropping them at
-        // ingest would silently undercount orders_created_event_cnt /
-        // order_partially_filled_event_cnt, so refuse the config.
-        const METRIC_CRITICAL: [&str; 2] = ["OrderBook.OrderPlaced", "OrderBook.PartialFill"];
+        // Reject dropping any metric-critical type: its raw_events rows back
+        // the OTLP counters, so shedding it at ingest would silently undercount
+        // them. See METRIC_CRITICAL_EVENT_TYPES. This guard covers ONLY these
+        // types — a state-changing type listed here still passes validation and
+        // corrupts the read model (see `ignored_event_types` field docs).
         for t in &i.ignored_event_types {
             anyhow::ensure!(
-                !METRIC_CRITICAL.contains(&t.as_str()),
+                !METRIC_CRITICAL_EVENT_TYPES.contains(&t.as_str()),
                 "indexer.ignored_event_types must not contain metric-critical type {t}"
             );
         }
