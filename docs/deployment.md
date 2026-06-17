@@ -251,6 +251,13 @@ api only:
   HTTP timeout could fire while a chain submission or BOC read is still in
   flight.
 
+indexer only:
+
+- `indexer.ignored_event_types` must not list a metric-critical type
+  (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`): those are counted from
+  `raw_events` for the OTLP metrics, so dropping them at ingest would
+  undercount. A bad list refuses startup.
+
 ## Step 4 — Compose override, build, and run
 
 The base `docker-compose.yml` mounts `./config` into each container read-only

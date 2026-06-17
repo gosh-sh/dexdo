@@ -64,6 +64,9 @@ async fn persist_page_skips_ignored_event_type_but_advances_cursor() {
     sqlx::query("delete from raw_events where msg_id = $1").bind(msg_id).execute(&pool).await.unwrap();
     sqlx::query("delete from indexer_cursors where stream_name = $1").bind(stream).execute(&pool).await.unwrap();
 
+    // OrderPlaced is used only because its BOC fixture decodes reliably; it
+    // exercises the generic skip path. `persist_page` accepts any set — the
+    // startup config guard separately forbids this metric-critical type.
     let ignored: HashSet<&str> = ["OrderBook.OrderPlaced"].into_iter().collect();
     let res = repo
         .persist_page(stream, &[edge(msg_id, "cursor-1")], Some("cursor-1"), &decoder, &ignored)
