@@ -106,6 +106,12 @@ pub fn init(service: &str) -> Vec<WorkerGuard> {
                     m.target() == EVENT_NOISE_TARGET
                 }));
 
+            // `env_filter()` is applied at the registry level, i.e. BEFORE the
+            // per-layer target filters. The default is `info`, so the WARN-level
+            // noise lines reach the noise layer fine; but an aggressive
+            // `RUST_LOG` (e.g. `error`, or a directive disabling this target)
+            // suppresses them globally before routing — keep that in mind when
+            // tuning `RUST_LOG`.
             tracing_subscriber::registry()
                 .with(env_filter())
                 .with(stdout_layer)
