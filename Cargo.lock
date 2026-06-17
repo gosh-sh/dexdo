@@ -1697,6 +1697,7 @@ dependencies = [
  "dodex-application",
  "dodex-chain",
  "dodex-domain",
+ "dodex-logging",
  "dotenvy",
  "hex",
  "hmac",

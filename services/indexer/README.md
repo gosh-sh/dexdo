@@ -23,12 +23,16 @@ Config sections:
 - `app`: environment name and log level.
 - `database`: Postgres URL and pool settings.
 - `graphql`: gateway endpoint, page size, request timeout.
-- `indexer`: polling/reconciliation/reprojection intervals and ignored addresses.
+- `indexer`: polling/reconciliation/reprojection intervals, `ignored_addresses`, and `ignored_event_types` (decoded event types dropped before `raw_events` insert; see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#event-type-ignore-list)).
 
 Logging is configured by environment variables, not YAML: `RUST_LOG` sets the
 filter (default `info`), and `LOG_DIR` (optional) makes the service additionally
 write daily-rotated `indexer.log.<date>` files into that directory, retaining
-`LOG_MAX_FILES` of them (default 14). See [docs/deployment.md](../../docs/deployment.md#logs).
+`LOG_MAX_FILES` of them (default 14). When `LOG_DIR` is set, projector "no
+handler for event type" warnings are routed to a separate `indexer.noise.log`
+file in that directory rather than the main log. See
+[docs/deployment.md](../../docs/deployment.md#logs) and
+[docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#noise-log).
 
 Metrics are OpenTelemetry/OTLP and also environment-driven: when
 `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) is set,

@@ -219,6 +219,8 @@ indexer:
   oracle_event_list_reconciliation_interval_ms: 60000
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
+  ignored_event_types:
+    - "OrderBook.Queued"
 ```
 
 The api and indexer **must share one database**: the indexer writes the

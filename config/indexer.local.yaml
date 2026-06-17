@@ -32,3 +32,10 @@ indexer:
   # confirmed noise.
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
+  # Decoded event types dropped before raw_events insert and projector dispatch.
+  # The cursor still advances past ignored types. Keep this list narrow — only
+  # types confirmed to be observability-only noise (metric-critical types such
+  # as OrderBook.OrderPlaced and OrderBook.PartialFill are rejected by the
+  # startup guard).
+  ignored_event_types:
+    - "OrderBook.Queued"
