@@ -213,6 +213,7 @@ impl IndexerRepository {
                         // hook: a new event type produces one log line per
                         // occurrence so operators see the gap.
                         warn!(
+                            target: dodex_logging::EVENT_NOISE_TARGET,
                             msg_id = %edge.node.msg_id,
                             event_type = %decoded_event.event_type,
                             "projector has no handler for event type; marking processed and advancing cursor"
@@ -309,6 +310,7 @@ impl IndexerRepository {
                 }
                 Ok(ProjectionOutcome::Unknown) => {
                     warn!(
+                        target: dodex_logging::EVENT_NOISE_TARGET,
                         msg_id = %row.msg_id,
                         event_type = %event.event_type,
                         "reprojection has no handler for event type; marking processed and advancing"
