@@ -253,10 +253,13 @@ api only:
 
 indexer only:
 
-- `indexer.ignored_event_types` must not list a metric-critical type
-  (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`): those are counted from
-  `raw_events` for the OTLP metrics, so dropping them at ingest would
-  undercount. A bad list refuses startup.
+- `indexer.ignored_event_types` may list only known droppable no-op types
+  (`OrderBook.Queued` / `FullyFilled` / `Rejected` / `CallbackBounced`). The
+  startup guard refuses anything else — metric-critical types
+  (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`, counted from `raw_events`
+  for the OTLP metrics), state-changing types, and typos — so a bad list
+  refuses startup rather than silently dropping nothing or corrupting the read
+  model.
 
 ## Step 4 — Compose override, build, and run
 
@@ -366,8 +369,8 @@ high-volume, low-value "projector has no handler for event type" repeats. The
 first sighting of each unseen type still goes to stdout and `indexer.log`; only
 the repeats are diverted here, so this file stays quiet unless a deployed
 contract is steadily emitting an event the indexer does not yet handle. Other
-services build the appender lazily but never write to it, so no `*.noise.log`
-appears for them.
+services build the noise appender too, so an empty `<service>.noise.log.<date>`
+is created, but only the indexer ever writes to it.
 
 ```sh
 # tail the live stdout stream (unchanged)

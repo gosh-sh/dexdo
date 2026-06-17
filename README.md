@@ -88,7 +88,7 @@ Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override a
 Notable indexer config keys under `indexer:`:
 
 - `ignored_addresses` — source addresses dropped before `raw_events` insert and projection.
-- `ignored_event_types` — decoded event types dropped before `raw_events` insert and projection; the cursor advances past them. Metric-critical types (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`) are rejected by the startup guard. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#event-type-ignore-list).
+- `ignored_event_types` — decoded event types dropped before `raw_events` insert and projection; the cursor advances past them. The startup guard accepts only known droppable no-op types and refuses anything else (metric-critical types, state-changing types, and typos). See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#event-type-ignore-list).
 
 Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
 (optional) makes each service also write rotated log files into a directory —
