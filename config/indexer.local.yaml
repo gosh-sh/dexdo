@@ -36,9 +36,10 @@ indexer:
   # The cursor still advances past ignored types. List ONLY genuine no-op types
   # (the projector maps them to Applied without touching the read model):
   # OrderBook.Queued / FullyFilled / Rejected / CallbackBounced. The startup
-  # guard rejects only the two metric-critical types (OrderBook.OrderPlaced,
-  # OrderBook.PartialFill); it does NOT catch a state-changing type such as
-  # OrderBook.OrderFilled, which would pass validation and silently corrupt
-  # live_orders.
+  # guard is an allow-list: it accepts only those four types and rejects every
+  # other entry, including metric-critical types (OrderBook.OrderPlaced,
+  # OrderBook.PartialFill), state-changing types such as OrderBook.OrderFilled
+  # (rejected before they could corrupt live_orders), and typos. A bad entry
+  # fails validation at startup rather than dropping events silently.
   ignored_event_types:
     - "OrderBook.Queued"

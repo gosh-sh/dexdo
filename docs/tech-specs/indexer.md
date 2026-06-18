@@ -46,7 +46,7 @@ flowchart LR
 
 ## Ingestion
 
-The indexer follows a GraphQL message-edge stream. Every edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema.
+The indexer follows a GraphQL message-edge stream. Every edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema. The one exception is an edge whose decoded `event_type` is listed in `indexer.ignored_event_types` (see [Event-type ignore list](#event-type-ignore-list) below): it is dropped before the insert, so by design it is never stored and falls outside the rebuild boundary.
 
 ### Event-type ignore list
 
