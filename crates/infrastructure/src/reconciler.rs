@@ -246,7 +246,7 @@ async fn write_market_state(
     // we never erase a previously-recorded cancellation timestamp.
     // `orderbook_address` is written unconditionally — `getOrderBookAddress()`
     // is deterministic and returns the precomputed address even pre-freeze
-    // (contracts/PMP.sol:1360). The migration-0014 CHECK constraint pins the
+    // (contracts/dex/PMP.sol:1360). The migration-0014 CHECK constraint pins the
     // invariant `last_reconciled_at IS NOT NULL ⇒ orderbook_address IS NOT NULL`
     // so an empty getter result fails the pass instead of producing a hidden
     // half-state.

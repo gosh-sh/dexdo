@@ -140,7 +140,7 @@ async fn read_orderbook_address(pool: &PgPool, market_id: i64) -> Option<String>
 
 #[tokio::test]
 async fn pre_freeze_reconcile_stamps_orderbook() {
-    // `PMP.getOrderBookAddress()` is deterministic (contracts/PMP.sol:1360) and
+    // `PMP.getOrderBookAddress()` is deterministic (contracts/dex/PMP.sol:1360) and
     // returns the precomputed address even before PoolsFrozen lands. The
     // reconciler stamps that address on the first pass; the public api-spec.md
     // contract requires `orderBookAddress` to be present for any reconciled

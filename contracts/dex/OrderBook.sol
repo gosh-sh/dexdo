@@ -26,8 +26,10 @@ contract OrderBook is Modifiers {
     /// @notice Token type associated with this order book.
     uint32 static _tokenType;
 
-    /// @notice PrivateNote code used for deterministic wallet address resolution.
-    TvmCell _privateNoteCode;
+    /// @notice PrivateNote code HASH/DEPTH (not the full code) for deterministic
+    ///         wallet-address resolution via DexLib.computePrivateNoteAddressFromHash.
+    uint256 _privateNoteCodeHash;
+    uint16  _privateNoteCodeDepth;
 
     /// @notice PMP contract that deployed this OrderBook.
     address _pmpAddress;
@@ -127,6 +129,11 @@ contract OrderBook is Modifiers {
     /// @notice Accumulated protocol fees retained by the contract
     ///         (= takerFee - makerRebate per fill, i.e. 0.01125% of notional).
     uint128 _totalProtocolFees;
+
+    /// @notice Monotonic match counter. Both legs (maker + taker) of one match
+    ///         emit OrderFilled with the same `matchId`, so off-chain consumers
+    ///         can pair the two legs unambiguously.
+    uint64 _matchSeq;
 
     // ===== Matching constants =====
 
@@ -231,9 +238,9 @@ contract OrderBook is Modifiers {
 
     // ===== Events =====
 
-    event OrderPlaced(uint128 orderId, uint32 outcomeId, bool isBuy, uint8 flags, uint256 price, uint128 amount, uint128 clientOrderId);
+    event OrderPlaced(uint128 orderId, uint32 outcomeId, bool isBuy, uint8 flags, uint256 price, uint128 amount, uint128 clientOrderId, uint256 depositHash, uint64 opNonce);
     event OrderCancelled(uint128 orderId, uint128 clientOrderId);
-    event OrderFilled(uint128 orderId, uint128 filledAmount, uint256 clearingPrice, uint128 feeAmount, bool isTaker);
+    event OrderFilled(uint128 orderId, uint128 filledAmount, uint256 clearingPrice, uint128 feeAmount, bool isTaker, uint64 matchId, uint256 depositHash);
     /// @notice Aggregated MM-friendly fill events. Emitted ONCE per order
     ///         after matching for that order completes (across continuations):
     ///         - `PartialFill` if the order remains in the book with leftover
@@ -263,7 +270,8 @@ contract OrderBook is Modifiers {
 
         TvmCell salt = abi.codeSalt(tvm.code()).get();
         (TvmCell PrivateNoteCode) = abi.decode(salt, (TvmCell));
-        _privateNoteCode = PrivateNoteCode;
+        _privateNoteCodeHash  = tvm.hash(PrivateNoteCode);
+        _privateNoteCodeDepth = uint16(PrivateNoteCode.depth());
 
         _pmpAddress = msg.sender;
         require(msg.sender == DexLib.computePMPAddressFromHash(
@@ -303,7 +311,7 @@ contract OrderBook is Modifiers {
         PlaceParams op,
         uint64  opNonce
     ) private view {
-        address pn = DexLib.computePrivateNoteAddress(_privateNoteCode, depositHash);
+        address pn = DexLib.computePrivateNoteAddressFromHash(_privateNoteCodeHash, _privateNoteCodeDepth, depositHash);
         PrivateNote(pn).onOrderRejected{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
         }(_eventId, _oracleListHash, _tokenType,
@@ -321,8 +329,7 @@ contract OrderBook is Modifiers {
         require(!_shuttingDown, ERR_ALREADY_CANCELLED);
         // Book is closed at the result deadline.
         require(block.timestamp < _resultStart, ERR_RESULT_NOT_STARTED);
-        address wallet = DexLib.computePrivateNoteAddress(
-            _privateNoteCode,
+        address wallet = DexLib.computePrivateNoteAddressFromHash(_privateNoteCodeHash, _privateNoteCodeDepth,
             depositIdentifierHash
         );
         require(msg.sender == wallet, ERR_INVALID_SENDER);
@@ -404,7 +411,7 @@ contract OrderBook is Modifiers {
                     _notifyRejectedPlace(depositIdentifierHash, op, opNonce);
                 }
             } else {
-                address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+                address addrExtern = address.makeAddrExtern(OB_REJECTED, bitCntAddress);
                 emit Rejected{dest: addrExtern}(QENTRY_PLACE, depositIdentifierHash);
                 _notifyRejectedPlace(depositIdentifierHash, op, opNonce);
             }
@@ -423,8 +430,7 @@ contract OrderBook is Modifiers {
     function cancelAllOrders(uint256 depositIdentifierHash, uint64 opNonce) public {
         require(!_shuttingDown, ERR_ALREADY_CANCELLED);
         require(block.timestamp < _resultStart, ERR_RESULT_NOT_STARTED);
-        address wallet = DexLib.computePrivateNoteAddress(
-            _privateNoteCode,
+        address wallet = DexLib.computePrivateNoteAddressFromHash(_privateNoteCodeHash, _privateNoteCodeDepth,
             depositIdentifierHash
         );
         require(msg.sender == wallet, ERR_INVALID_SENDER);
@@ -443,8 +449,7 @@ contract OrderBook is Modifiers {
     }
 
     function _notifyBatchAccepted(uint256 depositIdentifierHash, uint64 opNonce) private view {
-        address pn = DexLib.computePrivateNoteAddress(
-            _privateNoteCode, depositIdentifierHash
+        address pn = DexLib.computePrivateNoteAddressFromHash(_privateNoteCodeHash, _privateNoteCodeDepth, depositIdentifierHash
         );
         PrivateNote(pn).onBatchComplete{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
@@ -491,7 +496,7 @@ contract OrderBook is Modifiers {
         uint64  opNonce
     ) private returns (bool ok) {
         if (!_canQueuePlace()) {
-            address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+            address addrExtern = address.makeAddrExtern(OB_REJECTED, bitCntAddress);
             emit Rejected{dest: addrExtern}(QENTRY_PLACE, depositHash);
             return false;
         }
@@ -517,7 +522,7 @@ contract OrderBook is Modifiers {
             opNonce: opNonce
         });
         // (placeholder anchor — _enqueueCancel/_enqueueCancelAll use clientOrderId: 0)
-        address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern2 = address.makeAddrExtern(OB_QUEUED, bitCntAddress);
         emit Queued{dest: addrExtern2}(slot, queueId, QENTRY_PLACE);
         return true;
     }
@@ -528,7 +533,7 @@ contract OrderBook is Modifiers {
         uint64  opNonce
     ) private returns (bool ok) {
         if (!_canQueueCancel()) {
-            address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+            address addrExtern = address.makeAddrExtern(OB_REJECTED, bitCntAddress);
             emit Rejected{dest: addrExtern}(QENTRY_CANCEL, depositHash);
             return false;
         }
@@ -553,14 +558,14 @@ contract OrderBook is Modifiers {
             isBatchEnd: false,
             opNonce: opNonce
         });
-        address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern2 = address.makeAddrExtern(OB_QUEUED, bitCntAddress);
         emit Queued{dest: addrExtern2}(slot, queueId, QENTRY_CANCEL);
         return true;
     }
 
     function _enqueueCancelAll(uint256 depositHash, uint64 opNonce) private returns (bool ok) {
         if (!_canQueueCancel()) {
-            address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+            address addrExtern = address.makeAddrExtern(OB_REJECTED, bitCntAddress);
             emit Rejected{dest: addrExtern}(QENTRY_CANCEL_ALL, depositHash);
             return false;
         }
@@ -585,7 +590,7 @@ contract OrderBook is Modifiers {
             isBatchEnd: false,
             opNonce: opNonce
         });
-        address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern2 = address.makeAddrExtern(OB_QUEUED, bitCntAddress);
         emit Queued{dest: addrExtern2}(slot, queueId, QENTRY_CANCEL_ALL);
         return true;
     }
@@ -650,8 +655,7 @@ contract OrderBook is Modifiers {
                 } else {
                     // onOrderPlaced fired (precheck started, didn't finish) →
                     // must cancel symmetrically so _openOrderCount decrements.
-                    address callerPn = DexLib.computePrivateNoteAddress(
-                        _privateNoteCode, doneHash
+                    address callerPn = DexLib.computePrivateNoteAddressFromHash(_privateNoteCodeHash, _privateNoteCodeDepth, doneHash
                     );
                     uint128 returnAmt = _collateralFor(
                         head.isBuy, head.price, head.amount
@@ -784,9 +788,9 @@ contract OrderBook is Modifiers {
         uint128 orderId = isContinuation ? existingOrderId : _nextOrderId++;
 
         // Compute caller PN address once and reuse across all callbacks.
-        address callerPn = DexLib.computePrivateNoteAddress(_privateNoteCode, callerHash);
+        address callerPn = DexLib.computePrivateNoteAddressFromHash(_privateNoteCodeHash, _privateNoteCodeDepth, callerHash);
 
-        if (!isContinuation) _emitOrderPlacedTo(callerPn, orderId, p, opNonce);
+        if (!isContinuation) _emitOrderPlacedTo(callerPn, callerHash, orderId, p, opNonce);
 
         // ── POST_ONLY check: only on first call. (Cheap — single _bestOpposite.)
         if (!isContinuation && isPostOnly) {
@@ -941,10 +945,13 @@ contract OrderBook is Modifiers {
                 //           trade (base) as before.
                 bool makerFinal = (cp.amount == trade);
                 bool takerFinal = (p.isBuy && isMarket) ? (spentQuote == remaining) : (remaining == trade);
+                // One match_id per match — both legs (maker + taker) carry it.
+                _matchSeq += 1;
+                uint64 matchId = _matchSeq;
                 // Maker callback: maker's address differs per fill, must compute.
-                _processFill(cp.depositHash, cur, p.outcomeId, trade, clearingPrice, cp.isBuy, cpBuyerRefund, false, makerFinal, cp.clientOrderId);
+                _processFill(cp.depositHash, cur, p.outcomeId, trade, clearingPrice, cp.isBuy, cpBuyerRefund, false, makerFinal, cp.clientOrderId, matchId);
                 // Taker callback: reuse cached caller address.
-                _processFillTo(callerPn, orderId, p.outcomeId, trade, clearingPrice, p.isBuy, newBuyerRefund, true, takerFinal, p.clientOrderId);
+                _processFillTo(callerPn, orderId, p.outcomeId, trade, clearingPrice, p.isBuy, newBuyerRefund, true, takerFinal, p.clientOrderId, matchId, callerHash);
 
                 // Maker-side aggregated MM event — emitted right at the fill
                 // (maker is touched at most once per overall taker placement).
@@ -1206,7 +1213,7 @@ contract OrderBook is Modifiers {
 
     /// @notice Variant that takes the resolved PN address directly. Used by
     ///         _doPlace to avoid recomputing the caller's PN address per fill.
-    function _emitOrderPlacedTo(address pn, uint128 orderId, PlaceParams p, uint64 opNonce) private view {
+    function _emitOrderPlacedTo(address pn, uint256 depositHash, uint128 orderId, PlaceParams p, uint64 opNonce) private view {
         uint128 feeReserve = 0;
         uint128 lock = 0;
         if (p.isBuy) {
@@ -1220,7 +1227,7 @@ contract OrderBook is Modifiers {
             lock = cost + feeReserve;
         }
         address addrExtern = address.makeAddrExtern(OB_ORDER_PLACED, bitCntAddress);
-        emit OrderPlaced{dest: addrExtern}(orderId, p.outcomeId, p.isBuy, p.flags, p.price, p.amount, p.clientOrderId);
+        emit OrderPlaced{dest: addrExtern}(orderId, p.outcomeId, p.isBuy, p.flags, p.price, p.amount, p.clientOrderId, depositHash, opNonce);
         PrivateNote(pn).onOrderPlaced{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
         }(_eventId, _oracleListHash, _tokenType, orderId, feeReserve, lock, p.clientOrderId, p.outcomeId, p.isBuy, p.flags, p.price, p.amount, opNonce);
@@ -1234,7 +1241,7 @@ contract OrderBook is Modifiers {
     function _notifyOrderCancelled(
         uint256 callerHash, uint128 orderId, uint32 outcomeId, bool isBuy, uint128 returnAmt, uint128 clientOrderId, uint64 opNonce
     ) private view {
-        address pn = DexLib.computePrivateNoteAddress(_privateNoteCode, callerHash);
+        address pn = DexLib.computePrivateNoteAddressFromHash(_privateNoteCodeHash, _privateNoteCodeDepth, callerHash);
         _notifyOrderCancelledTo(pn, orderId, outcomeId, isBuy, returnAmt, clientOrderId, opNonce);
     }
 
@@ -1260,12 +1267,12 @@ contract OrderBook is Modifiers {
     ///         FullyFilled on full consumption). Per-fill `OrderFilled`
     ///         continues to fire alongside for raw analytics.
     function _emitPartialFill(uint128 orderId, uint128 clientOrderId, uint128 filledAmount, uint128 remainingAmount) private pure {
-        address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern = address.makeAddrExtern(OB_PARTIAL_FILL, bitCntAddress);
         emit PartialFill{dest: addrExtern}(orderId, clientOrderId, filledAmount, remainingAmount);
     }
 
     function _emitFullyFilled(uint128 orderId, uint128 clientOrderId, uint128 filledAmount) private pure {
-        address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern = address.makeAddrExtern(OB_FULLY_FILLED, bitCntAddress);
         emit FullyFilled{dest: addrExtern}(orderId, clientOrderId, filledAmount);
     }
 
@@ -1279,10 +1286,11 @@ contract OrderBook is Modifiers {
         uint128 buyerRefund,
         bool    isTaker,
         bool    isFinal,
-        uint128 clientOrderId
+        uint128 clientOrderId,
+        uint64  matchId
     ) private {
-        address pn = DexLib.computePrivateNoteAddress(_privateNoteCode, pnHash);
-        _processFillTo(pn, orderId, outcomeId, filledAmount, clearingPrice, isBuy, buyerRefund, isTaker, isFinal, clientOrderId);
+        address pn = DexLib.computePrivateNoteAddressFromHash(_privateNoteCodeHash, _privateNoteCodeDepth, pnHash);
+        _processFillTo(pn, orderId, outcomeId, filledAmount, clearingPrice, isBuy, buyerRefund, isTaker, isFinal, clientOrderId, matchId, pnHash);
     }
 
     function _processFillTo(
@@ -1295,7 +1303,9 @@ contract OrderBook is Modifiers {
         uint128 buyerRefund,
         bool    isTaker,
         bool    isFinal,
-        uint128 clientOrderId
+        uint128 clientOrderId,
+        uint64  matchId,
+        uint256 depositHash
     ) private {
         uint128 notional = uint128(
             (uint256(filledAmount) * clearingPrice) / uint256(FULL_PERCENT)
@@ -1325,7 +1335,7 @@ contract OrderBook is Modifiers {
         }
 
         address addrExtern = address.makeAddrExtern(OB_ORDER_FILLED, bitCntAddress);
-        emit OrderFilled{dest: addrExtern}(orderId, filledAmount, clearingPrice, feeAmount, isTaker);
+        emit OrderFilled{dest: addrExtern}(orderId, filledAmount, clearingPrice, feeAmount, isTaker, matchId, depositHash);
 
         PrivateNote(pn).onOrderFilled{
             value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
@@ -1487,7 +1497,7 @@ contract OrderBook is Modifiers {
     ///         the bounce would silently be a no-op; here it surfaces as an event.
     onBounce(TvmSlice body) external pure {
         body;
-        address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern = address.makeAddrExtern(OB_CALLBACK_BOUNCED, bitCntAddress);
         emit CallbackBounced{dest: addrExtern}(msg.sender, tx.logicaltime);
     }
 

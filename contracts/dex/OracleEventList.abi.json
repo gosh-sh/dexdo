@@ -36,6 +36,20 @@
 			]
 		},
 		{
+			"name": "addRangeEvent",
+			"inputs": [
+				{"name":"eventName","type":"string"},
+				{"name":"oracleFee","type":"uint128"},
+				{"name":"deadline","type":"uint64"},
+				{"name":"describe","type":"string"},
+				{"name":"bounds","type":"uint256[]"},
+				{"name":"outcomeNames","type":"map(uint32,string)"},
+				{"name":"ob","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "confirmEvent",
 			"inputs": [
 				{"name":"eventId","type":"uint256"},
@@ -43,6 +57,38 @@
 				{"name":"tokenType","type":"uint32"}
 			],
 			"outputs": [
+			]
+		},
+		{
+			"name": "resolveRange",
+			"inputs": [
+				{"name":"eventId","type":"uint256"},
+				{"name":"oracleListHash","type":"uint256"},
+				{"name":"tokenType","type":"uint32"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "onWeeklyMedian",
+			"inputs": [
+				{"name":"eventId","type":"uint256"},
+				{"name":"oracleListHash","type":"uint256"},
+				{"name":"tokenType","type":"uint32"},
+				{"name":"price","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getRangeData",
+			"inputs": [
+				{"name":"eventId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"bounds","type":"uint256[]"},
+				{"name":"ob","type":"address"},
+				{"name":"exists","type":"bool"}
 			]
 		},
 		{
@@ -115,6 +161,7 @@
 		{"init":true,"name":"_pubkey","type":"uint256"},
 		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
+		{"components":[{"name":"bounds","type":"uint256[]"},{"name":"ob","type":"address"},{"name":"exists","type":"bool"}],"init":false,"name":"_rangeData","type":"map(uint256,tuple)"},
 		{"init":true,"name":"_oracle","type":"address"},
 		{"init":true,"name":"_index","type":"uint128"},
 		{"init":false,"name":"_oraclePubkey","type":"uint256"},

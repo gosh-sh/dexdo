@@ -346,8 +346,8 @@ async fn deploy_oracle_with_event(
 
     let event_name = format!("DodexE2EMatch_{:x}", now_unix());
     let mut outcome_names = HashMap::new();
-    outcome_names.insert(1_u32, "Team A".to_string());
-    outcome_names.insert(2_u32, "Team B".to_string());
+    outcome_names.insert(0_u32, "Team A".to_string());
+    outcome_names.insert(1_u32, "Team B".to_string());
 
     dex.add_event(
         &event_list_address,

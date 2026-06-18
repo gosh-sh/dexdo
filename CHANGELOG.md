@@ -117,7 +117,7 @@ All notable changes to DEX.DO are recorded here. Entries are date-based, newest 
 ### Added
 
 - `POST /api/v1/order` mocked implementation with auth/permission wiring (#15) and `docs/tech-specs/auth.md` end-to-end smoke coverage.
-- `GET /api/v1/depth` order-book endpoint (#11) — initial DEX read API skeleton, ABI bundle under `contracts/abi/dex/`, root `Cargo.toml` workspace, `config/{api,indexer}.local.yaml`, and `LICENSE.md`.
+- `GET /api/v1/depth` order-book endpoint (#11) — initial DEX read API skeleton, ABI bundle under `contracts/dex/`, root `Cargo.toml` workspace, `config/{api,indexer}.local.yaml`, and `LICENSE.md`.
 - `docs/README.md` — documentation map with file ownership.
 - `CHANGELOG.md` (this file).
 

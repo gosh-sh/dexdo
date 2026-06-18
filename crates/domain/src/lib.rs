@@ -172,7 +172,7 @@ pub struct Terminal {
 pub const MAKER_COMMISSION: &str = "-0.0003375";
 
 /// Taker fee rate applied to trades, mirroring `TAKER_FEE_RATE` /
-/// `FEE_DENOMINATOR` from `contracts/modifiers/modifiers.sol`. Always
+/// `FEE_DENOMINATOR` from `contracts/dex/modifiers/modifiers.sol`. Always
 /// non-negative.
 pub const TAKER_COMMISSION: &str = "0.0004500";
 
@@ -729,7 +729,7 @@ impl OrderStatus {
 }
 
 /// Chain-side flag bits packed into `placeOrder.flags` (uint8). Layout
-/// matches `contracts/modifiers/modifiers.sol`.
+/// matches `contracts/dex/modifiers/modifiers.sol`.
 pub const FLAG_IOC: u8 = 0x01;
 pub const FLAG_FOK: u8 = 0x02;
 pub const FLAG_MARKET: u8 = 0x04;

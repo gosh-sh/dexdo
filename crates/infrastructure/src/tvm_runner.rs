@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_account_boc() {
-        let abi = include_str!("../../../contracts/abi/dex/PMP.abi.json");
+        let abi = include_str!("../../../contracts/dex/PMP.abi.json");
         let contract = Contract::load(std::io::Cursor::new(abi)).unwrap();
         let err = run_getter(&contract, "not_a_boc", "getDetails", &json!({})).unwrap_err();
         let msg = format!("{:#}", err);
@@ -246,7 +246,7 @@ mod tests {
         // Empty Account BOC suffices because the function-name lookup happens
         // before account decoding succeeds — but tokenization needs a valid
         // ABI match, so we send a deliberately wrong name.
-        let abi = include_str!("../../../contracts/abi/dex/PMP.abi.json");
+        let abi = include_str!("../../../contracts/dex/PMP.abi.json");
         let contract = Contract::load(std::io::Cursor::new(abi)).unwrap();
         // base64 of empty bytes — parsing will fail before function name check;
         // but the error path is what matters: it must NOT panic.

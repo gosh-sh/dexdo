@@ -43,7 +43,7 @@ pub fn network_endpoint() -> String {
 }
 
 // On-chain constants for NACKL (token_type=1), from
-// `contracts/modifiers/modifiers.sol`. The `market_outcomes` row we
+// `contracts/dex/modifiers/modifiers.sol`. The `market_outcomes` row we
 // insert mirrors them so our local validation does not reject (or
 // under-scale) values the chain would actually accept:
 //   - TICK_SIZE = 10 bps on chain → tick_size = 0.001 as a probability, so

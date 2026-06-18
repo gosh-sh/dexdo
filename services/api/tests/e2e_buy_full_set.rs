@@ -10,7 +10,7 @@
 //   - POST returns 200 with the two-field acceptance envelope;
 //   - the chain debits `_balance[tokenType]` synchronously inside
 //     `PrivateNote.splitFullSet` (see the function body in
-//     `contracts/PrivateNote.sol`);
+//     `contracts/dex/PrivateNote.sol`);
 //   - the asynchronous `onSplitAccepted` callback clears the PN's
 //     `_busy` flag (polled directly via `Dex::get_private_note_details`).
 //
@@ -99,7 +99,7 @@ async fn buy_full_set_against_shellnet() {
     // the time this returns the market is in TRADING and the trader-PN
     // already holds some outcome tokens. The buyFullSet we send below
     // is a SECOND split that accumulates onto the existing stake — see
-    // `PrivateNote.onSplitAccepted` in `contracts/PrivateNote.sol`.
+    // `PrivateNote.onSplitAccepted` in `contracts/dex/PrivateNote.sol`.
     let market =
         deploy_ephemeral_market(vec![network_endpoint()], &trader, DeployOptions::default())
             .await
@@ -257,7 +257,7 @@ async fn buy_full_set_against_shellnet() {
     // Outcome-token credit probe: balance debit alone proves the chain
     // ACCEPTED the splitFullSet, but the user-visible effect is the
     // outcome tokens credited via `onSplitAccepted` (the `stake.amount[i] +=
-    // amounts[i]` loop body in `contracts/PrivateNote.sol`). Read
+    // amounts[i]` loop body in `contracts/dex/PrivateNote.sol`). Read
     // `_stakes[hash].amount` post-callback and assert each outcome's
     // amount is strictly greater than its pre-snapshot — closes the gap
     // where a chain bug could debit collateral without crediting outcome
@@ -292,7 +292,7 @@ async fn buy_full_set_against_shellnet() {
 ///   2. Up to 90 s waiting for `busy_address` to flip back to `None`,
 ///      signalling `onSplitAccepted` ran and any leftover collateral
 ///      was refunded into `_balance` (see `onSplitAccepted` in
-///      `contracts/PrivateNote.sol`).
+///      `contracts/dex/PrivateNote.sol`).
 ///
 /// If phase 1 never observes `Some`, the operation might have landed
 /// and completed inside one polling tick — sleep an extra 3 s before

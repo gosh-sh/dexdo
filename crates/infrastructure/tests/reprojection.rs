@@ -2321,7 +2321,7 @@ async fn orderplaced_rejects_non_string_client_order_id() {
 /// one `trades` row. `trade_id` is the event's chain_order; `price`/`qty` come
 /// from the event (`clearingPrice`/`filledAmount`), while `outcome_id` and
 /// direction are recovered from the order's `live_orders` row — the on-chain
-/// event (`OrderFilled` in contracts/OrderBook.sol) carries neither field. The parent is a SELL, so a taker fill means the
+/// event (`OrderFilled` in contracts/dex/OrderBook.sol) carries neither field. The parent is a SELL, so a taker fill means the
 /// buyer is the maker => `is_buyer_maker = true`.
 #[tokio::test]
 async fn taker_orderfilled_writes_one_trade_row() {
