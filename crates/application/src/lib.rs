@@ -3685,8 +3685,8 @@ mod tests {
     // Contract-accurate encoding. The lifted price/amount must satisfy the
     // exact lattice + notional gates the chain enforces — price in basis
     // points (FULL_PERCENT=10_000, TICK_SIZE=10 bps) and amount in token atoms
-    // (LOT_SIZE per token) — per contracts/modifiers/modifiers.sol and
-    // contracts/PrivateNote.sol §placeOrder. Numbers are the real seeded
+    // (LOT_SIZE per token) — per contracts/dex/modifiers/modifiers.sol and
+    // contracts/dex/PrivateNote.sol §placeOrder. Numbers are the real seeded
     // params, not synthetic, so a regression in the lift scale fails here.
     #[test]
     fn encode_matches_contract_lattice_usdc() {

@@ -12,6 +12,7 @@ import "../PMP.sol";
 import "../Oracle.sol";
 import "../OracleEventList.sol";
 import "../OrderBook.sol";
+import "../../airegistry/InferenceOrderBook.sol";
 
 /// @title DexLib
 /// @notice Utility library for deterministic address and StateInit/code construction.
@@ -156,6 +157,27 @@ library DexLib {
         return abi.setCodeSalt(orderBookCode, salt);
     }
 
+    // ═══ InferenceOrderBook (deployed FROM a PrivateNote) ═══
+    // No code salt: the book binds to the note family via NOTE_CODE_HASH pinned
+    // in the InferenceOrderBook code itself, and the deploy is gated in its ctor
+    // (deployer must be a genuine note). The address is just (book code + §8
+    // statics): same (model, tick) ⇒ same address ⇒ one book.
+
+    /// @notice InferenceOrderBook StateInit: book code + the §8 static set
+    ///         (model + tick size).
+    function buildInferenceOrderBookStateInit(TvmCell inferenceOrderBookCode, uint256 modelHash, uint128 tickSize) public returns (TvmCell) {
+        return abi.encodeStateInit({
+            contr: InferenceOrderBook,
+            varInit: { _modelHash: modelHash, _tickSize: tickSize },
+            code: inferenceOrderBookCode
+        });
+    }
+
+    function computeInferenceOrderBookAddress(TvmCell inferenceOrderBookCode, uint256 modelHash, uint128 tickSize) public returns (address) {
+        TvmCell stateInit = buildInferenceOrderBookStateInit(inferenceOrderBookCode, modelHash, tickSize);
+        return address.makeAddrStd(0, tvm.hash(stateInit));
+    }
+
     // ═══ Hash-based address computation (stores uint256+uint16 instead of TvmCell) ═══
 
     /// @notice Extracts data cell from StateInit.
@@ -186,6 +208,24 @@ library DexLib {
         });
         TvmCell dataCell = _extractDataCell(si);
         return address.makeAddrStd(0, abi.stateInitHash(saltedCodeHash, tvm.hash(dataCell), saltedCodeDepth, dataCell.depth()));
+    }
+
+    /// @notice Computes deterministic PrivateNote address from its code hash/depth
+    ///         (so callers can store the hash instead of the full note code).
+    /// @param codeHash PrivateNote code hash.
+    /// @param codeDepth PrivateNote code depth.
+    /// @param depositIdentifierHash Deposit identifier hash.
+    /// @return PrivateNote deterministic address.
+    function computePrivateNoteAddressFromHash(
+        uint256 codeHash, uint16 codeDepth, uint256 depositIdentifierHash
+    ) public returns (address) {
+        TvmCell dummyCode;
+        TvmCell si = abi.encodeStateInit({
+            contr: PrivateNote, code: dummyCode,
+            varInit: { _depositIdentifierHash: depositIdentifierHash }
+        });
+        TvmCell dataCell = _extractDataCell(si);
+        return address.makeAddrStd(0, abi.stateInitHash(codeHash, tvm.hash(dataCell), codeDepth, dataCell.depth()));
     }
 
     /// @notice Computes deterministic Oracle address from code hash/depth.

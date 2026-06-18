@@ -1,0 +1,177 @@
+{
+	"ABI version": 2,
+	"version": "2.4",
+	"header": ["pubkey", "time", "expire"],
+	"functions": [
+		{
+			"name": "constructor",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setOrderBook",
+			"inputs": [
+				{"name":"ob","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setPmp",
+			"inputs": [
+				{"name":"pmp","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "recordExecution",
+			"inputs": [
+				{"name":"pricePerTick","type":"uint128"},
+				{"name":"ticks","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "poke",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "publish",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"uint128"}
+			]
+		},
+		{
+			"name": "getReferencePrice",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"price","type":"uint128"},
+				{"name":"windowVolume","type":"uint128"},
+				{"name":"settleable","type":"bool"}
+			]
+		},
+		{
+			"name": "getCurrent",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"intervalIndex","type":"uint64"},
+				{"name":"sampleCount","type":"uint32"},
+				{"name":"volume","type":"uint128"}
+			]
+		},
+		{
+			"name": "getInterval",
+			"inputs": [
+				{"name":"index","type":"uint64"}
+			],
+			"outputs": [
+				{"name":"price","type":"uint128"},
+				{"name":"volume","type":"uint128"}
+			]
+		},
+		{
+			"name": "getLastReference",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"price","type":"uint128"},
+				{"name":"hasReference","type":"bool"}
+			]
+		},
+		{
+			"name": "getWiring",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"orderBook","type":"address"},
+				{"name":"pmp","type":"address"}
+			]
+		},
+		{
+			"name": "getConfig",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"modelHash","type":"uint256"},
+				{"name":"sampleInterval","type":"uint64"},
+				{"name":"windowIntervals","type":"uint64"},
+				{"name":"trimPctBps","type":"uint32"},
+				{"name":"minLiquidity","type":"uint128"},
+				{"name":"moveCapBps","type":"uint32"}
+			]
+		},
+		{
+			"name": "getVersion",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"string"},
+				{"name":"value1","type":"string"}
+			]
+		}
+	],
+	"events": [
+		{
+			"name": "ExecutionRecorded",
+			"inputs": [
+				{"name":"price","type":"uint128"},
+				{"name":"ticks","type":"uint128"},
+				{"name":"intervalIndex","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "IntervalFinalized",
+			"inputs": [
+				{"name":"index","type":"uint64"},
+				{"name":"vwTrimmedMean","type":"uint128"},
+				{"name":"volume","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "ReferencePublished",
+			"inputs": [
+				{"name":"price","type":"uint128"},
+				{"name":"windowVolume","type":"uint128"}
+			],
+			"outputs": [
+			]
+		}
+	],
+	"fields": [
+		{"init":true,"name":"_pubkey","type":"uint256"},
+		{"init":false,"name":"_timestamp","type":"uint64"},
+		{"init":false,"name":"_constructorFlag","type":"bool"},
+		{"init":true,"name":"_modelHash","type":"uint256"},
+		{"init":true,"name":"_sampleInterval","type":"uint64"},
+		{"init":true,"name":"_windowIntervals","type":"uint64"},
+		{"init":true,"name":"_trimPctBps","type":"uint32"},
+		{"init":true,"name":"_minLiquidity","type":"uint128"},
+		{"init":true,"name":"_moveCapBps","type":"uint32"},
+		{"init":false,"name":"_orderBook","type":"address"},
+		{"init":false,"name":"_pmp","type":"address"},
+		{"init":false,"name":"_curIndex","type":"uint64"},
+		{"init":false,"name":"_curPrices","type":"uint128[]"},
+		{"init":false,"name":"_curVolumes","type":"uint128[]"},
+		{"init":false,"name":"_curVolume","type":"uint128"},
+		{"init":false,"name":"_intervalPrice","type":"map(uint64,uint128)"},
+		{"init":false,"name":"_intervalVolume","type":"map(uint64,uint128)"},
+		{"init":false,"name":"_lastFinalizedIndex","type":"uint64"},
+		{"init":false,"name":"_lastReference","type":"uint128"},
+		{"init":false,"name":"_hasReference","type":"bool"}
+	]
+}

@@ -6,11 +6,32 @@ import "./modifiers/modifiers.sol";
 import "./PMP.sol";
 import "./libraries/DexLib.sol";
 
+/// @notice Pull the weekly median reference price from an InferenceOrderBook
+///         (spec §6.2). The OB calls onWeeklyMedian back here.
+interface IInferenceOB {
+    function requestWeeklyMedian(uint256 eventId, uint256 oracleListHash, uint32 tokenType) external;
+}
+
 /// @title Oracle Event List Contract
 contract OracleEventList is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "1.4.0";
+    string constant version = "1.5.0";
+
+    // ── Range events (numeric outcomes): the price is resolved on-chain from an
+    // InferenceOrderBook's weekly median, mapped to a numeric range = outcome.
+    // The Oracle converts ranges → string labels and feeds PMP ONLY strings, so
+    // PMP is unchanged. This OEL is the single trust-addr oracle of the event
+    // (decision: one oracle per range event), so it drives setTimings + resolve
+    // through PMP's existing submitSetTimings/submitResolve quorum-of-1.
+    struct RangeData {
+        uint256[] bounds;   // strictly increasing upper bounds; n bounds → n+1 outcomes
+        address ob;         // InferenceOrderBook providing reference_price (§6.2)
+        bool exists;
+    }
+    mapping(uint256 => RangeData) _rangeData;
+
+    uint16 constant ERR_NOT_RANGE_EVENT = 350;
 
     /// @notice Oracle contract address bound to this list (state-init static field).
     address static _oracle;
@@ -111,8 +132,17 @@ contract OracleEventList is Modifiers {
     ) public onlyOwnerPubkey(_oraclePubkey) accept {
         require(deadline > block.timestamp, ERR_INVALID_PARAMS);
         ensureBalance();
-        require(outcomeNames.keys().length >= 2, ERR_INVALID_PARAMS);
-        require(outcomeNames.keys().length < 20, ERR_INVALID_PARAMS);
+        uint32 outcomeCount = uint32(outcomeNames.keys().length);
+        require(outcomeCount >= 2, ERR_INVALID_PARAMS);
+        require(outcomeCount < 20, ERR_INVALID_PARAMS);
+        // Outcome ids must be a dense 0..n-1 range. PMP derives _numOutcomes from the
+        // key count and indexes _typedOutcomePools by id, validating outcomeId <
+        // _numOutcomes (PMP.stake/resolve). A sparse/1-based map (e.g. {1,2}) would
+        // otherwise accept bets on a phantom id 0 yet revert resolve on the labeled
+        // outcome with ERR_INVALID_OUTCOME_ID after quorum.
+        for (uint32 i = 0; i < outcomeCount; i++) {
+            require(outcomeNames.exists(i), ERR_INVALID_PARAMS);
+        }
         uint256 eventId = tvm.hash(abi.encode(eventName, deadline, describe, outcomeNames));
         require(!_events.exists(eventId), ERR_ALREADY_INITIALIZED);
         _events[eventId] = EventInfo({
@@ -127,6 +157,54 @@ contract OracleEventList is Modifiers {
 
         address addrExtern = address.makeAddrExtern(ORACLE_EVENT_ADDED, bitCntAddress);
         emit EventAdded{dest: addrExtern}(eventId, eventName, oracleFee, deadline);
+    }
+
+    /// @notice Adds a numeric RANGE event (spec: Range Event). `bounds` are the
+    ///         strictly increasing upper bounds; n bounds → n+1 outcomes
+    ///         (`[0,b0)`,…,`[b_{n-1},inf)`). The creator passes the matching string
+    ///         labels in `outcomeNames` (built off-chain — "Oracle converts ranges
+    ///         to strings additionally"); the contract stores the numeric `bounds`
+    ///         for on-chain mapping and feeds PMP ONLY the strings (PMP unchanged).
+    ///         Resolves on-chain from `ob`'s weekly median (§6.2). This OEL is the
+    ///         single trust-addr oracle of the event.
+    /// @param outcomeNames Dense 0..n labels, exactly `bounds.length + 1` entries.
+    /// @param ob InferenceOrderBook providing the reference price.
+    function addRangeEvent(
+        string eventName,
+        uint128 oracleFee,
+        uint64 deadline,
+        string describe,
+        uint256[] bounds,
+        mapping(uint32 => string) outcomeNames,
+        address ob
+    ) public onlyOwnerPubkey(_oraclePubkey) accept {
+        // deadline doubles as the PMP result-start; first setTimings needs the gap.
+        require(deadline >= uint64(block.timestamp) + MIN_RESULT_GAP, ERR_INVALID_PARAMS);
+        ensureBalance();
+        uint32 n = uint32(bounds.length);
+        require(n >= 1, ERR_INVALID_PARAMS);                         // ≥1 bound → ≥2 outcomes
+        for (uint32 i = 1; i < n; i++) {
+            require(bounds[i] > bounds[i - 1], ERR_INVALID_PARAMS);  // strictly increasing
+        }
+        // Labels must be dense 0..n (n+1 outcomes), matching the ranges.
+        uint32 outcomeCount = uint32(outcomeNames.keys().length);
+        require(outcomeCount == n + 1, ERR_INVALID_PARAMS);
+        require(outcomeCount < 20, ERR_INVALID_PARAMS);
+        for (uint32 i = 0; i < outcomeCount; i++) {
+            require(outcomeNames.exists(i), ERR_INVALID_PARAMS);
+        }
+
+        uint256 eventId = tvm.hash(abi.encode(eventName, deadline, describe, outcomeNames));
+        require(!_events.exists(eventId), ERR_ALREADY_INITIALIZED);
+        optional(uint256) trustAddr;
+        trustAddr.set(address(this).value);   // OEL is the single oracle (trust-addr)
+        _events[eventId] = EventInfo({
+            eventName: eventName, oracleFee: oracleFee, deadline: deadline,
+            outcomeNames: outcomeNames, describe: describe, count: 0, trustAddr: trustAddr
+        });
+        _rangeData[eventId] = RangeData({bounds: bounds, ob: ob, exists: true});
+
+        emit EventAdded{dest: address.makeAddrExtern(ORACLE_EVENT_ADDED, bitCntAddress)}(eventId, eventName, oracleFee, deadline);
     }
 
     /// @notice Confirms an event for a PMP after fee and deadline checks.
@@ -149,9 +227,59 @@ contract OracleEventList is Modifiers {
             eventInfo.count += 1;
             _events[eventId] = eventInfo;
             PMP(msg.sender).approveEvent{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_oraclePubkey, eventInfo.outcomeNames, eventInfo.describe, eventInfo.eventName, eventInfo.trustAddr);
+            // Range event: this OEL is the single oracle, so it also sets the PMP
+            // timing (result-start = deadline). Sent after approveEvent so the
+            // trust-addr oracle is already registered (quorum-of-1 → applies).
+            if (_rangeData[eventId].exists) {
+                PMP(msg.sender).submitSetTimings{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(eventInfo.deadline);
+            }
             address addrExtern = address.makeAddrExtern(ORACLE_EVENT_CONFIRMED, bitCntAddress);
             emit EventConfirmed{dest: addrExtern}(eventId, msg.sender);
         }
+    }
+
+    /// @notice Map a reference price to a range outcome id via stored bounds:
+    ///         price < bounds[0] → 0; bounds[i-1] ≤ price < bounds[i] → i;
+    ///         price ≥ bounds[n-1] → n.
+    function _priceToOutcome(uint256 eventId, uint256 price) private view returns (uint32) {
+        uint256[] bounds = _rangeData[eventId].bounds;
+        uint32 n = uint32(bounds.length);
+        for (uint32 i = 0; i < n; i++) {
+            if (price < bounds[i]) { return i; }
+        }
+        return n;
+    }
+
+    /// @notice Resolve a RANGE event — callable by ANYONE after the deadline
+    ///         (spec §6: on-chain event). Pulls the OB weekly median async; the
+    ///         mapping + PMP resolve happen in onWeeklyMedian.
+    function resolveRange(uint256 eventId, uint256 oracleListHash, uint32 tokenType) public {
+        require(_rangeData[eventId].exists, ERR_NOT_RANGE_EVENT);
+        require(_events.exists(eventId), ERR_NOT_RANGE_EVENT);
+        require(_events[eventId].deadline <= block.timestamp, ERR_INVALID_PARAMS);
+        tvm.accept();
+        ensureBalance();
+        IInferenceOB(_rangeData[eventId].ob).requestWeeklyMedian{value: 1 vmshell, flag: 1, bounce: false}(
+            eventId, oracleListHash, tokenType);
+    }
+
+    /// @notice OB callback with the weekly median (spec §6.2). Maps the price to a
+    ///         numeric range outcome and resolves the PMP via the existing
+    ///         submitResolve — this OEL is the single trust-addr oracle, so a
+    ///         quorum-of-1 resolves immediately. PMP is unchanged.
+    function onWeeklyMedian(uint256 eventId, uint256 oracleListHash, uint32 tokenType, uint256 price)
+        public senderIs(_rangeData[eventId].ob) accept
+    {
+        ensureBalance();
+        uint32 outcomeId = _priceToOutcome(eventId, price);
+        address pmp = DexLib.computePMPAddressFromHash(_pmpSaltedCodeHash, _pmpSaltedCodeDepth, eventId, oracleListHash, tokenType);
+        PMP(pmp).submitResolve{value: 0.2 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(outcomeId);
+    }
+
+    /// @notice Range-event data (bounds + bound OB) for off-chain inspection.
+    function getRangeData(uint256 eventId) external view returns (uint256[] bounds, address ob, bool exists) {
+        RangeData rd = _rangeData[eventId];
+        return (rd.bounds, rd.ob, rd.exists);
     }
 
     /// @notice Decrements active confirmation counter for an event when PMP is canceled.

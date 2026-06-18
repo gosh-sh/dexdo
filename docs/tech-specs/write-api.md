@@ -22,7 +22,7 @@ Implementation-facing requirements for the write endpoints (trading, position, a
 
 **clientOrderId** — caller-supplied (request field `newOrderClientId`) or backend-generated identifier that correlates the response with the eventually-projected `live_orders` row. Carried by the chain as `uint128` and surfaced in every `OrderBook` event (see [dex-events-routing.md](../contract-specs/dex-events-routing.md#orderbook)). The chain enforces per-PN uniqueness across still-live coids; collisions are silently rejected (`Rejected` event, no `OrderPlaced`).
 
-**PN busy window** — between `PrivateNote.placeOrder` and the matching `onOrderPlaced` callback, the PN's `_busy` flag is set and any further `placeOrder` is rejected on-chain with `ERR_NOTE_BUSY` (`contracts/PrivateNote.sol:1178`). Each account has exactly one trading PN, so placement against one account is serial at the chain level.
+**PN busy window** — between `PrivateNote.placeOrder` and the matching `onOrderPlaced` callback, the PN's `_busy` flag is set and any further `placeOrder` is rejected on-chain with `ERR_NOTE_BUSY` (`contracts/dex/PrivateNote.sol:1178`). Each account has exactly one trading PN, so placement against one account is serial at the chain level.
 
 ## `POST /api/v1/order`
 
@@ -85,13 +85,13 @@ Each [api-spec §Validation Rules](../api-spec.md#validation-rules) row maps to 
 | `quantity ≥ minNotional` in quote (MARKET BUY) | `OrderValidationFailed` |
 | MARKET BUY precision/step apply to the quote-asset amount | `PrecisionExceeded` |
 
-The local checks duplicate the contract's own validation (`contracts/PrivateNote.sol:1179-1197`) and exist to surface a fast `-1111` / `-2010` to a misbehaving client without spending a chain round-trip on a doomed submission. The chain remains the authority.
+The local checks duplicate the contract's own validation (`contracts/dex/PrivateNote.sol:1179-1197`) and exist to surface a fast `-1111` / `-2010` to a misbehaving client without spending a chain round-trip on a doomed submission. The chain remains the authority.
 
-Balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_LOW_VALUE` at `contracts/PrivateNote.sol:1219`); clients track their own available balance via `GET /api/v1/account`. The chain rejection itself surfaces synchronously through [Failure surface](#failure-surface) §2 — `BeeDexChainSender` waits for the `PrivateNote.placeOrder` execution, so an insufficient-balance reject becomes `OrderValidationFailed` → 400 / -2010 on the HTTP response rather than silent absence in `/api/v1/orders`.
+Balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_LOW_VALUE` at `contracts/dex/PrivateNote.sol:1219`); clients track their own available balance via `GET /api/v1/account`. The chain rejection itself surfaces synchronously through [Failure surface](#failure-surface) §2 — `BeeDexChainSender` waits for the `PrivateNote.placeOrder` execution, so an insufficient-balance reject becomes `OrderValidationFailed` → 400 / -2010 on the HTTP response rather than silent absence in `/api/v1/orders`.
 
 ### Flags
 
-The chain takes a `uint8 flags` argument encoding order type and time-in-force (constants in `contracts/modifiers/modifiers.sol`, parameter doc in `contracts/PrivateNote.sol:1160`):
+The chain takes a `uint8 flags` argument encoding order type and time-in-force (constants in `contracts/dex/modifiers/modifiers.sol`, parameter doc in `contracts/dex/PrivateNote.sol:1160`):
 
 | Bit | Constant | Meaning |
 | --- | --- | --- |
@@ -120,7 +120,7 @@ The mapping table lives next to the `OrderType` / `TimeInForce` domain enums so 
 
 ### `clientOrderId` generation
 
-If `newOrderClientId` is absent the handler generates a fresh value. The on-chain ABI is `uint128` (`contracts/PrivateNote.sol:1174`, `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceOrder`) and the read-model storage type in [`live_orders.client_order_id`](data-schema.md#live_orders) is `numeric(78,0)`, both of which accept the full 128-bit range. **The public API surface is narrower: `uint64`**. The reason is a serialization-path constraint, not an ABI one — `bee_dex::Dex::place_order` reaches `ackinacki-kit::PrivateNote::place_order` which constructs the call set via `serde_json::json!(params)`. Without the `arbitrary_precision` feature (not enabled in the current `ackinacki-kit` build), `serde_json` rejects any `u128` value greater than `u64::MAX` with `"number out of range"`, which `json!` then `.unwrap()`s — panicking the worker.
+If `newOrderClientId` is absent the handler generates a fresh value. The on-chain ABI is `uint128` (`contracts/dex/PrivateNote.sol:1174`, `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceOrder`) and the read-model storage type in [`live_orders.client_order_id`](data-schema.md#live_orders) is `numeric(78,0)`, both of which accept the full 128-bit range. **The public API surface is narrower: `uint64`**. The reason is a serialization-path constraint, not an ABI one — `bee_dex::Dex::place_order` reaches `ackinacki-kit::PrivateNote::place_order` which constructs the call set via `serde_json::json!(params)`. Without the `arbitrary_precision` feature (not enabled in the current `ackinacki-kit` build), `serde_json` rejects any `u128` value greater than `u64::MAX` with `"number out of range"`, which `json!` then `.unwrap()`s — panicking the worker.
 
 Until the upstream SDK enables `arbitrary_precision`, both paths therefore enforce the u64 ceiling at the public boundary:
 
@@ -138,7 +138,7 @@ clients and SDK authors must NOT assume more than 64 bits. -->
 
 ### Chain submission
 
-Encode and dispatch a `PrivateNote.placeOrder` external message against `trading_pn.pn_address`. ABI from `contracts/PrivateNote.sol:1163`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceOrder`:
+Encode and dispatch a `PrivateNote.placeOrder` external message against `trading_pn.pn_address`. ABI from `contracts/dex/PrivateNote.sol:1163`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceOrder`:
 
 ```text
 placeOrder(
@@ -163,7 +163,7 @@ Two sender boundaries:
 - **`ChainOrderSender` trait** (`crates/application/src/lib.rs`) — `async fn submit_order(&self, payload: NewOrderPayload) -> Result<(), DomainError>`. Mirrors the existing [`Authenticator`](auth.md#authentication) pattern. The use case depends only on the trait; production wiring and tests inject different implementations.
 - **`BeeDexChainSender` impl** (`crates/infrastructure/src/chain_sender.rs`) — wraps `bee_dex::Dex::place_order`. Re-encodes `pn_pubkey` from decimal to hex and `pn_seckey` from bytes to hex to build a `KeyPair`, parses `amount` and `client_order_id` from decimal strings to `u128`, and translates known TVM `exit_code`s back into typed `DomainError` variants (the table in [Failure surface](#failure-surface)).
 
-`bee_dex::Dex::place_order` **waits for the chain to execute `PrivateNote.placeOrder` on the trading PN** and returns the TVM exit code on `require(...)` failure. `map_bee_dex_error` translates known PrivateNote-side codes from `contracts/modifiers/errors.sol` into typed `DomainError` variants — the HTTP caller therefore gets a synchronous, specific reject for the common rejection cases (insufficient balance, PN busy, etc.) rather than an opaque 500. The `OrderBook` side runs as an internal message after `placeOrder` returns; rejections there (`OrderBook.Rejected` for coid collision / queue overflow / ABI validation) are not visible at submission time. See [Failure surface](#failure-surface) for the full split.
+`bee_dex::Dex::place_order` **waits for the chain to execute `PrivateNote.placeOrder` on the trading PN** and returns the TVM exit code on `require(...)` failure. `map_bee_dex_error` translates known PrivateNote-side codes from `contracts/dex/modifiers/errors.sol` into typed `DomainError` variants — the HTTP caller therefore gets a synchronous, specific reject for the common rejection cases (insufficient balance, PN busy, etc.) rather than an opaque 500. The `OrderBook` side runs as an internal message after `placeOrder` returns; rejections there (`OrderBook.Rejected` for coid collision / queue overflow / ABI validation) are not visible at submission time. See [Failure surface](#failure-surface) for the full split.
 
 ### Response
 
@@ -188,7 +188,7 @@ Three failure classes — two synchronous, one async:
 
 1. **Pre-submit, surfaced synchronously** — request shape, market/outcome resolution, local input validation (precision/tick/step/notional). Mapped per [Error mapping](#error-mapping).
 
-2. **PrivateNote chain-side, surfaced synchronously** — `bee_dex::Dex::place_order` awaits the chain's execution of `PrivateNote.placeOrder`, so any `require(...)` failure inside that ABI call comes back as a typed `AppError` carrying the TVM `exit_code`. `map_bee_dex_error` (in `crates/infrastructure/src/chain_sender.rs`) translates the known codes from `contracts/modifiers/errors.sol`:
+2. **PrivateNote chain-side, surfaced synchronously** — `bee_dex::Dex::place_order` awaits the chain's execution of `PrivateNote.placeOrder`, so any `require(...)` failure inside that ABI call comes back as a typed `AppError` carrying the TVM `exit_code`. `map_bee_dex_error` (in `crates/infrastructure/src/chain_sender.rs`) translates the known codes from `contracts/dex/modifiers/errors.sol`:
 
    | chain `exit_code` | source | `DomainError` |
    | --- | --- | --- |
@@ -296,7 +296,7 @@ Status derivation reuses the SQL from [read-api.md §Status derivation](read-api
 
 ### Chain submission
 
-Encode and dispatch a `PrivateNote.cancelOrder` external message against `trading_pn.pn_address`. ABI from `contracts/PrivateNote.sol::cancelOrder`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfCancelOrder`:
+Encode and dispatch a `PrivateNote.cancelOrder` external message against `trading_pn.pn_address`. ABI from `contracts/dex/PrivateNote.sol::cancelOrder`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfCancelOrder`:
 
 ```text
 cancelOrder(
@@ -428,7 +428,7 @@ The resolved row supplies the chain-level fields once for the whole batch:
 
 ### Batch size cap
 
-The cap is the api config knob `chain.max_batch_size` — the same value `/api/v1/markets` advertises as `maxBatchSize`, so the promise and the enforcement share one source. It manually mirrors the chain's compiled-in per-side `MAX_BATCH_SIZE` (`contracts/modifiers/modifiers.sol`, 10 today; the chain exposes no getter for it) and must not exceed it. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
+The cap is the api config knob `chain.max_batch_size` — the same value `/api/v1/markets` advertises as `maxBatchSize`, so the promise and the enforcement share one source. It manually mirrors the chain's compiled-in per-side `MAX_BATCH_SIZE` (`contracts/dex/modifiers/modifiers.sol`, 10 today; the chain exposes no getter for it) and must not exceed it. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
 
 ### Per-item input validation
 
@@ -446,7 +446,7 @@ Identical to the single-order path; see [§clientOrderId generation](#clientorde
 
 ### Chain submission
 
-Encode and dispatch a `PrivateNote.placeBatch` external message against `trading_pn.pn_address`. ABI from `contracts/PrivateNote.sol::placeBatch`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceBatch`:
+Encode and dispatch a `PrivateNote.placeBatch` external message against `trading_pn.pn_address`. ABI from `contracts/dex/PrivateNote.sol::placeBatch`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceBatch`:
 
 ```text
 placeBatch(
@@ -587,7 +587,7 @@ The bulk SELECT projects the same market-timing columns as `resolve_for_cancel`.
 
 ### Chain submission
 
-Encode and dispatch a `PrivateNote.placeBatch` external message against `trading_pn.pn_address`, with the placements side empty — `placeBatch` is the chain's single atomic batch entry and carries both placements and cancellations. ABI from `contracts/PrivateNote.sol::placeBatch`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceBatch`:
+Encode and dispatch a `PrivateNote.placeBatch` external message against `trading_pn.pn_address`, with the placements side empty — `placeBatch` is the chain's single atomic batch entry and carries both placements and cancellations. ABI from `contracts/dex/PrivateNote.sol::placeBatch`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfPlaceBatch`:
 
 ```text
 placeBatch(
@@ -730,7 +730,7 @@ Two remap notes:
 - Quote-asset precision violations surface as `-1130 InvalidParameter`, not `-1111 PrecisionExceeded`. Quote-asset precision is **not** part of [api-spec §Validation Rules]; the spec lumps it with "other body shape violation" in the [api-spec §Buy Full Set error table](../api-spec.md#buy-full-set).
 - `token_type` missing from `ref_tokens` is read-model corruption — the initial migration seeds the canonical set, so a miss means the read-model fell out of sync with the on-chain registry.
 
-Free-balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_LOW_VALUE` at `contracts/PrivateNote.sol`) and the synchronous chain return maps that to `OrderValidationFailed` → 400 / -2010, same shape as placement.
+Free-balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_LOW_VALUE` at `contracts/dex/PrivateNote.sol`) and the synchronous chain return maps that to `OrderValidationFailed` → 400 / -2010, same shape as placement.
 
 #### Quantum lower bound is not pre-validated
 
@@ -738,7 +738,7 @@ Free-balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_L
 
 ### Chain submission
 
-Encode and dispatch a `PrivateNote.splitFullSet` external message against `trading_pn.pn_address`. ABI from `contracts/PrivateNote.sol::splitFullSet`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfSplitFullSet`:
+Encode and dispatch a `PrivateNote.splitFullSet` external message against `trading_pn.pn_address`. ABI from `contracts/dex/PrivateNote.sol::splitFullSet`, exposed by `ackinacki-kit/contracts/src/dex/private_note.rs::ParamsOfSplitFullSet`:
 
 ```text
 splitFullSet(
@@ -772,7 +772,7 @@ Two failure classes — synchronous (pre-submit + PrivateNote chain-side) and as
 
 1. **Pre-submit** — request shape, market resolution, status gate, collateral validation. Mapped per [Error mapping](#error-mapping-3).
 
-2. **PrivateNote chain-side, surfaced synchronously** — `dodex_chain::Dex::split_full_set` awaits the chain's execution of `PrivateNote.splitFullSet`, so any `require(...)` failure inside that ABI call comes back as a typed `AppError` carrying the TVM `exit_code`. `map_tvm_exit_code` (in `crates/infrastructure/src/chain_sender.rs`) translates the codes from `contracts/modifiers/errors.sol`. `splitFullSet` itself carries four PN-side `require(...)` invariants spanning three exit codes (`contracts/PrivateNote.sol::splitFullSet`): `121 ERR_NOTE_BUSY` (per-PN serial), `102 ERR_LOW_VALUE` (collateral non-positive *or* free `_balance[tokenType]` below `collateral` — two separate `require`s, same code), and `150 ERR_DEBT_NON_ZERO` (PN has outstanding debt). All three codes are already wired into the shared exit-code map; no new mapping required.
+2. **PrivateNote chain-side, surfaced synchronously** — `dodex_chain::Dex::split_full_set` awaits the chain's execution of `PrivateNote.splitFullSet`, so any `require(...)` failure inside that ABI call comes back as a typed `AppError` carrying the TVM `exit_code`. `map_tvm_exit_code` (in `crates/infrastructure/src/chain_sender.rs`) translates the codes from `contracts/dex/modifiers/errors.sol`. `splitFullSet` itself carries four PN-side `require(...)` invariants spanning three exit codes (`contracts/dex/PrivateNote.sol::splitFullSet`): `121 ERR_NOTE_BUSY` (per-PN serial), `102 ERR_LOW_VALUE` (collateral non-positive *or* free `_balance[tokenType]` below `collateral` — two separate `require`s, same code), and `150 ERR_DEBT_NON_ZERO` (PN has outstanding debt). All three codes are already wired into the shared exit-code map; no new mapping required.
 
 3. **PMP-side require failure, surfaced asynchronously via bounce** — `PrivateNote.splitFullSet` accepts the request and sends an internal message to `PMP.splitFullSet`, which executes in a separate transaction the synchronous return cannot observe. If `PMP.splitFullSet` reverts (`t = 0` for `collateral < Q`, status drift between the read-model snapshot and the on-chain phase, normalization refund still pending, market resolved/cancelled mid-flight), the message bounces back to `PrivateNote.onBounce` which restores `_balance[tokenType]` from the candidate slot — the caller ends up with the original collateral refunded and no outcome-token credits. From the HTTP standpoint the `POST` returned `200`; clients detect this class through `GET /api/v1/account/balances` showing no new outcome-token credits and the `GET /api/v1/account` `free` quote-asset row unchanged.
 

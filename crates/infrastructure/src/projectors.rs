@@ -890,7 +890,7 @@ async fn apply_order_filled(
 
     // Canonicalise the public trade on the taker-side event only. `outcome_id`
     // and the taker order's side come from the live_orders row recovered above
-    // (`OrderFilled` in contracts/OrderBook.sol carries neither field);
+    // (`OrderFilled` in contracts/dex/OrderBook.sol carries neither field);
     // `price`/`qty` come from the event. `feeAmount` is intentionally not
     // projected into the public tape. A SELL taker means the buyer is the maker, hence
     // `is_buyer_maker = !is_buy`. `trade_id` is the event's chain_order, so

@@ -34,7 +34,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tvm_abi::Contract;
 
-const PN_ABI: &str = include_str!("../../../contracts/abi/dex/PrivateNote.abi.json");
+const PN_ABI: &str = include_str!("../../../contracts/dex/PrivateNote.abi.json");
 
 #[derive(Deserialize)]
 struct Fixture {

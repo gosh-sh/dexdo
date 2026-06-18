@@ -27,7 +27,7 @@ use crate::graphql::GraphqlClient;
 use crate::tvm_runner::decode_account_fields;
 use crate::tvm_runner::run_getter;
 
-const PN_ABI: &str = include_str!("../../../contracts/abi/dex/PrivateNote.abi.json");
+const PN_ABI: &str = include_str!("../../../contracts/dex/PrivateNote.abi.json");
 
 #[derive(Clone)]
 pub struct GraphqlPnStateReader {
@@ -85,7 +85,7 @@ impl PnStateReader for GraphqlPnStateReader {
 }
 
 /// Parse the detokenized `getDetails()` reply into `PnDetails`. The
-/// ABI shape (see contracts/abi/dex/PrivateNote.abi.json) emits
+/// ABI shape (see contracts/dex/PrivateNote.abi.json) emits
 /// `map(uint32,uint128)` as a JSON object keyed by uint32 strings.
 ///
 /// Exposed so HTTP integration tests can push raw `getDetails`-shaped

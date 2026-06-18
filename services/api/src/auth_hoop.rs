@@ -26,7 +26,7 @@ const HEADER_API_KEY: &str = "x-dodex-apikey";
 
 /// Cap so a malformed/oversize body is rejected as `-1009 / HTTP 413`
 /// before HMAC or pool. Worst legitimate body is a batchOrders at
-/// `MAX_BATCH_SIZE` (`contracts/modifiers/modifiers.sol`, shared by
+/// `MAX_BATCH_SIZE` (`contracts/dex/modifiers/modifiers.sol`, shared by
 /// `PrivateNote.placeBatch` and `OrderBook.executeBatch`) which fits
 /// in ~2.3 KiB; 64 KiB is the deliberate over-provision so order-shape
 /// tweaks don't surface as a 413 in prod.

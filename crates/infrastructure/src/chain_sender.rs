@@ -601,7 +601,7 @@ fn map_chain_error(err: &ChainError, ctx: &ChainCallContext<'_>) -> DomainError 
     DomainError::Unexpected
 }
 
-/// `PrivateNote` exit codes from `contracts/modifiers/errors.sol`,
+/// `PrivateNote` exit codes from `contracts/dex/modifiers/errors.sol`,
 /// shared across the entry points (`placeOrder`, `cancelOrder`,
 /// `placeBatch`, `splitFullSet`) the wrapper dispatches —
 /// the originating entry point is carried in `ChainCallContext.entry_point`
@@ -769,7 +769,7 @@ mod tests {
         // The full table from `map_tvm_exit_code` — locking each row
         // down so a future "small refactor" cannot silently remap a
         // known reject onto the wrong HTTP class. Codes come from
-        // `contracts/modifiers/errors.sol`.
+        // `contracts/dex/modifiers/errors.sol`.
         let single = ctx_single("place_order");
         let batch = ctx_batch("place_batch", 3);
         assert_eq!(map_chain_error(&tvm_exit(102), &single), DomainError::OrderValidationFailed);

@@ -16,15 +16,15 @@ use tvm_abi::Function;
 use tvm_types::read_single_root_boc;
 use tvm_types::SliceData;
 
-const ABI_ROOT_ORACLE: &str = include_str!("../../../contracts/abi/dex/RootOracle.abi.json");
-const ABI_ORACLE: &str = include_str!("../../../contracts/abi/dex/Oracle.abi.json");
+const ABI_ROOT_ORACLE: &str = include_str!("../../../contracts/dex/RootOracle.abi.json");
+const ABI_ORACLE: &str = include_str!("../../../contracts/dex/Oracle.abi.json");
 const ABI_ORACLE_EVENT_LIST: &str =
-    include_str!("../../../contracts/abi/dex/OracleEventList.abi.json");
-const ABI_PMP: &str = include_str!("../../../contracts/abi/dex/PMP.abi.json");
-const ABI_ORDER_BOOK: &str = include_str!("../../../contracts/abi/dex/OrderBook.abi.json");
-const ABI_ROOT_PN: &str = include_str!("../../../contracts/abi/dex/RootPN.abi.json");
-const ABI_PRIVATE_NOTE: &str = include_str!("../../../contracts/abi/dex/PrivateNote.abi.json");
-const ABI_NULLIFIER: &str = include_str!("../../../contracts/abi/dex/Nullifier.abi.json");
+    include_str!("../../../contracts/dex/OracleEventList.abi.json");
+const ABI_PMP: &str = include_str!("../../../contracts/dex/PMP.abi.json");
+const ABI_ORDER_BOOK: &str = include_str!("../../../contracts/dex/OrderBook.abi.json");
+const ABI_ROOT_PN: &str = include_str!("../../../contracts/dex/RootPN.abi.json");
+const ABI_PRIVATE_NOTE: &str = include_str!("../../../contracts/dex/PrivateNote.abi.json");
+const ABI_NULLIFIER: &str = include_str!("../../../contracts/dex/Nullifier.abi.json");
 
 const DEX_ABIS: &[(&str, &str)] = &[
     ("RootOracle", ABI_ROOT_ORACLE),

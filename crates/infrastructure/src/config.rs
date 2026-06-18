@@ -134,7 +134,7 @@ pub struct ChainSection {
     /// Batch-length cap for `POST`/`DELETE /api/v1/batchOrders`,
     /// advertised as `maxBatchSize` in `/api/v1/markets`. Manually
     /// mirrors the chain's compiled-in per-side `MAX_BATCH_SIZE`
-    /// (`contracts/modifiers/modifiers.sol`, 10 today) — the chain
+    /// (`contracts/dex/modifiers/modifiers.sol`, 10 today) — the chain
     /// exposes no getter for it. Must not exceed the chain value:
     /// a larger cap lets batches through only to be rejected on-chain
     /// with `ERR_BATCH_TOO_LARGE`, surfaced as 503 instead of 400.
@@ -187,7 +187,7 @@ fn default_split_full_set_timeout_ms() -> u64 {
     30_000
 }
 
-/// Mirrors the chain's `MAX_BATCH_SIZE` (contracts/modifiers/modifiers.sol).
+/// Mirrors the chain's `MAX_BATCH_SIZE` (contracts/dex/modifiers/modifiers.sol).
 fn default_max_batch_size() -> u16 {
     10
 }

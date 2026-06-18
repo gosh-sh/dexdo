@@ -1,0 +1,84 @@
+pragma gosh-solidity >=0.76.1;
+
+import "./errors.sol";
+
+abstract contract AiRegistryModifiers is AiRegistryErrors {
+    uint64 constant MIN_BALANCE = 100 vmshell;
+
+    // ECC currency id used for payments and fee burn.
+    uint32 constant SHELL_ECC_ID = 2;
+
+    uint16 constant BPS_DENOMINATOR = 10_000;
+
+    // ── Protocol-wide constants (were per-ДОБ params; fixed by design) ──────
+    // Platform fee: 2.5% (spec §5.1 PLATFORM_FEE_BPS), buyer-side, BY-FACT (on
+    // delivered ticks), net-of-rebate burned (§5.4). NOT charged upfront.
+    uint16 constant PLATFORM_FEE_BPS = 250;       // 2.5%
+    // Seller rebate (§5.3, positive anti-scam): rate = min(REBATE_MAX_BPS,
+    // REBATE_SLOPE_BPS * n) bps; paid only on clean (non-disputed) close;
+    // REBATE_MAX_BPS strictly < PLATFORM_FEE_BPS so net burn > 0 always.
+    uint16 constant REBATE_MAX_BPS   = 200;       // 2.0% cap
+    uint16 constant REBATE_SLOPE_BPS = 4;         // bps per tick (cap at 50 ticks)
+    // Streaming-deal timing (spec §9.1).
+    uint64 constant SETTLE_WINDOW   = 180;        // optimistic-accept window (s)
+    uint64 constant STREAM_TIMEOUT  = 600;        // seller inactivity (heartbeat) reclaim (s)
+    uint64 constant DISPUTE_WINDOW  = 600;        // dispute -> split timeout (s)
+    uint64 constant MATCH_OPEN_TIMEOUT = 600;     // funded-but-unopened cleanup (no-show, §2.1)
+
+    // Forwarded value for child -> parent registration messages.
+    varuint16 constant REGISTER_FORWARD_VALUE = 5 vmshell;
+
+    // External address constants for directed events (off-chain subscribers).
+    uint constant bitCntAddress = 256;
+    uint128 constant RootRegisteredEmit          = 700;
+    uint128 constant ManifestRegisteredEmit      = 701;
+    uint128 constant TokenContractRegisteredEmit = 702;
+    uint128 constant ContractDeployedEmit        = 703;
+    uint128 constant ManifestUpdatedEmit         = 704;
+    uint128 constant TokensPurchasedEmit         = 705;
+    uint128 constant TokensConsumedEmit          = 706;
+    uint128 constant FeeBurnedEmit               = 707;
+    uint128 constant TokensReplenishedEmit       = 708;
+    uint128 constant ContractDestroyedEmit       = 709;
+    uint128 constant ShellWithdrawnEmit          = 710;
+    uint128 constant ReservationCancelledEmit    = 712;
+    uint128 constant AvailableReducedEmit        = 714;
+    // Streaming deal (spec §3-4)
+    uint128 constant StreamFundedEmit            = 720;
+    uint128 constant StreamOpenedEmit            = 721;
+    uint128 constant TickFinalizedEmit           = 722;
+    uint128 constant StreamStoppedEmit           = 723;
+    uint128 constant StreamDisputedEmit          = 724;
+    uint128 constant DisputeResolvedEmit         = 725;
+    uint128 constant StreamReclaimedEmit         = 726;
+    // InferenceOrderBook (spec §2 + §8) — dedicated 1000+ range (separate from registry/streaming/oracle 700s)
+    uint128 constant OfferPlacedEmit             = 1000;
+    uint128 constant OfferCancelledEmit          = 1001;
+    uint128 constant BuyUnmatchedEmit            = 1002;
+    uint128 constant MatchedEmit                 = 1003;
+    uint128 constant ExecutedEmit                = 1004;
+    uint128 constant StreamClosedEmit            = 735;
+    // InferenceOracle (spec §6-7)
+    uint128 constant ExecutionRecordedEmit       = 736;
+    uint128 constant IntervalFinalizedEmit       = 737;
+    uint128 constant ReferencePublishedEmit      = 738;
+    // InferenceOrderBook §8 — continue the 1000+ range
+    uint128 constant SubscriptionPlacedEmit      = 1005;
+    uint128 constant CycleForfeitedEmit          = 1006;
+    uint128 constant ForfeitClaimedEmit          = 1007;
+
+    modifier accept() {
+        tvm.accept();
+        _;
+    }
+
+    modifier onlyOwnerPubkey(uint256 ownerPubkey) {
+        require(msg.pubkey() == ownerPubkey, ERR_NOT_OWNER);
+        _;
+    }
+
+    modifier senderIs(address sender) {
+        require(msg.sender == sender, ERR_INVALID_SENDER);
+        _;
+    }
+}
