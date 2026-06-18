@@ -5,7 +5,7 @@ Backend for DEX.DO — a decentralized exchange on the Acki Nacki chain. Two Rus
 - `services/api` — HTTP service serving the public REST API.
 - `services/indexer` — chain-event ingestor that builds the Postgres read-model.
 
-On-chain DEX.DO contracts live under `contracts/`.
+On-chain contracts live under `contracts/`: the DEX.DO core in `contracts/dex/`, and the AI-inference registry it integrates with in `contracts/airegistry/`.
 
 ## Onboarding (Shellnet)
 
@@ -63,7 +63,10 @@ crates/
 services/
   api/               # REST API service
   indexer/           # chain-event indexer
-contracts/           # on-chain DEX.DO contracts (TVM)
+contracts/           # on-chain contracts (TVM), .sol + .abi.json side by side
+  dex/               #   DEX.DO core: PrivateNote, OrderBook, PMP, Oracle, RootPN, Nullifier
+  airegistry/        #   AI-inference registry (integrates with dex): SuperRoot/RootModel,
+                     #   ManifestMetadata, TokenContract, InferenceOrderBook, InferenceOracle
 sdk/                 # dodex-sdk: write-side DEX facade + halo2 voucher pipeline
                      # (separate workspace, excluded from the root build)
 tools/               # end-user CLIs (separate workspace; see tools/README.md)
