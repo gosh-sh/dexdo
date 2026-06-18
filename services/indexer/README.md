@@ -28,9 +28,7 @@ Config sections:
 Logging is configured by environment variables, not YAML: `RUST_LOG` sets the
 filter (default `info`), and `LOG_DIR` (optional) makes the service additionally
 write daily-rotated `indexer.log.<date>` files into that directory, retaining
-`LOG_MAX_FILES` of them (default 14). When `LOG_DIR` is set, the first sighting
-of each projector "no handler for event type" warning stays in the main log and
-the repeats are diverted to a separate `indexer.noise.log` file. See
+`LOG_MAX_FILES` of them (default 14). See
 [docs/deployment.md](../../docs/deployment.md#logs) and
 [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#noise-log).
 

@@ -34,8 +34,8 @@ pub struct IndexerRepository {
     /// noise log. Shared via `Arc` across the clones that record sightings —
     /// the fetch loop and the reprojection sweep — so "first" is process-global
     /// across both. (The metrics-refresh clone shares the `Arc` too but never
-    /// records sightings.) Bounded by the contract event vocabulary (a few
-    /// dozen entries), so it does not grow without limit.
+    /// records sightings.) Bounded by the decoder's ABI event vocabulary, so it
+    /// cannot grow without limit.
     seen_unknown_event_types: Arc<Mutex<HashSet<String>>>,
 }
 

@@ -1754,6 +1754,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tracing",
+ "tracing-subscriber 0.3.23",
  "tvm_abi",
  "tvm_block",
  "tvm_executor",

@@ -88,14 +88,12 @@ Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override a
 Notable indexer config keys under `indexer:`:
 
 - `ignored_addresses` — source addresses dropped before `raw_events` insert and projection.
-- `ignored_event_types` — decoded event types dropped before `raw_events` insert and projection; the cursor advances past them. The startup guard accepts only known droppable no-op types and refuses anything else (metric-critical types, state-changing types, and typos). See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#event-type-ignore-list).
+- `ignored_event_types` — decoded event types dropped before `raw_events` insert and projection. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#event-type-ignore-list).
 
 Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
 (optional) makes each service also write rotated log files into a directory —
-the Compose deployment bind-mounts these to `./logs/<service>`. When `LOG_DIR`
-is set, the indexer logs the first sighting of each unhandled-event-type warning
-to the main log and diverts the repeats to a separate `<service>.noise.log` file.
-See [docs/deployment.md](docs/deployment.md#logs) and
+the Compose deployment bind-mounts these to `./logs/<service>`. See
+[docs/deployment.md](docs/deployment.md#logs) and
 [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#noise-log).
 
 Metrics are OpenTelemetry/OTLP: the indexer exports event counters when

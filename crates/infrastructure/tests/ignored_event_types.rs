@@ -5,6 +5,8 @@
 
 use std::collections::HashSet;
 use std::env;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use dodex_infrastructure::config::IGNORABLE_EVENT_TYPES;
@@ -20,6 +22,13 @@ use serde_json::json;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing::Event;
+use tracing::Subscriber;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
 
 // Real OrderBook.OrderPlaced event body (base64 BOC), from the decoder unit
 // test fixture. Decodes to event_type "OrderBook.OrderPlaced".
@@ -28,6 +37,16 @@ const ORDER_PLACED_BODY: &str = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAACAAA
 // Not valid base64 (and not a BOC), so the decoder returns None — the edge is
 // "undecodable": it carries no event_type to match against the ignore list.
 const UNDECODABLE_BODY: &str = "@@@not-a-valid-boc@@@";
+
+// Real PMP.StakeAccepted event body (base64 BOC), captured from shellnet
+// message 9ded852d5f4de2645703534b568f0bfa9a6c94a609e05bce0b9f6d04862352a3.
+// It decodes cleanly but PMP.StakeAccepted has no projector arm, so
+// project_event returns Unknown — the outcome that drives the no-handler noise
+// routing. A shellnet redeploy may retire the message; the fixture is
+// self-contained regardless.
+const UNHANDLED_EVENT_BODY: &str =
+    "te6ccgEBAQEAPQAAdUdlUlyAAs07z2h9tsBjTWvTVO1y7hoNFyPFA00R2BHKcjXndidgAAAAIAAAAAAAAAAAAAAAJUC+QAAQ";
+const UNHANDLED_EVENT_TYPE: &str = "PMP.StakeAccepted";
 
 async fn setup() -> Option<PgPool> {
     let _ = dotenvy::dotenv();
@@ -383,4 +402,131 @@ async fn every_ignorable_event_type_is_a_projector_no_op() {
              filter will silently drop a state-changing event before the read model"
         );
     }
+}
+
+/// One captured `warn!` event: its tracing target plus the `message` and
+/// `event_type` fields, enough to assert which sink the no-handler warning
+/// would land in.
+#[derive(Clone, Debug)]
+struct CapturedEvent {
+    target: String,
+    message: String,
+    event_type: String,
+}
+
+/// Records every event into a shared buffer so a test can assert on the
+/// tracing `target` the indexer chose, without a real file/stdout subscriber.
+struct CaptureLayer {
+    events: Arc<StdMutex<Vec<CapturedEvent>>>,
+}
+
+impl<S: Subscriber> Layer<S> for CaptureLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        #[derive(Default)]
+        struct Fields {
+            message: String,
+            event_type: String,
+        }
+        impl Visit for Fields {
+            // `%event_type` (Display) and the message literal both arrive via
+            // record_debug as format_args, whose Debug output is the plain
+            // string with no surrounding quotes.
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                match field.name() {
+                    "message" => self.message = format!("{value:?}"),
+                    "event_type" => self.event_type = format!("{value:?}"),
+                    _ => {}
+                }
+            }
+
+            fn record_str(&mut self, field: &Field, value: &str) {
+                match field.name() {
+                    "message" => self.message = value.to_string(),
+                    "event_type" => self.event_type = value.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        self.events.lock().unwrap().push(CapturedEvent {
+            target: event.metadata().target().to_string(),
+            message: fields.message,
+            event_type: fields.event_type,
+        });
+    }
+}
+
+// Verifies the wiring the rest of the suite leaves untested at the fetch-loop
+// callsite: when persist_page decodes an event with no projector handler, the
+// FIRST sighting emits on the normal target (stdout + main log) and the REPEAT
+// emits on EVENT_NOISE_TARGET. The dedup boolean and the sink truth-table are
+// each tested in isolation; a swapped if/else or a dropped `target:` arg would
+// pass both yet flood the main log or hide the operator's first signal.
+// current_thread flavor keeps the persist_page future on this thread so the
+// thread-local subscriber set below sees its events.
+#[tokio::test(flavor = "current_thread")]
+async fn persist_page_unknown_event_warns_first_on_normal_target_then_repeat_on_noise() {
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let stream = "ignored_types_test_noise_routing";
+    let first = "noise_routing_first";
+    let repeat = "noise_routing_repeat";
+    cleanup(&pool, stream, &[first, repeat]).await;
+
+    // Two edges decoding to the same handler-less event in one page: the first
+    // is the first sighting, the second a repeat. Distinct msg_ids so both
+    // insert and both reach the Unknown projector arm.
+    let edges = vec![
+        edge_with_body(first, "c1", json!(UNHANDLED_EVENT_BODY)),
+        edge_with_body(repeat, "c2", json!(UNHANDLED_EVENT_BODY)),
+    ];
+    let ignored: HashSet<&str> = HashSet::new();
+
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(CaptureLayer { events: events.clone() });
+    let res = {
+        let _sub = tracing::subscriber::set_default(subscriber);
+        repo.persist_page(stream, &edges, Some("c2"), &decoder, &ignored)
+            .await
+            .expect("persist_page")
+    };
+
+    assert_eq!(res.decoded, 2, "both edges decoded to the handler-less event");
+    assert_eq!(res.inserted, 2, "both edges inserted");
+
+    let warnings: Vec<CapturedEvent> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e.event_type == UNHANDLED_EVENT_TYPE && e.message.contains("no handler for event type")
+        })
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected first-sighting + one repeat no-handler warning, got {warnings:?}"
+    );
+    assert_ne!(
+        warnings[0].target,
+        dodex_logging::EVENT_NOISE_TARGET,
+        "first sighting must use the normal target (stdout + main log), not the noise target"
+    );
+    assert!(
+        warnings[0].message.contains("first sighting"),
+        "first sighting must carry the operator-facing message, got {:?}",
+        warnings[0].message
+    );
+    assert_eq!(
+        warnings[1].target,
+        dodex_logging::EVENT_NOISE_TARGET,
+        "the repeat must be diverted to EVENT_NOISE_TARGET so it lands in the noise log"
+    );
+
+    cleanup(&pool, stream, &[first, repeat]).await;
 }
