@@ -18,8 +18,7 @@ use tvm_types::SliceData;
 
 const ABI_ROOT_ORACLE: &str = include_str!("../../../contracts/dex/RootOracle.abi.json");
 const ABI_ORACLE: &str = include_str!("../../../contracts/dex/Oracle.abi.json");
-const ABI_ORACLE_EVENT_LIST: &str =
-    include_str!("../../../contracts/dex/OracleEventList.abi.json");
+const ABI_ORACLE_EVENT_LIST: &str = include_str!("../../../contracts/dex/OracleEventList.abi.json");
 const ABI_PMP: &str = include_str!("../../../contracts/dex/PMP.abi.json");
 const ABI_ORDER_BOOK: &str = include_str!("../../../contracts/dex/OrderBook.abi.json");
 const ABI_ROOT_PN: &str = include_str!("../../../contracts/dex/RootPN.abi.json");
