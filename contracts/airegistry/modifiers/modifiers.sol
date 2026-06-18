@@ -51,17 +51,21 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant StreamDisputedEmit          = 724;
     uint128 constant DisputeResolvedEmit         = 725;
     uint128 constant StreamReclaimedEmit         = 726;
-    // InferenceOrderBook (spec §2)
-    uint128 constant OfferPlacedEmit             = 730;
-    uint128 constant OfferCancelledEmit          = 731;
-    uint128 constant BuyUnmatchedEmit            = 732;
-    uint128 constant MatchedEmit                 = 733;
-    uint128 constant ExecutedEmit                = 734;
+    // InferenceOrderBook (spec §2 + §8) — dedicated 1000+ range (separate from registry/streaming/oracle 700s)
+    uint128 constant OfferPlacedEmit             = 1000;
+    uint128 constant OfferCancelledEmit          = 1001;
+    uint128 constant BuyUnmatchedEmit            = 1002;
+    uint128 constant MatchedEmit                 = 1003;
+    uint128 constant ExecutedEmit                = 1004;
     uint128 constant StreamClosedEmit            = 735;
     // InferenceOracle (spec §6-7)
     uint128 constant ExecutionRecordedEmit       = 736;
     uint128 constant IntervalFinalizedEmit       = 737;
     uint128 constant ReferencePublishedEmit      = 738;
+    // InferenceOrderBook §8 — continue the 1000+ range
+    uint128 constant SubscriptionPlacedEmit      = 1005;
+    uint128 constant CycleForfeitedEmit          = 1006;
+    uint128 constant ForfeitClaimedEmit          = 1007;
 
     modifier accept() {
         tvm.accept();

@@ -671,7 +671,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
             periodStart: uint64(block.timestamp), curCycle: 0,
             cycleBudget: cycleBudget, cycleSpent: 0, autoRenew: autoRenew, exists: true
         });
-        emit SubscriptionPlaced{dest: address.makeAddrExtern(OfferPlacedEmit, bitCntAddress)}(orderId, buyerNote, maxPricePerTick, ticks, cycleBudget, autoRenew);
+        emit SubscriptionPlaced{dest: address.makeAddrExtern(SubscriptionPlacedEmit, bitCntAddress)}(orderId, buyerNote, maxPricePerTick, ticks, cycleBudget, autoRenew);
     }
 
     function _subTouch(uint128 orderId) private {
@@ -684,7 +684,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 if (o.escrow < unspent) { unspent = o.escrow; }
                 _orders[orderId].escrow = o.escrow - unspent;
                 _forfeitPool[orderId][s.curCycle] += unspent;
-                emit CycleForfeited{dest: address.makeAddrExtern(FeeBurnedEmit, bitCntAddress)}(orderId, s.curCycle, unspent, _cycleFundedTicks[orderId][s.curCycle]);
+                emit CycleForfeited{dest: address.makeAddrExtern(CycleForfeitedEmit, bitCntAddress)}(orderId, s.curCycle, unspent, _cycleFundedTicks[orderId][s.curCycle]);
             }
             s.cycleSpent = 0;
             s.curCycle += 1;
@@ -721,7 +721,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         _forfeitPool[orderId][cycle]      = pool - share;
         _cycleFundedTicks[orderId][cycle] = total - mine;
         _payShell(seller, share);
-        emit ForfeitClaimed{dest: address.makeAddrExtern(ShellWithdrawnEmit, bitCntAddress)}(orderId, cycle, seller, share);
+        emit ForfeitClaimed{dest: address.makeAddrExtern(ForfeitClaimedEmit, bitCntAddress)}(orderId, cycle, seller, share);
     }
 
     // ========================================================

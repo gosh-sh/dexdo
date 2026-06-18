@@ -120,6 +120,12 @@ abstract contract Modifiers is Errors {
     uint128 constant OB_EPOCH_SETTLED = 145;
     /// @notice External event id for `OrderBook.OrderFilled`.
     uint128 constant OB_ORDER_FILLED = 146;
+    /// @notice External event ids for OrderBook events that previously shared dst=0.
+    uint128 constant OB_PARTIAL_FILL = 157;
+    uint128 constant OB_FULLY_FILLED = 158;
+    uint128 constant OB_QUEUED = 159;
+    uint128 constant OB_REJECTED = 160;
+    uint128 constant OB_CALLBACK_BOUNCED = 161;
     /// @notice External event id for `PrivateNote.OrderPlaced`.
     uint128 constant PRIVATENOTE_ORDER_PLACED = 147;
     /// @notice External event id for `PrivateNote.OrderFilled`.
@@ -220,7 +226,7 @@ abstract contract Modifiers is Errors {
     uint64 constant GRACE_PERIOD = 86400;
 
     /// @notice Minimum lead time from now to resultStart on first setTimings call.
-    uint64 constant MIN_RESULT_GAP = 36_000;
+    uint64 constant MIN_RESULT_GAP = 120;
 
     /// @notice Fee percentage for staking operations
     uint128 constant FEE_PERCENT = 1; // 0.01% = 1

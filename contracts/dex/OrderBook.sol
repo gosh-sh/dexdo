@@ -411,7 +411,7 @@ contract OrderBook is Modifiers {
                     _notifyRejectedPlace(depositIdentifierHash, op, opNonce);
                 }
             } else {
-                address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+                address addrExtern = address.makeAddrExtern(OB_REJECTED, bitCntAddress);
                 emit Rejected{dest: addrExtern}(QENTRY_PLACE, depositIdentifierHash);
                 _notifyRejectedPlace(depositIdentifierHash, op, opNonce);
             }
@@ -496,7 +496,7 @@ contract OrderBook is Modifiers {
         uint64  opNonce
     ) private returns (bool ok) {
         if (!_canQueuePlace()) {
-            address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+            address addrExtern = address.makeAddrExtern(OB_REJECTED, bitCntAddress);
             emit Rejected{dest: addrExtern}(QENTRY_PLACE, depositHash);
             return false;
         }
@@ -522,7 +522,7 @@ contract OrderBook is Modifiers {
             opNonce: opNonce
         });
         // (placeholder anchor — _enqueueCancel/_enqueueCancelAll use clientOrderId: 0)
-        address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern2 = address.makeAddrExtern(OB_QUEUED, bitCntAddress);
         emit Queued{dest: addrExtern2}(slot, queueId, QENTRY_PLACE);
         return true;
     }
@@ -533,7 +533,7 @@ contract OrderBook is Modifiers {
         uint64  opNonce
     ) private returns (bool ok) {
         if (!_canQueueCancel()) {
-            address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+            address addrExtern = address.makeAddrExtern(OB_REJECTED, bitCntAddress);
             emit Rejected{dest: addrExtern}(QENTRY_CANCEL, depositHash);
             return false;
         }
@@ -558,14 +558,14 @@ contract OrderBook is Modifiers {
             isBatchEnd: false,
             opNonce: opNonce
         });
-        address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern2 = address.makeAddrExtern(OB_QUEUED, bitCntAddress);
         emit Queued{dest: addrExtern2}(slot, queueId, QENTRY_CANCEL);
         return true;
     }
 
     function _enqueueCancelAll(uint256 depositHash, uint64 opNonce) private returns (bool ok) {
         if (!_canQueueCancel()) {
-            address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+            address addrExtern = address.makeAddrExtern(OB_REJECTED, bitCntAddress);
             emit Rejected{dest: addrExtern}(QENTRY_CANCEL_ALL, depositHash);
             return false;
         }
@@ -590,7 +590,7 @@ contract OrderBook is Modifiers {
             isBatchEnd: false,
             opNonce: opNonce
         });
-        address addrExtern2 = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern2 = address.makeAddrExtern(OB_QUEUED, bitCntAddress);
         emit Queued{dest: addrExtern2}(slot, queueId, QENTRY_CANCEL_ALL);
         return true;
     }
@@ -1267,12 +1267,12 @@ contract OrderBook is Modifiers {
     ///         FullyFilled on full consumption). Per-fill `OrderFilled`
     ///         continues to fire alongside for raw analytics.
     function _emitPartialFill(uint128 orderId, uint128 clientOrderId, uint128 filledAmount, uint128 remainingAmount) private pure {
-        address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern = address.makeAddrExtern(OB_PARTIAL_FILL, bitCntAddress);
         emit PartialFill{dest: addrExtern}(orderId, clientOrderId, filledAmount, remainingAmount);
     }
 
     function _emitFullyFilled(uint128 orderId, uint128 clientOrderId, uint128 filledAmount) private pure {
-        address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern = address.makeAddrExtern(OB_FULLY_FILLED, bitCntAddress);
         emit FullyFilled{dest: addrExtern}(orderId, clientOrderId, filledAmount);
     }
 
@@ -1497,7 +1497,7 @@ contract OrderBook is Modifiers {
     ///         the bounce would silently be a no-op; here it surfaces as an event.
     onBounce(TvmSlice body) external pure {
         body;
-        address addrExtern = address.makeAddrExtern(0, bitCntAddress);
+        address addrExtern = address.makeAddrExtern(OB_CALLBACK_BOUNCED, bitCntAddress);
         emit CallbackBounced{dest: addrExtern}(msg.sender, tx.logicaltime);
     }
 
