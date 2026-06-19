@@ -58,15 +58,28 @@ change `dexdo_env`, drop in the env's vault, and override what differs.
 
 ## Database
 
-The compose stack bundles **Postgres 16** as the `postgres` service, with data
-on the named docker volume `dodex_pgdata` (persists across redeploys). api and
-indexer wait for it to be healthy and connect over the compose network at
-`postgres:5432`. The connection string is built from `dexdo_db_user` /
-`dexdo_db_name` / `dexdo_db_host` / `dexdo_db_port` (role defaults) plus
-`vault_dexdo_db_password` (vault); migrations run automatically on startup
-(`sqlx::migrate!`). To use a managed/Supabase database instead, set
-`dexdo_db_host` to the external host in the inventory and remove the `postgres`
-service from `compose.yml.j2`.
+`dexdo_db_local` chooses where Postgres comes from:
+
+- **`false` (default) — connect to an existing database.** Set `dexdo_db_host`,
+  `dexdo_db_port`, `dexdo_db_name`, `dexdo_db_user` (in the env inventory) and
+  `vault_dexdo_db_password` (vault) to point at it (managed/Supabase/etc.). No
+  `postgres` service is rendered into the compose file.
+- **`true` — run a bundled Postgres 16** as the `postgres` service, with data on
+  the named docker volume `dodex_pgdata` (persists across redeploys). api and
+  indexer wait for it to be healthy and connect over the compose network at
+  `postgres:5432`; keep `dexdo_db_host: postgres`.
+
+Either way the connection string is built from `dexdo_db_user` / `dexdo_db_name`
+/ `dexdo_db_host` / `dexdo_db_port` + `vault_dexdo_db_password`, and migrations
+run automatically on startup (`sqlx::migrate!`).
+
+## Metrics
+
+The indexer can export OTLP metrics. A rendered `.env` next to the compose file
+(loaded by the indexer via `env_file`) carries `OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`, and `OTEL_SERVICE_NAME`. Set
+`dexdo_otel_endpoint` (per env) to your OTLP collector to enable them; left empty
+(the default) the indexer collects nothing.
 
 ## One-time setup (per environment)
 

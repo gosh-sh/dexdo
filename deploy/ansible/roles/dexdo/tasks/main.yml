@@ -35,6 +35,13 @@
   no_log: true   # rendered file holds the db password — keep it out of -v/--diff output
   notify: Restart dexdo stack
 
+- name: Render .env (OTLP metrics for the indexer)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ dexdo_deploy_dir }}/.env"
+    mode: "0640"
+  notify: Restart dexdo stack
+
 - name: Render compose file
   ansible.builtin.template:
     src: compose.yml.j2

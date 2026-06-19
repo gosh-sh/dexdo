@@ -3,9 +3,15 @@
 #
 # Build-based: images are built on the host from the checkout at
 # {{ dexdo_src_dir }} (ref {{ dexdo_version }}) via `docker compose up --build`.
-# Nothing is pulled from a registry. Postgres runs alongside the services with
-# its data on the named volume `dodex_pgdata`.
+# Nothing is pulled from a registry.
+{% if dexdo_db_local %}
+# dexdo_db_local=true: a bundled Postgres runs here, data on volume dodex_pgdata.
+{% else %}
+# dexdo_db_local=false: no Postgres here — services connect to the external DB
+# at dexdo_db_host:dexdo_db_port.
+{% endif %}
 services:
+{% if dexdo_db_local %}
   postgres:
     image: postgres:16-alpine
     environment:
@@ -22,13 +28,16 @@ services:
       retries: 20
       start_period: 10s
 
+{% endif %}
   api:
     build:
       context: {{ dexdo_src_dir }}
       dockerfile: docker/api.Dockerfile
+{% if dexdo_db_local %}
     depends_on:
       postgres:
         condition: service_healthy
+{% endif %}
     environment:
       APP_CONFIG: /app/config/api.{{ dexdo_env }}.yaml
       RUST_LOG: "{{ dexdo_rust_log }}"
@@ -50,9 +59,13 @@ services:
     build:
       context: {{ dexdo_src_dir }}
       dockerfile: docker/indexer.Dockerfile
+{% if dexdo_db_local %}
     depends_on:
       postgres:
         condition: service_healthy
+{% endif %}
+    env_file:
+      - .env
     environment:
       APP_CONFIG: /app/config/indexer.{{ dexdo_env }}.yaml
       RUST_LOG: "{{ dexdo_rust_log }}"
@@ -61,6 +74,8 @@ services:
       - ./config:/app/config:ro
       - ./logs/indexer:/app/logs
     restart: unless-stopped
+{% if dexdo_db_local %}
 
 volumes:
   dodex_pgdata:
+{% endif %}

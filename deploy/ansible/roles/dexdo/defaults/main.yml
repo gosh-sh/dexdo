@@ -39,23 +39,33 @@ dexdo_api_port: 8080
 dexdo_seed_accounts: false
 
 # --- Database ---------------------------------------------------------------
-# Postgres runs in the same compose stack; its data lives on the named volume
-# `dodex_pgdata`. api + indexer reach it over the compose network at the
-# service name `postgres`. Point dexdo_db_host at an external host instead to
-# use a managed/Supabase database (and drop the postgres service from compose).
+# Bundled-Postgres toggle:
+#   false (default) -> connect to an EXISTING database; set dexdo_db_host/port/
+#                      name/user + vault_dexdo_db_password to point at it.
+#   true            -> run a `postgres` service inside the compose stack (data on
+#                      the dodex_pgdata volume); leave dexdo_db_host at `postgres`.
+dexdo_db_local: false
+
 dexdo_db_user: dodex
 dexdo_db_name: dodex
+# When dexdo_db_local=true this must stay `postgres` (the compose service name).
+# When false, override it with the external DB host in the env inventory.
 dexdo_db_host: postgres
-# Internal compose-network port only — Postgres is NOT published to the host, so
-# it cannot clash with other host services and is left at the default. (If you
-# point dexdo_db_host at an external DB, set this to that DB's port.)
+# Internal compose-network port when local; the external DB's port when not.
 dexdo_db_port: 5432
 # Password is a secret -> the env vault (vault_dexdo_db_password).
 dexdo_db_password: "{{ vault_dexdo_db_password }}"
 # Connection string shared by api + indexer. The password is URL-encoded so
 # special characters are safe inside the URL; the postgres service env gets the
 # raw value.
-dexdo_database_url: "postgres://{{ dexdo_db_user }}:{{ dexdo_db_password | urlencode }}@{{ dexdo_db_host }}:{{ dexdo_db_port }}/{{ dexdo_db_name }}"
+dexdo_database_url: "postgresql://{{ dexdo_db_user }}:{{ dexdo_db_password | urlencode }}@{{ dexdo_db_host }}:{{ dexdo_db_port }}/{{ dexdo_db_name }}"
+
+# --- OpenTelemetry / OTLP metrics (indexer) ---------------------------------
+# Endpoint of your OTLP collector (gRPC). Empty -> the indexer collects no
+# metrics (empty counts as unset). Set per environment in the inventory.
+dexdo_otel_endpoint: ""
+dexdo_otel_metrics_protocol: grpc
+dexdo_otel_service_name: dodex-indexer-test
 
 # --- Secrets (resolved from the env vault) ----------------------------------
 dexdo_kek_hex: "{{ vault_dexdo_kek_hex }}"
