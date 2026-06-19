@@ -3,17 +3,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ackinacki_kit::contracts::dex::oracle::ParamsOfGetEventListAddress;
-use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfAddEvent;
-use ackinacki_kit::contracts::dex::pmp::Pmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
-use ackinacki_kit::contracts::dex::root_oracle::ParamsOfDeployOracle;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPmpAddress;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::giver::v3::top_up_native_with_giver_if_below;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
+use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::root_oracle::ParamsOfDeployOracle;
+use dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress;
+use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 use dodex_sdk::Dex;
@@ -36,9 +36,9 @@ pub async fn deploy_oracle_with_event(
     dex: &Dex,
     prefix: &str,
 ) -> (String, String, KeyPair, String, String) {
-    use ackinacki_kit::contracts::dex::oracle::Oracle;
-    use ackinacki_kit::contracts::dex::oracle_event_list::OracleEventList;
-    use ackinacki_kit::contracts::dex::root_oracle::RootOracle;
+    use dodex_contracts::dex::oracle::Oracle;
+    use dodex_contracts::dex::oracle_event_list::OracleEventList;
+    use dodex_contracts::dex::root_oracle::RootOracle;
 
     let oracle_keys = gen_keys(context.clone());
     let ephemeral_keys = gen_keys(context.clone());

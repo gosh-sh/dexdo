@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "ackinacki-kit"
-version = "2.1.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.1.0#5b8a6909dc8bd66d6aaea6541839abd7a1a0083c"
+version = "3.0.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v3.0.0#69a3026ddc8d71bb67a692b69c326e2a8835d889"
 dependencies = [
  "contracts",
  "shared",
@@ -1029,8 +1029,8 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "contracts"
-version = "2.1.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.1.0#5b8a6909dc8bd66d6aaea6541839abd7a1a0083c"
+version = "3.0.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v3.0.0#69a3026ddc8d71bb67a692b69c326e2a8835d889"
 dependencies = [
  "base64",
  "chrono",
@@ -1616,6 +1616,7 @@ dependencies = [
  "async-trait",
  "dodex-application",
  "dodex-chain",
+ "dodex-contracts",
  "dodex-domain",
  "dodex-infrastructure",
  "dodex-logging",
@@ -1656,8 +1657,21 @@ name = "dodex-chain"
 version = "0.1.0"
 dependencies = [
  "ackinacki-kit",
+ "dodex-contracts",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "dodex-contracts"
+version = "0.1.0"
+dependencies = [
+ "ackinacki-kit",
+ "num-bigint 0.4.6",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]
@@ -1696,6 +1710,7 @@ dependencies = [
  "base64",
  "dodex-application",
  "dodex-chain",
+ "dodex-contracts",
  "dodex-domain",
  "dotenvy",
  "hex",
@@ -5232,8 +5247,8 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "2.1.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v2.1.0#5b8a6909dc8bd66d6aaea6541839abd7a1a0083c"
+version = "3.0.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v3.0.0#69a3026ddc8d71bb67a692b69c326e2a8835d889"
 dependencies = [
  "tokio",
 ]

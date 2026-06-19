@@ -200,7 +200,9 @@ impl From<KitError> for AppError {
 
 fn module_prefix(module: KitModule) -> &'static str {
     match module {
-        KitModule::Dex(_) => "dex",
+        // Relocated wrappers tag themselves `External("dex.<contract>")`; the
+        // prefix (first dotted segment) is the category, e.g. "dex".
+        KitModule::External(name) => name.split('.').next().unwrap_or(name),
         KitModule::MvSystem(_) => "mvsystem",
         KitModule::BkSystem(_) => "bksystem",
         KitModule::AuthService(_) => "authservice",
@@ -212,6 +214,8 @@ fn module_prefix(module: KitModule) -> &'static str {
         KitModule::Accumulator(_) => "accumulator",
         KitModule::Exchange(_) => "exchange",
         KitModule::Multisig => "multisig",
+        // `KitModule` is `#[non_exhaustive]`.
+        _ => "unknown",
     }
 }
 

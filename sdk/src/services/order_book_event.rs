@@ -15,12 +15,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use ackinacki_kit::contracts::dex::order_book::OrderBook;
-use ackinacki_kit::contracts::dex::order_book_events::OrderBookEvent;
-use ackinacki_kit::contracts::dex::order_book_events::OrderCancelledData;
-use ackinacki_kit::contracts::dex::order_book_events::OrderFilledData;
-use ackinacki_kit::contracts::dex::order_book_events::OrderPlacedData;
-use ackinacki_kit::contracts::error::DexModule;
 use ackinacki_kit::contracts::error::KitError;
 use ackinacki_kit::contracts::error::KitErrorCode;
 use ackinacki_kit::contracts::error::KitModule;
@@ -28,12 +22,17 @@ use ackinacki_kit::contracts::event::Event;
 use ackinacki_kit::contracts::KitResult;
 use ackinacki_kit::tvm_client::net;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::order_book::OrderBook;
+use dodex_contracts::dex::order_book_events::OrderBookEvent;
+use dodex_contracts::dex::order_book_events::OrderCancelledData;
+use dodex_contracts::dex::order_book_events::OrderFilledData;
+use dodex_contracts::dex::order_book_events::OrderPlacedData;
 use serde::Deserialize;
 
 use crate::dapp::account_query_vars;
 use crate::dapp::dex_contract_params;
 
-const MODULE: KitModule = KitModule::Dex(DexModule::OrderBook);
+const MODULE: KitModule = KitModule::External("dex.order_book");
 
 const GQL_EXTOUT_MESSAGES: &str = r#"
     query($address: String!, $last: Int!) {

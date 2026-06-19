@@ -1,30 +1,30 @@
 pub mod dto;
 
-use ackinacki_kit::contracts::dex::oracle::ParamsOfGetEventListAddress;
-use ackinacki_kit::contracts::dex::oracle::ParamsOfWithdrawFees;
-use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfAddEvent;
-use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfConfirmOrCancelEvent;
-use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfDeleteEvent;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelAllOrders;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfChangeOwner;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfGenerateCoupon;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfInitTransfer;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfMergeFullSet;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfStakeKey;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfWithdrawTokens;
-use ackinacki_kit::contracts::dex::root_oracle::ParamsOfDeployOracle;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfDeployPrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGenerateVoucher;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
 use ackinacki_kit::tvm_client::abi::Signer;
+use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
+use dodex_contracts::dex::oracle::ParamsOfWithdrawFees;
+use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::oracle_event_list::ParamsOfConfirmOrCancelEvent;
+use dodex_contracts::dex::oracle_event_list::ParamsOfDeleteEvent;
+use dodex_contracts::dex::private_note::ParamsOfCancelAllOrders;
+use dodex_contracts::dex::private_note::ParamsOfCancelOrder;
+use dodex_contracts::dex::private_note::ParamsOfCancelOrderByClient;
+use dodex_contracts::dex::private_note::ParamsOfChangeOwner;
+use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::private_note::ParamsOfGenerateCoupon;
+use dodex_contracts::dex::private_note::ParamsOfInitTransfer;
+use dodex_contracts::dex::private_note::ParamsOfMergeFullSet;
+use dodex_contracts::dex::private_note::ParamsOfPlaceBatch;
+use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
+use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
+use dodex_contracts::dex::private_note::ParamsOfStakeKey;
+use dodex_contracts::dex::private_note::ParamsOfWithdrawTokens;
+use dodex_contracts::dex::root_oracle::ParamsOfDeployOracle;
+use dodex_contracts::dex::root_pn::ParamsOfDeployPrivateNote;
+use dodex_contracts::dex::root_pn::ParamsOfGenerateVoucher;
+use dodex_contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
+use dodex_contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
 use dto::oracle::OracleEvents;
 use dto::order_book::OrderBookDetails;
 use dto::order_book::OrderBookShutdownState;
@@ -265,12 +265,12 @@ impl Dex {
         names: Vec<String>,
         token_type: u32,
     ) -> AppResult<String> {
-        let root_pn = ackinacki_kit::contracts::dex::root_pn::RootPn::new(
+        let root_pn = dodex_contracts::dex::root_pn::RootPn::new(
             self.inner.private_note().ctx_client(),
-            dex_contract_params(ackinacki_kit::contracts::dex::root_pn::RootPn::DEFAULT_ADDRESS),
+            dex_contract_params(dodex_contracts::dex::root_pn::RootPn::DEFAULT_ADDRESS),
         );
         let result = root_pn
-            .get_pmp_address(ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPmpAddress {
+            .get_pmp_address(dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress {
                 event_id,
                 names,
                 token_type,
@@ -324,7 +324,7 @@ impl Dex {
         for dih in deposit_identifier_hashes {
             let address = pn_mod
                 .get_private_note_address(
-                    ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress {
+                    dodex_contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress {
                         deposit_identifier_hash: dih.clone(),
                     },
                 )
@@ -346,7 +346,7 @@ impl Dex {
     pub async fn submit_set_timings(
         &self,
         pmp_address: &str,
-        params: ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings,
+        params: dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings,
         signer: Signer,
     ) -> AppResult<ResultOfBlockchainWrite> {
         self.inner.pmp().submit_set_timings(pmp_address, params, signer).await.map(Into::into)
@@ -355,7 +355,7 @@ impl Dex {
     pub async fn submit_resolve(
         &self,
         pmp_address: &str,
-        params: ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve,
+        params: dodex_contracts::dex::pmp::ParamsOfSubmitResolve,
         signer: Signer,
     ) -> AppResult<ResultOfBlockchainWrite> {
         self.inner.pmp().submit_resolve(pmp_address, params, signer).await.map(Into::into)
@@ -402,10 +402,7 @@ impl Dex {
     pub async fn get_order(&self, ob_address: &str, order_id: u128) -> AppResult<OrderInfo> {
         self.inner
             .order_book()
-            .get_order(
-                ob_address,
-                ackinacki_kit::contracts::dex::order_book::ParamsOfGetOrder { order_id },
-            )
+            .get_order(ob_address, dodex_contracts::dex::order_book::ParamsOfGetOrder { order_id })
             .await
             .map(Into::into)
     }
@@ -420,7 +417,7 @@ impl Dex {
             .order_book()
             .get_orders_by_owner(
                 ob_address,
-                ackinacki_kit::contracts::dex::order_book::ParamsOfGetOrdersByOwner {
+                dodex_contracts::dex::order_book::ParamsOfGetOrdersByOwner {
                     deposit_hash: deposit_identifier_hash,
                 },
             )
@@ -471,7 +468,7 @@ impl Dex {
         client_order_id: u128,
         min_created_at: u64,
         timeout: std::time::Duration,
-    ) -> AppResult<ackinacki_kit::contracts::dex::order_book_events::OrderPlacedData> {
+    ) -> AppResult<dodex_contracts::dex::order_book_events::OrderPlacedData> {
         crate::services::order_book_event::wait_for_order_placed_by_client_id(
             self.inner.private_note().ctx_client(),
             ob_address,
@@ -491,7 +488,7 @@ impl Dex {
         client_order_id: u128,
         min_created_at: u64,
         timeout: std::time::Duration,
-    ) -> AppResult<ackinacki_kit::contracts::dex::order_book_events::OrderCancelledData> {
+    ) -> AppResult<dodex_contracts::dex::order_book_events::OrderCancelledData> {
         crate::services::order_book_event::wait_for_order_cancelled_by_client_id(
             self.inner.private_note().ctx_client(),
             ob_address,
@@ -513,7 +510,7 @@ impl Dex {
         order_id: u128,
         min_created_at: u64,
         timeout: std::time::Duration,
-    ) -> AppResult<ackinacki_kit::contracts::dex::order_book_events::OrderFilledData> {
+    ) -> AppResult<dodex_contracts::dex::order_book_events::OrderFilledData> {
         crate::services::order_book_event::wait_for_order_filled_by_order_id(
             self.inner.private_note().ctx_client(),
             ob_address,
@@ -542,7 +539,7 @@ impl Dex {
     pub async fn deploy_event_list(
         &self,
         oracle_address: &str,
-        params: ackinacki_kit::contracts::dex::oracle::ParamsOfDeployEventList,
+        params: dodex_contracts::dex::oracle::ParamsOfDeployEventList,
         signer: Signer,
     ) -> AppResult<ResultOfBlockchainWrite> {
         self.inner.oracle().deploy_event_list(oracle_address, params, signer).await.map(Into::into)

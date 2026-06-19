@@ -3,16 +3,16 @@
 
 use std::collections::HashMap;
 
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use ackinacki_kit::contracts::dex::pmp::Pmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfChangeOwner;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPmpAddress;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::giver::v3::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::tvm_client::abi::Signer;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::private_note::ParamsOfChangeOwner;
+use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress;
+use dodex_contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
+use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 

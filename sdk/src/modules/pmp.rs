@@ -1,9 +1,9 @@
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use ackinacki_kit::contracts::dex::pmp::Pmp;
-use ackinacki_kit::contracts::dex::pmp::ResultOfGetDetails;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::pmp::ResultOfGetDetails;
 
 use crate::client::DexContext;
 use crate::dex_contract_params;
@@ -66,7 +66,7 @@ impl<'a> PmpModule<'a> {
     pub async fn get_shutdown_state(
         &self,
         pmp_address: &str,
-    ) -> AppResult<ackinacki_kit::contracts::dex::pmp::ResultOfGetShutdownState> {
+    ) -> AppResult<dodex_contracts::dex::pmp::ResultOfGetShutdownState> {
         self.ctx.acquire().await;
         services::pmp::get_shutdown_state(&self.pmp(pmp_address)).await
     }

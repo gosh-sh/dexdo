@@ -25,18 +25,6 @@ use std::time::UNIX_EPOCH;
 
 use ackinacki_kit::contracts::account::AccountStatus;
 use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
-use ackinacki_kit::contracts::dex::oracle::Oracle;
-use ackinacki_kit::contracts::dex::oracle::ParamsOfGetEventListAddress;
-use ackinacki_kit::contracts::dex::oracle_event_list::OracleEventList;
-use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfAddEvent;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use ackinacki_kit::contracts::dex::pmp::Pmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
-use ackinacki_kit::contracts::dex::root_oracle::ParamsOfDeployOracle;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPmpAddress;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::traits::AccountAccessor;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::generate_random_sign_keys;
@@ -48,6 +36,18 @@ use anyhow::anyhow;
 use anyhow::Context;
 use dodex_chain::dex_contract_params;
 use dodex_chain::Dex;
+use dodex_contracts::dex::oracle::Oracle;
+use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
+use dodex_contracts::dex::oracle_event_list::OracleEventList;
+use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
+use dodex_contracts::dex::root_oracle::ParamsOfDeployOracle;
+use dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress;
+use dodex_contracts::dex::root_pn::RootPn;
 use num_bigint::BigUint;
 
 use super::test_pns::TestPn;
@@ -257,7 +257,7 @@ pub async fn deploy_ephemeral_market(
         .get_order_book_address(&pmp_address)
         .await
         .map_err(|e| anyhow!("get_order_book_address: {e:?}"))?;
-    let ob = ackinacki_kit::contracts::dex::order_book::OrderBook::new(
+    let ob = dodex_contracts::dex::order_book::OrderBook::new(
         context.clone(),
         dex_contract_params(&order_book_address),
     );

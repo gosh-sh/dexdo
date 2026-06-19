@@ -159,7 +159,7 @@ impl Dex {
         self.inner
             .private_note()
             .get_private_note_address(
-                ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress {
+                dodex_contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress {
                     deposit_identifier_hash,
                 },
             )
@@ -226,9 +226,7 @@ impl Dex {
             .oracle()
             .get_event_list_address(
                 &oracle_address,
-                ackinacki_kit::contracts::dex::oracle::ParamsOfGetEventListAddress {
-                    index: index as u128,
-                },
+                dodex_contracts::dex::oracle::ParamsOfGetEventListAddress { index: index as u128 },
             )
             .await
             .map_err(|e| JsError::new(&e.to_string()))

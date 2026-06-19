@@ -1,11 +1,11 @@
-use ackinacki_kit::contracts::dex::order_book::OrderBook;
-use ackinacki_kit::contracts::dex::order_book::ParamsOfGetOrder;
-use ackinacki_kit::contracts::dex::order_book::ParamsOfGetOrdersByOwner;
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetDetails;
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetOrder;
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetOrdersByOwner;
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetQueueSize;
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetShutdownState;
+use dodex_contracts::dex::order_book::OrderBook;
+use dodex_contracts::dex::order_book::ParamsOfGetOrder;
+use dodex_contracts::dex::order_book::ParamsOfGetOrdersByOwner;
+use dodex_contracts::dex::order_book::ResultOfGetDetails;
+use dodex_contracts::dex::order_book::ResultOfGetOrder;
+use dodex_contracts::dex::order_book::ResultOfGetOrdersByOwner;
+use dodex_contracts::dex::order_book::ResultOfGetQueueSize;
+use dodex_contracts::dex::order_book::ResultOfGetShutdownState;
 
 use crate::client::DexContext;
 use crate::dex_contract_params;

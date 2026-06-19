@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
-use ackinacki_kit::contracts::dex::root_pn_events::PrivateNoteDeployedData;
-use ackinacki_kit::contracts::dex::root_pn_events::RootPnEvent;
 use ackinacki_kit::contracts::event::Event;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::root_pn::RootPn;
+use dodex_contracts::dex::root_pn_events::PrivateNoteDeployedData;
+use dodex_contracts::dex::root_pn_events::RootPnEvent;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -172,7 +172,7 @@ pub async fn discover_private_notes(
 
             if let Ok(Some(data)) = event.decode::<PrivateNoteDeployedData>(&root_pn) {
                 // Check if this note belongs to one of our keys by querying its details
-                let pn = ackinacki_kit::contracts::dex::private_note::PrivateNote::new(
+                let pn = dodex_contracts::dex::private_note::PrivateNote::new(
                     tvm_client.clone(),
                     dex_contract_params(&data.note_address),
                 );

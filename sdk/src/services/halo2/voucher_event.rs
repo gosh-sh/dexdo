@@ -8,9 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
-use ackinacki_kit::contracts::dex::root_pn_events::VoucherGeneratedData;
-use ackinacki_kit::contracts::error::DexModule;
 use ackinacki_kit::contracts::error::KitError;
 use ackinacki_kit::contracts::error::KitErrorCode;
 use ackinacki_kit::contracts::error::KitModule;
@@ -18,6 +15,8 @@ use ackinacki_kit::contracts::event::Event;
 use ackinacki_kit::contracts::KitResult;
 use ackinacki_kit::tvm_client::net;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::root_pn::RootPn;
+use dodex_contracts::dex::root_pn_events::VoucherGeneratedData;
 use serde::Deserialize;
 
 use crate::dapp::account_query_vars;
@@ -29,7 +28,7 @@ use crate::dapp::dex_contract_params;
 pub const VOUCHER_EVENT_DST: &str =
     ":0000000000000000000000000000000000000000000000000000000000000087";
 
-const MODULE: KitModule = KitModule::Dex(DexModule::RootPn);
+const MODULE: KitModule = KitModule::External("dex.root_pn");
 
 const GQL_EXTOUT_MESSAGES: &str = r#"
     query($address: String!, $last: Int!) {

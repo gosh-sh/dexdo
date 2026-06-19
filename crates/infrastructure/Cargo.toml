@@ -22,6 +22,7 @@ tvm_executor.workspace = true
 tvm_types.workspace = true
 tvm_vm.workspace = true
 ackinacki-kit.workspace = true
+dodex-contracts.workspace = true
 dodex-chain.workspace = true
 uuid.workspace = true
 zeroize.workspace = true

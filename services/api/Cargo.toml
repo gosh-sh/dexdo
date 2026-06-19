@@ -23,6 +23,7 @@ dodex-logging = { path = "../../crates/logging" }
 
 [dev-dependencies]
 ackinacki-kit.workspace = true
+dodex-contracts.workspace = true
 async-trait.workspace = true
 # e2e tests deploy an ephemeral PMP + OrderBook before exercising the
 # trader path; that needs `test-helpers` to expose deploy methods on

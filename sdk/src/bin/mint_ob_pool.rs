@@ -47,23 +47,6 @@ use std::time::Duration;
 
 use ackinacki_kit::contracts::account::AccountStatus;
 use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
-use ackinacki_kit::contracts::dex::oracle::Oracle;
-use ackinacki_kit::contracts::dex::oracle::ParamsOfGetEventListAddress;
-use ackinacki_kit::contracts::dex::oracle_event_list::OracleEventList;
-use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfAddEvent;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use ackinacki_kit::contracts::dex::pmp::Pmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
-use ackinacki_kit::contracts::dex::private_note::PrivateNote;
-use ackinacki_kit::contracts::dex::root_oracle::ParamsOfDeployOracle;
-use ackinacki_kit::contracts::dex::root_oracle::RootOracle;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfDeployPrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPmpAddress;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::giver::v3::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::contracts::giver::v3::top_up_native_with_giver_if_below;
 use ackinacki_kit::contracts::traits::AccountAccessor;
@@ -72,6 +55,23 @@ use ackinacki_kit::tvm_client::crypto::generate_random_sign_keys;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::oracle::Oracle;
+use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
+use dodex_contracts::dex::oracle_event_list::OracleEventList;
+use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
+use dodex_contracts::dex::private_note::PrivateNote;
+use dodex_contracts::dex::root_oracle::ParamsOfDeployOracle;
+use dodex_contracts::dex::root_oracle::RootOracle;
+use dodex_contracts::dex::root_pn::ParamsOfDeployPrivateNote;
+use dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress;
+use dodex_contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
+use dodex_contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
+use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::halo2::giver_voucher::mint_voucher_via_giver;
 use dodex_sdk::halo2::Halo2Paths;
@@ -882,7 +882,7 @@ async fn deploy_one_market(
         .get_order_book_address(&pmp_address)
         .await
         .map_err(|e| format!("get_order_book_address: {e:?}"))?;
-    let ob_handle = ackinacki_kit::contracts::dex::order_book::OrderBook::new(
+    let ob_handle = dodex_contracts::dex::order_book::OrderBook::new(
         context.clone(),
         dex_contract_params(&order_book_address),
     );

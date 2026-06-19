@@ -1,11 +1,11 @@
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use ackinacki_kit::contracts::dex::pmp::Pmp;
-use ackinacki_kit::contracts::dex::pmp::ResultOfGetDetails;
-use ackinacki_kit::contracts::dex::pmp::ResultOfGetOrderBookAddress;
-use ackinacki_kit::contracts::dex::pmp::ResultOfGetShutdownState;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::pmp::ResultOfGetDetails;
+use dodex_contracts::dex::pmp::ResultOfGetOrderBookAddress;
+use dodex_contracts::dex::pmp::ResultOfGetShutdownState;
 
 use crate::errors::AppResult;
 

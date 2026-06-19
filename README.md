@@ -60,6 +60,8 @@ crates/
   domain/            # domain types
   application/       # use cases
   infrastructure/    # adapters (Postgres, TVM runner, GraphQL gateway)
+  contracts/         # dodex-contracts: Rust wrappers for the on-chain contracts,
+                     # built on ackinacki-kit traits; ABIs read from contracts/<group>/
 services/
   api/               # REST API service
   indexer/           # chain-event indexer

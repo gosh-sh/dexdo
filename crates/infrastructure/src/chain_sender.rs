@@ -17,11 +17,6 @@
 
 use std::time::Duration;
 
-use ackinacki_kit::contracts::dex::order_book::OrderBookOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use async_trait::async_trait;
@@ -34,6 +29,11 @@ use dodex_application::NewOrderPayload;
 use dodex_application::SplitFullSetPayload;
 use dodex_chain::ChainError;
 use dodex_chain::Dex;
+use dodex_contracts::dex::order_book::OrderBookOrder;
+use dodex_contracts::dex::private_note::ParamsOfCancelOrder;
+use dodex_contracts::dex::private_note::ParamsOfPlaceBatch;
+use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
+use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
 use dodex_domain::DomainError;
 use dodex_domain::SensitiveBytes;
 use num_bigint::BigUint;
@@ -734,7 +734,6 @@ mod tests {
     }
 
     fn tvm_exit(code: u16) -> ChainError {
-        use ackinacki_kit::contracts::error::DexModule;
         use ackinacki_kit::contracts::error::KitError;
         use ackinacki_kit::contracts::error::KitErrorCode;
         use ackinacki_kit::contracts::error::KitModule;
@@ -743,7 +742,7 @@ mod tests {
         // are raised by `PrivateNote`; module matches the originating
         // contract so a reader is not misled when reviewing the test.
         ChainError::Kit(KitError {
-            module: KitModule::Dex(DexModule::PrivateNote),
+            module: KitModule::External("dex.private_note"),
             code: KitErrorCode::None,
             message: "Send message".into(),
             tvm_error: Some(ClientError::new(
@@ -803,13 +802,12 @@ mod tests {
         // Transport / decode kit failures that did not bubble up from
         // a contract revert carry no exit code; they must not be
         // misinterpreted as a known TVM exit.
-        use ackinacki_kit::contracts::error::DexModule;
         use ackinacki_kit::contracts::error::KitError;
         use ackinacki_kit::contracts::error::KitErrorCode;
         use ackinacki_kit::contracts::error::KitModule;
         let ctx = ctx_single("place_order");
         let err = ChainError::Kit(KitError {
-            module: KitModule::Dex(DexModule::PrivateNote),
+            module: KitModule::External("dex.private_note"),
             code: KitErrorCode::AccountIsNotActive,
             message: "transport blew up".into(),
             tvm_error: None,
@@ -822,13 +820,12 @@ mod tests {
         // The `data()` JSON exists but does not carry an `exit_code`
         // — could happen if the gateway shape ever changes. Must not
         // panic; must fall through cleanly.
-        use ackinacki_kit::contracts::error::DexModule;
         use ackinacki_kit::contracts::error::KitError;
         use ackinacki_kit::contracts::error::KitErrorCode;
         use ackinacki_kit::contracts::error::KitModule;
         use ackinacki_kit::tvm_client::error::ClientError;
         let err = ChainError::Kit(KitError {
-            module: KitModule::Dex(DexModule::PrivateNote),
+            module: KitModule::External("dex.private_note"),
             code: KitErrorCode::None,
             message: "boom".into(),
             tvm_error: Some(ClientError::new(

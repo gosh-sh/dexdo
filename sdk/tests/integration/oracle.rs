@@ -1,9 +1,9 @@
 //! Oracle-side tests: fee withdrawal, oracle/market discovery.
 
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
 use ackinacki_kit::tvm_client::abi::Signer;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::private_note::ParamsOfSetStake;
 
 use crate::common::context::create_context;
 use crate::common::context::create_dex;
@@ -63,7 +63,7 @@ async fn test_oracle_withdraw_fees_via_dex() {
     let result = dex
         .withdraw_fees(
             &s.oracle_address,
-            ackinacki_kit::contracts::dex::oracle::ParamsOfWithdrawFees {
+            dodex_contracts::dex::oracle::ParamsOfWithdrawFees {
                 to: GIVER_ADDRESS.to_string(),
                 amount: 1, // withdraw minimal amount
             },

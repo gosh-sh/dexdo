@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use ackinacki_kit::contracts::dex::private_note::PrivateNote;
-use ackinacki_kit::contracts::dex::private_note_events::DecodedPrivateNoteEvent;
-use ackinacki_kit::contracts::dex::private_note_events::PrivateNoteEvent;
 use ackinacki_kit::contracts::event::Event;
 use ackinacki_kit::contracts::traits::FromEvent;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::private_note::PrivateNote;
+use dodex_contracts::dex::private_note_events::DecodedPrivateNoteEvent;
+use dodex_contracts::dex::private_note_events::PrivateNoteEvent;
 use serde::Deserialize;
 use serde_json::json;
 

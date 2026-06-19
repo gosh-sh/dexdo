@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ackinacki_kit::contracts::dex::oracle_event_list::ResultOfGetEvents as KitEvents;
+use dodex_contracts::dex::oracle_event_list::ResultOfGetEvents as KitEvents;
 use serde::Deserialize;
 use serde::Serialize;
 

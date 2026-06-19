@@ -11,7 +11,6 @@
 //! poseidon commitment keeps the kit aligned with v2 attack scenarios that
 //! rely on the canonical sk_u ↔ skUCommit binding.
 
-use ackinacki_kit::contracts::error::DexModule;
 use ackinacki_kit::contracts::error::KitError;
 use ackinacki_kit::contracts::error::KitErrorCode;
 use ackinacki_kit::contracts::error::KitModule;
@@ -21,7 +20,7 @@ use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::halo2_proofs::halo2curves::ff::Field;
 use halo2_base::halo2_proofs::halo2curves::ff::PrimeField;
 
-const MODULE: KitModule = KitModule::Dex(DexModule::RootPn);
+const MODULE: KitModule = KitModule::External("dex.root_pn");
 
 /// Compute `skUCommit = poseidon_hash([sk_u, 0])` for the given 32-byte sk_u.
 /// `sk_u_hex` may be prefixed with `0x` and is parsed as little-endian (BN254

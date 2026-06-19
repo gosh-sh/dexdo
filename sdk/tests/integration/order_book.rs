@@ -17,15 +17,15 @@
 //!   OB_POOL_PATH=/path/to/ob_pool.json
 //!   PN_POOL_PATH=/path/to/pn_pool.json
 
-use ackinacki_kit::contracts::dex::order_book::OrderBookOrder;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfMergeFullSet;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfStakeKey;
 use ackinacki_kit::tvm_client::abi::Signer;
+use dodex_contracts::dex::order_book::OrderBookOrder;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
+use dodex_contracts::dex::private_note::ParamsOfCancelOrderByClient;
+use dodex_contracts::dex::private_note::ParamsOfMergeFullSet;
+use dodex_contracts::dex::private_note::ParamsOfPlaceBatch;
+use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
+use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
+use dodex_contracts::dex::private_note::ParamsOfStakeKey;
 use dodex_sdk::Dex;
 use dodex_sdk::OwnedOrder;
 

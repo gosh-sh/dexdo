@@ -15,8 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGenerateVoucher;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
+use ackinacki_kit::contracts::account::ParamsOfNewContract;
 use ackinacki_kit::contracts::multisig::Multisig;
 use ackinacki_kit::contracts::multisig::ParamsOfSubmitTransaction;
 use ackinacki_kit::contracts::traits::AbiAccessor;
@@ -26,7 +25,8 @@ use ackinacki_kit::tvm_client::abi::ParamsOfEncodeMessageBody;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
-use ackinacki_kit::contracts::account::ParamsOfNewContract;
+use dodex_contracts::dex::root_pn::ParamsOfGenerateVoucher;
+use dodex_contracts::dex::root_pn::RootPn;
 use serde_json::json;
 
 use crate::dex_contract_params;

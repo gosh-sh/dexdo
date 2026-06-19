@@ -5,7 +5,7 @@
 // `getOrdersByOwner` for absence-polling between a cancel call and the
 // next placement.
 
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetOrdersByOwner as KitOrdersByOwner;
+use dodex_contracts::dex::order_book::ResultOfGetOrdersByOwner as KitOrdersByOwner;
 
 use super::error::ChainError;
 use super::error::ChainResult;

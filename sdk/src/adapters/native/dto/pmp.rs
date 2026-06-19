@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use ackinacki_kit::contracts::dex::pmp::ResultOfGetDetails as KitPmpDetails;
-use ackinacki_kit::contracts::dex::pmp::ResultOfGetShutdownState as KitPmpShutdownState;
+use dodex_contracts::dex::pmp::ResultOfGetDetails as KitPmpDetails;
+use dodex_contracts::dex::pmp::ResultOfGetShutdownState as KitPmpShutdownState;
 use serde::Deserialize;
 use serde::Serialize;
 

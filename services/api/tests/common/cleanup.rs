@@ -18,12 +18,12 @@
 
 use std::time::Duration;
 
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use dodex_chain::ChainError;
 use dodex_chain::Dex;
 use dodex_chain::OwnedOrder;
+use dodex_contracts::dex::private_note::ParamsOfCancelOrderByClient;
 
 use super::deploy_market::EphemeralMarket;
 use super::test_pns::TestPn;

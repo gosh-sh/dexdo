@@ -4,7 +4,6 @@
 
 use std::path::Path;
 
-use ackinacki_kit::contracts::error::DexModule;
 use ackinacki_kit::contracts::error::KitError;
 use ackinacki_kit::contracts::error::KitErrorCode;
 use ackinacki_kit::contracts::error::KitModule;
@@ -15,7 +14,7 @@ use halo2_proover::Prover;
 
 use crate::services::halo2::cache::ProverCacheStorage;
 
-const MODULE: KitModule = KitModule::Dex(DexModule::RootPn);
+const MODULE: KitModule = KitModule::External("dex.root_pn");
 
 /// `HISTORY_PROOF_WINDOW_SIZE` for the connected network. Both shellnet
 /// (after the bridge/DEX restart) and mainnet use 128.

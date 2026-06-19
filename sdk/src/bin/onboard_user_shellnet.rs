@@ -53,17 +53,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use ackinacki_kit::contracts::dex::private_note::PrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfDeployPrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::traits::AccountAccessor;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::generate_random_sign_keys;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::private_note::PrivateNote;
+use dodex_contracts::dex::root_pn::ParamsOfDeployPrivateNote;
+use dodex_contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
+use dodex_contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
+use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::halo2::multisig_voucher::mint_voucher_via_multisig;
 use dodex_sdk::halo2::Halo2Paths;
@@ -210,8 +210,7 @@ impl Args {
         }
 
         let multisig_address = multisig_address.ok_or("--multisig-address is required")?;
-        let multisig_keys_file =
-            multisig_keys_file.ok_or("--multisig-keys-file is required")?;
+        let multisig_keys_file = multisig_keys_file.ok_or("--multisig-keys-file is required")?;
 
         let network_url = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
             endpoint.clone()
@@ -305,10 +304,8 @@ fn write_account_file(state: &PnState, token_type: TokenTypeArg, state_path: &Pa
             state.deposit_identifier_hash.as_deref().expect("dih must be set"),
         ),
     };
-    let dir = state_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let dir =
+        state_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let path = dir.join(format!("{}.account.json", token_type.label().to_ascii_lowercase()));
     let json = serde_json::to_string_pretty(&account).expect("serialize account file");
     std::fs::write(&path, json).expect("write account file");
@@ -572,8 +569,7 @@ async fn main() -> ExitCode {
     }
 
     let pn_address = state.pn_address.clone().expect("pn_address must be set by now");
-    let dih_dec =
-        state.deposit_identifier_hash.clone().expect("dih_dec must be set by now");
+    let dih_dec = state.deposit_identifier_hash.clone().expect("dih_dec must be set by now");
     let pn_keys = KeyPair {
         public: state.owner_public_key_hex.clone().expect("pn pubkey must be set"),
         secret: state.owner_secret_key_hex.clone().expect("pn seckey must be set"),

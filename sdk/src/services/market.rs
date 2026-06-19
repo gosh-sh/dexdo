@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use ackinacki_kit::contracts::dex::oracle::Oracle;
-use ackinacki_kit::contracts::dex::oracle::ParamsOfGetEventListAddress;
-use ackinacki_kit::contracts::dex::oracle_event_list::OracleEventList;
-use ackinacki_kit::contracts::dex::pmp::Pmp;
-use ackinacki_kit::contracts::dex::root_oracle::RootOracle;
-use ackinacki_kit::contracts::dex::root_oracle_events::OracleDeployedData;
-use ackinacki_kit::contracts::dex::root_oracle_events::RootOracleEvent;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPmpAddress;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::event::Event;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::oracle::Oracle;
+use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
+use dodex_contracts::dex::oracle_event_list::OracleEventList;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::root_oracle::RootOracle;
+use dodex_contracts::dex::root_oracle_events::OracleDeployedData;
+use dodex_contracts::dex::root_oracle_events::RootOracleEvent;
+use dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress;
+use dodex_contracts::dex::root_pn::RootPn;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;

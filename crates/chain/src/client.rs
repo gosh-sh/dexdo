@@ -8,18 +8,18 @@
 
 use std::sync::Arc;
 
-use ackinacki_kit::contracts::dex::order_book::OrderBook;
-use ackinacki_kit::contracts::dex::order_book::ParamsOfGetOrdersByOwner;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfCancelOrderByClient;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceBatch;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfPlaceOrder;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSplitFullSet;
-use ackinacki_kit::contracts::dex::private_note::PrivateNote;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::order_book::OrderBook;
+use dodex_contracts::dex::order_book::ParamsOfGetOrdersByOwner;
+use dodex_contracts::dex::private_note::ParamsOfCancelOrder;
+use dodex_contracts::dex::private_note::ParamsOfCancelOrderByClient;
+use dodex_contracts::dex::private_note::ParamsOfPlaceBatch;
+use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
+use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
+use dodex_contracts::dex::private_note::PrivateNote;
 
 use super::dapp::dex_contract_params;
 use super::dto::OwnedOrders;

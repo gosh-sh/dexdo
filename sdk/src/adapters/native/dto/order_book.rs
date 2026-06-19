@@ -1,7 +1,7 @@
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetDetails as KitOrderBookDetails;
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetOrder as KitOrderInfo;
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetOrdersByOwner as KitOrdersByOwner;
-use ackinacki_kit::contracts::dex::order_book::ResultOfGetShutdownState as KitOrderBookShutdownState;
+use dodex_contracts::dex::order_book::ResultOfGetDetails as KitOrderBookDetails;
+use dodex_contracts::dex::order_book::ResultOfGetOrder as KitOrderInfo;
+use dodex_contracts::dex::order_book::ResultOfGetOrdersByOwner as KitOrdersByOwner;
+use dodex_contracts::dex::order_book::ResultOfGetShutdownState as KitOrderBookShutdownState;
 use serde::Deserialize;
 use serde::Serialize;
 

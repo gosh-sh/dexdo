@@ -1,8 +1,8 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
-use ackinacki_kit::contracts::dex::private_note::ResultOfGetDetails as KitPnDetails;
-use ackinacki_kit::contracts::dex::private_note::ResultOfGetStakes as KitPnStakes;
+use dodex_contracts::dex::private_note::ResultOfGetDetails as KitPnDetails;
+use dodex_contracts::dex::private_note::ResultOfGetStakes as KitPnStakes;
 use serde::Deserialize;
 use serde::Serialize;
 

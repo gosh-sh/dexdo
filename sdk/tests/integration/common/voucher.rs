@@ -7,8 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGenerateVoucher;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::giver::GiverV3;
 use ackinacki_kit::contracts::giver::ParamsOfSendCurrencyWithBody;
 use ackinacki_kit::contracts::traits::AbiAccessor;
@@ -17,6 +15,8 @@ use ackinacki_kit::tvm_client::abi::CallSet;
 use ackinacki_kit::tvm_client::abi::ParamsOfEncodeMessageBody;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::root_pn::ParamsOfGenerateVoucher;
+use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::halo2::live::prove_voucher_for_event;
 use dodex_sdk::halo2::sk_commit::compute_sk_u_commit_hex;

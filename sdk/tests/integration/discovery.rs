@@ -3,15 +3,15 @@
 use std::collections::HashMap;
 
 use ackinacki_kit::contracts::dapp::SystemDapp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfWithdrawTokens;
-use ackinacki_kit::contracts::dex::private_note::PrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfDeployPrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::contracts::giver::v3::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
+use dodex_contracts::dex::private_note::ParamsOfWithdrawTokens;
+use dodex_contracts::dex::private_note::PrivateNote;
+use dodex_contracts::dex::root_pn::ParamsOfDeployPrivateNote;
+use dodex_contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
+use dodex_contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
+use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::proof;
 

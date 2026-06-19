@@ -10,27 +10,27 @@
 // The prod api/infrastructure build leaves `test-helpers` off so
 // `Dex` exposes only the trader-path methods in `client.rs`.
 
-use ackinacki_kit::contracts::dex::oracle::Oracle;
-use ackinacki_kit::contracts::dex::oracle::ParamsOfGetEventListAddress;
-use ackinacki_kit::contracts::dex::oracle_event_list::OracleEventList;
-use ackinacki_kit::contracts::dex::oracle_event_list::ParamsOfAddEvent;
-use ackinacki_kit::contracts::dex::oracle_event_list::ResultOfGetEvents;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use ackinacki_kit::contracts::dex::pmp::Pmp;
-use ackinacki_kit::contracts::dex::pmp::ResultOfGetDetails as PmpKitDetails;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfDeployPmp;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
-use ackinacki_kit::contracts::dex::private_note::PrivateNote;
-use ackinacki_kit::contracts::dex::private_note::ResultOfGetDetails as PnDetails;
-use ackinacki_kit::contracts::dex::private_note::ResultOfGetStakes as PnStakesRaw;
-use ackinacki_kit::contracts::dex::root_oracle::ParamsOfDeployOracle;
-use ackinacki_kit::contracts::dex::root_oracle::ParamsOfGetOracleAddress;
-use ackinacki_kit::contracts::dex::root_oracle::RootOracle;
-use ackinacki_kit::contracts::dex::root_pn::ParamsOfGetPmpAddress;
-use ackinacki_kit::contracts::dex::root_pn::RootPn;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
+use dodex_contracts::dex::oracle::Oracle;
+use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
+use dodex_contracts::dex::oracle_event_list::OracleEventList;
+use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::oracle_event_list::ResultOfGetEvents;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::pmp::ResultOfGetDetails as PmpKitDetails;
+use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::private_note::PrivateNote;
+use dodex_contracts::dex::private_note::ResultOfGetDetails as PnDetails;
+use dodex_contracts::dex::private_note::ResultOfGetStakes as PnStakesRaw;
+use dodex_contracts::dex::root_oracle::ParamsOfDeployOracle;
+use dodex_contracts::dex::root_oracle::ParamsOfGetOracleAddress;
+use dodex_contracts::dex::root_oracle::RootOracle;
+use dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress;
+use dodex_contracts::dex::root_pn::RootPn;
 
 use super::client::Dex;
 use super::dapp::dex_contract_params;

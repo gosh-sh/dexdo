@@ -1,13 +1,13 @@
 //! PN event-history tests: parsed events, single/batched note history,
 //! pagination over a rich event log.
 
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitResolve;
-use ackinacki_kit::contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfChangeOwner;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfInitTransfer;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfSetStake;
-use ackinacki_kit::contracts::dex::private_note::ParamsOfStakeKey;
 use ackinacki_kit::tvm_client::abi::Signer;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::private_note::ParamsOfChangeOwner;
+use dodex_contracts::dex::private_note::ParamsOfInitTransfer;
+use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::private_note::ParamsOfStakeKey;
 use dodex_sdk::proof;
 
 use crate::common::context::create_context;
