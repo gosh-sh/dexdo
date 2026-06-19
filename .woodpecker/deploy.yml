@@ -22,7 +22,7 @@ steps:
     image: *ansible_image
     directory: deploy/ansible
     environment:
-      SSH_NET_KEY: { from_secret: ssh_net_key }
+      SSH_NET_KEY: { from_secret: ssh_dodex_ci }
     commands:
       - mkdir -p ~/.ssh
       - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_deploy
