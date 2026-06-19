@@ -12,6 +12,10 @@ variables:
 steps:
   inventory_clone:
     image: *git_image
+    environment:
+      CI_NETRC_MACHINE: github.com
+      CI_NETRC_USERNAME: x-access-token
+      CI_NETRC_PASSWORD: { from_secret: GITHUB_TOKEN }
     settings:
       remote: { from_secret: inventory_repo_url }
       branch: *inventory_branch
