@@ -60,7 +60,27 @@ pub async fn run_refresh_loop(
 
 #[cfg(test)]
 mod tests {
+    use dodex_infrastructure::config::METRIC_CRITICAL_EVENT_TYPES;
+
     use super::resolve_counts;
+    use super::ORDERS_CREATED_EVENT;
+    use super::ORDER_PARTIALLY_FILLED_EVENT;
+
+    /// The config startup guard refuses to drop a metric-critical type, but it
+    /// only knows the types listed in `METRIC_CRITICAL_EVENT_TYPES`. If a third
+    /// metric-backed type is tracked here without being added there, the guard
+    /// silently stops protecting it. Fail loudly instead of drifting.
+    #[test]
+    fn metric_critical_covers_tracked_types() {
+        for tracked in [ORDERS_CREATED_EVENT, ORDER_PARTIALLY_FILLED_EVENT] {
+            assert!(
+                METRIC_CRITICAL_EVENT_TYPES.contains(&tracked),
+                "metrics_refresh tracks {tracked:?} but config::METRIC_CRITICAL_EVENT_TYPES \
+                 does not list it — the ignored_event_types guard would not protect it; \
+                 add it to METRIC_CRITICAL_EVENT_TYPES"
+            );
+        }
+    }
 
     #[test]
     fn maps_tracked_types() {

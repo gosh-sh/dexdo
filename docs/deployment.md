@@ -219,6 +219,8 @@ indexer:
   oracle_event_list_reconciliation_interval_ms: 60000
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
+  ignored_event_types:
+    - "OrderBook.Queued"
 ```
 
 The api and indexer **must share one database**: the indexer writes the
@@ -248,6 +250,16 @@ api only:
   `chain.*_timeout_ms` and than `graphql.request_timeout_ms` — otherwise the
   HTTP timeout could fire while a chain submission or BOC read is still in
   flight.
+
+indexer only:
+
+- `indexer.ignored_event_types` may list only known droppable no-op types
+  (`OrderBook.Queued` / `FullyFilled` / `Rejected` / `CallbackBounced`). The
+  startup guard refuses anything else — metric-critical types
+  (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`, counted from `raw_events`
+  for the OTLP metrics), state-changing types, and typos — so a bad list
+  refuses startup rather than silently dropping nothing or corrupting the read
+  model.
 
 ## Step 4 — Compose override, build, and run
 
@@ -349,7 +361,16 @@ Each service writes to **both** stdout and a host-mounted directory. The base
 to `/app/logs` (in each container) and sets `LOG_DIR=/app/logs`. With `LOG_DIR`
 set, the service writes daily-rotated, human-readable files named
 `<service>.log.<YYYY-MM-DD>` into that directory, keeping at most `LOG_MAX_FILES`
-of them (default 14):
+of them (default 14).
+
+The indexer additionally writes a second daily-rotated file,
+`indexer.noise.log.<YYYY-MM-DD>` (same `LOG_MAX_FILES` retention), carrying the
+high-volume, low-value "projector has no handler for event type" repeats. The
+first sighting of each unseen type still goes to stdout and `indexer.log`; only
+the repeats are diverted here, so this file stays quiet unless a deployed
+contract is steadily emitting an event the indexer does not yet handle. Other
+services build the noise appender too, so an empty `<service>.noise.log.<date>`
+is created, but only the indexer ever writes to it.
 
 ```sh
 # tail the live stdout stream (unchanged)
@@ -357,6 +378,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f api inde
 
 # the persisted files on the host (survive container removal / redeploy)
 tail -f logs/api/api.log.*
+tail -f logs/indexer/indexer.noise.log.*   # diverted "no handler" repeats
 ls -1 logs/indexer/
 ```
 

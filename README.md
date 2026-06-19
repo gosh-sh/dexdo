@@ -90,10 +90,16 @@ Per-service config files live under `config/`:
 
 Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override at runtime with `APP_CONFIG=/path/to/file.yaml`.
 
+Notable indexer config keys under `indexer:`:
+
+- `ignored_addresses` — source addresses dropped before `raw_events` insert and projection.
+- `ignored_event_types` — decoded event types dropped before `raw_events` insert and projection. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#event-type-ignore-list).
+
 Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
 (optional) makes each service also write rotated log files into a directory —
 the Compose deployment bind-mounts these to `./logs/<service>`. See
-[docs/deployment.md](docs/deployment.md#logs).
+[docs/deployment.md](docs/deployment.md#logs) and
+[docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#noise-log).
 
 Metrics are OpenTelemetry/OTLP: the indexer exports event counters when
 `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) is set,

@@ -1,6 +1,9 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -24,6 +27,16 @@ use crate::projectors::ProjectionOutcome;
 #[derive(Debug, Clone)]
 pub struct IndexerRepository {
     pool: PgPool,
+    /// Event types already seen with no projector handler this process. The
+    /// first sighting of a type is logged at the normal target (stdout + main
+    /// log) as the operator's signal that a deployed contract emits something
+    /// the indexer does not yet handle; every later repeat is diverted to the
+    /// noise log. Shared via `Arc` across the clones that record sightings —
+    /// the fetch loop and the reprojection sweep — so "first" is process-global
+    /// across both. (The metrics-refresh clone shares the `Arc` too but never
+    /// records sightings.) Bounded by the decoder's ABI event vocabulary, so it
+    /// cannot grow without limit.
+    seen_unknown_event_types: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -35,6 +48,7 @@ pub struct PagePersistResult {
     pub projected: u64,
     pub projection_deferred: u64,
     pub projection_failed: u64,
+    pub type_ignored: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -60,7 +74,19 @@ struct PendingRow {
 
 impl IndexerRepository {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, seen_unknown_event_types: Arc::new(Mutex::new(HashSet::new())) }
+    }
+
+    /// Returns `true` the first time `event_type` is seen as projector-unknown
+    /// this process, `false` on every later sighting. Used to surface a novel
+    /// event type once (loudly) without flooding the main log on every repeat.
+    fn first_unknown_sighting(&self, event_type: &str) -> bool {
+        // The guard is held only across the in-memory insert (no await), so a
+        // poisoned lock can only mean a prior panic while holding it — recover
+        // the set rather than cascading the panic into the ingest loop.
+        let mut seen =
+            self.seen_unknown_event_types.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        seen.insert(event_type.to_string())
     }
 
     /// Counts `raw_events` rows grouped by `event_type`, restricted to the
@@ -101,6 +127,7 @@ impl IndexerRepository {
         edges: &[EventEdge],
         end_cursor: Option<&str>,
         decoder: &Decoder,
+        ignored_event_types: &HashSet<&str>,
     ) -> anyhow::Result<PagePersistResult> {
         let mut tx: Transaction<'_, Postgres> = self.pool.begin().await.context("begin tx")?;
         let mut result = PagePersistResult::default();
@@ -123,6 +150,17 @@ impl IndexerRepository {
 
             let body_value = edge.node.body.clone().unwrap_or(Value::Null);
             let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref());
+            // Drop configured no-op event types before they cost a raw_events
+            // insert + projection + mark_processed. The page-level cursor
+            // upsert after the loop still runs, so the cursor advances past
+            // them. event_type is only known post-decode, which is why this
+            // lives here and not in drain_events' src-based filter.
+            if let Some(d) = decoded.as_ref()
+                && ignored_event_types.contains(d.event_type.as_str())
+            {
+                result.type_ignored += 1;
+                continue;
+            }
             if decoded.is_some() {
                 result.decoded += 1;
             } else {
@@ -194,15 +232,25 @@ impl IndexerRepository {
                     Ok(ProjectionOutcome::Unknown) => {
                         // The row is still marked processed so the cursor
                         // advances — blocking it would stall ingestion on
-                        // every newly deployed contract emitting an event
-                        // we don't yet teach. The warn! is the observability
-                        // hook: a new event type produces one log line per
-                        // occurrence so operators see the gap.
-                        warn!(
-                            msg_id = %edge.node.msg_id,
-                            event_type = %decoded_event.event_type,
-                            "projector has no handler for event type; marking processed and advancing cursor"
-                        );
+                        // every newly deployed contract emitting an event we
+                        // don't yet teach. The first sighting of each unhandled
+                        // type goes to the normal target (stdout + main log) so
+                        // operators actually see the gap; later repeats are
+                        // diverted to the noise log to avoid flooding it.
+                        if self.first_unknown_sighting(&decoded_event.event_type) {
+                            warn!(
+                                msg_id = %edge.node.msg_id,
+                                event_type = %decoded_event.event_type,
+                                "projector has no handler for event type; marking processed and advancing cursor (first sighting — later repeats go to the noise log)"
+                            );
+                        } else {
+                            warn!(
+                                target: dodex_logging::EVENT_NOISE_TARGET,
+                                msg_id = %edge.node.msg_id,
+                                event_type = %decoded_event.event_type,
+                                "projector has no handler for event type; marking processed and advancing cursor"
+                            );
+                        }
                         sp.commit().await.context("projector savepoint release")?;
                         mark_processed_by_msg_id(&mut tx, &edge.node.msg_id).await?;
                     }
@@ -294,11 +342,23 @@ impl IndexerRepository {
                     stats.deferred += 1;
                 }
                 Ok(ProjectionOutcome::Unknown) => {
-                    warn!(
-                        msg_id = %row.msg_id,
-                        event_type = %event.event_type,
-                        "reprojection has no handler for event type; marking processed and advancing"
-                    );
+                    // First sighting -> normal target so operators see the gap;
+                    // repeats -> noise log. Shares the dedup set with the fetch
+                    // loop, so a type already surfaced there stays quiet here.
+                    if self.first_unknown_sighting(&event.event_type) {
+                        warn!(
+                            msg_id = %row.msg_id,
+                            event_type = %event.event_type,
+                            "reprojection has no handler for event type; marking processed and advancing (first sighting — later repeats go to the noise log)"
+                        );
+                    } else {
+                        warn!(
+                            target: dodex_logging::EVENT_NOISE_TARGET,
+                            msg_id = %row.msg_id,
+                            event_type = %event.event_type,
+                            "reprojection has no handler for event type; marking processed and advancing"
+                        );
+                    }
                     sp.commit().await.context("reproject savepoint release")?;
                     mark_processed_by_id(&mut tx, row.id).await?;
                     stats.unknown += 1;
@@ -490,6 +550,31 @@ mod tests {
         for bad in ["inf", "-inf", "Infinity", "NaN", "nan"] {
             assert_eq!(parse_unix_seconds(Some(&Value::from(bad))), None, "string {bad:?}");
         }
+    }
+
+    /// The main-vs-noise split for unhandled events rides entirely on this
+    /// boolean: `true` routes the first sighting to the operator-visible log,
+    /// `false` diverts repeats to the noise log. Pin the direction (true once
+    /// per type, false thereafter) and the per-type independence, so a flipped
+    /// return — which would flood the main log with the repeats this guard
+    /// exists to suppress — fails here rather than only in production.
+    #[tokio::test]
+    async fn first_unknown_sighting_is_true_once_per_type() {
+        // A lazy pool never opens a connection unless a query runs;
+        // `first_unknown_sighting` only touches the in-memory set, so this
+        // needs no database — only a Tokio context for the pool to build in.
+        let pool = PgPool::connect_lazy("postgres://unused/unused").expect("lazy pool");
+        let repo = IndexerRepository::new(pool);
+
+        assert!(repo.first_unknown_sighting("OrderBook.NovelEvent"), "first sighting is true");
+        assert!(!repo.first_unknown_sighting("OrderBook.NovelEvent"), "repeat is false");
+        assert!(!repo.first_unknown_sighting("OrderBook.NovelEvent"), "still false");
+
+        // Tracking is per-type: a different type is still "first" even after
+        // another type has been seen.
+        assert!(repo.first_unknown_sighting("PMP.OtherNovelEvent"), "distinct type is first");
+        assert!(!repo.first_unknown_sighting("PMP.OtherNovelEvent"), "its repeat is false");
+        assert!(!repo.first_unknown_sighting("OrderBook.NovelEvent"), "earlier type stays seen");
     }
 
     fn pending_row_with(

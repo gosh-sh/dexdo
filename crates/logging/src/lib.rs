@@ -26,6 +26,12 @@ use tracing_subscriber::EnvFilter;
 /// is unset or unparseable.
 const DEFAULT_MAX_FILES: usize = 14;
 
+/// Tracing target for high-volume, low-value diagnostic lines (e.g. the
+/// projector's "no handler for event type" warns). Routed to a dedicated
+/// `<service>.noise.log` file when `LOG_DIR` is set, and kept out of stdout
+/// and the main log file.
+pub const EVENT_NOISE_TARGET: &str = "dodex::event_noise";
+
 fn env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
 }
@@ -34,59 +40,133 @@ fn max_files() -> usize {
     env::var("LOG_MAX_FILES").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_FILES)
 }
 
-/// Build the daily rolling-file appender for `service` under `dir`, creating
-/// the directory if needed. Errors out (rather than panicking) so the caller
-/// can fall back to stdout-only.
-fn file_appender(dir: &str, service: &str) -> anyhow::Result<RollingFileAppender> {
+/// Build the daily rolling-file appender with the given filename `prefix`
+/// under `dir`, creating the directory if needed. Errors out (rather than
+/// panicking) so the caller can fall back to stdout-only.
+fn file_appender(dir: &str, prefix: &str) -> anyhow::Result<RollingFileAppender> {
     std::fs::create_dir_all(dir)?;
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
-        .filename_prefix(format!("{service}.log"))
+        .filename_prefix(prefix.to_string())
         .max_log_files(max_files())
         .build(dir)?;
     Ok(appender)
 }
 
+/// Whether the main-file sink should also carry [`EVENT_NOISE_TARGET`] lines:
+/// only when the noise file is unavailable, so noise falls back to the main
+/// file instead of being dropped. Pure so the routing truth table is testable
+/// without installing a global subscriber.
+fn main_carries_noise(noise_failed: bool) -> bool {
+    noise_failed
+}
+
+/// Whether stdout should carry [`EVENT_NOISE_TARGET`] lines: only when neither
+/// file sink captured them (both unavailable) — the last-resort fallback so
+/// noise is never lost. Pure for the same testability reason as
+/// [`main_carries_noise`].
+fn stdout_carries_noise(main_failed: bool, noise_failed: bool) -> bool {
+    main_failed && noise_failed
+}
+
 /// Install the global tracing subscriber for `service`.
 ///
-/// Always logs to stdout. If `LOG_DIR` is set and non-empty, also writes
-/// daily-rotated `<service>.log.<date>` files there. On a log-dir error, warns
-/// loudly to the (already-installed) stdout logger and continues stdout-only.
+/// Always logs to stdout (excluding noise-target lines when `LOG_DIR` is set).
+/// If `LOG_DIR` is set and non-empty, also writes daily-rotated files:
+/// `<service>.log.<date>` for normal lines and `<service>.noise.log.<date>`
+/// for [`EVENT_NOISE_TARGET`] lines (normally kept out of stdout and the main
+/// log — but see the sink-degradation note below: if an appender fails, noise
+/// falls back to the surviving sinks rather than being dropped).
+/// When `LOG_DIR` is absent (dev), everything including noise goes to stdout.
+/// On a log-dir error, warns loudly and degrades each sink independently
+/// (worst case: stdout-only).
 ///
 /// Returns the appender guard(s). The caller MUST keep them alive for the
 /// lifetime of the process (`let _guards = dodex_logging::init("api");`) — drop
 /// them and the background file writer stops flushing.
 #[must_use]
 pub fn init(service: &str) -> Vec<WorkerGuard> {
-    let stdout_layer = fmt::layer().with_writer(std::io::stdout);
+    use tracing_subscriber::filter::FilterFn;
+    use tracing_subscriber::Layer;
 
     let log_dir = env::var("LOG_DIR").unwrap_or_default();
     if log_dir.is_empty() {
+        // No LOG_DIR: a single stdout sink carries everything, including the
+        // noise-target lines — nothing is dropped in dev.
+        let stdout_layer = fmt::layer().with_writer(std::io::stdout);
         tracing_subscriber::registry().with(env_filter()).with(stdout_layer).init();
         return Vec::new();
     }
 
-    match file_appender(&log_dir, service) {
-        Ok(appender) => {
-            let (writer, guard) = tracing_appender::non_blocking(appender);
-            let file_layer = fmt::layer().with_ansi(false).with_writer(writer);
-            tracing_subscriber::registry()
-                .with(env_filter())
-                .with(stdout_layer)
-                .with(file_layer)
-                .init();
-            vec![guard]
-        }
-        Err(err) => {
-            tracing_subscriber::registry().with(env_filter()).with(stdout_layer).init();
-            tracing::warn!(
-                log_dir = %log_dir,
-                error = %err,
-                "LOG_DIR set but file logging could not be initialised; continuing with stdout only"
-            );
-            Vec::new()
-        }
+    let main_appender = file_appender(&log_dir, &format!("{service}.log"));
+    let noise_appender = file_appender(&log_dir, &format!("{service}.noise.log"));
+
+    // Degrade each file sink independently: a failure on one must not discard
+    // the other, and whatever fails is named in the warning rather than having
+    // its lines vanish. When a file sink is unavailable, its lines fall back to
+    // the surviving sinks (noise -> main file; or -> stdout when the main file
+    // is also gone) so nothing is silently dropped.
+    let main_err = main_appender.as_ref().err().map(ToString::to_string);
+    let noise_err = noise_appender.as_ref().err().map(ToString::to_string);
+    let noise_failed = noise_appender.is_err();
+
+    let mut guards = Vec::new();
+
+    // Main file: non-noise lines always; noise lines too when the noise file is
+    // unavailable, so they are still captured durably instead of dropped.
+    let main_layer = main_appender.ok().map(|main| {
+        let (writer, guard) = tracing_appender::non_blocking(main);
+        guards.push(guard);
+        fmt::layer().with_ansi(false).with_writer(writer).with_filter(FilterFn::new(
+            move |m: &tracing::Metadata| {
+                m.target() != EVENT_NOISE_TARGET || main_carries_noise(noise_failed)
+            },
+        ))
+    });
+    let main_failed = main_layer.is_none();
+
+    // Noise file: noise-target lines only, when its appender built.
+    let noise_layer = noise_appender.ok().map(|noise| {
+        let (writer, guard) = tracing_appender::non_blocking(noise);
+        guards.push(guard);
+        fmt::layer()
+            .with_ansi(false)
+            .with_writer(writer)
+            .with_filter(FilterFn::new(|m: &tracing::Metadata| m.target() == EVENT_NOISE_TARGET))
+    });
+
+    // stdout: non-noise lines always; noise lines too only when neither file
+    // sink captured them (both unavailable), so noise is never lost.
+    let stdout_layer = fmt::layer().with_writer(std::io::stdout).with_filter(FilterFn::new(
+        move |m: &tracing::Metadata| {
+            m.target() != EVENT_NOISE_TARGET || stdout_carries_noise(main_failed, noise_failed)
+        },
+    ));
+
+    // `env_filter()` is applied at the registry level, i.e. BEFORE the
+    // per-layer target filters. The default is `info`, so the WARN-level
+    // noise lines reach the noise layer fine; but an aggressive `RUST_LOG`
+    // (e.g. `error`, or a directive disabling this target) suppresses them
+    // globally before routing — keep that in mind when tuning `RUST_LOG`.
+    tracing_subscriber::registry()
+        .with(env_filter())
+        .with(stdout_layer)
+        .with(main_layer)
+        .with(noise_layer)
+        .init();
+
+    if main_failed || noise_failed {
+        tracing::warn!(
+            log_dir = %log_dir,
+            main_log_failed = main_failed,
+            noise_log_failed = noise_failed,
+            main_error = ?main_err,
+            noise_error = ?noise_err,
+            "LOG_DIR set but a log file could not be initialised; its lines fall back to the surviving sinks (stdout/main file)"
+        );
     }
+
+    guards
 }
 
 #[cfg(test)]
@@ -98,7 +178,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_str().expect("utf-8 path");
 
-        let appender = file_appender(path, "testsvc").expect("appender builds");
+        let appender = file_appender(path, "testsvc.log").expect("appender builds");
         let (writer, guard) = tracing_appender::non_blocking(appender);
         let subscriber =
             tracing_subscriber::registry().with(fmt::layer().with_ansi(false).with_writer(writer));
@@ -119,5 +199,117 @@ mod tests {
 
         let contents = std::fs::read_to_string(log_files[0].path()).expect("read log file");
         assert!(contents.contains("hello-from-test"), "log line written, got: {contents}");
+    }
+
+    #[test]
+    fn noise_target_routes_to_separate_file() {
+        use tracing_subscriber::filter::FilterFn;
+        use tracing_subscriber::Layer;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+
+        // `init()` installs a *global* subscriber (settable once per process),
+        // so a unit test cannot drive it without poisoning every other test in
+        // the binary. Instead reproduce init()'s three layers with the same
+        // target filters under a scoped subscriber — including a stdout
+        // stand-in carrying the exact filter init() puts on `std::io::stdout`,
+        // so the "noise kept out of stdout" guarantee is actually asserted and
+        // not just the file-vs-file split.
+        let main = file_appender(path, "rt.log").expect("main appender");
+        let noise = file_appender(path, "rt.noise.log").expect("noise appender");
+        let stdout_proxy = file_appender(path, "stdoutproxy.log").expect("stdout-proxy appender");
+        let (mw, mg) = tracing_appender::non_blocking(main);
+        let (nw, ng) = tracing_appender::non_blocking(noise);
+        let (sw, sg) = tracing_appender::non_blocking(stdout_proxy);
+
+        // Drive each layer's filter through the same predicates init() uses
+        // (with both file sinks healthy), so this test cannot drift from the
+        // production routing it stands in for.
+        let subscriber = tracing_subscriber::registry()
+            .with(fmt::layer().with_ansi(false).with_writer(sw).with_filter(FilterFn::new(
+                |m: &tracing::Metadata| {
+                    m.target() != EVENT_NOISE_TARGET || stdout_carries_noise(false, false)
+                },
+            )))
+            .with(fmt::layer().with_ansi(false).with_writer(mw).with_filter(FilterFn::new(
+                |m: &tracing::Metadata| {
+                    m.target() != EVENT_NOISE_TARGET || main_carries_noise(false)
+                },
+            )))
+            .with(fmt::layer().with_ansi(false).with_writer(nw).with_filter(FilterFn::new(
+                |m: &tracing::Metadata| m.target() == EVENT_NOISE_TARGET,
+            )));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: EVENT_NOISE_TARGET, "noise-line");
+            tracing::info!(target: "rt::normal", "normal-line");
+        });
+        drop(mg);
+        drop(ng);
+        drop(sg);
+
+        let read = |prefix: &str| -> String {
+            let entry = std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .find(|e| e.file_name().to_string_lossy().starts_with(prefix))
+                .expect("file exists");
+            std::fs::read_to_string(entry.path()).unwrap()
+        };
+        let main_contents = read("rt.log");
+        let noise_contents = read("rt.noise.log");
+        let stdout_contents = read("stdoutproxy.log");
+
+        assert!(main_contents.contains("normal-line"), "main has normal");
+        assert!(!main_contents.contains("noise-line"), "main excludes noise");
+        assert!(noise_contents.contains("noise-line"), "noise has noise");
+        assert!(!noise_contents.contains("normal-line"), "noise excludes normal");
+        // The headline guarantee: noise stays out of the stdout stream.
+        assert!(stdout_contents.contains("normal-line"), "stdout has normal");
+        assert!(!stdout_contents.contains("noise-line"), "stdout excludes noise");
+    }
+
+    #[test]
+    fn noise_falls_back_only_when_its_own_file_is_gone() {
+        // The main file carries noise ONLY when the noise file failed. Dropping
+        // this dependency (e.g. always-false, or always-true) is the silent
+        // regression the routing test alone cannot catch.
+        assert!(!main_carries_noise(false), "noise stays out of main while its file is healthy");
+        assert!(main_carries_noise(true), "noise falls back to main when its file failed");
+
+        // stdout is the last resort: it carries noise ONLY when BOTH files are
+        // gone, never on a single-sink failure.
+        assert!(!stdout_carries_noise(false, false), "both healthy: stdout carries no noise");
+        assert!(
+            !stdout_carries_noise(false, true),
+            "noise file gone -> main covers it, not stdout"
+        );
+        assert!(!stdout_carries_noise(true, false), "main file gone -> noise file still covers it");
+        assert!(stdout_carries_noise(true, true), "both gone: stdout is the only sink left");
+    }
+
+    #[test]
+    fn noise_line_lands_in_exactly_one_sink_in_every_failure_mode() {
+        // A sink layer only exists when its appender built (stdout always
+        // exists). The fallback contract: a noise line is captured exactly
+        // once — never duplicated, never dropped — across all four
+        // (main_failed, noise_failed) combinations.
+        for main_failed in [false, true] {
+            for noise_failed in [false, true] {
+                let main_accepts = !main_failed && main_carries_noise(noise_failed);
+                let noise_accepts = !noise_failed; // noise layer takes every noise line
+                let stdout_accepts = stdout_carries_noise(main_failed, noise_failed);
+                let sinks = [main_accepts, noise_accepts, stdout_accepts]
+                    .into_iter()
+                    .filter(|&a| a)
+                    .count();
+                assert_eq!(
+                    sinks, 1,
+                    "exactly one sink must carry a noise line \
+                     (main_failed={main_failed}, noise_failed={noise_failed})"
+                );
+            }
+        }
     }
 }

@@ -46,14 +46,31 @@ flowchart LR
 
 ## Ingestion
 
-The indexer follows a GraphQL message-edge stream. Every edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema.
+The indexer follows a GraphQL message-edge stream. Every edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema. The one exception is an edge whose decoded `event_type` is listed in `indexer.ignored_event_types` (see [Event-type ignore list](#event-type-ignore-list) below): it is dropped before the insert, so by design it is never stored and falls outside the rebuild boundary.
 
-Sequence per edge:
+### Event-type ignore list
+
+`indexer.ignored_event_types` in the config YAML accepts a list of decoded `event_type` values (e.g. `"OrderBook.Queued"`). An edge whose decoded `event_type` matches an entry is dropped **before** the `raw_events` insert and before projector dispatch. The page cursor still advances past the dropped edge, so the indexer makes forward progress without storing or projecting these events.
+
+The startup guard accepts **only** the known droppable no-op types — `OrderBook.Queued` / `FullyFilled` / `Rejected` / `CallbackBounced` (the `IGNORABLE_EVENT_TYPES` allow-list) — and refuses any other entry. It fires at startup, not at ingest time, so a bad list prevents the service from starting rather than failing silently.
+
+The allow-list closes three otherwise-silent failures: a metric-critical type (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`) is rejected, because those must always land in `raw_events` for the OTLP counters to stay accurate; a state-changing type (anything the projector routes to a real handler, e.g. `OrderBook.OrderFilled`) is rejected before it could corrupt `live_orders`; and a typo (e.g. `OrderBook.Quued`) is rejected rather than parsing as a no-op that drops nothing. The last matters because the ignore filter only fires post-decode — a name that matches nothing simply never drops an edge, leaving `type_ignored=0`, indistinguishable from "configured correctly, zero volume".
+
+Each indexer-tick log line includes a `type_ignored` count: the number of edges skipped by the type ignore list during that page fetch (`type_ignored=0` when nothing was skipped).
+
+Intended use: shed confirmed observability-only floods (e.g. `OrderBook.Queued`, which fires at queue entry before any order ID exists and has no read-model effect) without writing or projecting them.
+
+### Ingestion sequence per edge
 
 1. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). On success, store the decoded JSON payload alongside `event_type`.
-2. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches.
-3. If decoding produced a known event, dispatch the projector inside the same transaction. The projector outcome decides whether `processed_at` is stamped now (`Applied`, `Unknown`) or left null for retry (`Deferred`).
-4. After the page commits, persist the resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). A restart resumes from this cursor — already-projected rows are not replayed.
+2. If the decoded `event_type` matches an entry in `indexer.ignored_event_types`, drop the edge — no `raw_events` row is written and no projector runs. The page cursor still advances (step 5), so the edge is not revisited.
+3. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches.
+4. If decoding produced a known event, dispatch the projector inside the same transaction. The projector outcome decides whether `processed_at` is stamped now (`Applied`, `Unknown`) or left null for retry (`Deferred`).
+5. After the page commits, persist the resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). A restart resumes from this cursor — already-projected rows are not replayed.
+
+### Noise log
+
+When `LOG_DIR` is set, the projector's "no handler for event type" warnings are split by novelty. The **first** time the process sees a given unhandled `event_type` (from either the fetch loop or the reprojection sweep — they share one in-process set), the warning is emitted at the normal target, so it reaches stdout and the main `<service>.log` — this is the operator's signal that a deployed contract emits an event the indexer does not yet handle. Every **later** repeat of that same type is written to `<service>.noise.log` (a separate daily-rotating file in `LOG_DIR`, like the main log) via the `dodex::event_noise` tracing target, configured by the `dodex-logging` crate (`EVENT_NOISE_TARGET`), so a steady flood does not drown the main log. When `LOG_DIR` is not set, all of these warnings appear on stdout alongside the rest of the log output.
 
 ## Projection — lifecycle events
 
@@ -88,7 +105,7 @@ events are observability-only.
 | `OrderBook.OrderFilled` | For a non-terminal row: decrements `amount_remaining` by `filledAmount`, flips `status` to `FILLED` when the remainder reaches zero, advances `last_chain_order` via `greatest(existing, new)`, advances `chain_updated_at` via `greatest`. For a row whose prior status is already terminal (`FILLED` / `CANCELLED` / `REJECTED`) all four mutation columns (`amount_remaining`, `status`, `last_chain_order`, `chain_updated_at`) are CASE-gated to leave the row unchanged; the event is logged at `warn!` and the projector still reports `Applied`. |
 | `OrderBook.OrderCancelled` | For a non-terminal row: preserves `amount_remaining` as the unfilled cancelled remainder, flips `status` to `CANCELLED`, advances `last_chain_order` and `chain_updated_at` via `greatest`. For a row whose prior status is already terminal (`FILLED` / `REJECTED`) all three mutation columns are CASE-gated to leave the row unchanged; the event is logged at `warn!` and the projector still reports `Applied`. The terminal-state guard prevents a late cancel from demoting `FILLED` or rewriting `REJECTED`. |
 | `PrivateNote.OrderPlacedConfirmed` | Updates the matching `(orderBook, orderId)` row with `owner_pn_address = event.src`, where `event.src` is the authenticated account's trading PrivateNote address. If the OrderBook row has not arrived yet, the confirmation is deferred and replayed later. This ownership update does not advance `last_chain_order`, so public depth cursors continue to represent OrderBook activity only. Refuses to overwrite an already-attached `owner_pn_address`; that path is reported as `Applied` (no-op). |
-| `OrderBook.PartialFill` / `FullyFilled` / `Queued` / `Rejected` / `CallbackBounced` | Observability-only. The row is recorded in `raw_events` for audit but no read-model table is touched. |
+| `OrderBook.PartialFill` / `FullyFilled` / `Queued` / `Rejected` / `CallbackBounced` | Observability-only — no read-model table is touched. The row is recorded in `raw_events` for audit, unless its `event_type` is listed in `indexer.ignored_event_types` (e.g. `OrderBook.Queued` in the deployed config), in which case the edge is dropped before the insert. |
 
 `PartialFill` / `FullyFilled` are derived aggregates that the contract emits for MM-friendly UX; the underlying state is already captured by `OrderFilled`. `Queued` / `Rejected` occur at the queue level, before any order ID is assigned. `CallbackBounced` is a diagnostic event — the OrderBook state is not automatically rolled back, and the bounced credit requires operator-driven recovery.
 

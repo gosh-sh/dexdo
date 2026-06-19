@@ -62,7 +62,10 @@ pub async fn project_event(
         "PrivateNote.OrderPlacedConfirmed" => {
             apply_order_placed_confirmed(tx, event, node).await.with_context(context)
         }
-        // Observability-only OrderBook events; state of the book does not change.
+        // Observability-only OrderBook events; state of the book does not
+        // change. This arm minus the metric-critical `PartialFill` is
+        // `config::IGNORABLE_EVENT_TYPES` (the types `ignored_event_types` may
+        // shed) — keep the two in sync.
         "OrderBook.PartialFill"
         | "OrderBook.FullyFilled"
         | "OrderBook.Queued"
