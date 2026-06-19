@@ -6,21 +6,21 @@ when:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  - &git_image "woodpeckerci/plugin-git"
   - &inventory_branch "feature/add-dodex-invs"
 
 steps:
   inventory_clone:
-    image: *git_image
+    image: *ansible_image
     environment:
-      CI_NETRC_MACHINE: github.com
-      CI_NETRC_USERNAME: x-access-token
-      CI_NETRC_PASSWORD: { from_secret: GITHUB_TOKEN }
-    settings:
-      remote: { from_secret: inventory_repo_url }
-      branch: *inventory_branch
-      path: .inventory
-      sha: *inventory_branch
+      INVENTORY_REPO: { from_secret: inventory_repo_url }
+      GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
+      INVENTORY_BRANCH: *inventory_branch
+    commands:
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc
+      - chmod 600 ~/.netrc
+      - rm -rf .inventory
+      - git clone --depth 1 --branch "$INVENTORY_BRANCH" "$INVENTORY_REPO" .inventory
+      - rm -f ~/.netrc
 
   remember_ssh_key:
     image: *ansible_image
