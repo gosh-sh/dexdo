@@ -232,6 +232,23 @@ pub struct IndexerSection {
     /// (system / null-route addresses) without polluting the read-model.
     #[serde(default)]
     pub ignored_addresses: Vec<String>,
+    /// Decoded `event_type` values to drop at ingest, before the `raw_events`
+    /// insert and projection. The page cursor still advances past them. Used
+    /// to shed observability-only floods (e.g. `OrderBook.Queued`).
+    ///
+    /// Only genuine no-op types belong here — those `projectors::project_event`
+    /// maps to `ProjectionOutcome::Applied` without touching a read-model table
+    /// AND that are not metric-critical
+    /// (`OrderBook.FullyFilled`/`Queued`/`Rejected`/`CallbackBounced` — the
+    /// exact set is [`IGNORABLE_EVENT_TYPES`]). `OrderBook.PartialFill` is also
+    /// a projector no-op, but its `raw_events` rows back an OTLP counter (it is
+    /// metric-critical), so it is excluded.
+    /// `IndexerConfig::validate` rejects any entry outside
+    /// [`IGNORABLE_EVENT_TYPES`] — metric-critical types, state-changing types
+    /// (e.g. `OrderBook.OrderFilled`, which would corrupt `live_orders`), and
+    /// typos all fail loudly at startup rather than silently doing nothing.
+    #[serde(default)]
+    pub ignored_event_types: Vec<String>,
 }
 
 fn default_reprojection_interval_ms() -> u64 {
@@ -375,6 +392,35 @@ impl AuthSection {
     }
 }
 
+/// `raw_events.event_type` values whose row counts back OTLP metric counters
+/// in the indexer's metrics-refresh loop (`services/indexer/src/metrics_refresh.rs`).
+/// Dropping any of these at ingest would silently undercount
+/// `orders_created_event_cnt` / `order_partially_filled_event_cnt`, so
+/// [`IndexerConfig::validate`] refuses a config that lists one.
+///
+/// This set must stay a superset of the types `metrics_refresh` actually
+/// tracks; a unit test there (`metric_critical_covers_tracked_types`) fails
+/// loudly if a new tracked type is added without updating this list.
+pub const METRIC_CRITICAL_EVENT_TYPES: [&str; 2] =
+    ["OrderBook.OrderPlaced", "OrderBook.PartialFill"];
+
+/// The only event types `indexer.ignored_event_types` may contain: projector
+/// no-ops (`projectors::project_event` -> `ProjectionOutcome::Applied` without
+/// touching a read-model table) that are NOT metric-critical. This is the
+/// `OrderBook` observability-only arm of `projectors::project_event` minus
+/// `OrderBook.PartialFill` (a no-op there, but it backs an OTLP counter — see
+/// [`METRIC_CRITICAL_EVENT_TYPES`]). `validate` rejects any configured type
+/// outside this set, so a typo or a state-changing type fails loudly at startup
+/// instead of being a silent no-op (the ingest filter only fires post-decode,
+/// so an unmatched name simply never drops anything). Keep in sync with the
+/// no-op arm in `projectors::project_event`.
+pub const IGNORABLE_EVENT_TYPES: [&str; 4] = [
+    "OrderBook.FullyFilled",
+    "OrderBook.Queued",
+    "OrderBook.Rejected",
+    "OrderBook.CallbackBounced",
+];
+
 impl IndexerConfig {
     pub fn load_from_path(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let cfg: Self = load_yaml(path)?;
@@ -412,6 +458,27 @@ impl IndexerConfig {
             i.oracle_event_list_reconciliation_interval_ms > 0,
             "indexer.oracle_event_list_reconciliation_interval_ms must be > 0"
         );
+        // Every configured ignored type must be a known droppable no-op
+        // (`IGNORABLE_EVENT_TYPES`). This rejects, at startup: metric-critical
+        // types (dropping them silently undercounts the OTLP counters their
+        // raw_events back), state-changing types (dropping them corrupts the
+        // read model), and typos — which would otherwise be a silent no-op,
+        // since the ingest filter only fires post-decode and an unmatched name
+        // never drops anything. Metric-critical types are checked first so they
+        // get the more specific message.
+        for t in &i.ignored_event_types {
+            let t = t.as_str();
+            anyhow::ensure!(
+                !METRIC_CRITICAL_EVENT_TYPES.contains(&t),
+                "indexer.ignored_event_types must not contain metric-critical type {t}"
+            );
+            anyhow::ensure!(
+                IGNORABLE_EVENT_TYPES.contains(&t),
+                "indexer.ignored_event_types contains {t}, which is not a droppable no-op \
+                 event type (allowed: {:?}); check for a typo or a state-changing type",
+                IGNORABLE_EVENT_TYPES
+            );
+        }
         Ok(())
     }
 }
@@ -1322,5 +1389,65 @@ indexer:
         let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("graphql.endpoint"), "got: {err}");
+    }
+
+    fn indexer_cfg_with_ignored(types: &[&str]) -> IndexerConfig {
+        let list: String = types.iter().map(|t| format!("    - \"{t}\"\n")).collect();
+        let raw = format!(
+            "{COMMON}
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
+indexer:
+  polling_interval_ms: 3000
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+  ignored_event_types:
+{list}"
+        );
+        serde_yaml::from_str(&raw).expect("parse")
+    }
+
+    #[test]
+    fn indexer_validate_rejects_metric_critical_ignored_event_type() {
+        // Both metric-critical types — not just PartialFill — must be rejected
+        // with the metric-critical message; dropping either undercounts an
+        // OTLP counter its raw_events back.
+        for t in METRIC_CRITICAL_EVENT_TYPES {
+            let err = indexer_cfg_with_ignored(&[t]).validate().unwrap_err();
+            assert!(err.to_string().contains("metric-critical"), "{t}: {err}");
+        }
+    }
+
+    #[test]
+    fn indexer_validate_rejects_unknown_or_state_changing_ignored_event_type() {
+        // A typo and a state-changing type both fail loudly. The latter would,
+        // before the allow-list guard, pass validation and corrupt the read
+        // model; the former is the silent no-op this guard exists to surface.
+        for t in ["OrderBook.Quued", "OrderBook.OrderFilled"] {
+            let err = indexer_cfg_with_ignored(&[t]).validate().unwrap_err();
+            assert!(err.to_string().contains("not a droppable no-op"), "{t}: {err}");
+        }
+    }
+
+    #[test]
+    fn indexer_validate_accepts_every_ignorable_event_type() {
+        let cfg = indexer_cfg_with_ignored(&IGNORABLE_EVENT_TYPES);
+        cfg.validate().expect("all ignorable no-op types must validate");
+        assert_eq!(cfg.indexer.ignored_event_types.len(), IGNORABLE_EVENT_TYPES.len());
+    }
+
+    /// `IGNORABLE_EVENT_TYPES` is, by construction, the projector no-op arm
+    /// minus the metric-critical types. If the two ever overlap, a type would
+    /// be both shed-able and metric-backing — pin the disjointness.
+    #[test]
+    fn ignorable_and_metric_critical_are_disjoint() {
+        for t in IGNORABLE_EVENT_TYPES {
+            assert!(
+                !METRIC_CRITICAL_EVENT_TYPES.contains(&t),
+                "{t} is both ignorable and metric-critical"
+            );
+        }
     }
 }

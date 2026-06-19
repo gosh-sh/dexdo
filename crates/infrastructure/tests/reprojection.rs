@@ -16,6 +16,8 @@
 //       cargo test -p dodex-infrastructure --test reprojection
 
 use std::env;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use dodex_application::MarketReadRepository;
@@ -29,6 +31,13 @@ use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing::Event;
+use tracing::Subscriber;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
 
 static REPROJECTION_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -335,6 +344,142 @@ async fn unknown_event_type_is_marked_processed() {
         processed_at_is_set(&pool, &msg_id).await,
         "Unknown outcome must stamp processed_at to keep the row out of the retry queue"
     );
+}
+
+/// One captured `warn!` event: its tracing target plus the `message` and
+/// `event_type` fields, enough to assert which sink the no-handler warning
+/// would land in.
+#[derive(Clone, Debug)]
+struct CapturedEvent {
+    target: String,
+    message: String,
+    event_type: String,
+}
+
+/// Records every event into a shared buffer so a test can assert on the
+/// tracing `target` the indexer chose, without a real file/stdout subscriber.
+struct CaptureLayer {
+    events: Arc<StdMutex<Vec<CapturedEvent>>>,
+}
+
+impl<S: Subscriber> Layer<S> for CaptureLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        #[derive(Default)]
+        struct Fields {
+            message: String,
+            event_type: String,
+        }
+        impl Visit for Fields {
+            // `%event_type` (Display) and the message literal both arrive via
+            // record_debug as format_args, whose Debug output is the plain
+            // string with no surrounding quotes.
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                match field.name() {
+                    "message" => self.message = format!("{value:?}"),
+                    "event_type" => self.event_type = format!("{value:?}"),
+                    _ => {}
+                }
+            }
+
+            fn record_str(&mut self, field: &Field, value: &str) {
+                match field.name() {
+                    "message" => self.message = value.to_string(),
+                    "event_type" => self.event_type = value.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        self.events.lock().unwrap().push(CapturedEvent {
+            target: event.metadata().target().to_string(),
+            message: fields.message,
+            event_type: fields.event_type,
+        });
+    }
+}
+
+// Verifies the wiring the rest of the suite leaves untested: at the real
+// reprojection warn! callsite, the FIRST sighting of an unhandled type emits on
+// the normal target (stdout + main log) and the REPEAT emits on
+// EVENT_NOISE_TARGET. The dedup boolean and the sink truth-table are each tested
+// in isolation; a swapped if/else or a dropped `target:` arg would pass both yet
+// flood the main log or hide the operator's first signal. current_thread flavor
+// keeps the reproject future on this thread so the thread-local subscriber set
+// below sees its events.
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_event_warning_routes_first_to_normal_target_then_repeat_to_noise() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_noise_routing";
+    // chain_order is derived from msg_id, so `-1` projects before `-2`: the
+    // first sighting, then the repeat, in one reproject_pending pass.
+    let first = format!("{test}-msg-1");
+    let repeat = format!("{test}-msg-2");
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", first.as_str()),
+            ("delete from raw_events where msg_id = $1", repeat.as_str()),
+        ],
+    )
+    .await;
+
+    // A synthetic event_type with no projector handler -> Unknown. Unique to
+    // this test, so the event_type field filter below is unaffected by any
+    // other pending rows the shared database may hold.
+    let probe_type = "Test.NoiseRoutingProbe";
+    let src = "0:reproj_noise_routing_src";
+    insert_raw(&pool, &first, src, probe_type, &json!({})).await;
+    insert_raw(&pool, &repeat, src, probe_type, &json!({})).await;
+
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(CaptureLayer { events: events.clone() });
+    {
+        let _sub = tracing::subscriber::set_default(subscriber);
+        repo.reproject_pending(1000).await.expect("reproject");
+    }
+
+    let warnings: Vec<CapturedEvent> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.event_type == probe_type && e.message.contains("no handler for event type"))
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected first-sighting + one repeat no-handler warning, got {warnings:?}"
+    );
+
+    assert_ne!(
+        warnings[0].target,
+        dodex_logging::EVENT_NOISE_TARGET,
+        "first sighting must use the normal target (stdout + main log), not the noise target"
+    );
+    assert!(
+        warnings[0].message.contains("first sighting"),
+        "first sighting must carry the operator-facing message, got {:?}",
+        warnings[0].message
+    );
+    assert_eq!(
+        warnings[1].target,
+        dodex_logging::EVENT_NOISE_TARGET,
+        "the repeat must be diverted to EVENT_NOISE_TARGET so it lands in the noise log"
+    );
+
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", first.as_str()),
+            ("delete from raw_events where msg_id = $1", repeat.as_str()),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test]
