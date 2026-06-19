@@ -27,3 +27,8 @@ sdk/pn_pool*.json
 tests/fixtures/seed_notes.json
 # Local-dev API seed notes (real keys) — dropped at runtime, never commit.
 config/seed_notes*.json
+
+# Ansible deploy: per-environment inventories carry host addresses + encrypted
+# vaults. Commit only the *.example dirs and templates. See deploy/ansible/README.md.
+deploy/ansible/inventories/*/
+!deploy/ansible/inventories/*.example/

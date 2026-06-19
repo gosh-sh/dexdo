@@ -1,0 +1,40 @@
+---
+
+when:
+  - event: pull_request
+    branch: dev
+
+variables:
+  - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
+  - &git_image "woodpeckerci/plugin-git"
+  - &inventory_branch "main"
+
+steps:
+  inventory_clone:
+    image: *git_image
+    settings:
+      remote: { from_secret: inventory_repo_url }
+      branch: *inventory_branch
+      path: .inventory
+      sha: *inventory_branch
+
+  remember_ssh_key:
+    image: *ansible_image
+    directory: deploy/ansible
+    environment:
+      SSH_NET_KEY: { from_secret: ssh_net_key }
+    commands:
+      - mkdir -p ~/.ssh
+      - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_deploy
+      - chmod 600 ~/.ssh/id_deploy
+      - cp -ar ~/.ssh ./.ssh
+
+  deploy:
+    image: *ansible_image
+    directory: deploy/ansible
+    environment:
+      ANSIBLE_VAULT_PASSWORD: { from_secret: ansible_vault_password }
+    commands:
+      - cp -ar .ssh ~/.ssh
+      - echo "$ANSIBLE_VAULT_PASSWORD" > /tmp/vault-pass && chmod 600 /tmp/vault-pass
+      - ansible-playbook deploy-dexdo.yml -i $CI_WORKSPACE/.inventory/ansible/inventory/dexdo/stage/hosts.yml --vault-password-file /tmp/vault-pass -e dexdo_version=$CI_COMMIT_SHA

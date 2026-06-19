@@ -11,6 +11,10 @@ reference see [`services/api/README.md`](../services/api/README.md) and
 [`services/indexer/README.md`](../services/indexer/README.md); for the config
 schema itself see `crates/infrastructure/src/config.rs`.
 
+To deploy with **Ansible** instead of running Compose by hand — one playbook
+that provisions the host, renders the config, and brings the stack up — see
+[`deploy/ansible/README.md`](../deploy/ansible/README.md).
+
 ## What connects to what
 
 ```

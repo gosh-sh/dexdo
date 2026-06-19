@@ -1,0 +1,7 @@
+---
+- name: Deploy DEX.DO backend (api + indexer)
+  hosts: dexdo
+  gather_facts: no
+  become: true
+  roles:
+    - dexdo

@@ -1,0 +1,37 @@
+# Rendered by Ansible — do NOT edit on the host. See docs/deployment.md
+# Step 3 for the meaning of each field and the startup validation rules.
+app:
+  env: {{ dexdo_env }}
+  log_level: {{ dexdo_log_level }}
+
+server:
+  host: 0.0.0.0
+  port: {{ dexdo_api_port }}
+  # Must exceed every chain.*_timeout_ms AND graphql.request_timeout_ms below.
+  request_timeout_ms: 35000
+
+database:
+  url: "{{ dexdo_database_url }}"
+  max_connections: 10
+  min_connections: 1
+  connect_timeout_ms: 3000
+
+auth:
+  kek_hex: "{{ dexdo_kek_hex }}"
+  default_recv_window_ms: 5000
+  max_recv_window_ms: 60000
+  seed_accounts: {{ dexdo_seed_accounts | string | lower }}
+  seed_accounts_path: ./config/seed_notes_list.json
+
+chain:
+  gateway_endpoint: {{ dexdo_chain_gateway_endpoint }}
+  place_order_timeout_ms: 30000
+  cancel_order_timeout_ms: 30000
+  place_batch_timeout_ms: 30000
+  cancel_batch_timeout_ms: 30000
+  split_full_set_timeout_ms: 30000
+  max_batch_size: 10
+
+graphql:
+  endpoint: {{ dexdo_graphql_endpoint }}
+  request_timeout_ms: 10000

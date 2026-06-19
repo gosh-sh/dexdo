@@ -73,6 +73,7 @@ tools/               # end-user CLIs (separate workspace; see tools/README.md)
 docs/                # specs and plans (see docs/README.md)
 migrations/          # SQL migrations applied by sqlx::migrate! at startup
 config/              # service config files (api.<env>.yaml, indexer.<env>.yaml)
+deploy/              # deployment tooling
 scripts/             # operational scripts
 tests/               # repo-level integration fixtures (REST .rest files, e2e)
 ```
