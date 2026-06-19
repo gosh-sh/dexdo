@@ -83,8 +83,8 @@ pub async fn deploy_oracle_with_event(
 
     let event_name = format!("Match {run_id:x}");
     let mut outcomes = HashMap::new();
-    outcomes.insert(1_u32, "Team A".to_string());
-    outcomes.insert(2_u32, "Team B".to_string());
+    outcomes.insert(0_u32, "Team A".to_string());
+    outcomes.insert(1_u32, "Team B".to_string());
 
     dex.add_event(
         &el_address,
