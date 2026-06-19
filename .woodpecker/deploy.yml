@@ -6,7 +6,7 @@ when:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  - &inventory_branch "feature/add-dodex-invs"
+  - &inventory_branch "main"
 
 steps:
   inventory_clone:
