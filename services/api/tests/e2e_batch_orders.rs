@@ -312,6 +312,11 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
         }
     }
 
+    // Recover the deploy's split collateral + stakes back to the shared
+    // deployer note so they are not stranded in this throwaway market.
+    common::cleanup::reclaim_full_set_best_effort(&raw_dex, &trader, &market, "e2e_batch_orders")
+        .await;
+
     if !failures.is_empty() {
         panic!("e2e_batch_orders failures:\n  - {}", failures.join("\n  - "));
     }

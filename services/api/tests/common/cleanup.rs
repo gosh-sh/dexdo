@@ -24,6 +24,9 @@ use dodex_chain::ChainError;
 use dodex_chain::Dex;
 use dodex_chain::OwnedOrder;
 use dodex_contracts::dex::private_note::ParamsOfCancelOrderByClient;
+use dodex_contracts::dex::private_note::ParamsOfMergeFullSet;
+use dodex_infrastructure::tvm_hash::stake_hash;
+use num_bigint::BigUint;
 
 use super::deploy_market::EphemeralMarket;
 use super::test_pns::TestPn;
@@ -99,6 +102,130 @@ pub async fn cancel_coids_best_effort(
                 tokio::time::sleep(CANCEL_RETRY_BACKOFF).await;
             }
         }
+    }
+}
+
+/// Per-poll budget while waiting for `_busy` to clear after a merge: the
+/// callback is a PN → PMP → `onMergeAccepted` round-trip, slower than a
+/// single op, so allow ~120 s.
+const BUSY_POLL_TICK: Duration = Duration::from_secs(2);
+const BUSY_POLL_TICKS: u32 = 60;
+
+/// Best-effort: merge the deployer note's leftover full-set outcome tokens
+/// for `market` back into collateral, recovering the NACKL that the deploy's
+/// `splitFullSet` locked into the throwaway market. The deployer note is
+/// shared across the whole single-threaded suite, so without this each run
+/// strands ~100+ NACKL and the note drains after a handful of runs.
+///
+/// Call AFTER the test's order cleanup, so canceled orders have already
+/// returned their locked tokens to `_stakes[hash].amount`. Merges only
+/// complete sets (`min` over outcomes); proceeds from filled orders already
+/// sit in `_balance`. Never panics — every failure is logged to captured
+/// stderr (surfaced only on a failing test). Waits for `_busy` to clear so
+/// the next test's `deployPMP` is not rejected with `ERR_NOTE_BUSY`.
+pub async fn reclaim_full_set_best_effort(
+    raw_dex: &Dex,
+    deployer: &TestPn,
+    market: &EphemeralMarket,
+    label: &str,
+) {
+    let (Some(event_id), Some(oracle_list_hash)) =
+        (parse_uint256(&market.event_id), parse_uint256(&market.oracle_list_hash))
+    else {
+        eprintln!("[{label}] reclaim: unparseable market ids, skipping merge");
+        return;
+    };
+    let key = match stake_hash(&event_id, &oracle_list_hash, market.token_type) {
+        Ok(k) => k,
+        Err(err) => {
+            eprintln!("[{label}] reclaim: stake_hash failed: {err:?}");
+            return;
+        }
+    };
+
+    let stakes = match raw_dex.get_private_note_stakes(&deployer.address).await {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("[{label}] reclaim: getStakes failed: {err:?}");
+            return;
+        }
+    };
+    let per_outcome: Vec<u128> = match stakes
+        .stakes
+        .get(&key)
+        .and_then(|entry| entry.get("amount"))
+        .and_then(|amount| amount.as_array())
+    {
+        Some(arr) => {
+            let parsed: Option<Vec<u128>> =
+                arr.iter().map(|v| v.as_str().and_then(|s| s.parse::<u128>().ok())).collect();
+            match parsed {
+                Some(v) if !v.is_empty() => v,
+                _ => {
+                    eprintln!("[{label}] reclaim: stake amounts unparseable, skipping merge");
+                    return;
+                }
+            }
+        }
+        None => {
+            eprintln!("[{label}] reclaim: no stake entry for this market — nothing to merge");
+            return;
+        }
+    };
+
+    let merge = per_outcome.iter().copied().min().unwrap_or(0);
+    if merge == 0 {
+        eprintln!("[{label}] reclaim: a leg holds 0 tokens — no full set to merge");
+        return;
+    }
+
+    let signer = Signer::Keys {
+        keys: KeyPair {
+            public: deployer.owner_public_key_hex.clone(),
+            secret: deployer.owner_secret_key_hex.clone(),
+        },
+    };
+    eprintln!(
+        "[{label}] reclaim: merging {merge} full set(s) across {} outcome(s) back to collateral",
+        per_outcome.len(),
+    );
+    if let Err(err) = raw_dex
+        .merge_full_set(
+            &deployer.address,
+            ParamsOfMergeFullSet {
+                event_id: market.event_id.clone(),
+                oracle_list_hash: market.oracle_list_hash.clone(),
+                token_type: market.token_type,
+                amount: vec![merge; per_outcome.len()],
+            },
+            signer,
+        )
+        .await
+    {
+        eprintln!("[{label}] reclaim: mergeFullSet failed: {err:?}");
+        return;
+    }
+
+    // The shared note is single-threaded; wait for the merge callback to
+    // clear `_busy` before the next test's deployPMP fires.
+    for _ in 0..BUSY_POLL_TICKS {
+        match raw_dex.get_private_note_details(&deployer.address).await {
+            Ok(d) if d.busy_address.is_none() => return,
+            Ok(_) => {}
+            Err(err) => eprintln!("[{label}] reclaim: busy-poll getDetails failed: {err:?}"),
+        }
+        tokio::time::sleep(BUSY_POLL_TICK).await;
+    }
+    eprintln!("[{label}] reclaim: note still busy after merge — next deploy may hit ERR_NOTE_BUSY");
+}
+
+/// Parse a uint256 as `deploy_market` emits it on `EphemeralMarket`
+/// (`0x`-prefixed hex; see `e2e_buy_full_set`), with a plain-decimal
+/// fallback. `None` on malformed input — the caller then skips the merge.
+fn parse_uint256(s: &str) -> Option<BigUint> {
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => BigUint::parse_bytes(hex.as_bytes(), 16),
+        None => BigUint::parse_bytes(s.as_bytes(), 10),
     }
 }
 

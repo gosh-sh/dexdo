@@ -279,6 +279,11 @@ async fn buy_full_set_against_shellnet() {
              (full pre={pre_stake:?}, post={post_stake:?})",
         );
     }
+
+    // Recover the deploy's split collateral + the bought full set back to the
+    // shared deployer note so they are not stranded in this throwaway market.
+    common::cleanup::reclaim_full_set_best_effort(&raw_dex, &trader, &market, "e2e_buy_full_set")
+        .await;
 }
 
 /// Two-phase poll on `PrivateNote.getDetails().busyAddress`:

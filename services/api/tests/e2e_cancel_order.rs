@@ -280,4 +280,9 @@ async fn cancel_order_against_shellnet() {
              verify cancellation of client_order_id={coid}",
         ),
     }
+
+    // Recover the deploy's split collateral + stakes back to the shared
+    // deployer note so they are not stranded in this throwaway market.
+    common::cleanup::reclaim_full_set_best_effort(&raw_dex, &trader, &market, "e2e_cancel_order")
+        .await;
 }
