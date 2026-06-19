@@ -2,7 +2,7 @@
 
 when:
   - event: push
-    branch: feature/add-deployment
+    branch: dev
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
