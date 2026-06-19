@@ -29,8 +29,8 @@ steps:
       SSH_NET_KEY: { from_secret: ssh_dodex_ci }
     commands:
       - mkdir -p ~/.ssh
-      - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_deploy
-      - chmod 600 ~/.ssh/id_deploy
+      - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_ed25519
+      - chmod 600 ~/.ssh/id_ed25519
       - cp -ar ~/.ssh ./.ssh
 
   deploy:
