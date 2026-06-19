@@ -1,0 +1,23 @@
+# Per-environment secrets template. Each environment gets its OWN vault, kept
+# next to that environment's inventory so multi-env deploys never share secrets:
+#
+#   mkdir -p inventories/<env>/group_vars/all
+#   cp inventories/vault.example.yml inventories/<env>/group_vars/all/vault.yml
+#   # edit inventories/<env>/group_vars/all/vault.yml
+#   ansible-vault encrypt inventories/<env>/group_vars/all/vault.yml
+#
+# Ansible auto-loads group_vars relative to the inventory file, so
+# inventories/<env>/group_vars/all/ applies only when that env is deployed.
+# The real vault.yml files are gitignored — only this template is committed.
+# This file lives at inventories/ root (not inside any group_vars) so it is
+# never auto-loaded.
+
+# Postgres password for the bundled `postgres` service. This is the raw value;
+# the connection string URL-encodes it automatically. Prefer a URL-safe value
+# (a `/` is not encoded) — `openssl rand -hex 24` gives hex-only, no escaping
+# needed. Used for both the DB container and the api/indexer connection.
+vault_dexdo_db_password: "CHANGE-ME"
+
+# 32-byte KEK (64 hex chars) that encrypts api_secret / pn_seckey at rest.
+# Generate a fresh one per environment:  openssl rand -hex 32
+vault_dexdo_kek_hex: "REPLACE-with-64-hex-chars"

@@ -1,0 +1,71 @@
+---
+# Defaults for the dexdo role. These are the lowest-precedence layer, so any
+# value can be overridden per environment in that env's inventory
+# (inventories/<env>/hosts.yml → group `dexdo` vars). Secrets live in the env's
+# own vault (inventories/<env>/group_vars/all/vault.yml).
+
+# --- Environment ------------------------------------------------------------
+# Environment name. Drives the rendered config file names (api.<env>.yaml /
+# indexer.<env>.yaml), the app.env field, and APP_CONFIG in the compose file.
+# SET THIS PER ENVIRONMENT IN THE INVENTORY — this default is only a fallback.
+dexdo_env: stage
+
+# --- Source (images are BUILT on the host from this checkout) ---------------
+# Images are not pulled from a registry — compose builds them on the host from
+# the Dockerfiles in this repo. Ansible checks the source out at dexdo_src_dir.
+dexdo_repo_url: https://github.com/gosh-sh/dexdo.git
+# Git ref to build (branch, tag, or commit SHA). CI passes the commit SHA via
+# `-e dexdo_version=...`; the default is only used for manual runs.
+dexdo_version: dev
+
+# --- Host layout ------------------------------------------------------------
+dexdo_deploy_dir: /opt/dexdo
+# Where the source checkout (docker build context) lives on the host.
+dexdo_src_dir: "{{ dexdo_deploy_dir }}/src"
+
+# --- Acki Nacki endpoints (see docs/deployment.md Step 1) -------------------
+dexdo_graphql_endpoint: https://shellnet.ackinacki.org/graphql
+dexdo_chain_gateway_endpoint: shellnet.ackinacki.org
+
+# --- App knobs --------------------------------------------------------------
+dexdo_log_level: info
+dexdo_rust_log: info
+# API port — drives the host-published port, the in-container listen port, and
+# server.port (all from this one var). Override per environment in the inventory
+# when 8080 is already taken on the host (multiple services share it).
+dexdo_api_port: 8080
+# Seeding writes DB rows for pre-deployed PrivateNotes; off by default.
+# See docs/seed-private-notes.md before turning on.
+dexdo_seed_accounts: false
+
+# --- Database ---------------------------------------------------------------
+# Bundled-Postgres toggle:
+#   false (default) -> connect to an EXISTING database; set dexdo_db_host/port/
+#                      name/user + vault_dexdo_db_password to point at it.
+#   true            -> run a `postgres` service inside the compose stack (data on
+#                      the dodex_pgdata volume); leave dexdo_db_host at `postgres`.
+dexdo_db_local: false
+
+dexdo_db_user: dodex
+dexdo_db_name: dodex
+# When dexdo_db_local=true this must stay `postgres` (the compose service name).
+# When false, override it with the external DB host in the env inventory.
+dexdo_db_host: postgres
+# Internal compose-network port when local; the external DB's port when not.
+dexdo_db_port: 5432
+# Password is a secret -> the env vault (vault_dexdo_db_password).
+dexdo_db_password: "{{ vault_dexdo_db_password }}"
+# Connection string shared by api + indexer. The password is URL-encoded so
+# special characters are safe inside the URL; the postgres service env gets the
+# raw value.
+dexdo_database_url: "postgresql://{{ dexdo_db_user }}:{{ dexdo_db_password | urlencode }}@{{ dexdo_db_host }}:{{ dexdo_db_port }}/{{ dexdo_db_name }}"
+
+# --- OpenTelemetry / OTLP metrics (indexer) ---------------------------------
+# Endpoint of your OTLP collector (gRPC). Empty -> the indexer collects no
+# metrics (empty counts as unset). Set per environment in the inventory.
+dexdo_otel_endpoint: ""
+dexdo_otel_metrics_protocol: grpc
+dexdo_otel_service_name: dodex-indexer-test
+
+# --- Secrets (resolved from the env vault) ----------------------------------
+dexdo_kek_hex: "{{ vault_dexdo_kek_hex }}"

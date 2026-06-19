@@ -1,0 +1,81 @@
+# Rendered by Ansible (deploy/ansible/roles/dexdo). Do NOT edit on the host —
+# it is overwritten on the next deploy. Change the template instead.
+#
+# Build-based: images are built on the host from the checkout at
+# {{ dexdo_src_dir }} (ref {{ dexdo_version }}) via `docker compose up --build`.
+# Nothing is pulled from a registry.
+{% if dexdo_db_local %}
+# dexdo_db_local=true: a bundled Postgres runs here, data on volume dodex_pgdata.
+{% else %}
+# dexdo_db_local=false: no Postgres here — services connect to the external DB
+# at dexdo_db_host:dexdo_db_port.
+{% endif %}
+services:
+{% if dexdo_db_local %}
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "{{ dexdo_db_user }}"
+      POSTGRES_PASSWORD: "{{ dexdo_db_password }}"
+      POSTGRES_DB: "{{ dexdo_db_name }}"
+    volumes:
+      - dodex_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ dexdo_db_user }} -d {{ dexdo_db_name }}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+{% endif %}
+  api:
+    build:
+      context: {{ dexdo_src_dir }}
+      dockerfile: docker/api.Dockerfile
+{% if dexdo_db_local %}
+    depends_on:
+      postgres:
+        condition: service_healthy
+{% endif %}
+    environment:
+      APP_CONFIG: /app/config/api.{{ dexdo_env }}.yaml
+      RUST_LOG: "{{ dexdo_rust_log }}"
+      LOG_DIR: /app/logs
+    ports:
+      - "{{ dexdo_api_port }}:{{ dexdo_api_port }}"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs/api:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:{{ dexdo_api_port }}/readiness"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  indexer:
+    build:
+      context: {{ dexdo_src_dir }}
+      dockerfile: docker/indexer.Dockerfile
+{% if dexdo_db_local %}
+    depends_on:
+      postgres:
+        condition: service_healthy
+{% endif %}
+    env_file:
+      - .env
+    environment:
+      APP_CONFIG: /app/config/indexer.{{ dexdo_env }}.yaml
+      RUST_LOG: "{{ dexdo_rust_log }}"
+      LOG_DIR: /app/logs
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs/indexer:/app/logs
+    restart: unless-stopped
+{% if dexdo_db_local %}
+
+volumes:
+  dodex_pgdata:
+{% endif %}

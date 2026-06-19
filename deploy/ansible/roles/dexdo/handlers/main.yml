@@ -1,0 +1,8 @@
+---
+# api is restart-to-reconfigure and the indexer hot-reloads only a subset, so
+# a config change is applied by restarting the stack. See docs/deployment.md.
+- name: Restart dexdo stack
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ dexdo_deploy_dir }}"
+  changed_when: true

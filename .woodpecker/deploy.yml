@@ -1,0 +1,44 @@
+---
+
+when:
+  - event: push
+    branch: dev
+
+variables:
+  - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
+  - &inventory_branch "main"
+
+steps:
+  inventory_clone:
+    image: *ansible_image
+    environment:
+      INVENTORY_REPO: { from_secret: inventory_repo_url }
+      GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
+      INVENTORY_BRANCH: *inventory_branch
+    commands:
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc
+      - chmod 600 ~/.netrc
+      - rm -rf .inventory
+      - git clone --depth 1 --branch "$INVENTORY_BRANCH" "$INVENTORY_REPO" .inventory
+      - rm -f ~/.netrc
+
+  remember_ssh_key:
+    image: *ansible_image
+    directory: deploy/ansible
+    environment:
+      SSH_NET_KEY: { from_secret: ssh_dodex_ci }
+    commands:
+      - mkdir -p ~/.ssh
+      - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_ed25519
+      - chmod 600 ~/.ssh/id_ed25519
+      - cp -ar ~/.ssh ./.ssh
+
+  deploy:
+    image: *ansible_image
+    directory: deploy/ansible
+    environment:
+      ANSIBLE_VAULT_PASSWORD: { from_secret: ansible_vault_password }
+    commands:
+      - cp -ar .ssh ~/.ssh
+      - echo "$ANSIBLE_VAULT_PASSWORD" > /tmp/vault-pass && chmod 600 /tmp/vault-pass
+      - ansible-playbook deploy-dexdo.yml -i $CI_WORKSPACE/.inventory/ansible/inventory/dexdo/stage/hosts.yml --vault-password-file /tmp/vault-pass -e dexdo_version=$CI_COMMIT_SHA

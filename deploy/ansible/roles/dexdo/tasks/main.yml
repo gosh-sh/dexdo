@@ -1,0 +1,59 @@
+---
+- name: Ensure deploy directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ dexdo_deploy_dir }}"
+    - "{{ dexdo_deploy_dir }}/config"
+    - "{{ dexdo_deploy_dir }}/logs/api"
+    - "{{ dexdo_deploy_dir }}/logs/indexer"
+
+# Images are built on the host, so the source (the docker build context) has to
+# be present. `force: true` discards local changes so a redeploy is clean.
+- name: Check out source at the target ref
+  ansible.builtin.git:
+    repo: "{{ dexdo_repo_url }}"
+    dest: "{{ dexdo_src_dir }}"
+    version: "{{ dexdo_version }}"
+    force: true
+
+- name: Render api config
+  ansible.builtin.template:
+    src: api.yaml.j2
+    dest: "{{ dexdo_deploy_dir }}/config/api.{{ dexdo_env }}.yaml"
+    mode: "0640"
+  no_log: true   # rendered file holds kek_hex + db password — keep it out of -v/--diff output
+  notify: Restart dexdo stack
+
+- name: Render indexer config
+  ansible.builtin.template:
+    src: indexer.yaml.j2
+    dest: "{{ dexdo_deploy_dir }}/config/indexer.{{ dexdo_env }}.yaml"
+    mode: "0640"
+  no_log: true   # rendered file holds the db password — keep it out of -v/--diff output
+  notify: Restart dexdo stack
+
+- name: Render .env (OTLP metrics for the indexer)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ dexdo_deploy_dir }}/.env"
+    mode: "0640"
+  notify: Restart dexdo stack
+
+- name: Render compose file
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ dexdo_deploy_dir }}/compose.yml"
+    mode: "0644"
+
+# Builds the images from the checkout and (re)creates containers. `--build`
+# rebuilds whenever the source changed; config-only changes are applied by the
+# "Restart dexdo stack" handler (bind-mounted YAML does not trigger a recreate).
+- name: Build images and start the stack
+  ansible.builtin.command:
+    cmd: docker compose up -d --build --remove-orphans
+    chdir: "{{ dexdo_deploy_dir }}"
+  register: dexdo_compose_up
+  changed_when: "'Started' in dexdo_compose_up.stderr or 'Recreated' in dexdo_compose_up.stderr or 'Created' in dexdo_compose_up.stderr or 'Built' in dexdo_compose_up.stderr"

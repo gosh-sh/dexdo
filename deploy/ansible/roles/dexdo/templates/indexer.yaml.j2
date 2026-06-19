@@ -1,0 +1,28 @@
+# Rendered by Ansible — do NOT edit on the host. Must point at the SAME
+# database as api.<env>.yaml: the indexer writes the read-model api serves.
+app:
+  env: {{ dexdo_env }}
+  log_level: {{ dexdo_log_level }}
+
+database:
+  url: "{{ dexdo_database_url }}"
+  max_connections: 10
+  min_connections: 1
+  connect_timeout_ms: 3000
+
+graphql:
+  endpoint: {{ dexdo_graphql_endpoint }}
+  page_size: 100
+  request_timeout_ms: 10000
+
+indexer:
+  polling_interval_ms: 3000
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+  reprojection_interval_ms: 30000
+  reprojection_batch_size: 500
+  oracle_event_list_reconciliation_interval_ms: 60000
+  ignored_addresses:
+    - "0:1111111111111111111111111111111111111111111111111111111111111111"
+  ignored_event_types:
+    - "OrderBook.Queued"
