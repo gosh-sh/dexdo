@@ -231,11 +231,12 @@ impl OracleEventList {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// # Confirm event and deploy PMP
+    /// # Confirm event
     ///
     /// Original contract method: `confirmEvent`
     ///
-    /// Should be signed with oracle owner keys
+    /// PMP callback: on-chain sender must be the PMP (`senderIs`); it then calls
+    /// back into the existing PMP (no deployment).
     pub async fn confirm_event(
         &self,
         params: ParamsOfConfirmOrCancelEvent,
@@ -253,7 +254,7 @@ impl OracleEventList {
     ///
     /// Original contract method: `cancelEvent`
     ///
-    /// Should be signed with oracle owner keys
+    /// PMP callback: on-chain sender must be the PMP (`senderIs`).
     pub async fn cancel_event(
         &self,
         params: ParamsOfConfirmOrCancelEvent,

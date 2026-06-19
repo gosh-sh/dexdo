@@ -1713,7 +1713,6 @@ dependencies = [
  "num-bigint 0.4.6",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tokio",
 ]
 

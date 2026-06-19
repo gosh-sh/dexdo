@@ -163,7 +163,7 @@ pub struct ParamsOfWithdrawTokens {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Parameters for owner-only `RootPN.collectProtocolFee`.
+/// Parameters for `RootPN.collectProtocolFee` (on-chain sender must be the OrderBook).
 pub struct ParamsOfCollectProtocolFee {
     pub event_id: String,
     pub oracle_list_hash: String,
@@ -244,7 +244,8 @@ impl RootPn {
     ///
     /// Original contract method: `sendEccShellToPrivateNote`
     ///
-    /// Open method, can be called by any external sender (valid ZK proof required)
+    /// The message must be signed by the recipient's ephemeral key
+    /// (`msg.pubkey() == recipientEphemeralPubkey`) and carry a valid ZK proof.
     pub async fn send_ecc_shell_to_private_note(
         &self,
         params: ParamsOfSendEccShellToPrivateNote,
@@ -370,7 +371,7 @@ impl RootPn {
     ///
     /// Original contract method: `collectProtocolFee`
     ///
-    /// Owner-only; accrues the fee under `_protocolFees[tokenType]`.
+    /// On-chain sender must be the OrderBook; accrues the fee under `_protocolFees[tokenType]`.
     pub async fn collect_protocol_fee(
         &self,
         params: ParamsOfCollectProtocolFee,

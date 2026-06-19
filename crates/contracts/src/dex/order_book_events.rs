@@ -276,8 +276,8 @@ mod multicell_orderplaced_tests {
     //!
     //! This test decodes the REAL shellnet event body through the REAL event path
     //! (bundled ABI, `is_internal = false`) and asserts all 9 fields. It passes only
-    //! with the fixed `tvm_abi` (the kit's `tvm_client` is currently pinned to the
-    //! fix branch in `Cargo.toml`); on the unfixed `v3.0.0.an` it fails with 304.
+    //! with the `tvm_abi` multi-cell decode fix, released in the `v3.0.2.an` tag
+    //! pinned in the workspace `Cargo.toml`; earlier `tvm_abi` fails with 304.
 
     use ackinacki_kit::tvm_client::abi::decode_message_body;
     use ackinacki_kit::tvm_client::abi::Abi;

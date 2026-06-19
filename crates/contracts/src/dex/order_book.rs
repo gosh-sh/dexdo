@@ -259,7 +259,8 @@ impl OrderBook {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// Original contract method: `shutdown`. Owner-only.
+    /// Original contract method: `shutdown`. On-chain sender must be the PMP or
+    /// the OrderBook itself (`OrderBook.sol`).
     pub async fn shutdown(&self, signer: Signer) -> KitResult<ResultOfSendMessage> {
         let call_set = CallSet { function_name: "shutdown".to_string(), header: None, input: None };
         self.send_message(Some(call_set), None, signer).await

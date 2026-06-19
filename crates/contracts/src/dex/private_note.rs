@@ -545,6 +545,8 @@ pub struct ResultOfGetDetails {
     pub ephemeral_pubkey: String,
     #[serde(deserialize_with = "deserialize_u128_map")]
     pub balance: HashMap<String, u128>,
+    #[serde(rename = "lockedInOrders", deserialize_with = "deserialize_u128_map")]
+    pub locked_in_orders: HashMap<String, u128>,
     #[serde(rename = "pmpCodeHash")]
     pub pmp_code_hash: String,
     #[serde(rename = "privateNoteCodeHash")]

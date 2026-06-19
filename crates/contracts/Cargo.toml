@@ -6,8 +6,9 @@ license.workspace = true
 
 [dependencies]
 ackinacki-kit.workspace = true
-num-bigint.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
 tokio.workspace = true
+
+[dev-dependencies]
+num-bigint.workspace = true

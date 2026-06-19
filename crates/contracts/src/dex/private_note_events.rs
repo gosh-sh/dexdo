@@ -1,5 +1,6 @@
 use std::fmt::Display;
 
+use ackinacki_kit::contracts::deserialize::deserialize_option_u32;
 use ackinacki_kit::contracts::deserialize::deserialize_u128;
 use ackinacki_kit::contracts::deserialize::deserialize_u128_vec;
 use ackinacki_kit::contracts::deserialize::deserialize_u32;
@@ -24,8 +25,10 @@ pub enum PrivateNoteEvent {
     StakeConfirmed = 113,
     ClaimAccepted = 114,
     StakeCancelled = 115,
-    FullSetStakeConfirmed = 116,
-    FullSetStakeCancelled = 117,
+    // Emitted to the SPLIT/MERGE address slots (138/139), not the like-named
+    // FULLSET_STAKE_* constants 116/117 — see PrivateNote.sol:946,1059.
+    FullSetStakeConfirmed = 138,
+    FullSetStakeCancelled = 139,
     OrderPlacedConfirmed = 147,
     OrderFilledConfirmed = 148,
     TransferInitiated = 149,
@@ -54,8 +57,8 @@ impl TryFrom<String> for PrivateNoteEvent {
             113 => Ok(PrivateNoteEvent::StakeConfirmed),
             114 => Ok(PrivateNoteEvent::ClaimAccepted),
             115 => Ok(PrivateNoteEvent::StakeCancelled),
-            116 => Ok(PrivateNoteEvent::FullSetStakeConfirmed),
-            117 => Ok(PrivateNoteEvent::FullSetStakeCancelled),
+            138 => Ok(PrivateNoteEvent::FullSetStakeConfirmed),
+            139 => Ok(PrivateNoteEvent::FullSetStakeCancelled),
             147 => Ok(PrivateNoteEvent::OrderPlacedConfirmed),
             148 => Ok(PrivateNoteEvent::OrderFilledConfirmed),
             149 => Ok(PrivateNoteEvent::TransferInitiated),
@@ -394,7 +397,8 @@ pub struct FullSetStakeCancelledData {
 pub struct ClaimAcceptedData {
     #[serde(rename = "stakeController")]
     pub stake_controller: String,
-    pub outcome: Option<String>,
+    #[serde(deserialize_with = "deserialize_option_u32")]
+    pub outcome: Option<u32>,
     #[serde(deserialize_with = "deserialize_u128")]
     pub payout: u128,
 }
