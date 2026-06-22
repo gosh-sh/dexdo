@@ -2841,6 +2841,82 @@ async fn malformed_is_taker_fails_projection_loudly() {
     purge(&pool, &cleanup_refs).await;
 }
 
+/// A clean row and a poison row in the same batch: the optimistic drain aborts
+/// on the poison and the savepointed fallback still applies the clean row and
+/// leaves the poison pending. Guards that the rollback-then-replay never loses a
+/// clean row, and that a poison row keeps `processed_at` null for a later replay.
+#[tokio::test]
+async fn fast_path_falls_back_and_isolates_poison_row() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_fastfb";
+    let book = format!("0:{test}_book");
+    let order_id = "91";
+    let clean_msg = format!("{test}_a_clean-msg");
+    let poison_msg = format!("{test}_b_poison-msg");
+
+    let cleanup: Vec<(&str, &str)> = vec![
+        ("delete from live_orders where orderbook_address = $1", book.as_str()),
+        ("delete from raw_events where msg_id = $1", clean_msg.as_str()),
+        ("delete from raw_events where msg_id = $1", poison_msg.as_str()),
+    ];
+    purge(&pool, &cleanup).await;
+
+    // Parent so the poison OrderFilled reaches (and fails at) the isTaker parse
+    // rather than deferring on a missing order — a Deferred outcome would not
+    // error and so would never trigger the fallback this test exercises.
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(&book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    // Clean: ABI-decoded but unhandled -> Unknown -> marked processed.
+    insert_raw(
+        &pool,
+        &clean_msg,
+        &format!("0:{test}_src"),
+        "Nullifier.VoucherGenerated",
+        &json!({}),
+    )
+    .await;
+    // Poison: OrderFilled with absent isTaker -> projector Err.
+    insert_raw(
+        &pool,
+        &poison_msg,
+        &book,
+        "OrderBook.OrderFilled",
+        &json!({"orderId": order_id, "filledAmount": "30", "clearingPrice": "6150"}),
+    )
+    .await;
+
+    let stats = repo.reproject_pending(1000).await.expect("reproject");
+
+    assert_eq!(stats.unknown, 1, "the clean Unknown row must be applied via the fallback");
+    assert_eq!(stats.failed, 1, "the poison row must be reported as a failed projection");
+    assert!(
+        processed_at_is_set(&pool, &clean_msg).await,
+        "the clean row must be marked processed even though the batch fell back to savepoints",
+    );
+    assert!(
+        !processed_at_is_set(&pool, &poison_msg).await,
+        "the poison row must stay pending for a later repaired replay",
+    );
+
+    purge(&pool, &cleanup).await;
+}
+
 /// A taker OrderFilled with no `clearingPrice` fails the projection
 /// atomically: the live_orders mutation issued earlier in the same
 /// transaction rolls back with the trade insert, no trade row appears, and
