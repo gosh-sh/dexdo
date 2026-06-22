@@ -118,7 +118,9 @@ impl IndexerMetrics {
         let cursor_age_cache = Arc::clone(&capture_cursor_age_seconds);
         let capture_cursor_age_seconds_gauge = meter
             .u64_observable_gauge("indexer_capture_cursor_age_seconds")
-            .with_description("Seconds since the capture cursor last advanced")
+            .with_description(
+                "Seconds since the capture cursor last advanced; 0 when capture has not started",
+            )
             .with_callback(move |observer| {
                 observer.observe(cursor_age_cache.load(Ordering::Relaxed), &[]);
             })

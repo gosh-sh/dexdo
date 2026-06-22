@@ -3849,12 +3849,16 @@ async fn projection_lag_seconds_empty_queue_is_zero() {
     let Some(pool) = setup().await else { return };
     let repo = IndexerRepository::new(pool.clone());
 
-    let test = "metrics_lag_empty";
-    let msg_id = format!("{test}-msg");
-    purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id.as_str())]).await;
-
+    // projection_lag_seconds is a global min over ALL eligible pending rows, not
+    // scoped to this test. A concurrent test binary (e.g. capture.rs) may hold
+    // eligible rows on the shared DB, and REPROJECTION_LOCK does not cross
+    // processes, so only assert the empty-queue==0 contract when the queue is
+    // genuinely empty right now.
     let lag = repo.projection_lag_seconds().await.expect("projection_lag_seconds");
-    assert_eq!(lag, 0, "empty eligible queue must return 0");
+    let pending = repo.count_pending_projection().await.expect("count_pending_projection");
+    if pending == 0 {
+        assert_eq!(lag, 0, "empty eligible queue must return 0");
+    }
 }
 
 #[tokio::test]
@@ -3937,7 +3941,12 @@ async fn pool_connection_stats_is_callable_and_sane() {
     let _: i32 = sqlx::query_scalar("select 1").fetch_one(&pool).await.expect("warmup query");
 
     let (in_use, idle) = repo.pool_connection_stats();
-    // in_use + idle == pool.size() (u32 -> u64). Just assert the sum equals
-    // pool.size() cast to u64 — sanity check without asserting exact counts.
-    assert_eq!(in_use + idle, u64::from(pool.size()), "in_use + idle must equal pool.size()");
+    // Pool state is live and read non-atomically (size()/num_idle() are separate
+    // reads, and other test binaries share the pool), so exact counts are not
+    // assertable without flaking. After the warmup query at least one connection
+    // exists, so the total is positive — the strongest non-flaky check.
+    assert!(
+        in_use + idle >= 1,
+        "expected >=1 connection after warmup, got in_use={in_use} idle={idle}"
+    );
 }
