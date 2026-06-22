@@ -3849,14 +3849,17 @@ async fn projection_lag_seconds_empty_queue_is_zero() {
     let Some(pool) = setup().await else { return };
     let repo = IndexerRepository::new(pool.clone());
 
-    // projection_lag_seconds is a global min over ALL eligible pending rows, not
-    // scoped to this test. A concurrent test binary (e.g. capture.rs) may hold
-    // eligible rows on the shared DB, and REPROJECTION_LOCK does not cross
-    // processes, so only assert the empty-queue==0 contract when the queue is
-    // genuinely empty right now.
+    // projection_lag_seconds and count_pending_projection are global over ALL
+    // eligible pending rows, not scoped to this test, and run as separate reads
+    // on a shared DB (REPROJECTION_LOCK is in-process only, so it does not cross
+    // nextest's process-per-test). Read the count on both sides of the lag read
+    // and assert the empty-queue==0 contract only when the queue is observably
+    // empty across both — then it was empty during the lag read too. Otherwise a
+    // concurrent row makes the snapshots disagree and we skip rather than flake.
+    let pending_before = repo.count_pending_projection().await.expect("count_pending_projection");
     let lag = repo.projection_lag_seconds().await.expect("projection_lag_seconds");
-    let pending = repo.count_pending_projection().await.expect("count_pending_projection");
-    if pending == 0 {
+    let pending_after = repo.count_pending_projection().await.expect("count_pending_projection");
+    if pending_before == 0 && pending_after == 0 {
         assert_eq!(lag, 0, "empty eligible queue must return 0");
     }
 }
@@ -3877,7 +3880,17 @@ async fn projection_lag_seconds_pending_row_has_positive_lag() {
     insert_raw(&pool, &msg_id, &src, "Nullifier.VoucherGenerated", &serde_json::json!({})).await;
 
     let lag = repo.projection_lag_seconds().await.expect("projection_lag_seconds");
-    assert!(lag > 0, "pending row with old created_at_chain must produce positive lag, got {lag}");
+    // On the shared DB another nextest process may consume this eligible row via
+    // reproject_* before the lag read. processed_at is monotonic (NULL -> set),
+    // so if the row is still pending afterward it was pending during the read and
+    // the global min therefore included its old timestamp -> lag > 0. If it was
+    // consumed, skip rather than flake on a spurious 0.
+    if !processed_at_is_set(&pool, &msg_id).await {
+        assert!(
+            lag > 0,
+            "pending row with old created_at_chain must produce positive lag, got {lag}"
+        );
+    }
 
     purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id.as_str())]).await;
 }
@@ -3912,7 +3925,12 @@ async fn projection_lag_seconds_null_chain_time_falls_back_to_ingest_time() {
     .expect("insert null-chain raw_events");
 
     let lag = repo.projection_lag_seconds().await.expect("projection_lag_seconds");
-    assert!(lag > 0, "NULL chain time must fall back to ingest age, got {lag}");
+    // Same shared-DB isolation as the positive-lag test (processed_at monotonic):
+    // assert only while the row is still pending, so its created_at fallback was
+    // in the global min -> lag > 0.
+    if !processed_at_is_set(&pool, msg_id).await {
+        assert!(lag > 0, "NULL chain time must fall back to ingest age, got {lag}");
+    }
 
     purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id)]).await;
 }
