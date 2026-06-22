@@ -270,9 +270,10 @@ impl IndexerRepository {
     /// transaction is rolled back untouched and the same range is replayed with
     /// per-row savepoints, which applies the clean rows and leaves the failing
     /// row pending — the same outcome as savepointing every row, paid for only
-    /// when a failure actually occurs. With the drain loop's forward floor the
-    /// fallback is confined to passes that include a stuck row (the periodic
-    /// retry pass); steady forward drain stays on the fast path.
+    /// when a failure actually occurs. The fallback is paid only on passes that
+    /// hit a projector error — in practice the retry pass re-attempting a stuck
+    /// row, though a newly captured row that errors on first sight also drops its
+    /// forward pass to the fallback; a clean forward drain stays on the fast path.
     pub async fn reproject_pending_from(
         &self,
         batch_size: u32,
@@ -338,13 +339,15 @@ impl IndexerRepository {
                 Err(err) => {
                     // The optimistic transaction is now aborted; discard it and
                     // let the caller replay this range with per-row savepoints,
-                    // which applies the clean rows and isolates this one.
+                    // which applies the clean rows and isolates this one. Logged
+                    // at debug, not warn: the savepointed replay re-attempts this
+                    // row and emits the single authoritative failure warning.
                     tx.rollback().await.ok();
-                    warn!(
+                    debug!(
                         msg_id = %row.msg_id,
                         event_type = ?event.event_type,
                         ?err,
-                        "reprojection failed in optimistic batch; retrying batch with per-row savepoints"
+                        "optimistic projection batch errored; falling back to per-row savepoints"
                     );
                     return Ok(None);
                 }
@@ -354,7 +357,9 @@ impl IndexerRepository {
         Self::mark_processed(&mut tx, &to_mark).await?;
         tx.commit().await.context("reproject(fast) tx commit")?;
         // Durably committed — now (and only now) emit the unknown-type warnings
-        // and record first-sightings, in chain_order.
+        // and record first-sightings, in chain_order. A crash between the commit
+        // and this loop loses only log lines (and the first-sighting dedup),
+        // never projection state: the rows are already marked processed.
         for (msg_id, event_type) in &unknown_warnings {
             self.warn_unknown(msg_id, event_type);
         }
