@@ -1,0 +1,310 @@
+// 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
+//
+// Integration tests for IndexerRepository::persist_page (capture path).
+// Gated on TEST_DATABASE_URL exactly like reprojection.rs: unset → skip.
+//
+//   TEST_DATABASE_URL=postgres://user:pass@localhost:5432/db \
+//       cargo test -p dodex-infrastructure --test capture
+
+use std::env;
+use std::time::Duration;
+
+use dodex_infrastructure::database;
+use dodex_infrastructure::decoder::Decoder;
+use dodex_infrastructure::graphql::EventEdge;
+use dodex_infrastructure::graphql::EventNode;
+use dodex_infrastructure::indexer_repo::IndexerRepository;
+use serde_json::json;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+
+async fn setup() -> Option<PgPool> {
+    let _ = dotenvy::dotenv();
+    let url = match env::var("TEST_DATABASE_URL") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            eprintln!("skipping: TEST_DATABASE_URL not set");
+            return None;
+        }
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .expect("TEST_DATABASE_URL connect");
+    database::run_migrations(&pool).await.expect("run migrations");
+    Some(pool)
+}
+
+async fn purge(pool: &PgPool, queries: &[(&str, &str)]) {
+    for (sql, key) in queries {
+        sqlx::query(sql).bind(*key).execute(pool).await.expect("purge");
+    }
+}
+
+/// Builds an edge with a decodable / non-decodable body. `body` is the
+/// base64 BOC string, or None for an undecodable edge.
+fn edge(msg_id: &str, chain_order: Option<&str>, src: &str, body: Option<&str>) -> EventEdge {
+    EventEdge {
+        cursor: "c".to_string(),
+        node: EventNode {
+            msg_id: msg_id.to_string(),
+            msg_chain_order: chain_order.map(str::to_string),
+            src: Some(src.to_string()),
+            src_dapp_id: None,
+            dst: Some(src.to_string()),
+            body: body.map(|b| json!(b)),
+            created_at: Some(json!(1_700_000_000_i64)),
+        },
+    }
+}
+
+// Real OrderBook.OrderPlaced body fixture (decoder.rs unit tests). Decodes to
+// event_type "OrderBook.OrderPlaced", orderId "2".
+const ORDER_PLACED_BODY: &str = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAACAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJGgAAAAAAAAAAAAAAAn+OzoAAAAAAAAAAAFcScEalnJSVsVKAm0LrR0TbuPbU18Mkb7ENEBG22bNzhvrIubdt2wtAAQAQAAAAAAAAAXM=";
+
+#[tokio::test]
+async fn captures_decodable_event_without_projecting() {
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let test = "capture_no_project";
+    let orderbook = format!("0:{test}_book");
+    let msg_id = format!("{test}-msg");
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+
+    let edges = vec![edge(
+        &msg_id,
+        Some("5f80capture0000000000000001"),
+        &orderbook,
+        Some(ORDER_PLACED_BODY),
+    )];
+    let result = repo
+        .persist_page("blockchain_events", &edges, Some("cursor-1"), &decoder)
+        .await
+        .expect("persist_page");
+
+    assert_eq!(result.inserted, 1, "decodable edge must be inserted");
+    assert_eq!(result.decoded, 1, "OrderPlaced body must decode");
+
+    let (event_type, decoded_is_set, processed_is_null): (Option<String>, bool, bool) =
+        sqlx::query_as(
+            "select event_type, decoded is not null, processed_at is null
+               from raw_events where msg_id = $1",
+        )
+        .bind(&msg_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read raw_events");
+    assert_eq!(event_type.as_deref(), Some("OrderBook.OrderPlaced"));
+    assert!(decoded_is_set, "decoded jsonb must be stored at capture time");
+    assert!(processed_is_null, "capture must NOT project — processed_at stays NULL");
+
+    let live_count: i64 =
+        sqlx::query_scalar("select count(*) from live_orders where orderbook_address = $1")
+            .bind(&orderbook)
+            .fetch_one(&pool)
+            .await
+            .expect("count live_orders");
+    assert_eq!(
+        live_count, 0,
+        "capture must NOT write the read-model; projection is the loop's job"
+    );
+
+    // Purge before returning: this row is a valid, typed, decoded OrderPlaced
+    // left with processed_at NULL, so a reprojection-suite reproject_pending
+    // running against the shared test DB would pick it up and apply it. Clean it
+    // (and any read-model it could spawn) so it cannot contaminate other tests.
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bulk_insert_counts_new_and_conflicting_and_dedups_within_page() {
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let test = "capture_counts";
+    let src = format!("0:{test}_src");
+    let existing = format!("{test}-existing");
+    let fresh = format!("{test}-fresh");
+    let dup = format!("{test}-dup");
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", existing.as_str()),
+            ("delete from raw_events where msg_id = $1", fresh.as_str()),
+            ("delete from raw_events where msg_id = $1", dup.as_str()),
+        ],
+    )
+    .await;
+
+    // Pre-insert `existing` so it conflicts on the next page.
+    let pre = vec![edge(&existing, Some("5f80capture_counts_000000001"), &src, None)];
+    repo.persist_page("blockchain_events", &pre, None, &decoder).await.expect("pre-insert");
+
+    // Page: the conflicting `existing`, a `fresh` row, and `dup` twice.
+    let edges = vec![
+        edge(&existing, Some("5f80capture_counts_000000001"), &src, None),
+        edge(&fresh, Some("5f80capture_counts_000000002"), &src, None),
+        edge(&dup, Some("5f80capture_counts_000000003"), &src, None),
+        edge(&dup, Some("5f80capture_counts_000000003"), &src, None),
+    ];
+    let result =
+        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+
+    // After in-page de-dup: 3 unique candidates (existing, fresh, dup); 1
+    // conflicts (existing) → inserted 2 (fresh, dup), skipped 1.
+    assert_eq!(result.inserted, 2, "fresh + dup insert once each");
+    assert_eq!(result.skipped, 1, "the pre-existing msg_id conflicts");
+
+    let dup_count: i64 = sqlx::query_scalar("select count(*) from raw_events where msg_id = $1")
+        .bind(&dup)
+        .fetch_one(&pool)
+        .await
+        .expect("count dup");
+    assert_eq!(dup_count, 1, "a within-page duplicate msg_id must land exactly once");
+}
+
+#[tokio::test]
+async fn edge_missing_chain_order_is_dropped() {
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let test = "capture_no_chain_order";
+    let src = format!("0:{test}_src");
+    let msg_id = format!("{test}-msg");
+    purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id.as_str())]).await;
+
+    let edges = vec![edge(&msg_id, None, &src, None)];
+    let result =
+        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+
+    assert_eq!(result.inserted, 0, "an edge without msg_chain_order is not inserted");
+    assert_eq!(result.undecoded, 1, "the dropped edge is counted as undecoded");
+
+    let exists: bool =
+        sqlx::query_scalar("select exists(select 1 from raw_events where msg_id = $1)")
+            .bind(&msg_id)
+            .fetch_one(&pool)
+            .await
+            .expect("exists");
+    assert!(!exists, "no raw_events row for a keyless edge");
+}
+
+#[tokio::test]
+async fn persist_page_advances_cursor() {
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    // Unique stream name so this test does not race the live cursor row.
+    let stream = "capture_cursor_test_stream";
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("purge cursor");
+
+    repo.persist_page(stream, &[], Some("cursor-xyz"), &decoder).await.expect("persist_page");
+
+    let cursor = repo.load_cursor(stream).await.expect("load_cursor");
+    assert_eq!(cursor.as_deref(), Some("cursor-xyz"), "end_cursor must be persisted");
+}
+
+#[tokio::test]
+async fn persist_page_handles_mixed_decodable_and_undecodable_edges() {
+    // One page with a decodable edge (ORDER_PLACED_BODY) and an undecodable
+    // edge (body None). Asserts the counts and per-row DB state are correct —
+    // catching UNNEST column misalignment and the 'null'::jsonb vs SQL-NULL
+    // asymmetry.
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let test = "capture_mixed";
+    let orderbook = format!("0:{test}_book");
+    let msg_decodable = format!("{test}-decodable");
+    let msg_undecodable = format!("{test}-undecodable");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_decodable.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_undecodable.as_str()),
+        ],
+    )
+    .await;
+
+    let edges = vec![
+        edge(
+            &msg_decodable,
+            Some("5f80capture_mixed_00000000000001"),
+            &orderbook,
+            Some(ORDER_PLACED_BODY),
+        ),
+        edge(&msg_undecodable, Some("5f80capture_mixed_00000000000002"), &orderbook, None),
+    ];
+    let result =
+        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+
+    assert_eq!(result.inserted, 2, "both edges must be inserted");
+    assert_eq!(result.decoded, 1, "only the OrderPlaced body decodes");
+    assert_eq!(result.undecoded, 1, "the body-None edge is undecoded");
+
+    // Decodable row: event_type set, decoded non-null, processed_at null.
+    let (event_type, decoded_is_set, processed_is_null): (Option<String>, bool, bool) =
+        sqlx::query_as(
+            "select event_type, decoded is not null, processed_at is null
+               from raw_events where msg_id = $1",
+        )
+        .bind(&msg_decodable)
+        .fetch_one(&pool)
+        .await
+        .expect("read decodable row");
+    assert_eq!(
+        event_type.as_deref(),
+        Some("OrderBook.OrderPlaced"),
+        "decodable row must have event_type set"
+    );
+    assert!(decoded_is_set, "decodable row must have decoded jsonb stored");
+    assert!(processed_is_null, "capture must not project — processed_at stays NULL");
+
+    // Undecodable row: event_type null, decoded null.
+    let (event_type_u, decoded_is_set_u): (Option<String>, bool) =
+        sqlx::query_as("select event_type, decoded is not null from raw_events where msg_id = $1")
+            .bind(&msg_undecodable)
+            .fetch_one(&pool)
+            .await
+            .expect("read undecodable row");
+    assert!(event_type_u.is_none(), "undecodable row must have event_type NULL");
+    assert!(!decoded_is_set_u, "undecodable row must have decoded NULL");
+
+    purge(
+        &pool,
+        &[
+            ("delete from live_orders where orderbook_address = $1", orderbook.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_decodable.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_undecodable.as_str()),
+        ],
+    )
+    .await;
+}

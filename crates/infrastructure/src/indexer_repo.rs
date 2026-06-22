@@ -31,11 +31,11 @@ pub struct IndexerRepository {
     /// first sighting of a type is logged at the normal target (stdout + main
     /// log) as the operator's signal that a deployed contract emits something
     /// the indexer does not yet handle; every later repeat is diverted to the
-    /// noise log. Shared via `Arc` across the clones that record sightings —
-    /// the fetch loop and the reprojection sweep — so "first" is process-global
-    /// across both. (The metrics-refresh clone shares the `Arc` too but never
-    /// records sightings.) Bounded by the decoder's ABI event vocabulary, so it
-    /// cannot grow without limit.
+    /// noise log. Shared via `Arc` across all clones. The projection loop
+    /// (`run_reprojection_loop`) is the sole emitter of unknown-type sightings;
+    /// "first" is process-global across the loop's passes. (The metrics-refresh
+    /// clone shares the `Arc` too but never records sightings.) Bounded by the
+    /// decoder's ABI event vocabulary, so it cannot grow without limit.
     seen_unknown_event_types: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -45,19 +45,20 @@ pub struct PagePersistResult {
     pub skipped: u64,
     pub decoded: u64,
     pub undecoded: u64,
-    pub projected: u64,
-    pub projection_deferred: u64,
-    pub projection_failed: u64,
-    pub type_ignored: u64,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct ReprojectionStats {
     pub scanned: u64,
     pub applied: u64,
     pub deferred: u64,
     pub unknown: u64,
     pub failed: u64,
+    /// Highest `chain_order` read in the batch (rows are ordered asc, so the
+    /// last row's). `None` for an empty batch. Drives the drain loop's cursor.
+    /// It is a keyset cursor folded into the stats struct (returned alongside
+    /// the counts to avoid a second return value), not an outcome counter.
+    pub max_chain_order: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -127,18 +128,29 @@ impl IndexerRepository {
         edges: &[EventEdge],
         end_cursor: Option<&str>,
         decoder: &Decoder,
-        ignored_event_types: &HashSet<&str>,
     ) -> anyhow::Result<PagePersistResult> {
-        let mut tx: Transaction<'_, Postgres> = self.pool.begin().await.context("begin tx")?;
         let mut result = PagePersistResult::default();
+
+        // Build column vectors for one bulk insert. Capture decodes (so the
+        // row lands with `decoded` populated for the projection loop) but does
+        // NOT project — projection is run_reprojection_loop's job. De-dup by
+        // msg_id within the page so a repeated edge does not have to be
+        // absorbed by `on conflict` and the inserted/skipped counts stay honest.
+        let mut seen: HashSet<&str> = HashSet::with_capacity(edges.len());
+        let mut msg_ids: Vec<String> = Vec::with_capacity(edges.len());
+        let mut chain_orders: Vec<String> = Vec::with_capacity(edges.len());
+        let mut created_ats: Vec<Option<f64>> = Vec::with_capacity(edges.len());
+        let mut src_addresses: Vec<Option<String>> = Vec::with_capacity(edges.len());
+        let mut dst_addresses: Vec<Option<String>> = Vec::with_capacity(edges.len());
+        let mut event_types: Vec<Option<String>> = Vec::with_capacity(edges.len());
+        let mut body_texts: Vec<String> = Vec::with_capacity(edges.len());
+        let mut decoded_texts: Vec<Option<String>> = Vec::with_capacity(edges.len());
 
         for edge in edges {
             // `chain_order` is the projection-ordering key. The GraphQL gateway
-            // promises it on every message edge; an event
-            // without it is unusable here — the reproject SQL orders by
-            // `chain_order` and would either misplace this row or fail on the
-            // NOT NULL constraint. Drop the edge with a warning rather than
-            // synthesise a fake key.
+            // promises it on every message edge; an event without it is unusable
+            // (the projection SQL orders by `chain_order` and the column is NOT
+            // NULL). Drop the edge with a warning rather than synthesise a key.
             let Some(chain_order) = edge.node.msg_chain_order.as_deref() else {
                 result.undecoded += 1;
                 warn!(
@@ -147,28 +159,17 @@ impl IndexerRepository {
                 );
                 continue;
             };
-
-            let body_value = edge.node.body.clone().unwrap_or(Value::Null);
-            let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref());
-            // Drop configured no-op event types before they cost a raw_events
-            // insert + projection + mark_processed. The page-level cursor
-            // upsert after the loop still runs, so the cursor advances past
-            // them. event_type is only known post-decode, which is why this
-            // lives here and not in drain_events' src-based filter.
-            if let Some(d) = decoded.as_ref()
-                && ignored_event_types.contains(d.event_type.as_str())
-            {
-                result.type_ignored += 1;
+            if !seen.insert(edge.node.msg_id.as_str()) {
                 continue;
             }
+
+            let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref());
             if decoded.is_some() {
                 result.decoded += 1;
             } else {
                 result.undecoded += 1;
             }
 
-            let event_type = decoded.as_ref().map(|d| d.event_type.clone());
-            let decoded_value = decoded.as_ref().map(|d| d.value.clone());
             let created_at_chain = parse_unix_seconds(edge.node.created_at.as_ref());
             if should_warn_unparseable_created_at(edge.node.created_at.as_ref(), created_at_chain) {
                 warn!(
@@ -179,93 +180,60 @@ impl IndexerRepository {
                 );
             }
 
-            let affected = sqlx::query(
+            msg_ids.push(edge.node.msg_id.clone());
+            chain_orders.push(chain_order.to_string());
+            created_ats.push(created_at_chain);
+            src_addresses.push(edge.node.src.clone());
+            dst_addresses.push(edge.node.dst.clone());
+            event_types.push(decoded.as_ref().map(|d| d.event_type.clone()));
+            // body_json is NOT NULL; an absent body stores jsonb 'null'
+            // ("null"::jsonb), exactly as the prior per-row path did.
+            body_texts
+                .push(edge.node.body.as_ref().map_or_else(|| "null".to_string(), Value::to_string));
+            decoded_texts.push(decoded.as_ref().map(|d| d.value.to_string()));
+        }
+
+        let mut tx: Transaction<'_, Postgres> = self.pool.begin().await.context("begin tx")?;
+
+        if !msg_ids.is_empty() {
+            // One prepared statement regardless of page size. The jsonb columns
+            // are passed as text[] and cast with `::jsonb` so we never depend on
+            // sqlx encoding an array of jsonb values directly.
+            let inserted = sqlx::query(
                 r#"insert into raw_events
                        (msg_id, chain_order, created_at_chain, src_address,
                         dst_address, event_type, body_json, decoded)
-                   values ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8)
+                   select msg_id, chain_order, to_timestamp(created_f8),
+                          src_address, dst_address, event_type,
+                          body_text::jsonb, decoded_text::jsonb
+                     from unnest($1::text[], $2::text[], $3::double precision[],
+                                 $4::text[], $5::text[], $6::text[],
+                                 $7::text[], $8::text[])
+                          as t(msg_id, chain_order, created_f8, src_address,
+                               dst_address, event_type, body_text, decoded_text)
                    on conflict (msg_id) do nothing"#,
             )
-            .bind(&edge.node.msg_id)
-            .bind(chain_order)
-            .bind(created_at_chain)
-            .bind(edge.node.src.as_deref())
-            .bind(edge.node.dst.as_deref())
-            .bind(event_type)
-            .bind(body_value)
-            .bind(decoded_value)
+            .bind(msg_ids.as_slice())
+            .bind(chain_orders.as_slice())
+            .bind(created_ats.as_slice())
+            .bind(src_addresses.as_slice())
+            .bind(dst_addresses.as_slice())
+            .bind(event_types.as_slice())
+            .bind(body_texts.as_slice())
+            .bind(decoded_texts.as_slice())
             .execute(&mut *tx)
             .await
-            .with_context(|| format!("insert raw_events msg_id={}", edge.node.msg_id))?
+            .with_context(|| {
+                format!(
+                    "bulk insert raw_events chain_orders {:?}..{:?}",
+                    chain_orders.first(),
+                    chain_orders.last()
+                )
+            })?
             .rows_affected();
 
-            if affected == 0 {
-                result.skipped += 1;
-            } else {
-                result.inserted += affected;
-            }
-
-            // Skip projection on conflict: either the row was already projected
-            // (processed_at is set) or it is queued for retry — reproject_pending
-            // will pick it up. Re-running the projector here is unsafe because
-            // OrderBook arms are not idempotent (re-subtracted fills, OPEN reset
-            // by a duplicate OrderPlaced).
-            if affected == 0 {
-                continue;
-            }
-
-            if let Some(decoded_event) = decoded.as_ref() {
-                let mut sp = tx.begin().await.context("projector savepoint begin")?;
-                let outcome = projectors::project_event(&mut sp, decoded_event, &edge.node).await;
-                match outcome {
-                    Ok(ProjectionOutcome::Applied) => {
-                        sp.commit().await.context("projector savepoint release")?;
-                        result.projected += 1;
-                        mark_processed_by_msg_id(&mut tx, &edge.node.msg_id).await?;
-                    }
-                    Ok(ProjectionOutcome::Deferred) => {
-                        // Leave processed_at null; the reprojection loop picks
-                        // it up once the missing parent record materialises.
-                        sp.commit().await.context("projector savepoint release")?;
-                        result.projection_deferred += 1;
-                    }
-                    Ok(ProjectionOutcome::Unknown) => {
-                        // The row is still marked processed so the cursor
-                        // advances — blocking it would stall ingestion on
-                        // every newly deployed contract emitting an event we
-                        // don't yet teach. The first sighting of each unhandled
-                        // type goes to the normal target (stdout + main log) so
-                        // operators actually see the gap; later repeats are
-                        // diverted to the noise log to avoid flooding it.
-                        if self.first_unknown_sighting(&decoded_event.event_type) {
-                            warn!(
-                                msg_id = %edge.node.msg_id,
-                                event_type = %decoded_event.event_type,
-                                "projector has no handler for event type; marking processed and advancing cursor (first sighting — later repeats go to the noise log)"
-                            );
-                        } else {
-                            warn!(
-                                target: dodex_logging::EVENT_NOISE_TARGET,
-                                msg_id = %edge.node.msg_id,
-                                event_type = %decoded_event.event_type,
-                                "projector has no handler for event type; marking processed and advancing cursor"
-                            );
-                        }
-                        sp.commit().await.context("projector savepoint release")?;
-                        mark_processed_by_msg_id(&mut tx, &edge.node.msg_id).await?;
-                    }
-                    Err(err) => {
-                        drop(sp);
-                        result.projection_failed += 1;
-                        warn!(
-                            msg_id = %edge.node.msg_id,
-                            event_type = %decoded_event.event_type,
-                            ?err,
-                            "projector failed; raw event still persisted, savepoint rolled back"
-                        );
-                    }
-                }
-            }
+            result.inserted = inserted;
+            result.skipped = msg_ids.len() as u64 - inserted;
         }
 
         if let Some(cursor) = end_cursor {
@@ -286,17 +254,21 @@ impl IndexerRepository {
         Ok(result)
     }
 
-    /// Replays decoded-but-unprojected `raw_events` through the projector.
-    /// Picks rows where `processed_at is null` in chain-arrival order so a
-    /// previously-deferred parent gets its first chance before children retry.
-    /// Stored `decoded` jsonb is reused — bodies are not re-decoded.
-    ///
-    /// Uses `for update skip locked` and runs the whole batch inside a single
-    /// transaction so concurrent reproject workers (or a parallel test
-    /// harness) cannot pick up the same row and apply a non-idempotent
-    /// projector twice — without the lock, an `OrderFilled` could subtract
-    /// `filledAmount` from `live_orders` more than once.
-    pub async fn reproject_pending(&self, batch_size: u32) -> anyhow::Result<ReprojectionStats> {
+    /// Replays decoded-but-unprojected `raw_events` through the projector in
+    /// `chain_order` order, considering only rows in the range
+    /// `after_chain_order < chain_order <= until_chain_order` (either bound
+    /// `None` = unbounded on that side). The drain loop passes the previous
+    /// batch's high-water mark as `after` and the cycle ceiling as `until`, so
+    /// each pending row is attempted at most once per cycle and the cycle is
+    /// bounded to rows that existed at its start. `for update skip locked` + a
+    /// single transaction keep concurrent workers from applying a non-idempotent
+    /// projector twice.
+    pub async fn reproject_pending_from(
+        &self,
+        batch_size: u32,
+        after_chain_order: Option<&str>,
+        until_chain_order: Option<&str>,
+    ) -> anyhow::Result<ReprojectionStats> {
         let mut tx: Transaction<'_, Postgres> =
             self.pool.begin().await.context("reproject tx begin")?;
 
@@ -313,16 +285,26 @@ impl IndexerRepository {
                 where processed_at is null
                   and event_type is not null
                   and decoded is not null
+                  and ($2::text is null or chain_order > $2::text)
+                  and ($3::text is null or chain_order <= $3::text)
                 order by chain_order asc
                 limit $1
                 for update skip locked"#,
         )
         .bind(i64::from(batch_size))
+        .bind(after_chain_order)
+        .bind(until_chain_order)
         .fetch_all(&mut *tx)
         .await
         .context("select pending raw_events")?;
 
-        let mut stats = ReprojectionStats::default();
+        // Rows are ordered asc, so the last one carries the high-water chain_order.
+        let mut stats = ReprojectionStats {
+            max_chain_order: rows.last().map(|r| r.chain_order.clone()),
+            ..Default::default()
+        };
+        let mut to_mark: Vec<i64> = Vec::new();
+
         for row in rows {
             stats.scanned += 1;
             let Some((event, node)) = pending_row_to_inputs(&row) else {
@@ -334,7 +316,7 @@ impl IndexerRepository {
             match outcome {
                 Ok(ProjectionOutcome::Applied) => {
                     sp.commit().await.context("reproject savepoint release")?;
-                    mark_processed_by_id(&mut tx, row.id).await?;
+                    to_mark.push(row.id);
                     stats.applied += 1;
                 }
                 Ok(ProjectionOutcome::Deferred) => {
@@ -342,9 +324,6 @@ impl IndexerRepository {
                     stats.deferred += 1;
                 }
                 Ok(ProjectionOutcome::Unknown) => {
-                    // First sighting -> normal target so operators see the gap;
-                    // repeats -> noise log. Shares the dedup set with the fetch
-                    // loop, so a type already surfaced there stays quiet here.
                     if self.first_unknown_sighting(&event.event_type) {
                         warn!(
                             msg_id = %row.msg_id,
@@ -360,7 +339,7 @@ impl IndexerRepository {
                         );
                     }
                     sp.commit().await.context("reproject savepoint release")?;
-                    mark_processed_by_id(&mut tx, row.id).await?;
+                    to_mark.push(row.id);
                     stats.unknown += 1;
                 }
                 Err(err) => {
@@ -376,28 +355,206 @@ impl IndexerRepository {
             }
         }
 
+        if !to_mark.is_empty() {
+            let marked = sqlx::query(
+                r#"update raw_events
+                      set processed_at = now()
+                    where id = any($1)
+                      and processed_at is null"#,
+            )
+            .bind(&to_mark)
+            .execute(&mut *tx)
+            .await
+            .context("batch mark raw_events.processed_at")?
+            .rows_affected();
+            if marked != to_mark.len() as u64 {
+                warn!(
+                    expected = to_mark.len(),
+                    actual = marked,
+                    "batch-mark stamped fewer rows than projected: another writer may have set \
+                     processed_at concurrently — single-consumer assumption may be violated"
+                );
+            }
+        }
+
         tx.commit().await.context("reproject tx commit")?;
         Ok(stats)
     }
 
-    /// Hot loop, runs forever until cancelled.
-    pub async fn run_reprojection_loop(self, interval: Duration, batch_size: u32) {
+    /// Projects the whole pending queue from the front, unbounded. Thin wrapper
+    /// over `reproject_pending_from`; kept for tests and any single-shot caller.
+    pub async fn reproject_pending(&self, batch_size: u32) -> anyhow::Result<ReprojectionStats> {
+        self.reproject_pending_from(batch_size, None, None).await
+    }
+
+    /// Number of `raw_events` rows waiting for the projection loop — the
+    /// backlog gauge. Predicate matches `reproject_pending_from`'s SELECT so the
+    /// count reflects exactly what the loop will pick up. Cheap thanks to
+    /// `raw_events_pending_chain_order_idx`.
+    pub async fn count_pending_projection(&self) -> anyhow::Result<i64> {
+        let count: i64 = sqlx::query_scalar(
+            r#"select count(*) from raw_events
+                where processed_at is null
+                  and event_type is not null
+                  and decoded is not null"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("count pending projection")?;
+        Ok(count)
+    }
+
+    /// Highest pending `chain_order` right now, or `None` when the queue is
+    /// empty. The drain loop snapshots this as each cycle's ceiling so the cycle
+    /// is bounded to rows that existed at its start and terminates even under
+    /// sustained ingest. Cheap — a backward scan endpoint of
+    /// `raw_events_pending_chain_order_idx`.
+    pub async fn max_pending_chain_order(&self) -> anyhow::Result<Option<String>> {
+        let max: Option<String> = sqlx::query_scalar(
+            r#"select max(chain_order) from raw_events
+                where processed_at is null
+                  and event_type is not null
+                  and decoded is not null"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("max pending chain_order")?;
+        Ok(max)
+    }
+
+    /// Whether any pending row exists with `chain_order` above the argument. The
+    /// drain loop calls this after a cycle to decide whether to idle: rows at or
+    /// below the just-drained ceiling are stuck (Deferred/failed, already
+    /// attempted this cycle), so the loop sleeps only when NO new rows have
+    /// arrived above it — it never idles while applicable work is queued. The
+    /// `>` comparison is done in SQL so it matches the column's Postgres
+    /// collation (the same ordering `reproject_pending_from` filters on).
+    pub async fn has_pending_above(&self, chain_order: &str) -> anyhow::Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            r#"select exists(
+                   select 1 from raw_events
+                    where processed_at is null
+                      and event_type is not null
+                      and decoded is not null
+                      and chain_order > $1)"#,
+        )
+        .bind(chain_order)
+        .fetch_one(&self.pool)
+        .await
+        .context("has pending above chain_order")?;
+        Ok(exists)
+    }
+
+    /// Hot loop, runs forever until cancelled. The sole projector. It keeps a
+    /// forward `floor` (high-water chain_order already attempted) and a retry
+    /// timer; each pass snapshots a `ceiling` (highest pending chain_order now)
+    /// and drains the bounded range `(after, ceiling]` batch by batch.
+    ///  - Forward pass (default): `after` = floor, so it drains only newly
+    ///    captured rows above the floor and never re-touches the stuck
+    ///    Deferred/failed rows below it; the floor then advances to the ceiling.
+    ///  - Retry pass: `after` = None (front), re-attempting the stuck rows too,
+    ///    rate-limited to once per `idle_interval` — so a permanently stuck row
+    ///    is re-tried/re-logged on the polling cadence, not the drain cadence.
+    ///
+    /// The ceiling bounds every pass so it terminates under sustained ingest; the
+    /// retry timer fires every idle_interval regardless of ingest (Deferred rows
+    /// retried within ~one interval); the post-pass sleep is conditional on
+    /// `has_pending_above`, so the projector never idles with work queued.
+    /// `idle_interval` is wired to polling_interval_ms.
+    pub async fn run_reprojection_loop(self, idle_interval: Duration, batch_size: u32) {
+        let mut floor: Option<String> = None;
+        let mut last_retry = tokio::time::Instant::now();
+        let mut force_retry = true; // first pass rewinds to the front
+
         loop {
-            match self.reproject_pending(batch_size).await {
-                Ok(stats) if stats.scanned > 0 => {
-                    info!(
-                        scanned = stats.scanned,
-                        applied = stats.applied,
-                        deferred = stats.deferred,
-                        unknown = stats.unknown,
-                        failed = stats.failed,
-                        "reprojection sweep"
-                    );
+            let retry = force_retry || last_retry.elapsed() >= idle_interval;
+            force_retry = false;
+            // Forward passes resume above the floor; a rate-limited retry pass
+            // rewinds to the front to re-attempt the stuck set below the floor.
+            let mut after: Option<String> = if retry {
+                last_retry = tokio::time::Instant::now();
+                None
+            } else {
+                floor.clone()
+            };
+
+            // Ceiling = highest pending chain_order now; bounds this pass so it
+            // terminates even while capture keeps appending above it.
+            let ceiling = match self.max_pending_chain_order().await {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    tokio::time::sleep(idle_interval).await;
+                    continue;
                 }
-                Ok(_) => debug!("reprojection sweep (idle)"),
-                Err(err) => error!(?err, "reprojection sweep failed"),
+                Err(err) => {
+                    error!(?err, "projection ceiling query failed");
+                    tokio::time::sleep(idle_interval).await;
+                    continue;
+                }
+            };
+
+            let mut drained_clean = true;
+            loop {
+                match self
+                    .reproject_pending_from(batch_size, after.as_deref(), Some(&ceiling))
+                    .await
+                {
+                    Ok(stats) => {
+                        if stats.scanned > 0 {
+                            info!(
+                                scanned = stats.scanned,
+                                applied = stats.applied,
+                                deferred = stats.deferred,
+                                unknown = stats.unknown,
+                                failed = stats.failed,
+                                "projection sweep"
+                            );
+                        }
+                        // Not a full batch -> the bounded range (after, ceiling]
+                        // is drained; stop.
+                        if stats.scanned < u64::from(batch_size) {
+                            break;
+                        }
+                        // Full batch -> advance past the highest chain_order read.
+                        // A full batch always has a max; if absent, stop.
+                        match stats.max_chain_order {
+                            Some(co) => after = Some(co),
+                            None => break,
+                        }
+                    }
+                    Err(err) => {
+                        error!(?err, "projection sweep failed");
+                        drained_clean = false;
+                        break;
+                    }
+                }
             }
-            tokio::time::sleep(interval).await;
+            // Advances floor only after a clean drain; on a sweep error the floor
+            // is left so the next forward pass re-covers the range.
+            if drained_clean {
+                floor = Some(ceiling.clone());
+            }
+
+            // Backlog gauge: rows still pending after the pass (Deferred waiting
+            // on a parent, or rows that arrived above the ceiling). Info only when
+            // non-zero to avoid an idle flood.
+            match self.count_pending_projection().await {
+                Ok(backlog) if backlog > 0 => info!(backlog, "projection backlog"),
+                Ok(backlog) => debug!(backlog, "projection backlog (drained)"),
+                Err(err) => warn!(?err, "projection backlog gauge failed"),
+            }
+
+            // Idle only if no new rows arrived above the ceiling. If they did, run
+            // the next pass immediately so the projector never idles with
+            // applicable work queued. The retry timer still fires on schedule.
+            match self.has_pending_above(&ceiling).await {
+                Ok(true) => {}
+                Ok(false) => tokio::time::sleep(idle_interval).await,
+                Err(err) => {
+                    warn!(?err, "projection has-pending-above check failed; idling");
+                    tokio::time::sleep(idle_interval).await;
+                }
+            }
         }
     }
 }
@@ -423,37 +580,6 @@ fn pending_row_to_inputs(row: &PendingRow) -> Option<(DecodedEvent, EventNode)> 
         created_at: row.ts.and_then(serde_json::Number::from_f64).map(Value::Number),
     };
     Some((event, node))
-}
-
-async fn mark_processed_by_msg_id(
-    tx: &mut Transaction<'_, Postgres>,
-    msg_id: &str,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"update raw_events
-              set processed_at = now()
-            where msg_id = $1
-              and processed_at is null"#,
-    )
-    .bind(msg_id)
-    .execute(&mut **tx)
-    .await
-    .with_context(|| format!("mark raw_events.processed_at for msg_id={msg_id}"))?;
-    Ok(())
-}
-
-async fn mark_processed_by_id(tx: &mut Transaction<'_, Postgres>, id: i64) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"update raw_events
-              set processed_at = now()
-            where id = $1
-              and processed_at is null"#,
-    )
-    .bind(id)
-    .execute(&mut **tx)
-    .await
-    .with_context(|| format!("mark raw_events.processed_at for id={id}"))?;
-    Ok(())
 }
 
 fn try_decode(decoder: &Decoder, msg_id: &str, body: Option<&Value>) -> Option<DecodedEvent> {

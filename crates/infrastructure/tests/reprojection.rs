@@ -3329,3 +3329,516 @@ async fn divergent_qty_replay_never_heals_null_chain_time() {
 
     purge(&pool, cleanup).await;
 }
+
+#[tokio::test]
+async fn count_pending_projection_counts_only_unprojected_typed_decoded_rows() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "count_pending";
+    let pending = format!("{test}-pending");
+    let processed = format!("{test}-processed");
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", pending.as_str()),
+            ("delete from raw_events where msg_id = $1", processed.as_str()),
+        ],
+    )
+    .await;
+
+    let before = repo.count_pending_projection().await.expect("count before");
+
+    // One pending decodable+typed row.
+    insert_raw(&pool, &pending, "0:count_pending_src", "RootOracle.OracleDeployed", &json!({}))
+        .await;
+    // One already-processed row — must NOT be counted.
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded, processed_at)
+           values ($1, $2, to_timestamp(1700000000), $3, $3,
+                   'RootOracle.OracleDeployed', '{}'::jsonb, '{}'::jsonb, now())"#,
+    )
+    .bind(&processed)
+    .bind(format!("5f80{processed:0>28}"))
+    .bind("0:count_pending_src")
+    .execute(&pool)
+    .await
+    .expect("insert processed row");
+
+    let after = repo.count_pending_projection().await.expect("count after");
+    assert_eq!(after - before, 1, "only the unprojected typed+decoded row adds to the backlog");
+
+    // Purge before returning: `pending` is typed + decoded + processed_at NULL,
+    // so it satisfies reproject_pending's filter. Left behind in the shared test
+    // DB, a later reproject_pending(1000) would select it, fail on the empty
+    // payload, and add a phantom stats.failed — breaking the exact failure-count
+    // assertions elsewhere in this suite.
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", pending.as_str()),
+            ("delete from raw_events where msg_id = $1", processed.as_str()),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn reproject_pending_marks_a_whole_batch_processed() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_batch_mark";
+    let addr_a = format!("0:{test}_a");
+    let addr_b = format!("0:{test}_b");
+    let msg_a = format!("{test}-a");
+    let msg_b = format!("{test}-b");
+    purge(
+        &pool,
+        &[
+            ("delete from oracles where address = $1", addr_a.as_str()),
+            ("delete from oracles where address = $1", addr_b.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_a.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_b.as_str()),
+        ],
+    )
+    .await;
+
+    insert_raw(
+        &pool,
+        &msg_a,
+        &addr_a,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": addr_a, "pubkey": "0x00", "name": format!("{test}-a") }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &msg_b,
+        &addr_b,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": addr_b, "pubkey": "0x00", "name": format!("{test}-b") }),
+    )
+    .await;
+
+    let stats = repo.reproject_pending(1000).await.expect("reproject");
+    assert!(stats.applied >= 2, "both rows apply in one batch");
+
+    assert!(processed_at_is_set(&pool, &msg_a).await, "row A marked processed");
+    assert!(processed_at_is_set(&pool, &msg_b).await, "row B marked processed");
+
+    // Purge the rows and the oracles they projected so the test leaves the
+    // shared DB as it found it.
+    purge(
+        &pool,
+        &[
+            ("delete from oracles where address = $1", addr_a.as_str()),
+            ("delete from oracles where address = $1", addr_b.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_a.as_str()),
+            ("delete from raw_events where msg_id = $1", msg_b.as_str()),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn reproject_pending_from_honors_after_and_until_bounds() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_range";
+    let a1 = format!("0:{test}_a1");
+    let a2 = format!("0:{test}_a2");
+    let a3 = format!("0:{test}_a3");
+    let m1 = format!("{test}-1");
+    let m2 = format!("{test}-2");
+    let m3 = format!("{test}-3");
+    let cleanup = [
+        ("delete from oracles where address = $1", a1.as_str()),
+        ("delete from oracles where address = $1", a2.as_str()),
+        ("delete from oracles where address = $1", a3.as_str()),
+        ("delete from raw_events where msg_id = $1", m1.as_str()),
+        ("delete from raw_events where msg_id = $1", m2.as_str()),
+        ("delete from raw_events where msg_id = $1", m3.as_str()),
+    ];
+    purge(&pool, &cleanup).await;
+
+    insert_raw(
+        &pool,
+        &m1,
+        &a1,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": a1, "pubkey": "0x00", "name": m1 }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &m2,
+        &a2,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": a2, "pubkey": "0x00", "name": m2 }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &m3,
+        &a3,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": a3, "pubkey": "0x00", "name": m3 }),
+    )
+    .await;
+
+    // insert_raw derives chain_order as `5f80{msg_id:0>28}`. after = row 1's value,
+    // until = row 2's value, so only row 2 (after < chain_order <= until) is eligible:
+    // row 1 is excluded by `>`, row 3 by `<=`.
+    let after = format!("5f80{m1:0>28}");
+    let until = format!("5f80{m2:0>28}");
+    let stats = repo
+        .reproject_pending_from(1000, Some(&after), Some(&until))
+        .await
+        .expect("reproject_from");
+
+    assert!(!processed_at_is_set(&pool, &m1).await, "row at/before `after` must be skipped");
+    assert!(processed_at_is_set(&pool, &m2).await, "row inside (after, until] must be projected");
+    assert!(!processed_at_is_set(&pool, &m3).await, "row above `until` must be skipped");
+    assert_eq!(
+        stats.max_chain_order.as_deref(),
+        Some(until.as_str()),
+        "max_chain_order must be the highest chain_order read in the batch"
+    );
+
+    purge(&pool, &cleanup).await;
+}
+
+#[tokio::test]
+async fn has_pending_above_and_max_pending_chain_order_respect_eligibility() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_pending_endpoints";
+    let addr = format!("0:{test}_oracle");
+
+    // Three eligible rows with known chain_orders (derived from msg_id by insert_raw).
+    let m1 = format!("{test}-msg-1");
+    let m2 = format!("{test}-msg-2");
+    let m3 = format!("{test}-msg-3");
+    // Ineligible rows: processed_at set, event_type NULL, decoded NULL.
+    let m_proc = format!("{test}-msg-proc");
+    let m_null_type = format!("{test}-msg-nulltype");
+    let m_null_dec = format!("{test}-msg-nulldec");
+
+    let cleanup = [
+        ("delete from oracles where address = $1", addr.as_str()),
+        ("delete from raw_events where msg_id = $1", m1.as_str()),
+        ("delete from raw_events where msg_id = $1", m2.as_str()),
+        ("delete from raw_events where msg_id = $1", m3.as_str()),
+        ("delete from raw_events where msg_id = $1", m_proc.as_str()),
+        ("delete from raw_events where msg_id = $1", m_null_type.as_str()),
+        ("delete from raw_events where msg_id = $1", m_null_dec.as_str()),
+    ];
+    purge(&pool, &cleanup).await;
+
+    // Insert three eligible rows.
+    insert_raw(
+        &pool,
+        &m1,
+        &addr,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": format!("0:{test}_o1"), "pubkey": "0x01", "name": "n1" }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &m2,
+        &addr,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": format!("0:{test}_o2"), "pubkey": "0x02", "name": "n2" }),
+    )
+    .await;
+    insert_raw(
+        &pool,
+        &m3,
+        &addr,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": format!("0:{test}_o3"), "pubkey": "0x03", "name": "n3" }),
+    )
+    .await;
+
+    // Insert an already-processed row (highest chain_order among all inserts,
+    // so if the predicate were broken it would show up as max).
+    // chain_order = 5f80{msg_id:0>28}; m_proc > m3 lexicographically so its
+    // chain_order is above m3's — confirming the filter ignores it.
+    insert_raw(
+        &pool,
+        &m_proc,
+        &addr,
+        "RootOracle.OracleDeployed",
+        &json!({ "oracle": format!("0:{test}_oproc"), "pubkey": "0x04", "name": "nproc" }),
+    )
+    .await;
+    sqlx::query("update raw_events set processed_at = now() where msg_id = $1")
+        .bind(&m_proc)
+        .execute(&pool)
+        .await
+        .expect("mark processed");
+
+    // Insert a row with event_type IS NULL.
+    sqlx::query(
+        r#"insert into raw_events (msg_id, chain_order, created_at_chain, src_address,
+               dst_address, event_type, body_json, decoded)
+           values ($1, $2, to_timestamp(1700000000), $3, $3,
+                   null, '{}'::jsonb, '{}'::jsonb)"#,
+    )
+    .bind(&m_null_type)
+    .bind(format!("5f80{m_null_type:0>28}"))
+    .bind(&addr)
+    .execute(&pool)
+    .await
+    .expect("insert null-type row");
+
+    // Insert a row with decoded IS NULL.
+    sqlx::query(
+        r#"insert into raw_events (msg_id, chain_order, created_at_chain, src_address,
+               dst_address, event_type, body_json, decoded)
+           values ($1, $2, to_timestamp(1700000000), $3, $3,
+                   'RootOracle.OracleDeployed', '{}'::jsonb, null)"#,
+    )
+    .bind(&m_null_dec)
+    .bind(format!("5f80{m_null_dec:0>28}"))
+    .bind(&addr)
+    .execute(&pool)
+    .await
+    .expect("insert null-decoded row");
+
+    // chain_orders for the three eligible rows (derived by insert_raw formula):
+    let co1 = format!("5f80{m1:0>28}");
+    let co2 = format!("5f80{m2:0>28}");
+    let co3 = format!("5f80{m3:0>28}");
+
+    // max_pending_chain_order returns the highest eligible chain_order (m3's).
+    let max = repo.max_pending_chain_order().await.expect("max_pending_chain_order");
+    assert_eq!(
+        max.as_deref(),
+        Some(co3.as_str()),
+        "max_pending_chain_order must return the highest eligible chain_order; \
+         processed/null-type/null-decoded rows must not count"
+    );
+
+    // has_pending_above(co2) is true: m3 is eligible and above co2.
+    assert!(
+        repo.has_pending_above(&co2).await.expect("has_pending_above co2"),
+        "has_pending_above must be true when an eligible row exists above the threshold"
+    );
+    // has_pending_above(co3) is false: no eligible row above the highest.
+    assert!(
+        !repo.has_pending_above(&co3).await.expect("has_pending_above co3"),
+        "has_pending_above must be false at or above the highest eligible chain_order"
+    );
+    // has_pending_above(co1) is true: m2 and m3 are both above co1.
+    assert!(
+        repo.has_pending_above(&co1).await.expect("has_pending_above co1"),
+        "has_pending_above must be true when multiple eligible rows exist above threshold"
+    );
+
+    purge(&pool, &cleanup).await;
+}
+
+#[tokio::test]
+async fn run_reprojection_loop_drains_pending_and_retries_deferred() {
+    // Tests that the loop drains seeded pending rows end-to-end and that the
+    // timer-gated retry pass re-attempts deferred rows once their dependency
+    // arrives.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_loop_orch";
+    let oracle_addr = format!("0:{test}_oracle");
+    let oracle_name = format!("{test}-oracle");
+    let evlist_addr = format!("0:{test}_evlist");
+    let msg_oracle = format!("{test}-oracle-msg");
+    let msg_child = format!("{test}-child-msg");
+
+    let cleanup = [
+        ("delete from oracle_event_lists where address = $1", evlist_addr.as_str()),
+        ("delete from oracles where address = $1", oracle_addr.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_oracle.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_child.as_str()),
+    ];
+    purge(&pool, &cleanup).await;
+
+    // Seed the parent oracle raw event (will Apply immediately).
+    insert_raw(
+        &pool,
+        &msg_oracle,
+        &oracle_addr,
+        "RootOracle.OracleDeployed",
+        &json!({
+            "oracle": oracle_addr,
+            "pubkey": "0x0000000000000000000000000000000000000000000000000000000000001234",
+            "name": oracle_name,
+        }),
+    )
+    .await;
+
+    // Seed the child event list — its oracle parent is not yet in `oracles`,
+    // so the first pass will Defer it.
+    insert_raw(
+        &pool,
+        &msg_child,
+        &oracle_addr,
+        "Oracle.OracleEventListDeployed",
+        &json!({
+            "eventListAddress": evlist_addr,
+            "index": "1",
+            "description": "Loop orch test event list",
+        }),
+    )
+    .await;
+
+    // Start the reprojection loop with a 50ms idle interval.
+    let h = tokio::spawn(repo.clone().run_reprojection_loop(Duration::from_millis(50), 1000));
+
+    // Poll up to 3 seconds for the oracle row (parent) to be applied.
+    let oracle_applied = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if processed_at_is_set(&pool, &msg_oracle).await {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    assert!(oracle_applied, "loop must drain the oracle row within 3s");
+
+    // The oracle row is now Applied → the `oracles` table has the row.
+    // The child event list was Deferred on the first pass. Poll up to 3s
+    // for the retry pass to re-attempt it and find the parent now present.
+    let child_applied = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if processed_at_is_set(&pool, &msg_child).await {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    assert!(
+        child_applied,
+        "loop retry pass must re-attempt the deferred child and apply it once the parent exists"
+    );
+
+    h.abort();
+    let _ = h.await; // drive the aborted task to completion before purging its rows
+    purge(&pool, &cleanup).await;
+}
+
+#[tokio::test]
+async fn identical_chain_order_both_rows_eventually_drain() {
+    // Verifies that two pending rows sharing the same chain_order are both
+    // eventually drained. With batch_size=1, the first forward pass takes row A
+    // and advances `after` to the shared chain_order; the next forward SELECT
+    // (`chain_order > after`) then excludes row B, stranding it. The loop's
+    // front-rewinding retry pass (after = None, `processed_at is null` filter)
+    // then recovers B. This exercises the actual boundary path: forward-pass
+    // stranding followed by retry-pass recovery.
+    //
+    // chain_order is globally unique by gateway design, so real duplicates are
+    // not anticipated on the write path; this test asserts the recovery
+    // mechanism as defense-in-depth.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_dup_chain_order";
+    let addr_a = format!("0:{test}_a");
+    let addr_b = format!("0:{test}_b");
+    let msg_a = format!("{test}-msg-a");
+    let msg_b = format!("{test}-msg-b");
+    // Both rows share the SAME chain_order, deliberately violating the normal
+    // uniqueness guarantee to probe the keyset boundary.
+    let shared_chain_order = "5f80reproj_dup_chain_order000000";
+
+    let cleanup = [
+        ("delete from oracles where address = $1", addr_a.as_str()),
+        ("delete from oracles where address = $1", addr_b.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_a.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_b.as_str()),
+    ];
+    purge(&pool, &cleanup).await;
+
+    // Insert both rows with the same chain_order.
+    sqlx::query(
+        r#"insert into raw_events (msg_id, chain_order, created_at_chain, src_address,
+               dst_address, event_type, body_json, decoded)
+           values ($1, $2, to_timestamp(1700000000), $3, $3,
+                   'RootOracle.OracleDeployed', '{}'::jsonb, $4)"#,
+    )
+    .bind(&msg_a)
+    .bind(shared_chain_order)
+    .bind(&addr_a)
+    .bind(json!({ "oracle": addr_a, "pubkey": "0x01", "name": format!("{test}-a") }))
+    .execute(&pool)
+    .await
+    .expect("insert row A");
+
+    sqlx::query(
+        r#"insert into raw_events (msg_id, chain_order, created_at_chain, src_address,
+               dst_address, event_type, body_json, decoded)
+           values ($1, $2, to_timestamp(1700000000), $3, $3,
+                   'RootOracle.OracleDeployed', '{}'::jsonb, $4)"#,
+    )
+    .bind(&msg_b)
+    .bind(shared_chain_order)
+    .bind(&addr_b)
+    .bind(json!({ "oracle": addr_b, "pubkey": "0x02", "name": format!("{test}-b") }))
+    .execute(&pool)
+    .await
+    .expect("insert row B");
+
+    // Drive through the loop with batch_size=1 and a short idle interval.
+    // batch_size=1 forces the keyset boundary: the first forward pass takes
+    // row A (advances `after` to the shared chain_order), the next forward
+    // SELECT excludes row B, and the timer-gated retry pass (rewind to front)
+    // recovers B.
+    let h = tokio::spawn(repo.clone().run_reprojection_loop(Duration::from_millis(50), 1));
+
+    // Poll up to 5 seconds for BOTH rows to drain.
+    let both_applied = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let a = processed_at_is_set(&pool, &msg_a).await;
+            let b = processed_at_is_set(&pool, &msg_b).await;
+            if a && b {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+
+    h.abort();
+    let _ = h.await; // drive the aborted task to completion before purging its rows
+
+    assert!(
+        both_applied,
+        "both rows with identical chain_order must eventually drain via the loop's \
+         front-rewinding retry pass"
+    );
+
+    purge(&pool, &cleanup).await;
+}

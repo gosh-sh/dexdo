@@ -1,6 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -211,11 +212,6 @@ pub struct IndexerSection {
     pub polling_interval_ms: u64,
     pub depth_refresh_interval_ms: u64,
     pub reconciliation_interval_ms: u64,
-    /// Cadence of the deferred-projection retry pass. Background loop scans
-    /// `raw_events` rows whose `processed_at` is still null and re-runs the
-    /// projector against stored `decoded` jsonb, in chain-arrival order.
-    #[serde(default = "default_reprojection_interval_ms")]
-    pub reprojection_interval_ms: u64,
     /// Maximum rows replayed per reprojection sweep. Bounded so a long idle
     /// backlog does not block the rest of the indexer for too long.
     #[serde(default = "default_reprojection_batch_size")]
@@ -232,9 +228,10 @@ pub struct IndexerSection {
     /// (system / null-route addresses) without polluting the read-model.
     #[serde(default)]
     pub ignored_addresses: Vec<String>,
-    /// Decoded `event_type` values to drop at ingest, before the `raw_events`
-    /// insert and projection. The page cursor still advances past them. Used
-    /// to shed observability-only floods (e.g. `OrderBook.Queued`).
+    /// Decoded `event_type` names to drop at ingest — matched by their external
+    /// `dst` and dropped before decode, the `raw_events` insert, and projection.
+    /// The page cursor still advances past them. Used to shed observability-only
+    /// floods (e.g. `OrderBook.Queued`).
     ///
     /// Only genuine no-op types belong here — those `projectors::project_event`
     /// maps to `ProjectionOutcome::Applied` without touching a read-model table
@@ -249,10 +246,12 @@ pub struct IndexerSection {
     /// typos all fail loudly at startup rather than silently doing nothing.
     #[serde(default)]
     pub ignored_event_types: Vec<String>,
-}
-
-fn default_reprojection_interval_ms() -> u64 {
-    30_000
+    /// The DEXDO `dapp_id`. When set, the indexer keeps only event edges whose
+    /// `src_dapp_id` matches it — foreign chain traffic is dropped before
+    /// decode. Edges with no `src_dapp_id` are kept (so a gateway that omits the
+    /// field never costs us our own events). When unset, no dapp scoping runs.
+    #[serde(default)]
+    pub dapp_id: Option<String>,
 }
 
 fn default_reprojection_batch_size() -> u32 {
@@ -411,8 +410,9 @@ pub const METRIC_CRITICAL_EVENT_TYPES: [&str; 2] =
 /// `OrderBook.PartialFill` (a no-op there, but it backs an OTLP counter — see
 /// [`METRIC_CRITICAL_EVENT_TYPES`]). `validate` rejects any configured type
 /// outside this set, so a typo or a state-changing type fails loudly at startup
-/// instead of being a silent no-op (the ingest filter only fires post-decode,
-/// so an unmatched name simply never drops anything). Keep in sync with the
+/// instead of being a silent no-op (the ingest filter matches by dst before
+/// decode, so an unmatched name maps to no dst and would silently never drop
+/// anything). Keep in sync with the
 /// no-op arm in `projectors::project_event`.
 pub const IGNORABLE_EVENT_TYPES: [&str; 4] = [
     "OrderBook.FullyFilled",
@@ -420,6 +420,44 @@ pub const IGNORABLE_EVENT_TYPES: [&str; 4] = [
     "OrderBook.Rejected",
     "OrderBook.CallbackBounced",
 ];
+
+/// The `makeAddrExtern` EVENT_ID each ignorable event type routes its external
+/// `dst` to (`contracts/dex/modifiers/modifiers.sol`). The ingest filter drops
+/// these events by `dst` before decode; this table maps the configured
+/// event-type name to the EVENT_ID needed to compute that `dst`. Names must
+/// equal [`IGNORABLE_EVENT_TYPES`] and IDs must match `modifiers.sol` — unit
+/// tests pin both.
+pub const IGNORABLE_EVENT_IDS: [(&str, u32); 4] = [
+    ("OrderBook.FullyFilled", 158),
+    ("OrderBook.Queued", 159),
+    ("OrderBook.Rejected", 160),
+    ("OrderBook.CallbackBounced", 161),
+];
+
+/// The external `dst` the gateway reports for an event routed to
+/// `address.makeAddrExtern(event_id, 256)`: a `:` followed by the EVENT_ID as
+/// 64 lowercase hex digits (verified against production `raw_events`, e.g.
+/// `OrderBook.OrderPlaced` / EVENT_ID 143 -> a recorded production dst of
+/// `:000000000000000000000000000000000000000000000000000000000000008f`).
+pub fn event_type_dst(event_id: u32) -> String {
+    format!(":{event_id:064x}")
+}
+
+/// The set of external `dst` strings to drop before decode, derived from the
+/// configured `ignored_event_types`. A name not in [`IGNORABLE_EVENT_IDS`] is
+/// skipped — it cannot occur, because `validate` restricts the config to
+/// [`IGNORABLE_EVENT_TYPES`], the same set.
+pub fn ignored_event_dsts(ignored_event_types: &[String]) -> HashSet<String> {
+    ignored_event_types
+        .iter()
+        .filter_map(|t| {
+            IGNORABLE_EVENT_IDS
+                .iter()
+                .find(|(name, _)| *name == t.as_str())
+                .map(|(_, id)| event_type_dst(*id))
+        })
+        .collect()
+}
 
 impl IndexerConfig {
     pub fn load_from_path(path: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -447,10 +485,6 @@ impl IndexerConfig {
             "indexer.reconciliation_interval_ms must be > 0"
         );
         anyhow::ensure!(
-            i.reprojection_interval_ms > 0,
-            "indexer.reprojection_interval_ms must be > 0"
-        );
-        anyhow::ensure!(
             i.reprojection_batch_size > 0,
             "indexer.reprojection_batch_size must be > 0"
         );
@@ -458,14 +492,22 @@ impl IndexerConfig {
             i.oracle_event_list_reconciliation_interval_ms > 0,
             "indexer.oracle_event_list_reconciliation_interval_ms must be > 0"
         );
+        // `dapp_id: ""` deserializes to Some(""), which would enable the scope
+        // filter and drop every edge with a real src_dapp_id while the cursor
+        // still advances — silent, unrecoverable data loss. An empty string is
+        // never valid; omit the key to disable dapp scoping.
+        anyhow::ensure!(
+            i.dapp_id.as_deref() != Some(""),
+            "indexer.dapp_id must not be empty; omit the key to disable dapp scoping"
+        );
         // Every configured ignored type must be a known droppable no-op
         // (`IGNORABLE_EVENT_TYPES`). This rejects, at startup: metric-critical
         // types (dropping them silently undercounts the OTLP counters their
         // raw_events back), state-changing types (dropping them corrupts the
         // read model), and typos — which would otherwise be a silent no-op,
-        // since the ingest filter only fires post-decode and an unmatched name
-        // never drops anything. Metric-critical types are checked first so they
-        // get the more specific message.
+        // since the ingest filter matches by dst before decode and an unmatched
+        // name maps to no dst, so it would never drop anything. Metric-critical
+        // types are checked first so they get the more specific message.
         for t in &i.ignored_event_types {
             let t = t.as_str();
             anyhow::ensure!(
@@ -1449,5 +1491,90 @@ indexer:
                 "{t} is both ignorable and metric-critical"
             );
         }
+    }
+
+    #[test]
+    fn event_type_dst_matches_gateway_format() {
+        // Cross-check the wire format against a real production dst:
+        // OrderBook.OrderPlaced is EVENT_ID 143 (0x8f).
+        const ORDER_PLACED_GATEWAY_DST: &str =
+            ":000000000000000000000000000000000000000000000000000000000000008f";
+
+        assert_eq!(event_type_dst(143), ORDER_PLACED_GATEWAY_DST);
+    }
+
+    #[test]
+    fn ignorable_event_ids_cover_exactly_ignorable_event_types() {
+        let names: std::collections::HashSet<&str> =
+            IGNORABLE_EVENT_IDS.iter().map(|(n, _)| *n).collect();
+        let types: std::collections::HashSet<&str> =
+            IGNORABLE_EVENT_TYPES.iter().copied().collect();
+        assert_eq!(names, types, "IGNORABLE_EVENT_IDS names must equal IGNORABLE_EVENT_TYPES");
+    }
+
+    #[test]
+    fn ignorable_event_ids_match_contract_constants() {
+        // Pin EVENT_IDs against the contract source: if modifiers.sol renumbers
+        // an OB_* constant, this fails instead of silently filtering a wrong dst.
+        let src = include_str!("../../../contracts/dex/modifiers/modifiers.sol");
+        let want = [
+            ("OrderBook.FullyFilled", "OB_FULLY_FILLED"),
+            ("OrderBook.Queued", "OB_QUEUED"),
+            ("OrderBook.Rejected", "OB_REJECTED"),
+            ("OrderBook.CallbackBounced", "OB_CALLBACK_BOUNCED"),
+        ];
+        for (event_type, const_name) in want {
+            let id = IGNORABLE_EVENT_IDS
+                .iter()
+                .find(|(n, _)| *n == event_type)
+                .map(|(_, id)| *id)
+                .expect("event type present in IGNORABLE_EVENT_IDS");
+            let line = src
+                .lines()
+                .find(|l| l.contains(const_name) && l.contains("constant") && l.contains('='))
+                .unwrap_or_else(|| panic!("{const_name} not found in modifiers.sol"));
+            let rhs = line.split('=').nth(1).expect("constant line has =");
+            let value: u32 = rhs
+                .split(';')
+                .next()
+                .expect("constant line has ;")
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("could not parse {const_name} from {line:?}"));
+            assert_eq!(value, id, "{const_name} in modifiers.sol != IGNORABLE_EVENT_IDS");
+        }
+    }
+
+    #[test]
+    fn ignored_event_dsts_maps_names_to_dst() {
+        let set = ignored_event_dsts(&["OrderBook.Queued".to_string()]);
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&event_type_dst(159)));
+        assert!(ignored_event_dsts(&[]).is_empty());
+    }
+
+    #[test]
+    fn indexer_dapp_id_defaults_to_none() {
+        // indexer_cfg_with_ignored builds a config YAML with no dapp_id key.
+        let cfg = indexer_cfg_with_ignored(&[]);
+        assert_eq!(cfg.indexer.dapp_id, None);
+    }
+
+    #[test]
+    fn indexer_validate_rejects_blank_dapp_id() {
+        // A templated deploy rendering an unset var to "" must fail loudly, not
+        // silently enable scoping and drop every real-dapp edge.
+        let mut cfg = indexer_cfg_with_ignored(&[]);
+        cfg.indexer.dapp_id = Some(String::new());
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("dapp_id must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn indexer_validate_accepts_absent_or_nonempty_dapp_id() {
+        let mut cfg = indexer_cfg_with_ignored(&[]);
+        cfg.validate().expect("absent dapp_id validates");
+        cfg.indexer.dapp_id = Some("dexdo-dapp".to_string());
+        cfg.validate().expect("non-empty dapp_id validates");
     }
 }

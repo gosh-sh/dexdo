@@ -94,7 +94,8 @@ Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override a
 Notable indexer config keys under `indexer:`:
 
 - `ignored_addresses` — source addresses dropped before `raw_events` insert and projection.
-- `ignored_event_types` — decoded event types dropped before `raw_events` insert and projection. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#event-type-ignore-list).
+- `dapp_id` — scopes ingestion to the DEXDO dapp; foreign events dropped before decode. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#scope-filter-indexerdapp_id).
+- `ignored_event_types` — event types dropped before decode, matched by `dst`. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#no-op-filter-indexerignored_event_types).
 
 Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
 (optional) makes each service also write rotated log files into a directory —

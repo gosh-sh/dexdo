@@ -20,26 +20,27 @@ indexer:
   polling_interval_ms: 3000
   depth_refresh_interval_ms: 5000
   reconciliation_interval_ms: 60000
-  # Cadence and batch size for the deferred-projection retry pass.
-  reprojection_interval_ms: 30000
   reprojection_batch_size: 500
   # Cadence for the OracleEventList reconciler that fills oracle_events.describe
   # (and trust_addr) by calling OEL._events getter — `EventAdded` does not
   # carry these fields, they live only in contract state.
   oracle_event_list_reconciliation_interval_ms: 60000
+  # DEXDO dapp_id. When set, only events whose src_dapp_id matches are kept
+  # (foreign chain traffic is dropped before decode); edges with no src_dapp_id
+  # are kept. Leave commented out to disable dapp scoping locally. An empty
+  # string is rejected at startup — omit/comment the key instead to disable.
+  # dapp_id: "<dexdo-dapp-id>"   # set at deploy time; unset locally
   # Source addresses whose events are dropped before raw_events insert and
   # projector dispatch. Keep this list narrow — only addresses that emit
   # confirmed noise.
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
-  # Decoded event types dropped before raw_events insert and projector dispatch.
-  # The cursor still advances past ignored types. List ONLY genuine no-op types
+  # Event types dropped before decode, matched by their external dst (no decode
+  # cost). The cursor still advances past them. List ONLY genuine no-op types
   # (the projector maps them to Applied without touching the read model):
   # OrderBook.Queued / FullyFilled / Rejected / CallbackBounced. The startup
-  # guard is an allow-list: it accepts only those four types and rejects every
-  # other entry, including metric-critical types (OrderBook.OrderPlaced,
-  # OrderBook.PartialFill), state-changing types such as OrderBook.OrderFilled
-  # (rejected before they could corrupt live_orders), and typos. A bad entry
-  # fails validation at startup rather than dropping events silently.
+  # guard is an allow-list and rejects everything else — metric-critical types
+  # (OrderBook.OrderPlaced, OrderBook.PartialFill), state-changing types, and
+  # typos — so a bad entry fails startup rather than dropping events silently.
   ignored_event_types:
     - "OrderBook.Queued"

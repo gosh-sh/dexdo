@@ -68,8 +68,8 @@ Indices:
 | `raw_events_event_type_idx` | General `event_type` scans (debug, analytics). |
 | `raw_events_event_type_decoded_idx` (partial, `event_type IS NOT NULL`) | Same scope but optimised for decoded rows. |
 | `raw_events_created_at_chain_idx` (desc) | Time-window queries (analytics only). |
-| `raw_events_chain_order_idx` | Backs the reproject `ORDER BY chain_order asc`. |
-| `raw_events_pending_projection_idx` (partial: `processed_at IS NULL AND event_type IS NOT NULL AND decoded IS NOT NULL`) | Drives reprojection (`crates/infrastructure/src/indexer_repo.rs::reproject_pending`). |
+| `raw_events_chain_order_idx` | Backs the projection loop's `ORDER BY chain_order ASC`. |
+| `raw_events_pending_chain_order_idx` (partial: `processed_at IS NULL AND event_type IS NOT NULL AND decoded IS NOT NULL`) | Backs the projection loop's keyset scan (`crates/infrastructure/src/indexer_repo.rs::reproject_pending_from`). Added by migration `0004`; replaces the former `raw_events_pending_projection_idx` which was keyed on `(created_at_chain, id)`. |
 
 ### `indexer_cursors`
 
