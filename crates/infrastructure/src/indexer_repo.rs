@@ -311,6 +311,11 @@ impl IndexerRepository {
             ..Default::default()
         };
         let mut to_mark: Vec<i64> = Vec::new();
+        // Unknown-type warnings are collected and emitted only after the batch
+        // commits — `warn_unknown`'s log line and its first-sighting set mutation
+        // both survive a rollback, so firing them mid-pass would double-warn the
+        // same row once a later Err forces the savepointed replay.
+        let mut unknown_warnings: Vec<(String, String)> = Vec::new();
 
         for row in rows {
             stats.scanned += 1;
@@ -326,7 +331,7 @@ impl IndexerRepository {
                     stats.deferred += 1;
                 }
                 Ok(ProjectionOutcome::Unknown) => {
-                    self.warn_unknown(&row.msg_id, &event.event_type);
+                    unknown_warnings.push((row.msg_id.clone(), event.event_type.clone()));
                     to_mark.push(row.id);
                     stats.unknown += 1;
                 }
@@ -348,6 +353,11 @@ impl IndexerRepository {
 
         Self::mark_processed(&mut tx, &to_mark).await?;
         tx.commit().await.context("reproject(fast) tx commit")?;
+        // Durably committed — now (and only now) emit the unknown-type warnings
+        // and record first-sightings, in chain_order.
+        for (msg_id, event_type) in &unknown_warnings {
+            self.warn_unknown(msg_id, event_type);
+        }
         Ok(Some(stats))
     }
 

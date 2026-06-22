@@ -2917,6 +2917,94 @@ async fn fast_path_falls_back_and_isolates_poison_row() {
     purge(&pool, &cleanup).await;
 }
 
+/// A rolled-back fast pass must not pre-log an Unknown warning. With an Unknown
+/// row ordered before a poison row in the same batch, the optimistic pass would
+/// log the warning and consume the first-sighting, then roll back — and the
+/// savepointed replay would log the same row again at the noise target. The
+/// warning (and its first-sighting set mutation) must be owned solely by the
+/// committed replay: exactly one warning, on the normal target.
+#[tokio::test]
+async fn fast_path_fallback_does_not_double_warn_unknown() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let book = "0:reproj_fbwarn_book";
+    let order_id = "55";
+    // Equal-length msg_ids so chain_order (derived from msg_id) orders the
+    // Unknown row before the poison row: the fast pass reaches the Unknown,
+    // then aborts on the poison.
+    let unknown_msg = "reproj_fbwarn_a_msg";
+    let poison_msg = "reproj_fbwarn_b_msg";
+    let probe_type = "Test.FastFallbackWarnProbe";
+
+    let cleanup: Vec<(&str, &str)> = vec![
+        ("delete from live_orders where orderbook_address = $1", book),
+        ("delete from raw_events where msg_id = $1", unknown_msg),
+        ("delete from raw_events where msg_id = $1", poison_msg),
+    ];
+    purge(&pool, &cleanup).await;
+
+    sqlx::query(
+        r#"insert into live_orders
+               (orderbook_address, order_id, outcome_id, is_buy, price,
+                amount_initial, amount_remaining, status,
+                last_chain_order, placed_chain_order)
+           values ($1, $2::numeric, 1, true, 6150::numeric,
+                   100::numeric, 100::numeric, 'OPEN',
+                   '5f800000000000000000', '5f800000000000000000')"#,
+    )
+    .bind(book)
+    .bind(order_id)
+    .execute(&pool)
+    .await
+    .expect("insert parent live_orders");
+
+    // Clean Unknown row (sorts first) + poison OrderFilled (sorts second).
+    insert_raw(&pool, unknown_msg, "0:reproj_fbwarn_src", probe_type, &json!({})).await;
+    insert_raw(
+        &pool,
+        poison_msg,
+        book,
+        "OrderBook.OrderFilled",
+        &json!({"orderId": order_id, "filledAmount": "30", "clearingPrice": "6150"}),
+    )
+    .await;
+
+    let events = Arc::new(StdMutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(CaptureLayer { events: events.clone() });
+    {
+        let _sub = tracing::subscriber::set_default(subscriber);
+        repo.reproject_pending(1000).await.expect("reproject");
+    }
+
+    let warnings: Vec<CapturedEvent> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.event_type == probe_type && e.message.contains("no handler for event type"))
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a rolled-back fast pass must not pre-log the unknown warning; the savepointed replay owns it, got {warnings:?}"
+    );
+    assert_ne!(
+        warnings[0].target,
+        dodex_logging::EVENT_NOISE_TARGET,
+        "the single warning must be the first-sighting on the normal target, not a noise repeat"
+    );
+    assert!(
+        warnings[0].message.contains("first sighting"),
+        "the single warning must carry the first-sighting message, got {:?}",
+        warnings[0].message
+    );
+
+    purge(&pool, &cleanup).await;
+}
+
 /// A taker OrderFilled with no `clearingPrice` fails the projection
 /// atomically: the live_orders mutation issued earlier in the same
 /// transaction rolls back with the trade insert, no trade row appears, and
