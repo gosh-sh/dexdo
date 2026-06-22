@@ -19,6 +19,7 @@ use std::time::Duration;
 use opentelemetry::metrics::Meter;
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::metrics::ObservableCounter;
+use opentelemetry::metrics::ObservableGauge;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::PeriodicReader;
@@ -41,24 +42,38 @@ pub struct Metrics {
     pub indexer: IndexerMetrics,
 }
 
-/// Cloneable handle to the indexer's two observable counters. Setter calls
-/// update the values reported on the next OTLP collection.
+/// Cloneable handle to the indexer's observable counters and gauges. Setter
+/// calls update the values reported on the next OTLP collection.
 #[derive(Clone)]
 pub struct IndexerMetrics {
     orders_created: Arc<AtomicU64>,
     orders_partially_filled: Arc<AtomicU64>,
-    // Retain the observable-counter handles for the lifetime of the provider,
-    // mirroring the reference metrics setup. The observe callbacks themselves
-    // are registered with the meter at `build()` time. Underscore-prefixed
-    // because the handles are never read directly.
+    projection_backlog: Arc<AtomicU64>,
+    projection_lag_seconds: Arc<AtomicU64>,
+    capture_cursor_age_seconds: Arc<AtomicU64>,
+    pool_in_use: Arc<AtomicU64>,
+    pool_idle: Arc<AtomicU64>,
+    // Retain the observable-counter and gauge handles for the lifetime of the
+    // provider, mirroring the reference metrics setup. The observe callbacks
+    // themselves are registered with the meter at `build()` time.
+    // Underscore-prefixed because the handles are never read directly.
     _orders_created_counter: ObservableCounter<u64>,
     _orders_partially_filled_counter: ObservableCounter<u64>,
+    _projection_backlog_gauge: ObservableGauge<u64>,
+    _projection_lag_seconds_gauge: ObservableGauge<u64>,
+    _capture_cursor_age_seconds_gauge: ObservableGauge<u64>,
+    _db_pool_connections_gauge: ObservableGauge<u64>,
 }
 
 impl IndexerMetrics {
     fn new(meter: &Meter) -> Self {
         let orders_created = Arc::new(AtomicU64::new(0));
         let orders_partially_filled = Arc::new(AtomicU64::new(0));
+        let projection_backlog = Arc::new(AtomicU64::new(0));
+        let projection_lag_seconds = Arc::new(AtomicU64::new(0));
+        let capture_cursor_age_seconds = Arc::new(AtomicU64::new(0));
+        let pool_in_use = Arc::new(AtomicU64::new(0));
+        let pool_idle = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -78,11 +93,66 @@ impl IndexerMetrics {
             })
             .build();
 
+        let backlog_cache = Arc::clone(&projection_backlog);
+        let projection_backlog_gauge = meter
+            .u64_observable_gauge("indexer_projection_backlog")
+            .with_description(
+                "raw_events rows waiting for the projection loop (typed + decoded, processed_at NULL)",
+            )
+            .with_callback(move |observer| {
+                observer.observe(backlog_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
+        let lag_cache = Arc::clone(&projection_lag_seconds);
+        let projection_lag_seconds_gauge = meter
+            .u64_observable_gauge("indexer_projection_lag_seconds")
+            .with_description(
+                "Wall-clock age in seconds of the oldest eligible-but-unprojected raw_events row",
+            )
+            .with_callback(move |observer| {
+                observer.observe(lag_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
+        let cursor_age_cache = Arc::clone(&capture_cursor_age_seconds);
+        let capture_cursor_age_seconds_gauge = meter
+            .u64_observable_gauge("indexer_capture_cursor_age_seconds")
+            .with_description("Seconds since the capture cursor last advanced")
+            .with_callback(move |observer| {
+                observer.observe(cursor_age_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
+        let in_use_cache = Arc::clone(&pool_in_use);
+        let idle_cache = Arc::clone(&pool_idle);
+        let db_pool_connections_gauge = meter
+            .u64_observable_gauge("indexer_db_pool_connections")
+            .with_description("sqlx DB pool connections by state (in_use or idle)")
+            .with_callback(move |observer| {
+                observer.observe(
+                    in_use_cache.load(Ordering::Relaxed),
+                    &[KeyValue::new("state", "in_use")],
+                );
+                observer
+                    .observe(idle_cache.load(Ordering::Relaxed), &[KeyValue::new("state", "idle")]);
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
+            projection_backlog,
+            projection_lag_seconds,
+            capture_cursor_age_seconds,
+            pool_in_use,
+            pool_idle,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
+            _projection_backlog_gauge: projection_backlog_gauge,
+            _projection_lag_seconds_gauge: projection_lag_seconds_gauge,
+            _capture_cursor_age_seconds_gauge: capture_cursor_age_seconds_gauge,
+            _db_pool_connections_gauge: db_pool_connections_gauge,
         }
     }
 
@@ -94,6 +164,27 @@ impl IndexerMetrics {
     /// Set the value reported by `order_partially_filled_event_cnt`.
     pub fn set_orders_partially_filled(&self, value: u64) {
         self.orders_partially_filled.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the value reported by `indexer_projection_backlog`.
+    pub fn set_projection_backlog(&self, value: u64) {
+        self.projection_backlog.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the value reported by `indexer_projection_lag_seconds`.
+    pub fn set_projection_lag_seconds(&self, value: u64) {
+        self.projection_lag_seconds.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the value reported by `indexer_capture_cursor_age_seconds`.
+    pub fn set_capture_cursor_age_seconds(&self, value: u64) {
+        self.capture_cursor_age_seconds.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the values reported by `indexer_db_pool_connections`.
+    pub fn set_pool_connections(&self, in_use: u64, idle: u64) {
+        self.pool_in_use.store(in_use, Ordering::Relaxed);
+        self.pool_idle.store(idle, Ordering::Relaxed);
     }
 }
 
@@ -219,8 +310,17 @@ mod tests {
 
         metrics.set_orders_created(7);
         metrics.set_orders_partially_filled(3);
+        metrics.set_projection_backlog(42);
+        metrics.set_projection_lag_seconds(120);
+        metrics.set_capture_cursor_age_seconds(5);
+        metrics.set_pool_connections(3, 7);
 
         assert_eq!(metrics.orders_created.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.orders_partially_filled.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.projection_backlog.load(Ordering::Relaxed), 42);
+        assert_eq!(metrics.projection_lag_seconds.load(Ordering::Relaxed), 120);
+        assert_eq!(metrics.capture_cursor_age_seconds.load(Ordering::Relaxed), 5);
+        assert_eq!(metrics.pool_in_use.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.pool_idle.load(Ordering::Relaxed), 7);
     }
 }

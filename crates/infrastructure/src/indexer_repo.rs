@@ -404,6 +404,49 @@ impl IndexerRepository {
         Ok(count)
     }
 
+    /// Wall-clock age in seconds of the oldest eligible-but-unprojected raw_events
+    /// row — how stale the read-model is. 0 when the projection queue is empty.
+    /// Eligibility matches `count_pending_projection`. Preferred over
+    /// `now() - max(processed_at)`, which under-reports lag while the loop is busy
+    /// projecting old rows.
+    pub async fn projection_lag_seconds(&self) -> anyhow::Result<i64> {
+        let secs: Option<i64> = sqlx::query_scalar(
+            r#"select extract(epoch from now() - min(created_at_chain))::bigint
+                 from raw_events
+                where processed_at is null
+                  and event_type is not null
+                  and decoded is not null"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("projection lag seconds")?;
+        Ok(secs.unwrap_or(0))
+    }
+
+    /// Seconds since the capture cursor for `stream_name` last advanced. `None`
+    /// when no cursor row exists yet (capture not started). Small here while
+    /// `projection_lag_seconds` is large is the "capture healthy, projection
+    /// behind" signature.
+    pub async fn cursor_age_seconds(&self, stream_name: &str) -> anyhow::Result<Option<i64>> {
+        let secs: Option<i64> = sqlx::query_scalar(
+            r#"select extract(epoch from now() - updated_at)::bigint
+                 from indexer_cursors where stream_name = $1"#,
+        )
+        .bind(stream_name)
+        .fetch_optional(&self.pool)
+        .await
+        .context("cursor age seconds")?;
+        Ok(secs)
+    }
+
+    /// (in_use, idle) sqlx pool connections — cheap in-memory reads, no DB query.
+    /// `size()` is total (in_use + idle); `num_idle()` is idle.
+    pub fn pool_connection_stats(&self) -> (u64, u64) {
+        let size = u64::from(self.pool.size());
+        let idle = self.pool.num_idle() as u64;
+        (size.saturating_sub(idle), idle)
+    }
+
     /// Highest pending `chain_order` right now, or `None` when the queue is
     /// empty. The drain loop snapshots this as each cycle's ceiling so the cycle
     /// is bounded to rows that existed at its start and terminates even under

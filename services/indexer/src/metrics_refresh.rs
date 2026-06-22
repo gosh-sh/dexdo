@@ -42,6 +42,7 @@ pub async fn run_refresh_loop(
     repo: IndexerRepository,
     interval: Duration,
     metrics: IndexerMetrics,
+    cursor_stream: &'static str,
 ) {
     loop {
         match repo.count_events_by_type(&[ORDERS_CREATED_EVENT, ORDER_PARTIALLY_FILLED_EVENT]).await
@@ -54,6 +55,20 @@ pub async fn run_refresh_loop(
             }
             Err(err) => error!(?err, "metrics refresh failed"),
         }
+        match repo.count_pending_projection().await {
+            Ok(n) => metrics.set_projection_backlog(n.max(0) as u64),
+            Err(err) => error!(?err, "projection backlog metric refresh failed"),
+        }
+        match repo.projection_lag_seconds().await {
+            Ok(s) => metrics.set_projection_lag_seconds(s.max(0) as u64),
+            Err(err) => error!(?err, "projection lag metric refresh failed"),
+        }
+        match repo.cursor_age_seconds(cursor_stream).await {
+            Ok(age) => metrics.set_capture_cursor_age_seconds(age.unwrap_or(0).max(0) as u64),
+            Err(err) => error!(?err, "cursor age metric refresh failed"),
+        }
+        let (in_use, idle) = repo.pool_connection_stats();
+        metrics.set_pool_connections(in_use, idle);
         tokio::time::sleep(interval).await;
     }
 }

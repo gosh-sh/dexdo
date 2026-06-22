@@ -3842,3 +3842,102 @@ async fn identical_chain_order_both_rows_eventually_drain() {
 
     purge(&pool, &cleanup).await;
 }
+
+#[tokio::test]
+async fn projection_lag_seconds_empty_queue_is_zero() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "metrics_lag_empty";
+    let msg_id = format!("{test}-msg");
+    purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id.as_str())]).await;
+
+    let lag = repo.projection_lag_seconds().await.expect("projection_lag_seconds");
+    assert_eq!(lag, 0, "empty eligible queue must return 0");
+}
+
+#[tokio::test]
+async fn projection_lag_seconds_pending_row_has_positive_lag() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "metrics_lag_pending";
+    let src = format!("0:{test}_src");
+    let msg_id = format!("{test}-msg");
+    purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id.as_str())]).await;
+
+    // insert_raw uses created_at_chain = to_timestamp(1_700_000_000)
+    // which is far in the past, so lag will be large and positive.
+    insert_raw(&pool, &msg_id, &src, "Nullifier.VoucherGenerated", &serde_json::json!({})).await;
+
+    let lag = repo.projection_lag_seconds().await.expect("projection_lag_seconds");
+    assert!(lag > 0, "pending row with old created_at_chain must produce positive lag, got {lag}");
+
+    purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id.as_str())]).await;
+}
+
+#[tokio::test]
+async fn cursor_age_seconds_nonexistent_stream_is_none() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let stream = "metrics_cursor_age_nonexistent_stream";
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("purge cursor");
+
+    let age = repo.cursor_age_seconds(stream).await.expect("cursor_age_seconds");
+    assert!(age.is_none(), "non-existent stream must return None");
+}
+
+#[tokio::test]
+async fn cursor_age_seconds_known_stream_is_small() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let stream = "metrics_cursor_age_known_stream";
+
+    // Upsert a cursor row with updated_at = now().
+    sqlx::query(
+        r#"insert into indexer_cursors (stream_name, cursor, updated_at)
+           values ($1, 'test-cursor', now())
+           on conflict (stream_name)
+           do update set cursor = excluded.cursor, updated_at = now()"#,
+    )
+    .bind(stream)
+    .execute(&pool)
+    .await
+    .expect("upsert cursor");
+
+    let age = repo.cursor_age_seconds(stream).await.expect("cursor_age_seconds");
+    assert!(age.is_some(), "known stream must return Some");
+    let age = age.unwrap();
+    assert!((0..10).contains(&age), "cursor just updated must have age < 10s, got {age}");
+
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("cleanup cursor");
+}
+
+#[tokio::test]
+async fn pool_connection_stats_is_callable_and_sane() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    // Issue a query to ensure at least one connection exists.
+    let _: i32 = sqlx::query_scalar("select 1").fetch_one(&pool).await.expect("warmup query");
+
+    let (in_use, idle) = repo.pool_connection_stats();
+    // in_use + idle == pool.size() (u32 -> u64). Just assert the sum equals
+    // pool.size() cast to u64 — sanity check without asserting exact counts.
+    assert_eq!(in_use + idle, u64::from(pool.size()), "in_use + idle must equal pool.size()");
+}

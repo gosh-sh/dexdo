@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
                 repo.clone(),
                 dodex_metrics::REFRESH_INTERVAL,
                 m.indexer.clone(),
+                STREAM_NAME,
             ));
             info!(
                 interval_s = dodex_metrics::REFRESH_INTERVAL.as_secs(),
