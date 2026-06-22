@@ -406,12 +406,16 @@ impl IndexerRepository {
 
     /// Wall-clock age in seconds of the oldest eligible-but-unprojected raw_events
     /// row — how stale the read-model is. 0 when the projection queue is empty.
-    /// Eligibility matches `count_pending_projection`. Preferred over
-    /// `now() - max(processed_at)`, which under-reports lag while the loop is busy
-    /// projecting old rows.
+    /// Eligibility matches `count_pending_projection`. Chain time
+    /// (`created_at_chain`) is nullable — the gateway may omit or send an
+    /// unparseable `created_at` — so each row falls back to its non-null ingest
+    /// time (`created_at`); a min over `coalesce(created_at_chain, created_at)`
+    /// is therefore never NULL for a non-empty queue, so the gauge can't report
+    /// 0 lag while pending work exists. Preferred over `now() - max(processed_at)`,
+    /// which under-reports lag while the loop is busy projecting old rows.
     pub async fn projection_lag_seconds(&self) -> anyhow::Result<i64> {
         let secs: Option<i64> = sqlx::query_scalar(
-            r#"select extract(epoch from now() - min(created_at_chain))::bigint
+            r#"select extract(epoch from now() - min(coalesce(created_at_chain, created_at)))::bigint
                  from raw_events
                 where processed_at is null
                   and event_type is not null

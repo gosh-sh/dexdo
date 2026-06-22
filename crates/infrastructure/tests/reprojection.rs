@@ -3883,6 +3883,41 @@ async fn projection_lag_seconds_pending_row_has_positive_lag() {
 }
 
 #[tokio::test]
+async fn projection_lag_seconds_null_chain_time_falls_back_to_ingest_time() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let msg_id = "metrics_lag_null_chain-msg";
+    let src = "0:metrics_lag_null_chain_src";
+    purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id)]).await;
+
+    // Eligible pending row whose gateway created_at was unparseable, so chain
+    // time is NULL, but whose ingest time (created_at) is far in the past. A
+    // bare min(created_at_chain) would be NULL and report 0 lag, hiding the
+    // stale row; the coalesce fallback to created_at must surface it.
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, created_at, src_address,
+                dst_address, event_type, body_json, decoded)
+           values ($1, $2, NULL, to_timestamp($3), $4, $4,
+                   'Nullifier.VoucherGenerated', '{}'::jsonb, '{}'::jsonb)"#,
+    )
+    .bind(msg_id)
+    .bind(format!("5f80{msg_id:0>28}"))
+    .bind(1_700_000_000_f64)
+    .bind(src)
+    .execute(&pool)
+    .await
+    .expect("insert null-chain raw_events");
+
+    let lag = repo.projection_lag_seconds().await.expect("projection_lag_seconds");
+    assert!(lag > 0, "NULL chain time must fall back to ingest age, got {lag}");
+
+    purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id)]).await;
+}
+
+#[tokio::test]
 async fn cursor_age_seconds_nonexistent_stream_is_none() {
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
