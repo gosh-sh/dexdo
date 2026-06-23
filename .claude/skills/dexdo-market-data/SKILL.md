@@ -126,13 +126,13 @@ $DODEX orders --open --creds "$DODEX_CREDS" --market-address "0:…" --symbol "<
 `--open` is the shortcut for `--status NEW,PARTIALLY_FILLED`. Render: `symbol`,
 `side`, `price`, `origQty`, `executedQty`, `status`, `time`. Empty ⇒ "no open orders".
 
-> **Eventual consistency (important on dev).** A freshly placed order can take a
-> while to appear here — the public placement is indexed before the private
-> owner-attribution that this endpoint needs, and the dev indexer can lag minutes.
-> If the user "just placed" an order and it's not listed, that does **not** mean it
-> failed: corroborate with `account` (collateral shows up as `locked`) and `depth`
-> (the resting level appears publicly). Tell the user it's placed and will surface
-> shortly; offer to re-check.
+> **Eventual consistency.** A freshly placed order can briefly not appear here — the
+> public placement is indexed before the private owner-attribution this endpoint
+> needs. On the post-restart dev deployment it surfaced within seconds, but it can
+> lag further under indexer backlog. If the user "just placed" an order and it's not
+> listed, that does **not** mean it failed: corroborate with `account` (collateral
+> shows up as `locked`) and `depth` (the resting level appears publicly). Tell the
+> user it's placed and will surface shortly; offer to re-check.
 
 ## 5. My order history (signed)
 

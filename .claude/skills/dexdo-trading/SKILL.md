@@ -119,13 +119,14 @@ $DODEX buy-full-set --creds "$DODEX_CREDS" \
 Available while the market is `AWAITING_FREEZE` or `TRADING`. Any amount that does
 not divide evenly across outcomes is refunded to free balance. Result becomes
 visible via `account` (collateral debit) and `balances` (per-outcome credits).
+Verified on dev (2026-06-23, post-restart): `buy-full-set 20` debited 20 NACKL and
+credited the Yes/No outcome tokens split by current price.
 
-> **Known dev limitation (2026-06-23):** on `dodex-dev.ackinacki.org`,
-> `POST /api/v1/buyFullSet` currently returns `-1000` (HTTP 500, "Unknown error")
-> for well-formed requests — a backend-side failure, not a client bug. The command
-> is correct per spec; if you hit `-1000`, report it as a dev-side issue rather than
-> retrying endlessly or "fixing" the request. Single-outcome market/limit orders
-> work normally.
+> If `buyFullSet` ever returns `-1000` (HTTP 500, "Unknown error"), that is a
+> backend-side failure, not a client bug — the request shape is correct per spec.
+> It was observed transiently on an earlier deployment and cleared after the chain
+> restart; if you hit it, verify state via `account` and report it as a dev-side
+> issue rather than reshaping the request.
 
 ## 3. Create a limit order in an order book
 
@@ -157,9 +158,12 @@ $DODEX cancel-order --creds "$DODEX_CREDS" \
   --market-address "0:…" --symbol "<symbol>" --order-id "<orderId>"
 ```
 
-You need the chain-assigned `orderId` (from `dexdo-market-data` → `orders`). Because
-order attribution can lag on dev, the `orderId` may not be queryable immediately
-after placing; if so, tell the user to retry the cancel once the order is listed.
+You need the chain-assigned `orderId` (from `dexdo-market-data` → `orders`).
+Verified on dev (2026-06-23): placing a resting LIMIT order, reading its `orderId`
+from `orders`, and cancelling it returns `PENDING_CANCEL` and frees the locked
+collateral. Order attribution is eventually consistent, so if a just-placed order
+isn't listed yet, retry the cancel once it appears (it surfaced within seconds on the
+post-restart deployment, but can lag under indexer backlog).
 (`DELETE /api/v1/openOrders` "cancel all on symbol", `sellFullSet`, and `claim` are
 in the draft spec but **not deployed** on dev — don't call them.)
 
