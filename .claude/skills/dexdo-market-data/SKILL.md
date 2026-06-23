@@ -1,13 +1,14 @@
 ---
 name: dexdo-market-data
-description: Read DEX.DO market data and a trader's own orders from the indexer/read API, and present it to the user as clean tables. Covers active markets to stake/trade, the order book (depth) for a symbol, the market price (best bid/ask/mid/spread + last trade), the user's open orders, and the user's order history. Load when the user asks to see markets, "where can I stake/bet", an order book, a price/quote for a symbol, "my open orders", or "my order history" on DEX.DO. Read-only — never places or cancels orders (that's the `dexdo-trading` skill).
+description: Read DEX.DO market data and a trader's own orders/stakes, and present it to the user as clean tables. Covers active markets to stake/trade, the order book (depth) for a symbol, the market price (best bid/ask/mid/spread + last trade), the user's open orders, the user's order history (all via the indexer/read REST API), and the user's on-chain stakes per market (via the dexdo SDK CLI). Load when the user asks to see markets, "where can I stake/bet", an order book, a price/quote for a symbol, "my open orders", "my order history", or "my stakes / my bets" on DEX.DO. Read-only — never places or cancels orders or stakes (that's the `dexdo-trading` skill).
 ---
 
-# DEX.DO — Market Data (read / indexer API)
+# DEX.DO — Market Data (read)
 
-Read-only skill. It calls the public + signed **read** endpoints of the DEX.DO
-REST API and renders the results as readable tables for the user. It never
-mutates state — placing/cancelling orders and full-splits live in the
+Read-only skill. It renders DEX.DO data as readable tables for the user. Most views
+use the public + signed **read** endpoints of the REST API; "my stakes" is an
+on-chain read via the `dexdo` SDK CLI (the REST API has no stakes view). It never
+mutates state — placing/cancelling orders, full-splits, and staking live in the
 **`dexdo-trading`** skill.
 
 What it answers:
@@ -17,17 +18,18 @@ What it answers:
 3. **Market price for a symbol** — best bid/ask/mid/spread + last trade (depth + trades)
 4. **My open orders** — `GET /api/v1/orders?status=NEW,PARTIALLY_FILLED` (signed)
 5. **My order history** — `GET /api/v1/orders` (signed, all statuses, paginated)
+6. **My stakes / bets per market** — `dexdo stakes` (on-chain, via the SDK CLI)
 
-The canonical API contract is [`docs/api-spec.md`](../../../docs/api-spec.md). This
-skill drives it through the shared client described below; you should not hand-roll
-curl + HMAC.
+The canonical REST contract is [`docs/api-spec.md`](../../../docs/api-spec.md). The
+REST views go through the shared client below; "my stakes" goes through the `dexdo`
+SDK CLI (§6). Don't hand-roll curl + HMAC.
 
 ## The shared client
 
 Both DEX.DO API skills use one stdlib-only Python client:
 
 ```
-.claude/skills/dodex-common/dodex_client.py
+.claude/skills/dexdo-common/dexdo_client.py
 ```
 
 It handles base URL, HMAC-SHA256 request signing (the tricky part — the key is the
@@ -36,11 +38,11 @@ percent-encoded and signed consistently), and prints the JSON response to stdout
 On an API error envelope (`{"code","msg"}`) it prints it and exits non-zero.
 
 ```sh
-DODEX="python3 $PWD/.claude/skills/dodex-common/dodex_client.py"   # run from repo root
+DEXDO="python3 $PWD/.claude/skills/dexdo-common/dexdo_client.py"   # run from repo root
 ```
 
 Default base URL is the dev endpoint `https://dodex-dev.ackinacki.org` (override
-with `--base-url` or `$DODEX_BASE_URL`).
+with `--base-url` or `$DEXDO_BASE_URL`).
 
 ### Credentials (only for the two private/USER_DATA views)
 
@@ -50,7 +52,7 @@ and "my order history" are signed and need the account's API credential — the
 (`POST /api/v1/accounts`; see the deposit/onboarding flow). Point the client at it:
 
 ```sh
-export DODEX_CREDS="$HOME/dexdo-workspace/notes/nackl.creds.json"   # {apiKey, apiSecret}
+export DEXDO_CREDS="$HOME/dexdo-workspace/notes/nackl.creds.json"   # {apiKey, apiSecret}
 # or pass --creds <file> per call
 ```
 
@@ -77,7 +79,7 @@ Staking is open in `STAKING`; order-book trading is open in `TRADING`. For "mark
 I can act on now" fetch both:
 
 ```sh
-$DODEX markets --status STAKING,TRADING --limit 50
+$DEXDO markets --status STAKING,TRADING --limit 50
 ```
 
 Other useful filters: `--quote-asset NACKL`, `--oracle-name <name>`,
@@ -97,7 +99,7 @@ is the human-facing title. Each outcome's `symbol`, `tickSize`, `stepSize`,
 ## 2. Order book (depth) for a symbol
 
 ```sh
-$DODEX depth --market-address "0:…" --symbol "<marketName>-<OUTCOME>" --limit 20
+$DEXDO depth --market-address "0:…" --symbol "<marketName>-<OUTCOME>" --limit 20
 ```
 
 `symbol` is `<marketName>-<outcomeName>` exactly as it appears in the market's
@@ -108,7 +110,7 @@ ascending) as `price | qty`, plus the spread between best bid and best ask.
 ## 3. Market price for a symbol
 
 ```sh
-$DODEX price --market-address "0:…" --symbol "<symbol>"
+$DEXDO price --market-address "0:…" --symbol "<symbol>"
 ```
 
 Returns `bestBid`, `bestAsk`, `mid`, `spread`, and `lastTrade` (price/qty/time/
@@ -118,9 +120,9 @@ isBuyerMaker). Present it as a tiny quote block. Note for the user that a predic
 ## 4. My open orders (signed)
 
 ```sh
-$DODEX orders --open --creds "$DODEX_CREDS"
+$DEXDO orders --open --creds "$DEXDO_CREDS"
 # or scope to one market symbol:
-$DODEX orders --open --creds "$DODEX_CREDS" --market-address "0:…" --symbol "<symbol>"
+$DEXDO orders --open --creds "$DEXDO_CREDS" --market-address "0:…" --symbol "<symbol>"
 ```
 
 `--open` is the shortcut for `--status NEW,PARTIALLY_FILLED`. Render: `symbol`,
@@ -137,10 +139,10 @@ $DODEX orders --open --creds "$DODEX_CREDS" --market-address "0:…" --symbol "<
 ## 5. My order history (signed)
 
 ```sh
-$DODEX orders --creds "$DODEX_CREDS" --limit 100
+$DEXDO orders --creds "$DEXDO_CREDS" --limit 100
 # filter by status / market as needed:
-$DODEX orders --creds "$DODEX_CREDS" --status FILLED,CANCELED
-$DODEX orders --creds "$DODEX_CREDS" --market-address "0:…" --symbol "<symbol>"
+$DEXDO orders --creds "$DEXDO_CREDS" --status FILLED,CANCELED
+$DEXDO orders --creds "$DEXDO_CREDS" --market-address "0:…" --symbol "<symbol>"
 ```
 
 Results are newest-first. Page with `--cursor <nextCursor>` until `nextCursor` is
@@ -148,9 +150,43 @@ Results are newest-first. Page with `--cursor <nextCursor>` until `nextCursor` i
 wants. Collateral/outcome balances for context come from `account` and `balances`:
 
 ```sh
-$DODEX account --creds "$DODEX_CREDS"                       # quote-asset free/locked
-$DODEX balances --creds "$DODEX_CREDS" --market-address "0:…"   # per-outcome holdings
+$DEXDO account --creds "$DEXDO_CREDS"                       # quote-asset free/locked
+$DEXDO balances --creds "$DEXDO_CREDS" --market-address "0:…"   # per-outcome holdings
 ```
+
+## 6. My stakes (on-chain — via the `dexdo` SDK CLI, not the REST API)
+
+Stakes made during a market's **STAKING** phase live on-chain in the user's
+PrivateNote, not in the indexer/REST API — so this read goes through the **`dexdo`
+SDK CLI** (the same binary the `dexdo-trading` skill builds for `dexdo stake`; build
+it once per `dexdo-trading` §0). It needs only the note address, so a read-only
+`pn_state.<tt>.json` (or `--pn-address`) is enough — no API creds:
+
+```sh
+DEXDO_CLI="$WORKSPACE/dexdo/sdk/target/release/dexdo"
+"$DEXDO_CLI" stakes --pn-state-file "$WORKSPACE/notes/pn_state.<tt>.json"
+# or: "$DEXDO_CLI" stakes --pn-address "0:<pn>"
+```
+
+It prints a JSON `stakes` map keyed by the market's `eventId`. Each entry has
+`amount` (a **per-outcome** array, raw token units — scale by the quote asset's
+decimals: NACKL/SHELL = 9, USDC = 6), plus `debtAmount` / `couponsAmount`,
+`tokenType`, and `oracleListHash`. A position from a full split shows non-zero
+amounts on **all** outcomes; a single-side stake shows the amount on one outcome.
+
+Render it for the user by **joining `eventId` → market** via `markets`
+(`event.eventId` matches the stakes key) so each row reads as a market name +
+phase + the staked amount per outcome. Example shape:
+
+| Market | Phase | Staked (NACKL) |
+|---|---|---|
+| Acki Nacki: will NACKL be listed…  | STAKING | No = 40.0 |
+| Sport: will the home side win…     | STAKING | No = 10.0 |
+| Group Stage — USA…                  | TRADING | Yes = 8.78, No = 11.22 (full set) |
+
+(`amount[i]` corresponds to `outcomes[i].outcomeId` from that market; convert raw →
+human by the token decimals, and label outcomes with `outcomeNames`.) An empty map
+means the note has no stakes yet.
 
 ## Error handling
 
@@ -164,6 +200,7 @@ for the user (full table in `docs/api-spec.md` §Error Response):
 
 ## Scope / out of scope
 
-- **In:** reading markets, depth, price, the caller's orders/balances; pretty output.
+- **In:** reading markets, depth, price, the caller's orders/balances, and the
+  caller's on-chain stakes (`dexdo stakes`); pretty output.
 - **Out:** placing or cancelling orders, full-splits, staking transactions → use
   **`dexdo-trading`**. Registering a note / onboarding → the onboarding/deposit skills.

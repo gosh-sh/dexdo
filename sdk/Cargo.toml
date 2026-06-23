@@ -34,6 +34,11 @@ name = "onboard_user_shellnet"
 path = "src/bin/onboard_user_shellnet.rs"
 required-features = ["default"]
 
+[[bin]]
+name = "dodex"
+path = "src/bin/dodex.rs"
+required-features = ["default"]
+
 [features]
 default = ["ackinacki-kit/default", "ackinacki-kit/contracts"]
 wasm = [

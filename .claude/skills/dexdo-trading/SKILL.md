@@ -1,39 +1,45 @@
 ---
 name: dexdo-trading
-description: Place manual trades on DEX.DO prediction markets via the signed REST API — stake on an outcome for an amount (market buy), full-split collateral into a market's outcome tokens (buyFullSet), create a limit order in an outcome's order book, and cancel an order. Load when the user wants to bet/stake on an outcome, buy a full set / "fullsplit", place or cancel an order on DEX.DO. Spends real funds, so it confirms parameters before submitting. For read-only views (markets, depth, price, my orders) use the `dexdo-market-data` skill.
+description: Place manual trades on DEX.DO prediction markets. Two distinct paths by market phase. STAKING phase — stake on an outcome (a real bet on a side) via the on-chain SDK binary (NOT the REST API, which has no staking endpoint). TRADING phase — order-book actions via the signed REST API: a market/limit order on an outcome, a full split (buyFullSet), and cancel. Load when the user wants to stake/bet on an outcome, "fullsplit", place/cancel an order, or take a position on DEX.DO. Spends real funds, so it confirms parameters before submitting. For read-only views (markets, depth, price, my orders) use the `dexdo-market-data` skill.
 ---
 
-# DEX.DO — Manual Trading (signed TRADE API)
+# DEX.DO — Manual Trading
 
-This skill submits **state-changing, fund-spending** trades to DEX.DO through the
-signed `TRADE` endpoints. Three operations the user asks for, plus cancel:
+This skill submits **state-changing, fund-spending** actions to DEX.DO. There are
+**two different paths depending on the market's phase** — getting this right is the
+whole point:
 
-1. **Stake on an outcome for an amount** — market-buy that outcome's token, spending
-   a quote-asset amount → `POST /api/v1/order` (`type=MARKET`, `side=BUY`).
-2. **Full split into a market** ("fullsplit") — split collateral into one token of
-   every outcome → `POST /api/v1/buyFullSet`.
-3. **Create an order in an order book** — a resting limit order →
-   `POST /api/v1/order` (`type=LIMIT`).
-4. **Cancel an order** — `DELETE /api/v1/order` by `orderId`.
+| Want to… | Market phase | How |
+|---|---|---|
+| **Stake / bet on a side** (back one outcome) | **STAKING** | on-chain `PrivateNote.setStake` via the **`dexdo` SDK CLI** (`dexdo stake`, §0). The REST API has **no** staking endpoint. |
+| Take a position via the book (market/limit order) | **TRADING** | signed REST `POST /api/v1/order` (§2/§3) |
+| Full split collateral into all outcomes | AWAITING_FREEZE / TRADING | signed REST `POST /api/v1/buyFullSet` (§4) |
+| Cancel an order | TRADING | signed REST `DELETE /api/v1/order` (§5) |
 
-Canonical contract: [`docs/api-spec.md`](../../../docs/api-spec.md) (§Trading,
-§Position, §Validation Rules). Read-only lookups (find the market, see the book,
-check fills) belong to **`dexdo-market-data`**; this skill calls the read client only
-to validate inputs and to confirm results.
+> **The #1 thing to get right:** "make a stake into a market" (`сделать стейк в маркет`)
+> during the **STAKING** phase is **NOT** a REST/order operation. The order book is
+> closed in STAKING, so `POST /api/v1/order` and `buyFullSet` both return `-2010`.
+> Staking is an on-chain library call — use `dexdo stake` (§0). Only once the market
+> reaches **TRADING** do the order-book endpoints (§2–§5) apply.
+
+Canonical REST contract: [`docs/api-spec.md`](../../../docs/api-spec.md) (§Trading,
+§Position, §Validation Rules). The staking path is the SDK (`dodex-sdk`) →
+`PrivateNote.setStake` → `PMP.acceptStake`. Read-only lookups (find the market, see
+the book, check fills, check phase) belong to **`dexdo-market-data`**.
 
 ## Shared client + credentials
 
 Same client as the read skill:
 
 ```sh
-DODEX="python3 $PWD/.claude/skills/dodex-common/dodex_client.py"   # from repo root
+DEXDO="python3 $PWD/.claude/skills/dexdo-common/dexdo_client.py"   # from repo root
 ```
 
 Every endpoint here is `TRADE`-signed, so credentials are **required** — the
 account's `<tt>.creds.json` from registration (`POST /api/v1/accounts`):
 
 ```sh
-export DODEX_CREDS="$HOME/dexdo-workspace/notes/nackl.creds.json"
+export DEXDO_CREDS="$HOME/dexdo-workspace/notes/nackl.creds.json"
 ```
 
 The account trades in its PrivateNote's funded quote asset. Match the market's
@@ -60,7 +66,7 @@ are handled by the client — you supply the trade parameters.
 Fetch the market to get the exact `symbol` and the outcome's trading constraints:
 
 ```sh
-$DODEX markets --market-address "0:…"
+$DEXDO markets --market-address "0:…"
 ```
 
 From the target outcome read: `symbol` (use verbatim), `pricePrecision`,
@@ -76,14 +82,84 @@ Validate the user's numbers against [§Validation Rules](../../../docs/api-spec.
 Check funds with `account` (free collateral for buys) / `balances` (outcome tokens
 for sells) before placing.
 
-## 1. Stake on an outcome (market buy)
+## 0. Stake into a market (STAKING phase) — via the SDK binary, not the API
 
-"Stake N <quote> on <outcome> in <market>" = buy that outcome's token at market,
-spending N of the quote asset. For a **MARKET BUY the `quantity` field is the
-quote-asset amount to spend** (not outcome-token units), and `price` must be omitted:
+This is what "make a stake / bet on a side" means while the market is in **STAKING**.
+It is an on-chain operation (`PrivateNote.setStake` → `PMP.acceptStake`) signed by the
+user's note key — the REST API does not expose it. It is driven by the **`dexdo`** CLI
+(one binary, subcommands) in the `dodex-sdk` workspace.
+
+### Setup — build the `dexdo` CLI (one-time, shares the deposit skill's checkout)
+
+Needs Rust + the `dexdo` checkout (same as the deposit skill). If you onboarded with
+`dexdo-deposit-shellnet`, the checkout already exists; just build the CLI:
 
 ```sh
-$DODEX order --creds "$DODEX_CREDS" \
+export WORKSPACE="${WORKSPACE:-$HOME/dexdo-workspace}"
+cd "$WORKSPACE/dexdo/sdk" && cargo build --release --bin dexdo
+DEXDO_CLI="$WORKSPACE/dexdo/sdk/target/release/dexdo"
+"$DEXDO_CLI" --help        # lists subcommands (stake, pmp-details, …)
+```
+
+(If there is no checkout yet, run `dexdo-deposit-shellnet` Setup 0.2–0.5 first — it
+clones `dexdo`, builds against `ackinacki-kit`, and produces the note state files this
+CLI needs.) The `dexdo` CLI is **one entry point for all chain/library operations** —
+staking today, with room for more (`claim`, `cancel-stake`, full-set ops, …) as new
+subcommands; check `--help` for what's available.
+
+### Inspect the market first (read-only)
+
+`dexdo pmp-details` reads the market's phase window, outcomes, and identity straight
+from the PMP — use it to resolve the outcome id and confirm the STAKING window:
+
+```sh
+"$DEXDO_CLI" pmp-details --market-address "0:<pmp>"
+# → {phaseHint:"STAKING", numOutcomes, outcomeNames:{0:"Yes",1:"No"}, stakeStart/End, tokenLabel, …}
+```
+
+### Place the stake
+
+The note's key signs the stake, so this reads the **note state file**
+(`pn_state.<tt>.json` from onboarding — holds `pn_address` + the owner keypair), not
+the API creds. `dexdo stake` reads the market's `eventId` / `oracleListHash` /
+`tokenType` from the PMP on-chain, validates the **STAKING window**, scales `--amount`
+by the quote asset's decimals, and submits:
+
+```sh
+"$DEXDO_CLI" stake \
+  --market-address "0:<pmp>" \
+  --pn-state-file  "$WORKSPACE/notes/pn_state.<tt>.json" \
+  --outcome        <id> \
+  --amount         <human> \
+  --endpoint       shellnet.ackinacki.org
+# outcome: 0-based (e.g. Yes=0, No=1 — see pmp-details). amount: human, e.g. 20 = 20 NACKL.
+# add --use-coupon to spend coupon balance instead of clean balance.
+```
+
+It refuses (with a clear message, no spend) when the market is not approved, is
+cancelled, staking hasn't started, the **staking window has closed** (then use the
+order book, §2–§5), or the outcome id is out of range. On success it prints the
+`tx_hash`; the staked amount leaves the note's free balance once the chain settles —
+confirm with `dexdo-market-data` (`account` free drops by the staked amount).
+
+> **Verified on dev (2026-06-23, post-restart):** `dexdo stake --outcome 1 --amount 20`
+> on a STAKING market submitted on-chain and the note's free NACKL dropped 80 → 60
+> (a second `--amount 10` stake then took it 60 → 50).
+
+Resolve the outcome id and currency first with `pmp-details` (above) or
+`dexdo-market-data` (`markets --market-address …` → `outcomes[].outcomeId` /
+`outcomeName`, and `quoteAsset` → which note to sign with). Confirm market, outcome,
+and amount with the user before running — staking spends real funds.
+
+## 1. Take a position with a MARKET order (TRADING phase)
+
+Once a market is **TRADING**, you can take a position on the book by market-buying an
+outcome token. (This is order-book trading, **not** the STAKING-phase stake in §0.)
+For a **MARKET BUY the `quantity` field is the quote-asset amount to spend** (not
+outcome-token units), and `price` must be omitted:
+
+```sh
+$DEXDO order --creds "$DEXDO_CREDS" \
   --market-address "0:…" \
   --symbol "<marketName>-<OUTCOME>" \
   --side BUY --type MARKET \
@@ -98,6 +174,8 @@ second spend (see *Timeouts & retries*). Response is
 The acquired outcome tokens show up in `balances` once the chain confirms. A market
 buy takes liquidity from the asks; if the book is thin it may fill partially or move
 the price — warn the user when the ask side is shallow (check `depth`/`price` first).
+On a brand-new market with an empty ask side a market buy has nothing to match and is
+canceled — place a LIMIT order (§3) to set the first price instead.
 
 > A single-outcome **buy** only needs collateral. A single-outcome **sell** needs
 > outcome tokens you already hold, which only exist after a full split (or a prior
@@ -111,7 +189,7 @@ outcome. Holding the full set is economically equal to holding the collateral, a
 it is the prerequisite for later **selling** any single outcome on the book.
 
 ```sh
-$DODEX buy-full-set --creds "$DODEX_CREDS" \
+$DEXDO buy-full-set --creds "$DEXDO_CREDS" \
   --market-address "0:…" \
   --collateral "<quote-amount>"        # e.g. 20  → split 20 NACKL across outcomes
 ```
@@ -131,7 +209,7 @@ credited the Yes/No outcome tokens split by current price.
 ## 3. Create a limit order in an order book
 
 ```sh
-$DODEX order --creds "$DODEX_CREDS" \
+$DEXDO order --creds "$DEXDO_CREDS" \
   --market-address "0:…" \
   --symbol "<symbol>" \
   --side BUY|SELL --type LIMIT \
@@ -154,7 +232,7 @@ $DODEX order --creds "$DODEX_CREDS" \
 ## 4. Cancel an order
 
 ```sh
-$DODEX cancel-order --creds "$DODEX_CREDS" \
+$DEXDO cancel-order --creds "$DEXDO_CREDS" \
   --market-address "0:…" --symbol "<symbol>" --order-id "<orderId>"
 ```
 
@@ -170,7 +248,7 @@ in the draft spec but **not deployed** on dev — don't call them.)
 ## Timeouts & retries
 
 Trade endpoints submit an on-chain transaction before responding and can take tens
-of seconds; the client waits up to 90s (`--timeout` / `$DODEX_HTTP_TIMEOUT`). On a
+of seconds; the client waits up to 90s (`--timeout` / `$DEXDO_HTTP_TIMEOUT`). On a
 client timeout the operation **may still have been accepted** — do not blindly
 resubmit. For `POST /api/v1/order`, resubmit with the **same** `--client-id`; the
 exchange deduplicates on the coid. For `buyFullSet`, verify via `account` before any

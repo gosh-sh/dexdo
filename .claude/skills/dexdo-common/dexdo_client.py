@@ -34,11 +34,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-DEFAULT_BASE_URL = os.environ.get("DODEX_BASE_URL", "https://dodex-dev.ackinacki.org")
+DEFAULT_BASE_URL = os.environ.get("DEXDO_BASE_URL", "https://dodex-dev.ackinacki.org")
 DEFAULT_RECV_WINDOW = 5000
 # Trade endpoints submit an on-chain transaction before responding and can take
 # tens of seconds; keep the client read timeout comfortably above that.
-DEFAULT_HTTP_TIMEOUT = int(os.environ.get("DODEX_HTTP_TIMEOUT", "90"))
+DEFAULT_HTTP_TIMEOUT = int(os.environ.get("DEXDO_HTTP_TIMEOUT", "90"))
 
 
 def _fail(msg, code=2):
@@ -67,9 +67,9 @@ def _encode_pairs(params):
 
 def load_creds(args):
     """Resolve apiKey + raw-byte HMAC key from --creds file or flags/env."""
-    api_key = args.api_key or os.environ.get("DODEX_API_KEY")
-    api_secret = args.api_secret or os.environ.get("DODEX_API_SECRET")
-    creds_path = args.creds or os.environ.get("DODEX_CREDS")
+    api_key = args.api_key or os.environ.get("DEXDO_API_KEY")
+    api_secret = args.api_secret or os.environ.get("DEXDO_API_SECRET")
+    creds_path = args.creds or os.environ.get("DEXDO_CREDS")
     if creds_path:
         try:
             with open(creds_path) as fh:
@@ -80,7 +80,7 @@ def load_creds(args):
         api_secret = api_secret or blob.get("apiSecret")
     if not api_key or not api_secret:
         _fail("missing credentials: pass --creds FILE (or --api-key/--api-secret, "
-              "or DODEX_CREDS / DODEX_API_KEY / DODEX_API_SECRET)")
+              "or DEXDO_CREDS / DEXDO_API_KEY / DEXDO_API_SECRET)")
     try:
         key = bytes.fromhex(api_secret)
     except ValueError:
@@ -312,18 +312,18 @@ def cmd_buy_full_set(args):
 
 def build_parser():
     # Common options live on a parent so they work after the subcommand
-    # (`dodex_client.py account --creds X`), the natural CLI order.
+    # (`dexdo_client.py account --creds X`), the natural CLI order.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--base-url", default=DEFAULT_BASE_URL,
-                        help=f"API base URL (default {DEFAULT_BASE_URL}; or $DODEX_BASE_URL)")
-    common.add_argument("--creds", help="path to a creds JSON ({apiKey, apiSecret}); or $DODEX_CREDS")
-    common.add_argument("--api-key", help="API key (overrides --creds); or $DODEX_API_KEY")
-    common.add_argument("--api-secret", help="API secret hex (overrides --creds); or $DODEX_API_SECRET")
+                        help=f"API base URL (default {DEFAULT_BASE_URL}; or $DEXDO_BASE_URL)")
+    common.add_argument("--creds", help="path to a creds JSON ({apiKey, apiSecret}); or $DEXDO_CREDS")
+    common.add_argument("--api-key", help="API key (overrides --creds); or $DEXDO_API_KEY")
+    common.add_argument("--api-secret", help="API secret hex (overrides --creds); or $DEXDO_API_SECRET")
     common.add_argument("--recv-window", type=int, default=DEFAULT_RECV_WINDOW,
                         help=f"recvWindow ms (default {DEFAULT_RECV_WINDOW}, max 60000)")
     common.add_argument("--timeout", type=int, default=DEFAULT_HTTP_TIMEOUT,
                         help=f"HTTP read timeout seconds (default {DEFAULT_HTTP_TIMEOUT}; "
-                             "or $DODEX_HTTP_TIMEOUT)")
+                             "or $DEXDO_HTTP_TIMEOUT)")
 
     # `common` is attached ONLY to the subparsers, not the root. If it were on
     # both, argparse would let the subparser's defaults overwrite a global option
