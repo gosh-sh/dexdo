@@ -102,8 +102,25 @@ under its own account-id as dApp id); pass it explicitly only if different:
 
 **Confirm with the user before this step** — it moves all the note's free funds out.
 `withdraw_tokens` sweeps the note's free balance of every token type to `--dest`.
-Anything still locked (an order/stake you didn't close) stays behind, so re-run
-Steps 2–4 for it and withdraw again.
+
+> **Hard precondition (contract invariant).** `PrivateNote.withdrawTokens` requires the
+> note to be **fully flat first**: `require(_stakes.empty())`, no open orders, nothing
+> `lockedInOrders`, no pending place/batch locks, and `_debt == 0`. If ANY stake or
+> order remains, the withdraw reverts on the compute phase (TVM **exit 121** /
+> `ERR_INVALID_STATE`-class) — it does **not** do a partial sweep. So Steps 2–4 must
+> clear **every** market the note touched, not just some.
+>
+> **The catch:** `cancel-stake` only works while a market is still in **STAKING**.
+> A stake in `AWAITING_FREEZE` / `TRADING` / `RESOLVING` can't be cancelled — it is
+> released only when the market reaches `RESOLVED`/`CANCELLED` and you **`claim`** it.
+> So if the note staked a market that has moved past STAKING and hasn't resolved yet,
+> **withdrawal is blocked until that market resolves** (then `claim`, then withdraw).
+> Enumerate with `dexdo stakes` + map each `eventId` to its market `status`; if any
+> are stuck mid-lifecycle, tell the user the sweep must wait for resolution.
+>
+> `--dapp-id` is a `uint256` — the CLI passes the destination's account-id **0x-prefixed**
+> by default (a bare hex account-id fails to parse as a decimal). Override only if the
+> wallet's real dApp id differs.
 
 ## Step 6 — Verify
 

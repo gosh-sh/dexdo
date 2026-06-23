@@ -558,8 +558,12 @@ async fn cmd_withdraw(f: Flags) -> ExitCode {
     let dest = match f.require("dest") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
     // dapp_id defaults to the destination's account-id (a multisig deploys under
     // its own account-id as dapp_id); override with --dapp-id if different.
-    let dapp_id = f.get("dapp-id").map(|s| s.to_string())
-        .unwrap_or_else(|| dest.strip_prefix("0:").unwrap_or(&dest).to_string());
+    // It is a uint256 — pass it 0x-prefixed so the ABI parses it as hex, not as a
+    // (failing) decimal of the bare account-id.
+    let dapp_id = f.get("dapp-id").map(|s| s.to_string()).unwrap_or_else(|| {
+        let bare = dest.strip_prefix("0:").unwrap_or(&dest);
+        if bare.starts_with("0x") { bare.to_string() } else { format!("0x{bare}") }
+    });
     let (pn_address, keys) = match load_pn(&pn_state) { Ok(v) => v, Err(e) => return fail(&e) };
     let dex = match dex(&f.endpoint()) { Ok(d) => d, Err(e) => return fail(&e) };
     eprintln!("[dexdo withdraw] note {pn_address} → wallet {dest} (dapp_id {dapp_id})");
