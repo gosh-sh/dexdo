@@ -36,7 +36,8 @@ DEXDO="python3 $PWD/.claude/skills/dexdo-common/dexdo_client.py"   # from repo r
 ```
 
 Every endpoint here is `TRADE`-signed, so credentials are **required** — the
-account's `<tt>.creds.json` from registration (`POST /api/v1/accounts`):
+account's `<tt>.creds.json` from registration (`POST /api/v1/accounts`; produce it with
+the **`dexdo-register-account`** skill if it doesn't exist yet):
 
 ```sh
 export DEXDO_CREDS="$HOME/dexdo-workspace/notes/nackl.creds.json"

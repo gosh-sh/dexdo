@@ -433,4 +433,11 @@ Three funded on-chain PrivateNotes (one per currency: SHELL / NACKL / USDC) unde
 - place/cancel orders in the outcome books;
 - claim payouts after a market resolves.
 
+**Next step to trade via the API:** the notes are deployed but **not yet registered**
+with the backend. To get API credentials (and use `dexdo-market-data` signed reads /
+`dexdo-trading` REST orders), register each note with the **`dexdo-register-account`**
+skill (`POST /api/v1/accounts` → `<tt>.creds.json`). That step is separate on purpose
+— it delegates the note's key to the backend. (The on-chain SDK path — `dexdo stake` /
+`place-order` — needs no registration; it signs with the note key directly.)
+
 All of this is covered by the **research / trading skills** built on top of this onboarding.

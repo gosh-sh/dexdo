@@ -161,6 +161,48 @@ def signed_request(args, method, path, query_params=None, body_obj=None):
 
 # --------------------------- command handlers ---------------------------
 
+def cmd_register(args):
+    """POST /api/v1/accounts (public): register a deployed note, get + store creds.
+
+    Reads the account body from --account-file (the onboarding `<tt>.account.json`),
+    POSTs it, and — on success — writes the returned credential to --save-creds with
+    owner-only perms (it carries the apiSecret, returned only once).
+    """
+    try:
+        with open(args.account_file) as fh:
+            body_obj = json.load(fh)
+    except (OSError, ValueError) as exc:
+        _fail(f"cannot read account file {args.account_file}: {exc}")
+    body_str = json.dumps(body_obj, separators=(",", ":"), ensure_ascii=False)
+    url = f"{args.base_url}/api/v1/accounts"
+    status, text = _request("POST", url, args.timeout,
+                            headers={"Content-Type": "application/json"},
+                            body_bytes=body_str.encode("utf-8"))
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        _emit(status, text)
+        return
+    print(json.dumps(parsed, indent=2, ensure_ascii=False))
+    if isinstance(parsed, dict) and parsed.get("apiSecret"):
+        if args.save_creds:
+            try:
+                fd = os.open(args.save_creds, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(parsed, fh, indent=2)
+                os.chmod(args.save_creds, 0o600)
+                sys.stderr.write(f"saved credential (0600) to {args.save_creds}\n")
+            except OSError as exc:
+                _fail(f"got credential but failed to save it to {args.save_creds}: {exc}")
+        else:
+            sys.stderr.write("WARNING: apiSecret is returned ONCE — capture it now "
+                             "(re-run with --save-creds <file> to store it)\n")
+        return
+    # error envelope (e.g. -2015 already registered, -2013 not deployed, -2016 wrong key)
+    if _is_error_envelope(parsed) or status >= 400:
+        sys.exit(1)
+
+
 def cmd_markets(args):
     params = [
         ("marketAddress", args.market_address),
@@ -333,6 +375,13 @@ def build_parser():
     p = argparse.ArgumentParser(
         description="DEX.DO REST client for agent skills (put options AFTER the subcommand)")
     sub = p.add_subparsers(dest="command", required=True)
+
+    sp = sub.add_parser("register", help="POST /api/v1/accounts (public) — register a note, get creds",
+                        parents=[common])
+    sp.add_argument("--account-file", required=True,
+                    help="path to the onboarding <tt>.account.json (the POST body)")
+    sp.add_argument("--save-creds", help="write the returned credential here (mode 0600)")
+    sp.set_defaults(func=cmd_register)
 
     sp = sub.add_parser("markets", help="GET /api/v1/markets (public)", parents=[common])
     sp.add_argument("--market-address")

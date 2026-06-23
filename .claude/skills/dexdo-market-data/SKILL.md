@@ -49,7 +49,8 @@ with `--base-url` or `$DEXDO_BASE_URL`).
 The public views (markets, depth, price) need **no** credentials. "My open orders"
 and "my order history" are signed and need the account's API credential — the
 `<tt>.creds.json` file produced when the PrivateNote was registered
-(`POST /api/v1/accounts`; see the deposit/onboarding flow). Point the client at it:
+(`POST /api/v1/accounts` — produce it with the **`dexdo-register-account`** skill).
+Point the client at it:
 
 ```sh
 export DEXDO_CREDS="$HOME/dexdo-workspace/notes/nackl.creds.json"   # {apiKey, apiSecret}
