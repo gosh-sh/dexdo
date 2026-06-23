@@ -1,36 +1,10 @@
 # DEX.DO Shellnet Testing Guide
 
 To start testing DEX.DO in Shellnet, prepare your own test Private Notes,
-register them in the backend, and use the issued API keys for trading
+choose a backend to register them, and use the issued API keys for trading
 scenarios.
 
-## 1. Deploy Block Manager
-
-Deploy your own Block Manager (BM) instance using the Acki Nacki documentation:
-<https://github.com/ackinacki/ackinacki/blob/main/README.md#deployment-overview>
-
-During deployment, use the test BM license and BK endpoint provided to you.
-
-## 2. Deploy the DEX.DO backend
-
-Deploy a separate DEX.DO backend instance using this guide:
-
-<https://github.com/gosh-sh/dexdo/blob/dev/docs/deployment.md>
-
-For Shellnet testing, you can use the DEX.DO backend endpoint provided by the
-DEX.DO team: <https://dodex-dev.ackinacki.org>
-(DEX.DO will not offer this hosted-backend option on Mainnet.)
-
-**Important:** Loading a PN into any API service delegates the PrivateNote's
-private key to the backend and does not provide any security guarantees for
-delegated PN keys.
-
-Configure the backend to connect to your BM service and assigned BK endpoint.
-
-For self-service registration through `POST /api/v1/accounts`, keep
-`auth.seed_accounts` disabled (`false` or unset).
-
-## 3. Prepare Private Notes
+## 1. Prepare Private Notes
 
 Testing requires pre-deployed and funded Private Notes (PNs). Each trading
 account works through a separate PN.
@@ -51,7 +25,40 @@ share them only as secrets.
 For agent-driven Shellnet onboarding, see the root
 [`README.md`](../README.md#onboarding-shellnet).
 
-## 4. Register Trading Accounts
+## 2. Choose a backend for PN registration
+
+DEX.DO testing requires a backend where your PNs will be registered. You can either use the hosted Shellnet backend provided by the DEX.DO team or deploy your own BM and DEX.DO backend instances.
+
+### Option 1: Use the hosted DEX.DO backend
+
+Use the DEX.DO backend endpoint provided by the DEX.DO team:
+<https://dodex-dev.ackinacki.org>.
+(DEX.DO will not offer this hosted-backend option on Mainnet)
+
+🚨 **Important:**
+Loading a PN into any API service **delegates **the PrivateNote's
+private key to the backend and does not provide any security guarantees for
+delegated PN keys**
+
+### Option 2: Deploy your own BM and DEX.DO backend
+
+Deploy your own Block Manager (BM) instance using the Acki Nacki documentation:
+<https://github.com/ackinacki/ackinacki/blob/main/README.md#deployment-overview>
+
+During BM deployment, use the test BM license and BK endpoint provided to you.
+
+Deploy a separate DEX.DO backend instance using this guide:
+
+<https://github.com/gosh-sh/dexdo/blob/dev/docs/deployment.md>
+
+Configure the backend to connect to your BM service and assigned BK endpoint.
+
+For self-service registration through `POST /api/v1/accounts` on your backend,
+keep `auth.seed_accounts` disabled (`false` or unset).
+
+## 3. Register Trading Accounts
+
+Use the backend selected in the previous step.
 
 For each PN, create one API account:
 
@@ -91,7 +98,7 @@ error, use another PN or the credentials issued during the first registration.
 Full endpoint contract:
 [`api-spec.md#register-account`](api-spec.md#register-account).
 
-## 5. Start Testing the API
+## 4. Start Testing the API
 
 After registering accounts, you can test trading scenarios through the DEX.DO
 API.
