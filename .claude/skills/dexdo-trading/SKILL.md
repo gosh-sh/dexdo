@@ -245,6 +245,21 @@ post-restart deployment, but can lag under indexer backlog).
 (`DELETE /api/v1/openOrders` "cancel all on symbol", `sellFullSet`, and `claim` are
 in the draft spec but **not deployed** on dev — don't call them.)
 
+## Network rate limit (429) — pace on-chain SENDS
+
+The network throttles **message sends to the chain at >3 requests/second** → the
+Block Producer returns **`429 Too Many Requests`** (surfaced by the SDK CLI as a
+`tvm` error, code 621). This limit is on **on-chain writes — creating orders
+(`order` / `dexdo place-order`), stakes (`dexdo stake`), full splits, cancels** —
+**not** on reads (markets / depth / price / orders / stakes via `dexdo-market-data`,
+which you can call freely).
+
+So: **do not fire write ops in a burst.** Submit them **one at a time, spaced
+(~1s+ between sends is enough to stay under 3 rps; a few seconds is safer)**, and
+never run several order/stake commands in parallel. On a `429`, wait a few seconds
+and retry that one op — it's a throttle, not a rejection. (A single SDK write may
+itself issue a few chain queries, so leave margin rather than racing the limit.)
+
 ## Timeouts & retries
 
 Trade endpoints submit an on-chain transaction before responding and can take tens

@@ -15,6 +15,7 @@
 //! Implemented subcommands:
 //!   stake        Stake on one outcome during the STAKING phase (PrivateNote.setStake).
 //!   stakes       Show a note's stakes across markets. (read-only)
+//!   place-order  Place an order via the SDK, bypassing REST (surfaces the real error).
 //!   pmp-details  Read a market's (PMP) phase, window, outcomes, identity. (read-only)
 //!
 //! Common flag: --endpoint <host>  (default shellnet.ackinacki.org)
@@ -32,7 +33,12 @@ use std::time::UNIX_EPOCH;
 
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
+use dodex_contracts::dex::private_note::ParamsOfCancelAllOrders;
+use dodex_contracts::dex::private_note::ParamsOfMergeFullSet;
+use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::private_note::ParamsOfStakeKey;
+use dodex_contracts::dex::private_note::ParamsOfWithdrawTokens;
 use dodex_sdk::Dex;
 use dodex_sdk::DexConfig;
 use serde::Deserialize;
@@ -350,6 +356,78 @@ async fn cmd_pmp_details(f: Flags) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `dexdo place-order` — place an order on the order book DIRECTLY via the SDK
+/// (`PrivateNote.placeOrder`), bypassing the REST API. The REST `POST /order`
+/// masks chain failures as a generic `-1000`; this path surfaces the real error.
+/// price is a human probability 0..1 (converted to basis points); amount is the
+/// outcome-token quantity (scaled by token decimals). tif → flags:
+/// GTC=0, IOC=0x01, FOK=0x02, POST_ONLY=0x08.
+async fn cmd_place_order(f: Flags) -> ExitCode {
+    let market = match f.require("market-address") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let pn_state = match f.require("pn-state-file") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let outcome: u32 = match f.require("outcome").and_then(|v| v.parse().map_err(|_| format!("--outcome not a u32: {v}"))) {
+        Ok(v) => v, Err(e) => return fail(&e),
+    };
+    let side = match f.require("side") { Ok(v) => v.to_uppercase(), Err(e) => return fail(&e) };
+    let is_buy = match side.as_str() {
+        "BUY" => true, "SELL" => false,
+        other => return fail(&format!("--side must be BUY or SELL, got {other}")),
+    };
+    let price_human = match f.require("price") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let amount_human = match f.require("amount") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let flags: u8 = match f.get("tif").unwrap_or("GTC").to_uppercase().as_str() {
+        "GTC" => 0x00, "IOC" => 0x01, "FOK" => 0x02, "POST_ONLY" => 0x08,
+        other => return fail(&format!("--tif must be GTC|IOC|FOK|POST_ONLY, got {other}")),
+    };
+
+    let dex = match dex(&f.endpoint()) { Ok(d) => d, Err(e) => return fail(&e) };
+    let d = match dex.get_pmp_details(&market).await {
+        Ok(d) => d, Err(e) => return fail(&format!("get_pmp_details({market}) failed: {e:?}")),
+    };
+    if outcome >= d.num_outcomes {
+        return fail(&format!("outcome {} out of range ({} outcomes)", outcome, d.num_outcomes));
+    }
+    let decimals = match decimals_for(d.token_type) { Ok(v) => v, Err(e) => return fail(&e) };
+    let amount = match parse_amount_to_raw(&amount_human, decimals) { Ok(v) => v, Err(e) => return fail(&e) };
+    let price_bps = match price_to_bps(&price_human) { Ok(v) => v, Err(e) => return fail(&e) };
+    let client_order_id: u128 = f.get("client-id")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| now_unix() as u128);
+
+    let (pn_address, keys) = match load_pn(&pn_state) { Ok(v) => v, Err(e) => return fail(&e) };
+    eprintln!(
+        "[dexdo place-order] {} {} {} outcome {} @ {} bps x {} (raw {}) flags=0x{:02x} on {} via {}",
+        side, token_label(d.token_type), if is_buy {"BUY"} else {"SELL"},
+        outcome, price_bps, amount_human, amount, flags, market, pn_address,
+    );
+    match dex.place_order(
+        &pn_address,
+        ParamsOfPlaceOrder {
+            event_id: d.event_id.clone(),
+            oracle_list_hash: d.oracle_list_hash.clone(),
+            token_type: d.token_type,
+            outcome_id: outcome,
+            is_buy,
+            price: price_bps.to_string(),
+            amount,
+            flags,
+            min_amount: 0,
+            epoch_id: 0,
+            client_order_id,
+        },
+        Signer::Keys { keys },
+    ).await {
+        Ok(res) => { println!("[dexdo place-order] DONE: {res:?}"); ExitCode::SUCCESS }
+        Err(e) => fail(&format!("place_order failed (REAL error, not the REST -1000): {e:?}")),
+    }
+}
+
+/// Human probability "0.30" → basis points (3000). tickSize 0.001 → 10 bps steps.
+fn price_to_bps(price: &str) -> Result<u64, String> {
+    let raw = parse_amount_to_raw(price, 4)?; // 4 dp == basis points
+    Ok(raw as u64)
+}
+
 /// `dexdo stakes` — show a note's stakes across markets (read-only).
 async fn cmd_stakes(f: Flags) -> ExitCode {
     let pn_address = match resolve_pn_address(&f) {
@@ -373,6 +451,128 @@ async fn cmd_stakes(f: Flags) -> ExitCode {
     }
 }
 
+/// `dexdo cancel-stake` — recover a stake from a still-open STAKING market.
+async fn cmd_cancel_stake(f: Flags) -> ExitCode {
+    stake_key_op(f, "cancel-stake").await
+}
+/// `dexdo claim` — settle/claim a RESOLVED or CANCELLED market.
+async fn cmd_claim(f: Flags) -> ExitCode {
+    stake_key_op(f, "claim").await
+}
+
+/// Shared body for the two `ParamsOfStakeKey` ops (cancel-stake / claim): both
+/// take {event_id, oracle_list_hash, token_type} read from the PMP on-chain.
+async fn stake_key_op(f: Flags, which: &str) -> ExitCode {
+    let market = match f.require("market-address") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let pn_state = match f.require("pn-state-file") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let dex = match dex(&f.endpoint()) { Ok(d) => d, Err(e) => return fail(&e) };
+    let d = match dex.get_pmp_details(&market).await {
+        Ok(d) => d, Err(e) => return fail(&format!("get_pmp_details({market}) failed: {e:?}")),
+    };
+    let (pn_address, keys) = match load_pn(&pn_state) { Ok(v) => v, Err(e) => return fail(&e) };
+    let key = ParamsOfStakeKey {
+        event_id: d.event_id.clone(),
+        oracle_list_hash: d.oracle_list_hash.clone(),
+        token_type: d.token_type,
+    };
+    eprintln!("[dexdo {which}] market {market} via note {pn_address}");
+    let res = if which == "claim" {
+        dex.claim(&pn_address, key, Signer::Keys { keys }).await
+    } else {
+        dex.cancel_stake(&pn_address, key, Signer::Keys { keys }).await
+    };
+    match res {
+        Ok(r) => { println!("[dexdo {which}] DONE: {r:?}"); ExitCode::SUCCESS }
+        Err(e) => fail(&format!("{which} failed: {e:?}")),
+    }
+}
+
+/// `dexdo cancel-all-orders` — cancel all the note's resting orders on one market.
+async fn cmd_cancel_all_orders(f: Flags) -> ExitCode {
+    let market = match f.require("market-address") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let pn_state = match f.require("pn-state-file") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let dex = match dex(&f.endpoint()) { Ok(d) => d, Err(e) => return fail(&e) };
+    let d = match dex.get_pmp_details(&market).await {
+        Ok(d) => d, Err(e) => return fail(&format!("get_pmp_details({market}) failed: {e:?}")),
+    };
+    let (pn_address, keys) = match load_pn(&pn_state) { Ok(v) => v, Err(e) => return fail(&e) };
+    eprintln!("[dexdo cancel-all-orders] market {market} via note {pn_address}");
+    match dex.cancel_all_orders(
+        &pn_address,
+        ParamsOfCancelAllOrders {
+            event_id: d.event_id.clone(),
+            oracle_list_hash: d.oracle_list_hash.clone(),
+            token_type: d.token_type,
+        },
+        Signer::Keys { keys },
+    ).await {
+        Ok(r) => { println!("[dexdo cancel-all-orders] DONE: {r:?}"); ExitCode::SUCCESS }
+        Err(e) => fail(&format!("cancel_all_orders failed: {e:?}")),
+    }
+}
+
+/// `dexdo merge-full-set` — merge held outcome tokens back into collateral on one
+/// market. `--amounts` is a comma list of per-outcome human amounts (order = outcomeId).
+async fn cmd_merge_full_set(f: Flags) -> ExitCode {
+    let market = match f.require("market-address") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let pn_state = match f.require("pn-state-file") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let amounts_csv = match f.require("amounts") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let dex = match dex(&f.endpoint()) { Ok(d) => d, Err(e) => return fail(&e) };
+    let d = match dex.get_pmp_details(&market).await {
+        Ok(d) => d, Err(e) => return fail(&format!("get_pmp_details({market}) failed: {e:?}")),
+    };
+    let decimals = match decimals_for(d.token_type) { Ok(v) => v, Err(e) => return fail(&e) };
+    let mut amount: Vec<u128> = Vec::new();
+    for part in amounts_csv.split(',') {
+        let p = part.trim();
+        if p == "0" { amount.push(0); continue; }
+        match parse_amount_to_raw(p, decimals) {
+            Ok(v) => amount.push(v),
+            Err(e) => return fail(&format!("--amounts: {e}")),
+        }
+    }
+    if amount.len() as u32 != d.num_outcomes {
+        return fail(&format!("--amounts has {} entries but market has {} outcomes", amount.len(), d.num_outcomes));
+    }
+    let (pn_address, keys) = match load_pn(&pn_state) { Ok(v) => v, Err(e) => return fail(&e) };
+    eprintln!("[dexdo merge-full-set] {amount:?} on {market} via {pn_address}");
+    match dex.merge_full_set(
+        &pn_address,
+        ParamsOfMergeFullSet {
+            event_id: d.event_id.clone(),
+            oracle_list_hash: d.oracle_list_hash.clone(),
+            token_type: d.token_type,
+            amount,
+        },
+        Signer::Keys { keys },
+    ).await {
+        Ok(r) => { println!("[dexdo merge-full-set] DONE: {r:?}"); ExitCode::SUCCESS }
+        Err(e) => fail(&format!("merge_full_set failed: {e:?}")),
+    }
+}
+
+/// `dexdo withdraw` — sweep ALL the note's free collateral to a wallet (the
+/// multisig). Close positions/orders/stakes first so collateral is unlocked.
+async fn cmd_withdraw(f: Flags) -> ExitCode {
+    let pn_state = match f.require("pn-state-file") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let dest = match f.require("dest") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    // dapp_id defaults to the destination's account-id (a multisig deploys under
+    // its own account-id as dapp_id); override with --dapp-id if different.
+    let dapp_id = f.get("dapp-id").map(|s| s.to_string())
+        .unwrap_or_else(|| dest.strip_prefix("0:").unwrap_or(&dest).to_string());
+    let (pn_address, keys) = match load_pn(&pn_state) { Ok(v) => v, Err(e) => return fail(&e) };
+    let dex = match dex(&f.endpoint()) { Ok(d) => d, Err(e) => return fail(&e) };
+    eprintln!("[dexdo withdraw] note {pn_address} → wallet {dest} (dapp_id {dapp_id})");
+    match dex.withdraw_tokens(
+        &pn_address,
+        ParamsOfWithdrawTokens { dest_wallet_addr: dest, dapp_id },
+        Signer::Keys { keys },
+    ).await {
+        Ok(r) => { println!("[dexdo withdraw] DONE: {r:?}"); ExitCode::SUCCESS }
+        Err(e) => fail(&format!("withdraw_tokens failed: {e:?}")),
+    }
+}
+
 // ----------------------------- dispatch -----------------------------
 
 fn fail(msg: &str) -> ExitCode {
@@ -389,6 +589,19 @@ fn usage() -> String {
        Stake on one outcome during the STAKING phase (PrivateNote.setStake).\n  \
        stakes        (--pn-state-file <path> | --pn-address 0:<pn>) [--endpoint host]\n                  \
        Show a note's stakes across markets (read-only).\n  \
+       place-order   --market-address 0:<pmp> --pn-state-file <path> --outcome <id> \
+     --side BUY|SELL --price <0..1> --amount <human> [--tif GTC|IOC|FOK|POST_ONLY]\n                  \
+       Place an order via the SDK (bypasses REST; shows the real chain error).\n  \
+       cancel-all-orders  --market-address 0:<pmp> --pn-state-file <path>\n                  \
+       Cancel all the note's resting orders on one market.\n  \
+       cancel-stake  --market-address 0:<pmp> --pn-state-file <path>\n                  \
+       Recover a stake from a still-open STAKING market.\n  \
+       merge-full-set  --market-address 0:<pmp> --pn-state-file <path> --amounts a,b[,..]\n                  \
+       Merge held outcome tokens back into collateral (per-outcome amounts).\n  \
+       claim         --market-address 0:<pmp> --pn-state-file <path>\n                  \
+       Settle/claim a RESOLVED or CANCELLED market.\n  \
+       withdraw      --pn-state-file <path> --dest 0:<multisig> [--dapp-id <id>]\n                  \
+       Sweep the note's free collateral to a wallet (the multisig).\n  \
        pmp-details   --market-address 0:<pmp> [--endpoint host]\n                  \
        Read a market's phase window, outcomes, and identity (read-only).\n\n\
      common flags:\n  \
@@ -404,6 +617,12 @@ async fn dispatch(sub: &str, rest: &[String]) -> ExitCode {
     match sub {
         "stake" => cmd_stake(flags).await,
         "stakes" => cmd_stakes(flags).await,
+        "place-order" => cmd_place_order(flags).await,
+        "cancel-all-orders" => cmd_cancel_all_orders(flags).await,
+        "cancel-stake" => cmd_cancel_stake(flags).await,
+        "merge-full-set" => cmd_merge_full_set(flags).await,
+        "claim" => cmd_claim(flags).await,
+        "withdraw" => cmd_withdraw(flags).await,
         "pmp-details" => cmd_pmp_details(flags).await,
         other => fail(&format!("unknown subcommand `{other}`\n\n{}", usage())),
     }
