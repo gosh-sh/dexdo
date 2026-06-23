@@ -353,19 +353,31 @@ impl IndexerRepository {
                 Err(err) => {
                     // The optimistic transaction is now aborted; discard it and
                     // let the caller replay this range with per-row savepoints,
-                    // which applies the clean rows and isolates this one. Logged
-                    // at debug, not warn: the savepointed replay re-attempts this
-                    // row and emits the single authoritative failure warning. The
-                    // fallback rate is surfaced as the indexer_projection_fallbacks
-                    // counter (a steady climb = the fast path routinely aborting).
+                    // which applies the clean rows and isolates this one.
                     self.projection_fallbacks.fetch_add(1, Ordering::Relaxed);
-                    tx.rollback().await.ok();
-                    debug!(
-                        msg_id = %row.msg_id,
-                        event_type = ?event.event_type,
-                        ?err,
-                        "optimistic projection batch errored; falling back to per-row savepoints"
-                    );
+                    let rollback_error = tx.rollback().await.err();
+                    // A deterministic projector error (e.g. a missing field) is not
+                    // a sqlx error: the savepointed replay re-attempts the row and
+                    // emits the single authoritative `warn`, so log at debug to
+                    // avoid double-warning. A DB-layer error (sqlx) or a failed
+                    // rollback is instead a transient/health signal the replay may
+                    // silently recover from on a fresh connection — surface it.
+                    if err.downcast_ref::<sqlx::Error>().is_some() || rollback_error.is_some() {
+                        warn!(
+                            msg_id = %row.msg_id,
+                            event_type = ?event.event_type,
+                            ?err,
+                            ?rollback_error,
+                            "optimistic projection batch hit a DB-layer error; falling back to per-row savepoints"
+                        );
+                    } else {
+                        debug!(
+                            msg_id = %row.msg_id,
+                            event_type = ?event.event_type,
+                            ?err,
+                            "optimistic projection batch errored; falling back to per-row savepoints"
+                        );
+                    }
                     return Ok(None);
                 }
             }

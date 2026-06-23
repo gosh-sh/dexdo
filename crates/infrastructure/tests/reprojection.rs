@@ -3098,6 +3098,98 @@ async fn fast_path_first_row_poison_falls_back() {
     purge(&pool, &cleanup).await;
 }
 
+/// The poison row mutates `live_orders` and *then* fails — a taker OrderFilled
+/// missing `clearingPrice`: the `amount_remaining` UPDATE applies, then the trade
+/// insert fails. This proves the optimistic rollback actually reverts a
+/// partially-applied transaction, which the missing-`isTaker` poison (it fails
+/// before any write) cannot. The clean row still commits, the poison stays
+/// pending with its mutation reverted, and the fallback counter accumulates
+/// across retries (and the revert holds on each).
+#[tokio::test]
+async fn fast_path_rolls_back_partial_mutation() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let book = "0:reproj_pmut_book";
+    let order_id = "91";
+    let probe_type = "Test.PmutCleanProbe";
+    let clean_msg = "reproj_pmut_clean-msg";
+    let poison_msg = "reproj_pmut_poison-msg";
+    let after = "zzzw_reproj_pmut_0";
+    let clean_chain = "zzzw_reproj_pmut_1_clean";
+    let poison_chain = "zzzw_reproj_pmut_2_poison";
+
+    let cleanup: Vec<(&str, &str)> = vec![
+        ("delete from trades where orderbook_address = $1", book),
+        ("delete from live_orders where orderbook_address = $1", book),
+        ("delete from raw_events where msg_id = $1", clean_msg),
+        ("delete from raw_events where msg_id = $1", poison_msg),
+    ];
+    purge(&pool, &cleanup).await;
+
+    insert_open_parent(&pool, book, order_id).await;
+    insert_raw_at(&pool, clean_msg, clean_chain, "0:reproj_pmut_src", probe_type, &json!({})).await;
+    // Taker fill with no clearingPrice: the amount_remaining UPDATE applies, then
+    // the trade insert fails, so the projector's whole apply must revert.
+    insert_raw_at(
+        &pool,
+        poison_msg,
+        poison_chain,
+        book,
+        "OrderBook.OrderFilled",
+        &json!({"orderId": order_id, "filledAmount": "30", "isTaker": true}),
+    )
+    .await;
+
+    let stats = repo
+        .reproject_pending_from(1000, Some(after), Some(poison_chain))
+        .await
+        .expect("reproject");
+    assert_eq!(stats.scanned, 2);
+    assert_eq!(stats.unknown, 1, "the clean row");
+    assert_eq!(stats.failed, 1, "the mutating poison");
+    assert!(processed_at_is_set(&pool, clean_msg).await, "clean row committed");
+    assert!(!processed_at_is_set(&pool, poison_msg).await, "poison stays pending");
+    assert_eq!(repo.projection_fallback_count(), 1, "one fallback so far");
+
+    // The poison's amount_remaining UPDATE must not survive the optimistic
+    // rollback — a regression that committed the fast transaction's partial
+    // writes on the error path would leave 70 here.
+    let remaining: String = sqlx::query_scalar(
+        "select amount_remaining::text from live_orders \
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(book)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read live_orders");
+    assert_eq!(remaining, "100", "the rolled-back optimistic batch must not persist the mutation");
+
+    // A second pass falls back again (the poison is still pending): the counter
+    // accumulates past 1 — the property the metric depends on — and the mutation
+    // still must not leak.
+    repo.reproject_pending_from(1000, Some(after), Some(poison_chain)).await.expect("reproject 2");
+    assert_eq!(
+        repo.projection_fallback_count(),
+        2,
+        "the fallback counter accumulates across passes"
+    );
+    let remaining_again: String = sqlx::query_scalar(
+        "select amount_remaining::text from live_orders \
+              where orderbook_address = $1 and order_id = $2::numeric",
+    )
+    .bind(book)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read live_orders again");
+    assert_eq!(remaining_again, "100", "the mutation stays reverted across retries");
+
+    purge(&pool, &cleanup).await;
+}
+
 /// A taker OrderFilled with no `clearingPrice` fails the projection
 /// atomically: the live_orders mutation issued earlier in the same
 /// transaction rolls back with the trade insert, no trade row appears, and
