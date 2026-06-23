@@ -9,7 +9,7 @@ On-chain contracts live under `contracts/`: the DEX.DO core in `contracts/dex/`,
 
 ## Onboarding (Shellnet)
 
-DEX.DO onboarding is **agent-driven**: an AI coding agent with shell access to this repo runs the whole flow from a one-line prompt.
+DEX.DO onboarding is **agent-driven**: an AI coding agent with shell access to this repo runs the flow from one-line prompts, split across two chained skills (deploy the multisig, then deposit / create PrivateNotes).
 
 **Prerequisites**
 
@@ -17,11 +17,20 @@ DEX.DO onboarding is **agent-driven**: an AI coding agent with shell access to t
 - macOS or Linux with `git`, `curl`, `jq` — the skill installs Rust (`cargo`) and `tvm-cli` itself if they're missing.
 - Network access to Shellnet (`shellnet.ackinacki.org`) and its public giver.
 
-**Prompt** (paste into the agent):
+Onboarding is split into two chained skills:
 
-> Onboard me to DEXDO on Shellnet end-to-end: deploy and fund a multisig, then deploy three gas-funded PrivateNotes ready to trade.
+1. **Deploy the multisig** — [`.claude/skills/dexdo-deploy-multisig-shellnet/SKILL.md`](.claude/skills/dexdo-deploy-multisig-shellnet/SKILL.md): generate a 12-word seed + keypair, fund the precomputed address from the public giver, and deploy the wallet until it is Active.
+2. **Deposit / create PrivateNotes** — [`.claude/skills/dexdo-deposit-shellnet/SKILL.md`](.claude/skills/dexdo-deposit-shellnet/SKILL.md): takes the multisig as **input** (seed phrase *or* key pair), funds it with the deposit currencies, and deploys three gas-funded PrivateNotes (SHELL / NACKL / USDC).
 
-The agent follows the procedure in [`.claude/skills/dexdo-onboarding-shellnet/SKILL.md`](.claude/skills/dexdo-onboarding-shellnet/SKILL.md).
+If you already have a multisig, run step 2 alone — supply its seed phrase or keypair.
+
+**Prompts** (paste into the agent):
+
+> Deploy and fund a multisig wallet for me on DEXDO Shellnet.
+
+then, once it is Active:
+
+> Deposit onto DEXDO Shellnet using my multisig (here is the seed phrase / keypair) — create three gas-funded PrivateNotes ready to trade.
 
 **Output** — a multisig wallet you control and three funded PrivateNotes (SHELL / NACKL / USDC).
 

@@ -32,3 +32,6 @@ config/seed_notes*.json
 # vaults. Commit only the *.example dirs and templates. See deploy/ansible/README.md.
 deploy/ansible/inventories/*/
 !deploy/ansible/inventories/*.example/
+TODO.md
+.claude/scheduled_tasks.lock
+.claude/skills/dodex-common/__pycache__/dodex_client.cpython-314.pyc
