@@ -18,6 +18,7 @@ Operational cutover notes for specific schema/projector changes live in [migrati
 
 ## Operations
 
+- [shellnet-testing.md](shellnet-testing.md) — tester guide for trying DEX.DO on Shellnet with the hosted testing backend or a self-hosted backend, including Private Note key custody warnings.
 - [deployment.md](deployment.md) — self-hosting `indexer` + `api` with Docker Compose against your own Acki Nacki GraphQL endpoint and your own Postgres / Supabase.
 - [seed-private-notes.md](seed-private-notes.md) — seeding the api's trading accounts from a JSON notes file (config path, docker-compose delivery, KEK-derived API keys), and deploying/funding the PrivateNotes they point at.
 

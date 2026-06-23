@@ -37,10 +37,15 @@ $WORKSPACE/
 └── giver/      GiverV3.abi.json — Shellnet funding artifact
 ```
 
-Use the notes two ways:
+Use the PNs two ways:
 
 - **directly with the SDK libraries** (`dodex-sdk` / `ackinacki-kit`) — sign on-chain operations with each note's key from its file;
 - **loaded into a running API service** — POST each `notes/<token>.account.json` to `/api/v1/accounts`.
+
+🚨 **Important:**
+Loading a PN into any API service delegates that PrivateNote's private key to the backend. 
+
+The hosted testing backend (`https://dodex-dev.ackinacki.org`) is for Shellnet testing only, **provides no security guarantees for delegated PN keys**, and will not be offered on Mainnet.
 
 Files under `multisig/` and `notes/` carry secret keys — back them up, never commit them.
 
@@ -49,6 +54,7 @@ Files under `multisig/` and `notes/` carry secret keys — back them up, never c
 - [docs/api-spec.md](docs/api-spec.md) — public REST API contract.
 - [docs/openapi.yaml](docs/openapi.yaml) — OpenAPI 3.1 contract, generated from the Rust handlers. See [openapi/README.md](openapi/README.md) for the regen workflow and the GitHub Pages deployment.
 - [docs/README.md](docs/README.md) — documentation map and file ownership.
+- [docs/shellnet-testing.md](docs/shellnet-testing.md) — tester guide for trying DEX.DO on Shellnet with the hosted testing backend or a self-hosted backend.
 - [docs/deployment.md](docs/deployment.md) — self-hosting the `indexer` and `api` on your own server, wired to your own Acki Nacki GraphQL endpoint and your own Postgres / Supabase.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — where code and docs go (libs / services / tools), test and documentation rules, PR checklist. For humans and agents.
 - [AGENT_REQUIREMENTS.md](AGENT_REQUIREMENTS.md) — rules for any agent making repository changes.
