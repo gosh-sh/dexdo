@@ -144,11 +144,25 @@ Tell the user plainly whether the sweep completed:
   (exit 121) until each resolves. **Show a table of exactly where the funds are stuck
   and when they free up — in the user's LOCAL time.**
 
-Build it from `dexdo stakes` (the stuck `eventId`s) joined to `markets`
-(`event.eventId` → `marketName`, `status`, `timings`). The unlock moment is when the
-market resolves: earliest at `timings.resultStart` (resolution window opens), and no
-later than `timings.resultEnd` (deadline → `EXPIRED`, then claimable). Convert those
-unix-seconds to the user's local time for display:
+Build it from `dexdo stakes` joined to `markets`. **Caveat (verified):** the top-level
+key in `dexdo stakes` is **not** the market's `event.eventId` — it is an opaque
+`tvm.hash(abi.encode(eventId, oracleListHash, tokenType))`, so you **cannot** join it
+to `markets` by `event.eventId`. Map each stake to its market instead by:
+
+- **what you staked** — in this same session you placed the stakes with
+  `dexdo stake --market-address … --outcome … --amount …`, so you already know each
+  stake's market; match on the `oracleListHash` + per-outcome `amount` shown in
+  `dexdo stakes` against those calls; **or**
+- **enumeration** — for each candidate market, pull `pmp-details` (`eventId`,
+  `oracleListHash`, `tokenType`) and recognise it by `oracleListHash` + the amounts.
+
+(Known gap to close: `dexdo stakes` should emit the resolved `marketAddress`/`status`
+per stake — it can't be reversed client-side from the hash key alone.)
+
+Once mapped, the unlock moment is when the market resolves: earliest at
+`timings.resultStart` (resolution window opens), and no later than `timings.resultEnd`
+(deadline → `EXPIRED`, then claimable). Convert those unix-seconds to the user's local
+time for display:
 
 ```sh
 # local time for a unix-seconds value (macOS/BSD: date -r ; GNU: date -d @)
