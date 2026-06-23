@@ -133,6 +133,41 @@ tvm-cli -u shellnet.ackinacki.org account "${MULTISIG#0:}::${MULTISIG#0:}" | gre
 The note's free balance should be ~0 and the multisig's `ecc` balance increased by
 the swept amount. Leftover locked balance ⇒ a position/order wasn't closed; repeat.
 
+## Step 7 — Report to the user (and the "stuck stakes" table)
+
+Tell the user plainly whether the sweep completed:
+
+- **Fully withdrawn:** note ~0, multisig credited — done.
+- **Blocked by stuck stakes:** the note still has stakes in markets that are **past
+  STAKING but not yet resolved** (`AWAITING_FREEZE` / `TRADING` / `RESOLVING`). These
+  can't be cancelled and can't be claimed yet, so `withdraw` will keep reverting
+  (exit 121) until each resolves. **Show a table of exactly where the funds are stuck
+  and when they free up — in the user's LOCAL time.**
+
+Build it from `dexdo stakes` (the stuck `eventId`s) joined to `markets`
+(`event.eventId` → `marketName`, `status`, `timings`). The unlock moment is when the
+market resolves: earliest at `timings.resultStart` (resolution window opens), and no
+later than `timings.resultEnd` (deadline → `EXPIRED`, then claimable). Convert those
+unix-seconds to the user's local time for display:
+
+```sh
+# local time for a unix-seconds value (macOS/BSD: date -r ; GNU: date -d @)
+date -r 1782310222 '+%Y-%m-%d %H:%M %Z' 2>/dev/null || date -d @1782310222 '+%Y-%m-%d %H:%M %Z'
+```
+
+Render, e.g.:
+
+| Market | Status | Your stake | Claimable from (local) | Hard deadline (local) |
+|---|---|---|---|---|
+| Group Stage — USA | RESOLVING | No 11.22 NACKL | 2026-06-25 09:30 CEST | 2026-06-26 09:30 CEST |
+| Rosengård W vs Djurgården | AWAITING_FREEZE | 0/1 split | 2026-06-25 12:00 CEST | 2026-06-26 12:00 CEST |
+
+Then state the next action: once a row reaches `RESOLVED`/`CANCELLED`, run
+`dexdo claim --market-address <that market> --pn-state-file "$STATE"`, and after the
+**last** stake clears, re-run `dexdo withdraw` to sweep the rest to the multisig.
+Reassure the user the funds are safe on the note in the meantime — nothing is lost,
+it's just time-locked by the market lifecycle.
+
 ## Pacing / errors (be gentle)
 
 Each step is an on-chain transaction (a network SEND) signed by the note. The network
