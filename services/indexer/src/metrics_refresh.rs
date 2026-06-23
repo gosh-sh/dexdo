@@ -69,6 +69,7 @@ pub async fn run_refresh_loop(
         }
         let (in_use, idle) = repo.pool_connection_stats();
         metrics.set_pool_connections(in_use, idle);
+        metrics.set_projection_fallbacks(repo.projection_fallback_count());
         tokio::time::sleep(interval).await;
     }
 }

@@ -2,6 +2,8 @@
 //
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -37,6 +39,14 @@ pub struct IndexerRepository {
     /// clone shares the `Arc` too but never records sightings.) Bounded by the
     /// decoder's ABI event vocabulary, so it cannot grow without limit.
     seen_unknown_event_types: Arc<Mutex<HashSet<String>>>,
+    /// Running count of projection batches that aborted the optimistic
+    /// (savepoint-free) pass and replayed with per-row savepoints. Shared via
+    /// `Arc` across all clones, so the projection loop's increments are visible
+    /// to the metrics-refresh clone, which polls it for `indexer_projection_fallbacks`.
+    /// A steadily climbing rate means projector errors are routinely dropping
+    /// the fast path — a throughput regression the backlog/lag gauges only show
+    /// as a symptom.
+    projection_fallbacks: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -75,7 +85,11 @@ struct PendingRow {
 
 impl IndexerRepository {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool, seen_unknown_event_types: Arc::new(Mutex::new(HashSet::new())) }
+        Self {
+            pool,
+            seen_unknown_event_types: Arc::new(Mutex::new(HashSet::new())),
+            projection_fallbacks: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// Returns `true` the first time `event_type` is seen as projector-unknown
@@ -341,7 +355,10 @@ impl IndexerRepository {
                     // let the caller replay this range with per-row savepoints,
                     // which applies the clean rows and isolates this one. Logged
                     // at debug, not warn: the savepointed replay re-attempts this
-                    // row and emits the single authoritative failure warning.
+                    // row and emits the single authoritative failure warning. The
+                    // fallback rate is surfaced as the indexer_projection_fallbacks
+                    // counter (a steady climb = the fast path routinely aborting).
+                    self.projection_fallbacks.fetch_add(1, Ordering::Relaxed);
                     tx.rollback().await.ok();
                     debug!(
                         msg_id = %row.msg_id,
@@ -580,6 +597,13 @@ impl IndexerRepository {
         let size = u64::from(self.pool.size());
         let idle = self.pool.num_idle() as u64;
         (size.saturating_sub(idle), idle)
+    }
+
+    /// Running total of projection batches that fell back from the optimistic
+    /// pass to per-row savepoints (process-wide, since startup). Polled by the
+    /// metrics-refresh loop for `indexer_projection_fallbacks`.
+    pub fn projection_fallback_count(&self) -> u64 {
+        self.projection_fallbacks.load(Ordering::Relaxed)
     }
 
     /// Highest pending `chain_order` right now, or `None` when the queue is

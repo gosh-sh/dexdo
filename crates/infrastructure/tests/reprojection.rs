@@ -2953,6 +2953,7 @@ async fn fast_path_falls_back_and_isolates_poison_row() {
     assert_eq!(stats.max_chain_order.as_deref(), Some(poison_chain));
     assert!(processed_at_is_set(&pool, clean_msg).await, "clean row marked despite the fallback");
     assert!(!processed_at_is_set(&pool, poison_msg).await, "poison row stays pending");
+    assert_eq!(repo.projection_fallback_count(), 1, "the batch fell back exactly once");
 
     let captured: Vec<CapturedEvent> = events.lock().unwrap().clone();
     // The branch actually taken: the optimistic pass logged its fallback.
@@ -3013,6 +3014,7 @@ async fn fast_path_clean_batch_commits_without_fallback() {
     assert_eq!(stats.max_chain_order.as_deref(), Some(b_chain));
     assert!(processed_at_is_set(&pool, a_msg).await);
     assert!(processed_at_is_set(&pool, b_msg).await);
+    assert_eq!(repo.projection_fallback_count(), 0, "a clean batch must not fall back");
 
     let captured: Vec<CapturedEvent> = events.lock().unwrap().clone();
     assert!(
@@ -3085,6 +3087,7 @@ async fn fast_path_first_row_poison_falls_back() {
         processed_at_is_set(&pool, clean_msg).await,
         "the trailing clean row is applied by the fallback"
     );
+    assert_eq!(repo.projection_fallback_count(), 1, "the batch fell back exactly once");
 
     let captured: Vec<CapturedEvent> = events.lock().unwrap().clone();
     assert!(

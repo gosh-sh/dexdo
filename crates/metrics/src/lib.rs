@@ -53,6 +53,7 @@ pub struct IndexerMetrics {
     capture_cursor_age_seconds: Arc<AtomicU64>,
     pool_in_use: Arc<AtomicU64>,
     pool_idle: Arc<AtomicU64>,
+    projection_fallbacks: Arc<AtomicU64>,
     // Retain the observable-counter and gauge handles for the lifetime of the
     // provider, mirroring the reference metrics setup. The observe callbacks
     // themselves are registered with the meter at `build()` time.
@@ -63,6 +64,7 @@ pub struct IndexerMetrics {
     _projection_lag_seconds_gauge: ObservableGauge<u64>,
     _capture_cursor_age_seconds_gauge: ObservableGauge<u64>,
     _db_pool_connections_gauge: ObservableGauge<u64>,
+    _projection_fallbacks_counter: ObservableCounter<u64>,
 }
 
 impl IndexerMetrics {
@@ -74,6 +76,7 @@ impl IndexerMetrics {
         let capture_cursor_age_seconds = Arc::new(AtomicU64::new(0));
         let pool_in_use = Arc::new(AtomicU64::new(0));
         let pool_idle = Arc::new(AtomicU64::new(0));
+        let projection_fallbacks = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -141,6 +144,17 @@ impl IndexerMetrics {
             })
             .build();
 
+        let fallbacks_cache = Arc::clone(&projection_fallbacks);
+        let projection_fallbacks_counter = meter
+            .u64_observable_counter("indexer_projection_fallbacks")
+            .with_description(
+                "Projection batches that aborted the optimistic pass and replayed with per-row savepoints",
+            )
+            .with_callback(move |observer| {
+                observer.observe(fallbacks_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
@@ -149,12 +163,14 @@ impl IndexerMetrics {
             capture_cursor_age_seconds,
             pool_in_use,
             pool_idle,
+            projection_fallbacks,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
             _projection_backlog_gauge: projection_backlog_gauge,
             _projection_lag_seconds_gauge: projection_lag_seconds_gauge,
             _capture_cursor_age_seconds_gauge: capture_cursor_age_seconds_gauge,
             _db_pool_connections_gauge: db_pool_connections_gauge,
+            _projection_fallbacks_counter: projection_fallbacks_counter,
         }
     }
 
@@ -187,6 +203,12 @@ impl IndexerMetrics {
     pub fn set_pool_connections(&self, in_use: u64, idle: u64) {
         self.pool_in_use.store(in_use, Ordering::Relaxed);
         self.pool_idle.store(idle, Ordering::Relaxed);
+    }
+
+    /// Set the cumulative value reported by `indexer_projection_fallbacks` — the
+    /// running total of projection batches that fell back to per-row savepoints.
+    pub fn set_projection_fallbacks(&self, value: u64) {
+        self.projection_fallbacks.store(value, Ordering::Relaxed);
     }
 }
 
@@ -316,6 +338,7 @@ mod tests {
         metrics.set_projection_lag_seconds(120);
         metrics.set_capture_cursor_age_seconds(5);
         metrics.set_pool_connections(3, 7);
+        metrics.set_projection_fallbacks(9);
 
         assert_eq!(metrics.orders_created.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.orders_partially_filled.load(Ordering::Relaxed), 3);
@@ -324,5 +347,6 @@ mod tests {
         assert_eq!(metrics.capture_cursor_age_seconds.load(Ordering::Relaxed), 5);
         assert_eq!(metrics.pool_in_use.load(Ordering::Relaxed), 3);
         assert_eq!(metrics.pool_idle.load(Ordering::Relaxed), 7);
+        assert_eq!(metrics.projection_fallbacks.load(Ordering::Relaxed), 9);
     }
 }

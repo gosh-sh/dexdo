@@ -258,6 +258,14 @@ Four gauges complement the counters, covering projection health and connection s
 
 All four ride the same OTLP path as the counters: exported only when `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set, refreshed every `REFRESH_INTERVAL` (15s). The pool gauge is sampled in the refresh loop (≤15s granularity). Diagnostic shape: backlog rising + pool `in_use` at max + cursor age small = projection stalled on connection exhaustion.
 
+### Fallback counter
+
+| Metric | Type | What it measures | Source |
+| --- | --- | --- | --- |
+| `indexer_projection_fallbacks` | counter | Projection batches that aborted the optimistic (savepoint-free) pass and replayed with per-row savepoints | in-process counter, polled each refresh |
+
+Unlike the two event counters above (read from `raw_events`), this is an in-process count: the projection loop increments it whenever an optimistic batch hits a projector error and falls back, and the refresh loop polls it like the gauges. A steadily climbing rate means the fast path is routinely aborting — a ~1.5–2× per-row round-trip cost that the backlog/lag gauges only surface as a symptom (slower drain), so this pins the cause. The per-row failure itself is still logged once (a `warn`) by the savepointed replay; the fallback transition is `debug`-level, so the counter — not a log — is the dashboard signal.
+
 ## Schema invariants — write side
 
 | Invariant | Enforced by |
