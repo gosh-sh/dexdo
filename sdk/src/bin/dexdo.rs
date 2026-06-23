@@ -390,9 +390,18 @@ async fn cmd_place_order(f: Flags) -> ExitCode {
     let decimals = match decimals_for(d.token_type) { Ok(v) => v, Err(e) => return fail(&e) };
     let amount = match parse_amount_to_raw(&amount_human, decimals) { Ok(v) => v, Err(e) => return fail(&e) };
     let price_bps = match price_to_bps(&price_human) { Ok(v) => v, Err(e) => return fail(&e) };
-    let client_order_id: u128 = f.get("client-id")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| now_unix() as u128);
+    if price_bps > 10_000 {
+        return fail(&format!("--price must be a probability in (0, 1] ({price_bps} bps > 10000)"));
+    }
+    // A bad --client-id must error, not silently fall back to a timestamp (that would
+    // place the order under an id the caller can't track / dedup a retry against).
+    let client_order_id: u128 = match f.get("client-id") {
+        Some(v) => match v.parse() {
+            Ok(n) => n,
+            Err(_) => return fail(&format!("--client-id must be a numeric u128, got `{v}`")),
+        },
+        None => now_unix() as u128,
+    };
 
     let (pn_address, keys) = match load_pn(&pn_state) { Ok(v) => v, Err(e) => return fail(&e) };
     eprintln!(
@@ -525,7 +534,12 @@ async fn cmd_merge_full_set(f: Flags) -> ExitCode {
     let mut amount: Vec<u128> = Vec::new();
     for part in amounts_csv.split(',') {
         let p = part.trim();
-        if p == "0" { amount.push(0); continue; }
+        // A zero per-outcome amount is legitimate (merge fewer outcomes); accept any
+        // spelling ("0", "0.0", "0.00"), which parse_amount_to_raw rejects as "> 0".
+        if p.parse::<f64>().map(|f| f == 0.0).unwrap_or(false) {
+            amount.push(0);
+            continue;
+        }
         match parse_amount_to_raw(p, decimals) {
             Ok(v) => amount.push(v),
             Err(e) => return fail(&format!("--amounts: {e}")),

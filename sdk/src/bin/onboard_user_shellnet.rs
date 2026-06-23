@@ -48,6 +48,7 @@
 //!
 //! Output file holds a secret — keep it private.
 
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -317,9 +318,20 @@ fn write_account_file(state: &PnState, token_type: TokenTypeArg, state_path: &Pa
 /// These files (`<tt>.account.json`, `pn_state.<tt>.json`) carry `pnSeckeyHex`,
 /// so they must not be world-readable like a default `fs::write` (0644) leaves them.
 fn write_secret_file(path: &Path, json: &str) {
-    std::fs::write(path, json).expect("write secret file");
+    use std::io::Write;
+    // Create with 0600 from the start (no world-readable window), and also chmod
+    // before writing any bytes so a pre-existing looser file is locked down while
+    // still empty — the secret never lands on a 0644 file.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .expect("open secret file");
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .expect("chmod 600 secret file");
+    f.write_all(json.as_bytes()).expect("write secret file");
 }
 
 #[derive(Debug, Clone, Deserialize)]
