@@ -39,12 +39,21 @@ Everything is written under the workspace directory **`$WORKSPACE`** (default `~
 ```
 $WORKSPACE/
 ├── multisig/   wallet — Multisig.keys.json, Multisig.seed (SECRET) + Multisig.abi.json, Multisig.tvc
-├── notes/      two files per PrivateNote, token ∈ {shell, nackl, usdc} (SECRET):
+├── notes/      per-PrivateNote files, token ∈ {shell, nackl, usdc} (SECRET, mode 0600):
 │                 <token>.account.json  — ready POST /api/v1/accounts body
 │                                         (pnAddress / pnPubkeyHex / pnSeckeyHex / pnDihHex)
-│                 pn_state.<token>.json — onboarding resume state (not API-loadable)
+│                 pn_state.<token>.json — onboarding resume state, holds the note key (not API-loadable)
+│                 <token>.creds.json    — registration credential from POST /api/v1/accounts
+│                                         (apiKey + apiSecret); written only after you register the note
 └── giver/      GiverV3.abi.json — Shellnet funding artifact
 ```
+
+The `notes/` files hold two kinds of secret used by the trading / CLI skills:
+
+- **the note's on-chain key** (`pnSeckeyHex`, in `account.json` / `pn_state.json`) — signs on-chain ops (stake, place-order, withdraw) directly;
+- **the backend API credential** (`apiKey` + `apiSecret`, in `creds.json`) — obtained when you register the note (`POST /api/v1/accounts`); REST calls are then signed `HMAC-SHA256(request, apiSecret)` under the `X-DODEX-APIKEY` header, and the `apiSecret` is returned **only once** at registration.
+
+All of these are written **mode 0600** and stored in plaintext under `$WORKSPACE` — back them up, **never commit them**, and prefer an OS keychain over the workspace on an untrusted/multi-user host.
 
 Use the PNs two ways:
 

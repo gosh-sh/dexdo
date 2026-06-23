@@ -48,6 +48,7 @@
 //!
 //! Output file holds a secret — keep it private.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -308,8 +309,17 @@ fn write_account_file(state: &PnState, token_type: TokenTypeArg, state_path: &Pa
         state_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let path = dir.join(format!("{}.account.json", token_type.label().to_ascii_lowercase()));
     let json = serde_json::to_string_pretty(&account).expect("serialize account file");
-    std::fs::write(&path, json).expect("write account file");
+    write_secret_file(&path, &json);
     eprintln!("[onboard] API-registration file: {}", path.display());
+}
+
+/// Write a file that holds the PN's secret key with owner-only perms (0600).
+/// These files (`<tt>.account.json`, `pn_state.<tt>.json`) carry `pnSeckeyHex`,
+/// so they must not be world-readable like a default `fs::write` (0644) leaves them.
+fn write_secret_file(path: &Path, json: &str) {
+    std::fs::write(path, json).expect("write secret file");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .expect("chmod 600 secret file");
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -334,7 +344,8 @@ fn create_tvm_context(endpoint: &str) -> Arc<ClientContext> {
 
 fn save_state(state: &PnState, path: &Path) {
     let json = serde_json::to_string_pretty(state).expect("serialize state");
-    std::fs::write(path, json).expect("write state json");
+    // 0600 — the state file holds the note's secret key (owner_secret_key_hex).
+    write_secret_file(path, &json);
 }
 
 fn load_or_init_state(path: &Path, args: &Args) -> Result<PnState, String> {

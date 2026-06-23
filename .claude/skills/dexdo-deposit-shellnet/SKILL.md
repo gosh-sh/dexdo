@@ -70,6 +70,8 @@ Target layout after setup:
 
 `multisig/` and `notes/` are the universal layout (same on mainnet); `giver/` is network-specific (shellnet). Secrecy is per-file: recovery-critical are `Multisig.keys.json` and all `pn_state.*.json` (they go into the back-up checklist in Step 5); `*.abi.json`/`*.tvc` are disposable and re-downloadable.
 
+`pn_state.<tt>.json` and `<tt>.account.json` hold the note's **secret key** (`pnSeckeyHex`), so `onboard_user_shellnet` writes them **mode 0600** (owner-only). If you copy or regenerate them by other means, keep `0600` (`chmod 600 notes/*.json`) — never leave a note's key world-readable, and never commit these files.
+
 The dexdo SDK pulls `ackinacki-kit` as a git dependency (tag `v2.1.0`) — cargo clones the kit into its own cache at build time. We do **not** clone the kit locally: the three ABI/TVC artifacts are downloaded straight from `raw.githubusercontent` of that tag (Step 1).
 
 ### Setup 0.1 — Working directory
