@@ -12,7 +12,7 @@ import "./libraries/DexLib.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "1.4.0";
+    string constant version = "4.0.3";
 
     /// @notice Stored code of PrivateNote contract
     TvmCell _privateNoteCode;
@@ -31,6 +31,12 @@ contract RootPN is Modifiers {
 
     /// @notice Stored code of OrderBook contract
     TvmCell _orderBookCode;
+
+    /// @notice Stored code of InferenceOrderBook contract (§8 inference market).
+    ///         Baked into every PrivateNote at deploy so the note derives the
+    ///         canonical book address itself instead of trusting a caller-
+    ///         supplied OB code / raw address.
+    TvmCell _inferenceOrderBookCode;
 
     /// @notice Root owner public key
     uint256 _ownerPubkey;
@@ -351,7 +357,7 @@ contract RootPN is Modifiers {
             stateInit: stateInit,
             value: 50 vmshell,
             flag: 1
-        }(value, ephemeralPubkey, tokenType, _pmpCode, _orderBookCode,
+        }(value, ephemeralPubkey, tokenType, _pmpCode, _orderBookCode, _inferenceOrderBookCode,
           tvm.hash(_oracleCode), _oracleCode.depth(), tvm.hash(_oracleEventListCode), _oracleEventListCode.depth());
     }
 
@@ -381,7 +387,7 @@ contract RootPN is Modifiers {
         tvm.accept();
         ensureBalance();
         tvm.resetStorage();
-        (_pmpCode, _privateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _orderBookCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
+        (_pmpCode, _privateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _orderBookCode, _inferenceOrderBookCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
     }
 
     /// @notice Returns the salted PrivateNote contract code

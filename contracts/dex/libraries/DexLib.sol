@@ -164,17 +164,17 @@ library DexLib {
     // statics): same (model, tick) ⇒ same address ⇒ one book.
 
     /// @notice InferenceOrderBook StateInit: book code + the §8 static set
-    ///         (model + tick size).
-    function buildInferenceOrderBookStateInit(TvmCell inferenceOrderBookCode, uint256 modelHash, uint128 tickSize) public returns (TvmCell) {
+    ///         (model). One book per model.
+    function buildInferenceOrderBookStateInit(TvmCell inferenceOrderBookCode, uint256 modelHash) public returns (TvmCell) {
         return abi.encodeStateInit({
             contr: InferenceOrderBook,
-            varInit: { _modelHash: modelHash, _tickSize: tickSize },
+            varInit: { _modelHash: modelHash },
             code: inferenceOrderBookCode
         });
     }
 
-    function computeInferenceOrderBookAddress(TvmCell inferenceOrderBookCode, uint256 modelHash, uint128 tickSize) public returns (address) {
-        TvmCell stateInit = buildInferenceOrderBookStateInit(inferenceOrderBookCode, modelHash, tickSize);
+    function computeInferenceOrderBookAddress(TvmCell inferenceOrderBookCode, uint256 modelHash) public returns (address) {
+        TvmCell stateInit = buildInferenceOrderBookStateInit(inferenceOrderBookCode, modelHash);
         return address.makeAddrStd(0, tvm.hash(stateInit));
     }
 

@@ -17,7 +17,7 @@ import "./libraries/DexLib.sol";
 contract OrderBook is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "1.4.0";
+    string constant version = "4.0.3";
 
     /// @notice Event identifier associated with this order book.
     uint256 static _eventId;
@@ -1160,6 +1160,12 @@ contract OrderBook is Modifiers {
     function _removeFromBook(uint128 orderId) private {
         Order o = _orders[orderId];
 
+        // Idempotency guard: an already-removed / never-existed slot is all-zero.
+        // Without this, a double _removeFromBook would run the unconditional
+        // _orderCount-- below twice for one order → uint32 underflow → _orderCount
+        // stuck at ~4.29e9 → shutdown's drain could never terminate (queue flood).
+        if (o.depositHash == 0 && o.amount == 0) { return; }
+
         // cid lifecycle is owned by PN — OB does not track cid → orderId
         // anymore, the corresponding cleanup happens on PN side via
         // onOrderCancelled / onOrderFilled (isFinal) callbacks.
@@ -1466,7 +1472,12 @@ contract OrderBook is Modifiers {
             _notifyOrderCancelled(pnHash, oid, outcomeId, isBuy, returnAmt, cid, 0);
         }
 
-        if (_orderCount > 0) {
+        // Terminate the drain on the strictly-advancing scan cursor, NOT on the
+        // derived _orderCount: a counter corruption (e.g. an underflow) must
+        // never wedge this into a perpetual 1-vmshell self-call (queue flood).
+        // _shutdownCursor only ever increases and is bounded by the frozen
+        // _nextOrderId, so this is guaranteed to terminate.
+        if (_shutdownCursor < _nextOrderId) {
             OrderBook(address(this)).shutdown{
                 value: 1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
             }();

@@ -71,6 +71,16 @@ For each row in the page, the API:
 
 `description` and other reconciler-only fields rely on data filled by the OracleEventList reconciler — they may be null briefly after a market is discovered but before the reconciler-side metadata lands. `eventName`/`description` are derived from `eventId = hash(eventName, description, deadline, outcomeNames)`, so every confirmation row for the same `pmp_address` must agree on those values; `aggregate_oracle_events` validates this cross-row equality and fails closed (`MarketInconsistent`) on mismatch.
 
+### Inference-settled markets (`resolvesFrom`)
+
+> 🚧 **TODO — not implemented** (inference linkage). Until the inference market ships, no market is inference-settled: `resolvesFrom` is always `null` and `?resolvesFrom=` matches nothing.
+
+A prediction market whose outcome is decided by a model's reference price (a numeric **range event**, spec §6.2) carries a `resolvesFrom` block; all other markets carry `resolvesFrom: null`. A market is inference-settled when its confirming event — joined `markets.pmp_address = oracle_events.confirmed_pmp_address` — has [`oracle_events.range_ob_address`](data-schema.md#oracle_events) set (the bound `InferenceOrderBook`, filled by the OracleEventList reconciler from `getRangeData`, see [indexer.md](indexer.md#oracleeventlist-reconciler)).
+
+- **`?resolvesFrom=<inferenceOrderBookAddress>`** filters the listing to markets settled from one inference book — backed by `oracle_events_range_ob_idx`. It composes with the other list filters (it is not a single-market selector, unlike `marketAddress`).
+- The `resolvesFrom` block is `{inferenceOrderBookAddress (= range_ob_address), model, metric: "WEEKLY_MEDIAN_PRICE"}`. `model` is joined from [`inference_markets`](data-schema.md#inference_markets) on that address and degrades to `null`/hash-only if the inference book is not yet reconciled — the prediction market is not hidden on that account.
+- The numeric outcome ranges are the market's normal `outcomes`; no separate `ranges` field is emitted.
+
 ### Pagination
 
 Two sort modes:
@@ -409,6 +419,82 @@ Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
 - `crates/infrastructure/tests/trades.rs` (repo) — resolution (unknown / unreconciled pair → the `InvalidMarketOrSymbol` mapping; blank `orderbook_address` → `MarketInconsistent`); per-outcome and per-orderbook scoping (neither a sibling outcome's trades nor another book's same-id outcome leaks); DESC-by-`trade_id` order and the `LIMIT` cut; empty tape → `[]`; `price` / `qty` / `quoteQty` scaling, including the integer-division notional matching the contract; `isBuyerMaker` passthrough; a `chain_time IS NULL` row excluded before `LIMIT`. The `limit` default and `[1, 1000]` bounds live one layer up, in the `GetTradesUseCase` / `TradesLimit` unit tests in `crates/application`.
 - Projector test (alongside the `live_orders` projector scenarios in `crates/infrastructure/tests/reprojection.rs`) — the taker-side event (`isTaker = true`) writes exactly one `trades` row and the maker-side writes none; `trade_id` equals the taker event's `chain_order`; replay is idempotent (`ON CONFLICT`); one taker crossing N makers yields N rows with N distinct `trade_id`s.
 - `services/api/tests/trades_http.rs` — happy path returns a bare JSON array newest-first through the production router; the error shapes (`-1102` missing param, `-1102` limit out of range, `-1130` non-numeric limit, `-1121` unknown pair, `-1500` inconsistent); the route is reachable without an auth envelope (public); a terminal-status market still serves its tape.
+
+## `/api/v1/inference/markets`
+
+> 🚧 **TODO — not implemented.** The three inference endpoints below (`/inference/markets`, `/inference/market`, `/inference/depth`) and the `resolvesFrom` linkage are specified but **not yet built**. Forward-looking; safe to merge into `dev` as spec-only.
+
+Lists the tradable models — one entry per `InferenceOrderBook`. The public contract (fields, examples) is in [api-spec.md](../api-spec.md#inference-markets). Structurally this mirrors [`/api/v1/prediction/markets`](#apiv1predictionmarkets): a `serverTime` + cursor + array envelope built from indexed read-model rows, never from a contract call at request time. Source is [`inference_markets`](data-schema.md#inference_markets).
+
+### Visibility filter
+
+`WHERE last_reconciled_at IS NOT NULL`. A book discovered by a first `OrderPlaced` but not yet reconciled (no `model_hash` / precision) is hidden — clients see only fully described markets. Symmetric write-side rule in [indexer.md](indexer.md#visibility-gate).
+
+### Status derivation
+
+Inference books have no multi-phase lifecycle. `status` is `TRADING` for every visible (reconciled) row; the enum is kept as a forward-compatible single value so a later `INACTIVE` / `HALTED` signal can be added without a shape change. It is not a stored column.
+
+### Building the response
+
+Per row: render `model.{producer,name,version,ref}` from `model_ref` and its parsed parts (NULL parts → `model` carries only `ref`/hash — see the [model-id open question](indexer.md#inference-reconciler)); `takerCommission` (buyer-side, charged) from `platform_fee_bps ÷ 10 000` and `makerCommission` (seller-side rebate **cap**, credited → negative) as `−REBATE_MAX_BPS ÷ 10 000` — mirroring how `/api/v1/prediction/markets` sources `MAKER_COMMISSION` / `TAKER_COMMISSION` from global constants rather than per-row columns. The displayed values are the buyer-side fee and the seller rebate cap; the per-deal split (ramped rebate vs burn, spec §5.3/§5.4) is settlement state, not a market property. Then the precision block (`pricePrecision`, `quantityPrecision`, `tickSize`, `stepSize`, `minNotional`) from the row; `quoteAsset = "SHELL"`; `referencePrice` from `reference_price` decoded ÷ `10^9`, or **`null`** when the column is NULL (dry book — see [indexer.md §Inference reconciler](indexer.md#inference-reconciler)); `createdAt` from `created_at_chain`.
+
+### Pagination
+
+Same cursor machinery as `/api/v1/prediction/markets` (URL-safe base64 of `"<sort_key>:<id>"`). One sort mode: `sort=createdAt` (default, DESC, key `created_at_chain`) — `resultStart` from the prediction side does not apply (inference markets have no result timing). A corrupted cursor → `InvalidParameter` → 400.
+
+### Single-market mode
+
+`?inferenceOrderBookAddress=` returns exactly one market and is mutually exclusive with the list filters (`producer`, `status`, `sort`, `cursor`) — passing both → `MissingParameter` → 400, mirroring [`/api/v1/prediction/markets`](#apiv1predictionmarkets)'s `predictionMarketAddress` single-market rule. An unknown or unreconciled address → `InvalidMarketOrSymbol` → 404. The response is the same market object built per [Building the response](#building-the-response-1), wrapped with `serverTime`.
+
+### Error mapping
+
+| Condition | DomainError | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` unknown / not yet reconciled | `InvalidMarketOrSymbol` | 404 |
+| Invalid `status` / `sort` enum value | `InvalidParameter` | 400 |
+| `inferenceOrderBookAddress` together with list filters | `MissingParameter` | 400 |
+| Corrupted cursor | `InvalidParameter` | 400 |
+
+## `/api/v1/inference/depth`
+
+Returns the order-book depth for one model — the inference analogue of [`/api/v1/prediction/depth`](#apiv1predictiondepth), built from [`inference_orders`](data-schema.md#inference_orders), never from a contract call. Because an `InferenceOrderBook` is one book per model (no outcome dimension), it is keyed by `inferenceOrderBookAddress` alone — there is no `symbol`. Public contract in [api-spec.md](../api-spec.md#inference-depth).
+
+### Resolution
+
+Resolve `inferenceOrderBookAddress` to `(orderbook_address, price_precision, quantity_precision)` via [`inference_markets`](data-schema.md#inference_markets). The book must be reconciled (`last_reconciled_at IS NOT NULL`); otherwise `InvalidMarketOrSymbol` → 404.
+
+### Empty-book contract
+
+A reconciled book with no `OrderPlaced` yet returns the well-formed empty shape — empty `bids`, empty `asks`, `lastUpdateId = ""` — the steady state before trading starts. Same contract as depth.
+
+### Aggregation
+
+One SQL query produces both sides. Per side, the database:
+
+1. Filters `inference_orders` to `status = 'OPEN' AND amount_remaining > 0` for this `orderbook_address` (resting buy orders and subscriptions are bids, sell offers are asks).
+2. Groups by `price`, sums `amount_remaining` — orders at one price collapse into one level (`[pricePerTick, ticks]`).
+3. Orders by price (bids DESC, asks ASC), `LIMIT $limit`. The partial index `inference_orders_open_book_idx` (`WHERE status = 'OPEN'`) backs this.
+
+Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lexicographic string order would misrank prices of differing length). Price is decoded ÷ `10^9` (SHELL atoms → SHELL) and formatted at `price_precision`; quantity (ticks) is integer, formatted at `quantity_precision = 0`.
+
+### `lastUpdateId`
+
+`max(inference_orders.last_chain_order)` over rows for this `orderbook_address` — a lex-sortable STRING, empty when no book event has landed. Never lex-decreases (`greatest(existing, new)` on the write side; chain-order projection keeps arrival monotonic). Scope is per book (no outcome sub-scope, unlike depth).
+
+### Invariants
+
+1. `bids` DESC, `asks` ASC by price, exact-numeric.
+2. One `[price, quantity]` per price level; quantity is the summed resting ticks.
+3. `lastUpdateId` scoped to the book; empty string before any event; never lex-decreases.
+
+### Error mapping
+
+| Condition | DomainError | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
+| Reconciled book with NULL/blank `orderbook_address` | `MarketInconsistent` | 503 |
+| Missing `inferenceOrderBookAddress` | `MissingParameter` | 400 |
+| Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
 
 ## `/api/v1/prediction/orders`
 

@@ -29,17 +29,22 @@ flowchart LR
     projectors --> discovery[oracles / oracle_event_lists / oracle_events]
     projectors --> markets[markets]
     projectors --> orders[live_orders]
+    projectors --> inf_orders[inference_orders]
 
     chain_state[GraphQL account BOC lookup] --> market_reconciler[Market reconciler]
     chain_state --> oel_reconciler[OracleEventList reconciler]
+    chain_state --> inf_reconciler[Inference reconciler]
     market_reconciler --> markets
     market_reconciler --> outcomes[market_outcomes]
     oel_reconciler --> discovery
+    inf_reconciler --> inf_markets[inference_markets]
 
     discovery --> api[Market-data API]
     markets --> api
     outcomes --> api
     orders --> api
+    inf_orders --> api
+    inf_markets --> api
 ```
 
 ## Ingestion
@@ -174,9 +179,37 @@ surface as `t` (see [api-spec.md](../api-spec.md#prediction-trades)); associatin
 maker side's frame as well is part of that stream's implementation and is out of scope
 here.
 
+## Projection — inference order events
+
+> 🚧 **TODO — not implemented.** Inference projection and the inference reconciler (below) are specified but **not yet built** — no projector/reconciler code or migration exists yet. Forward-looking; safe to merge into `dev` as spec-only.
+
+`InferenceOrderBook` events drive [`inference_orders`](data-schema.md#inference_orders), the per-order read model behind `/api/v1/inference/depth` (order-book depth). The shape mirrors [order events](#projection--order-events): one row per chain-side order, mutated in place, never deleted. The unit is a **tick** (one unit of inference); `price` is price-per-tick in SHELL atoms.
+
+| Event | Effect |
+| --- | --- |
+| `InferenceOrderBook.OrderPlaced` | Upserts into `inference_orders` with `status = 'OPEN'`, `amount_initial = amount_remaining = ticks`, `price`, `is_buy`, `note_address = note`, `last_chain_order = msg_chain_order`. `chain_created_at` first-write-wins via `coalesce`; `chain_updated_at` via `greatest`. Conflict is `WHERE`-guarded against terminal rows (an isolated replay on a closed row is a no-op, logged at `warn!`). If `orderbook_address` is unknown, the projector also seeds a skeleton [`inference_markets`](data-schema.md#inference_markets) row (`orderbook_address`, `created_at_chain`, `last_reconciled_at = NULL`) so the inference reconciler picks it up — this first-order-event seed is the discovery trigger (there is no `InferenceOrderBookDeployed` event). **Caveat:** `OrderPlaced` carries no `flags`, and it is emitted for *every* placement — including pure-taker (`IOC`/`FOK`/`MARKET`) and rejected `POST_ONLY` orders that never rest. See [Non-resting orders](#non-resting-orders). |
+| `InferenceOrderBook.Filled` | Decrements `amount_remaining` by `ticks` on **both** the `makerId` and `takerId` rows; advances `last_chain_order` / `chain_updated_at` via `greatest`. Close rule, mirroring the contract's one-deal-slot semantics: a **SELL offer** (`is_buy = false`) is consumed by the book on any match — flip it to `FILLED` on the first `Filled` that names it, even a partial one. A **BUY maker** spans deals — it stays `OPEN` until `amount_remaining` reaches zero, then flips to `FILLED`. A named row that has not arrived yet defers the event. |
+| `InferenceOrderBook.OrderCancelled` | Flips `status` to `CANCELLED`, preserves `amount_remaining` as the unfilled remainder, advances `last_chain_order` / `chain_updated_at` via `greatest`. Terminal-state guard prevents a late cancel from demoting a `FILLED` row. |
+| `InferenceOrderBook.SubscriptionPlaced` | Upserts the resting BUY created by a §8 subscription: `status = 'OPEN'`, `is_buy = true`, `is_subscription = true`, `price = maxPrice`, `amount_initial = amount_remaining = ticks`. It rests as a standing bid and is matched by incoming sells like any other buy maker. |
+| `InferenceOrderBook.Executed` / `Refunded` / `CycleForfeited` / `ForfeitClaimed` | Observability-only — no `inference_orders` mutation. In particular `Refunded` carries `(note, amount)` with **no order id**, so it cannot close a specific row; non-resting and rejected orders are healed by the reconciler (below), never projected from `Refunded`. |
+
+Ordering is anchored on `raw_events.chain_order` as elsewhere. `OrderPlaced` for a taker is emitted at queue-entry before its `Filled` events, so the parent row always exists by the time a fill applies; a `Filled` seen first is `Deferred` and retried.
+
+### Non-resting orders
+
+The contract emits `OrderPlaced` *before* it knows whether the order will rest: pure-taker orders (`IOC` / `FOK` / `MARKET`) and a crossing `POST_ONLY` are placed, emit `OrderPlaced`, then either fill or are refunded — without resting. Three closure paths exist:
+
+- **Fully filled** — `Filled` reduces `amount_remaining` to zero → `FILLED`. Correct from events alone.
+- **Explicitly cancelled** — `OrderCancelled` → `CANCELLED`. Correct from events alone.
+- **Placed-but-never-rested** (FOK/POST_ONLY rejected, IOC/MARKET leftover, expired subscription) — the only on-chain signal is a `Refunded` event that carries **no order id**, so the projector cannot close the specific row. Left untreated, the `OrderPlaced` row sits `OPEN` and pollutes depth (a phantom level).
+
+The inference reconciler closes this gap: for each recently-placed `OPEN` row it calls `InferenceOrderBook.getOrder(orderId)` and, when the order is no longer in the book (zero amount / zero note), flips the row to `CANCELLED`. This is the same getter-fills-what-events-miss pattern used by the market reconciler, bounded to recent OPEN rows so it stays cheap.
+
+> **Recommended contract-side follow-up.** Add `flags` to `OrderPlaced` (so a taker-only order is never recorded as resting), an `orderId` to `Refunded`, or an explicit `OrderClosed(orderId)` event. Any one removes the getter sweep and makes depth event-exact — the analogue of the [`REJECTED` follow-up](read-api.md#rejected-status) on the prediction-market side. Tracked as an open item because it touches `InferenceOrderBook` (and re-pins the note↔book code hash).
+
 ## Reconciliation
 
-Two reconcilers fill metadata that the event stream alone does not carry. Both run on a fixed cadence (`reconciliation_interval_ms`, `oracle_event_list_reconciliation_interval_ms` in `config/indexer.*.yaml`) and share a failure-backoff pattern (`last_reconcile_failed_at`, `reconcile_attempts` on the parent row) so a permanently broken contract cannot starve the queue.
+Three reconcilers fill metadata that the event stream alone does not carry. All run on a fixed cadence (`reconciliation_interval_ms`, `oracle_event_list_reconciliation_interval_ms`, `inference_reconciliation_interval_ms` in `config/indexer.*.yaml`) and share a failure-backoff pattern (`last_reconcile_failed_at`, `reconcile_attempts` on the parent row) so a permanently broken contract cannot starve the queue.
 
 ### Market reconciler
 
@@ -202,6 +235,8 @@ Queue ordering (the SELECT in `MarketReconciler::run_once`):
 
 For each [`oracle_event_lists`](data-schema.md#oracle_event_lists) row that has at least one event still missing reconciler-only metadata, the OracleEventList reconciler runs `OracleEventList._events` and fills `describe` / `trust_addr` / `outcome_names_jsonb` per event. The `outcomeNames` map (used to render `/api/v1/oracles` `events[].outcomes`) lives only in the getter, not in `EventAdded`, so it is reconciler-sourced like the other two.
 
+For a numeric **range event** the same pass also reads `OracleEventList.getRangeData(eventId)` and fills [`oracle_events.range_ob_address`](data-schema.md#oracle_events) (the `InferenceOrderBook` the event resolves from) and `range_bounds_jsonb`. Like `trust_addr`, these are reconciler-only — `EventAdded` is identical for plain and range events — and they are what links a prediction market to an inference market: `/api/v1/prediction/markets?resolvesFrom=<inferenceOrderBookAddress>` reverse-looks-up markets by `range_ob_address`. A plain (non-range) event leaves both NULL, which `meta_reconciled_at` already tolerates (the marker is stamped regardless, so a legitimately-non-range event does not re-queue forever).
+
 Not yet projected: `OracleEventList.DescriptionUpdated` (post-deploy edits to a list's description) and `Oracle.EventPublished`. The read-model therefore reflects the list `description` as of deploy time; a later on-chain description update is not surfaced until a projector for that event is added. The decoder counts these events (they are part of the pinned ABI total) but no projector consumes them today.
 
 Key column: [`oracle_events.meta_reconciled_at`](data-schema.md#oracle_events). The reconciler stamps this **unconditionally** on every successful pass — even when the on-chain `trustAddr` is legitimately null, the marker is set so the row drops out of the pending queue. The marker replaced an earlier `describe IS NULL OR trust_addr IS NULL` predicate that never cleared for events with null on-chain metadata.
@@ -218,6 +253,21 @@ Two anti-starvation outcomes share the failure-backoff path with the market reco
 
 - **`NoBoc`** — the OracleEventList account BOC is not yet available from the gateway.
 - **`Reconciled(0)` — no-progress pass.** The BOC is queryable but the run does not stamp any child. Two shapes collapse into this: an empty `_events` map, and a non-empty map whose items all target children that are already `meta_reconciled_at IS NOT NULL`. Both mean the indexed contract state lags the event stream — `EventAdded` persisted a pending child that `_events` does not yet reflect. Without the backoff the OracleEventList would be picked every sweep (the pending SELECT still matches it) and starve later rows behind the LIMIT 16 batch until the node catches up.
+
+### Inference reconciler
+
+For each [`inference_markets`](data-schema.md#inference_markets) row, the inference reconciler fetches the `InferenceOrderBook` account BOC and runs getters off-chain through the local TVM emulator:
+
+1. `getParams()` → `model_hash`, `platform_fee_bps`. On the first pass it also fills the fixed precision/quote columns (`quote_token_type = SHELL`, `price_precision`, `quantity_precision = 0`, `tick_size`, `step_size`, `min_notional`).
+2. `getWeeklyMedianPrice()` → `reference_price` (+ `reference_price_at`). The getter **reverts `ERR_NO_LIQUIDITY`** on a dry book; the reconciler treats that revert as a normal outcome and writes `reference_price = NULL` (the API renders `referencePrice: null`) — it is not a reconcile failure.
+3. Stamps `last_reconciled_at`. The market becomes visible to the API only after this point (mirrors the [market reconciler](#market-reconciler) visibility gate).
+
+Two passes with different cadence/triggers share the row:
+
+- **Discovery completion** (`last_reconciled_at IS NULL`): the one-time fill of identity + static columns. `model_ref` / `producer` / `model_name` / `version` are resolved from the model's `ManifestMetadata` manifest and may stay NULL on this pass — they do not block visibility (a market is usable by hash alone).
+- **Refresh** (already-reconciled rows, on cadence): re-reads `getWeeklyMedianPrice()` because `reference_price` moves with trading, and runs the [non-resting-order](#non-resting-orders) `getOrder()` sweep over recent `OPEN` [`inference_orders`](data-schema.md#inference_orders) to close phantom rows. Unlike `markets.orderbook_address` (write-once), these fields are intentionally re-queued.
+
+> **Open question — model-id source.** The order book carries only `model_hash`; the human `producer--model--version` is not on the book. This spec assumes the reconciler resolves it from the model's `ManifestMetadata` manifest (linked via the model registry — `SuperRoot` → `RootModel` / `ManifestMetadata`). If the manifest does not carry a parseable model id, `model_ref` stays NULL and the API exposes the model by `model_hash` only. Confirm the manifest schema / registry-walk before implementation.
 
 ## Failure handling
 
@@ -276,6 +326,9 @@ Unlike `orders_created_event_cnt` and `order_partially_filled_event_cnt` (read f
 | `live_orders.last_chain_order` lex-monotonic per row | `greatest(existing, new)` on every UPDATE; chain-order sorted reproject keeps natural arrival order monotonic too. |
 | `live_orders.placed_chain_order` set once and never moves | `coalesce(live, excluded)` on every `OrderPlaced` upsert; column is `text not null` so a missing `chain_order` fails the insert outright. |
 | Cancellation reason matches its source | Projector picks `PMP_REJECTED_BY_ORACLE` or `EVENT_CANCELLED` based on event type, never NULL. |
+| `inference_markets.last_reconciled_at IS NOT NULL ⇒ model_hash IS NOT NULL` | Inference reconciler writes `model_hash` from `getParams()` on the discovery pass before stamping `last_reconciled_at`. |
+| `inference_orders.last_chain_order` lex-monotonic per row | `greatest(existing, new)` on every book-event UPDATE. |
+| A SELL offer never rests after a match | `Filled` flips an `is_buy = false` row to `FILLED` on first match (one-deal slot), independent of `amount_remaining`. |
 
 The API enforces complementary read-side invariants on the assembled DTO — see [read-api.md](read-api.md#fail-closed-validation). Together they guarantee that an inconsistent indexer state (e.g. `PMP.Resolved` indexed before `PoolsFrozen`) cannot leak into a client response.
 
@@ -284,3 +337,5 @@ The API enforces complementary read-side invariants on the assembled DTO — see
 A market is visible to the public API only when `markets.last_reconciled_at IS NOT NULL`. Until the market reconciler runs, the row exists internally (`PMPDeployed` inserted it) but is hidden — clients see consistent, fully-populated markets only.
 
 This pairs with the API's PENDING short-circuit: a row with NULL timing columns (reconciled but pre-`TimingsSet`) surfaces as `status = "PENDING"` with `timings = null`, per [read-api.md](read-api.md#status-derivation).
+
+The same gate applies to inference markets: an [`inference_markets`](data-schema.md#inference_markets) row is hidden until the inference reconciler stamps `last_reconciled_at`, so a book seeded by a first `OrderPlaced` but not yet reconciled (no `model_hash` / precision) never reaches `/api/v1/inference/markets`.

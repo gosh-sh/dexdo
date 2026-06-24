@@ -16,6 +16,7 @@
           - [OracleEntry](#oracleentry)
         - [Terminal](#terminal)
         - [Outcome](#outcome)
+        - [resolvesFrom](#resolvesfrom)
     - [Prediction Order Book](#prediction-order-book)
     - [Prediction Trades](#prediction-trades)
   - [Oracles](#oracles)
@@ -24,6 +25,9 @@
       - [OracleEventList](#oracleeventlist)
       - [OracleEvent](#oracleevent)
       - [OracleOutcome](#oracleoutcome)
+  - [Inference Market Data](#inference-market-data)
+    - [Inference Markets](#inference-markets)
+    - [Inference Depth](#inference-depth)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
     - [Market Outcome Balances](#market-outcome-balances)
@@ -216,6 +220,8 @@ envelope field failed or why a credential was rejected.
 | List oracles and their available events | `GET` | `/api/v1/oracles` | `NONE` |
 | Fetch prediction order book | `GET` | `/api/v1/prediction/depth` | `NONE` |
 | Fetch recent prediction trades | `GET` | `/api/v1/prediction/trades` | `NONE` |
+| 🚧 TODO — List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
+| 🚧 TODO — Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
@@ -252,6 +258,7 @@ Query parameters:
 | `status` | STRING | NO | Comma-separated list of statuses to include. Example: `TRADING,AWAITING_FREEZE`. |
 | `quoteAsset` | STRING | NO | Filter by quote asset. Example: `USDC`. |
 | `oracleName` | STRING | NO | Filter by oracle name. A market matches if its `event.oracles[]` contains this oracle name. |
+| `resolvesFrom` | STRING | NO | Return only markets settled from this inference model's order book (its `inferenceOrderBookAddress` from [`/api/v1/inference/markets`](#inference-markets)). See `resolvesFrom` in the response. |
 | `closingBefore` | LONG | NO | Return only markets with `timings.resultEnd < closingBefore` (unix seconds). |
 | `sort` | STRING | NO | Sort field. One of: `resultStart` (default, ASC), `createdAt` (DESC). |
 | `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. |
@@ -342,6 +349,7 @@ Response fields:
 | `event` | OBJECT | See [Event](#event). |
 | `terminal` | OBJECT \| null | See [Terminal](#terminal). `null` for non-terminal statuses. |
 | `outcomes` | ARRAY | Outcome-token descriptors. See [Outcome](#outcome). |
+| `resolvesFrom` | OBJECT \| null | Present only for markets settled from an inference model's reference price; `null` otherwise. See [resolvesFrom](#resolvesfrom). |
 
 #### Common Enums
 
@@ -502,6 +510,26 @@ Example for a non-terminal market (any of the six live statuses, including the t
 | `stepSize` | DECIMAL | Minimum quantity increment. |
 | `minNotional` | DECIMAL | Minimum accepted notional value for an order. |
 | `maxBatchSize` | INT | Maximum number of orders accepted in one batch request for this outcome. |
+
+##### resolvesFrom
+
+> 🚧 **TODO — not implemented** (inference linkage). Until the inference market ships, `resolvesFrom` is always `null` and the `?resolvesFrom=` filter matches nothing.
+
+Present only on a prediction market whose outcome is decided by a model's reference price (a numeric range event); `null` on all other markets. The numeric outcome ranges are the market's normal `outcomes`.
+
+```json
+{
+  "inferenceOrderBookAddress": "0:ob-addr...",
+  "model": "qwen--qwen2.5-32b--instruct",
+  "metric": "WEEKLY_MEDIAN_PRICE"
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | The inference market ([`/api/v1/inference/markets`](#inference-markets)) this market settles from. |
+| `model` | STRING \| null | The model `ref` (`producer--model--version`); `null` if the model identity is not yet known on chain. |
+| `metric` | ENUM | The price metric used to settle. Currently `WEEKLY_MEDIAN_PRICE`. |
 
 ### Prediction Order Book
 
@@ -786,6 +814,144 @@ Response fields:
 | --- | --- | --- |
 | `outcomeId` | INT | Outcome id. |
 | `outcomeName` | STRING | Human-readable outcome label. |
+
+## Inference Market Data
+
+> 🚧 **TODO — not implemented.** The inference market (endpoints, indexer, and read-model below) is specified but **not yet built**. This section is a forward-looking contract; the endpoints are not served until the inference indexer/API ships. Safe to merge into `dev` as spec-only.
+
+Market data for the **private-inference market**: tradable AI models and the prediction markets settled from their prices. The unit of trade is an **inference tick** — one unit of model generation — priced **per tick in `SHELL`**. Each model has exactly one order book; there is no `symbol` dimension (unlike prediction-market depth, which is per outcome).
+
+All three endpoints are public (`NONE`), read-only, and eventually consistent — a just-placed order or a fresh reference price may briefly lag the chain.
+
+### Inference Markets
+
+```http
+GET /api/v1/inference/markets
+```
+
+List the tradable models — one entry per model order book.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
+| `producer` | STRING | NO | Filter by model producer (e.g. `qwen`). |
+| `status` | STRING | NO | Comma-separated statuses to include. Currently only `TRADING`. |
+| `sort` | STRING | NO | Sort field. `createdAt` (default, DESC). |
+| `cursor` | STRING | NO | Opaque pagination cursor from a previous call. |
+| `limit` | INT | NO | Page size. Default: `50`. Max: `200`. |
+
+Response:
+
+```json
+{
+  "serverTime": 1710000000,
+  "nextCursor": null,
+  "hasMore": false,
+  "markets": [
+    {
+      "inferenceOrderBookAddress": "0:ob-addr...",
+      "model": {
+        "producer": "qwen",
+        "name": "qwen2.5-32b",
+        "version": "instruct",
+        "ref": "qwen--qwen2.5-32b--instruct"
+      },
+      "status": "TRADING",
+      "quoteAsset": "SHELL",
+      "makerCommission": "-0.02",
+      "takerCommission": "0.025",
+      "pricePrecision": 9,
+      "quantityPrecision": 0,
+      "tickSize": "0.000000001",
+      "stepSize": "1",
+      "minNotional": "1",
+      "referencePrice": "1010",
+      "createdAt": 1709980000
+    }
+  ]
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `serverTime` | LONG | Unix seconds, captured once for the request. |
+| `nextCursor` | STRING \| null | Cursor for the next page. `null` when `hasMore` is `false`. |
+| `hasMore` | BOOLEAN | Whether more pages follow. |
+| `inferenceOrderBookAddress` | STRING | Stable market id — the model's order-book address. Pass it as `?inferenceOrderBookAddress=` to fetch this one market, and as the key for [`/api/v1/inference/depth`](#inference-depth). |
+| `model` | OBJECT | Model identity. `ref` is the canonical `producer--model--version`. `producer` / `name` / `version` MAY be `null` if the model identity is not yet known on chain; `ref` then carries the model hash. |
+| `status` | ENUM | `TRADING`. Reserved for future inactive states; clients MUST treat it as opaque. |
+| `quoteAsset` | STRING | Always `SHELL`. |
+| `makerCommission` | DECIMAL | Maker (**seller**) fee rate, a signed decimal string. The seller is never charged; a negative value (`"-0.02"` = −2%) is a **rebate credited to the seller** for delivering ticks cleanly. This is the rebate **cap**: the actual rebate ramps from `0` with delivered ticks and applies only on a clean, non-disputed close, so a given deal may credit less. |
+| `takerCommission` | DECIMAL | Taker (**buyer**) fee rate, charged to the buyer per delivered tick. Always non-negative (`"0.025"` = 2.5%). What the buyer spends on top of the tick price. The amount not returned to the seller as a rebate is burned. |
+| `pricePrecision` | INT | Decimal places for price-per-tick. |
+| `quantityPrecision` | INT | Decimal places for tick quantity. Ticks are whole units, so `0`. |
+| `tickSize` | DECIMAL | Minimum price-per-tick increment. |
+| `stepSize` | DECIMAL | Minimum tick-quantity increment (`"1"`). |
+| `minNotional` | DECIMAL | Minimum order notional in `SHELL`. |
+| `referencePrice` | DECIMAL \| null | Weekly-median price per tick used to settle prediction markets. **`null`** when the book has no recent liquidity. |
+| `createdAt` | LONG | Unix seconds. When the book was first seen. |
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` together with filter/pagination params | `-1102` | 400 |
+| Invalid `status` / `sort` value | `-1130` | 400 |
+| Corrupted `cursor` | `-1130` | 400 |
+| `inferenceOrderBookAddress` not found | `-1121` | 404 |
+
+### Inference Depth
+
+```http
+GET /api/v1/inference/depth
+```
+
+Fetch resting bids and asks for one model's order book. Mirrors [`/api/v1/prediction/depth`](#prediction-order-book), keyed by the order-book address (no `symbol` — one book per model).
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | YES | The model's order-book address from [`/api/v1/inference/markets`](#inference-markets). |
+| `limit` | INT | NO | Number of price levels per side. Default: `100`. Max: `1000`. |
+
+Response:
+
+```json
+{
+  "inferenceOrderBookAddress": "0:ob-addr...",
+  "lastUpdateId": "76a23086a006700000000000000000000000000000000000000000000000000000000000000000007",
+  "bids": [
+    ["1000", "120"],
+    ["990", "300"]
+  ],
+  "asks": [
+    ["1050", "80"],
+    ["1060", "210"]
+  ]
+}
+```
+
+Each bid or ask item is `[pricePerTick, ticks]` — price in `SHELL` and the total ticks resting at that price.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `lastUpdateId` | STRING | Opaque chain-order cursor for this book. Lex-comparable: a larger string means a newer event has touched the book. Empty string when no order has landed yet. Do not parse it as an integer. |
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` missing or blank | `-1102` | 400 |
+| `limit` present but not an integer | `-1130` | 400 |
+| `inferenceOrderBookAddress` not found / not yet available | `-1121` | 404 |
+| Book data temporarily inconsistent | `-1500` | 503 |
+
+> **Prediction markets settled from a model price** are regular prediction markets, listed by [`/api/v1/prediction/markets`](#prediction-markets) — filter with `?resolvesFrom=<inferenceOrderBookAddress>` and read the per-market `resolvesFrom` block. See [Markets](#prediction-markets).
 
 ## Account Endpoints
 

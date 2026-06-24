@@ -31,7 +31,11 @@ abstract contract AiRegistryErrors {
     uint16 constant ERR_STREAM_TIMEOUT_OPEN   = 327;
     uint16 constant ERR_INSUFFICIENT_DEPOSIT  = 328;
     uint16 constant ERR_STILL_OPEN            = 329;
-    // Anti-abuse / oracle (spec §5-7)
-    uint16 constant ERR_ALREADY_SET           = 330;
-    uint16 constant ERR_LOW_LIQUIDITY         = 331;
+    // (330 ERR_ALREADY_SET / 331 ERR_LOW_LIQUIDITY were the standalone
+    //  InferenceOracle — removed; reference price lives in InferenceOrderBook.)
+    // Probe tick (spec §3.1.2)
+    uint16 constant ERR_PROBE_NOT_FUNDED      = 332;  // open() before the seller funded the probe commission
+    uint16 constant ERR_PROBE_ALREADY_FUNDED  = 333;  // fundProbeCommission() called twice
+    uint16 constant ERR_NOT_PROBE             = 334;  // op requires the Probe state (probe not yet accepted)
+    uint16 constant ERR_ALREADY_STREAMING     = 335;  // probe already accepted, Probe-only op rejected
 }
