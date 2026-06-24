@@ -440,7 +440,7 @@ Per row: render `model.{producer,name,version,ref}` from `model_ref` and its par
 
 ### Pagination
 
-Same cursor machinery as `/api/v1/prediction/markets` (URL-safe base64 of `"<sort_key>:<id>"`). Two sort modes: `sort=createdAt` (default, DESC, key `created_at_chain`) and `sort=volume` (DESC). A corrupted cursor → `InvalidParameter` → 400.
+Same cursor machinery as `/api/v1/prediction/markets` (URL-safe base64 of `"<sort_key>:<id>"`). One sort mode: `sort=createdAt` (default, DESC, key `created_at_chain`) — `resultStart` from the prediction side does not apply (inference markets have no result timing). A corrupted cursor → `InvalidParameter` → 400.
 
 ### Single-market mode
 

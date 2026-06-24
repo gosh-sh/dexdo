@@ -838,7 +838,7 @@ Query parameters:
 | `inferenceOrderBookAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
 | `producer` | STRING | NO | Filter by model producer (e.g. `qwen`). |
 | `status` | STRING | NO | Comma-separated statuses to include. Currently only `TRADING`. |
-| `sort` | STRING | NO | Sort field. One of: `createdAt` (default, DESC), `volume` (DESC). |
+| `sort` | STRING | NO | Sort field. `createdAt` (default, DESC). |
 | `cursor` | STRING | NO | Opaque pagination cursor from a previous call. |
 | `limit` | INT | NO | Page size. Default: `50`. Max: `200`. |
 
