@@ -16,13 +16,14 @@ import "../airegistry/InferenceOrderBook.sol";
 interface IInferenceDeal {
     function stop() external;
     function dispute() external;
+    function reclaimOnTimeout() external;
 }
 
 /// @notice Wallet that can deploy and interact with PMP contracts
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "1.5.0";
+    string constant version = "4.0.3";
 
     /// @notice Owner escape hatch: stale stream/dispute locks can be force
     ///         cleared after this many seconds since the last lock change, so a
@@ -51,6 +52,15 @@ contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice OrderBook code for deployment
     TvmCell _orderBookCode;
+
+    /// @notice InferenceOrderBook code (§8) baked at deploy by RootPN. The note
+    ///         deploys/derives the canonical book from THIS code — never from a
+    ///         caller-supplied code or a raw address — so it cannot be tricked
+    ///         into a forged book / wrong build. (Kept in data, not as a code
+    ///         constant, so the note↔OB pin stays one-way: OB pins the note's
+    ///         NOTE_CODE_HASH; pinning the OB hash in the note's CODE would make
+    ///         the two hashes mutually recursive and the build never converge.)
+    TvmCell _inferenceOrderBookCode;
 
     /// @notice Mapping from stake hash to stake info
     mapping(uint256 => StakeInfo) public _stakes;
@@ -325,11 +335,13 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @param tokenType Type of token
     /// @param pmpCode PMP contract code used for deterministic PMP derivation.
     /// @param orderBookCode OrderBook contract code used for deterministic OB derivation.
+    /// @param inferenceOrderBookCode InferenceOrderBook code (§8) for deterministic book derivation.
     /// @param oracleCodeHash Oracle contract code hash.
     /// @param oracleCodeDepth Oracle contract code depth.
     /// @param oracleEventListCodeHash OracleEventList contract code hash.
     /// @param oracleEventListCodeDepth OracleEventList contract code depth.
     constructor(uint128 value, uint256 ephemeralPubkey, uint32 tokenType, TvmCell pmpCode, TvmCell orderBookCode,
+                TvmCell inferenceOrderBookCode,
                 uint256 oracleCodeHash, uint16 oracleCodeDepth, uint256 oracleEventListCodeHash, uint16 oracleEventListCodeDepth) {
         tvm.accept();
         require(msg.sender == ROOT_PN_ADDRESS, ERR_INVALID_SENDER);
@@ -340,6 +352,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         _oracleEventListCodeHash = oracleEventListCodeHash;
         _oracleEventListCodeDepth = oracleEventListCodeDepth;
         _orderBookCode = orderBookCode;
+        _inferenceOrderBookCode = inferenceOrderBookCode;
         _balance[tokenType] = value;
         _ephemeralPubkey = ephemeralPubkey;
         RootPN(ROOT_PN_ADDRESS).privateNoteDeployed{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_depositIdentifierHash, tokenType, value);
@@ -427,27 +440,29 @@ contract PrivateNote is Modifiers, ReplayProtection {
 
     // ── Inference market: deploy an InferenceOrderBook FROM this note (§2/§8) ──
 
-    /// @notice Deploy an InferenceOrderBook from this note. The caller supplies
-    ///         the canonical OB code; the address derives from the salted note
-    ///         code + (model, tick size) (spec §8), so a given (model, tick)
-    ///         maps to exactly one book. Permissionless: any note holder may
-    ///         (re)deploy the canonical book at its deterministic address.
-    function deployInferenceOrderBook(TvmCell inferenceOrderBookCode, uint256 modelHash, uint128 tickSize)
+    /// @notice Deploy an InferenceOrderBook from this note. The OB code is the
+    ///         one baked into this note at deploy (`_inferenceOrderBookCode`) —
+    ///         NOT caller-supplied — so a note can never plant a forged/wrong
+    ///         build. The address derives from that code + the model
+    ///         (spec §8), so a given model maps to exactly one book.
+    ///         Permissionless: any note holder may (re)deploy the canonical book
+    ///         at its deterministic address.
+    function deployInferenceOrderBook(uint256 modelHash)
         public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
     {
         ensureBalance();
-        TvmCell stateInit = DexLib.buildInferenceOrderBookStateInit(inferenceOrderBookCode, modelHash, tickSize);
+        TvmCell stateInit = DexLib.buildInferenceOrderBookStateInit(_inferenceOrderBookCode, modelHash);
         // The book's ctor verifies the deployer is a genuine note by recomputing
         // this address from its pinned NOTE_CODE_HASH + our depositHash.
         new InferenceOrderBook{stateInit: stateInit, value: 5 vmshell, flag: 1, bounce: false}(_depositIdentifierHash);
     }
 
     /// @notice Deterministic address of the InferenceOrderBook for the given
-    ///         OB code + params (model + tick size).
-    function getInferenceOrderBookAddress(TvmCell inferenceOrderBookCode, uint256 modelHash, uint128 tickSize)
+    ///         the model, using the OB code baked into this note.
+    function getInferenceOrderBookAddress(uint256 modelHash)
         external view returns (address)
     {
-        return DexLib.computeInferenceOrderBookAddress(inferenceOrderBookCode, modelHash, tickSize);
+        return DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
     }
 
     // ── Inference market: note as active participant (spec §2-4) ────────────
@@ -456,13 +471,15 @@ contract PrivateNote is Modifiers, ReplayProtection {
     // methods forward that physical SHELL, so the note itself is the market
     // participant (no external multisig). SHELL id: CURRENCIES_ID_SHELL == 2.
 
-    /// @notice Post a SELL offer to an `orderBook` from this note, attaching the
-    ///         platform fee in SHELL (spec §2.1). The fee becomes irrevocable on
-    ///         match (no-show penalty); this note is recorded as the sellerNote
-    ///         (fee refund target on cancel, dispute-lock target). `sellerPubkey`
-    ///         is the key that will drive the deal's TokenContract (open/advance).
+    /// @notice Post a SELL offer to the canonical book for the model from
+    ///         this note, attaching the platform fee in SHELL (spec §2.1). The
+    ///         fee becomes irrevocable on match (no-show penalty); this note is
+    ///         recorded as the sellerNote (fee refund target on cancel,
+    ///         dispute-lock target). The OB address is derived from the baked
+    ///         `_inferenceOrderBookCode` + model — never a raw address —
+    ///         so SHELL/fee flows cannot be routed to a forged book.
     function postSellOffer(
-        address orderBook,
+        uint256 modelHash,
         uint128 pricePerTick,
         uint128 maxTicks,
         address tokenContract,
@@ -472,6 +489,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // seller posts fee-free (§2.1, no no-show penalty). Owner = this note
         // (the OB uses msg.sender for ownership/handover).
         ensureBalance();
+        address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
         InferenceOrderBook(orderBook).placeSellOffer{value: 1 vmshell, flag: 1, bounce: false}(
             pricePerTick, maxTicks, tokenContract, flags);
     }
@@ -481,7 +499,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///         cost to the offer's token_contract and binds this note there, so
     ///         the same note can later `streamStop`/`streamDispute` the deal.
     function placeInferenceBuy(
-        address orderBook,
+        uint256 modelHash,
         uint128 maxPricePerTick,
         uint128 ticks,
         uint128 escrow,
@@ -494,15 +512,19 @@ contract PrivateNote is Modifiers, ReplayProtection {
         ensureBalance();
         mapping(uint32 => varuint32) ecc;
         ecc[CURRENCIES_ID_SHELL] = varuint32(escrow);
+        // §3.1.1: forward this note's pubkey so the OB can record it in the deal
+        // contract (the gateway authenticates the buyer against it). SHELL escrow
+        // goes to the derived canonical book, never a caller-supplied address.
+        address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
         InferenceOrderBook(orderBook).placeBuyOrder{value: 2 vmshell, flag: 1, bounce: false, currencies: ecc}(
-            maxPricePerTick, ticks, flags, deadline);
+            maxPricePerTick, ticks, flags, deadline, _ephemeralPubkey);
     }
 
     /// @notice Place a §8 subscription (semantic order) from this note: budget
     ///         (escrow) throttled into weekly cycles, unspent forfeited by-fact to
     ///         sellers. `autoRenew` is a client hint (renewal = re-place, §8.2).
     function placeInferenceSubscription(
-        address orderBook,
+        uint256 modelHash,
         uint128 maxPricePerTick,
         uint128 ticks,
         uint128 escrow,
@@ -511,24 +533,28 @@ contract PrivateNote is Modifiers, ReplayProtection {
         ensureBalance();
         mapping(uint32 => varuint32) ecc;
         ecc[CURRENCIES_ID_SHELL] = varuint32(escrow);
+        // §3.1.1: forward this note's pubkey (gateway auth, recorded in the deal).
+        address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
         InferenceOrderBook(orderBook).placeSubscription{value: 2 vmshell, flag: 1, bounce: false, currencies: ecc}(
-            maxPricePerTick, ticks, autoRenew);
+            maxPricePerTick, ticks, autoRenew, _ephemeralPubkey);
     }
 
     /// @notice Cancel one resting inference order owned by this note (refunds any
     ///         held BUY escrow back to this note).
-    function cancelInferenceOrder(address orderBook, uint128 orderId)
+    function cancelInferenceOrder(uint256 modelHash, uint128 orderId)
         public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
     {
         ensureBalance();
+        address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
         InferenceOrderBook(orderBook).cancelOrder{value: 1 vmshell, flag: 1, bounce: false}(orderId);
     }
 
     /// @notice Cancel all resting inference orders owned by this note.
-    function cancelAllInferenceOrders(address orderBook)
+    function cancelAllInferenceOrders(uint256 modelHash)
         public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
     {
         ensureBalance();
+        address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
         InferenceOrderBook(orderBook).cancelAllOrders{value: 1 vmshell, flag: 1, bounce: false}();
     }
 
@@ -544,6 +570,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
     function streamDispute(address tokenContract) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
         IInferenceDeal(tokenContract).dispute{value: 1 vmshell, flag: 1, bounce: false}();
+    }
+
+    /// @notice Buyer note reclaims the frozen tick after the seller goes silent
+    ///         for STREAM_TIMEOUT (spec §3.4 / §3.1.2). On the probe tick the
+    ///         buyer pays nothing; the seller's probe commission is returned.
+    function streamReclaim(address tokenContract) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+        ensureBalance();
+        IInferenceDeal(tokenContract).reclaimOnTimeout{value: 1 vmshell, flag: 1, bounce: false}();
     }
 
     /// @notice Deploys a new PMP contract for a prediction market event.

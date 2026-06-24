@@ -11,7 +11,7 @@ import "../dex/PrivateNote.sol";
 /// @notice Handover: the matched seller's `token_contract` receives the deal's
 ///         SHELL and binds the buyer note (spec §2.3).
 interface ITokenContractDeal {
-    function fundFromOrderBook(address buyerNote) external;
+    function fundFromOrderBook(address buyerNote, uint256 buyerPubkey) external;
 }
 
 /// @notice Async pull sink (spec §6.2): the weekly median is handed back here.
@@ -38,12 +38,12 @@ interface IWeeklyMedianSink {
 ///         quote/base + collateral, event-resolution shutdown, and PN callbacks
 ///         (inference order entry is fire-and-forget; the note tracks via getters).
 contract InferenceOrderBook is AiRegistryModifiers {
-    string constant version = "4.0.0";
+    string constant version = "4.0.3";
 
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x8df6f988e99b973c1d90362bf1e03f9e6992861cd5133d46ec6d600018f5d0ed;
+    uint256 constant NOTE_CODE_HASH  = 0x2ec623bd486262595af6f9a1e14694f7c5f0778e8cf7c2338ca25d2cbed56161;
     uint16  constant NOTE_CODE_DEPTH = 19;
 
     // Local errors (NOT in shared AiRegistryErrors — avoids rippling RootModel/TC/SuperRoot pins).
@@ -85,13 +85,13 @@ contract InferenceOrderBook is AiRegistryModifiers {
     uint64  constant SECS_PER_DAY  = 86400;
     uint128 constant MIN_LIQUIDITY = 1;
 
-    // Statics — address derivation: book = (model, tick).
+    // Static — address derivation: one book per model.
     uint256 static _modelHash;
-    uint128 static _tickSize;
 
     // ── Order book ──
     struct Order {
         address note;           // owner note; cancel auth + handover
+        uint256 buyerPubkey;    // BUY: buyer note pubkey (gateway auth, §3.1.1); SELL: 0
         address tokenContract;  // SELL: seller's deal contract; BUY: 0
         uint256 price;          // price per tick P
         uint128 amount;         // remaining ticks
@@ -125,6 +125,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     struct QueueEntry {
         uint8   entryType;
         address owner;          // the note (msg.sender at entry)
+        uint256 buyerPubkey;    // BUY: buyer note pubkey (§3.1.1); else 0
         bool    isBuy;
         uint8   flags;
         uint256 price;          // stored price (market: 0 sell / max buy)
@@ -258,6 +259,9 @@ contract InferenceOrderBook is AiRegistryModifiers {
 
     function _removeFromBook(uint128 orderId) private {
         Order o = _orders[orderId];
+        // Idempotency guard: a removed/empty slot has amount 0. Prevents a double
+        // _removeFromBook from underflowing _orderCount below (see OrderBook).
+        if (o.amount == 0) { return; }
         uint128 prevP = o.prevAtPrice;
         uint128 nextP = o.nextAtPrice;
         PriceLevel level = _levels[o.isBuy][o.price];
@@ -279,13 +283,13 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // Fill settlement (spec §2.3 → §3)
     // ========================================================
 
-    function _settleFill(uint128 makerId, uint128 takerId, address buyerNote, address sellerTC, uint128 trade, uint256 clearing) private returns (uint128) {
+    function _settleFill(uint128 makerId, uint128 takerId, address buyerNote, uint256 buyerPubkey, address sellerTC, uint128 trade, uint256 clearing) private returns (uint128) {
         uint128 cost = uint128(uint256(trade) * _unit(clearing));
         mapping(uint32 => varuint32) ecc;
         ecc[SHELL_ECC_ID] = varuint32(cost);
         ITokenContractDeal(sellerTC).fundFromOrderBook{
             value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false, currencies: ecc
-        }(buyerNote);
+        }(buyerNote, buyerPubkey);
         _executedNotional += uint128(uint256(trade) * clearing);
         _executedTicks    += trade;
         _matchSeq += 1;
@@ -319,7 +323,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         per-tx cap with crossing liquidity left → caller continues).
     function _match(
         uint128 takerId, bool takerIsBuy, uint256 takerPrice, bool isMarket,
-        address takerNote, address takerTC, uint128 amount, uint128 buyEscrow
+        address takerNote, address takerTC, uint256 takerBuyerPubkey, uint128 amount, uint128 buyEscrow
     ) private returns (uint128 remaining, uint128 leftoverEscrow, bool capped) {
         remaining = amount;
         leftoverEscrow = buyEscrow;
@@ -351,8 +355,9 @@ contract InferenceOrderBook is AiRegistryModifiers {
 
                 address buyerNote;
                 address sellerTC;
-                if (takerIsBuy) { buyerNote = takerNote; sellerTC = mk.tokenContract; }
-                else            { buyerNote = mk.note;   sellerTC = takerTC; }
+                uint256 buyerPubkey;
+                if (takerIsBuy) { buyerNote = takerNote; buyerPubkey = takerBuyerPubkey; sellerTC = mk.tokenContract; }
+                else            { buyerNote = mk.note;   buyerPubkey = mk.buyerPubkey;   sellerTC = takerTC; }
 
                 uint256 unit = _unit(clearing);
                 uint128 budget = takerIsBuy ? leftoverEscrow : mk.escrow;
@@ -371,7 +376,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                     continue;
                 }
 
-                uint128 cost = _settleFill(takerIsBuy ? cur : takerId, takerIsBuy ? takerId : cur, buyerNote, sellerTC, trade, clearing);
+                uint128 cost = _settleFill(takerIsBuy ? cur : takerId, takerIsBuy ? takerId : cur, buyerNote, buyerPubkey, sellerTC, trade, clearing);
 
                 if (takerIsBuy) { leftoverEscrow -= cost; } else { _orders[cur].escrow = mk.escrow - cost; }
 
@@ -412,7 +417,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
 
     /// @notice Rest leftover (limit) or refund (taker-only / market) after a match completes.
     function _finalizeTaker(
-        uint128 orderId, bool isBuy, uint256 storedPrice, address note, address tc,
+        uint128 orderId, uint256 buyerPubkey, bool isBuy, uint256 storedPrice, address note, address tc,
         uint128 remaining, uint128 leftover, uint128 initialAmount, uint8 flags, uint64 deadline
     ) private {
         bool takerOnly = (flags & FLAG_MARKET) != 0 || (flags & (FLAG_IOC | FLAG_FOK)) != 0;
@@ -422,7 +427,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 return;
             }
             _insertIntoBook(orderId, Order({
-                note: note, tokenContract: address(0), price: storedPrice,
+                note: note, buyerPubkey: buyerPubkey, tokenContract: address(0), price: storedPrice,
                 amount: remaining, initialAmount: initialAmount, filledAccum: initialAmount - remaining,
                 escrow: leftover, deadline: deadline, ts: uint64(block.timestamp),
                 flags: flags, isBuy: true,
@@ -431,7 +436,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         } else {
             if (remaining > 0 && !takerOnly) {
                 _insertIntoBook(orderId, Order({
-                    note: note, tokenContract: tc, price: storedPrice,
+                    note: note, buyerPubkey: 0, tokenContract: tc, price: storedPrice,
                     amount: remaining, initialAmount: initialAmount, filledAccum: initialAmount - remaining,
                     escrow: 0, deadline: 0, ts: uint64(block.timestamp),
                     flags: flags, isBuy: false,
@@ -457,11 +462,11 @@ contract InferenceOrderBook is AiRegistryModifiers {
         _queueSize--;
     }
 
-    function _enqueuePlace(address owner, bool isBuy, uint8 flags, uint256 price, uint128 amount, uint128 escrow, address tc, uint64 deadline) private {
+    function _enqueuePlace(address owner, uint256 buyerPubkey, bool isBuy, uint8 flags, uint256 price, uint128 amount, uint128 escrow, address tc, uint64 deadline) private {
         require(_queueSize < QUEUE_PLACE_LIMIT, ERR_QUEUE_FULL);
         uint8 slot = _allocSlot();
         _queue[slot] = QueueEntry({
-            entryType: QENTRY_PLACE, owner: owner, isBuy: isBuy, flags: flags, price: price,
+            entryType: QENTRY_PLACE, owner: owner, buyerPubkey: buyerPubkey, isBuy: isBuy, flags: flags, price: price,
             amount: amount, escrow: escrow, tokenContract: tc, deadline: deadline,
             targetOrderId: 0, contOrderId: 0, contRemaining: 0, contLeftover: 0
         });
@@ -471,7 +476,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         require(_queueSize < QUEUE_CAPACITY, ERR_QUEUE_FULL);
         uint8 slot = _allocSlot();
         _queue[slot] = QueueEntry({
-            entryType: QENTRY_CANCEL, owner: owner, isBuy: false, flags: 0, price: 0,
+            entryType: QENTRY_CANCEL, owner: owner, buyerPubkey: 0, isBuy: false, flags: 0, price: 0,
             amount: 0, escrow: 0, tokenContract: address(0), deadline: 0,
             targetOrderId: targetOrderId, contOrderId: 0, contRemaining: 0, contLeftover: 0
         });
@@ -481,7 +486,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         require(_queueSize < QUEUE_CAPACITY, ERR_QUEUE_FULL);
         uint8 slot = _allocSlot();
         _queue[slot] = QueueEntry({
-            entryType: QENTRY_CANCEL_ALL, owner: owner, isBuy: false, flags: 0, price: 0,
+            entryType: QENTRY_CANCEL_ALL, owner: owner, buyerPubkey: 0, isBuy: false, flags: 0, price: 0,
             amount: 0, escrow: 0, tokenContract: address(0), deadline: 0,
             targetOrderId: 0, contOrderId: 0, contRemaining: 0, contLeftover: 0
         });
@@ -550,7 +555,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         uint128 inAmount   = firstRun ? e.amount  : e.contRemaining;
         uint128 inEscrow   = firstRun ? e.escrow  : e.contLeftover;
         (uint128 remaining, uint128 leftover, bool capped) =
-            _match(orderId, e.isBuy, e.price, isMarket, e.owner, e.tokenContract, inAmount, inEscrow);
+            _match(orderId, e.isBuy, e.price, isMarket, e.owner, e.tokenContract, e.buyerPubkey, inAmount, inEscrow);
 
         if (capped) {
             // BUY taker crossed > one tx of liquidity → persist cursor, resume next tx.
@@ -560,7 +565,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
             _queue[_queueHead] = e;
             return true;
         }
-        _finalizeTaker(orderId, e.isBuy, e.price, e.owner, e.tokenContract, remaining, leftover, e.amount, e.flags, e.deadline);
+        _finalizeTaker(orderId, e.buyerPubkey, e.isBuy, e.price, e.owner, e.tokenContract, remaining, leftover, e.amount, e.flags, e.deadline);
         return false;
     }
 
@@ -601,11 +606,11 @@ contract InferenceOrderBook is AiRegistryModifiers {
         bool isMarket = (flags & FLAG_MARKET) != 0;
         require(isMarket || pricePerTick > 0, ERR_BAD_PARAM);
         tvm.accept();
-        _enqueuePlace(msg.sender, false, flags, isMarket ? 0 : pricePerTick, maxTicks, 0, tokenContract, 0);
+        _enqueuePlace(msg.sender, 0, false, flags, isMarket ? 0 : pricePerTick, maxTicks, 0, tokenContract, 0);
         _processHeadCore();
     }
 
-    function placeBuyOrder(uint128 maxPricePerTick, uint128 ticks, uint8 flags, uint64 deadline) public {
+    function placeBuyOrder(uint128 maxPricePerTick, uint128 ticks, uint8 flags, uint64 deadline, uint256 buyerPubkey) public {
         ensureBalance();
         require(ticks > 0, ERR_BAD_PARAM);
         require((flags & FLAG_POST_ONLY) == 0 || (flags & TAKER_FLAGS) == 0, ERR_BAD_FLAGS);
@@ -619,7 +624,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         uint128 escrow = uint128(currencies[SHELL_ECC_ID]);
         if (!isMarket) { require(escrow >= uint128(uint256(ticks) * _unit(maxPricePerTick)), ERR_INSUFFICIENT_DEPOSIT); }
         tvm.accept();
-        _enqueuePlace(msg.sender, true, flags, isMarket ? type(uint256).max : maxPricePerTick, ticks, escrow, address(0), deadline);
+        _enqueuePlace(msg.sender, buyerPubkey, true, flags, isMarket ? type(uint256).max : maxPricePerTick, ticks, escrow, address(0), deadline);
         _processHeadCore();
     }
 
@@ -646,7 +651,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         rolled) to the sellers it funded that cycle, pro-rata by funded ticks.
     /// @dev Rests as a standing bid (filled by incoming sells); does not take on
     ///      placement. Renewal = client re-places (§8.2); `autoRenew` is a hint.
-    function placeSubscription(uint128 maxPricePerTick, uint128 ticks, bool autoRenew) public {
+    function placeSubscription(uint128 maxPricePerTick, uint128 ticks, bool autoRenew, uint256 buyerPubkey) public {
         ensureBalance();
         require(ticks > 0 && maxPricePerTick > 0, ERR_BAD_PARAM);
         mapping(uint32 => varuint32) currencies = msg.currencies;
@@ -661,7 +666,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         uint128 cycleBudget = escrow / uint128(SUB_CYCLES);
 
         _insertIntoBook(orderId, Order({
-            note: buyerNote, tokenContract: address(0), price: maxPricePerTick,
+            note: buyerNote, buyerPubkey: buyerPubkey, tokenContract: address(0), price: maxPricePerTick,
             amount: ticks, initialAmount: ticks, filledAccum: 0,
             escrow: escrow, deadline: dl, ts: uint64(block.timestamp),
             flags: 0, isBuy: true,
@@ -807,8 +812,8 @@ contract InferenceOrderBook is AiRegistryModifiers {
         return (_forfeitPool[orderId][cycle], _cycleFundedTicks[orderId][cycle]);
     }
 
-    function getParams() external view returns (uint256 modelHash, uint128 tickSize, uint16 platformFeeBps) {
-        return (_modelHash, _tickSize, PLATFORM_FEE_BPS);
+    function getParams() external view returns (uint256 modelHash, uint16 platformFeeBps) {
+        return (_modelHash, PLATFORM_FEE_BPS);
     }
 
     function getVersion() external pure returns (string, string) {
