@@ -94,7 +94,7 @@ impl Dex {
     /// the market's quote asset into the PMP. On a market sitting in
     /// `AWAITING_FREEZE`, the first successful call also activates the
     /// OrderBook, after which it stays active for all subsequent callers.
-    /// See `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet`.
+    /// See `docs/tech-specs/write-api.md §POST /api/v1/prediction/buyFullSet`.
     pub async fn split_full_set(
         &self,
         pn_address: &str,

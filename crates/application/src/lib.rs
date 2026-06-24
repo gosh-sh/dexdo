@@ -149,13 +149,13 @@ pub struct OraclesRequest {
     pub now: i64,
 }
 
-/// Slim projection the `DELETE /api/v1/order` path needs. Built by a
+/// Slim projection the `DELETE /api/v1/prediction/order` path needs. Built by a
 /// single SELECT joining `live_orders ⋈ markets ⋈ market_outcomes` with
 /// the ownership predicate `live_orders.owner_pn_address = :pn_address`
 /// baked into the where-clause — a miss collapses to
 /// `DomainError::UnknownOrder` regardless of whether the orderId does
 /// not exist, belongs to another account, is no longer OPEN, or the
-/// `(marketAddress, symbol)` does not match the order's actual market.
+/// `(predictionMarketAddress, symbol)` does not match the order's actual market.
 /// That ambiguity is intentional: differentiating those cases would
 /// leak the existence of orders the caller does not own.
 #[derive(Debug, Clone)]
@@ -173,7 +173,7 @@ pub struct OrderForCancel {
     pub client_order_id: Option<String>,
 }
 
-/// Slim market+outcome projection the `POST /api/v1/order` path needs.
+/// Slim market+outcome projection the `POST /api/v1/prediction/order` path needs.
 /// Built by a single SELECT joining `markets ⋈ market_outcomes`; the
 /// oracle/event aggregation that `list_markets` performs is irrelevant
 /// on the trading hot path. `status` is computed against the caller's
@@ -196,7 +196,7 @@ pub struct MarketForPlacement {
     pub decimals: u8,
 }
 
-/// Slim market projection the `POST /api/v1/buyFullSet` path needs.
+/// Slim market projection the `POST /api/v1/prediction/buyFullSet` path needs.
 /// No `market_outcomes` join — splitFullSet is a market-level operation
 /// (the chain produces one outcome token of every outcome from the
 /// `collateral`), so no symbol resolution is involved. `status` is
@@ -225,7 +225,7 @@ pub struct BalanceOutcome {
     pub quantity_precision: u8,
 }
 
-/// Result of resolving `marketAddress` for a balances request. Contains
+/// Result of resolving `predictionMarketAddress` for a balances request. Contains
 /// every chain-side field (`event_id`, `oracle_list_hash`, `token_type`)
 /// needed to compute `stake_hash` plus the outcome list used to render
 /// the response.
@@ -262,7 +262,7 @@ pub trait MarketReadRepository: Send + Sync {
         limit: u16,
     ) -> Result<DepthSnapshot, anyhow::Error>;
 
-    /// Newest-first public trade tape for one `(marketAddress, symbol)`
+    /// Newest-first public trade tape for one `(predictionMarketAddress, symbol)`
     /// outcome, capped at `limit` rows. The typed [`TradesLimit`] carries the
     /// `[1, TRADES_MAX_LIMIT]` invariant through the boundary — unlike
     /// `get_depth`'s raw `u16`, whose public contract is a silent clamp, the
@@ -279,7 +279,7 @@ pub trait MarketReadRepository: Send + Sync {
         limit: TradesLimit,
     ) -> Result<Vec<Trade>, anyhow::Error>;
 
-    /// Resolve the `(marketAddress, symbol)` pair the trading path needs
+    /// Resolve the `(predictionMarketAddress, symbol)` pair the trading path needs
     /// in a single SELECT — no oracle/event aggregation, no second
     /// outcome fetch. `now` lets the implementation compute the
     /// `MarketStatus` so the use case can fail closed without a separate
@@ -359,7 +359,7 @@ pub trait MarketReadRepository: Send + Sync {
         market_address: &MarketAddress,
     ) -> Result<MarketBalancesResolution, anyhow::Error>;
 
-    /// Resolve `marketAddress` for `POST /api/v1/buyFullSet`. Returns
+    /// Resolve `predictionMarketAddress` for `POST /api/v1/prediction/buyFullSet`. Returns
     /// chain identity (`event_id`, `oracle_list_hash`, `token_type`)
     /// plus the `MarketStatus` derived against `now`. Gated by
     /// `last_reconciled_at IS NOT NULL`; misses collapse to
@@ -494,7 +494,7 @@ pub const ORDERS_MAX_LIMIT: u16 = 500;
 pub const TRADES_DEFAULT_LIMIT: u16 = 20;
 pub const TRADES_MAX_LIMIT: u16 = 1000;
 
-/// Order statuses queryable through `GET /api/v1/orders`. This deliberately
+/// Order statuses queryable through `GET /api/v1/prediction/orders`. This deliberately
 /// excludes write-side synthetic states (`PENDING_NEW`, `PENDING_CANCEL`) so
 /// SQL predicate construction cannot accidentally admit them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -597,7 +597,7 @@ impl OrderStatusFilter {
     }
 }
 
-/// Opaque pagination cursor for `/api/v1/orders`. The inner string is
+/// Opaque pagination cursor for `/api/v1/prediction/orders`. The inner string is
 /// the `placed_chain_order` of the last row returned by a previous
 /// page; the server reads it as a lexicographic token via the strict
 /// `<` predicate in [`PostgresReadModelRepository::list_orders`].
@@ -625,7 +625,7 @@ impl OrdersCursor {
     /// rejects blank as [`DomainError::MissingParameter`]; rejects
     /// lengths above [`MAX_CURSOR_LEN`] as
     /// [`DomainError::InvalidParameter`] (the value is present, just
-    /// malformed). Both maps surface to the documented `/api/v1/orders`
+    /// malformed). Both maps surface to the documented `/api/v1/prediction/orders`
     /// error codes — see read-api.md §error mapping.
     pub fn new(raw: String) -> Result<Self, DomainError> {
         let trimmed = raw.trim();
@@ -661,7 +661,7 @@ impl OrdersCursor {
     }
 }
 
-/// Page-size cap for `/api/v1/orders`. The constructor enforces
+/// Page-size cap for `/api/v1/prediction/orders`. The constructor enforces
 /// `1..=ORDERS_MAX_LIMIT`, lifting the "must be at least 1" invariant
 /// into the type so the Postgres cursor builder's
 /// `last() == Some` after `truncate(limit)` holds by construction
@@ -706,7 +706,7 @@ impl OrdersLimit {
     }
 }
 
-/// Page-size cap for `/api/v1/trades`. Mirrors [`OrdersLimit`] — out-of-range
+/// Page-size cap for `/api/v1/prediction/trades`. Mirrors [`OrdersLimit`] — out-of-range
 /// values surface as `MissingParameter` (the public `-1102`) so the trade
 /// tape shares the paginated-read family's limit semantics rather than
 /// depth's silent clamp. See read-api.md §Page-size protocol.
@@ -862,7 +862,7 @@ where
     }
 }
 
-/// Inputs to [`GetTradesUseCase::execute`]. `marketAddress` / `symbol` are
+/// Inputs to [`GetTradesUseCase::execute`]. `predictionMarketAddress` / `symbol` are
 /// required and enforced non-blank at the HTTP boundary; `limit` is the raw
 /// request value (absent → default), validated inside `execute`.
 pub struct GetTradesInput {
@@ -1269,7 +1269,7 @@ fn add_decimal_strs(a: &str, b: &str, c: &str) -> Result<String, anyhow::Error> 
 }
 
 /// Input shape for `CreateOrderUseCase`. The HTTP layer parses
-/// `POST /api/v1/order` body + `AuthContext` + clock into this struct.
+/// `POST /api/v1/prediction/order` body + `AuthContext` + clock into this struct.
 /// All decimal fields stay as strings — exact-decimal validation runs
 /// inside the use case via `dodex_domain` helpers; floats are never
 /// involved.
@@ -1333,7 +1333,7 @@ pub struct NewOrderPayload {
 }
 
 /// Output of `CreateOrderUseCase`. The HTTP response shape for
-/// `POST /api/v1/order` is intentionally minimal — see
+/// `POST /api/v1/prediction/order` is intentionally minimal — see
 /// `docs/tech-specs/write-api.md §Response` for the rationale; the
 /// only fact the use case contributes that the handler does not
 /// already have is the resolved `clientOrderId` (caller-supplied or
@@ -1344,7 +1344,7 @@ pub struct SubmittedOrder {
 }
 
 /// Input shape for `CancelOrderUseCase`. The HTTP layer parses
-/// `DELETE /api/v1/order` query string + `AuthContext` + clock into
+/// `DELETE /api/v1/prediction/order` query string + `AuthContext` + clock into
 /// this struct. `order_id` is already parsed as `u64` — overflow is
 /// rejected at the HTTP boundary so the use case never sees out-of-range
 /// values (see `docs/tech-specs/write-api.md §Request parsing`).
@@ -1388,8 +1388,8 @@ pub struct CancelledOrder {
     pub client_order_id: Option<String>,
 }
 
-/// One body item of `POST /api/v1/batchOrders`. Validation rules are
-/// identical to `POST /api/v1/order` — both paths share
+/// One body item of `POST /api/v1/prediction/batchOrders`. Validation rules are
+/// identical to `POST /api/v1/prediction/order` — both paths share
 /// `validate_and_encode_order_item`.
 #[derive(Debug, Clone)]
 pub struct BatchOrderInputItem {
@@ -1401,7 +1401,7 @@ pub struct BatchOrderInputItem {
     pub client_order_id: Option<String>,
 }
 
-/// Input shape for `CreateBatchOrdersUseCase`. One `(marketAddress,
+/// Input shape for `CreateBatchOrdersUseCase`. One `(predictionMarketAddress,
 /// symbol)` per request: the chain ABI accepts only one `(eventId,
 /// oracleListHash, tokenType)` per batch, so all items share the same
 /// market/outcome resolution.
@@ -1452,7 +1452,7 @@ pub struct SubmittedBatchOrders {
 }
 
 /// Input shape for `CancelBatchOrdersUseCase`. Mirrors the body of
-/// `DELETE /api/v1/batchOrders` — one trading PN, one `(marketAddress,
+/// `DELETE /api/v1/prediction/batchOrders` — one trading PN, one `(predictionMarketAddress,
 /// symbol)`, plus the per-item id list. The chain ABI takes one
 /// `(eventId, oracleListHash, tokenType)` per batch, so all items share
 /// the same market resolution.
@@ -1567,7 +1567,7 @@ pub struct CancelledBatchOrder {
 }
 
 /// Input shape for `BuyFullSetUseCase`. The HTTP layer parses
-/// `POST /api/v1/buyFullSet` body + `AuthContext` + clock into this
+/// `POST /api/v1/prediction/buyFullSet` body + `AuthContext` + clock into this
 /// struct. `collateral` is kept as a string until precision validation
 /// lifts it to `u128` against the quote asset's on-chain `decimals`.
 /// Unlike the order-placement inputs, no `now_ms` is carried — the
@@ -1962,7 +1962,7 @@ where
     }
 }
 
-/// Orchestrates `POST /api/v1/order`: resolves market, derives status,
+/// Orchestrates `POST /api/v1/prediction/order`: resolves market, derives status,
 /// validates input per spec §Input validation, encodes flags, builds the
 /// chain payload, dispatches through `ChainOrderSender`, and returns
 /// values the HTTP layer needs to assemble the response. The use case
@@ -2058,7 +2058,7 @@ fn generate_client_order_id() -> String {
 }
 
 /// Run the per-order validation and chain encoding that both
-/// `POST /api/v1/order` and `POST /api/v1/batchOrders` apply identically
+/// `POST /api/v1/prediction/order` and `POST /api/v1/prediction/batchOrders` apply identically
 /// per [api-spec §Validation Rules]. Single-order callers wrap the
 /// result with chain-level fields into a `NewOrderPayload`; batch
 /// callers collect a `Vec<BatchOrderPayloadItem>` into
@@ -2186,7 +2186,7 @@ fn validate_and_encode_order_item(
     })
 }
 
-/// Orchestrates `DELETE /api/v1/order`: resolves the caller-owned open
+/// Orchestrates `DELETE /api/v1/prediction/order`: resolves the caller-owned open
 /// order through one SELECT, validates market `status == TRADING`,
 /// builds the chain payload, dispatches `PrivateNote.cancelOrder`, and
 /// returns the `clientOrderId` to echo. The chain-side effects on
@@ -2255,10 +2255,10 @@ where
     }
 }
 
-/// Orchestrates `POST /api/v1/batchOrders`: resolves market+outcome
+/// Orchestrates `POST /api/v1/prediction/batchOrders`: resolves market+outcome
 /// once, validates the request shape (non-empty,
 /// `len ≤ max_batch_size`), runs the same per-item validation
-/// chain `POST /api/v1/order` uses (any failure rejects the whole
+/// chain `POST /api/v1/prediction/order` uses (any failure rejects the whole
 /// batch), and dispatches a single `PrivateNote.placeBatch` call. The
 /// chain itself enforces all-or-nothing — if any item fails on-chain
 /// the entire `placeBatch` reverts.
@@ -2268,7 +2268,7 @@ pub struct CreateBatchOrdersUseCase<R, S> {
     /// Batch-length cap from api config (`chain.max_batch_size`) —
     /// the backend's mirror of the chain's compiled-in per-side
     /// `MAX_BATCH_SIZE` (not readable via any getter). The same value
-    /// is advertised as `maxBatchSize` in `/api/v1/markets`, so the
+    /// is advertised as `maxBatchSize` in `/api/v1/prediction/markets`, so the
     /// promise and the enforcement share one source.
     max_batch_size: u16,
 }
@@ -2329,7 +2329,7 @@ where
         if oracle_list_hash.is_empty() {
             return Err(DomainError::MarketInconsistent);
         }
-        // Batch cap from api config — the same value `/api/v1/markets`
+        // Batch cap from api config — the same value `/api/v1/prediction/markets`
         // advertises as `maxBatchSize`; the chain enforces its own
         // ceiling (161 `ERR_BATCH_TOO_LARGE`). Reject locally so a
         // misbehaving client gets `-1130 / 400` instead of paying a
@@ -2387,7 +2387,7 @@ where
     }
 }
 
-/// Orchestrates `DELETE /api/v1/batchOrders`: resolves market+outcome
+/// Orchestrates `DELETE /api/v1/prediction/batchOrders`: resolves market+outcome
 /// once, validates the request shape (non-empty,
 /// `len ≤ max_batch_size`, no intra-batch duplicates), resolves
 /// every order via one bulk SELECT, then dispatches a single
@@ -2635,7 +2635,7 @@ where
     }
 }
 
-/// Orchestrates `POST /api/v1/buyFullSet`: resolves the market (gate
+/// Orchestrates `POST /api/v1/prediction/buyFullSet`: resolves the market (gate
 /// `AWAITING_FREEZE | TRADING` per [api-spec §Buy Full Set]), looks up
 /// the quote asset's on-chain `decimals` so the public `collateral`
 /// decimal string can be lifted into the ABI's `uint128`, validates the
@@ -2682,7 +2682,7 @@ where
         // `AWAITING_FREEZE` or `TRADING`. Every other `MarketStatus`
         // variant (Pending / Upcoming / Staking / Resolving / Resolved
         // / Cancelled / Expired) collapses to -2010. Log so an ops
-        // incident triaged by `marketAddress` shows the actual phase
+        // incident triaged by `predictionMarketAddress` shows the actual phase
         // rather than just the wire code.
         if !matches!(status, MarketStatus::AwaitingFreeze | MarketStatus::Trading) {
             warn!(
@@ -2738,7 +2738,7 @@ where
             })?;
 
         // Three gates below all surface as -1130 per
-        // `docs/tech-specs/write-api.md §POST /api/v1/buyFullSet
+        // `docs/tech-specs/write-api.md §POST /api/v1/prediction/buyFullSet
         // §Input validation`. The spec doc is the single source of
         // truth for why; comments here only name the gate they enforce.
         //
@@ -2915,7 +2915,7 @@ mod tests {
         cancel_batch_rogue_key: Option<u64>,
         orders_response: OrdersPage,
         recorded_orders_queries: Mutex<Vec<OrdersQuery>>,
-        /// Records each `get_trades` call as `(marketAddress, symbol, limit)`
+        /// Records each `get_trades` call as `(predictionMarketAddress, symbol, limit)`
         /// so a test can assert the limit the use case forwarded.
         recorded_trades_calls: Mutex<Vec<(String, String, u16)>>,
         trades_response: Vec<Trade>,
@@ -4284,7 +4284,7 @@ mod tests {
         assert_eq!(calls[0], ("0:trades_uc".into(), "TRADES_UC_YES".into(), TRADES_DEFAULT_LIMIT));
     }
 
-    /// A valid `limit` and the `(marketAddress, symbol)` pair must be
+    /// A valid `limit` and the `(predictionMarketAddress, symbol)` pair must be
     /// forwarded verbatim, and the repository's tape returned unchanged.
     #[tokio::test]
     async fn get_trades_forwards_pair_and_valid_limit() {

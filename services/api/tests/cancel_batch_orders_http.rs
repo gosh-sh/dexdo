@@ -1,7 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
-// HTTP-level integration tests for `DELETE /api/v1/batchOrders` that
+// HTTP-level integration tests for `DELETE /api/v1/prediction/batchOrders` that
 // exercise the handler + use case end to end **without** a database or
 // a real chain. Mirrors the triad in `cancel_order_http.rs` and
 // `create_batch_orders_http.rs`: a fake `Authenticator` short-circuits
@@ -10,7 +10,7 @@
 // `cancelBatch` payload the handler would dispatch in production.
 //
 // Matching per-row coverage for the error-mapping table in
-// `docs/tech-specs/write-api.md §DELETE /api/v1/batchOrders` lives here.
+// `docs/tech-specs/write-api.md §DELETE /api/v1/prediction/batchOrders` lives here.
 
 mod common;
 
@@ -471,7 +471,7 @@ fn auth_envelope() -> Vec<(&'static str, String)> {
 
 fn delete_batch(_service: &Service, body: serde_json::Value) -> RequestBuilder {
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
-    let mut req = TestClient::delete("http://test/api/v1/batchOrders")
+    let mut req = TestClient::delete("http://test/api/v1/prediction/batchOrders")
         .add_header("X-DODEX-APIKEY", "fake", true)
         .add_header("content-type", "application/json", true);
     for (k, v) in auth_envelope() {
@@ -482,7 +482,7 @@ fn delete_batch(_service: &Service, body: serde_json::Value) -> RequestBuilder {
 
 fn valid_body(order_ids: Vec<&str>) -> serde_json::Value {
     json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL,
         "orderIds": order_ids,
     })
@@ -618,7 +618,7 @@ async fn malformed_json_body_returns_400_minus_1130() {
     let service = setup_with(repo, sender);
 
     let body = b"{not valid json".to_vec();
-    let mut req = TestClient::delete("http://test/api/v1/batchOrders")
+    let mut req = TestClient::delete("http://test/api/v1/prediction/batchOrders")
         .add_header("X-DODEX-APIKEY", "fake", true)
         .add_header("content-type", "application/json", true);
     for (k, v) in auth_envelope() {
@@ -643,7 +643,7 @@ async fn empty_body_returns_400_minus_1130() {
     let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
     let service = setup_with(repo, sender);
 
-    let mut req = TestClient::delete("http://test/api/v1/batchOrders")
+    let mut req = TestClient::delete("http://test/api/v1/prediction/batchOrders")
         .add_header("X-DODEX-APIKEY", "fake", true)
         .add_header("content-type", "application/json", true);
     for (k, v) in auth_envelope() {
@@ -678,7 +678,7 @@ async fn missing_symbol_returns_400_minus_1102() {
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "orderIds": ["1"],
     });
     let mut resp = delete_batch(&service, body).send(&service).await;
@@ -690,14 +690,14 @@ async fn missing_symbol_returns_400_minus_1102() {
 #[tokio::test]
 async fn blank_market_address_returns_400_minus_1102() {
     // `non_empty` trims at the boundary, so a whitespace-only
-    // `marketAddress` collapses to `None` — pinned here so the trim
+    // `predictionMarketAddress` collapses to `None` — pinned here so the trim
     // can't silently drift to a permissive accept.
     let repo: SharedRepo = Arc::new(FakeRepo::with_market(trading_market()));
     let sender: SharedChainSender = Arc::new(RecordingCancelBatchSender::ok());
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": "   ",
+        "predictionMarketAddress": "   ",
         "symbol": SYMBOL,
         "orderIds": ["1"],
     });
@@ -720,7 +720,7 @@ async fn unknown_field_in_body_returns_400_minus_1130() {
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL,
         "orderIds": ["1"],
         "orderIDs": ["typo"],
@@ -738,7 +738,7 @@ async fn blank_symbol_returns_400_minus_1102() {
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": "\t\n",
         "orderIds": ["1"],
     });
@@ -755,7 +755,7 @@ async fn missing_order_ids_field_returns_400_minus_1102() {
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL,
     });
     let mut resp = delete_batch(&service, body).send(&service).await;
@@ -779,7 +779,7 @@ async fn null_order_ids_returns_400_minus_1102() {
     let service = setup_with(repo, chain_sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL,
         "orderIds": serde_json::Value::Null,
     });
@@ -943,7 +943,7 @@ async fn unknown_market_returns_404_minus_1121() {
 
 #[tokio::test]
 async fn unknown_symbol_on_known_market_returns_404_minus_1121() {
-    // `marketAddress` exists but `symbol` is not one of its outcomes
+    // `predictionMarketAddress` exists but `symbol` is not one of its outcomes
     // — the placement-shape lookup (`resolve_for_new_order`) rejects
     // before the bulk SELECT runs, surfacing the same -1121 as a
     // wholly-unknown market. Pins which of the two read calls
@@ -955,7 +955,7 @@ async fn unknown_symbol_on_known_market_returns_404_minus_1121() {
     let service = setup_with(repo, chain_sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": "PM-NOT-AN-OUTCOME",
         "orderIds": vec!["1"],
     });

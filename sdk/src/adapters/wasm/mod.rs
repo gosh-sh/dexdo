@@ -11,8 +11,12 @@ pub struct Dex {
 #[wasm_bindgen]
 impl Dex {
     #[wasm_bindgen(constructor)]
-    pub fn new(endpoints: Vec<String>, api_token: Option<String>) -> Result<Dex, JsError> {
-        let inner = DexClient::new(DexConfig { endpoints, api_token, max_rps: None })
+    pub fn new(
+        endpoints: Vec<String>,
+        api_token: Option<String>,
+        max_rps: Option<u32>,
+    ) -> Result<Dex, JsError> {
+        let inner = DexClient::new(DexConfig { endpoints, api_token, max_rps })
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self { inner })
     }

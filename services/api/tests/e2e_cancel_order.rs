@@ -1,4 +1,4 @@
-// End-to-end smoke test for `DELETE /api/v1/order` against a real
+// End-to-end smoke test for `DELETE /api/v1/prediction/order` against a real
 // shellnet OrderBook. Deploys a fresh PMP + OrderBook, provisions an
 // HMAC api_key, posts a LIMIT GTC order, polls `getOrdersByOwner`
 // until the chain accepts it, then drives the **HTTP cancel path**
@@ -124,7 +124,7 @@ async fn cancel_order_against_shellnet() {
 
     let coid = fresh_coid(1).to_string();
     let place_body = serde_json::to_vec(&json!({
-        "marketAddress": market.pmp_address,
+        "predictionMarketAddress": market.pmp_address,
         "symbol": symbol,
         "newOrderClientId": coid,
         "side": "BUY",
@@ -139,7 +139,7 @@ async fn cancel_order_against_shellnet() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(&secret_hex, &canonical, &place_body);
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", api_key.clone(), true)
         .add_header("content-type", "application/json", true)
         .query("recvWindow", "5000")
@@ -150,7 +150,7 @@ async fn cancel_order_against_shellnet() {
         .await;
     let status = resp.status_code;
     let resp_body = resp.take_string().await.expect("place response body");
-    assert_eq!(status, Some(StatusCode::OK), "POST /api/v1/order; body: {resp_body}");
+    assert_eq!(status, Some(StatusCode::OK), "POST /api/v1/prediction/order; body: {resp_body}");
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -216,7 +216,7 @@ async fn cancel_order_against_shellnet() {
     .await
     .expect("seed live_orders row");
 
-    // ---- Phase 2: drive DELETE /api/v1/order through the handler.
+    // ---- Phase 2: drive DELETE /api/v1/prediction/order through the handler.
     // ---- The auth hoop signs `raw_query_string` byte-for-byte, so we
     // ---- pre-encode every value the way `TestClient` (and any real
     // ---- HTTP client) would put it on the wire, then build the URL
@@ -229,7 +229,7 @@ async fn cancel_order_against_shellnet() {
     let pmp_enc = percent_encode_query_value(&market.pmp_address);
     let symbol_enc = percent_encode_query_value(&symbol);
     let cancel_canonical = canonical_query(&[
-        ("marketAddress", pmp_enc.as_str()),
+        ("predictionMarketAddress", pmp_enc.as_str()),
         ("orderId", order_id_str.as_str()),
         ("recvWindow", "5000"),
         ("symbol", symbol_enc.as_str()),
@@ -237,12 +237,17 @@ async fn cancel_order_against_shellnet() {
     ]);
     let cancel_sig = sign(&secret_hex, &cancel_canonical, &[]);
 
-    let url = format!("http://test/api/v1/order?{cancel_canonical}&signature={cancel_sig}");
+    let url =
+        format!("http://test/api/v1/prediction/order?{cancel_canonical}&signature={cancel_sig}");
     let mut cancel_resp =
         TestClient::delete(url).add_header("X-DODEX-APIKEY", api_key, true).send(&service).await;
     let cancel_status = cancel_resp.status_code;
     let cancel_body = cancel_resp.take_string().await.expect("cancel response body");
-    assert_eq!(cancel_status, Some(StatusCode::OK), "DELETE /api/v1/order; body: {cancel_body}");
+    assert_eq!(
+        cancel_status,
+        Some(StatusCode::OK),
+        "DELETE /api/v1/prediction/order; body: {cancel_body}"
+    );
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -272,7 +277,7 @@ async fn cancel_order_against_shellnet() {
         PollOutcome::Found(()) => {}
         PollOutcome::NotFound => panic!(
             "order with client_order_id={coid} did not disappear from getOrdersByOwner within \
-             60s after DELETE /api/v1/order — chain may have queued cancel but not yet \
+             60s after DELETE /api/v1/prediction/order — chain may have queued cancel but not yet \
              executed it",
         ),
         PollOutcome::ChainSilent => panic!(

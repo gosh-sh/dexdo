@@ -13,11 +13,11 @@ mutates state — placing/cancelling orders, full-splits, and staking live in th
 
 What it answers:
 
-1. **Active markets I can stake/trade** — `GET /api/v1/markets`
-2. **Order book for a symbol** — `GET /api/v1/depth`
+1. **Active markets I can stake/trade** — `GET /api/v1/prediction/markets`
+2. **Order book for a symbol** — `GET /api/v1/prediction/depth`
 3. **Market price for a symbol** — best bid/ask/mid/spread + last trade (depth + trades)
-4. **My open orders** — `GET /api/v1/orders?status=NEW,PARTIALLY_FILLED` (signed)
-5. **My order history** — `GET /api/v1/orders` (signed, all statuses, paginated)
+4. **My open orders** — `GET /api/v1/prediction/orders?status=NEW,PARTIALLY_FILLED` (signed)
+5. **My order history** — `GET /api/v1/prediction/orders` (signed, all statuses, paginated)
 6. **My stakes / bets per market** — `dexdo stakes` (on-chain, via the SDK CLI)
 
 The canonical REST contract is [`docs/api-spec.md`](../../../docs/api-spec.md). The

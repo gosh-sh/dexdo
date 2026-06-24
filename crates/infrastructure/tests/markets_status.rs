@@ -444,7 +444,7 @@ async fn unknown_market_address_returns_invalid_market_or_symbol() {
     // tech-specs/read-api.md error mapping: a single-market lookup for
     // an unknown / not-yet-reconciled `marketAddress` must surface as
     // `InvalidMarketOrSymbol` (→ HTTP 404), not an empty success page —
-    // mirrors the /api/v1/depth contract.
+    // mirrors the /api/v1/prediction/depth contract.
     let Some(pool) = setup().await else { return };
     let repo = PostgresReadModelRepository::new(pool.clone());
 
@@ -462,7 +462,7 @@ async fn unknown_market_address_returns_invalid_market_or_symbol() {
 async fn blank_orderbook_address_fails_closed_in_markets() {
     // Migration-0014 CHECK forbids NULL `orderbook_address` on reconciled
     // rows but a whitespace-only string slips past it. The depth path
-    // already treats this as `MarketInconsistent`; `/api/v1/markets` must
+    // already treats this as `MarketInconsistent`; `/api/v1/prediction/markets` must
     // fail closed too — silently serializing `orderBookAddress: null`
     // would break the public contract that visible markets always carry
     // the address.

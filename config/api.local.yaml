@@ -43,7 +43,7 @@ chain:
   cancel_batch_timeout_ms: 30000
   split_full_set_timeout_ms: 30000
   # Batch-length cap for POST/DELETE /batchOrders, advertised as
-  # maxBatchSize in /api/v1/markets. Mirrors the chain's per-side
+  # maxBatchSize in /api/v1/prediction/markets. Mirrors the chain's per-side
   # MAX_BATCH_SIZE (contracts/dex/modifiers/modifiers.sol, 10 today) —
   # must not exceed it.
   max_batch_size: 10

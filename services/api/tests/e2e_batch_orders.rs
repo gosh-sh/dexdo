@@ -1,4 +1,4 @@
-// End-to-end smoke test for `POST /api/v1/batchOrders` against a real
+// End-to-end smoke test for `POST /api/v1/prediction/batchOrders` against a real
 // shellnet OrderBook. Deploys a fresh PMP + OrderBook, provisions an
 // HMAC api_key, drives the production router with `DexChainSender`
 // / `PostgresAuthenticator` / `PostgresReadModelRepository`, then
@@ -132,7 +132,7 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
     let coid_a = fresh_coid(1).to_string();
     let coid_b = fresh_coid(2).to_string();
     let body = serde_json::to_vec(&json!({
-        "marketAddress": market.pmp_address,
+        "predictionMarketAddress": market.pmp_address,
         "symbol": symbol,
         "orders": [
             {
@@ -159,7 +159,7 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(&secret_hex, &canonical, &body);
 
-    let mut resp = TestClient::post("http://test/api/v1/batchOrders")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/batchOrders")
         .add_header("X-DODEX-APIKEY", api_key, true)
         .add_header("content-type", "application/json", true)
         .query("recvWindow", "5000")
@@ -181,7 +181,9 @@ async fn batch_orders_buy_limit_gtc_against_shellnet() {
     // chain-side checks below tripped.
     let mut failures: Vec<String> = Vec::new();
     if !post_ok {
-        failures.push(format!("POST /api/v1/batchOrders status={status:?}; body: {resp_body}"));
+        failures.push(format!(
+            "POST /api/v1/prediction/batchOrders status={status:?}; body: {resp_body}"
+        ));
     }
 
     #[derive(Deserialize)]

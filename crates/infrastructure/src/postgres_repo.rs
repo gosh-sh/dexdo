@@ -511,7 +511,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
         // trade_id DESC` already yields true newest-first chain order with no
         // Rust-side re-sort. The plain (non-partial) `trades_tape_idx` serves
         // it as a range scan. `chain_time IS NOT NULL` guards the rare row the
-        // gateway delivered without a parseable time, matching /api/v1/orders.
+        // gateway delivered without a parseable time, matching /api/v1/prediction/orders.
         let rows: Vec<TradeRow> = sqlx::query_as(
             r#"select trade_id,
                       price::text as price,
@@ -583,7 +583,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
                 qty: scale_uint_to_decimal(&qty_grid, quantity_scale),
                 quote_qty: scale_uint_to_decimal(&notional.to_str_radix(10), quote_scale),
                 // Microseconds → Unix milliseconds, the same truncation as
-                // `time` / `updateTime` on /api/v1/orders.
+                // `time` / `updateTime` on /api/v1/prediction/orders.
                 time: row.chain_time_us / 1_000,
                 is_buyer_maker: row.is_buyer_maker,
             });
@@ -1205,7 +1205,7 @@ impl MarketReadRepository for PostgresReadModelRepository {
 
         // Resolve the market row + outcomes in two SELECTs to keep types
         // simple. The visibility gate `last_reconciled_at IS NOT NULL`
-        // matches /api/v1/markets — pre-reconcile markets are invisible.
+        // matches /api/v1/prediction/markets — pre-reconcile markets are invisible.
         let market: Option<(
             String,         // event_id (numeric → text via ::text)
             Option<String>, // oracle_list_hash
@@ -2061,7 +2061,7 @@ impl PostgresReadModelRepository {
             // Single-market lookup: an unknown / not-yet-reconciled address is
             // a client-side miss, not an empty listing. Surface it as a typed
             // domain error so the API handler maps it to 404, mirroring the
-            // /api/v1/depth contract above.
+            // /api/v1/prediction/depth contract above.
             return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
         };
 
@@ -2525,7 +2525,7 @@ fn assemble_market(
     // `oracle_list_hash` is reconciler-only and has no CHECK constraint
     // pinning it post-reconcile (unlike `orderbook_address`). A
     // NULL/blank value here must NOT fail-close the read endpoints —
-    // `/api/v1/markets` and `/api/v1/depth` do not surface this field
+    // `/api/v1/prediction/markets` and `/api/v1/prediction/depth` do not surface this field
     // and would silently hide an otherwise-valid market. Paths that
     // DO depend on the value reject NULL/blank at their own repo
     // boundary, emitting `MarketInconsistent` only when the field is

@@ -117,7 +117,7 @@ ansible-playbook deploy-dexdo.yml -i inventories/<env>/hosts.yml --ask-vault-pas
 
 ```sh
 curl -s http://<host>:<dexdo_api_port>/readiness        # dexdo_api_port default 8080
-curl -s 'http://<host>:<dexdo_api_port>/api/v1/markets?limit=5' | jq
+curl -s 'http://<host>:<dexdo_api_port>/api/v1/prediction/markets?limit=5' | jq
 ```
 
 Market-data endpoints are empty until the indexer has ingested chain events —

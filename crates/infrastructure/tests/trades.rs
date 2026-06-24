@@ -2,7 +2,7 @@
 //
 
 // Integration tests for PostgresReadModelRepository::get_trades — the read
-// side of GET /api/v1/trades (docs/tech-specs/read-api.md#apiv1trades). Gated
+// side of GET /api/v1/prediction/trades (docs/tech-specs/read-api.md#apiv1trades). Gated
 // on TEST_DATABASE_URL; see crates/infrastructure/tests/reprojection.rs for the
 // docker-compose harness. Each test uses a unique pmp/orderbook/symbol prefix
 // so the suite can run concurrently against one database.

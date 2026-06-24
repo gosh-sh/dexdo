@@ -49,7 +49,7 @@ $READ markets --status STAKING,TRADING,RESOLVING,RESOLVED,CANCELLED --limit 200 
 ```
 
 Map each `stakes` entry's `eventId`/`oracleListHash` to a market (via `markets`
-→ `event.eventId`) to get its `marketAddress` and `status`. Build the close-list:
+→ `event.eventId`) to get its `predictionMarketAddress` and `status`. Build the close-list:
 markets where you have **open orders**, **stakes**, or **outcome-token balances**
 (`$READ balances --market-address …`).
 
@@ -156,7 +156,7 @@ to `markets` by `event.eventId`. Map each stake to its market instead by:
 - **enumeration** — for each candidate market, pull `pmp-details` (`eventId`,
   `oracleListHash`, `tokenType`) and recognise it by `oracleListHash` + the amounts.
 
-(Known gap to close: `dexdo stakes` should emit the resolved `marketAddress`/`status`
+(Known gap to close: `dexdo stakes` should emit the resolved `predictionMarketAddress`/`status`
 per stake — it can't be reversed client-side from the hash key alone.)
 
 Once mapped, the unlock moment is when the market resolves: earliest at

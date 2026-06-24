@@ -34,4 +34,6 @@ deploy/ansible/inventories/*/
 !deploy/ansible/inventories/*.example/
 TODO.md
 .claude/scheduled_tasks.lock
-.claude/skills/dodex-common/__pycache__/dodex_client.cpython-314.pyc
+# Python bytecode caches (generated when running the dexdo skill client)
+__pycache__/
+*.pyc

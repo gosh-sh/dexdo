@@ -654,9 +654,11 @@ async fn deploy_oracle_with_event(
         .map_err(|e| format!("wait EventList active: {e:?}"))?;
 
     let event_name = format!("BeeOBMatch_{:x}", now_unix());
+    // addEvent requires dense 0-based outcome keys (`require(outcomeNames.exists(i))`
+    // for i in 0..count); downstream setStake/splitFullSet index outcomes 0/1.
     let mut outcome_names = HashMap::new();
-    outcome_names.insert(1_u32, "Team A".to_string());
-    outcome_names.insert(2_u32, "Team B".to_string());
+    outcome_names.insert(0_u32, "Team A".to_string());
+    outcome_names.insert(1_u32, "Team B".to_string());
 
     dex.add_event(
         &event_list_address,

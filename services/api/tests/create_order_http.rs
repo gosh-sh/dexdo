@@ -1,7 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
-// HTTP-level integration tests for `POST /api/v1/order` that exercise
+// HTTP-level integration tests for `POST /api/v1/prediction/order` that exercise
 // the handler + use case end to end **without** a database or a real
 // chain. A fake `Authenticator` short-circuits HMAC verification, a
 // fake `MarketReadRepository` returns a configurable `Market`, and a
@@ -355,7 +355,7 @@ fn setup_with(repo: SharedRepo, sender: SharedChainSender) -> Service {
 
 fn valid_body() -> serde_json::Value {
     json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL,
         "side": "BUY",
         "quantity": "1.5",
@@ -369,7 +369,7 @@ fn valid_body() -> serde_json::Value {
 /// `timeInForce` omitted (the api-spec says it's ignored on MARKET).
 fn market_body(side: &str, quantity: &str) -> serde_json::Value {
     json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL,
         "side": side,
         "quantity": quantity,
@@ -386,7 +386,7 @@ fn auth_envelope() -> Vec<(&'static str, String)> {
 
 fn post_order(_service: &Service, body: serde_json::Value) -> RequestBuilder {
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
-    let mut req = TestClient::post("http://test/api/v1/order")
+    let mut req = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", "fake", true)
         .add_header("content-type", "application/json", true);
     for (k, v) in auth_envelope() {
@@ -539,7 +539,7 @@ async fn missing_market_address_returns_1102() {
     let service =
         setup_with(Arc::new(FakeRepo::with(trading_market())), Arc::new(RecordingSender::ok()));
     let mut body = valid_body();
-    body.as_object_mut().unwrap().remove("marketAddress");
+    body.as_object_mut().unwrap().remove("predictionMarketAddress");
     expect_error(&service, body, StatusCode::BAD_REQUEST, -1102).await;
 }
 
@@ -902,7 +902,7 @@ async fn malformed_json_body_returns_1130() {
     let service =
         setup_with(Arc::new(FakeRepo::with(trading_market())), Arc::new(RecordingSender::ok()));
     let body = b"{not valid json".to_vec();
-    let mut req = TestClient::post("http://test/api/v1/order")
+    let mut req = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", "fake", true)
         .add_header("content-type", "application/json", true);
     for (k, v) in auth_envelope() {
