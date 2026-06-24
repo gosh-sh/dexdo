@@ -311,7 +311,7 @@ Reserved table for cached depth snapshots. Not used by the current depth handler
 
 > 🚧 **TODO — not implemented.** These tables (`inference_markets`, `inference_orders`) and the `oracle_events.range_ob_address` / `range_bounds_jsonb` columns back the inference market, which is **not yet built**. No migration ships them yet; this is a forward-looking schema. Safe to merge into `dev` as spec-only.
 
-The inference side tracks the per-model order books of the private-inference market (`contracts/airegistry/InferenceOrderBook.sol` — one book per model) and the resting orders inside them. These tables back `/api/v1/inference/markets` (list), `/api/v1/inference/market` (one market), and `/api/v1/inference/depth` (order book). Inference-settled **prediction** markets add no table of their own — `/api/v1/prediction/markets?resolvesFrom=` reuses [`markets`](#prediction-markets) joined to the range-event columns on [`oracle_events`](#oracle_events) (`range_ob_address`). As on the prediction-market side, a row is hidden from the public API until the inference reconciler stamps `last_reconciled_at`.
+The inference side tracks the per-model order books of the private-inference market (`contracts/airegistry/InferenceOrderBook.sol` — one book per model) and the resting orders inside them. These tables back `/api/v1/inference/markets` (list, plus single-market via `?inferenceOrderBookAddress=`) and `/api/v1/inference/depth` (order book). Inference-settled **prediction** markets add no table of their own — `/api/v1/prediction/markets?resolvesFrom=` reuses [`markets`](#prediction-markets) joined to the range-event columns on [`oracle_events`](#oracle_events) (`range_ob_address`). As on the prediction-market side, a row is hidden from the public API until the inference reconciler stamps `last_reconciled_at`.
 
 ### `inference_markets`
 
@@ -320,7 +320,7 @@ One row per `InferenceOrderBook` contract observed on chain — equivalently, on
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `bigserial` PK | Internal FK target. |
-| `orderbook_address` | `text` UNIQUE | The InferenceOrderBook contract address. Exposed as `orderBookAddress` — the public market id. |
+| `orderbook_address` | `text` UNIQUE | The InferenceOrderBook contract address. Exposed as `inferenceOrderBookAddress` — the public market id. |
 | `model_hash` | `numeric(78,0)` UNIQUE | On-chain model identity (`_modelHash` static), from `getParams()`. The only model identifier the order book itself carries. NULL only during the pre-reconcile window; the visibility gate guarantees it is set on every market the API returns. |
 | `model_ref` | `text` (nullable) | Human-readable model id `producer--model--version`. Reconciler-filled from the model's `ManifestMetadata` manifest (the order book carries only the hash). NULL when the manifest is not yet indexed or carries no model id — the API then surfaces the model by hash alone. See the [open question](indexer.md#inference-reconciler) on the model-id source. |
 | `producer` / `model_name` / `version` | `text` (nullable) | Parsed components of `model_ref`, for the `model.{producer,name,version}` render. Filled together with `model_ref`. |

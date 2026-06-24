@@ -77,8 +77,8 @@ For each row in the page, the API:
 
 A prediction market whose outcome is decided by a model's reference price (a numeric **range event**, spec §6.2) carries a `resolvesFrom` block; all other markets carry `resolvesFrom: null`. A market is inference-settled when its confirming event — joined `markets.pmp_address = oracle_events.confirmed_pmp_address` — has [`oracle_events.range_ob_address`](data-schema.md#oracle_events) set (the bound `InferenceOrderBook`, filled by the OracleEventList reconciler from `getRangeData`, see [indexer.md](indexer.md#oracleeventlist-reconciler)).
 
-- **`?resolvesFrom=<orderBookAddress>`** filters the listing to markets settled from one inference book — backed by `oracle_events_range_ob_idx`. It composes with the other list filters (it is not a single-market selector, unlike `marketAddress`).
-- The `resolvesFrom` block is `{orderBookAddress (= range_ob_address), model, metric: "WEEKLY_MEDIAN_PRICE"}`. `model` is joined from [`inference_markets`](data-schema.md#inference_markets) on that address and degrades to `null`/hash-only if the inference book is not yet reconciled — the prediction market is not hidden on that account.
+- **`?resolvesFrom=<inferenceOrderBookAddress>`** filters the listing to markets settled from one inference book — backed by `oracle_events_range_ob_idx`. It composes with the other list filters (it is not a single-market selector, unlike `marketAddress`).
+- The `resolvesFrom` block is `{inferenceOrderBookAddress (= range_ob_address), model, metric: "WEEKLY_MEDIAN_PRICE"}`. `model` is joined from [`inference_markets`](data-schema.md#inference_markets) on that address and degrades to `null`/hash-only if the inference book is not yet reconciled — the prediction market is not hidden on that account.
 - The numeric outcome ranges are the market's normal `outcomes`; no separate `ranges` field is emitted.
 
 ### Pagination
@@ -442,30 +442,26 @@ Per row: render `model.{producer,name,version,ref}` from `model_ref` and its par
 
 Same cursor machinery as `/api/v1/prediction/markets` (URL-safe base64 of `"<sort_key>:<id>"`). Two sort modes: `sort=createdAt` (default, DESC, key `created_at_chain`) and `sort=volume` (DESC). A corrupted cursor → `InvalidParameter` → 400.
 
+### Single-market mode
+
+`?inferenceOrderBookAddress=` returns exactly one market and is mutually exclusive with the list filters (`producer`, `status`, `sort`, `cursor`) — passing both → `MissingParameter` → 400, mirroring [`/api/v1/prediction/markets`](#apiv1predictionmarkets)'s `predictionMarketAddress` single-market rule. An unknown or unreconciled address → `InvalidMarketOrSymbol` → 404. The response is the same market object built per [Building the response](#building-the-response-1), wrapped with `serverTime`.
+
 ### Error mapping
 
 | Condition | DomainError | HTTP |
 | --- | --- | --- |
+| `inferenceOrderBookAddress` unknown / not yet reconciled | `InvalidMarketOrSymbol` | 404 |
 | Invalid `status` / `sort` enum value | `InvalidParameter` | 400 |
+| `inferenceOrderBookAddress` together with list filters | `MissingParameter` | 400 |
 | Corrupted cursor | `InvalidParameter` | 400 |
-
-The single-market lookup is its own endpoint — see [`/api/v1/inference/market`](#apiv1inferencemarket).
-
-## `/api/v1/inference/market`
-
-Returns one inference market — the single-row analogue of [`/api/v1/inference/markets`](#apiv1inferencemarkets), keyed by `orderBookAddress`. Same source ([`inference_markets`](data-schema.md#inference_markets)), same visibility gate (`last_reconciled_at IS NOT NULL`), and same per-row field assembly as the list; the response is that one market object wrapped with `serverTime`. Public contract in [api-spec.md](../api-spec.md#inference-market).
-
-### Resolution
-
-Resolve `orderBookAddress` via [`inference_markets`](data-schema.md#inference_markets). The book must be reconciled (`last_reconciled_at IS NOT NULL`); an unknown or unreconciled address → `InvalidMarketOrSymbol` → 404; a missing `orderBookAddress` → `MissingParameter` → 400.
 
 ## `/api/v1/inference/depth`
 
-Returns the order-book depth for one model — the inference analogue of [`/api/v1/prediction/depth`](#apiv1predictiondepth), built from [`inference_orders`](data-schema.md#inference_orders), never from a contract call. Because an `InferenceOrderBook` is one book per model (no outcome dimension), it is keyed by `orderBookAddress` alone — there is no `symbol`. Public contract in [api-spec.md](../api-spec.md#inference-depth).
+Returns the order-book depth for one model — the inference analogue of [`/api/v1/prediction/depth`](#apiv1predictiondepth), built from [`inference_orders`](data-schema.md#inference_orders), never from a contract call. Because an `InferenceOrderBook` is one book per model (no outcome dimension), it is keyed by `inferenceOrderBookAddress` alone — there is no `symbol`. Public contract in [api-spec.md](../api-spec.md#inference-depth).
 
 ### Resolution
 
-Resolve `orderBookAddress` to `(orderbook_address, price_precision, quantity_precision)` via [`inference_markets`](data-schema.md#inference_markets). The book must be reconciled (`last_reconciled_at IS NOT NULL`); otherwise `InvalidMarketOrSymbol` → 404.
+Resolve `inferenceOrderBookAddress` to `(orderbook_address, price_precision, quantity_precision)` via [`inference_markets`](data-schema.md#inference_markets). The book must be reconciled (`last_reconciled_at IS NOT NULL`); otherwise `InvalidMarketOrSymbol` → 404.
 
 ### Empty-book contract
 
@@ -495,9 +491,9 @@ Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lex
 
 | Condition | DomainError | HTTP |
 | --- | --- | --- |
-| `orderBookAddress` unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
+| `inferenceOrderBookAddress` unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
 | Reconciled book with NULL/blank `orderbook_address` | `MarketInconsistent` | 503 |
-| Missing `orderBookAddress` | `MissingParameter` | 400 |
+| Missing `inferenceOrderBookAddress` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
 
 ## `/api/v1/prediction/orders`

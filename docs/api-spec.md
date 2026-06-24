@@ -27,7 +27,6 @@
       - [OracleOutcome](#oracleoutcome)
   - [Inference Market Data](#inference-market-data)
     - [Inference Markets](#inference-markets)
-    - [Inference Market](#inference-market)
     - [Inference Depth](#inference-depth)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
@@ -222,7 +221,6 @@ envelope field failed or why a credential was rejected.
 | Fetch prediction order book | `GET` | `/api/v1/prediction/depth` | `NONE` |
 | Fetch recent prediction trades | `GET` | `/api/v1/prediction/trades` | `NONE` |
 | 🚧 TODO — List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
-| 🚧 TODO — Describe one inference market | `GET` | `/api/v1/inference/market` | `NONE` |
 | 🚧 TODO — Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
@@ -260,7 +258,7 @@ Query parameters:
 | `status` | STRING | NO | Comma-separated list of statuses to include. Example: `TRADING,AWAITING_FREEZE`. |
 | `quoteAsset` | STRING | NO | Filter by quote asset. Example: `USDC`. |
 | `oracleName` | STRING | NO | Filter by oracle name. A market matches if its `event.oracles[]` contains this oracle name. |
-| `resolvesFrom` | STRING | NO | Return only markets settled from this inference model's order book (its `orderBookAddress` from [`/api/v1/inference/markets`](#inference-markets)). See `resolvesFrom` in the response. |
+| `resolvesFrom` | STRING | NO | Return only markets settled from this inference model's order book (its `inferenceOrderBookAddress` from [`/api/v1/inference/markets`](#inference-markets)). See `resolvesFrom` in the response. |
 | `closingBefore` | LONG | NO | Return only markets with `timings.resultEnd < closingBefore` (unix seconds). |
 | `sort` | STRING | NO | Sort field. One of: `resultStart` (default, ASC), `createdAt` (DESC). |
 | `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. |
@@ -521,7 +519,7 @@ Present only on a prediction market whose outcome is decided by a model's refere
 
 ```json
 {
-  "orderBookAddress": "0:ob-addr...",
+  "inferenceOrderBookAddress": "0:ob-addr...",
   "model": "qwen--qwen2.5-32b--instruct",
   "metric": "WEEKLY_MEDIAN_PRICE"
 }
@@ -529,7 +527,7 @@ Present only on a prediction market whose outcome is decided by a model's refere
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `orderBookAddress` | STRING | The inference market ([`/api/v1/inference/markets`](#inference-markets)) this market settles from. |
+| `inferenceOrderBookAddress` | STRING | The inference market ([`/api/v1/inference/markets`](#inference-markets)) this market settles from. |
 | `model` | STRING \| null | The model `ref` (`producer--model--version`); `null` if the model identity is not yet known on chain. |
 | `metric` | ENUM | The price metric used to settle. Currently `WEEKLY_MEDIAN_PRICE`. |
 
@@ -837,6 +835,7 @@ Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
 | `producer` | STRING | NO | Filter by model producer (e.g. `qwen`). |
 | `status` | STRING | NO | Comma-separated statuses to include. Currently only `TRADING`. |
 | `sort` | STRING | NO | Sort field. One of: `createdAt` (default, DESC), `volume` (DESC). |
@@ -852,7 +851,7 @@ Response:
   "hasMore": false,
   "markets": [
     {
-      "orderBookAddress": "0:ob-addr...",
+      "inferenceOrderBookAddress": "0:ob-addr...",
       "model": {
         "producer": "qwen",
         "name": "qwen2.5-32b",
@@ -882,7 +881,7 @@ Response fields:
 | `serverTime` | LONG | Unix seconds, captured once for the request. |
 | `nextCursor` | STRING \| null | Cursor for the next page. `null` when `hasMore` is `false`. |
 | `hasMore` | BOOLEAN | Whether more pages follow. |
-| `orderBookAddress` | STRING | Stable market id — the model's order-book address. Used as the key for [`/api/v1/inference/market`](#inference-market) and [`/api/v1/inference/depth`](#inference-depth). |
+| `inferenceOrderBookAddress` | STRING | Stable market id — the model's order-book address. Pass it as `?inferenceOrderBookAddress=` to fetch this one market, and as the key for [`/api/v1/inference/depth`](#inference-depth). |
 | `model` | OBJECT | Model identity. `ref` is the canonical `producer--model--version`. `producer` / `name` / `version` MAY be `null` if the model identity is not yet known on chain; `ref` then carries the model hash. |
 | `status` | ENUM | `TRADING`. Reserved for future inactive states; clients MUST treat it as opaque. |
 | `quoteAsset` | STRING | Always `SHELL`. |
@@ -900,57 +899,10 @@ Errors:
 
 | Condition | Code | HTTP |
 | --- | --- | --- |
+| `inferenceOrderBookAddress` together with filter/pagination params | `-1102` | 400 |
 | Invalid `status` / `sort` value | `-1130` | 400 |
 | Corrupted `cursor` | `-1130` | 400 |
-
-### Inference Market
-
-```http
-GET /api/v1/inference/market
-```
-
-Describe one inference market — the same object as a [`/api/v1/inference/markets`](#inference-markets) list entry, fetched by its order-book address.
-
-Query parameters:
-
-| Name | Type | Mandatory | Description |
-| --- | --- | --- | --- |
-| `orderBookAddress` | STRING | YES | The model's order-book address. |
-
-Response — `serverTime` plus the market object (fields identical to one [Inference Markets](#inference-markets) entry):
-
-```json
-{
-  "serverTime": 1710000000,
-  "orderBookAddress": "0:ob-addr...",
-  "model": {
-    "producer": "qwen",
-    "name": "qwen2.5-32b",
-    "version": "instruct",
-    "ref": "qwen--qwen2.5-32b--instruct"
-  },
-  "status": "TRADING",
-  "quoteAsset": "SHELL",
-  "makerCommission": "-0.02",
-  "takerCommission": "0.025",
-  "pricePrecision": 9,
-  "quantityPrecision": 0,
-  "tickSize": "0.000000001",
-  "stepSize": "1",
-  "minNotional": "1",
-  "referencePrice": "1010",
-  "createdAt": 1709980000
-}
-```
-
-Field semantics are identical to [Inference Markets](#inference-markets).
-
-Errors:
-
-| Condition | Code | HTTP |
-| --- | --- | --- |
-| `orderBookAddress` missing or blank | `-1102` | 400 |
-| `orderBookAddress` not found / not yet available | `-1121` | 404 |
+| `inferenceOrderBookAddress` not found | `-1121` | 404 |
 
 ### Inference Depth
 
@@ -964,14 +916,14 @@ Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `orderBookAddress` | STRING | YES | The model's order-book address from [`/api/v1/inference/markets`](#inference-markets). |
+| `inferenceOrderBookAddress` | STRING | YES | The model's order-book address from [`/api/v1/inference/markets`](#inference-markets). |
 | `limit` | INT | NO | Number of price levels per side. Default: `100`. Max: `1000`. |
 
 Response:
 
 ```json
 {
-  "orderBookAddress": "0:ob-addr...",
+  "inferenceOrderBookAddress": "0:ob-addr...",
   "lastUpdateId": "76a23086a006700000000000000000000000000000000000000000000000000000000000000000007",
   "bids": [
     ["1000", "120"],
@@ -994,12 +946,12 @@ Errors:
 
 | Condition | Code | HTTP |
 | --- | --- | --- |
-| `orderBookAddress` missing or blank | `-1102` | 400 |
+| `inferenceOrderBookAddress` missing or blank | `-1102` | 400 |
 | `limit` present but not an integer | `-1130` | 400 |
-| `orderBookAddress` not found / not yet available | `-1121` | 404 |
+| `inferenceOrderBookAddress` not found / not yet available | `-1121` | 404 |
 | Book data temporarily inconsistent | `-1500` | 503 |
 
-> **Prediction markets settled from a model price** are regular prediction markets, listed by [`/api/v1/prediction/markets`](#prediction-markets) — filter with `?resolvesFrom=<orderBookAddress>` and read the per-market `resolvesFrom` block. See [Markets](#prediction-markets).
+> **Prediction markets settled from a model price** are regular prediction markets, listed by [`/api/v1/prediction/markets`](#prediction-markets) — filter with `?resolvesFrom=<inferenceOrderBookAddress>` and read the per-market `resolvesFrom` block. See [Markets](#prediction-markets).
 
 ## Account Endpoints
 
