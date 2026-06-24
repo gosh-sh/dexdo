@@ -4,12 +4,12 @@ Implementation-facing requirements for the write endpoints (trading, position, a
 
 | Endpoint | Method | api-spec section |
 | --- | --- | --- |
-| `/api/v1/order` | POST | [New Order](../api-spec.md#new-order) |
-| `/api/v1/order` | DELETE | [Cancel Order](../api-spec.md#cancel-order) |
-| `/api/v1/batchOrders` | POST | [New Batch Orders](../api-spec.md#new-batch-orders) |
-| `/api/v1/batchOrders` | DELETE | [Cancel Batch Orders](../api-spec.md#cancel-batch-orders) |
-| `/api/v1/openOrders` | DELETE | [Cancel All Open Orders On Symbol](../api-spec.md#cancel-all-open-orders-on-symbol) |
-| `/api/v1/buyFullSet` | POST | [Buy Full Set](../api-spec.md#buy-full-set) |
+| `/api/v1/prediction/order` | POST | [New Order](../api-spec.md#new-order) |
+| `/api/v1/prediction/order` | DELETE | [Cancel Order](../api-spec.md#cancel-order) |
+| `/api/v1/prediction/batchOrders` | POST | [New Batch Orders](../api-spec.md#new-batch-orders) |
+| `/api/v1/prediction/batchOrders` | DELETE | [Cancel Batch Orders](../api-spec.md#cancel-batch-orders) |
+| `/api/v1/prediction/openOrders` | DELETE | [Cancel All Open Orders On Symbol](../api-spec.md#cancel-all-open-orders-on-symbol) |
+| `/api/v1/prediction/buyFullSet` | POST | [Buy Full Set](../api-spec.md#buy-full-set) |
 | `/api/v1/accounts` | POST | [Register Account](../api-spec.md#register-account) |
 
 ## Glossary
@@ -18,13 +18,13 @@ Implementation-facing requirements for the write endpoints (trading, position, a
 
 **Chain sender** — the backend component that signs an external message under the trading-PN seckey and dispatches it to the Acki Nacki gateway. Defined as a `ChainOrderSender` trait in `crates/application`; the production implementation in `crates/infrastructure` wraps the `PrivateNote` ABI bindings exposed by `ackinacki-kit/contracts/src/dex/private_note.rs`.
 
-**Optimistic submission** — `POST /api/v1/order` returns once the chain sender has acknowledged dispatch of the external message, before any on-chain confirmation. The chain-assigned `orderId` is not available at response time — it appears later when the indexer projects `OrderBook.OrderPlaced` into [`live_orders`](data-schema.md#live_orders). Clients learn the `orderId` by polling `GET /api/v1/orders` and matching on the `clientOrderId` they supplied or received.
+**Optimistic submission** — `POST /api/v1/prediction/order` returns once the chain sender has acknowledged dispatch of the external message, before any on-chain confirmation. The chain-assigned `orderId` is not available at response time — it appears later when the indexer projects `OrderBook.OrderPlaced` into [`live_orders`](data-schema.md#live_orders). Clients learn the `orderId` by polling `GET /api/v1/prediction/orders` and matching on the `clientOrderId` they supplied or received.
 
 **clientOrderId** — caller-supplied (request field `newOrderClientId`) or backend-generated identifier that correlates the response with the eventually-projected `live_orders` row. Carried by the chain as `uint128` and surfaced in every `OrderBook` event (see [dex-events-routing.md](../contract-specs/dex-events-routing.md#orderbook)). The chain enforces per-PN uniqueness across still-live coids; collisions are silently rejected (`Rejected` event, no `OrderPlaced`).
 
 **PN busy window** — between `PrivateNote.placeOrder` and the matching `onOrderPlaced` callback, the PN's `_busy` flag is set and any further `placeOrder` is rejected on-chain with `ERR_NOTE_BUSY` (`contracts/dex/PrivateNote.sol:1178`). Each account has exactly one trading PN, so placement against one account is serial at the chain level.
 
-## `POST /api/v1/order`
+## `POST /api/v1/prediction/order`
 
 The handler runs three phases: request parsing → market/outcome resolution and input validation → chain submission. Each phase fails closed with its own error code (see [Error mapping](#error-mapping)); a later phase only runs once the earlier one has produced a fully-typed value.
 
@@ -40,7 +40,7 @@ Body fields are taken byte-exact from the request as transmitted; the HMAC layer
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `marketAddress` | `MarketAddress` | Mandatory. |
+| `predictionMarketAddress` | `MarketAddress` | Mandatory. |
 | `symbol` | `Symbol` | Mandatory. |
 | `newOrderClientId` | `Option<String>` | Optional; absent → backend generates (see [clientOrderId](#clientorderid-generation)). |
 | `side` | `OrderSide` | Mandatory; `BUY` or `SELL`. |
@@ -51,7 +51,7 @@ Body fields are taken byte-exact from the request as transmitted; the HMAC layer
 
 ### Market and outcome resolution
 
-Resolve `(marketAddress, symbol)` to a single row via [`markets`](data-schema.md#markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes), filtered by `m.last_reconciled_at IS NOT NULL` — the same visibility gate as [`/api/v1/markets`](read-api.md#visibility-filter). A miss surfaces as `InvalidMarketOrSymbol` → 404.
+Resolve `(predictionMarketAddress, symbol)` to a single row via [`markets`](data-schema.md#prediction-markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes), filtered by `m.last_reconciled_at IS NOT NULL` — the same visibility gate as [`/api/v1/prediction/markets`](read-api.md#visibility-filter). A miss surfaces as `InvalidMarketOrSymbol` → 404.
 
 Derive `status` from the row and request `now` using the logic in [read-api.md §Status derivation](read-api.md#status-derivation). Placement is permitted only when `status == TRADING`; any other phase rejects with `OrderValidationFailed` → 400 (-2010). The status derivation and the precision/step columns come from the same SELECT, so a status flip between read and validate is not possible inside one request.
 
@@ -70,11 +70,11 @@ The same row supplies every value the chain submission requires:
 
 ### Input validation
 
-Each [api-spec §Validation Rules](../api-spec.md#validation-rules) row maps to one check. Inputs are exact-decimal at this point; comparisons use `num-bigint::BigUint` lifted by `price_precision` / `quantity_precision`, the inverse of the lifting `/api/v1/depth` uses to render levels ([read-api.md §Aggregation](read-api.md#aggregation)). Lexicographic string comparison would silently misrank `"100"` vs `"99"`.
+Each [api-spec §Validation Rules](../api-spec.md#validation-rules) row maps to one check. Inputs are exact-decimal at this point; comparisons use `num-bigint::BigUint` lifted by `price_precision` / `quantity_precision`, the inverse of the lifting `/api/v1/prediction/depth` uses to render levels ([read-api.md §Aggregation](read-api.md#aggregation)). Lexicographic string comparison would silently misrank `"100"` vs `"99"`.
 
 | api-spec rule | Failure |
 | --- | --- |
-| `marketAddress` / `symbol` resolve | `InvalidMarketOrSymbol` |
+| `predictionMarketAddress` / `symbol` resolve | `InvalidMarketOrSymbol` |
 | Market `status == TRADING` | `OrderValidationFailed` |
 | Valid `type` × `timeInForce` combination (see [Flags](#flags)) | `InvalidParameter` |
 | `price` decimals ≤ `pricePrecision` (LIMIT) | `PrecisionExceeded` |
@@ -87,7 +87,7 @@ Each [api-spec §Validation Rules](../api-spec.md#validation-rules) row maps to 
 
 The local checks duplicate the contract's own validation (`contracts/dex/PrivateNote.sol:1179-1197`) and exist to surface a fast `-1111` / `-2010` to a misbehaving client without spending a chain round-trip on a doomed submission. The chain remains the authority.
 
-Balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_LOW_VALUE` at `contracts/dex/PrivateNote.sol:1219`); clients track their own available balance via `GET /api/v1/account`. The chain rejection itself surfaces synchronously through [Failure surface](#failure-surface) §2 — `BeeDexChainSender` waits for the `PrivateNote.placeOrder` execution, so an insufficient-balance reject becomes `OrderValidationFailed` → 400 / -2010 on the HTTP response rather than silent absence in `/api/v1/orders`.
+Balance is not pre-checked. The chain enforces sufficiency on-chain (`ERR_LOW_VALUE` at `contracts/dex/PrivateNote.sol:1219`); clients track their own available balance via `GET /api/v1/account`. The chain rejection itself surfaces synchronously through [Failure surface](#failure-surface) §2 — `BeeDexChainSender` waits for the `PrivateNote.placeOrder` execution, so an insufficient-balance reject becomes `OrderValidationFailed` → 400 / -2010 on the HTTP response rather than silent absence in `/api/v1/prediction/orders`.
 
 ### Flags
 
@@ -175,11 +175,11 @@ A successful submission returns a deliberately minimal three-field body:
 | `transactTime` | `now_pair()` captured once at the start of the handler. |
 | `status` | Always `"PENDING_NEW"` — the order has been accepted by `PrivateNote.placeOrder` (chain return of `bee_dex::Dex::place_order` succeeded) but is **not yet on the book**; `OrderBook.executeBatch` is processing the internal message and will emit `OrderPlaced` with the chain-assigned `orderId` shortly after. |
 
-Why minimal: every other field a fully-populated order would carry (`marketAddress`, `symbol`, `side`, `type`, `timeInForce`, `price`, `origQty`) is **already in the request the client just sent** — echoing them adds bytes without adding information. Two specific fields the Binance-style shape carries (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission: `orderId` is assigned by `OrderBook` after our return, and `executedQty` is always zero for a freshly-placed order. Surfacing them as `""` / `"0"` is worse than not surfacing them — it implies the order is further along the lifecycle than it actually is.
+Why minimal: every other field a fully-populated order would carry (`predictionMarketAddress`, `symbol`, `side`, `type`, `timeInForce`, `price`, `origQty`) is **already in the request the client just sent** — echoing them adds bytes without adding information. Two specific fields the Binance-style shape carries (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission: `orderId` is assigned by `OrderBook` after our return, and `executedQty` is always zero for a freshly-placed order. Surfacing them as `""` / `"0"` is worse than not surfacing them — it implies the order is further along the lifecycle than it actually is.
 
-The client correlates the response with future `live_orders` rows by polling `GET /api/v1/orders` and matching by `clientOrderId` in the returned `orders[]`. The `PENDING_NEW` status flips to `NEW` once the indexer projects `OrderPlaced`.
+The client correlates the response with future `live_orders` rows by polling `GET /api/v1/prediction/orders` and matching by `clientOrderId` in the returned `orders[]`. The `PENDING_NEW` status flips to `NEW` once the indexer projects `OrderPlaced`.
 
-`PENDING_NEW` is listed in [api-spec §Order Status](../api-spec.md#order-status); it's the only status `POST /api/v1/order` returns on success. Strictly additive — code that only switches on `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` continues to work because those values still arrive through `/api/v1/orders`.
+`PENDING_NEW` is listed in [api-spec §Order Status](../api-spec.md#order-status); it's the only status `POST /api/v1/prediction/order` returns on success. Strictly additive — code that only switches on `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` continues to work because those values still arrive through `/api/v1/prediction/orders`.
 
 
 ### Failure surface
@@ -203,9 +203,9 @@ Three failure classes — two synchronous, one async:
 
    The MM client therefore knows immediately why a given `POST` failed for the common cases and does not have to detect rejection through polling absence.
 
-3. **OrderBook chain-side, surfaced asynchronously** — once `PrivateNote.placeOrder` accepts, it sends an internal message to `OrderBook.executeBatch`. That executes in a separate transaction the synchronous return cannot observe. If `OrderBook` then rejects (`OrderBook.Rejected` for coid collision against a still-live coid, queue overflow, or ABI-level validation), the indexer records the raw event but does not (today) insert a row into `live_orders`. From the HTTP caller's standpoint the `POST` returned `200 NEW`, but the order never surfaces in `/api/v1/orders` until the REJECTED follow-up ships ([read-api.md §REJECTED — future work](read-api.md#rejected--future-work)). Clients detect this class by absence: a `clientOrderId` that does not appear within a few seconds was OrderBook-rejected. This residual asynchronicity is the only case left where MM bots must implement absence-detection — typical rejections (balance, busy, validation) now surface synchronously through class 2.
+3. **OrderBook chain-side, surfaced asynchronously** — once `PrivateNote.placeOrder` accepts, it sends an internal message to `OrderBook.executeBatch`. That executes in a separate transaction the synchronous return cannot observe. If `OrderBook` then rejects (`OrderBook.Rejected` for coid collision against a still-live coid, queue overflow, or ABI-level validation), the indexer records the raw event but does not (today) insert a row into `live_orders`. From the HTTP caller's standpoint the `POST` returned `200 NEW`, but the order never surfaces in `/api/v1/prediction/orders` until the REJECTED follow-up ships ([read-api.md §REJECTED — future work](read-api.md#rejected--future-work)). Clients detect this class by absence: a `clientOrderId` that does not appear within a few seconds was OrderBook-rejected. This residual asynchronicity is the only case left where MM bots must implement absence-detection — typical rejections (balance, busy, validation) now surface synchronously through class 2.
 
-Transport-level failures (gateway connection drop, malformed reply, decode error) sit outside this classification and always collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error` level. Accepted orders that later get filled or cancelled by normal market activity are not failures and are surfaced through `/api/v1/orders` per [read-api.md](read-api.md).
+Transport-level failures (gateway connection drop, malformed reply, decode error) sit outside this classification and always collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error` level. Accepted orders that later get filled or cancelled by normal market activity are not failures and are surfaced through `/api/v1/prediction/orders` per [read-api.md](read-api.md).
 
 **`-2014 OrderPnBusy` is transitional.** The current account model has exactly one trading PN per account ([auth.md §Trading Private Note](auth.md#trading-private-note)). When multi-PN trading lands (one account routing orders across several PNs in parallel), `_busy` ceases to be a per-account bottleneck and a client hitting `ERR_NOTE_BUSY` would mean an internal PN-selection bug — at that point this row collapses back into `OrderValidationFailed` / 400 and the `-2014` code is removed from the public surface. SDK authors should treat `-2014` the same as `-2010` plus a short retry hint; do not bake persistent retry logic keyed on this specific code.
 
@@ -242,15 +242,15 @@ The use case constructor takes trait objects, never concrete types, so the test-
 
 ### Idempotency and retries
 
-The backend does not store inflight submissions and does not retry on its own. Clients that need at-least-once delivery supply a fixed `newOrderClientId` and re-`POST` on transient errors: the chain rejects the second submission with the same coid (silent `Rejected`), and `/api/v1/orders` keyed on `clientOrderId` surfaces the eventually-confirmed state of the first one.
+The backend does not store inflight submissions and does not retry on its own. Clients that need at-least-once delivery supply a fixed `newOrderClientId` and re-`POST` on transient errors: the chain rejects the second submission with the same coid (silent `Rejected`), and `/api/v1/prediction/orders` keyed on `clientOrderId` surfaces the eventually-confirmed state of the first one.
 
 ### Concurrency
 
-Placement against one trading PN is serial at the chain ([PN busy window](#glossary)). The API does not coordinate concurrent submissions across replicas — two `POST /api/v1/order` requests from the same account that land on different API instances are sent to the chain in whatever order the gateway receives them. The losing submission is rejected on-chain with `ERR_NOTE_BUSY`; `BeeDexChainSender` maps that synchronously to `OrderPnBusy` → 429 / -2014 (see [Failure surface](#failure-surface) §2), so the client receives an actionable retry signal on the HTTP response rather than having to detect absence in `/api/v1/orders`.
+Placement against one trading PN is serial at the chain ([PN busy window](#glossary)). The API does not coordinate concurrent submissions across replicas — two `POST /api/v1/prediction/order` requests from the same account that land on different API instances are sent to the chain in whatever order the gateway receives them. The losing submission is rejected on-chain with `ERR_NOTE_BUSY`; `BeeDexChainSender` maps that synchronously to `OrderPnBusy` → 429 / -2014 (see [Failure surface](#failure-surface) §2), so the client receives an actionable retry signal on the HTTP response rather than having to detect absence in `/api/v1/prediction/orders`.
 
-Clients that need higher per-account throughput batch multiple orders into one chain message via `POST /api/v1/batchOrders` — one `placeBatch` call covers many orders under a single `_busy` lock.
+Clients that need higher per-account throughput batch multiple orders into one chain message via `POST /api/v1/prediction/batchOrders` — one `placeBatch` call covers many orders under a single `_busy` lock.
 
-## `DELETE /api/v1/order`
+## `DELETE /api/v1/prediction/order`
 
 The handler runs three phases: request parsing → order resolution (which folds market lookup, status derivation, and ownership into one SELECT) → chain submission. Each phase fails closed with its own error code (see [DELETE error mapping](#error-mapping-1)). The on-chain cancel itself is optimistic in the same sense as POST: `PrivateNote.cancelOrder` returns once PN has forwarded the cancel to `OrderBook.executeBatch` as an internal message — the actual removal from the book and the projection into [`live_orders`](data-schema.md#live_orders) happen asynchronously through the indexer.
 
@@ -264,7 +264,7 @@ DELETE has no body; all named parameters arrive in the query string (the HMAC la
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `marketAddress` | `MarketAddress` | Mandatory. |
+| `predictionMarketAddress` | `MarketAddress` | Mandatory. |
 | `symbol` | `Symbol` | Mandatory. |
 | `orderId` | `String` | Mandatory; parsed as `u64::from_str` in the use case. The on-chain ABI is `uint128`, but the `bee_dex` → `ackinacki-kit` → `serde_json::json!` path rejects values above `u64::MAX` (same `arbitrary_precision` constraint documented in [§clientOrderId generation](#clientorderid-generation)). Out-of-range or non-numeric → `InvalidParameter` → 400 / -1130. |
 
@@ -272,15 +272,15 @@ Mandatory-field absence returns `MissingParameter` → 400.
 
 ### Order resolution
 
-One SELECT joins [`live_orders`](data-schema.md#live_orders) ⨝ [`markets`](data-schema.md#markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes) and applies five predicates at once:
+One SELECT joins [`live_orders`](data-schema.md#live_orders) ⨝ [`markets`](data-schema.md#prediction-markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes) and applies five predicates at once:
 
 - `markets.last_reconciled_at IS NOT NULL` — same visibility gate as POST.
-- `markets.pmp_address = :marketAddress` AND `market_outcomes.symbol = :symbol`. The `pmp_address` column is the SQL spelling of the public `marketAddress` field; the alias dates from the contract-level naming.
+- `markets.pmp_address = :predictionMarketAddress` AND `market_outcomes.symbol = :symbol`. The `pmp_address` column is the SQL spelling of the public `predictionMarketAddress` field; the alias dates from the contract-level naming.
 - `live_orders.order_id = :orderId` AND `live_orders.status = 'OPEN'`.
 - `live_orders.owner_pn_address = :pn_address` — pins the caller as the owner of the row.
-- `live_orders.amount_remaining > 0` — same belt-and-suspenders predicate the `/api/v1/orders` read path applies to OPEN rows. A row could in principle linger as `status = 'OPEN'` with `amount_remaining = 0` in the brief window before `apply_order_filled` flips it to `FILLED`; the gate keeps that transient slice invisible to cancel.
+- `live_orders.amount_remaining > 0` — same belt-and-suspenders predicate the `/api/v1/prediction/orders` read path applies to OPEN rows. A row could in principle linger as `status = 'OPEN'` with `amount_remaining = 0` in the brief window before `apply_order_filled` flips it to `FILLED`; the gate keeps that transient slice invisible to cancel.
 
-A miss surfaces as `UnknownOrder` → 404 / -2011 with **no distinction** between "order does not exist", "order exists but belongs to another account", "order is not OPEN anymore", or "marketAddress/symbol does not match the order's actual market". This is deliberate: differentiating those cases would leak the existence (and account binding) of orders the caller does not own.
+A miss surfaces as `UnknownOrder` → 404 / -2011 with **no distinction** between "order does not exist", "order exists but belongs to another account", "order is not OPEN anymore", or "predictionMarketAddress/symbol does not match the order's actual market". This is deliberate: differentiating those cases would leak the existence (and account binding) of orders the caller does not own.
 
 The same row supplies every value the chain submission and the response need:
 
@@ -322,9 +322,9 @@ A successful submission returns the four-field body from [api-spec §Cancel Orde
 | `transactTime` | `now_pair()` captured once at the start of the handler. |
 | `status` | Always `"PENDING_CANCEL"` — `PrivateNote.cancelOrder` has accepted the request and forwarded to OrderBook, but the order has **not been removed from the book yet**. `OrderBook` will emit `OrderCancelled` once it dequeues the entry, and the indexer will flip [`live_orders.status`](data-schema.md#live_orders) to `CANCELLED` then. |
 
-The client correlates by `orderId` against `/api/v1/orders` (the stored status flips to `CANCELED`, or to `FILLED` if matching raced the cancel).
+The client correlates by `orderId` against `/api/v1/prediction/orders` (the stored status flips to `CANCELED`, or to `FILLED` if matching raced the cancel).
 
-`PENDING_CANCEL` is listed in [api-spec §Order Status](../api-spec.md#order-status); it is the only status `DELETE /api/v1/order` returns on success. Strictly additive — `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` still arrive through `/api/v1/orders` and existing client switches keep working.
+`PENDING_CANCEL` is listed in [api-spec §Order Status](../api-spec.md#order-status); it is the only status `DELETE /api/v1/prediction/order` returns on success. Strictly additive — `NEW`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`/`REJECTED` still arrive through `/api/v1/prediction/orders` and existing client switches keep working.
 
 ### Failure surface
 
@@ -344,7 +344,7 @@ Three failure classes — two synchronous, one async — same shape as POST.
    - **Owner mismatch** — `_doCancel` silently no-ops if `o.depositHash` does not match the caller's. The pre-submit ownership lookup makes this case unreachable under normal operation; it remains possible only under read-model corruption.
    - **Queue overflow** — `OrderBook.Rejected` fires; the indexer records the raw event but does not touch `live_orders`. The order stays `OPEN`.
 
-   An HTTP 200 `PENDING_CANCEL` is therefore not a guarantee that the cancel will land — it confirms only that `PrivateNote.cancelOrder` accepted the request. `PENDING_CANCEL` is the DELETE response token only; it is never persisted to `live_orders.status`, so polling `/api/v1/orders` continues to report `NEW` / `PARTIALLY_FILLED` until the indexer applies `OrderCancelled` or `OrderFilled` and flips the stored status to `CANCELED` or `FILLED`. Clients detect class-3 outcomes by watching for that flip on the `orderId` within a reasonable window.
+   An HTTP 200 `PENDING_CANCEL` is therefore not a guarantee that the cancel will land — it confirms only that `PrivateNote.cancelOrder` accepted the request. `PENDING_CANCEL` is the DELETE response token only; it is never persisted to `live_orders.status`, so polling `/api/v1/prediction/orders` continues to report `NEW` / `PARTIALLY_FILLED` until the indexer applies `OrderCancelled` or `OrderFilled` and flips the stored status to `CANCELED` or `FILLED`. Clients detect class-3 outcomes by watching for that flip on the `orderId` within a reasonable window.
 
 Transport-level failures (gateway drop, decode error) collapse to `Unexpected` → 500 / -1000 with the raw `AppError` logged at `error`, same as POST.
 
@@ -357,7 +357,7 @@ Transport-level failures (gateway drop, decode error) collapse to `Unexpected` �
 | Mandatory query field missing | `MissingParameter` | 400 |
 | `orderId` not numeric or overflows u64 | `InvalidParameter` | 400 |
 | Reconciled market with NULL `oracle_list_hash` | `MarketInconsistent` | 503 |
-| `(marketAddress, symbol, orderId)` does not resolve to an OPEN order owned by the caller (covers unknown order, wrong owner, wrong market, already closed) | `UnknownOrder` | 404 |
+| `(predictionMarketAddress, symbol, orderId)` does not resolve to an OPEN order owned by the caller (covers unknown order, wrong owner, wrong market, already closed) | `UnknownOrder` | 404 |
 | Resolved market `status != TRADING` | `OrderValidationFailed` | 400 |
 | Chain `ERR_NOTE_BUSY` (per-PN serial; another op still in flight) | `OrderPnBusy` | 429 |
 | Handler exceeded `ServerSection.request_timeout_ms` | `RequestTimeout` | 504 |
@@ -388,13 +388,13 @@ The backend stores no inflight cancel state and does not retry on its own. Dupli
 
 Cancellation contends for the same per-PN `_busy` lock as placement — see [§Concurrency for POST /order](#concurrency). A DELETE that races a POST (or another DELETE) from the same account surfaces as `OrderPnBusy` → 429 / -2014 with the same retry semantics.
 
-## `POST /api/v1/batchOrders`
+## `POST /api/v1/prediction/batchOrders`
 
-The handler runs three phases: request parsing → market/outcome resolution and per-item input validation → chain submission. Layout mirrors `POST /api/v1/order`: the per-item validation chain is the same and lives in one shared helper. Each phase fails closed with its own error code (see [Batch error mapping](#error-mapping-2)).
+The handler runs three phases: request parsing → market/outcome resolution and per-item input validation → chain submission. Layout mirrors `POST /api/v1/prediction/order`: the per-item validation chain is the same and lives in one shared helper. Each phase fails closed with its own error code (see [Batch error mapping](#error-mapping-2)).
 
 ### Authorization
 
-Same hoop as `POST /api/v1/order`. The handler calls `require_auth(depot, Permission::Trade)` and reads the resolved [`TradingPn`](auth.md#trading-private-note) out of `AuthContext`. All items in the batch are signed by the same trading-PN keypair — the chain ABI accepts only one external message and the busy lock is per-PN regardless of batch size.
+Same hoop as `POST /api/v1/prediction/order`. The handler calls `require_auth(depot, Permission::Trade)` and reads the resolved [`TradingPn`](auth.md#trading-private-note) out of `AuthContext`. All items in the batch are signed by the same trading-PN keypair — the chain ABI accepts only one external message and the busy lock is per-PN regardless of batch size.
 
 ### Request parsing
 
@@ -404,15 +404,15 @@ Top-level body fields:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `marketAddress` | `MarketAddress` | Mandatory. |
+| `predictionMarketAddress` | `MarketAddress` | Mandatory. |
 | `symbol` | `Symbol` | Mandatory. |
-| `orders` | `Vec<BatchOrderInputItem>` | Mandatory and non-empty. Maximum length equals the configured `chain.max_batch_size` (advertised as `maxBatchSize` in `/api/v1/markets`). |
+| `orders` | `Vec<BatchOrderInputItem>` | Mandatory and non-empty. Maximum length equals the configured `chain.max_batch_size` (advertised as `maxBatchSize` in `/api/v1/prediction/markets`). |
 
-Each `BatchOrderInputItem` is shaped the same as the body of `POST /api/v1/order` minus `marketAddress` / `symbol` (the chain ABI takes those once per batch, not per item). An unknown enum value (`side`, `type`, `timeInForce`) on any item returns `InvalidParameter` → 400.
+Each `BatchOrderInputItem` is shaped the same as the body of `POST /api/v1/prediction/order` minus `predictionMarketAddress` / `symbol` (the chain ABI takes those once per batch, not per item). An unknown enum value (`side`, `type`, `timeInForce`) on any item returns `InvalidParameter` → 400.
 
 ### Market and outcome resolution
 
-`(marketAddress, symbol)` is resolved once via the same `resolve_for_new_order` join `POST /api/v1/order` uses, including the visibility gate (`m.last_reconciled_at IS NOT NULL`) and the [Status derivation](read-api.md#status-derivation) clause. A miss surfaces as `InvalidMarketOrSymbol` → 404. Placement is permitted only when `status == TRADING`; any other phase rejects with `OrderValidationFailed` → 400. A reconciled market with NULL/blank `oracle_list_hash` surfaces as `MarketInconsistent` → 503 — same fail-closed invariant as POST.
+`(predictionMarketAddress, symbol)` is resolved once via the same `resolve_for_new_order` join `POST /api/v1/prediction/order` uses, including the visibility gate (`m.last_reconciled_at IS NOT NULL`) and the [Status derivation](read-api.md#status-derivation) clause. A miss surfaces as `InvalidMarketOrSymbol` → 404. Placement is permitted only when `status == TRADING`; any other phase rejects with `OrderValidationFailed` → 400. A reconciled market with NULL/blank `oracle_list_hash` surfaces as `MarketInconsistent` → 503 — same fail-closed invariant as POST.
 
 The resolved row supplies the chain-level fields once for the whole batch:
 
@@ -428,17 +428,17 @@ The resolved row supplies the chain-level fields once for the whole batch:
 
 ### Batch size cap
 
-The cap is the api config knob `chain.max_batch_size` — the same value `/api/v1/markets` advertises as `maxBatchSize`, so the promise and the enforcement share one source. It manually mirrors the chain's compiled-in per-side `MAX_BATCH_SIZE` (`contracts/dex/modifiers/modifiers.sol`, 10 today; the chain exposes no getter for it) and must not exceed it. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
+The cap is the api config knob `chain.max_batch_size` — the same value `/api/v1/prediction/markets` advertises as `maxBatchSize`, so the promise and the enforcement share one source. It manually mirrors the chain's compiled-in per-side `MAX_BATCH_SIZE` (`contracts/dex/modifiers/modifiers.sol`, 10 today; the chain exposes no getter for it) and must not exceed it. An empty `orders[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
 
 ### Per-item input validation
 
-Per-item validation is identical to `POST /api/v1/order` — same precision / tick / step / notional / coid rules from [api-spec §Validation Rules](../api-spec.md#validation-rules). The shared helper `validate_and_encode_order_item` in `crates/application/src/lib.rs` runs the chain for both endpoints, so a future tightening (e.g. tighter step-size handling) touches one place. The helper also encodes the chain-shaped fields (`outcome_id`, `is_buy`, `price_raw`, `amount_raw`, `flags`, `client_order_id`) the dispatch needs.
+Per-item validation is identical to `POST /api/v1/prediction/order` — same precision / tick / step / notional / coid rules from [api-spec §Validation Rules](../api-spec.md#validation-rules). The shared helper `validate_and_encode_order_item` in `crates/application/src/lib.rs` runs the chain for both endpoints, so a future tightening (e.g. tighter step-size handling) touches one place. The helper also encodes the chain-shaped fields (`outcome_id`, `is_buy`, `price_raw`, `amount_raw`, `flags`, `client_order_id`) the dispatch needs.
 
 The loop short-circuits on the first item-level failure: the entire request rejects with the failing item's error code; no chain message is sent. This matches the chain's atomic `placeBatch` semantics — partial submission is not a possible outcome — and avoids spending the per-PN busy window on a doomed batch. The response carries one error object regardless of how many items would have failed; the client correlates by re-reading its own request payload.
 
 ### Flags
 
-Same encoding table as `POST /api/v1/order` — see [Flags](#flags). The chain's `OrderBookOrder.flags` field is per-item, so a single batch can mix LIMIT and MARKET orders freely as long as each item's combination is valid.
+Same encoding table as `POST /api/v1/prediction/order` — see [Flags](#flags). The chain's `OrderBookOrder.flags` field is per-item, so a single batch can mix LIMIT and MARKET orders freely as long as each item's combination is valid.
 
 ### `clientOrderId` generation
 
@@ -460,7 +460,7 @@ placeBatch(
 )
 ```
 
-Per-item `minAmount` and `epochId` stay at 0 — same constants as `placeOrder` (neither is exposed by api-spec and neither has a per-order meaning in this version of the public API). `cancelIds` is the cancellation side of the chain's atomic batch — `placeBatch` is the single batch entry point and processes both sides in one `OrderBook.executeBatch` dispatch. `POST /api/v1/batchOrders` is placement-only and always sends `cancelIds = []`; the populated side belongs to `DELETE /api/v1/batchOrders`.
+Per-item `minAmount` and `epochId` stay at 0 — same constants as `placeOrder` (neither is exposed by api-spec and neither has a per-order meaning in this version of the public API). `cancelIds` is the cancellation side of the chain's atomic batch — `placeBatch` is the single batch entry point and processes both sides in one `OrderBook.executeBatch` dispatch. `POST /api/v1/prediction/batchOrders` is placement-only and always sends `cancelIds = []`; the populated side belongs to `DELETE /api/v1/prediction/batchOrders`.
 
 Sender boundary: the existing `ChainOrderSender` trait grows a third method `async fn submit_batch_order(&self, payload: NewBatchOrderPayload) -> Result<(), DomainError>`. The production `BeeDexChainSender` impl wraps `bee_dex::Dex::place_batch`, reuses `build_signer` for pubkey/seckey re-encoding and `classify_chain_outcome` for the timeout / exit-code translation. A dedicated `chain.place_batch_timeout_ms` config knob bounds the per-call wait; `ApiConfig::validate` pins `server.request_timeout_ms > chain.place_batch_timeout_ms` at boot so the HTTP timeout cannot fire while a batch submission is still in flight.
 
@@ -468,19 +468,19 @@ Sender boundary: the existing `ChainOrderSender` trait grows a third method `asy
 
 ### Response
 
-One `PENDING_NEW` envelope per accepted item, returned as a flat array in request order (see [api-spec §New Batch Orders](../api-spec.md#new-batch-orders)). The shape is symmetric with `POST /api/v1/order`:
+One `PENDING_NEW` envelope per accepted item, returned as a flat array in request order (see [api-spec §New Batch Orders](../api-spec.md#new-batch-orders)). The shape is symmetric with `POST /api/v1/prediction/order`:
 
 | Field | Source |
 | --- | --- |
 | `clientOrderId` | Per-item: caller-supplied `newOrderClientId`, or the backend-generated value. |
 | `transactTime` | `now_pair()` captured once at the start of the handler, repeated for every item — one chain submission, one moment of acceptance. |
-| `status` | Always `"PENDING_NEW"` — same rationale as the single-order path; the chain-assigned `orderId` arrives later through `/api/v1/openOrders`. |
+| `status` | Always `"PENDING_NEW"` — same rationale as the single-order path; the chain-assigned `orderId` arrives later through `/api/v1/prediction/openOrders`. |
 
 Why minimal: the same argument as POST /order applies item by item — every other field a fully-populated order would carry is already in the request the client just sent, and the only fields the Binance-style shape adds (`orderId`, `executedQty`) cannot be filled honestly under optimistic submission.
 
 ### Failure surface
 
-Same three-class split as `POST /api/v1/order`:
+Same three-class split as `POST /api/v1/prediction/order`:
 
 1. **Pre-submit, surfaced synchronously** — request shape (top-level and per-item), market/outcome resolution, batch size cap, per-item validation. First failure rejects the whole request; mapped per [Batch error mapping](#error-mapping-2).
 
@@ -526,19 +526,19 @@ Use case constructors take trait objects; `services/api/tests/create_batch_order
 
 ### Idempotency and retries
 
-The backend stores no inflight batch state and does not retry on its own. Clients that need at-least-once delivery supply explicit `newOrderClientId` values for each item and re-`POST` on transient errors: the chain rejects any item whose coid is still live as `ERR_INVALID_PARAMS`, reverting the whole batch; once the original batch is no longer in flight, `/api/v1/openOrders` keyed on `clientOrderId` surfaces the eventually-confirmed state.
+The backend stores no inflight batch state and does not retry on its own. Clients that need at-least-once delivery supply explicit `newOrderClientId` values for each item and re-`POST` on transient errors: the chain rejects any item whose coid is still live as `ERR_INVALID_PARAMS`, reverting the whole batch; once the original batch is no longer in flight, `/api/v1/prediction/openOrders` keyed on `clientOrderId` surfaces the eventually-confirmed state.
 
 ### Concurrency
 
 Same per-PN serial constraint as the single-order path — `placeBatch` takes the same `_busy` lock and holds it until `onBatchComplete` arrives. A POST `/batchOrders` racing any other placement or cancellation from the same account surfaces as `OrderPnBusy` → 429 / -2014, with the same retry semantics. Submitting an N-item batch instead of N sequential POSTs is the canonical way to get higher per-account placement throughput — one chain message, one `_busy` lock, one `onBatchComplete` callback.
 
-## `DELETE /api/v1/batchOrders`
+## `DELETE /api/v1/prediction/batchOrders`
 
-The handler runs three phases: request parsing → market/outcome resolution and bulk order resolution → chain submission. Layout mirrors `DELETE /api/v1/order` lifted from one order to N, with the same batch-level resolution gate `POST /api/v1/batchOrders` uses. Each phase fails closed with its own error code (see [Batch cancel error mapping](#error-mapping-3)). The on-chain cancel is optimistic in the same sense as the single-order DELETE: the chain has no standalone batch-cancel method — `PrivateNote.placeBatch` is the atomic batch entry point, and this endpoint dispatches it with an empty placements side (`orders = []`, `cancelIds` populated), forwarding one `OrderBook.executeBatch` message; per-order removal from the book and the projection into [`live_orders`](data-schema.md#live_orders) happen asynchronously through the indexer.
+The handler runs three phases: request parsing → market/outcome resolution and bulk order resolution → chain submission. Layout mirrors `DELETE /api/v1/prediction/order` lifted from one order to N, with the same batch-level resolution gate `POST /api/v1/prediction/batchOrders` uses. Each phase fails closed with its own error code (see [Batch cancel error mapping](#error-mapping-3)). The on-chain cancel is optimistic in the same sense as the single-order DELETE: the chain has no standalone batch-cancel method — `PrivateNote.placeBatch` is the atomic batch entry point, and this endpoint dispatches it with an empty placements side (`orders = []`, `cancelIds` populated), forwarding one `OrderBook.executeBatch` message; per-order removal from the book and the projection into [`live_orders`](data-schema.md#live_orders) happen asynchronously through the indexer.
 
 ### Authorization
 
-Same hoop as `POST /api/v1/batchOrders`. The handler calls `require_auth(depot, Permission::Trade)` and reads the resolved [`TradingPn`](auth.md#trading-private-note) out of `AuthContext`. The whole batch is signed by one trading-PN keypair — the chain ABI takes one external message and the busy lock is per-PN regardless of batch size.
+Same hoop as `POST /api/v1/prediction/batchOrders`. The handler calls `require_auth(depot, Permission::Trade)` and reads the resolved [`TradingPn`](auth.md#trading-private-note) out of `AuthContext`. The whole batch is signed by one trading-PN keypair — the chain ABI takes one external message and the busy lock is per-PN regardless of batch size.
 
 ### Request parsing
 
@@ -548,7 +548,7 @@ Top-level body fields:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `marketAddress` | `MarketAddress` | Mandatory. |
+| `predictionMarketAddress` | `MarketAddress` | Mandatory. |
 | `symbol` | `Symbol` | Mandatory. |
 | `orderIds` | `Vec<String>` | Mandatory and non-empty. Maximum length equals the configured `chain.max_batch_size`. Each element is parsed as `u64::from_str` in the handler (`build_cancel_batch_orders_input`); out-of-range or non-numeric → `InvalidParameter` → 400 / -1130 — same `arbitrary_precision` constraint documented for the single-order path. A blank or whitespace-only element is treated as an absent slot and surfaces as `MissingParameter` → 400 / -1102, matching the single-order DELETE's handling of a blank `orderId`. |
 
@@ -556,7 +556,7 @@ Intra-batch duplicate `orderId` values are rejected with `InvalidParameter` → 
 
 ### Market and outcome resolution
 
-`(marketAddress, symbol)` is resolved once via the same `resolve_for_new_order` join the placement paths use, including the visibility gate (`m.last_reconciled_at IS NOT NULL`) and the [Status derivation](read-api.md#status-derivation) clause. A miss surfaces as `InvalidMarketOrSymbol` → 404. Cancellation is permitted only when `status == TRADING`; any other phase rejects with `OrderValidationFailed` → 400 — same gate as the single-order DELETE. A reconciled market with NULL/blank `oracle_list_hash` surfaces as `MarketInconsistent` → 503.
+`(predictionMarketAddress, symbol)` is resolved once via the same `resolve_for_new_order` join the placement paths use, including the visibility gate (`m.last_reconciled_at IS NOT NULL`) and the [Status derivation](read-api.md#status-derivation) clause. A miss surfaces as `InvalidMarketOrSymbol` → 404. Cancellation is permitted only when `status == TRADING`; any other phase rejects with `OrderValidationFailed` → 400 — same gate as the single-order DELETE. A reconciled market with NULL/blank `oracle_list_hash` surfaces as `MarketInconsistent` → 503.
 
 The resolved row supplies the chain-level fields once for the whole batch:
 
@@ -568,7 +568,7 @@ The resolved row supplies the chain-level fields once for the whole batch:
 
 ### Batch size cap
 
-Sourced from the api config knob `chain.max_batch_size`, same as `POST /api/v1/batchOrders`. The chain's own `MAX_BATCH_SIZE` (10 today, applied independently to the `orders` and `cancelIds` sides of `placeBatch`) is the ceiling the configured value must not exceed; serving `/api/v1/markets` from the same knob keeps the public surface aligned with the enforcement. An empty `orderIds[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
+Sourced from the api config knob `chain.max_batch_size`, same as `POST /api/v1/prediction/batchOrders`. The chain's own `MAX_BATCH_SIZE` (10 today, applied independently to the `orders` and `cancelIds` sides of `placeBatch`) is the ceiling the configured value must not exceed; serving `/api/v1/prediction/markets` from the same knob keeps the public surface aligned with the enforcement. An empty `orderIds[]` or one whose length exceeds the cap surfaces as `InvalidParameter` → 400 / -1130 before the chain submission.
 
 ### Order resolution
 
@@ -577,7 +577,7 @@ One SELECT joins [`live_orders`](data-schema.md#live_orders) against `markets �
 - Scoping to the resolved outcome's book goes through the `markets ⨝ live_orders` join on `orderbook_address`, mirrored on the single-cancel path.
 - `live_orders.owner_pn_address = :pn_address` — pins the caller as the owner of every row.
 - `live_orders.order_id` filtered against the input list via `lo.order_id = ANY($3::text[]::numeric[])` — the cast happens on the bind-side array (once at planning), so the indexed `numeric` column is compared without a per-row functional expression and the `(orderbook_address, order_id)` primary key remains usable for the per-id lookup. The SELECT projects `lo.order_id::text` for the application layer to parse back into `u64` and key the resolution `HashMap` on the natural chain identity — no positional `bind_idx` is round-tripped through the wire.
-- `live_orders.status = 'OPEN'` AND `live_orders.amount_remaining > 0` — same belt-and-suspenders pair as `/api/v1/openOrders` and single-order DELETE; keeps the transient `OPEN`/`amount_remaining = 0` slice invisible to cancel.
+- `live_orders.status = 'OPEN'` AND `live_orders.amount_remaining > 0` — same belt-and-suspenders pair as `/api/v1/prediction/openOrders` and single-order DELETE; keeps the transient `OPEN`/`amount_remaining = 0` slice invisible to cancel.
 
 The SELECT also returns each row's `live_orders.client_order_id` (echoed in the response). The use case asserts `resolution.orders.len() < input.order_ids.len()` is false; any shortfall — unknown id, wrong owner, wrong book, already closed — surfaces as `UnknownOrder` → 404 / -2011 for the whole batch, with the same deliberate opacity as single-order DELETE (differentiating those cases would leak order existence and account binding). Validation is atomic: no chain message is sent if any item is unresolved.
 
@@ -605,7 +605,7 @@ Sender boundary: `ChainOrderSender::cancel_batch_order(&self, payload: CancelBat
 
 ### Response
 
-One `PENDING_CANCEL` envelope per accepted item, returned as a flat array in request order (see [api-spec §Cancel Batch Orders](../api-spec.md#cancel-batch-orders)). Shape is symmetric with `DELETE /api/v1/order`:
+One `PENDING_CANCEL` envelope per accepted item, returned as a flat array in request order (see [api-spec §Cancel Batch Orders](../api-spec.md#cancel-batch-orders)). Shape is symmetric with `DELETE /api/v1/prediction/order`:
 
 | Field | Source |
 | --- | --- |
@@ -616,7 +616,7 @@ One `PENDING_CANCEL` envelope per accepted item, returned as a flat array in req
 
 ### Failure surface
 
-Three failure classes — two synchronous, one async — same split as `DELETE /api/v1/order` and `POST /api/v1/batchOrders`.
+Three failure classes — two synchronous, one async — same split as `DELETE /api/v1/prediction/order` and `POST /api/v1/prediction/batchOrders`.
 
 1. **Pre-submit, surfaced synchronously** — request shape, market/outcome resolution, batch size cap, intra-batch duplicate check, bulk order resolution. First failure rejects the whole request; no chain message is sent. Mapped per [Batch cancel error mapping](#error-mapping-3).
 
@@ -628,7 +628,7 @@ Three failure classes — two synchronous, one async — same split as `DELETE /
    | `161` `ERR_BATCH_TOO_LARGE` / `162` `ERR_EMPTY_BATCH` | chain-side defence-in-depth — reaching either code means the configured `chain.max_batch_size` drifted above the on-chain ceiling, not a client bug | `MarketInconsistent` → 503 / -1500 |
    | any other `tvm_exit` code | unmapped chain code | `Unexpected` → 500 / -1000, logged at `error` for ops triage |
 
-3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancels from its internal queue in a later transaction. The single-order DELETE's three async outcomes (race with fill/earlier cancel, owner mismatch under read-model corruption, queue overflow) extend to the batch case **per order**: the batch as a whole can have some ids land as `CANCELED`, some as `FILLED` (matching raced the cancel), and — under queue overflow — some remain `OPEN`. The indexer projects each outcome independently into `live_orders` (stored status `CANCELLED` / `FILLED`); clients reconcile by polling `/api/v1/orders`, which surfaces each id with the public-spec status `CANCELED` or `FILLED`.
+3. **OrderBook chain-side, surfaced asynchronously** — `OrderBook.executeBatch` processes the cancels from its internal queue in a later transaction. The single-order DELETE's three async outcomes (race with fill/earlier cancel, owner mismatch under read-model corruption, queue overflow) extend to the batch case **per order**: the batch as a whole can have some ids land as `CANCELED`, some as `FILLED` (matching raced the cancel), and — under queue overflow — some remain `OPEN`. The indexer projects each outcome independently into `live_orders` (stored status `CANCELLED` / `FILLED`); clients reconcile by polling `/api/v1/prediction/orders`, which surfaces each id with the public-spec status `CANCELED` or `FILLED`.
 
    An HTTP 200 `PENDING_CANCEL` array is therefore not a guarantee that every cancel will land — it confirms only that `PrivateNote.placeBatch` accepted the request.
 
@@ -664,7 +664,7 @@ Use case constructors take trait objects; `services/api/tests/cancel_batch_order
 
 ### Idempotency and retries
 
-The backend stores no inflight cancel state and does not retry on its own. Duplicate `DELETE /api/v1/batchOrders` calls on overlapping `orderIds` sets are safe at the chain level by the same argument as single-order DELETE applied per id:
+The backend stores no inflight cancel state and does not retry on its own. Duplicate `DELETE /api/v1/prediction/batchOrders` calls on overlapping `orderIds` sets are safe at the chain level by the same argument as single-order DELETE applied per id:
 
 - If the first batch is still in flight at PN, the second hits `ERR_NOTE_BUSY` → 429 (retry).
 - If the first batch already cleared PN but the indexer has not flipped `live_orders` yet, the second passes pre-submit, PN forwards a second `executeBatch`, OrderBook's per-id `_doCancel` silently no-ops on ids already gone, and the indexer state remains consistent.
@@ -674,13 +674,13 @@ The backend stores no inflight cancel state and does not retry on its own. Dupli
 
 Same per-PN serial constraint as the single-order paths and the placement batch — the cancel-only `placeBatch` takes the `_busy` lock and holds it until `onBatchComplete` arrives. A DELETE `/batchOrders` racing any other placement or cancellation from the same account surfaces as `OrderPnBusy` → 429 / -2014. Submitting one batch instead of N sequential DELETEs is the canonical way to cancel multiple orders without per-call back-pressure today — one chain message, one `_busy` lock, one `onBatchComplete` callback.
 
-## `DELETE /api/v1/openOrders`
+## `DELETE /api/v1/prediction/openOrders`
 
 See [api-spec §Cancel All Open Orders On Symbol](../api-spec.md#cancel-all-open-orders-on-symbol) for the public contract.
 
 _Implementation tech spec to be filled in._
 
-## `POST /api/v1/buyFullSet`
+## `POST /api/v1/prediction/buyFullSet`
 
 Buys a full set of outcome tokens for one market by depositing `collateral` of the market's quote asset into the PMP. The chain entry point is `PrivateNote.splitFullSet`; on a market sitting in `AWAITING_FREEZE` the first successful call also activates the OrderBook, after which it stays active for all subsequent callers. From the caller's standpoint the request and response are identical to any later call against the same market.
 
@@ -694,14 +694,14 @@ Same hoop as the order endpoints. The handler calls `require_auth(depot, Permiss
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `marketAddress` | `MarketAddress` | Mandatory. |
+| `predictionMarketAddress` | `MarketAddress` | Mandatory. |
 | `collateral` | `String` | Mandatory; decimal. Kept as a string until quote-asset precision validation. |
 
 Mandatory-field absence (the field missing or trimming to the empty string) returns `MissingParameter` → 400.
 
 ### Market resolution
 
-Resolve `marketAddress` via [`markets`](data-schema.md#markets), filtered by `m.last_reconciled_at IS NOT NULL` — same visibility gate as [`/api/v1/markets`](read-api.md#visibility-filter). No `market_outcomes` join: `splitFullSet` operates at the market level (collateral → one outcome token of every outcome), so there is no per-outcome resolution to perform. A miss surfaces as `InvalidMarketOrSymbol` → 404 / -1121.
+Resolve `predictionMarketAddress` via [`markets`](data-schema.md#prediction-markets), filtered by `m.last_reconciled_at IS NOT NULL` — same visibility gate as [`/api/v1/prediction/markets`](read-api.md#visibility-filter). No `market_outcomes` join: `splitFullSet` operates at the market level (collateral → one outcome token of every outcome), so there is no per-outcome resolution to perform. A miss surfaces as `InvalidMarketOrSymbol` → 404 / -1121.
 
 Derive `status` from the row and the request `now` using the logic in [read-api.md §Status derivation](read-api.md#status-derivation). Per [api-spec §Buy Full Set](../api-spec.md#buy-full-set), the call is permitted only when `status ∈ { AWAITING_FREEZE, TRADING }`; every other phase rejects with `OrderValidationFailed` → 400 / -2010.
 
@@ -761,7 +761,7 @@ A successful submission returns the minimal two-field body from [api-spec §Buy 
 
 | Field | Source |
 | --- | --- |
-| `marketAddress` | Echoed from the request. |
+| `predictionMarketAddress` | Echoed from the request. |
 | `transactTime` | `now_pair()` captured once at the start of the handler. |
 
 Why minimal: the resulting collateral debit and per-outcome credits become visible through [`GET /api/v1/account`](read-api.md) and [`GET /api/v1/account/balances`](read-api.md) once the chain confirms — the synchronous response confirms acceptance only. There is no chain-assigned identifier the response could carry that the caller does not already have.
@@ -784,7 +784,7 @@ Transport-level failures collapse to `Unexpected` → 500 / -1000 with the raw `
 | --- | --- | --- |
 | Auth envelope / unknown api_key / bad signature / timestamp | handled upstream by [auth_hoop](auth.md#authentication) | 401 |
 | Caller lacks `TRADE` permission | `AuthRequired` | 401 |
-| `marketAddress` or `collateral` missing | `MissingParameter` | 400 |
+| `predictionMarketAddress` or `collateral` missing | `MissingParameter` | 400 |
 | `collateral` not positive, exceeds quote-asset precision, non-numeric, or lifted above `u64::MAX` | `InvalidParameter` | 400 |
 | Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
 | Reconciled market with NULL/blank `oracle_list_hash`, or quote `token_type` absent from `ref_tokens` | `MarketInconsistent` | 503 |

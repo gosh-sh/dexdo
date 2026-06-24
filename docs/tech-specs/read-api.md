@@ -12,17 +12,17 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Chain time** — `raw_events.created_at_chain` of the event that produced a state transition. Used for response `time` and `updateTime` so they are stable under indexer backlog.
 
-**Market row** — one row in the `markets` table. It represents one PMP contract and is the main source for `/api/v1/markets`.
+**Market row** — one row in the `markets` table. It represents one PMP contract and is the main source for `/api/v1/prediction/markets`.
 
-**Reconciled market** — a market row with `last_reconciled_at IS NOT NULL`. This means the market reconciler has already read the PMP state and filled the fields required for public responses. `/api/v1/markets` hides markets until this is true.
+**Reconciled market** — a market row with `last_reconciled_at IS NOT NULL`. This means the market reconciler has already read the PMP state and filled the fields required for public responses. `/api/v1/prediction/markets` hides markets until this is true.
 
 **Lifecycle status** — the public market phase returned as `status`: `PENDING`, `UPCOMING`, `STAKING`, `AWAITING_FREEZE`, `TRADING`, `RESOLVING`, `RESOLVED`, `CANCELLED`, or `EXPIRED`. It is computed by the API from the market row and current request time; it is not stored as a separate database column.
 
-**serverTime** — the unix-seconds timestamp captured once at the start of a `/api/v1/markets` request. The API returns it in the response and uses the same value to compute lifecycle status.
+**serverTime** — the unix-seconds timestamp captured once at the start of a `/api/v1/prediction/markets` request. The API returns it in the response and uses the same value to compute lifecycle status.
 
-**Depth** — the `/api/v1/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
+**Depth** — the `/api/v1/prediction/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
 
-**Trade tape** — the `/api/v1/trades` response for one market outcome: a newest-first list of maker↔taker matches built from the append-only `trades` table, not by querying the OrderBook contract during the HTTP request.
+**Trade tape** — the `/api/v1/prediction/trades` response for one market outcome: a newest-first list of maker↔taker matches built from the append-only `trades` table, not by querying the OrderBook contract during the HTTP request.
 
 **DTO** — Data Transfer Object. In this document it means the API response object after the backend has assembled it from database rows, but before it is serialized to JSON and sent to the client.
 
@@ -30,19 +30,19 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 ## Market identity
 
-The backend treats `marketAddress` as the PMP address. `orderBookAddress` is the deterministic address returned by `PMP.getOrderBookAddress()` and is stamped on the first successful reconciler pass — pre-`PoolsFrozen` rows already carry it. The pre-reconcile window between `PMPDeployed` and the first reconciler pass is the only state where the column is legitimately null, and such rows are hidden from the API by the `last_reconciled_at IS NOT NULL` visibility filter. The write-side flow is described in [indexer.md](indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `orderBookAddress` does not by itself imply the book is open.
+The backend treats `predictionMarketAddress` as the PMP address. `predictionOrderBookAddress` is the deterministic address returned by `PMP.getOrderBookAddress()` and is stamped on the first successful reconciler pass — pre-`PoolsFrozen` rows already carry it. The pre-reconcile window between `PMPDeployed` and the first reconciler pass is the only state where the column is legitimately null, and such rows are hidden from the API by the `last_reconciled_at IS NOT NULL` visibility filter. The write-side flow is described in [indexer.md](indexer.md#market-reconciler). Clients MUST use `status` to determine whether the order book is currently available for trading — a non-null `predictionOrderBookAddress` does not by itself imply the book is open.
 
-## `/api/v1/markets`
+## `/api/v1/prediction/markets`
 
 Lifecycle status is not stored as a separate database column. The API computes it for each request from the indexed market row and a single unix-seconds `now` value. The same `now` is returned as `serverTime` and used for status calculation, so one response cannot mix timestamps from both sides of a lifecycle boundary.
 
 ### Visibility filter
 
-The SQL query behind `GET /api/v1/markets` includes `WHERE m.last_reconciled_at IS NOT NULL`. Markets that the indexer has discovered (the `PMPDeployed` event arrived) but not yet reconciled are hidden — clients only see markets the backend can describe fully. See [indexer.md](indexer.md#visibility-gate) for the symmetric write-side rule.
+The SQL query behind `GET /api/v1/prediction/markets` includes `WHERE m.last_reconciled_at IS NOT NULL`. Markets that the indexer has discovered (the `PMPDeployed` event arrived) but not yet reconciled are hidden — clients only see markets the backend can describe fully. See [indexer.md](indexer.md#visibility-gate) for the symmetric write-side rule.
 
 ### Status derivation
 
-Source: a row in [`markets`](data-schema.md#markets) plus the request `now`. Order of checks (terminal events take precedence over time-derived phases):
+Source: a row in [`markets`](data-schema.md#prediction-markets) plus the request `now`. Order of checks (terminal events take precedence over time-derived phases):
 
 1. `cancelled_at IS NOT NULL` OR `is_cancelled` → `CANCELLED`.
 2. `resolved_at IS NOT NULL` → `RESOLVED`.
@@ -115,46 +115,46 @@ The matching write-side rules are in [indexer.md](indexer.md#schema-invariants--
 | --- | --- | --- |
 | Market not found / not yet reconciled | `InvalidMarketOrSymbol` | 404 |
 | Invalid `status` / `sort` enum value | `InvalidParameter` | 400 |
-| Mutually exclusive params (`marketAddress` together with list filters) | `MissingParameter` | 400 |
+| Mutually exclusive params (`predictionMarketAddress` together with list filters) | `MissingParameter` | 400 |
 | Corrupted cursor | `InvalidParameter` (from cursor decode) | 400 |
 | Invariant violation on built DTO | `MarketInconsistent` | 503 |
 
 ## `/api/v1/oracles`
 
-Public discovery endpoint: lists oracles, their event lists, and the events those lists currently offer for market creation. Public contract: [api-spec §Oracles](../api-spec.md#oracles). No authentication — the route is mounted alongside `/api/v1/markets` and `/api/v1/depth`, outside the auth subrouter. The Postgres source is [`oracles`](data-schema.md#oracles) ⨝ [`oracle_event_lists`](data-schema.md#oracle_event_lists) ⨝ [`oracle_events`](data-schema.md#oracle_events); the write side (projectors plus the OracleEventList reconciler) is in [indexer.md](indexer.md). The endpoint never queries the oracle contracts at request time — it reads the indexed discovery read-model.
+Public discovery endpoint: lists oracles, their event lists, and the events those lists currently offer for market creation. Public contract: [api-spec §Oracles](../api-spec.md#oracles). No authentication — the route is mounted alongside `/api/v1/prediction/markets` and `/api/v1/prediction/depth`, outside the auth subrouter. The Postgres source is [`oracles`](data-schema.md#oracles) ⨝ [`oracle_event_lists`](data-schema.md#oracle_event_lists) ⨝ [`oracle_events`](data-schema.md#oracle_events); the write side (projectors plus the OracleEventList reconciler) is in [indexer.md](indexer.md). The endpoint never queries the oracle contracts at request time — it reads the indexed discovery read-model.
 
 The response is grouped oracle → event list → event. Pagination is **by oracle** (`limit` counts oracles); an oracle's full set of event lists and available events is always returned whole — there is no inner pagination in v1.
 
 ### serverTime
 
-`serverTime` is the unix-seconds timestamp captured once at handler entry. The same value is the `now` used for the deadline-availability predicate, so one response cannot mix an availability boundary computed from a different clock reading than the one it reports — the same discipline `/api/v1/markets` applies to lifecycle status.
+`serverTime` is the unix-seconds timestamp captured once at handler entry. The same value is the `now` used for the deadline-availability predicate, so one response cannot mix an availability boundary computed from a different clock reading than the one it reports — the same discipline `/api/v1/prediction/markets` applies to lifecycle status.
 
 ### Available events
 
 An `oracle_events` row is **available** (eligible to surface) when all hold:
 
 - `is_deleted = false` — not soft-deleted. No projector sets this `true` today: the OracleEventList contract emits no delete/cancel event, so the conjunct is currently a no-op kept for forward-compatibility.
-- `deadline > now` — the event can still be used for a new market. The boundary is strict: at `now == deadline` the event is past and hidden, mirroring the `now >= result_end → EXPIRED` boundary in `/api/v1/markets`.
-- `meta_reconciled_at IS NOT NULL` — the OracleEventList reconciler has filled the metadata that lives only in the `_events` getter (`describe`, `trust_addr`, and `outcome_names_jsonb`). This is the symmetric analogue of the `last_reconciled_at IS NOT NULL` visibility gate on `/api/v1/markets`: an event is hidden until the backend can describe it fully, so `outcomes` is never served empty merely because reconciliation has not run. `event_name`, `oracle_fee`, and `deadline` arrive earlier via the `EventAdded` projector, but the reconciler-only fields gate visibility.
+- `deadline > now` — the event can still be used for a new market. The boundary is strict: at `now == deadline` the event is past and hidden, mirroring the `now >= result_end → EXPIRED` boundary in `/api/v1/prediction/markets`.
+- `meta_reconciled_at IS NOT NULL` — the OracleEventList reconciler has filled the metadata that lives only in the `_events` getter (`describe`, `trust_addr`, and `outcome_names_jsonb`). This is the symmetric analogue of the `last_reconciled_at IS NOT NULL` visibility gate on `/api/v1/prediction/markets`: an event is hidden until the backend can describe it fully, so `outcomes` is never served empty merely because reconciliation has not run. `event_name`, `oracle_fee`, and `deadline` arrive earlier via the `EventAdded` projector, but the reconciler-only fields gate visibility.
 
 Event lists with no available events, and oracles with no non-empty event lists, are omitted (see [api-spec §Oracles](../api-spec.md#oracles): "Event lists and oracles with no remaining events are omitted").
 
 ### Filters
 
-All four query filters combine freely — there is no mutually-exclusive mode like `/api/v1/markets`'s `marketAddress`:
+All four query filters combine freely — there is no mutually-exclusive mode like `/api/v1/prediction/markets`'s `predictionMarketAddress`:
 
 | Param | Predicate |
 | --- | --- |
 | `oracleAddress` | `oracles.address = $addr`, applied to oracle selection only. Blank / whitespace is treated as absent. |
 | `eventId` | The client passes the hex form (as rendered in `eventId` responses); the read path converts it to decimal and matches `oracle_events.internal_id_in_eventlist = $decimal::numeric`. With this filter the `events[]` arrays contain only the matching event, and lists / oracles without it are omitted. Un-decodable hex → `InvalidParameter` / 400. |
 | `deadlineBefore` | `oracle_events.deadline < $deadlineBefore` (unix seconds), combined with the availability `deadline > now`, i.e. `now < deadline < deadlineBefore`. Non-numeric → `InvalidParameter` / 400. |
-| `limit` | Oracle page size. Default 50, clamped to `[1, 200]`; non-numeric → `InvalidParameter` / 400. Clamping (rather than rejecting) out-of-range values matches `/api/v1/markets`. |
+| `limit` | Oracle page size. Default 50, clamped to `[1, 200]`; non-numeric → `InvalidParameter` / 400. Clamping (rather than rejecting) out-of-range values matches `/api/v1/prediction/markets`. |
 
 The availability predicate plus the `eventId` / `deadlineBefore` event-level filters form a single shared SQL fragment, bound identically into the Phase-1 `EXISTS` sub-query and the Phase-2 fetch (see [§ Query](#query)). Sharing one fragment is load-bearing: were the two to diverge, Phase 1 could select an oracle whose events Phase 2 then filters away, emitting an empty oracle and inflating `hasMore` — the same class of bug the markets `STATUS_CASE` sharing prevents.
 
 ### Query
 
-Two round-trips, mirroring `/api/v1/markets`'s `fetch_listing` → `fetch_outcomes` shape:
+Two round-trips, mirroring `/api/v1/prediction/markets`'s `fetch_listing` → `fetch_outcomes` shape:
 
 1. **Oracle page.** Select the next page of oracle ids, keyset-ordered by `(name, id)`:
 
@@ -211,18 +211,18 @@ Field mapping (see [api-spec §Oracles](../api-spec.md#oracles) for the public s
 | `eventLists[].index` | `oracle_event_lists.list_index` | |
 | `eventLists[].address` | `oracle_event_lists.address` | |
 | `eventLists[].description` | `oracle_event_lists.description` | `NOT NULL` column written by the deploy projector from the `OracleEventListDeployed` payload (read strictly). The public field is therefore a plain `STRING` (possibly empty, never null). |
-| `events[].eventId` | `oracle_events.internal_id_in_eventlist` → `numeric_to_hex` | The same hex rendering `/api/v1/markets` uses for `event.eventId`, so the value round-trips back into the `eventId` filter. |
+| `events[].eventId` | `oracle_events.internal_id_in_eventlist` → `numeric_to_hex` | The same hex rendering `/api/v1/prediction/markets` uses for `event.eventId`, so the value round-trips back into the `eventId` filter. |
 | `events[].eventName` | `oracle_events.event_name` | `EventAdded` projector. |
 | `events[].description` | `oracle_events.describe` | Reconciler-only; `null` until reconciled to a non-null value. |
 | `events[].oracleFee.asset` | literal `"SHELL"` | The oracle contracts denominate fees in SHELL today; not stored per-event. A second fee asset would turn this into a `ref_tokens` lookup. |
-| `events[].oracleFee.amount` | `oracle_events.oracle_fee::text` | Raw chain integer as a decimal string — **not** scaled, matching the unscaled `fee` rendering in `/api/v1/markets`'s `event.oracles[]`. |
+| `events[].oracleFee.amount` | `oracle_events.oracle_fee::text` | Raw chain integer as a decimal string — **not** scaled, matching the unscaled `fee` rendering in `/api/v1/prediction/markets`'s `event.oracles[]`. |
 | `events[].deadline` | `oracle_events.deadline` | Unix seconds. |
 | `events[].trustAddress` | `oracle_events.trust_addr` | Reconciler-only; the raw `0x…` form returned by the `_events` getter. `null` when absent on chain. |
 | `events[].outcomes` | `oracle_events.outcome_names_jsonb` | Decoded to `[{outcomeId, outcomeName}]` sorted by `outcomeId` ascending. |
 
 `outcome_names_jsonb` holds the on-chain `outcomeNames` map as `{"<outcomeId>": "<name>"}`. The decoder parses each key as `u32`, sorts ascending, and rejects a malformed map (non-object, non-numeric or out-of-`u32` key, non-string value) as `MarketInconsistent` — see fail-closed below. A legitimately empty `{}` (the chain published no labels) yields an empty `outcomes` array, not an error.
 
-The top-level response is returned directly (no envelope), like `/api/v1/markets`: `{ serverTime, nextCursor, hasMore, oracles }`.
+The top-level response is returned directly (no envelope), like `/api/v1/prediction/markets`: `{ serverTime, nextCursor, hasMore, oracles }`.
 
 ### Pagination cursor
 
@@ -246,7 +246,7 @@ After building each oracle DTO the assembled shape is checked; any violation is 
 | Rule | Source |
 | --- | --- |
 | `outcome_names_jsonb` is a JSON object; every key parses to `u32`; every value is a string | The `_events.outcomeNames` map shape; a non-conforming blob is reconciler / ingestion corruption, not a renderable outcome set. |
-| `eventId` renders (numeric → hex conversion succeeds on `internal_id_in_eventlist`) | The same `numeric_to_hex` invariant `/api/v1/markets` enforces on `event.eventId`. |
+| `eventId` renders (numeric → hex conversion succeeds on `internal_id_in_eventlist`) | The same `numeric_to_hex` invariant `/api/v1/prediction/markets` enforces on `event.eventId`. |
 
 ### Error mapping
 
@@ -267,7 +267,7 @@ Three points decided here for the team to confirm:
 
 1. **Confirmed events are not excluded.** The default availability filter is exactly "not deleted, not past deadline" per [api-spec §Oracles](../api-spec.md#oracles); an event with `confirmed_pmp_address IS NOT NULL` (already backing a market) still lists. Rationale: `OracleEventList.confirmEvent(eventId, oracleListHash, tokenType)` is parameterized by `(oracleListHash, tokenType)`, so one event can back more than one market, and the read-model's single `confirmed_pmp_address` column cannot express "fully consumed". If product intent is "hide once used", add `confirmed_pmp_address IS NULL` to the availability predicate.
 2. **`eventLists[].description` is required (resolved).** The api-spec keeps it `STRING`; the fresh path is hardened to match — `OracleEventListDeployed` always carries `description`, the projector reads it strictly, and the column is `NOT NULL`. The value may be an empty string but is never null, so no `STRING | null` softening is needed.
-3. **`oracleFee.amount` is unscaled.** Rendered as the raw chain integer (decimal string), consistent with `/api/v1/markets`. If clients need a human-scaled amount, scale by SHELL's `ref_tokens.decimals` — deferred until a concrete need.
+3. **`oracleFee.amount` is unscaled.** Rendered as the raw chain integer (decimal string), consistent with `/api/v1/prediction/markets`. If clients need a human-scaled amount, scale by SHELL's `ref_tokens.decimals` — deferred until a concrete need.
 
 ### Test coverage
 
@@ -279,13 +279,13 @@ Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
 
 Domain note: the unused `Oracle` / `OracleEventList` / `OracleEvent` structs in `crates/domain/src/lib.rs` predate the api-spec shape and are replaced by the response types this endpoint introduces (`OracleListing` / `OracleEventListEntry` / `OracleEventEntry` / `OracleOutcome` / `OracleFee`).
 
-## `/api/v1/depth`
+## `/api/v1/prediction/depth`
 
 Returns the top of the order book for one outcome of one market: a snapshot of resting bids and asks, the quantity available at each price level, and a sequence number the client uses to tell whether the snapshot has moved since the previous response. The endpoint never queries the contract at request time — every level shown is the projection of indexed `OrderBook` events into a per-order read-model (see [indexer.md](indexer.md#projection--order-events)).
 
 ### Resolution
 
-Resolve `(marketAddress, symbol)` to `(orderbook_address, outcome_id, price_precision, quantity_precision)` via [`markets`](data-schema.md#markets) joined with [`market_outcomes`](data-schema.md#market_outcomes). The market must already be reconciled at least once (`last_reconciled_at IS NOT NULL`); otherwise the endpoint returns `InvalidMarketOrSymbol` → 404. The symbol identifies one of the market's outcomes — depth is per-outcome, not per-market.
+Resolve `(predictionMarketAddress, symbol)` to `(orderbook_address, outcome_id, price_precision, quantity_precision)` via [`markets`](data-schema.md#prediction-markets) joined with [`market_outcomes`](data-schema.md#market_outcomes). The market must already be reconciled at least once (`last_reconciled_at IS NOT NULL`); otherwise the endpoint returns `InvalidMarketOrSymbol` → 404. The symbol identifies one of the market's outcomes — depth is per-outcome, not per-market.
 
 ### Empty-book contract
 
@@ -305,7 +305,7 @@ After the database returns, each side is re-sorted in Rust using exact-numeric `
 
 ### `lastUpdateId`
 
-`max(live_orders.last_chain_order)` over rows for this `(orderbook_address, outcome_id)` pair. `last_chain_order` is the lex-sortable chain-order string (`msg_chain_order` from the GraphQL gateway) of the most recent event that touched the row; the public `lastUpdateId` is therefore a STRING, not an integer (see [api-spec.md §Order Book](../api-spec.md#order-book)). The per-outcome scope is intentional: a single OrderBook serves multiple outcomes, and a per-orderbook cursor would let a quiet outcome inherit activity from sibling outcomes.
+`max(live_orders.last_chain_order)` over rows for this `(orderbook_address, outcome_id)` pair. `last_chain_order` is the lex-sortable chain-order string (`msg_chain_order` from the GraphQL gateway) of the most recent event that touched the row; the public `lastUpdateId` is therefore a STRING, not an integer (see [api-spec.md §Order Book](../api-spec.md#prediction-order-book)). The per-outcome scope is intentional: a single OrderBook serves multiple outcomes, and a per-orderbook cursor would let a quiet outcome inherit activity from sibling outcomes.
 
 Empty string means no OrderBook event has touched this pair yet. The value never lex-decreases between successive snapshots — `last_chain_order` is updated via `greatest(existing, new)` on the write side, and the reproject loop applies events in `chain_order` so the natural arrival order is already monotonic (see [indexer.md](indexer.md#projection--order-events)).
 
@@ -314,7 +314,7 @@ Empty string means no OrderBook event has touched this pair yet. The value never
 1. `bids` sorted by price descending; `asks` ascending. Comparison is exact-numeric.
 2. Each price level surfaces as one `[price, quantity]` entry. Quantity is the sum across every resting order at that price.
 3. `lastUpdateId` is scoped to `(orderbook_address, outcome_id)`. It is an empty string when no OrderBook event has touched this pair yet, and never lex-decreases between successive snapshots.
-4. A non-null `orderBookAddress` on the underlying market is necessary for non-empty depth but not sufficient — orders only land after the `PoolsFrozen` event is observed and clients start posting.
+4. A non-null `predictionOrderBookAddress` on the underlying market is necessary for non-empty depth but not sufficient — orders only land after the `PoolsFrozen` event is observed and clients start posting.
 
 ### Error mapping
 
@@ -322,16 +322,16 @@ Empty string means no OrderBook event has touched this pair yet. The value never
 | --- | --- | --- |
 | Market unknown or pre-reconcile | `InvalidMarketOrSymbol` | 404 |
 | Reconciled market with NULL/blank `orderbook_address` | `MarketInconsistent` | 503 |
-| Missing `marketAddress` or `symbol` | `MissingParameter` | 400 |
+| Missing `predictionMarketAddress` or `symbol` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
 
-## `/api/v1/trades`
+## `/api/v1/prediction/trades`
 
 Returns the most recent public trades for one outcome of one market: a newest-first tape of maker↔taker matches, each carrying price, size, quote notional, direction, and chain time. The endpoint never queries the contract at request time — every trade shown is the projection of an indexed `OrderBook.OrderFilled` event into the append-only [`trades`](data-schema.md#trades) read-model (write side in [indexer.md](indexer.md#projection--public-trades)). It is public (`NONE`) and unaffected by market lifecycle status: terminal markets (`RESOLVED` / `CANCELLED` / `EXPIRED`) still serve their tape so history stays readable after the book closes.
 
 ### Resolution
 
-Resolve `(marketAddress, symbol)` to `(orderbook_address, outcome_id, price_precision, quantity_precision, decimals)` via [`markets`](data-schema.md#markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes) ⨝ [`ref_tokens`](data-schema.md#ref_tokens) — the quote-asset `decimals` feeds `quoteQty` scaling. The market must already be reconciled at least once (`last_reconciled_at IS NOT NULL`); otherwise the endpoint returns `InvalidMarketOrSymbol` → 404, the same way an unknown pair is reported. A pair that exists in `markets` but has never reconciled cannot be distinguished from one that does not exist, matching [`/api/v1/depth`](#apiv1depth). The symbol identifies one of the market's outcomes — the tape is per-outcome, not per-market.
+Resolve `(predictionMarketAddress, symbol)` to `(orderbook_address, outcome_id, price_precision, quantity_precision, decimals)` via [`markets`](data-schema.md#prediction-markets) ⨝ [`market_outcomes`](data-schema.md#market_outcomes) ⨝ [`ref_tokens`](data-schema.md#ref_tokens) — the quote-asset `decimals` feeds `quoteQty` scaling. The market must already be reconciled at least once (`last_reconciled_at IS NOT NULL`); otherwise the endpoint returns `InvalidMarketOrSymbol` → 404, the same way an unknown pair is reported. A pair that exists in `markets` but has never reconciled cannot be distinguished from one that does not exist, matching [`/api/v1/prediction/depth`](#apiv1predictiondepth). The symbol identifies one of the market's outcomes — the tape is per-outcome, not per-market.
 
 ### Empty-tape contract
 
@@ -355,15 +355,15 @@ SELECT trade_id,
  LIMIT $limit;
 ```
 
-`trades_tape_idx` (`(orderbook_address, outcome_id, trade_id DESC)`) serves this as an index range scan — the top `$limit` rows per outcome, newest first, without loading the full tape. There is no pagination cursor in v1: the public contract exposes only `limit` (see [api-spec §Recent Trades](../api-spec.md#recent-trades)), so the endpoint is a bounded newest-first window, not a keyset walk.
+`trades_tape_idx` (`(orderbook_address, outcome_id, trade_id DESC)`) serves this as an index range scan — the top `$limit` rows per outcome, newest first, without loading the full tape. There is no pagination cursor in v1: the public contract exposes only `limit` (see [api-spec §Recent Trades](../api-spec.md#prediction-trades)), so the endpoint is a bounded newest-first window, not a keyset walk.
 
-`trade_id` is the taker-side `chain_order` (`msg_chain_order` from the gateway), which is globally unique and lexicographically monotonic by gateway design — the same total-order property `/api/v1/orders` relies on for `placed_chain_order`. The text `ORDER BY trade_id DESC` therefore already yields true chain order with no tie-breaker and no Rust-side numeric re-sort (unlike depth, where price levels of differing length must be re-ranked with exact-numeric comparison).
+`trade_id` is the taker-side `chain_order` (`msg_chain_order` from the gateway), which is globally unique and lexicographically monotonic by gateway design — the same total-order property `/api/v1/prediction/orders` relies on for `placed_chain_order`. The text `ORDER BY trade_id DESC` therefore already yields true chain order with no tie-breaker and no Rust-side numeric re-sort (unlike depth, where price levels of differing length must be re-ranked with exact-numeric comparison).
 
-`chain_time IS NOT NULL` is a heap filter guarding the rare ingestion path where the gateway delivered the `OrderFilled` edge without a parseable `created_at`; such a row would otherwise crash the response decoder mapping `NULL` into the `time` `i64`. This mirrors the `chain_created_at IS NOT NULL` guard on [`/api/v1/orders`](#apiv1orders).
+`chain_time IS NOT NULL` is a heap filter guarding the rare ingestion path where the gateway delivered the `OrderFilled` edge without a parseable `created_at`; such a row would otherwise crash the response decoder mapping `NULL` into the `time` `i64`. This mirrors the `chain_created_at IS NOT NULL` guard on [`/api/v1/prediction/orders`](#apiv1predictionorders).
 
 ### Field projection
 
-`trades` holds the raw chain integers the contract emitted; the API decodes each field at render (see [api-spec §Recent Trades](../api-spec.md#recent-trades) for the public shapes):
+`trades` holds the raw chain integers the contract emitted; the API decodes each field at render (see [api-spec §Recent Trades](../api-spec.md#prediction-trades) for the public shapes):
 
 | Response field | Source | Rendering |
 | --- | --- | --- |
@@ -371,7 +371,7 @@ SELECT trade_id,
 | `price` | `price` | ÷ `FULL_PERCENT` (10 000), formatted at `price_precision` — the same price decode as depth / orders. |
 | `qty` | `qty` | ÷ `10^decimals`, formatted at `quantity_precision`. |
 | `quoteQty` | `price`, `qty` | Quote-asset notional, computed as the contract computes it: `notional_atoms = price * qty / FULL_PERCENT` (integer division, `BigUint`), then ÷ `10^decimals` formatted at the quote asset's `decimals`. Deriving from the same two raw integers — rather than storing a column — keeps the value reconciled with the on-chain notional that drove settlement; the chain emits no separate notional field. |
-| `time` | `chain_time` | Extracted to microseconds and truncated to Unix milliseconds — the same convention as `time` / `updateTime` on `/api/v1/orders`. |
+| `time` | `chain_time` | Extracted to microseconds and truncated to Unix milliseconds — the same convention as `time` / `updateTime` on `/api/v1/prediction/orders`. |
 | `isBuyerMaker` | `is_buyer_maker` | Verbatim. `true` ⇒ the resting (maker) side was the buy order and the taker sold (downtick). |
 
 The integer-division order matters: `price * qty / FULL_PERCENT` floors *after* multiplying, exactly as `OrderBook` derives the match notional, so `quoteQty` never drifts from chain by the rounding ulp a `round(price_decimal × qty_decimal)` could introduce.
@@ -379,7 +379,7 @@ The integer-division order matters: `price * qty / FULL_PERCENT` floors *after* 
 ### Page-size protocol
 
 - `limit` defaults to `20` when omitted.
-- Valid range is `[1, 1000]`. Out-of-range → `-1102` / 400; present but non-numeric → `-1130` / 400. The split (range vs parse) matches `/api/v1/orders`'s `limit` semantics rather than depth's silent clamp — the trade tape is aligned with the paginated-read family even though it carries no cursor.
+- Valid range is `[1, 1000]`. Out-of-range → `-1102` / 400; present but non-numeric → `-1130` / 400. The split (range vs parse) matches `/api/v1/prediction/orders`'s `limit` semantics rather than depth's silent clamp — the trade tape is aligned with the paginated-read family even though it carries no cursor.
 
 ### Invariants
 
@@ -391,7 +391,7 @@ The integer-division order matters: `price * qty / FULL_PERCENT` floors *after* 
 
 | Condition | `DomainError` | API code | HTTP |
 | --- | --- | --- | --- |
-| `marketAddress` or `symbol` missing or blank | `MissingParameter` | `-1102` | 400 |
+| `predictionMarketAddress` or `symbol` missing or blank | `MissingParameter` | `-1102` | 400 |
 | `limit` out of `[1, 1000]` | `MissingParameter` | `-1102` | 400 |
 | `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
 | Pair not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
@@ -410,7 +410,7 @@ No read-side gate guards the projector: an empty `trades` table simply reads `[]
 
 ### Eventual consistency
 
-A just-matched trade briefly lags the fill that produced it: the row appears once the taker-side `OrderFilled` is projected (seconds, or after deferred-replay if the fill edge arrived before its parent `OrderPlaced`). This is the same indexer-backlog window `/api/v1/orders` exposes, surfaced to clients as the eventual-consistency note in [api-spec §Recent Trades](../api-spec.md#recent-trades). The endpoint reads only the indexed `trades` table — it never reaches chain at request time.
+A just-matched trade briefly lags the fill that produced it: the row appears once the taker-side `OrderFilled` is projected (seconds, or after deferred-replay if the fill edge arrived before its parent `OrderPlaced`). This is the same indexer-backlog window `/api/v1/prediction/orders` exposes, surfaced to clients as the eventual-consistency note in [api-spec §Recent Trades](../api-spec.md#prediction-trades). The endpoint reads only the indexed `trades` table — it never reaches chain at request time.
 
 ### Test coverage
 
@@ -424,7 +424,7 @@ Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
 
 > 🚧 **TODO — not implemented.** The three inference endpoints below (`/inference/markets`, `/inference/market`, `/inference/depth`) and the `resolvesFrom` linkage are specified but **not yet built**. Forward-looking; safe to merge into `dev` as spec-only.
 
-Lists the tradable models — one entry per `InferenceOrderBook`. The public contract (fields, examples) is in [api-spec.md](../api-spec.md#inference-markets). Structurally this mirrors [`/api/v1/markets`](#apiv1markets): a `serverTime` + cursor + array envelope built from indexed read-model rows, never from a contract call at request time. Source is [`inference_markets`](data-schema.md#inference_markets).
+Lists the tradable models — one entry per `InferenceOrderBook`. The public contract (fields, examples) is in [api-spec.md](../api-spec.md#inference-markets). Structurally this mirrors [`/api/v1/prediction/markets`](#apiv1predictionmarkets): a `serverTime` + cursor + array envelope built from indexed read-model rows, never from a contract call at request time. Source is [`inference_markets`](data-schema.md#inference_markets).
 
 ### Visibility filter
 
@@ -436,11 +436,11 @@ Inference books have no multi-phase lifecycle. `status` is `TRADING` for every v
 
 ### Building the response
 
-Per row: render `model.{producer,name,version,ref}` from `model_ref` and its parsed parts (NULL parts → `model` carries only `ref`/hash — see the [model-id open question](indexer.md#inference-reconciler)); `takerCommission` (buyer-side, charged) from `platform_fee_bps ÷ 10 000` and `makerCommission` (seller-side rebate **cap**, credited → negative) as `−REBATE_MAX_BPS ÷ 10 000` — mirroring how `/api/v1/markets` sources `MAKER_COMMISSION` / `TAKER_COMMISSION` from global constants rather than per-row columns. The displayed values are the buyer-side fee and the seller rebate cap; the per-deal split (ramped rebate vs burn, spec §5.3/§5.4) is settlement state, not a market property. Then the precision block (`pricePrecision`, `quantityPrecision`, `tickSize`, `stepSize`, `minNotional`) from the row; `quoteAsset = "SHELL"`; `referencePrice` from `reference_price` decoded ÷ `10^9`, or **`null`** when the column is NULL (dry book — see [indexer.md §Inference reconciler](indexer.md#inference-reconciler)); `createdAt` from `created_at_chain`.
+Per row: render `model.{producer,name,version,ref}` from `model_ref` and its parsed parts (NULL parts → `model` carries only `ref`/hash — see the [model-id open question](indexer.md#inference-reconciler)); `takerCommission` (buyer-side, charged) from `platform_fee_bps ÷ 10 000` and `makerCommission` (seller-side rebate **cap**, credited → negative) as `−REBATE_MAX_BPS ÷ 10 000` — mirroring how `/api/v1/prediction/markets` sources `MAKER_COMMISSION` / `TAKER_COMMISSION` from global constants rather than per-row columns. The displayed values are the buyer-side fee and the seller rebate cap; the per-deal split (ramped rebate vs burn, spec §5.3/§5.4) is settlement state, not a market property. Then the precision block (`pricePrecision`, `quantityPrecision`, `tickSize`, `stepSize`, `minNotional`) from the row; `quoteAsset = "SHELL"`; `referencePrice` from `reference_price` decoded ÷ `10^9`, or **`null`** when the column is NULL (dry book — see [indexer.md §Inference reconciler](indexer.md#inference-reconciler)); `createdAt` from `created_at_chain`.
 
 ### Pagination
 
-Same cursor machinery as `/api/v1/markets` (URL-safe base64 of `"<sort_key>:<id>"`). Two sort modes: `sort=createdAt` (default, DESC, key `created_at_chain`) and `sort=volume` (DESC). A corrupted cursor → `InvalidParameter` → 400.
+Same cursor machinery as `/api/v1/prediction/markets` (URL-safe base64 of `"<sort_key>:<id>"`). Two sort modes: `sort=createdAt` (default, DESC, key `created_at_chain`) and `sort=volume` (DESC). A corrupted cursor → `InvalidParameter` → 400.
 
 ### Error mapping
 
@@ -461,7 +461,7 @@ Resolve `orderBookAddress` via [`inference_markets`](data-schema.md#inference_ma
 
 ## `/api/v1/inference/depth`
 
-Returns the order-book depth for one model — the inference analogue of [`/api/v1/depth`](#apiv1depth), built from [`inference_orders`](data-schema.md#inference_orders), never from a contract call. Because an `InferenceOrderBook` is one book per model (no outcome dimension), it is keyed by `orderBookAddress` alone — there is no `symbol`. Public contract in [api-spec.md](../api-spec.md#inference-depth).
+Returns the order-book depth for one model — the inference analogue of [`/api/v1/prediction/depth`](#apiv1predictiondepth), built from [`inference_orders`](data-schema.md#inference_orders), never from a contract call. Because an `InferenceOrderBook` is one book per model (no outcome dimension), it is keyed by `orderBookAddress` alone — there is no `symbol`. Public contract in [api-spec.md](../api-spec.md#inference-depth).
 
 ### Resolution
 
@@ -500,16 +500,16 @@ Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lex
 | Missing `orderBookAddress` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
 
-## `/api/v1/orders`
+## `/api/v1/prediction/orders`
 
-`DELETE /api/v1/openOrders` (cancel-all-open) is a separate TRADE operation and is out of scope here — its tech spec lives in [write-api.md](write-api.md).
+`DELETE /api/v1/prediction/openOrders` (cancel-all-open) is a separate TRADE operation and is out of scope here — its tech spec lives in [write-api.md](write-api.md).
 
 ### Source data
 
 The endpoint reads exclusively from [`live_orders`](data-schema.md#live_orders). A row contributes to the response iff all hold:
 
 - `owner_pn_address = ctx.trading_pn.pn_address` — caller is the owner.
-- The parent market in [`markets`](data-schema.md#markets) has `last_reconciled_at IS NOT NULL` — pre-reconcile markets are hidden symmetrically with `/api/v1/markets`.
+- The parent market in [`markets`](data-schema.md#prediction-markets) has `last_reconciled_at IS NOT NULL` — pre-reconcile markets are hidden symmetrically with `/api/v1/prediction/markets`.
 - `chain_created_at IS NOT NULL AND chain_updated_at IS NOT NULL` — rows that the gateway delivered without a parseable timestamp would otherwise crash the decoder when mapping `NULL` into the `time` / `updateTime` `i64` fields. See [§ SQL](#sql) for how this is enforced and [§ Index reliance](#index-reliance) for why only the `chain_created_at` conjunct is part of the partial index.
 - The row's `status` (combined with `amount_remaining` vs `amount_initial` for OPEN rows) maps to at least one of the public statuses requested in the `status` filter — or, if `status` is omitted, all rows pass.
 
@@ -521,8 +521,8 @@ Market filter (same three shapes as before):
 
 | Inputs | Behaviour |
 | --- | --- |
-| neither `marketAddress` nor `symbol` | all-markets query, owner-scoped. |
-| both present | resolve `(marketAddress, symbol)` to `(orderbook_address, outcome_id)` via `markets ⨝ market_outcomes`. If the pair is missing or its market is not reconciled → `DomainError::InvalidMarketOrSymbol` → `-1121` / 404. |
+| neither `predictionMarketAddress` nor `symbol` | all-markets query, owner-scoped. |
+| both present | resolve `(predictionMarketAddress, symbol)` to `(orderbook_address, outcome_id)` via `markets ⨝ market_outcomes`. If the pair is missing or its market is not reconciled → `DomainError::InvalidMarketOrSymbol` → `-1121` / 404. |
 | exactly one present | `DomainError::MissingParameter` → `-1102` / 400. |
 
 The pair-resolution lookup is a separate SQL round-trip that runs before the main query so the unknown-pair case can be distinguished cleanly from "owner has no orders here". Resolution is bound by `last_reconciled_at IS NOT NULL` so a pair that exists in `markets` but has never reconciled is reported the same way as a pair that does not exist.
@@ -609,7 +609,7 @@ The handler reads `ctx` via `require_auth(depot, Permission::UserData)` and uses
 
 | Condition | `DomainError` | API code | HTTP |
 | --- | --- | --- | --- |
-| `marketAddress` / `symbol` pair is incomplete (only one present, or either is present but blank/whitespace) | `MissingParameter` | `-1102` | 400 |
+| `predictionMarketAddress` / `symbol` pair is incomplete (only one present, or either is present but blank/whitespace) | `MissingParameter` | `-1102` | 400 |
 | `limit` out of `[1, 500]` | `MissingParameter` | `-1102` | 400 |
 | `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
 | `cursor` is empty or whitespace-only | `MissingParameter` | `-1102` | 400 |
@@ -643,13 +643,13 @@ Status filters become heap predicates on top of the index range. Per-owner cardi
 
 The market-filter pair predicate (`orderbook_address = $X AND outcome_id = $Y`) is likewise a heap filter, matching the strategy already used for the OPEN-only variant.
 
-`live_orders_open_book_idx` (used by `/api/v1/depth`) is unaffected.
+`live_orders_open_book_idx` (used by `/api/v1/prediction/depth`) is unaffected.
 
 The data-schema doc ([`live_orders`](data-schema.md#live_orders)) is updated synchronously with the migration.
 
 ### Visibility / eventual consistency
 
-Between `OrderBook.OrderPlaced` and `PrivateNote.OrderPlacedConfirmed`, the row exists in `live_orders` with `owner_pn_address = NULL`. The partial index excludes `NULL` owners, so the row contributes to public depth but cannot appear in `/api/v1/orders`.
+Between `OrderBook.OrderPlaced` and `PrivateNote.OrderPlacedConfirmed`, the row exists in `live_orders` with `owner_pn_address = NULL`. The partial index excludes `NULL` owners, so the row contributes to public depth but cannot appear in `/api/v1/prediction/orders`.
 
 The confirmation event projector attaches the owner; if the confirmation event arrives first, it is deferred and replayed once the OrderBook row exists (via the existing `Deferred → Applied` reprojection mechanism). This window is exposed to clients as an eventual-consistency note in `api-spec.md`; no additional mitigation is provided in v1.
 
@@ -763,7 +763,7 @@ Returns the caller's outcome-token holdings for one market. `free` comes from a 
 
 Three inputs feed one response:
 
-1. **Market resolution.** Two SELECTs (one on [`markets`](data-schema.md#markets) INNER-joined to [`ref_tokens`](data-schema.md#ref_tokens) for the quote-asset `decimals`, one on [`market_outcomes`](data-schema.md#market_outcomes)) return `(event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, decimals, [(outcome_id, symbol, quantity_precision) …])`. The first is gated on `last_reconciled_at IS NOT NULL`; pre-reconcile markets are hidden symmetrically with `/api/v1/markets`. The `ref_tokens` join cannot hide a market: `markets.token_type` is `NOT NULL` and FK-references the statically seeded `ref_tokens` PK, so it is a strict 1:1. The market lifecycle status is NOT a gate — terminal markets still serve balances so holders can see what they own until they claim or settle. Keeping the per-outcome rows in a separate SELECT keeps the row types simple at the cost of one extra round trip.
+1. **Market resolution.** Two SELECTs (one on [`markets`](data-schema.md#prediction-markets) INNER-joined to [`ref_tokens`](data-schema.md#ref_tokens) for the quote-asset `decimals`, one on [`market_outcomes`](data-schema.md#market_outcomes)) return `(event_id, oracle_list_hash, token_type, orderbook_address, num_outcomes, decimals, [(outcome_id, symbol, quantity_precision) …])`. The first is gated on `last_reconciled_at IS NOT NULL`; pre-reconcile markets are hidden symmetrically with `/api/v1/prediction/markets`. The `ref_tokens` join cannot hide a market: `markets.token_type` is `NOT NULL` and FK-references the statically seeded `ref_tokens` PK, so it is a strict 1:1. The market lifecycle status is NOT a gate — terminal markets still serve balances so holders can see what they own until they claim or settle. Keeping the per-outcome rows in a separate SELECT keeps the row types simple at the cost of one extra round trip.
 2. **PN stake state.** The chain-side accessor is the auto-generated getter for the public mapping `PrivateNote._stakes`. TVM Solidity auto-getters for public mappings take no arguments and return the entire `map(uint256 → StakeInfo)` — see the PN ABI under `contracts/dex/PrivateNote.abi.json`. The API computes the per-market key `stake_hash = tvm.hash(abi.encode(event_id, oracle_list_hash, token_type))` — the same hash the PN itself uses internally — and looks it up on the returned map. The hash is built off-chain in Rust via a thin wrapper around `tvm_types`. Each `StakeInfo` value carries three parallel `uint128[]` arrays (`amount`, `debtAmount`, `couponsAmount`) indexed by `outcome_id`, plus housekeeping fields the API ignores. A missing key on the returned map (caller never staked on this market) is treated as "all outcomes at zero", not as an error.
 
    Returning the whole mapping in one call costs the same as one keyed lookup would on EVM (the ABI shape is fixed by TVM Solidity), so this is an opportunity, not a tax: a future "all my outcomes" view across markets needs no additional chain calls.
@@ -784,7 +784,7 @@ Three inputs feed one response:
 ### Pipeline
 
 1. `require_auth(Permission::UserData)` resolves `(account_id, pn_address)`.
-2. Parse `marketAddress` — blank or missing → `MissingParameter` → 400 / `-1102`.
+2. Parse `predictionMarketAddress` — blank or missing → `MissingParameter` → 400 / `-1102`.
 3. Run the market-resolution SELECT. Unknown market or `last_reconciled_at IS NULL` → `InvalidMarketOrSymbol` → 404 / `-1121`.
 4. Compute `stake_hash = tvm.hash(abi.encode(event_id, oracle_list_hash, token_type))`.
 5. In parallel (`tokio::try_join!` — the first error short-circuits, but a typed `DomainError` from either branch is preserved so the handler still maps it correctly):
@@ -802,7 +802,7 @@ Why `free` reads chain and `lockedInOrders` reads `live_orders`:
 - `free` comes from `PrivateNote._stakes(hash)`, which the contract mutates atomically with every stake / claim / split / merge / cancel-callback. There is no equivalent indexer projection today, and building one would require projectors for the five stake-mutation events listed in the [stake-projection follow-up](#stake-projection--future-work).
 - `lockedInOrders` is the sum of resting sell orders against this outcome. The indexer already tracks these in `live_orders`, with a partial index already sized for per-owner queries. The chain-side analogue would require iterating the OrderBook's internal red-black tree of orders — there is no public per-outcome getter for it.
 
-The split means the two numbers can drift while the indexer is replaying behind chain head: a sell that just landed on chain shows up in `_stakes.amount` (because the OB has not yet acknowledged the lock) AND in `live_orders` (because `OrderPlaced` was projected) — appearing as if both `free` and `lockedInOrders` count it. The window is small (seconds) and self-resolves once `OrderPlacedConfirmed` advances PN state; it surfaces to clients as the same eventual-consistency note that already applies to `/api/v1/orders`.
+The split means the two numbers can drift while the indexer is replaying behind chain head: a sell that just landed on chain shows up in `_stakes.amount` (because the OB has not yet acknowledged the lock) AND in `live_orders` (because `OrderPlaced` was projected) — appearing as if both `free` and `lockedInOrders` count it. The window is small (seconds) and self-resolves once `OrderPlacedConfirmed` advances PN state; it surfaces to clients as the same eventual-consistency note that already applies to `/api/v1/prediction/orders`.
 
 ### Fail-closed validation
 
@@ -810,7 +810,7 @@ Three fail-closed checks guard the pipeline at different stages:
 
 | Rule | Source |
 | --- | --- |
-| Resolved market has a non-blank `orderbook_address` | DB schema CHECK (`last_reconciled_at IS NULL OR orderbook_address IS NOT NULL`) plus a whitespace re-check, matching `/api/v1/depth`'s contract |
+| Resolved market has a non-blank `orderbook_address` | DB schema CHECK (`last_reconciled_at IS NULL OR orderbook_address IS NOT NULL`) plus a whitespace re-check, matching `/api/v1/prediction/depth`'s contract |
 | `_stakes.amount.len() == num_outcomes` (and same for `debtAmount`, `couponsAmount`) when any array is non-empty | The contract initializes all three arrays to `num_outcomes` length on first stake; a mismatch means the indexer's view of `num_outcomes` diverged from chain state |
 | Every `live_orders.outcome_id` returned by the aggregation is within `[0, num_outcomes)` | Sanity: a row outside this range is indexer corruption (`OrderBook.OrderPlaced` projector wrote an unknown `outcome_id`) |
 
@@ -818,7 +818,7 @@ Violations surface as `MarketInconsistent` → 503.
 
 ### Eventual consistency
 
-`lockedInOrders` inherits the same indexer-backlog window as `/api/v1/orders`: a sell order whose `OrderBook.OrderPlaced` event has not been projected yet is invisible here. Once projected (typically seconds later), the next response shows it. `free` is read live from chain state and does not inherit this window.
+`lockedInOrders` inherits the same indexer-backlog window as `/api/v1/prediction/orders`: a sell order whose `OrderBook.OrderPlaced` event has not been projected yet is invisible here. Once projected (typically seconds later), the next response shows it. `free` is read live from chain state and does not inherit this window.
 
 ### Error mapping
 
@@ -826,8 +826,8 @@ Violations surface as `MarketInconsistent` → 503.
 | --- | --- | --- | --- |
 | Missing / invalid auth envelope | upstream | `-1003` | 401 |
 | Unknown / disabled key, or key lacks `USER_DATA` | upstream | `-1002` | 401 |
-| `marketAddress` missing or blank | `MissingParameter` | `-1102` | 400 |
-| `marketAddress` not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
+| `predictionMarketAddress` missing or blank | `MissingParameter` | `-1102` | 400 |
+| `predictionMarketAddress` not found, or its market is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
 | Authenticated PN address has no deployed contract on chain | `AccountNotDeployed` | `-2013` | 404 |
 | Chain getter / BOC fetch / decode failure, or invariant violation on assembled DTO | `MarketInconsistent` | `-1500` | 503 |
 | Request budget elapsed | `RequestTimeout` | `-1007` | 504 |
@@ -854,4 +854,4 @@ Four test suites, all gated on `TEST_DATABASE_URL`:
   - `get_market_balances_use_case_tests`: happy path sums the three stake pools per outcome; absent stake key yields zero free; stake arrays shorter / longer than `num_outcomes`; mixed empty / populated stake arrays; unknown market; PN failure; hasher failure; out-of-range `outcome_id`.
 - Repo integration (`crates/infrastructure/tests/balances.rs`): `lookup_ref_token` happy path; `resolve_market_for_balances` happy path / unknown market / unreconciled market / num_outcomes mismatch; the three fail-closed guards (NULL `oracle_list_hash`, blank `orderbook_address`, negative `token_type`); `sum_open_sell_remaining` groups by outcome and filters; empty when no rows match.
 - HTTP integration (`services/api/tests/account_http.rs`): happy path; missing API key → 401 / `-1003`; chain-getter failure → 503 / `-1500`; unknown token type → 503 / `-1500`; two credentials produce distinct `accountId`.
-- HTTP integration (`services/api/tests/account_balances_http.rs`): happy path sorted by `outcomeId`; absent stake key yields zero free with nonzero locked; missing `marketAddress` → 400 / `-1102`; unknown market → 404 / `-1121`; stake-array mismatch → 503 / `-1500`; terminal market still serves; stake gateway failure → 503 / `-1500`; missing API key → 401 / `-1003`; cross-tenant isolation; production hasher wiring; stake registered at wrong hash yields zero; trade-only key → `-1002` on the user-data route.
+- HTTP integration (`services/api/tests/account_balances_http.rs`): happy path sorted by `outcomeId`; absent stake key yields zero free with nonzero locked; missing `predictionMarketAddress` → 400 / `-1102`; unknown market → 404 / `-1121`; stake-array mismatch → 503 / `-1500`; terminal market still serves; stake gateway failure → 503 / `-1500`; missing API key → 401 / `-1003`; cross-tenant isolation; production hasher wiring; stake registered at wrong hash yields zero; trade-only key → `-1002` on the user-data route.
