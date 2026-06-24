@@ -331,6 +331,50 @@ Applied automatically on startup: the indexer always runs them; the api runs
 them only when `auth.seed_accounts: true`. `sqlx::migrate!` takes an advisory
 lock, so the two racing on a fresh database is safe.
 
+### `raw_events` retention (optional)
+
+`raw_events` is the append-only event log and by far the largest table — every
+ingested message edge lands there, and nothing prunes it on its own. The live
+projection loop only needs rows with `processed_at IS NULL`; already-projected
+rows are kept solely for reprojection and on-call heals. Left unbounded it grows
+without limit, so on a long-lived database schedule a retention job.
+
+[`deploy/sql/prune_raw_events.sql`](../deploy/sql/prune_raw_events.sql) installs a
+[pg_cron](https://github.com/citusdata/pg_cron) job that deletes **processed**
+rows older than a retention window, in small batches (pending rows are never
+touched). Run the file once as a privileged role — on Supabase, the SQL editor
+(which runs as `postgres`); pg_cron must be enabled in the `postgres` database.
+The pooler application role (the `indexer` user) is not a superuser and can
+neither `CREATE EXTENSION` nor schedule jobs.
+
+It schedules a job named `prune-raw-events` to run daily at 03:00 **UTC** with a
+7-day window. Rows are deleted only once they age past the window, so the job is
+a no-op until the database holds more than the window's worth of history.
+
+Change the window — re-running `cron.schedule` with the same job name updates it
+in place (here, 14 days):
+
+```sql
+select cron.schedule('prune-raw-events', '0 3 * * *',
+  $$ call public.prune_raw_events(interval '14 days', 10000) $$);
+```
+
+Inspect recent runs, or disable the job:
+
+```sql
+select status, return_message, start_time, end_time
+  from cron.job_run_details
+ where jobid = (select jobid from cron.job where jobname = 'prune-raw-events')
+ order by start_time desc limit 10;
+
+select cron.unschedule('prune-raw-events');
+```
+
+After the first large purge, dead tuples are reclaimed for reuse by autovacuum;
+to return disk to the OS, run `vacuum full raw_events` once during a quiet window
+(it takes an `ACCESS EXCLUSIVE` lock — never put it in cron). See the file header
+for the full operations notes.
+
 ### API credentials for clients
 
 The seeder stores no `api_secret` — each one is derived from `auth.kek_hex` and
