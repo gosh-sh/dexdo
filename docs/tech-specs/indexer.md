@@ -254,7 +254,7 @@ Two anti-starvation outcomes share the failure-backoff path with the market reco
 
 ### Inference reconciler
 
-The inference reconciler is the sixth reconciler loop. It manages two work queues with separate cadences:
+The inference reconciler is the third reconciler — a sixth long-running indexer loop alongside capture, projection, the market and OracleEventList reconcilers, and metrics. It manages two work queues with separate cadences:
 
 - **Queue A — Discovery** (`last_reconciled_at IS NULL`): newly seeded books that need identity + static columns filled.
 - **Queue B — Refresh** (already-reconciled rows): periodic re-fetch of the reference price and sweep of phantom open orders.
@@ -276,9 +276,10 @@ For each `inference_markets` row with `last_reconciled_at IS NULL`, the reconcil
 2. Runs `getParams()` off-chain → writes `model_hash`, `platform_fee_bps`. Also sets the **constant** precision/quote columns that do not come from the getter but are protocol-fixed: `quote_token_type = SHELL (2)`, `price_precision = 9`, `quantity_precision = 0`, `tick_size = "0.000000001"`, `step_size = "1"`, `min_notional = "0.000000001"`. Note: `getParams()` no longer returns `tickSize`/`stepSize`/`minNotional` — these are reconciler-set constants, not getter-sourced.
 3. Runs `getWeeklyMedianPrice()` → writes `reference_price` (+ `reference_price_at`). The getter **reverts with TVM exit code `ERR_NO_LIQUIDITY`** on a dry book; the reconciler recognises this typed revert, writes `reference_price = NULL` (the API surfaces `referencePrice: null`), and continues — it is not a failure.
 4. Runs a **bounded round-robin phantom-cancel sweep** over `OPEN` [`inference_orders`](data-schema.md#inference_orders) for the book (see [Non-resting orders](#non-resting-orders)). Each tick advances `sweep_cursor`; the cycle completes when the cursor wraps past `sweep_cycle_max` (the snapshot of the highest `order_id` at cycle start). Newly-minted orders above `sweep_cycle_max` are deferred to the next cycle.
-5. The sweep runs only when **both** catch-up gates pass:
-   - **(i) `at_head` gate**: `indexer_cursors.at_head = true` — the capture loop is caught up to the chain tip. If false, the indexer is still replaying old pages; a sweep firing now would cancel orders that have already been filled by events not yet projected.
-   - **(ii) pending-events gate**: no `raw_events` row for this book remains `processed_at IS NULL` (checked via `raw_events_pending_src_idx`). An unprocessed event could be a `Filled` that closes the phantom order the sweep would otherwise cancel.
+5. The sweep runs only when **all three** catch-up gates pass:
+   - **(i) idle gate**: `getQueueSize() == 0` — the book has no in-flight queue continuation. A book with a pending queue item must not be swept yet.
+   - **(ii) `at_head` gate**: `indexer_cursors.at_head = true` — the capture loop is caught up to the chain tip. If false, the indexer is still replaying old pages; a sweep firing now would cancel orders that have already been filled by events not yet projected.
+   - **(iii) pending-events gate**: no `raw_events` row for this book remains `processed_at IS NULL` (checked via `raw_events_pending_src_idx`). An unprocessed event could be a `Filled` that closes the phantom order the sweep would otherwise cancel.
 6. **All-or-nothing visibility stamp**: stamps `last_reconciled_at` only after a complete sweep cycle (not mid-cycle). The stamp is guarded by a CAS on `sweep_override_seq` — if a `Filled` event overrode a provisionally cancelled order mid-cycle (bumping `sweep_override_seq`), the stamp is deferred until a fresh cycle completes cleanly. This prevents a book from becoming API-visible with phantom `CANCELLED` rows that events will later re-open.
 
 **Provisional sweep-cancel**
@@ -289,7 +290,7 @@ When `getOrder(orderId)` confirms an order is no longer in the book (zero amount
 
 For each already-reconciled book (`last_reconciled_at IS NOT NULL`) that is due for refresh:
 
-1. Re-fetches `getWeeklyMedianPrice()` → updates `reference_price` / `reference_price_at`. The `ERR_NO_LIQUIDITY` revert maps to NULL as on the discovery pass.
+1. If the price cadence is due (reference_price_at stale), re-fetches `getWeeklyMedianPrice()` → updates `reference_price` / `reference_price_at`. The `ERR_NO_LIQUIDITY` revert maps to NULL as on the discovery pass.
 2. Runs the phantom-cancel sweep under the same `at_head` + pending-events gates, over OPEN rows only (the sweep is a no-op if there are no open orders).
 
 **Orphan dead-letter (projection loop)**
