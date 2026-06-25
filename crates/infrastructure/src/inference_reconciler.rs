@@ -88,7 +88,8 @@ struct BookRow {
     last_swept_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-enum DiscoveryOutcome {
+#[derive(Debug, PartialEq, Eq)]
+pub enum DiscoveryOutcome {
     Stamped,
     WaitingGates,
     NoBoc,
@@ -247,13 +248,35 @@ impl InferenceReconciler {
         let Some(boc) = self.graphql.fetch_account_boc(ob).await.context("fetch boc")? else {
             return Ok(DiscoveryOutcome::NoBoc);
         };
-        if book.model_hash.is_none() {
-            self.fill_params(ob, &boc).await?;
+        self.reconcile_discovery_with_boc(
+            ob,
+            &boc,
+            book.model_hash.is_none(),
+            book.reference_price_at.is_none(),
+        )
+        .await
+    }
+
+    /// Discovery composition given an already-fetched BOC: fill params/constants
+    /// (`needs_params`), refresh the reference price (`needs_price`), run one
+    /// discovery sweep tick, and report whether the visibility stamp landed. Split
+    /// from `reconcile_discovery`'s GraphQL BOC fetch so the composed path is
+    /// exercisable through the off-chain getter seam. The two `needs_*` flags carry
+    /// the freshly-selected row state so a re-fill is skipped once a column is set.
+    pub async fn reconcile_discovery_with_boc(
+        &self,
+        ob: &str,
+        boc: &str,
+        needs_params: bool,
+        needs_price: bool,
+    ) -> anyhow::Result<DiscoveryOutcome> {
+        if needs_params {
+            self.fill_params(ob, boc).await?;
         }
-        if book.reference_price_at.is_none() {
-            self.refresh_price(ob, &boc).await?;
+        if needs_price {
+            self.refresh_price(ob, boc).await?;
         }
-        match self.run_sweep_step(ob, &boc, true).await? {
+        match self.run_sweep_step(ob, boc, true).await? {
             SweepStep::GatesFailed | SweepStep::Continued => Ok(DiscoveryOutcome::WaitingGates),
             SweepStep::CycleComplete => Ok(DiscoveryOutcome::Stamped),
         }

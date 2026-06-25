@@ -214,6 +214,7 @@ async fn discovery_stamp_is_optimistic_blocks_on_override() {
 
 // ---- getter-seam sweep tests ----
 
+use dodex_infrastructure::inference_reconciler::DiscoveryOutcome;
 use dodex_infrastructure::inference_reconciler::OrderBookGetter;
 use dodex_infrastructure::inference_reconciler::SweepStep;
 use dodex_infrastructure::tvm_runner::TvmGetterError;
@@ -596,6 +597,115 @@ async fn real_getter_failure_surfaces_as_err_not_silent_null() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn discovery_composes_params_price_phantom_cancel_then_stamps_visibility() {
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_disc_compose";
+    // Freshly seeded: last_reconciled_at / model_hash / reference_price_at all NULL.
+    seed_market(&pool, ob, false).await;
+    open_order(&pool, ob, 1).await; // resting OPEN row that the book no longer holds
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // One getter drives the whole composition: idle queue, params/price present,
+    // a low boundary so the single OPEN id completes the cycle in one tick, and an
+    // empty getOrder so id 1 is a phantom the sweep cancels.
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
+        "getQueueSize" => Ok(json!({"value0": "0x0"})),
+        // model_hash is UNIQUE across markets — use a value no other test writes.
+        "getParams" => Ok(json!({"modelHash": "0x2329", "platformFeeBps": "0x1e"})), // 9001, 30
+        "getWeeklyMedianPrice" => Ok(json!({"value0": "0x64"})),                     // 100
+        "getStats" => Ok(json!({"nextOrderId": "0xa"})),                           // boundary 10
+        "getOrder" => Ok(json!({"note": "0:0", "amount": "0x0", "isBuy": true})),  // empty ⇒ phantom
+        _ => Ok(json!({})),
+    }));
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+
+    let outcome = r.reconcile_discovery_with_boc(ob, "boc", true, true).await.unwrap();
+    assert_eq!(outcome, DiscoveryOutcome::Stamped, "clean one-tick cycle must stamp visibility");
+
+    // Every composed step landed: params + constants, reference price, phantom
+    // cancelled, and the visibility stamp — the "never visible with phantom
+    // liquidity" guarantee end-to-end.
+    let (model_hash, fee, price, reconciled): (
+        Option<String>,
+        i32,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "select model_hash::text, platform_fee_bps, reference_price::text, last_reconciled_at
+           from inference_markets where orderbook_address=$1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(model_hash.as_deref(), Some("9001"), "fill_params wrote model_hash");
+    assert_eq!(fee, 30, "fill_params wrote platform_fee_bps");
+    assert_eq!(price.as_deref(), Some("100"), "refresh_price wrote reference_price");
+    assert!(reconciled.is_some(), "completed clean cycle stamps last_reconciled_at");
+
+    let (status, swept): (String, bool) = sqlx::query_as(
+        "select status, swept_at is not null from inference_orders where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), swept), ("CANCELLED", true), "phantom swept-cancelled in the same pass");
+}
+
+#[tokio::test]
+async fn discovery_with_busy_queue_fills_params_but_leaves_book_invisible() {
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_disc_busy";
+    seed_market(&pool, ob, false).await;
+    open_order(&pool, ob, 1).await;
+    // at_head true and no pending events, so the ONLY failing gate is the busy queue.
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
+        "getQueueSize" => Ok(json!({"value0": "0x1"})), // in-flight queue ⇒ idle gate fails
+        // model_hash is UNIQUE across markets — distinct from every other test.
+        "getParams" => Ok(json!({"modelHash": "0x232a", "platformFeeBps": "0x1e"})), // 9002
+        "getWeeklyMedianPrice" => Ok(json!({"value0": "0x64"})),
+        _ => Ok(json!({})),
+    }));
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+
+    let outcome = r.reconcile_discovery_with_boc(ob, "boc", true, true).await.unwrap();
+    assert_eq!(outcome, DiscoveryOutcome::WaitingGates, "busy snapshot must not stamp");
+
+    // Params/price are filled (they precede the sweep), but the book stays invisible
+    // and the order is untouched until a clean sweep cycle can run.
+    let (model_hash, reconciled): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "select model_hash::text, last_reconciled_at from inference_markets where orderbook_address=$1",
+        )
+        .bind(ob)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(model_hash.as_deref(), Some("9002"), "params fill before the sweep gate");
+    assert!(reconciled.is_none(), "busy queue ⇒ last_reconciled_at stays NULL");
+    let status: String =
+        sqlx::query_scalar("select status from inference_orders where orderbook_address=$1 and order_id=1")
+            .bind(ob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "OPEN", "no sweep ran ⇒ order untouched");
 }
 
 // ---- Queue B refresh tests ----
