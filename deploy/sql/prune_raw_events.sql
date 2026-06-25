@@ -75,7 +75,7 @@ begin
 end;
 $$;
 
--- 3) Schedule: daily at 03:00 UTC, keep 7 days. Re-running cron.schedule with
+-- 3) Schedule: daily at 03:00 UTC, keep 3 days. Re-running cron.schedule with
 --    the same job name updates the existing job (idempotent).
 select cron.schedule(
     'prune-raw-events',

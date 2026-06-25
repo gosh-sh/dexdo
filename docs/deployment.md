@@ -348,7 +348,7 @@ The pooler application role (the `indexer` user) is not a superuser and can
 neither `CREATE EXTENSION` nor schedule jobs.
 
 It schedules a job named `prune-raw-events` to run daily at 03:00 **UTC** with a
-7-day window. Rows are deleted only once they age past the window, so the job is
+3-day window. Rows are deleted only once they age past the window, so the job is
 a no-op until the database holds more than the window's worth of history.
 
 Change the window — re-running `cron.schedule` with the same job name updates it
