@@ -74,6 +74,9 @@ const DEPLOYER_SEED_AMOUNT: u128 = 100_000_000_000; // 100 NACKL seeded per outc
 const EVENT_DEADLINE: u64 = 2_000_000_000; // event service deadline (far future)
 const ROOT_ORACLE_NATIVE_TARGET: u64 = 120_000_000_000;
 const ROOT_ORACLE_NATIVE_THRESHOLD: u64 = 50_000_000_000;
+// Timing constants taken from the contract (dex/modifiers/modifiers.sol + PMP.sol).
+const MIN_RESULT_GAP: u64 = 120; // PMP.setTimings requires resultStart >= now + this
+const DEFAULT_RESULT_GAP: u64 = 3000; // default resultStart = now + this when --result-start omitted
 
 // ----------------------------- arg parsing -----------------------------
 
@@ -672,12 +675,14 @@ async fn cmd_create_prediction_market(f: Flags) -> ExitCode {
     if outcome_list.len() < 2 {
         return fail("need at least 2 outcomes (--outcomes \"Yes,No\")");
     }
-    // Length of the STAKING window in seconds (result_start = now + this).
-    let stake_seconds: u64 = match f.get("stake-seconds").map(str::parse::<u64>) {
-        Some(Ok(v)) if v >= 60 => v,
-        Some(Ok(_)) => return fail("--stake-seconds must be >= 60"),
-        Some(Err(_)) => return fail("--stake-seconds must be an integer"),
-        None => 600,
+    // The contract's own `submitSetTimings(resultStart)` parameter (unix seconds).
+    // Optional override; if omitted we default to now + DEFAULT_RESULT_GAP. The
+    // contract derives the rest: stakeEnd = stakeStart + (resultStart-stakeStart)/10,
+    // resultEnd = resultStart + GRACE_PERIOD. We do NOT invent our own window.
+    let result_start_override: Option<u64> = match f.get("result-start").map(str::parse::<u64>) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(_)) => return fail("--result-start must be a unix timestamp (seconds)"),
+        None => None,
     };
 
     let token_type = proof::TokenType::Nackl as u32;
@@ -824,8 +829,18 @@ async fn cmd_create_prediction_market(f: Flags) -> ExitCode {
     // 5. Oracle sets the staking timings → market opens for STAKING.
     //    result_start = now + window; the contract derives the stake window from it.
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let result_start = now + stake_seconds;
-    eprintln!("[dexdo create-prediction-market] submitSetTimings(result_start={result_start}, window={stake_seconds}s)…");
+    let result_start = result_start_override.unwrap_or(now + DEFAULT_RESULT_GAP);
+    // Mirror the contract's first-call guard so we fail early with a clear message.
+    if result_start < now + MIN_RESULT_GAP {
+        return fail(&format!(
+            "--result-start must be >= now + {MIN_RESULT_GAP}s (contract MIN_RESULT_GAP); got {result_start}, now {now}"
+        ));
+    }
+    // Contract derives the STAKING window as (resultStart - stakeStart)/10.
+    let approx_stake_window = result_start.saturating_sub(now) / 10;
+    eprintln!(
+        "[dexdo create-prediction-market] submitSetTimings(resultStart={result_start}) → ~{approx_stake_window}s STAKING window…"
+    );
     let mut timings_ok = false;
     for attempt in 0..6 {
         match dx
@@ -908,11 +923,14 @@ fn usage() -> String {
        pmp-details   --market-address 0:<pmp> [--endpoint host]\n                  \
        Read a market's phase window, outcomes, and identity (read-only).\n  \
        create-prediction-market  --pn-state-file <path> [--name <prefix>] \
-     [--outcomes \"A,B\"] [--stake-seconds N] [--endpoint host]\n                  \
+     [--outcomes \"A,B\"] [--result-start <unix>] [--endpoint host]\n                  \
        Deploy a fresh oracle + event + PMP (one prediction market) using the funded \
      deployer note, then open STAKING (oracle submitSetTimings). Prints \
-     predictionMarketAddress + oracleSecretHex (keep — needed to resolve) + windows. \
-     NOTE: the contract caps the STAKING window short (~90s), so stake promptly.\n\n\
+     predictionMarketAddress + oracleSecretHex (keep — needed to resolve) + windows.\n                  \
+       --result-start is the contract's resultStart param (unix seconds); must be \
+     >= now + 120 (MIN_RESULT_GAP). The contract derives stakeEnd = stakeStart + \
+     (resultStart-stakeStart)/10 and resultEnd = resultStart + 86400, so the STAKING \
+     window is ~1/10 of (resultStart - now). Default: now + 3000 (~5-min window).\n\n\
      common flags:\n  \
        --endpoint    network host (default shellnet.ackinacki.org)\n"
         .to_string()
