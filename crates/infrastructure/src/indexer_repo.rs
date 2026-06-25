@@ -47,6 +47,16 @@ pub struct IndexerRepository {
     /// the fast path — a throughput regression the backlog/lag gauges only show
     /// as a symptom.
     projection_fallbacks: Arc<AtomicU64>,
+    /// How long an inference `Filled`/`OrderCancelled` row may remain `Deferred`
+    /// (measured from its ingest timestamp `raw_events.created_at`) before it is
+    /// treated as a permanent orphan and dead-lettered. Applies ONLY to inference
+    /// event types (`InferenceOrderBook.*`); DEX deferral is unaffected.
+    inference_orphan_cutoff: std::time::Duration,
+    /// Running count of inference orphan rows dead-lettered (marked processed
+    /// without an order-table write) because their parent `OrderPlaced` never
+    /// arrived within the cutoff window. Shared across clones via `Arc` — same
+    /// pattern as `projection_fallbacks`.
+    inference_orphans_dropped: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -81,6 +91,7 @@ struct PendingRow {
     event_type: Option<String>,
     decoded: Option<Value>,
     ts: Option<f64>,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl IndexerRepository {
@@ -89,7 +100,21 @@ impl IndexerRepository {
             pool,
             seen_unknown_event_types: Arc::new(Mutex::new(HashSet::new())),
             projection_fallbacks: Arc::new(AtomicU64::new(0)),
+            inference_orphan_cutoff: std::time::Duration::from_millis(1_800_000), // default; overridden in main
+            inference_orphans_dropped: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub fn with_inference_orphan_cutoff(mut self, cutoff: std::time::Duration) -> Self {
+        self.inference_orphan_cutoff = cutoff;
+        self
+    }
+
+    /// Running total of inference orphan rows that exceeded the cutoff and were
+    /// dead-lettered (marked processed with no order-table write). Polled by the
+    /// metrics-refresh loop for `indexer_inference_orphans_dropped`.
+    pub fn inference_orphans_dropped_count(&self) -> u64 {
+        self.inference_orphans_dropped.load(Ordering::Relaxed)
     }
 
     /// Returns `true` the first time `event_type` is seen as projector-unknown
@@ -359,7 +384,15 @@ impl IndexerRepository {
                     stats.applied += 1;
                 }
                 Ok(ProjectionOutcome::Deferred) => {
-                    stats.deferred += 1;
+                    if Self::is_expired_inference_orphan(&row, self.inference_orphan_cutoff) {
+                        warn!(msg_id = %row.msg_id, event_type = ?row.event_type,
+                            "inference orphan exceeded cutoff; dropping order row (dead-letter; no inference_orders write — discovered market kept)");
+                        self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
+                        to_mark.push(row.id); // mark processed so it stops looping; the handler wrote no order row
+                        stats.applied += 1;
+                    } else {
+                        stats.deferred += 1;
+                    }
                 }
                 Ok(ProjectionOutcome::Unknown) => {
                     unknown_warnings.push((row.msg_id.clone(), event.event_type.clone()));
@@ -449,7 +482,15 @@ impl IndexerRepository {
                 }
                 Ok(ProjectionOutcome::Deferred) => {
                     sp.commit().await.context("reproject savepoint release")?;
-                    stats.deferred += 1;
+                    if Self::is_expired_inference_orphan(&row, self.inference_orphan_cutoff) {
+                        warn!(msg_id = %row.msg_id, event_type = ?row.event_type,
+                            "inference orphan exceeded cutoff; dropping order row (dead-letter; no inference_orders write — discovered market kept)");
+                        self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
+                        to_mark.push(row.id); // mark processed so it stops looping; the handler wrote no order row
+                        stats.applied += 1;
+                    } else {
+                        stats.deferred += 1;
+                    }
                 }
                 Ok(ProjectionOutcome::Unknown) => {
                     self.warn_unknown(&row.msg_id, &event.event_type);
@@ -473,6 +514,18 @@ impl IndexerRepository {
         Self::mark_processed(&mut tx, &to_mark).await?;
         tx.commit().await.context("reproject tx commit")?;
         Ok(stats)
+    }
+
+    /// Returns `true` when the row is an inference event whose parent
+    /// `OrderPlaced` has not arrived and the row's **ingest** age
+    /// (`now() - raw_events.created_at`) exceeds the configured cutoff.
+    /// DEX rows (non-`InferenceOrderBook.*`) always return `false`.
+    fn is_expired_inference_orphan(row: &PendingRow, cutoff: std::time::Duration) -> bool {
+        row.event_type.as_deref().is_some_and(|t| t.starts_with("InferenceOrderBook."))
+            && (chrono::Utc::now() - row.created_at)
+                .to_std()
+                .map(|age| age > cutoff)
+                .unwrap_or(false)
     }
 
     /// The unknown-event warning: normal target on the first sighting of an
@@ -511,7 +564,8 @@ impl IndexerRepository {
                       dst_address,
                       event_type,
                       decoded,
-                      extract(epoch from created_at_chain)::double precision as ts
+                      extract(epoch from created_at_chain)::double precision as ts,
+                      created_at
                  from raw_events
                 where processed_at is null
                   and event_type is not null
@@ -947,6 +1001,7 @@ mod tests {
             event_type: event_type.map(str::to_string),
             decoded,
             ts,
+            created_at: chrono::Utc::now(),
         }
     }
 

@@ -34,6 +34,7 @@ subtle = "2.6"
 dodex-application = { path = "../application" }
 dodex-domain = { path = "../domain" }
 dodex-logging = { path = "../logging" }
+chrono.workspace = true
 
 [dev-dependencies]
 dotenvy.workspace = true
