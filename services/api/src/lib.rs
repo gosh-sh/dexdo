@@ -2575,6 +2575,20 @@ mod dto_tests {
     }
 
     #[test]
+    fn depth_response_uses_prediction_market_address() {
+        let resp = DepthResponse {
+            market_address: "0:m".into(),
+            symbol: "PM-X-YES".into(),
+            last_update_id: String::new(),
+            bids: vec![],
+            asks: vec![],
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["predictionMarketAddress"], "0:m");
+        assert_eq!(v["symbol"], "PM-X-YES");
+    }
+
+    #[test]
     fn market_to_dto_includes_camel_case_commission_fields() {
         use dodex_domain::Market;
         use dodex_domain::MarketAddress;
@@ -2606,6 +2620,9 @@ mod dto_tests {
         };
         let dto = market_to_dto(market, 10);
         let v = serde_json::to_value(&dto).unwrap();
+        // Wire fields renamed under the /api/v1/prediction/ namespace.
+        assert_eq!(v["predictionMarketAddress"], "0:m");
+        assert_eq!(v["predictionOrderBookAddress"], "0:ob");
         // Snapshot: literals catch silent drift in the domain constants.
         assert_eq!(v["makerCommission"], "-0.0003375");
         assert_eq!(v["takerCommission"], "0.0004500");
