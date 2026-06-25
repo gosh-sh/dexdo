@@ -200,21 +200,21 @@ async fn raw_processed(pool: &sqlx::PgPool, msg: &str) -> bool {
 async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
     let Some(pool) = setup().await else { return };
     let ob = "0:t_orphan_ob";
-    sqlx::query("delete from raw_events where chain_order like 'orphan-%'").execute(&pool).await.unwrap();
+    sqlx::query("delete from raw_events where chain_order like '00orphan-%'").execute(&pool).await.unwrap();
     sqlx::query("delete from inference_orders where orderbook_address=$1").bind(ob).execute(&pool).await.unwrap();
     let filled = serde_json::json!({"makerId":"900","takerId":"901","ticks":"1","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"});
     let cancel = serde_json::json!({"orderId":"902","refundedShell":"0"});
     // (a) aged-ingest Filled orphan => dropped.        (b) aged-ingest OrderCancelled orphan => dropped (BOTH types).
-    insert_raw(&pool, "orphan-fill", "orphan-a", 3600, 0, ob, "InferenceOrderBook.Filled", filled.clone()).await;
-    insert_raw(&pool, "orphan-cancel", "orphan-b", 3600, 0, ob, "InferenceOrderBook.OrderCancelled", cancel.clone()).await;
+    insert_raw(&pool, "orphan-fill", "00orphan-a", 3600, 0, ob, "InferenceOrderBook.Filled", filled.clone()).await;
+    insert_raw(&pool, "orphan-cancel", "00orphan-b", 3600, 0, ob, "InferenceOrderBook.OrderCancelled", cancel.clone()).await;
     // (c) FRESH ingest but ANCIENT created_at_chain (1 day) => NOT dropped — cutoff uses ingest age, not chain time.
-    insert_raw(&pool, "orphan-oldchain", "orphan-c", 0, 86400, ob, "InferenceOrderBook.Filled", filled.clone()).await;
+    insert_raw(&pool, "orphan-oldchain", "00orphan-c", 0, 86400, ob, "InferenceOrderBook.Filled", filled.clone()).await;
     // (d) fresh ingest, fresh chain => NOT dropped (normal short deferral).
-    insert_raw(&pool, "orphan-fresh", "orphan-d", 0, 0, ob, "InferenceOrderBook.Filled", filled.clone()).await;
+    insert_raw(&pool, "orphan-fresh", "00orphan-d", 0, 0, ob, "InferenceOrderBook.Filled", filled.clone()).await;
 
     IndexerRepository::new(pool.clone())
         .with_inference_orphan_cutoff(Duration::from_secs(60))
-        .reproject_pending_from(50, Some("orphan-"), Some("orphan-z")).await.unwrap();
+        .reproject_pending_from(50, Some("00orphan-"), Some("00orphan-z")).await.unwrap();
 
     assert!(raw_processed(&pool, "orphan-fill").await,   "aged Filled orphan must be dropped");
     assert!(raw_processed(&pool, "orphan-cancel").await, "aged OrderCancelled orphan must be dropped");
@@ -227,7 +227,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
 
     // Cleanup residual pending rows so they do not pollute other tests that
     // query max_pending_chain_order / has_pending_above globally.
-    sqlx::query("delete from raw_events where chain_order like 'orphan-%'").execute(&pool).await.unwrap();
+    sqlx::query("delete from raw_events where chain_order like '00orphan-%'").execute(&pool).await.unwrap();
 }
 
 // ---- Task 6: Filled handler helpers ----
