@@ -52,6 +52,14 @@ impl Dex {
         Ok(Self::new(Arc::new(ctx)))
     }
 
+    /// The shared TVM client context. Exposed so callers that need to drive
+    /// raw SDK primitives not covered by a typed method (e.g. an external
+    /// contract deploy from a `.tvc` in the e2e harness) can reuse the same
+    /// client instead of standing up a second one.
+    pub fn context(&self) -> Arc<ClientContext> {
+        self.ctx.clone()
+    }
+
     // ── PrivateNote (trader write-path) ──────────────────────────────
 
     pub async fn place_order(

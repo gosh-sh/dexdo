@@ -25,6 +25,7 @@ dodex-logging = { path = "../../crates/logging" }
 ackinacki-kit.workspace = true
 dodex-contracts.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 # e2e tests deploy an ephemeral PMP + OrderBook before exercising the
 # trader path; that needs `test-helpers` to expose deploy methods on
 # `dodex_chain::Dex`. The prod api binary depends on dodex-chain

@@ -1,0 +1,213 @@
+// End-to-end CLOB-match smoke for the AI Registry inference market against a
+// real shellnet, driven through `dodex_chain::Dex` (no DB, no HTTP).
+//
+// Flow (self-trade — one note is both maker and taker, like the reference
+// `test_inference_events`):
+//   1. note deploys the per-model InferenceOrderBook (internal message);
+//   2. a standalone TokenContract is deployed externally + giver-funded (the
+//      seller's per-deal escrow the offer points at);
+//   3. the note posts a SELL offer backed by that TokenContract;
+//   4. the note places a crossing BUY ⇒ the book matches and forwards the
+//      SHELL to TokenContract.fundFromOrderBook;
+//   5. assert the TokenContract is now funded and bound to the buyer note.
+//
+// This exercises the seller path + the matching engine + the TokenContract
+// settlement decoders against a live contract. The TokenContract is deployed by
+// an external message, so it is self-rooted (its `dapp_id` == its own account
+// id) and funded with ECC SHELL via flag 16 — native value does not cross a
+// dApp boundary on Acki Nacki (see `common::airegistry::deploy_token_contract`).
+// The streaming settlement (open/advance/stop) and probe model need timed
+// windows (180-600s) and are covered separately.
+//
+//   cargo test -p dodex-api --test e2e_inference_match -- --ignored --nocapture
+//
+// === SECURITY NOTE === see e2e_inference.rs.
+
+mod common;
+
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+use ackinacki_kit::tvm_client::abi::Signer;
+use ackinacki_kit::tvm_client::crypto::KeyPair;
+use common::airegistry::deploy_token_contract;
+use common::airegistry::TokenDeal;
+use common::e2e_setup::network_endpoint;
+use common::test_pns::TestPnPool;
+use dodex_chain::Dex;
+use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
+use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
+use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
+use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
+
+const POLL_TICK: Duration = Duration::from_secs(2);
+const POLL_TICKS: u32 = 45; // 90s budget per wait.
+const PRICE_PER_TICK: u128 = 1_000_000;
+const OFFER_TICKS: u128 = 2;
+
+fn unique_suffix() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+}
+
+#[tokio::test]
+#[ignore = "requires a reachable shellnet endpoint + seed_notes.json"]
+async fn inference_offer_matches_buy_and_funds_token_contract() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("info,ackinacki_kit=debug")
+        .try_init();
+
+    let pool = TestPnPool::load();
+    let note = pool.first().clone();
+    let keys = KeyPair {
+        public: note.owner_public_key_hex.clone(),
+        secret: note.owner_secret_key_hex.clone(),
+    };
+    let signer = || Signer::Keys { keys: keys.clone() };
+
+    let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex::from_endpoints");
+    let suffix = unique_suffix();
+    let model_hash = format!("{}", 0x000A_1E2E_0000_0000_u128.wrapping_add(suffix));
+    eprintln!("[e2e_match] note={} model_hash={model_hash}", note.address);
+
+    let mut failures: Vec<String> = Vec::new();
+
+    // 1. Note deploys the per-model book.
+    dex.deploy_inference_order_book(
+        &note.address,
+        ParamsOfInferenceOrderBook { model_hash: model_hash.clone() },
+        signer(),
+    )
+    .await
+    .expect("deployInferenceOrderBook accepted");
+    let ob = dex
+        .get_inference_order_book_address(
+            &note.address,
+            ParamsOfInferenceOrderBook { model_hash: model_hash.clone() },
+        )
+        .await
+        .expect("getInferenceOrderBookAddress");
+    eprintln!("[e2e_match] order_book={ob}");
+    wait_book_live(&dex, &ob).await;
+
+    // 2. Deploy the seller's TokenContract externally (giver-funded). Self-trade
+    //    ⇒ seller pubkey/note are this note; root model is a harmless placeholder.
+    let tc = deploy_token_contract(
+        dex.context(),
+        &note.owner_public_key_hex,
+        &note.address,
+        &note.address,
+        (suffix % 1_000_000_000) as u64 + 1,
+        TokenDeal {
+            model_name: "e2e-model".to_string(),
+            tick_size: 1,
+            price_per_tick: PRICE_PER_TICK,
+            max_ticks: 5,
+        },
+        keys.clone(),
+    )
+    .await
+    .expect("deploy TokenContract");
+    eprintln!("[e2e_match] token_contract={tc}");
+
+    // 3. Seller posts a SELL offer backed by the TokenContract.
+    dex.post_sell_offer(
+        &note.address,
+        ParamsOfPostSellOffer {
+            model_hash: model_hash.clone(),
+            price_per_tick: PRICE_PER_TICK,
+            max_ticks: OFFER_TICKS,
+            token_contract: tc.clone(),
+            flags: 0,
+        },
+        signer(),
+    )
+    .await
+    .expect("postSellOffer accepted");
+
+    // Wait until the offer rests in the book.
+    let mut offer_rested = false;
+    for _ in 0..POLL_TICKS {
+        tokio::time::sleep(POLL_TICK).await;
+        let Ok(stats) = dex.inference_get_stats(&ob).await else { continue };
+        if stats.order_count >= 1 {
+            eprintln!("[e2e_match] sell offer resting (order_count={})", stats.order_count);
+            offer_rested = true;
+            break;
+        }
+    }
+    if !offer_rested {
+        failures.push("sell offer never rested in the book".to_string());
+    }
+
+    // 4. Crossing BUY (taker): same price ⇒ matches the resting sell.
+    dex.place_inference_buy(
+        &note.address,
+        ParamsOfPlaceInferenceBuy {
+            model_hash: model_hash.clone(),
+            max_price_per_tick: PRICE_PER_TICK,
+            ticks: OFFER_TICKS,
+            escrow: 3_000_000,
+            flags: 1,
+            deadline: 0,
+        },
+        signer(),
+    )
+    .await
+    .expect("placeInferenceBuy accepted");
+
+    // 5. The match forwards SHELL to TokenContract.fundFromOrderBook.
+    let mut funded = false;
+    for _ in 0..POLL_TICKS {
+        tokio::time::sleep(POLL_TICK).await;
+        match dex.token_contract_get_state(&tc).await {
+            Ok(state) if state.funded => {
+                eprintln!("[e2e_match] TokenContract funded: deposit={}", state.deposit);
+                if state.deposit == 0 {
+                    failures.push("funded TokenContract has zero deposit".to_string());
+                }
+                funded = true;
+                break;
+            }
+            Ok(_) => eprintln!("[e2e_match] TokenContract not funded yet (retry)"),
+            Err(err) => eprintln!("[e2e_match] getState errored (retry): {err:?}"),
+        }
+    }
+    if !funded {
+        failures.push("TokenContract was never funded by the match".to_string());
+    } else if let Ok(parties) = dex.token_contract_get_parties(&tc).await {
+        eprintln!(
+            "[e2e_match] parties: buyer={} sellerNote={}",
+            parties.buyer, parties.seller_note
+        );
+        if parties.buyer != note.address {
+            failures.push(format!(
+                "funded buyer should be the note: want {}, got {}",
+                note.address, parties.buyer
+            ));
+        }
+    }
+
+    // 6. Cleanup: drop any of the note's resting orders on this book.
+    let _ = dex
+        .cancel_all_inference_orders(
+            &note.address,
+            ParamsOfCancelAllInferenceOrders { model_hash: model_hash.clone() },
+            signer(),
+        )
+        .await;
+
+    assert!(failures.is_empty(), "e2e_match failures: {failures:#?}");
+}
+
+async fn wait_book_live(dex: &Dex, ob: &str) {
+    for _ in 0..POLL_TICKS {
+        tokio::time::sleep(POLL_TICK).await;
+        if dex.inference_get_stats(ob).await.is_ok() {
+            eprintln!("[e2e_match] book live");
+            return;
+        }
+    }
+    panic!("InferenceOrderBook did not become live within budget");
+}

@@ -10,6 +10,7 @@
 
 #![allow(dead_code)]
 
+pub mod airegistry;
 pub mod cleanup;
 pub mod deploy_market;
 pub mod e2e_setup;
