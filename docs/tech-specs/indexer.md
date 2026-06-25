@@ -29,17 +29,22 @@ flowchart LR
     projectors --> discovery[oracles / oracle_event_lists / oracle_events]
     projectors --> markets[markets]
     projectors --> orders[live_orders]
+    projectors --> inf_orders[inference_orders]
 
     chain_state[GraphQL account BOC lookup] --> market_reconciler[Market reconciler]
     chain_state --> oel_reconciler[OracleEventList reconciler]
+    chain_state --> inf_reconciler[Inference reconciler]
     market_reconciler --> markets
     market_reconciler --> outcomes[market_outcomes]
     oel_reconciler --> discovery
+    inf_reconciler --> inf_markets[inference_markets]
 
     discovery --> api[Market-data API]
     markets --> api
     outcomes --> api
     orders --> api
+    inf_orders --> api
+    inf_markets --> api
 ```
 
 ## Ingestion
@@ -86,7 +91,7 @@ When `LOG_DIR` is set, the projector's "no handler for event type" warnings are 
 
 ## Projection — lifecycle events
 
-Lifecycle events drive transitions on [`markets`](data-schema.md#markets) and the [`oracles`](data-schema.md#oracles) / [`oracle_event_lists`](data-schema.md#oracle_event_lists) / [`oracle_events`](data-schema.md#oracle_events) hierarchy. Each projector identifies its row by `pmp_address` (or the relevant parent address); if that row does not exist yet, the projector returns `Deferred` so the projection loop will retry once the parent event has landed.
+Lifecycle events drive transitions on [`markets`](data-schema.md#prediction-markets) and the [`oracles`](data-schema.md#oracles) / [`oracle_event_lists`](data-schema.md#oracle_event_lists) / [`oracle_events`](data-schema.md#oracle_events) hierarchy. Each projector identifies its row by `pmp_address` (or the relevant parent address); if that row does not exist yet, the projector returns `Deferred` so the projection loop will retry once the parent event has landed.
 
 | Event | Read-model effect |
 | --- | --- |
@@ -94,7 +99,7 @@ Lifecycle events drive transitions on [`markets`](data-schema.md#markets) and th
 | `Oracle.OracleEventListDeployed` | Inserts [`oracle_event_lists`](data-schema.md#oracle_event_lists) under the parent oracle, including the per-list `description` carried by the event. The field is read **strictly** (a missing `description` fails the projection) and written via `coalesce` so replays do not clobber it; the column is `NOT NULL`. |
 | `OracleEventList.EventAdded` | Upserts [`oracle_events`](data-schema.md#oracle_events) with `event_name`, `oracle_fee`, `deadline`. Does NOT carry `describe`, `trust_addr`, or `outcome_names_jsonb` — those come from the OracleEventList reconciler. |
 | `OracleEventList.EventConfirmed` | Stamps `oracle_events.confirmed_pmp_address` and `confirmed_at`. Links an event to the PMP that will market it. |
-| `PrivateNote.PMPDeployed` | Inserts a row in [`markets`](data-schema.md#markets) with `pmp_address`, `event_id`, `token_type`, `token_code`. Lifecycle columns (`stake_*`, `result_*`, `frozen_at`, etc.) stay NULL — they belong to later events. The row is invisible to the API until the reconciler stamps `last_reconciled_at`. |
+| `PrivateNote.PMPDeployed` | Inserts a row in [`markets`](data-schema.md#prediction-markets) with `pmp_address`, `event_id`, `token_type`, `token_code`. Lifecycle columns (`stake_*`, `result_*`, `frozen_at`, etc.) stay NULL — they belong to later events. The row is invisible to the API until the reconciler stamps `last_reconciled_at`. |
 | `PMP.TimingsSet` | Updates `stake_start`, `stake_end`, `result_start`, `result_end`, sets `approved = true`. May fire repeatedly while `now < resultStart` — keep the latest by block time. This projector is the **sole writer** of the four timing columns. |
 | `PMP.PoolsFrozen` | Sets `frozen_at` via `coalesce` (never overwritten). This is the on-chain signal that the OrderBook contract has been deployed (see [dex-events-routing.md](../dex-events-routing.md): "after deploy OrderBook"). |
 | `PMP.Resolved` | Sets `resolved_at` and `resolved_outcome_id`. |
@@ -104,8 +109,8 @@ Lifecycle events drive transitions on [`markets`](data-schema.md#markets) and th
 ## Projection — order events
 
 OrderBook events drive [`live_orders`](data-schema.md#live_orders), the
-per-order read model backing `/api/v1/depth` and account-scoped
-`GET /api/v1/orders`.
+per-order read model backing `/api/v1/prediction/depth` and account-scoped
+`GET /api/v1/prediction/orders`.
 
 Three OrderBook events mutate order book state, one
 PrivateNote confirmation event attaches ownership for private reads, and five OrderBook
@@ -113,7 +118,7 @@ events are observability-only.
 
 | Event | Effect |
 | --- | --- |
-| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'`, full `amount_initial`, and full `amount_remaining`. `owner_pn_address` remains NULL until the matching PrivateNote confirmation arrives. `last_chain_order` is set to the event’s `msg_chain_order`. On conflict the upsert is `WHERE`-guarded against terminal rows (`FILLED` / `CANCELLED` / `REJECTED`): an isolated replay landing on a closed row is a no-op rather than reopening to OPEN, surfaced at `warn!` with `msg_id` / `chain_order` for triage. The handler sets: `chain_created_at` using first-write-wins semantics via `coalesce(...) on conflict` — the creation timestamp must never move once recorded; `chain_updated_at` using `greatest(...) on conflict`; `placed_chain_order` using `coalesce(live_orders.placed_chain_order, excluded.placed_chain_order)` from the event’s msg_chain_order. `placed_chain_order` is the sole sort key for `/api/v1/orders` and never changes once recorded, matching the first-write-wins semantics of chain_created_at. |
+| `OrderBook.OrderPlaced` | Upserts into `live_orders` with `status = 'OPEN'`, full `amount_initial`, and full `amount_remaining`. `owner_pn_address` remains NULL until the matching PrivateNote confirmation arrives. `last_chain_order` is set to the event’s `msg_chain_order`. On conflict the upsert is `WHERE`-guarded against terminal rows (`FILLED` / `CANCELLED` / `REJECTED`): an isolated replay landing on a closed row is a no-op rather than reopening to OPEN, surfaced at `warn!` with `msg_id` / `chain_order` for triage. The handler sets: `chain_created_at` using first-write-wins semantics via `coalesce(...) on conflict` — the creation timestamp must never move once recorded; `chain_updated_at` using `greatest(...) on conflict`; `placed_chain_order` using `coalesce(live_orders.placed_chain_order, excluded.placed_chain_order)` from the event’s msg_chain_order. `placed_chain_order` is the sole sort key for `/api/v1/prediction/orders` and never changes once recorded, matching the first-write-wins semantics of chain_created_at. |
 | `OrderBook.OrderFilled` | For a non-terminal row: decrements `amount_remaining` by `filledAmount`, flips `status` to `FILLED` when the remainder reaches zero, advances `last_chain_order` via `greatest(existing, new)`, advances `chain_updated_at` via `greatest`. For a row whose prior status is already terminal (`FILLED` / `CANCELLED` / `REJECTED`) all four mutation columns (`amount_remaining`, `status`, `last_chain_order`, `chain_updated_at`) are CASE-gated to leave the row unchanged; the event is logged at `warn!` and the projector still reports `Applied`. |
 | `OrderBook.OrderCancelled` | For a non-terminal row: preserves `amount_remaining` as the unfilled cancelled remainder, flips `status` to `CANCELLED`, advances `last_chain_order` and `chain_updated_at` via `greatest`. For a row whose prior status is already terminal (`FILLED` / `REJECTED`) all three mutation columns are CASE-gated to leave the row unchanged; the event is logged at `warn!` and the projector still reports `Applied`. The terminal-state guard prevents a late cancel from demoting `FILLED` or rewriting `REJECTED`. |
 | `PrivateNote.OrderPlacedConfirmed` | Updates the matching `(orderBook, orderId)` row with `owner_pn_address = event.src`, where `event.src` is the authenticated account's trading PrivateNote address. If the OrderBook row has not arrived yet, the confirmation is deferred and replayed later. This ownership update does not advance `last_chain_order`, so public depth cursors continue to represent OrderBook activity only. Refuses to overwrite an already-attached `owner_pn_address`; that path is reported as `Applied` (no-op). |
@@ -125,11 +130,11 @@ Event ordering is anchored on `raw_events.chain_order` (set from the GraphQL gat
 
 ## Projection — public trades
 
-The public trade tape behind [`GET /api/v1/trades`](../api-spec.md#recent-trades) is built from the
+The public trade tape behind [`GET /api/v1/prediction/trades`](../api-spec.md#prediction-trades) is built from the
 same `OrderBook.OrderFilled` event that drives `live_orders`, written into a separate
 append-only `trades` table. Only the `tradeId` derivation is specified here; the table
 shape lives in [data-schema.md](data-schema.md#trades) and the HTTP layer in
-[read-api.md](read-api.md#apiv1trades).
+[read-api.md](read-api.md#apiv1predictiontrades).
 
 A single match emits **two** `OrderFilled` events — one for the resting (maker) order
 and one for the aggressor (taker) order, distinguished by the boolean `isTaker` field.
@@ -170,17 +175,45 @@ directly, never by clearing `processed_at`; see the recovery notes in
 event observed before its parent `OrderPlaced` is `Deferred` and retried.
 
 The same canonical `tradeId` is the value the private `orderUpdate` WebSocket frame must
-surface as `t` (see [api-spec.md](../api-spec.md#recent-trades)); associating it with the
+surface as `t` (see [api-spec.md](../api-spec.md#prediction-trades)); associating it with the
 maker side's frame as well is part of that stream's implementation and is out of scope
 here.
 
+## Projection — inference order events
+
+> 🚧 **TODO — not implemented.** Inference projection and the inference reconciler (below) are specified but **not yet built** — no projector/reconciler code or migration exists yet. Forward-looking; safe to merge into `dev` as spec-only.
+
+`InferenceOrderBook` events drive [`inference_orders`](data-schema.md#inference_orders), the per-order read model behind `/api/v1/inference/depth` (order-book depth). The shape mirrors [order events](#projection--order-events): one row per chain-side order, mutated in place, never deleted. The unit is a **tick** (one unit of inference); `price` is price-per-tick in SHELL atoms.
+
+| Event | Effect |
+| --- | --- |
+| `InferenceOrderBook.OrderPlaced` | Upserts into `inference_orders` with `status = 'OPEN'`, `amount_initial = amount_remaining = ticks`, `price`, `is_buy`, `note_address = note`, `last_chain_order = msg_chain_order`. `chain_created_at` first-write-wins via `coalesce`; `chain_updated_at` via `greatest`. Conflict is `WHERE`-guarded against terminal rows (an isolated replay on a closed row is a no-op, logged at `warn!`). If `orderbook_address` is unknown, the projector also seeds a skeleton [`inference_markets`](data-schema.md#inference_markets) row (`orderbook_address`, `created_at_chain`, `last_reconciled_at = NULL`) so the inference reconciler picks it up — this first-order-event seed is the discovery trigger (there is no `InferenceOrderBookDeployed` event). **Caveat:** `OrderPlaced` carries no `flags`, and it is emitted for *every* placement — including pure-taker (`IOC`/`FOK`/`MARKET`) and rejected `POST_ONLY` orders that never rest. See [Non-resting orders](#non-resting-orders). |
+| `InferenceOrderBook.Filled` | Decrements `amount_remaining` by `ticks` on **both** the `makerId` and `takerId` rows; advances `last_chain_order` / `chain_updated_at` via `greatest`. Close rule, mirroring the contract's one-deal-slot semantics: a **SELL offer** (`is_buy = false`) is consumed by the book on any match — flip it to `FILLED` on the first `Filled` that names it, even a partial one. A **BUY maker** spans deals — it stays `OPEN` until `amount_remaining` reaches zero, then flips to `FILLED`. A named row that has not arrived yet defers the event. |
+| `InferenceOrderBook.OrderCancelled` | Flips `status` to `CANCELLED`, preserves `amount_remaining` as the unfilled remainder, advances `last_chain_order` / `chain_updated_at` via `greatest`. Terminal-state guard prevents a late cancel from demoting a `FILLED` row. |
+| `InferenceOrderBook.SubscriptionPlaced` | Upserts the resting BUY created by a §8 subscription: `status = 'OPEN'`, `is_buy = true`, `is_subscription = true`, `price = maxPrice`, `amount_initial = amount_remaining = ticks`. It rests as a standing bid and is matched by incoming sells like any other buy maker. |
+| `InferenceOrderBook.Executed` / `Refunded` / `CycleForfeited` / `ForfeitClaimed` | Observability-only — no `inference_orders` mutation. In particular `Refunded` carries `(note, amount)` with **no order id**, so it cannot close a specific row; non-resting and rejected orders are healed by the reconciler (below), never projected from `Refunded`. |
+
+Ordering is anchored on `raw_events.chain_order` as elsewhere. `OrderPlaced` for a taker is emitted at queue-entry before its `Filled` events, so the parent row always exists by the time a fill applies; a `Filled` seen first is `Deferred` and retried.
+
+### Non-resting orders
+
+The contract emits `OrderPlaced` *before* it knows whether the order will rest: pure-taker orders (`IOC` / `FOK` / `MARKET`) and a crossing `POST_ONLY` are placed, emit `OrderPlaced`, then either fill or are refunded — without resting. Three closure paths exist:
+
+- **Fully filled** — `Filled` reduces `amount_remaining` to zero → `FILLED`. Correct from events alone.
+- **Explicitly cancelled** — `OrderCancelled` → `CANCELLED`. Correct from events alone.
+- **Placed-but-never-rested** (FOK/POST_ONLY rejected, IOC/MARKET leftover, expired subscription) — the only on-chain signal is a `Refunded` event that carries **no order id**, so the projector cannot close the specific row. Left untreated, the `OrderPlaced` row sits `OPEN` and pollutes depth (a phantom level).
+
+The inference reconciler closes this gap: for each recently-placed `OPEN` row it calls `InferenceOrderBook.getOrder(orderId)` and, when the order is no longer in the book (zero amount / zero note), flips the row to `CANCELLED`. This is the same getter-fills-what-events-miss pattern used by the market reconciler, bounded to recent OPEN rows so it stays cheap.
+
+> **Recommended contract-side follow-up.** Add `flags` to `OrderPlaced` (so a taker-only order is never recorded as resting), an `orderId` to `Refunded`, or an explicit `OrderClosed(orderId)` event. Any one removes the getter sweep and makes depth event-exact — the analogue of the [`REJECTED` follow-up](read-api.md#rejected-status) on the prediction-market side. Tracked as an open item because it touches `InferenceOrderBook` (and re-pins the note↔book code hash).
+
 ## Reconciliation
 
-Two reconcilers fill metadata that the event stream alone does not carry. Both run on a fixed cadence (`reconciliation_interval_ms`, `oracle_event_list_reconciliation_interval_ms` in `config/indexer.*.yaml`) and share a failure-backoff pattern (`last_reconcile_failed_at`, `reconcile_attempts` on the parent row) so a permanently broken contract cannot starve the queue.
+Three reconcilers fill metadata that the event stream alone does not carry. All run on a fixed cadence (`reconciliation_interval_ms`, `oracle_event_list_reconciliation_interval_ms`, `inference_reconciliation_interval_ms` in `config/indexer.*.yaml`) and share a failure-backoff pattern (`last_reconcile_failed_at`, `reconcile_attempts` on the parent row) so a permanently broken contract cannot starve the queue.
 
 ### Market reconciler
 
-For each [`markets`](data-schema.md#markets) row that needs catch-up, the reconciler:
+For each [`markets`](data-schema.md#prediction-markets) row that needs catch-up, the reconciler:
 
 1. Fetches the PMP account BOC from chain.
 2. Runs `PMP.getDetails()` off-chain through the local TVM emulator (`crates/infrastructure/src/tvm_runner.rs`).
@@ -202,6 +235,8 @@ Queue ordering (the SELECT in `MarketReconciler::run_once`):
 
 For each [`oracle_event_lists`](data-schema.md#oracle_event_lists) row that has at least one event still missing reconciler-only metadata, the OracleEventList reconciler runs `OracleEventList._events` and fills `describe` / `trust_addr` / `outcome_names_jsonb` per event. The `outcomeNames` map (used to render `/api/v1/oracles` `events[].outcomes`) lives only in the getter, not in `EventAdded`, so it is reconciler-sourced like the other two.
 
+For a numeric **range event** the same pass also reads `OracleEventList.getRangeData(eventId)` and fills [`oracle_events.range_ob_address`](data-schema.md#oracle_events) (the `InferenceOrderBook` the event resolves from) and `range_bounds_jsonb`. Like `trust_addr`, these are reconciler-only — `EventAdded` is identical for plain and range events — and they are what links a prediction market to an inference market: `/api/v1/prediction/markets?resolvesFrom=<inferenceOrderBookAddress>` reverse-looks-up markets by `range_ob_address`. A plain (non-range) event leaves both NULL, which `meta_reconciled_at` already tolerates (the marker is stamped regardless, so a legitimately-non-range event does not re-queue forever).
+
 Not yet projected: `OracleEventList.DescriptionUpdated` (post-deploy edits to a list's description) and `Oracle.EventPublished`. The read-model therefore reflects the list `description` as of deploy time; a later on-chain description update is not surfaced until a projector for that event is added. The decoder counts these events (they are part of the pinned ABI total) but no projector consumes them today.
 
 Key column: [`oracle_events.meta_reconciled_at`](data-schema.md#oracle_events). The reconciler stamps this **unconditionally** on every successful pass — even when the on-chain `trustAddr` is legitimately null, the marker is set so the row drops out of the pending queue. The marker replaced an earlier `describe IS NULL OR trust_addr IS NULL` predicate that never cleared for events with null on-chain metadata.
@@ -219,6 +254,21 @@ Two anti-starvation outcomes share the failure-backoff path with the market reco
 - **`NoBoc`** — the OracleEventList account BOC is not yet available from the gateway.
 - **`Reconciled(0)` — no-progress pass.** The BOC is queryable but the run does not stamp any child. Two shapes collapse into this: an empty `_events` map, and a non-empty map whose items all target children that are already `meta_reconciled_at IS NOT NULL`. Both mean the indexed contract state lags the event stream — `EventAdded` persisted a pending child that `_events` does not yet reflect. Without the backoff the OracleEventList would be picked every sweep (the pending SELECT still matches it) and starve later rows behind the LIMIT 16 batch until the node catches up.
 
+### Inference reconciler
+
+For each [`inference_markets`](data-schema.md#inference_markets) row, the inference reconciler fetches the `InferenceOrderBook` account BOC and runs getters off-chain through the local TVM emulator:
+
+1. `getParams()` → `model_hash`, `platform_fee_bps`. On the first pass it also fills the fixed precision/quote columns (`quote_token_type = SHELL`, `price_precision`, `quantity_precision = 0`, `tick_size`, `step_size`, `min_notional`).
+2. `getWeeklyMedianPrice()` → `reference_price` (+ `reference_price_at`). The getter **reverts `ERR_NO_LIQUIDITY`** on a dry book; the reconciler treats that revert as a normal outcome and writes `reference_price = NULL` (the API renders `referencePrice: null`) — it is not a reconcile failure.
+3. Stamps `last_reconciled_at`. The market becomes visible to the API only after this point (mirrors the [market reconciler](#market-reconciler) visibility gate).
+
+Two passes with different cadence/triggers share the row:
+
+- **Discovery completion** (`last_reconciled_at IS NULL`): the one-time fill of identity + static columns. `model_ref` / `producer` / `model_name` / `version` are resolved from the model's `ManifestMetadata` manifest and may stay NULL on this pass — they do not block visibility (a market is usable by hash alone).
+- **Refresh** (already-reconciled rows, on cadence): re-reads `getWeeklyMedianPrice()` because `reference_price` moves with trading, and runs the [non-resting-order](#non-resting-orders) `getOrder()` sweep over recent `OPEN` [`inference_orders`](data-schema.md#inference_orders) to close phantom rows. Unlike `markets.orderbook_address` (write-once), these fields are intentionally re-queued.
+
+> **Open question — model-id source.** The order book carries only `model_hash`; the human `producer--model--version` is not on the book. This spec assumes the reconciler resolves it from the model's `ManifestMetadata` manifest (linked via the model registry — `SuperRoot` → `RootModel` / `ManifestMetadata`). If the manifest does not carry a parseable model id, `model_ref` stays NULL and the API exposes the model by `model_hash` only. Confirm the manifest schema / registry-walk before implementation.
+
 ## Failure handling
 
 Two outcomes leave a `raw_events` row pending:
@@ -230,7 +280,7 @@ The projection loop (`indexer_repo.rs::run_reprojection_loop`, draining via `rep
 
 A batch is drained optimistically in a single transaction with **no per-row savepoint**, so an applied row costs only its projector statements — not an extra `SAVEPOINT`/`RELEASE` round-trip pair, which matters when the database is far (high per-round-trip latency). If a projector returns `Err`, that transaction is rolled back untouched and the same range is replayed with per-row savepoints, which applies the clean rows and leaves the failing one pending — the identical outcome to savepointing every row, paid for only when a failure actually occurs. The savepointed replay is paid only on passes that hit a projector error — in practice the periodic retry pass re-attempting a stuck row, though a newly captured row that errors on first sight also drops its forward pass to the fallback. A clean forward drain stays on the savepoint-free fast path.
 
-Reconciler-side failures use a separate mechanism — `last_reconcile_failed_at` and `reconcile_attempts` on the [`markets`](data-schema.md#markets) and [`oracle_event_lists`](data-schema.md#oracle_event_lists) rows. The 5-minute backoff window prevents a permanently broken `getDetails()` from blocking the batch every tick.
+Reconciler-side failures use a separate mechanism — `last_reconcile_failed_at` and `reconcile_attempts` on the [`markets`](data-schema.md#prediction-markets) and [`oracle_event_lists`](data-schema.md#oracle_event_lists) rows. The 5-minute backoff window prevents a permanently broken `getDetails()` from blocking the batch every tick.
 
 ## Metrics
 
@@ -276,6 +326,9 @@ Unlike `orders_created_event_cnt` and `order_partially_filled_event_cnt` (read f
 | `live_orders.last_chain_order` lex-monotonic per row | `greatest(existing, new)` on every UPDATE; chain-order sorted reproject keeps natural arrival order monotonic too. |
 | `live_orders.placed_chain_order` set once and never moves | `coalesce(live, excluded)` on every `OrderPlaced` upsert; column is `text not null` so a missing `chain_order` fails the insert outright. |
 | Cancellation reason matches its source | Projector picks `PMP_REJECTED_BY_ORACLE` or `EVENT_CANCELLED` based on event type, never NULL. |
+| `inference_markets.last_reconciled_at IS NOT NULL ⇒ model_hash IS NOT NULL` | Inference reconciler writes `model_hash` from `getParams()` on the discovery pass before stamping `last_reconciled_at`. |
+| `inference_orders.last_chain_order` lex-monotonic per row | `greatest(existing, new)` on every book-event UPDATE. |
+| A SELL offer never rests after a match | `Filled` flips an `is_buy = false` row to `FILLED` on first match (one-deal slot), independent of `amount_remaining`. |
 
 The API enforces complementary read-side invariants on the assembled DTO — see [read-api.md](read-api.md#fail-closed-validation). Together they guarantee that an inconsistent indexer state (e.g. `PMP.Resolved` indexed before `PoolsFrozen`) cannot leak into a client response.
 
@@ -284,3 +337,5 @@ The API enforces complementary read-side invariants on the assembled DTO — see
 A market is visible to the public API only when `markets.last_reconciled_at IS NOT NULL`. Until the market reconciler runs, the row exists internally (`PMPDeployed` inserted it) but is hidden — clients see consistent, fully-populated markets only.
 
 This pairs with the API's PENDING short-circuit: a row with NULL timing columns (reconciled but pre-`TimingsSet`) surfaces as `status = "PENDING"` with `timings = null`, per [read-api.md](read-api.md#status-derivation).
+
+The same gate applies to inference markets: an [`inference_markets`](data-schema.md#inference_markets) row is hidden until the inference reconciler stamps `last_reconciled_at`, so a book seeded by a first `OrderPlaced` but not yet reconciled (no `model_hash` / precision) never reaches `/api/v1/inference/markets`.

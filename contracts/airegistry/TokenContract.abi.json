@@ -18,6 +18,7 @@
 		{
 			"name": "fund",
 			"inputs": [
+				{"name":"buyerPubkey","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -25,7 +26,15 @@
 		{
 			"name": "fundFromOrderBook",
 			"inputs": [
-				{"name":"buyerNote","type":"address"}
+				{"name":"buyerNote","type":"address"},
+				{"name":"buyerPubkey","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "fundProbeCommission",
+			"inputs": [
 			],
 			"outputs": [
 			]
@@ -112,6 +121,7 @@
 			"outputs": [
 				{"name":"funded","type":"bool"},
 				{"name":"opened","type":"bool"},
+				{"name":"probeAccepted","type":"bool"},
 				{"name":"disputed","type":"bool"},
 				{"name":"deposit","type":"uint128"},
 				{"name":"prepaid","type":"uint128"},
@@ -120,6 +130,16 @@
 				{"name":"prepaidTime","type":"uint64"},
 				{"name":"lastAdvance","type":"uint64"},
 				{"name":"disputeTime","type":"uint64"}
+			]
+		},
+		{
+			"name": "getProbe",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"probeFunded","type":"bool"},
+				{"name":"probeLocked","type":"uint128"},
+				{"name":"probeCommission","type":"uint128"}
 			]
 		},
 		{
@@ -162,6 +182,14 @@
 			"outputs": [
 				{"name":"buyer","type":"address"},
 				{"name":"sellerNote","type":"address"}
+			]
+		},
+		{
+			"name": "getBuyerPubkey",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"uint256"}
 			]
 		},
 		{
@@ -227,10 +255,39 @@
 			]
 		},
 		{
+			"name": "ProbeCommissionFunded",
+			"inputs": [
+				{"name":"amount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "StreamOpened",
 			"inputs": [
 				{"name":"buyer","type":"address"},
 				{"name":"pricePerTick","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "ProbeAccepted",
+			"inputs": [
+				{"name":"buyer","type":"address"},
+				{"name":"toSeller","type":"uint128"},
+				{"name":"commissionReturned","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "ProbeBurned",
+			"inputs": [
+				{"name":"buyer","type":"address"},
+				{"name":"burnedProbe","type":"uint128"},
+				{"name":"burnedCommission","type":"uint128"},
+				{"name":"refundToBuyer","type":"uint128"}
 			],
 			"outputs": [
 			]
@@ -312,11 +369,15 @@
 		{"init":false,"name":"_pricePerTick","type":"uint128"},
 		{"init":false,"name":"_maxTicks","type":"uint128"},
 		{"init":false,"name":"_buyer","type":"address"},
+		{"init":false,"name":"_buyerPubkey","type":"uint256"},
 		{"init":false,"name":"_sellerNote","type":"address"},
 		{"init":false,"name":"_endpointCipher","type":"bytes"},
 		{"init":false,"name":"_funded","type":"bool"},
 		{"init":false,"name":"_opened","type":"bool"},
+		{"init":false,"name":"_probeAccepted","type":"bool"},
 		{"init":false,"name":"_disputed","type":"bool"},
+		{"init":false,"name":"_sellerProbeFunded","type":"bool"},
+		{"init":false,"name":"_sellerProbeLocked","type":"uint128"},
 		{"init":false,"name":"_deposit","type":"uint128"},
 		{"init":false,"name":"_prepaid","type":"uint128"},
 		{"init":false,"name":"_frozen","type":"uint128"},

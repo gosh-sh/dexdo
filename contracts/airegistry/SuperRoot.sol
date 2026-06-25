@@ -20,7 +20,7 @@ import "./ManifestMetadata.sol";
 ///         SuperRoot instance via their `_superRootAddress` static, which
 ///         is mixed into the derivation here.
 contract SuperRoot is AiRegistryModifiers {
-    string constant version = "1.0.0";
+    string constant version = "4.0.3";
 
     /// @notice Canonical code hashes of the child contracts. The constructor
     ///         rejects any caller-supplied code whose `tvm.hash` does not
@@ -32,8 +32,8 @@ contract SuperRoot is AiRegistryModifiers {
     ///         the value returned by `tvm.decodeStateInit(tvc).code` then
     ///         `tvm.hash`. They are the same as the `code_hash` field
     ///         printed by `tvm-cli decode stateinit --tvc <file>`.
-    uint256 constant ROOT_MODEL_CODE_HASH        = 0xca737bfbf97d22527fb0685c1241aeb4b02e677949f5054eb8186ea537d89fc6;
-    uint256 constant MANIFEST_METADATA_CODE_HASH = 0x537fc452f2514c56a831f67d265b478a969e42a3597ae78abb7552efbc4420e1;
+    uint256 constant ROOT_MODEL_CODE_HASH        = 0x769dc56e5d3b8f99d4b253e4befefbd1360fbf098ed81b16ed09010246ea9f78;
+    uint256 constant MANIFEST_METADATA_CODE_HASH = 0x416d76c8a885ae7914603886e5ea8b1b2fa0112466089ad30cbb53ad4519a0e0;
 
     event RootRegistered(address rootAddress);
     event ManifestRegistered(address manifestAddress);

@@ -28,7 +28,7 @@ import "./interfaces.sol";
 ///         schema validation, finalization, or content-addressed
 ///         immutability.
 contract ManifestMetadata is AiRegistryModifiers {
-    string constant version = "1.0.0";
+    string constant version = "4.0.3";
 
     event ContractDeployed(address self);
     event ManifestUpdated(address self, uint32 chunkIdx);

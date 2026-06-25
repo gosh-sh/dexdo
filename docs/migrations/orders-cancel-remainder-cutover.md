@@ -21,7 +21,7 @@ it today:
 
 Either condition means historical `live_orders` rows may not match the
 shape the current projector emits. Clear and reproject the full order
-lifecycle before exposing `/api/v1/orders`:
+lifecycle before exposing `/api/v1/prediction/orders`:
 
 1. Set `raw_events.processed_at = NULL` for affected `OrderBook.OrderPlaced`,
    `OrderBook.OrderFilled`, and `OrderBook.OrderCancelled` rows.

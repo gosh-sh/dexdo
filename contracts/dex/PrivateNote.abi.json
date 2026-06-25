@@ -11,6 +11,7 @@
 				{"name":"tokenType","type":"uint32"},
 				{"name":"pmpCode","type":"cell"},
 				{"name":"orderBookCode","type":"cell"},
+				{"name":"inferenceOrderBookCode","type":"cell"},
 				{"name":"oracleCodeHash","type":"uint256"},
 				{"name":"oracleCodeDepth","type":"uint16"},
 				{"name":"oracleEventListCodeHash","type":"uint256"},
@@ -79,9 +80,7 @@
 		{
 			"name": "deployInferenceOrderBook",
 			"inputs": [
-				{"name":"inferenceOrderBookCode","type":"cell"},
-				{"name":"modelHash","type":"uint256"},
-				{"name":"tickSize","type":"uint128"}
+				{"name":"modelHash","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -89,9 +88,7 @@
 		{
 			"name": "getInferenceOrderBookAddress",
 			"inputs": [
-				{"name":"inferenceOrderBookCode","type":"cell"},
-				{"name":"modelHash","type":"uint256"},
-				{"name":"tickSize","type":"uint128"}
+				{"name":"modelHash","type":"uint256"}
 			],
 			"outputs": [
 				{"name":"value0","type":"address"}
@@ -100,7 +97,7 @@
 		{
 			"name": "postSellOffer",
 			"inputs": [
-				{"name":"orderBook","type":"address"},
+				{"name":"modelHash","type":"uint256"},
 				{"name":"pricePerTick","type":"uint128"},
 				{"name":"maxTicks","type":"uint128"},
 				{"name":"tokenContract","type":"address"},
@@ -112,7 +109,7 @@
 		{
 			"name": "placeInferenceBuy",
 			"inputs": [
-				{"name":"orderBook","type":"address"},
+				{"name":"modelHash","type":"uint256"},
 				{"name":"maxPricePerTick","type":"uint128"},
 				{"name":"ticks","type":"uint128"},
 				{"name":"escrow","type":"uint128"},
@@ -125,7 +122,7 @@
 		{
 			"name": "placeInferenceSubscription",
 			"inputs": [
-				{"name":"orderBook","type":"address"},
+				{"name":"modelHash","type":"uint256"},
 				{"name":"maxPricePerTick","type":"uint128"},
 				{"name":"ticks","type":"uint128"},
 				{"name":"escrow","type":"uint128"},
@@ -137,7 +134,7 @@
 		{
 			"name": "cancelInferenceOrder",
 			"inputs": [
-				{"name":"orderBook","type":"address"},
+				{"name":"modelHash","type":"uint256"},
 				{"name":"orderId","type":"uint128"}
 			],
 			"outputs": [
@@ -146,7 +143,7 @@
 		{
 			"name": "cancelAllInferenceOrders",
 			"inputs": [
-				{"name":"orderBook","type":"address"}
+				{"name":"modelHash","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -161,6 +158,14 @@
 		},
 		{
 			"name": "streamDispute",
+			"inputs": [
+				{"name":"tokenContract","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "streamReclaim",
 			"inputs": [
 				{"name":"tokenContract","type":"address"}
 			],
@@ -820,6 +825,7 @@
 		{"init":false,"name":"_oracleEventListCodeHash","type":"uint256"},
 		{"init":false,"name":"_oracleEventListCodeDepth","type":"uint16"},
 		{"init":false,"name":"_orderBookCode","type":"cell"},
+		{"init":false,"name":"_inferenceOrderBookCode","type":"cell"},
 		{"components":[{"name":"amount","type":"uint128[]"},{"name":"debtAmount","type":"uint128[]"},{"name":"couponsAmount","type":"uint128[]"},{"name":"candidateAmount","type":"uint128"},{"name":"candidateOutcome","type":"uint32"},{"name":"candidateBetType","type":"uint8"},{"name":"tokenType","type":"uint32"},{"name":"oracleListHash","type":"uint256"}],"init":false,"name":"_stakes","type":"map(uint256,tuple)"},
 		{"init":false,"name":"_busy","type":"optional(address)"},
 		{"init":false,"name":"_lastHash","type":"uint256"},

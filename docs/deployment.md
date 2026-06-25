@@ -313,7 +313,7 @@ rebuild. Rebuild (`--build`) only when the Rust source changes.
 curl -s http://localhost:8080/readiness
 
 # a real read path — exercises Postgres
-curl -s 'http://localhost:8080/api/v1/markets?limit=5' | jq
+curl -s 'http://localhost:8080/api/v1/prediction/markets?limit=5' | jq
 
 # indexer is making progress (look for the resumed-from-cursor line and
 # steadily advancing event ingestion)

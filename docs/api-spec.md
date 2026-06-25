@@ -6,8 +6,8 @@
     - [Signature Formation](#signature-formation)
   - [Error Response](#error-response)
   - [Endpoint Summary](#endpoint-summary)
-  - [Market Data Endpoints](#market-data-endpoints)
-    - [Markets](#markets)
+  - [Prediction Market Data](#prediction-market-data)
+    - [Prediction Markets](#prediction-markets)
       - [Common Enums](#common-enums)
         - [Market Status](#market-status)
       - [Common Objects](#common-objects)
@@ -16,22 +16,26 @@
           - [OracleEntry](#oracleentry)
         - [Terminal](#terminal)
         - [Outcome](#outcome)
-    - [Oracles](#oracles)
-      - [Oracle Data Objects](#oracle-data-objects)
-        - [OracleEntry](#oracleentry-1)
-        - [OracleEventList](#oracleeventlist)
-        - [OracleEvent](#oracleevent)
-        - [OracleOutcome](#oracleoutcome)
-    - [Order Book](#order-book)
-    - [Recent Trades](#recent-trades)
+        - [resolvesFrom](#resolvesfrom)
+    - [Prediction Order Book](#prediction-order-book)
+    - [Prediction Trades](#prediction-trades)
+  - [Oracles](#oracles)
+    - [Oracle Data Objects](#oracle-data-objects)
+      - [OracleEntry](#oracleentry-1)
+      - [OracleEventList](#oracleeventlist)
+      - [OracleEvent](#oracleevent)
+      - [OracleOutcome](#oracleoutcome)
+  - [Inference Market Data](#inference-market-data)
+    - [Inference Markets](#inference-markets)
+    - [Inference Depth](#inference-depth)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
     - [Market Outcome Balances](#market-outcome-balances)
-  - [Position Endpoints](#position-endpoints)
+  - [Prediction Position Endpoints](#prediction-position-endpoints)
     - [Buy Full Set](#buy-full-set)
     - [Sell Full Set](#sell-full-set)
     - [Claim](#claim)
-  - [Trading Endpoints](#trading-endpoints)
+  - [Prediction Trading Endpoints](#prediction-trading-endpoints)
     - [New Order](#new-order)
     - [Cancel Order](#cancel-order)
     - [New Batch Orders](#new-batch-orders)
@@ -43,7 +47,7 @@
       - [Order Type](#order-type)
       - [Time In Force](#time-in-force)
       - [Order Status](#order-status)
-  - [WebSocket Streams](#websocket-streams)
+  - [Prediction WebSocket Streams](#prediction-websocket-streams)
     - [Connection](#connection)
     - [Splice and Gap Detection](#splice-and-gap-detection)
     - [Order Updates](#order-updates)
@@ -88,18 +92,18 @@ floating-point precision loss.
 
 DEX.DO uses the following market identifiers:
 
-- `marketAddress` is the stable market identifier across the entire lifecycle. Used in all market-specific requests. Example: `0:market-address`.
-- `orderBookAddress` is the deterministic order-book address returned by `/api/v1/markets`. It is always present on any market that appears in API responses — the backend stamps it on the first reconcile, before the OrderBook contract is active on-chain. The only state where it can be null internally is the pre-reconcile window, and such markets are hidden from the API. Clients MUST use `status` to determine whether the order book is currently available for trading; a non-null `orderBookAddress` does not by itself imply the book is open.
+- `predictionMarketAddress` is the stable market identifier across the entire lifecycle. Used in all market-specific requests. Example: `0:market-address`.
+- `predictionOrderBookAddress` is the deterministic order-book address returned by `/api/v1/prediction/markets`. It is always present on any market that appears in API responses — the backend stamps it on the first reconcile, before the OrderBook contract is active on-chain. The only state where it can be null internally is the pre-reconcile window, and such markets are hidden from the API. Clients MUST use `status` to determine whether the order book is currently available for trading; a non-null `predictionOrderBookAddress` does not by itself imply the book is open.
 - `marketName` is the market name. Example: `PM-2026-ELECTION`.
 - `symbol` is the outcome-token symbol and is formed as `<marketName>-<OUTCOME_NAME>`. Example: `PM-2026-ELECTION-YES`.
 
-Requests that target one order book use `marketAddress` and `symbol`.
+Requests that target one order book use `predictionMarketAddress` and `symbol`.
 Responses return the same identifiers where relevant.
 
 Examples:
 
 ```text
-marketAddress = 0:market-address
+predictionMarketAddress = 0:market-address
 marketName    = PM-2026-ELECTION
 symbol        = PM-2026-ELECTION-YES
 ```
@@ -144,14 +148,14 @@ Formula:
 signature = HMAC_SHA256(canonicalQueryString + canonicalRequestBody, apiSecret)
 ```
 
-Example for `POST /api/v1/order`:
+Example for `POST /api/v1/prediction/order`:
 
 ```text
 canonicalQueryString = recvWindow=5000&timestamp=1710000000000
-canonicalRequestBody = {"marketAddress":"0:market-address","symbol":"PM-2026-ELECTION-YES","side":"BUY","quantity":"1.500000","price":"0.615","type":"LIMIT","timeInForce":"GTC"}
+canonicalRequestBody = {"predictionMarketAddress":"0:market-address","symbol":"PM-2026-ELECTION-YES","side":"BUY","quantity":"1.500000","price":"0.615","type":"LIMIT","timeInForce":"GTC"}
 
 signature = HMAC_SHA256(
-  'recvWindow=5000&timestamp=1710000000000{"marketAddress":"0:market-address","symbol":"PM-2026-ELECTION-YES","side":"BUY","quantity":"1.500000","price":"0.615","type":"LIMIT","timeInForce":"GTC"}',
+  'recvWindow=5000&timestamp=1710000000000{"predictionMarketAddress":"0:market-address","symbol":"PM-2026-ELECTION-YES","side":"BUY","quantity":"1.500000","price":"0.615","type":"LIMIT","timeInForce":"GTC"}',
   apiSecret
 )
 ```
@@ -190,11 +194,11 @@ Recommended common error codes:
 | `-2015` | Private note already registered. | 409 |
 | `-2016` | Submitted key does not control this private note. | 400 |
 
-`-1007` means the request did not complete in time. The order may still have been accepted by the exchange. Retry `POST /api/v1/order` with the same `newOrderClientId` — the server will deduplicate so the same order is not placed twice.
+`-1007` means the request did not complete in time. The order may still have been accepted by the exchange. Retry `POST /api/v1/prediction/order` with the same `newOrderClientId` — the server will deduplicate so the same order is not placed twice.
 
 `-2013` means the caller's authenticated account has no PrivateNote contract deployed at its resolved address. The credential is valid but the on-chain contract is missing; the client should offer "deploy your account" instead of retrying.
 
-`-2014` means another order from the same account is still being processed. Retry after a short delay; the in-flight order will appear in `/api/v1/orders` shortly.
+`-2014` means another order from the same account is still being processed. Retry after a short delay; the in-flight order will appear in `/api/v1/prediction/orders` shortly.
 
 `-2015` means `POST /api/v1/accounts` was called for a PrivateNote that already has an account. Registration is one-shot per note: the existing credential is left untouched and no new one is minted. Do not retry — use the credential issued at first registration.
 
@@ -212,46 +216,49 @@ envelope field failed or why a credential was rejected.
 
 | Function | Method | Path | Security |
 | --- | --- | --- | --- |
-| List markets | `GET` | `/api/v1/markets` | `NONE` |
+| List prediction markets | `GET` | `/api/v1/prediction/markets` | `NONE` |
 | List oracles and their available events | `GET` | `/api/v1/oracles` | `NONE` |
-| Fetch order book | `GET` | `/api/v1/depth` | `NONE` |
-| Fetch recent trades | `GET` | `/api/v1/trades` | `NONE` |
+| Fetch prediction order book | `GET` | `/api/v1/prediction/depth` | `NONE` |
+| Fetch recent prediction trades | `GET` | `/api/v1/prediction/trades` | `NONE` |
+| 🚧 TODO — List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
+| 🚧 TODO — Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
-| Buy a full set of outcome tokens with collateral | `POST` | `/api/v1/buyFullSet` | `TRADE` |
-| Sell a full set of outcome tokens back into collateral | `POST` | `/api/v1/sellFullSet` | `TRADE` |
-| Claim payout after market resolution | `POST` | `/api/v1/claim` | `TRADE` |
-| Create single order | `POST` | `/api/v1/order` | `TRADE` |
-| Cancel single order by ID | `DELETE` | `/api/v1/order` | `TRADE` |
-| Create batch orders | `POST` | `/api/v1/batchOrders` | `TRADE` |
-| Cancel batch orders by IDs | `DELETE` | `/api/v1/batchOrders` | `TRADE` |
-| Cancel all open orders on one symbol | `DELETE` | `/api/v1/openOrders` | `TRADE` |
-| Fetch orders | `GET` | `/api/v1/orders` | `USER_DATA` |
-| Subscribe to user order updates | `WS` | `/ws/v1/user` | `USER_DATA` |
+| Buy a full set of outcome tokens with collateral | `POST` | `/api/v1/prediction/buyFullSet` | `TRADE` |
+| Sell a full set of outcome tokens back into collateral | `POST` | `/api/v1/prediction/sellFullSet` | `TRADE` |
+| Claim payout after market resolution | `POST` | `/api/v1/prediction/claim` | `TRADE` |
+| Create single order | `POST` | `/api/v1/prediction/order` | `TRADE` |
+| Cancel single order by ID | `DELETE` | `/api/v1/prediction/order` | `TRADE` |
+| Create batch orders | `POST` | `/api/v1/prediction/batchOrders` | `TRADE` |
+| Cancel batch orders by IDs | `DELETE` | `/api/v1/prediction/batchOrders` | `TRADE` |
+| Cancel all open orders on one symbol | `DELETE` | `/api/v1/prediction/openOrders` | `TRADE` |
+| Fetch orders | `GET` | `/api/v1/prediction/orders` | `USER_DATA` |
+| Subscribe to user order updates | `WS` | `/ws/v1/prediction/user` | `USER_DATA` |
 
-## Market Data Endpoints
+## Prediction Market Data
 
-### Markets
+### Prediction Markets
 
 ```http
-GET /api/v1/markets
+GET /api/v1/prediction/markets
 ```
 
 Fetch available prediction markets, their outcomes, lifecycle phase, timings, and oracle event metadata.
 
 A market in DEX.DO has a finite lifecycle anchored to an oracle event. The lifecycle has nine phases — see [Market Status](#market-status). Clients MUST treat `status` as an opaque enum value and not derive it from raw timings.
 
-In `/api/v1/markets`, `event.oracles[]` contains only the oracles for that market. Use `/api/v1/oracles` to list oracles and events available for creating markets.
+In `/api/v1/prediction/markets`, `event.oracles[]` contains only the oracles for that market. Use `/api/v1/oracles` to list oracles and events available for creating markets.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
+| `predictionMarketAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
 | `status` | STRING | NO | Comma-separated list of statuses to include. Example: `TRADING,AWAITING_FREEZE`. |
 | `quoteAsset` | STRING | NO | Filter by quote asset. Example: `USDC`. |
 | `oracleName` | STRING | NO | Filter by oracle name. A market matches if its `event.oracles[]` contains this oracle name. |
+| `resolvesFrom` | STRING | NO | Return only markets settled from this inference model's order book (its `inferenceOrderBookAddress` from [`/api/v1/inference/markets`](#inference-markets)). See `resolvesFrom` in the response. |
 | `closingBefore` | LONG | NO | Return only markets with `timings.resultEnd < closingBefore` (unix seconds). |
 | `sort` | STRING | NO | Sort field. One of: `resultStart` (default, ASC), `createdAt` (DESC). |
 | `cursor` | STRING | NO | Opaque pagination cursor returned by a previous call. |
@@ -266,8 +273,8 @@ Response:
   "hasMore": false,
   "markets": [
     {
-      "marketAddress": "0:b286...",
-      "orderBookAddress": "0:c12d...",
+      "predictionMarketAddress": "0:b286...",
+      "predictionOrderBookAddress": "0:c12d...",
       "marketName": "PM-2026-ELECTION",
       "status": "TRADING",
       "quoteAsset": "USDC",
@@ -326,11 +333,11 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `serverTime` | LONG | Unix timestamp in seconds. All timestamp fields returned by `/api/v1/markets` are unix seconds unless explicitly stated otherwise. |
+| `serverTime` | LONG | Unix timestamp in seconds. All timestamp fields returned by `/api/v1/prediction/markets` are unix seconds unless explicitly stated otherwise. |
 | `nextCursor` | STRING \| null | Pagination cursor for the next page. `null` when `hasMore` is `false`. |
 | `hasMore` | BOOLEAN | Whether more pages follow. |
-| `marketAddress` | STRING | Stable market identifier. |
-| `orderBookAddress` | STRING | Deterministic order-book address. Always present on markets visible to the API (the backend stamps it on the first reconcile). Trading availability depends on market `status`. |
+| `predictionMarketAddress` | STRING | Stable market identifier. |
+| `predictionOrderBookAddress` | STRING | Deterministic order-book address. Always present on markets visible to the API (the backend stamps it on the first reconcile). Trading availability depends on market `status`. |
 | `marketName` | STRING | Technical market name. Not the user-facing title; see `event.eventName`. |
 | `status` | ENUM | Market phase. See [Market Status](#market-status). |
 | `quoteAsset` | STRING | Quote-asset symbol for display. |
@@ -342,6 +349,7 @@ Response fields:
 | `event` | OBJECT | See [Event](#event). |
 | `terminal` | OBJECT \| null | See [Terminal](#terminal). `null` for non-terminal statuses. |
 | `outcomes` | ARRAY | Outcome-token descriptors. See [Outcome](#outcome). |
+| `resolvesFrom` | OBJECT \| null | Present only for markets settled from an inference model's reference price; `null` otherwise. See [resolvesFrom](#resolvesfrom). |
 
 #### Common Enums
 
@@ -503,7 +511,160 @@ Example for a non-terminal market (any of the six live statuses, including the t
 | `minNotional` | DECIMAL | Minimum accepted notional value for an order. |
 | `maxBatchSize` | INT | Maximum number of orders accepted in one batch request for this outcome. |
 
-### Oracles
+##### resolvesFrom
+
+> 🚧 **TODO — not implemented** (inference linkage). Until the inference market ships, `resolvesFrom` is always `null` and the `?resolvesFrom=` filter matches nothing.
+
+Present only on a prediction market whose outcome is decided by a model's reference price (a numeric range event); `null` on all other markets. The numeric outcome ranges are the market's normal `outcomes`.
+
+```json
+{
+  "inferenceOrderBookAddress": "0:ob-addr...",
+  "model": "qwen--qwen2.5-32b--instruct",
+  "metric": "WEEKLY_MEDIAN_PRICE"
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | The inference market ([`/api/v1/inference/markets`](#inference-markets)) this market settles from. |
+| `model` | STRING \| null | The model `ref` (`producer--model--version`); `null` if the model identity is not yet known on chain. |
+| `metric` | ENUM | The price metric used to settle. Currently `WEEKLY_MEDIAN_PRICE`. |
+
+### Prediction Order Book
+
+```http
+GET /api/v1/prediction/depth
+```
+
+Fetch bids and asks for one symbol in one market.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
+| `limit` | INT | NO | Number of price levels per side. Default: `100`. Max: `1000`. |
+
+Response:
+
+```json
+{
+  "predictionMarketAddress": "0:market-address",
+  "symbol": "PM-2026-ELECTION-YES",
+  "lastUpdateId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000002",
+  "bids": [
+    ["0.614", "100.00"],
+    ["0.613", "25.50"]
+  ],
+  "asks": [
+    ["0.616", "50.00"],
+    ["0.617", "75.25"]
+  ]
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `lastUpdateId` | STRING | Opaque chain-order cursor. Lex-comparable: a larger string means a newer event has touched this `(predictionMarketAddress, symbol)`. Empty string when no order event has landed yet. Clients SHOULD compare for equality to detect "no change" and string-lex order to detect "moved forward"; they SHOULD NOT parse it as an integer. |
+
+Each bid or ask item is:
+
+```text
+[price, quantity]
+```
+
+### Prediction Trades
+
+```http
+GET /api/v1/prediction/trades
+```
+
+Security: `NONE`
+
+Fetch the most recent public trades for one symbol in one market. A trade is a
+single maker↔taker match produced by the order book — the public, account-agnostic
+view of the fills that surface privately as `x: "TRADE"` frames on the
+[`orderUpdate`](#order-updates) WebSocket stream. No authentication is required and
+no owner information is returned; the endpoint exposes only price, size, direction,
+and time.
+
+This endpoint is unaffected by market lifecycle status: trades are returned for any
+market that has been reconciled at least once, including terminal phases
+(`RESOLVED`, `CANCELLED`, `EXPIRED`), so the trade tape remains readable after the
+book closes. It is eventually consistent — a just-matched trade may briefly lag the
+fill that produced it until the indexer projects the match.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
+| `limit` | INT | NO | Number of trades to return, newest first. Default: `20`. Max: `1000`. |
+
+Response:
+
+```json
+[
+  {
+    "tradeId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000005",
+    "price": "0.615",
+    "qty": "1.00",
+    "quoteQty": "0.615000",
+    "time": 1710000008980,
+    "isBuyerMaker": true
+  },
+  {
+    "tradeId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000004",
+    "price": "0.615",
+    "qty": "0.50",
+    "quoteQty": "0.307500",
+    "time": 1710000004980,
+    "isBuyerMaker": true
+  }
+]
+```
+
+The response is a bare JSON array, newest trade first, ordered by the same
+server-internal chain-order key used by [`GET /api/v1/prediction/orders`](#orders) (descending).
+An empty array means no trade has matched on this symbol yet.
+
+Trade fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `tradeId` | STRING | Opaque, lex-comparable id for one maker↔taker match. The identical value is carried by the WebSocket [`orderUpdate`](#order-updates) fill frame as field `t`, on both sides of the match — so a client can correlate a public trade with its own private fills and deduplicate across the two feeds. Treat it as an opaque token; do not parse it. |
+| `price` | DECIMAL | Match (clearing) price, scaled by the outcome price precision. |
+| `qty` | DECIMAL | Matched outcome-token quantity, scaled by the outcome quantity precision. |
+| `quoteQty` | DECIMAL | Quote-asset notional of the match (`price × qty`), scaled by the quote asset's on-chain `decimals`. |
+| `time` | LONG | On-chain match time in Unix milliseconds, truncated from the indexed microsecond timestamp — same convention as `time` / `updateTime` on [`GET /api/v1/prediction/orders`](#orders). |
+| `isBuyerMaker` | BOOLEAN | `true` when the resting (maker) side was the buy order and the taker was selling; `false` when the taker was buying. Determines display direction: `true` = taker sold (downtick), `false` = taker bought (uptick). Matches Binance `isBuyerMaker` semantics. |
+
+Each public trade is the account-agnostic view of a fill that also appears on the
+private [`orderUpdate`](#order-updates) stream (`x: "TRADE"`). The fields line up
+one-to-one, so a client subscribed to both feeds can match them by `tradeId` / `t`:
+
+| `/api/v1/prediction/trades` field | `orderUpdate` fill field | Note |
+| --- | --- | --- |
+| `tradeId` | `t` | Same opaque match id on both feeds, and on both sides of the match. |
+| `price` | `L` | Last fill price. |
+| `qty` | `l` | Last fill quantity. |
+| `time` | `T` | On-chain match / transaction time. |
+| `isBuyerMaker` | `S` + `m` | Public trade carries the side-agnostic direction; the `orderUpdate` frame carries the recipient's own side (`S`) and maker flag (`m`). |
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `predictionMarketAddress` or `symbol` missing or blank | `-1102` | 400 |
+| `limit` present but not an integer | `-1130` | 400 |
+| `limit` outside `[1, 1000]` | `-1102` | 400 |
+| `(predictionMarketAddress, symbol)` pair not found, or its market has not been reconciled yet | `-1121` | 404 |
+| Trade data is temporarily inconsistent | `-1500` | 503 |
+
+## Oracles
 
 ```http
 GET /api/v1/oracles
@@ -513,7 +674,7 @@ Fetch oracles, their event lists, and events that can be used to create a market
 
 The response is grouped by oracle, then by event list. Each event list contains its description and the events it currently offers for market creation.
 
-This endpoint does not return markets already created from these events. Use `/api/v1/markets` for market lifecycle, status, timings, order-book address, and market outcomes.
+This endpoint does not return markets already created from these events. Use `/api/v1/prediction/markets` for market lifecycle, status, timings, order-book address, and market outcomes.
 
 By default, each event list includes only events that are still available for new markets: not deleted and not past `deadline`.
 
@@ -599,9 +760,9 @@ Response fields:
 | `oracles[].eventLists[].events[].trustAddress` | STRING \| null | Optional trusted address attached to the event. `null` when absent or unavailable. |
 | `oracles[].eventLists[].events[].outcomes` | ARRAY of [OracleOutcome](#oracleoutcome) | Event outcome labels, sorted by `outcomeId`. |
 
-#### Oracle Data Objects
+### Oracle Data Objects
 
-##### OracleEntry
+#### OracleEntry
 
 ```json
 {
@@ -624,7 +785,7 @@ Response fields:
 | `address` | STRING | Oracle address. |
 | `eventLists` | ARRAY of [OracleEventList](#oracleeventlist) | Event lists owned by this oracle. |
 
-##### OracleEventList
+#### OracleEventList
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -633,7 +794,7 @@ Response fields:
 | `description` | STRING | Human-readable event-list description. |
 | `events` | ARRAY of [OracleEvent](#oracleevent) | Events offered by this event list. |
 
-##### OracleEvent
+#### OracleEvent
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -647,145 +808,150 @@ Response fields:
 | `trustAddress` | STRING \| null | Optional trusted address attached to the event. `null` when absent or unavailable. |
 | `outcomes` | ARRAY of [OracleOutcome](#oracleoutcome) | Event outcome labels, sorted by `outcomeId`. |
 
-##### OracleOutcome
+#### OracleOutcome
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `outcomeId` | INT | Outcome id. |
 | `outcomeName` | STRING | Human-readable outcome label. |
 
-### Order Book
+## Inference Market Data
+
+> 🚧 **TODO — not implemented.** The inference market (endpoints, indexer, and read-model below) is specified but **not yet built**. This section is a forward-looking contract; the endpoints are not served until the inference indexer/API ships. Safe to merge into `dev` as spec-only.
+
+Market data for the **private-inference market**: tradable AI models and the prediction markets settled from their prices. The unit of trade is an **inference tick** — one unit of model generation — priced **per tick in `SHELL`**. Each model has exactly one order book; there is no `symbol` dimension (unlike prediction-market depth, which is per outcome).
+
+All three endpoints are public (`NONE`), read-only, and eventually consistent — a just-placed order or a fresh reference price may briefly lag the chain.
+
+### Inference Markets
 
 ```http
-GET /api/v1/depth
+GET /api/v1/inference/markets
 ```
 
-Fetch bids and asks for one symbol in one market.
+List the tradable models — one entry per model order book.
 
 Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
-| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
+| `inferenceOrderBookAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
+| `producer` | STRING | NO | Filter by model producer (e.g. `qwen`). |
+| `status` | STRING | NO | Comma-separated statuses to include. Currently only `TRADING`. |
+| `sort` | STRING | NO | Sort field. `createdAt` (default, DESC). |
+| `cursor` | STRING | NO | Opaque pagination cursor from a previous call. |
+| `limit` | INT | NO | Page size. Default: `50`. Max: `200`. |
+
+Response:
+
+```json
+{
+  "serverTime": 1710000000,
+  "nextCursor": null,
+  "hasMore": false,
+  "markets": [
+    {
+      "inferenceOrderBookAddress": "0:ob-addr...",
+      "model": {
+        "producer": "qwen",
+        "name": "qwen2.5-32b",
+        "version": "instruct",
+        "ref": "qwen--qwen2.5-32b--instruct"
+      },
+      "status": "TRADING",
+      "quoteAsset": "SHELL",
+      "makerCommission": "-0.02",
+      "takerCommission": "0.025",
+      "pricePrecision": 9,
+      "quantityPrecision": 0,
+      "tickSize": "0.000000001",
+      "stepSize": "1",
+      "minNotional": "1",
+      "referencePrice": "1010",
+      "createdAt": 1709980000
+    }
+  ]
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `serverTime` | LONG | Unix seconds, captured once for the request. |
+| `nextCursor` | STRING \| null | Cursor for the next page. `null` when `hasMore` is `false`. |
+| `hasMore` | BOOLEAN | Whether more pages follow. |
+| `inferenceOrderBookAddress` | STRING | Stable market id — the model's order-book address. Pass it as `?inferenceOrderBookAddress=` to fetch this one market, and as the key for [`/api/v1/inference/depth`](#inference-depth). |
+| `model` | OBJECT | Model identity. `ref` is the canonical `producer--model--version`. `producer` / `name` / `version` MAY be `null` if the model identity is not yet known on chain; `ref` then carries the model hash. |
+| `status` | ENUM | `TRADING`. Reserved for future inactive states; clients MUST treat it as opaque. |
+| `quoteAsset` | STRING | Always `SHELL`. |
+| `makerCommission` | DECIMAL | Maker (**seller**) fee rate, a signed decimal string. The seller is never charged; a negative value (`"-0.02"` = −2%) is a **rebate credited to the seller** for delivering ticks cleanly. This is the rebate **cap**: the actual rebate ramps from `0` with delivered ticks and applies only on a clean, non-disputed close, so a given deal may credit less. |
+| `takerCommission` | DECIMAL | Taker (**buyer**) fee rate, charged to the buyer per delivered tick. Always non-negative (`"0.025"` = 2.5%). What the buyer spends on top of the tick price. The amount not returned to the seller as a rebate is burned. |
+| `pricePrecision` | INT | Decimal places for price-per-tick. |
+| `quantityPrecision` | INT | Decimal places for tick quantity. Ticks are whole units, so `0`. |
+| `tickSize` | DECIMAL | Minimum price-per-tick increment. |
+| `stepSize` | DECIMAL | Minimum tick-quantity increment (`"1"`). |
+| `minNotional` | DECIMAL | Minimum order notional in `SHELL`. |
+| `referencePrice` | DECIMAL \| null | Weekly-median price per tick used to settle prediction markets. **`null`** when the book has no recent liquidity. |
+| `createdAt` | LONG | Unix seconds. When the book was first seen. |
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` together with filter/pagination params | `-1102` | 400 |
+| Invalid `status` / `sort` value | `-1130` | 400 |
+| Corrupted `cursor` | `-1130` | 400 |
+| `inferenceOrderBookAddress` not found | `-1121` | 404 |
+
+### Inference Depth
+
+```http
+GET /api/v1/inference/depth
+```
+
+Fetch resting bids and asks for one model's order book. Mirrors [`/api/v1/prediction/depth`](#prediction-order-book), keyed by the order-book address (no `symbol` — one book per model).
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | YES | The model's order-book address from [`/api/v1/inference/markets`](#inference-markets). |
 | `limit` | INT | NO | Number of price levels per side. Default: `100`. Max: `1000`. |
 
 Response:
 
 ```json
 {
-  "marketAddress": "0:market-address",
-  "symbol": "PM-2026-ELECTION-YES",
-  "lastUpdateId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000002",
+  "inferenceOrderBookAddress": "0:ob-addr...",
+  "lastUpdateId": "76a23086a006700000000000000000000000000000000000000000000000000000000000000000007",
   "bids": [
-    ["0.614", "100.00"],
-    ["0.613", "25.50"]
+    ["1000", "120"],
+    ["990", "300"]
   ],
   "asks": [
-    ["0.616", "50.00"],
-    ["0.617", "75.25"]
+    ["1050", "80"],
+    ["1060", "210"]
   ]
 }
 ```
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `lastUpdateId` | STRING | Opaque chain-order cursor. Lex-comparable: a larger string means a newer event has touched this `(marketAddress, symbol)`. Empty string when no order event has landed yet. Clients SHOULD compare for equality to detect "no change" and string-lex order to detect "moved forward"; they SHOULD NOT parse it as an integer. |
-
-Each bid or ask item is:
-
-```text
-[price, quantity]
-```
-
-### Recent Trades
-
-```http
-GET /api/v1/trades
-```
-
-Security: `NONE`
-
-Fetch the most recent public trades for one symbol in one market. A trade is a
-single maker↔taker match produced by the order book — the public, account-agnostic
-view of the fills that surface privately as `x: "TRADE"` frames on the
-[`orderUpdate`](#order-updates) WebSocket stream. No authentication is required and
-no owner information is returned; the endpoint exposes only price, size, direction,
-and time.
-
-This endpoint is unaffected by market lifecycle status: trades are returned for any
-market that has been reconciled at least once, including terminal phases
-(`RESOLVED`, `CANCELLED`, `EXPIRED`), so the trade tape remains readable after the
-book closes. It is eventually consistent — a just-matched trade may briefly lag the
-fill that produced it until the indexer projects the match.
-
-Query parameters:
-
-| Name | Type | Mandatory | Description |
-| --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
-| `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `limit` | INT | NO | Number of trades to return, newest first. Default: `20`. Max: `1000`. |
-
-Response:
-
-```json
-[
-  {
-    "tradeId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000005",
-    "price": "0.615",
-    "qty": "1.00",
-    "quoteQty": "0.615000",
-    "time": 1710000008980,
-    "isBuyerMaker": true
-  },
-  {
-    "tradeId": "76a23086a00670000000000000000000000000000000000000000000000000000000000000000000004",
-    "price": "0.615",
-    "qty": "0.50",
-    "quoteQty": "0.307500",
-    "time": 1710000004980,
-    "isBuyerMaker": true
-  }
-]
-```
-
-The response is a bare JSON array, newest trade first, ordered by the same
-server-internal chain-order key used by [`GET /api/v1/orders`](#orders) (descending).
-An empty array means no trade has matched on this symbol yet.
-
-Trade fields:
+Each bid or ask item is `[pricePerTick, ticks]` — price in `SHELL` and the total ticks resting at that price.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `tradeId` | STRING | Opaque, lex-comparable id for one maker↔taker match. The identical value is carried by the WebSocket [`orderUpdate`](#order-updates) fill frame as field `t`, on both sides of the match — so a client can correlate a public trade with its own private fills and deduplicate across the two feeds. Treat it as an opaque token; do not parse it. |
-| `price` | DECIMAL | Match (clearing) price, scaled by the outcome price precision. |
-| `qty` | DECIMAL | Matched outcome-token quantity, scaled by the outcome quantity precision. |
-| `quoteQty` | DECIMAL | Quote-asset notional of the match (`price × qty`), scaled by the quote asset's on-chain `decimals`. |
-| `time` | LONG | On-chain match time in Unix milliseconds, truncated from the indexed microsecond timestamp — same convention as `time` / `updateTime` on [`GET /api/v1/orders`](#orders). |
-| `isBuyerMaker` | BOOLEAN | `true` when the resting (maker) side was the buy order and the taker was selling; `false` when the taker was buying. Determines display direction: `true` = taker sold (downtick), `false` = taker bought (uptick). Matches Binance `isBuyerMaker` semantics. |
-
-Each public trade is the account-agnostic view of a fill that also appears on the
-private [`orderUpdate`](#order-updates) stream (`x: "TRADE"`). The fields line up
-one-to-one, so a client subscribed to both feeds can match them by `tradeId` / `t`:
-
-| `/api/v1/trades` field | `orderUpdate` fill field | Note |
-| --- | --- | --- |
-| `tradeId` | `t` | Same opaque match id on both feeds, and on both sides of the match. |
-| `price` | `L` | Last fill price. |
-| `qty` | `l` | Last fill quantity. |
-| `time` | `T` | On-chain match / transaction time. |
-| `isBuyerMaker` | `S` + `m` | Public trade carries the side-agnostic direction; the `orderUpdate` frame carries the recipient's own side (`S`) and maker flag (`m`). |
+| `lastUpdateId` | STRING | Opaque chain-order cursor for this book. Lex-comparable: a larger string means a newer event has touched the book. Empty string when no order has landed yet. Do not parse it as an integer. |
 
 Errors:
 
 | Condition | Code | HTTP |
 | --- | --- | --- |
-| `marketAddress` or `symbol` missing or blank | `-1102` | 400 |
+| `inferenceOrderBookAddress` missing or blank | `-1102` | 400 |
 | `limit` present but not an integer | `-1130` | 400 |
-| `limit` outside `[1, 1000]` | `-1102` | 400 |
-| `(marketAddress, symbol)` pair not found, or its market has not been reconciled yet | `-1121` | 404 |
-| Trade data is temporarily inconsistent | `-1500` | 503 |
+| `inferenceOrderBookAddress` not found / not yet available | `-1121` | 404 |
+| Book data temporarily inconsistent | `-1500` | 503 |
+
+> **Prediction markets settled from a model price** are regular prediction markets, listed by [`/api/v1/prediction/markets`](#prediction-markets) — filter with `?resolvesFrom=<inferenceOrderBookAddress>` and read the per-market `resolvesFrom` block. See [Markets](#prediction-markets).
 
 ## Account Endpoints
 
@@ -922,7 +1088,7 @@ Query parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 
 Signed parameters:
 
@@ -936,7 +1102,7 @@ Response:
 
 ```json
 {
-  "marketAddress": "0:market-address",
+  "predictionMarketAddress": "0:market-address",
   "updateTime": 1710000000000,
   "balances": [
     {
@@ -959,11 +1125,11 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `marketAddress` | STRING | Echoed from the request. |
+| `predictionMarketAddress` | STRING | Echoed from the request. |
 | `updateTime` | LONG | Server timestamp (Unix ms) captured when the request was served. |
-| `balances` | ARRAY | One entry per outcome of the market, sorted by `outcomeId` ascending. Length equals the market's `outcomes[]` length in `/api/v1/markets`. |
-| `balances[].outcomeId` | INT | Stable outcome id; matches `outcomes[].outcomeId` from `/api/v1/markets`. |
-| `balances[].symbol` | STRING | Outcome-token symbol; matches `outcomes[].symbol` from `/api/v1/markets`. |
+| `balances` | ARRAY | One entry per outcome of the market, sorted by `outcomeId` ascending. Length equals the market's `outcomes[]` length in `/api/v1/prediction/markets`. |
+| `balances[].outcomeId` | INT | Stable outcome id; matches `outcomes[].outcomeId` from `/api/v1/prediction/markets`. |
+| `balances[].symbol` | STRING | Outcome-token symbol; matches `outcomes[].symbol` from `/api/v1/prediction/markets`. |
 | `balances[].free` | DECIMAL | Outcome tokens currently held by the trading PrivateNote across clean, debt, and coupon stake pools, scaled by the quote asset's on-chain `decimals` (same scaling as `/api/v1/account`). |
 | `balances[].lockedInOrders` | DECIMAL | Outcome tokens locked in resting SELL orders on this outcome, scaled by the quote asset's on-chain `decimals`. |
 
@@ -971,17 +1137,17 @@ Errors:
 
 | Condition | Code | HTTP |
 | --- | --- | --- |
-| `marketAddress` missing or blank | `-1102` | 400 |
-| `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| `predictionMarketAddress` missing or blank | `-1102` | 400 |
+| `predictionMarketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
 | Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
 | Backend could not read the trading PrivateNote state (gateway timeout, malformed reply, unknown token type, decimals out of range) | `-1500` | 503 |
 
-## Position Endpoints
+## Prediction Position Endpoints
 
 ### Buy Full Set
 
 ```http
-POST /api/v1/buyFullSet
+POST /api/v1/prediction/buyFullSet
 ```
 
 Security: `TRADE`
@@ -996,7 +1162,7 @@ Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `collateral` | DECIMAL | YES | Amount of the market's `quoteAsset` to allocate. Scaled by the quote-asset on-chain `decimals`. |
 
 Signed query parameters:
@@ -1011,7 +1177,7 @@ Response:
 
 ```json
 {
-  "marketAddress": "0:market-address",
+  "predictionMarketAddress": "0:market-address",
   "transactTime": 1710000000000
 }
 ```
@@ -1020,7 +1186,7 @@ Response fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `marketAddress` | STRING | Echoed from the request. |
+| `predictionMarketAddress` | STRING | Echoed from the request. |
 | `transactTime` | LONG | Server timestamp (Unix ms) when the operation was accepted. |
 
 The response confirms acceptance only. The resulting collateral debit and outcome-token credits become visible through [`GET /api/v1/account`](#account-balance) and [`GET /api/v1/account/balances`](#market-outcome-balances) once the chain confirms.
@@ -1029,9 +1195,9 @@ Errors:
 
 | Condition | Code | HTTP |
 | --- | --- | --- |
-| `marketAddress` or `collateral` missing | `-1102` | 400 |
+| `predictionMarketAddress` or `collateral` missing | `-1102` | 400 |
 | `collateral` not positive, exceeds quote-asset precision, or other body shape violation | `-1130` | 400 |
-| `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| `predictionMarketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
 | Market status is not `AWAITING_FREEZE` or `TRADING`; free quote-asset balance is below `collateral`; the chain rejected the request | `-2010` | 400 |
 | Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
 | Trading note is busy with another operation; retry shortly | `-2014` | 429 |
@@ -1040,7 +1206,7 @@ Errors:
 ### Sell Full Set
 
 ```http
-POST /api/v1/sellFullSet
+POST /api/v1/prediction/sellFullSet
 ```
 
 Security: `TRADE`
@@ -1053,8 +1219,8 @@ Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
-| `amounts` | ARRAY of DECIMAL | YES | Per-outcome amounts to sell back. Length MUST equal the market's `outcomes[]` length in `/api/v1/markets`. Element `i` corresponds to `outcomes[i].outcomeId` and is scaled by `outcomes[i].quantityPrecision`. Elements MAY be zero; at least one element MUST be non-zero. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `amounts` | ARRAY of DECIMAL | YES | Per-outcome amounts to sell back. Length MUST equal the market's `outcomes[]` length in `/api/v1/prediction/markets`. Element `i` corresponds to `outcomes[i].outcomeId` and is scaled by `outcomes[i].quantityPrecision`. Elements MAY be zero; at least one element MUST be non-zero. |
 
 Signed query parameters:
 
@@ -1068,7 +1234,7 @@ Response:
 
 ```json
 {
-  "marketAddress": "0:market-address",
+  "predictionMarketAddress": "0:market-address",
   "transactTime": 1710000000000
 }
 ```
@@ -1077,7 +1243,7 @@ Response fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `marketAddress` | STRING | Echoed from the request. |
+| `predictionMarketAddress` | STRING | Echoed from the request. |
 | `transactTime` | LONG | Server timestamp (Unix ms) when the operation was accepted. |
 
 The response confirms acceptance only. The credited collateral and the burned outcome-token amounts become visible through [`GET /api/v1/account`](#account-balance) and [`GET /api/v1/account/balances`](#market-outcome-balances) once the chain confirms.
@@ -1086,9 +1252,9 @@ Errors:
 
 | Condition | Code | HTTP |
 | --- | --- | --- |
-| `marketAddress` or `amounts` missing | `-1102` | 400 |
+| `predictionMarketAddress` or `amounts` missing | `-1102` | 400 |
 | `amounts` length does not equal the market's outcome count, any element negative or beyond precision, all elements zero | `-1130` | 400 |
-| `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| `predictionMarketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
 | Market status is not `TRADING` or `RESOLVING`; caller does not hold enough of some outcome to cover the requested amount; the chain rejected the request | `-2010` | 400 |
 | Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
 | Trading note is busy with another operation; retry shortly | `-2014` | 429 |
@@ -1097,7 +1263,7 @@ Errors:
 ### Claim
 
 ```http
-POST /api/v1/claim
+POST /api/v1/prediction/claim
 ```
 
 Security: `TRADE`
@@ -1108,7 +1274,7 @@ Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 
 Signed query parameters:
 
@@ -1122,7 +1288,7 @@ Response:
 
 ```json
 {
-  "marketAddress": "0:market-address",
+  "predictionMarketAddress": "0:market-address",
   "transactTime": 1710000000000
 }
 ```
@@ -1131,7 +1297,7 @@ Response fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `marketAddress` | STRING | Echoed from the request. |
+| `predictionMarketAddress` | STRING | Echoed from the request. |
 | `transactTime` | LONG | Server timestamp (Unix ms) when the operation was accepted. |
 
 The response confirms acceptance only. The credited collateral becomes visible through [`GET /api/v1/account`](#account-balance) once the chain confirms.
@@ -1140,19 +1306,19 @@ Errors:
 
 | Condition | Code | HTTP |
 | --- | --- | --- |
-| `marketAddress` missing | `-1102` | 400 |
-| `marketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
+| `predictionMarketAddress` missing | `-1102` | 400 |
+| `predictionMarketAddress` not found, or its market has not been reconciled yet | `-1121` | 404 |
 | Market status is not `RESOLVED` or `CANCELLED` | `-2010` | 400 |
 | Authenticated account has no PrivateNote contract deployed at its resolved address | `-2013` | 404 |
 | Trading note is busy with another operation; retry shortly | `-2014` | 429 |
 | Backend could not submit the transaction (gateway timeout, malformed reply) | `-1500` | 503 |
 
-## Trading Endpoints
+## Prediction Trading Endpoints
 
 ### New Order
 
 ```http
-POST /api/v1/order
+POST /api/v1/prediction/order
 ```
 
 Security: `TRADE`
@@ -1163,11 +1329,11 @@ Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. |
 | `side` | ENUM | YES | Order side. See [Order Side](#order-side). |
-| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
+| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/prediction/markets` apply to the quote-asset spend amount exactly as sent in the request. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
 | `type` | ENUM | NO | Order type. See [Order Type](#order-type). Default: `LIMIT`. |
 | `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
@@ -1194,16 +1360,16 @@ Response fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `clientOrderId` | STRING | Either the `newOrderClientId` sent in the request, or a server-generated identifier when none was provided. Use it to look up the order in `/api/v1/orders` until the server-assigned `orderId` is available. |
+| `clientOrderId` | STRING | Either the `newOrderClientId` sent in the request, or a server-generated identifier when none was provided. Use it to look up the order in `/api/v1/prediction/orders` until the server-assigned `orderId` is available. |
 | `transactTime` | LONG | Server timestamp (Unix ms) when the order was accepted. |
 | `status` | ENUM | Always [`PENDING_NEW`](#order-status) on success. |
 
-The response confirms acceptance only. The full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/orders`](#orders) shortly after; look up by `clientOrderId`.
+The response confirms acceptance only. The full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/prediction/orders`](#orders) shortly after; look up by `clientOrderId`.
 
 ### Cancel Order
 
 ```http
-DELETE /api/v1/order
+DELETE /api/v1/prediction/order
 ```
 
 Security: `TRADE`
@@ -1214,7 +1380,7 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
 | `orderId` | STRING | YES | Order ID to cancel. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
@@ -1241,25 +1407,25 @@ Response fields:
 | `transactTime` | LONG | Server timestamp (Unix ms) when the cancel request was accepted. |
 | `status` | ENUM | Always [`PENDING_CANCEL`](#order-status) on success. |
 
-The response confirms acceptance only. The final outcome — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/orders`](#orders) shortly after.
+The response confirms acceptance only. The final outcome — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/prediction/orders`](#orders) shortly after.
 
 ### New Batch Orders
 
 ```http
-POST /api/v1/batchOrders
+POST /api/v1/prediction/batchOrders
 ```
 
 Security: `TRADE`
 
-Create multiple orders in one request. All orders in the batch are submitted to the single market symbol identified by the top-level `marketAddress` and `symbol`.
+Create multiple orders in one request. All orders in the batch are submitted to the single market symbol identified by the top-level `predictionMarketAddress` and `symbol`.
 
 Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/markets`. The backend rejects an empty array before submission with `-1130 / 400`. |
+| `orders` | ARRAY | YES | List of orders to create on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/prediction/markets`. The backend rejects an empty array before submission with `-1130 / 400`. |
 
 Each order item:
 
@@ -1267,7 +1433,7 @@ Each order item:
 | --- | --- | --- | --- |
 | `newOrderClientId` | STRING | NO | Optional client-defined order identifier. If omitted, the API generates a random value and returns it as `clientOrderId` in the response. Each item is generated or accepted independently; intra-batch duplicates are detected by the exchange during placement and surface as `-1130 / 400`. |
 | `side` | ENUM | YES | Order side. See [Order Side](#order-side). |
-| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/markets` apply to the quote-asset spend amount exactly as sent in the request. |
+| `quantity` | DECIMAL | YES | Outcome-token quantity. Must follow `stepSize`. For `MARKET` buy orders this field represents the amount of the market `quoteAsset` to spend, for example `USDC`. In that case, `quantityPrecision` and `stepSize` from `/api/v1/prediction/markets` apply to the quote-asset spend amount exactly as sent in the request. |
 | `price` | DECIMAL | NO | Required for `LIMIT` orders. Must follow `tickSize`. |
 | `type` | ENUM | NO | Order type. See [Order Type](#order-type). Default: `LIMIT`. |
 | `timeInForce` | ENUM | NO | For `LIMIT` orders only. See [Time In Force](#time-in-force). Default: `GTC`. |
@@ -1284,7 +1450,7 @@ Request body:
 
 ```json
 {
-  "marketAddress": "0:market-address",
+  "predictionMarketAddress": "0:market-address",
   "symbol": "PM-2026-ELECTION-YES",
   "orders": [
     {
@@ -1328,11 +1494,11 @@ Response items, in request order:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `clientOrderId` | STRING | Either the `newOrderClientId` sent in the corresponding request item, or a server-generated identifier when none was provided. Use it to look up the order in `/api/v1/openOrders` until the server-assigned `orderId` is available. |
+| `clientOrderId` | STRING | Either the `newOrderClientId` sent in the corresponding request item, or a server-generated identifier when none was provided. Use it to look up the order in `/api/v1/prediction/openOrders` until the server-assigned `orderId` is available. |
 | `transactTime` | LONG | Server timestamp (Unix ms) when the batch was accepted. The same value is repeated for every item in the response. |
 | `status` | ENUM | Always [`PENDING_NEW`](#order-status) on success. |
 
-The response confirms acceptance only. For each item, the full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/openOrders`](#current-open-orders) shortly after; look up by `clientOrderId`.
+The response confirms acceptance only. For each item, the full order state — `orderId`, fills, accepted price — becomes available through [`GET /api/v1/prediction/openOrders`](#current-open-orders) shortly after; look up by `clientOrderId`.
 
 Response shape depends on outcome: on success the body is a JSON array with one object per accepted item, in request order; on failure the body is a single standard error envelope (`{ "code": ..., "msg": ... }`), never an array.
 
@@ -1341,7 +1507,7 @@ Batch creation is atomic: if any order in the batch fails validation, the whole 
 ### Cancel Batch Orders
 
 ```http
-DELETE /api/v1/batchOrders
+DELETE /api/v1/prediction/batchOrders
 ```
 
 Security: `TRADE`
@@ -1352,9 +1518,9 @@ Body parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
-| `orderIds` | ARRAY | YES | List of order IDs to cancel on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/markets`. The backend rejects an empty array before submission with `-1130 / 400`. Duplicate `orderId` values within the array are rejected with `-1130 / 400` — each id consumes one slot in the chain's batch window, and a duplicate receipt carries no extra signal. |
+| `orderIds` | ARRAY | YES | List of order IDs to cancel on the specified market symbol. Must contain at least one item; the maximum is the outcome's `maxBatchSize` from `/api/v1/prediction/markets`. The backend rejects an empty array before submission with `-1130 / 400`. Duplicate `orderId` values within the array are rejected with `-1130 / 400` — each id consumes one slot in the chain's batch window, and a duplicate receipt carries no extra signal. |
 
 Signed query parameters:
 
@@ -1368,7 +1534,7 @@ Request body:
 
 ```json
 {
-  "marketAddress": "0:market-address",
+  "predictionMarketAddress": "0:market-address",
   "symbol": "PM-2026-ELECTION-YES",
   "orderIds": ["123456789", "123456790"]
 }
@@ -1402,12 +1568,12 @@ Response fields (one element per requested `orderId`, in request order):
 | `transactTime` | LONG | Server timestamp (Unix ms) when the cancel batch was accepted. Identical across every item — one chain submission, one moment of acceptance. |
 | `status` | ENUM | Always [`PENDING_CANCEL`](#order-status) on success. |
 
-The response confirms acceptance only. The final outcome per id — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/orders`](#orders) shortly after.
+The response confirms acceptance only. The final outcome per id — `CANCELED`, or `FILLED` if matching raced the cancel — becomes visible through [`GET /api/v1/prediction/orders`](#orders) shortly after.
 
 ### Cancel All Open Orders On Symbol
 
 ```http
-DELETE /api/v1/openOrders
+DELETE /api/v1/prediction/openOrders
 ```
 
 Security: `TRADE`
@@ -1418,7 +1584,7 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
+| `predictionMarketAddress` | STRING | YES | Market address. Example: `0:market-address`. |
 | `symbol` | STRING | YES | Outcome-token symbol. Example: `PM-2026-ELECTION-YES`. |
 | `timestamp` | LONG | YES | Unix timestamp in milliseconds. |
 | `recvWindow` | LONG | NO | Request validity window in milliseconds. |
@@ -1429,7 +1595,7 @@ Response:
 ```json
 [
   {
-    "marketAddress": "0:market-address",
+    "predictionMarketAddress": "0:market-address",
     "symbol": "PM-2026-ELECTION-YES",
     "orderId": "123456789",
     "price": "0.615",
@@ -1448,7 +1614,7 @@ Response:
 ### Orders
 
 ```http
-GET /api/v1/orders
+GET /api/v1/prediction/orders
 ```
 
 Security: `USER_DATA`
@@ -1459,8 +1625,8 @@ Parameters:
 
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
-| `marketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns orders across all markets. |
-| `symbol` | STRING | NO | Outcome-token symbol. Together with `marketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
+| `predictionMarketAddress` | STRING | NO | Market address. Together with `symbol`, selects one market symbol. If both are omitted, returns orders across all markets. |
+| `symbol` | STRING | NO | Outcome-token symbol. Together with `predictionMarketAddress`, selects one market symbol. If one is sent without the other, the request is invalid. |
 | `status` | STRING | NO | Comma-separated list of [Order Status](#order-status) values to include. Allowed: `NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`. Tokens are trimmed and de-duplicated. Default: include all statuses. |
 | `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`. |
 | `cursor` | STRING | NO | Opaque lex-comparable string returned by the server as `nextCursor`. Pass back verbatim to fetch the next page. An empty or whitespace-only cursor returns `-1102 / 400`. A well-formed cursor that lies past the last order returns an empty page with `nextCursor: null` — not an error. Omit for the first page. |
@@ -1470,14 +1636,14 @@ Parameters:
 
 Behavior:
 
-- If both `marketAddress` and `symbol` are omitted, returns orders for the authenticated account across all markets.
-- If both `marketAddress` and `symbol` are sent, returns orders for that one market symbol.
-- If only one of `marketAddress` / `symbol` is sent, returns `-1102` with HTTP `400`.
+- If both `predictionMarketAddress` and `symbol` are omitted, returns orders for the authenticated account across all markets.
+- If both `predictionMarketAddress` and `symbol` are sent, returns orders for that one market symbol.
+- If only one of `predictionMarketAddress` / `symbol` is sent, returns `-1102` with HTTP `400`.
 - If `limit` is outside `[1, 500]`, returns `-1102` with HTTP `400`.
 - If `limit` is present but not an integer, returns `-1130` with HTTP `400`.
 - If `cursor` is empty or whitespace-only, returns `-1102` with HTTP `400`. A well-formed cursor that points past the current set of orders is not an error — the response is `{ "orders": [], "nextCursor": null }`.
 - If `status` contains an unknown token, returns `-1130` with HTTP `400`.
-- If the `(marketAddress, symbol)` pair does not exist, returns `-1121` with HTTP `404`.
+- If the `(predictionMarketAddress, symbol)` pair does not exist, returns `-1121` with HTTP `404`.
 - Empty results are returned as `{ "orders": [], "nextCursor": null }`. A page may also return `orders: []` together with a non-null `nextCursor`; clients should keep paging until `nextCursor` is `null`.
 - Results are sorted by a single server-internal chain-order key, **descending** (most recently placed first). For all-market requests this ordering is global across all returned orders.
 - Pagination is cursor-based on the same chain-order key. The key is set once when the order is placed and never moves for the life of the order — subsequent fills, cancels, and status transitions do not touch it — so concurrent activity between page reads cannot duplicate or skip rows.
@@ -1489,7 +1655,7 @@ Response:
 {
   "orders": [
     {
-      "marketAddress": "0:market-address",
+      "predictionMarketAddress": "0:market-address",
       "symbol": "PM-2026-ELECTION-YES",
       "orderId": "123456789",
       "clientOrderId": "mm-order-0001",
@@ -1521,7 +1687,7 @@ Order fields:
 
 | Name | Type | Description |
 | --- | --- | --- |
-| `marketAddress` | STRING | Market address. |
+| `predictionMarketAddress` | STRING | Market address. |
 | `symbol` | STRING | Outcome-token symbol. |
 | `orderId` | STRING | Chain-side order id. Empty string for `REJECTED` orders (the chain never assigns an id to a rejected placement). |
 | `clientOrderId` | STRING | Client-supplied id, or an empty string if absent. |
@@ -1566,24 +1732,24 @@ Order fields:
 
 | Value | Description |
 | --- | --- |
-| `PENDING_NEW` | Order accepted by the exchange and not yet on the book. Will transition to `NEW` (or `PARTIALLY_FILLED` if it immediately matches) once visible in `/api/v1/orders`. |
+| `PENDING_NEW` | Order accepted by the exchange and not yet on the book. Will transition to `NEW` (or `PARTIALLY_FILLED` if it immediately matches) once visible in `/api/v1/prediction/orders`. |
 | `NEW` | Order is open and has no fills. |
 | `PARTIALLY_FILLED` | Order is open and partially filled. |
-| `PENDING_CANCEL` | Cancel request accepted by the exchange but not yet applied to the book. Will transition to `CANCELED` (or `FILLED` if matching raced the cancel) once the order's stored status flips in `/api/v1/orders`. |
+| `PENDING_CANCEL` | Cancel request accepted by the exchange but not yet applied to the book. Will transition to `CANCELED` (or `FILLED` if matching raced the cancel) once the order's stored status flips in `/api/v1/prediction/orders`. |
 | `FILLED` | Order is completely filled. |
 | `CANCELED` | Order was canceled by the user or system. |
 | `REJECTED` | Order was rejected and was not opened. |
 
-## WebSocket Streams
+## Prediction WebSocket Streams
 
 ### Connection
 
-Real-time stream of order lifecycle updates for the authenticated account. Delta-only — no snapshot is sent on subscribe. Clients reconcile current state via [`GET /api/v1/orders`](#orders) after (re)connect.
+Real-time stream of order lifecycle updates for the authenticated account. Delta-only — no snapshot is sent on subscribe. Clients reconcile current state via [`GET /api/v1/prediction/orders`](#orders) after (re)connect.
 
 Base URL:
 
 ```text
-wss://api.dex.do.example.com/ws/v1/user
+wss://api.dex.do.example.com/ws/v1/prediction/user
 ```
 
 Security: `USER_DATA`. Subscription requires the same signed envelope as private REST endpoints — `X-DODEX-APIKEY`, `timestamp`, `signature`, optional `recvWindow` — see [Signature Formation](#signature-formation). The signature payload is the canonical query string of the subscription parameters (sorted by key, excluding `signature`), HMAC-SHA256 with the API secret.
@@ -1617,14 +1783,14 @@ Connection lifecycle:
 
 Every `orderUpdate` carries a per-account contiguous integer `sq`. For one subscription, `sq` of the next event is **exactly** `prev_sq + 1`. The first event a fresh account ever receives carries `sq = 1`. `sq` is scoped to the authenticated account — one client never observes another account's counter.
 
-[`GET /api/v1/orders`](#orders) returns `lastSq` — the largest `sq` the server has already emitted for the caller's account at the moment the snapshot was assembled. Together with `sq` on each event, this lets clients splice a REST snapshot into the live stream and detect lost events without any server-side replay buffer.
+[`GET /api/v1/prediction/orders`](#orders) returns `lastSq` — the largest `sq` the server has already emitted for the caller's account at the moment the snapshot was assembled. Together with `sq` on each event, this lets clients splice a REST snapshot into the live stream and detect lost events without any server-side replay buffer.
 
 Recommended client algorithm:
 
 ```text
 on (re)connect:
   open WebSocket, subscribe, start buffering incoming events
-  fetch GET /api/v1/orders → L = lastSq
+  fetch GET /api/v1/prediction/orders → L = lastSq
   expected_next = L + 1
   discard buffered events with sq <= L
   apply remaining buffered events in sq-asc order:
@@ -1636,7 +1802,7 @@ on every live event:
 
 The algorithm above applies to `orderUpdate` frames only. Control frames (`ping`, `pong`) carry no `sq` and do not advance `expected_next` — clients dispatch them on `e` / `method` before running the gap check.
 
-`sq` is monotonic over the life of the account, not the life of the subscription — a reconnect does not reset the counter. The snapshot watermark `lastSq` from `GET /api/v1/orders` is therefore directly comparable with any `sq` the client has previously stored.
+`sq` is monotonic over the life of the account, not the life of the subscription — a reconnect does not reset the counter. The snapshot watermark `lastSq` from `GET /api/v1/prediction/orders` is therefore directly comparable with any `sq` the client has previously stored.
 
 ### Order Updates
 
@@ -1761,9 +1927,9 @@ Field reference:
 | `l` | DECIMAL | Last fill quantity. `"0"` on non-trade events. |
 | `L` | DECIMAL | Last fill price. `"0"` on non-trade events. |
 | `z` | DECIMAL | Cumulative filled quantity over the life of the order. |
-| `n` | DECIMAL | Commission for the last fill, as a signed decimal string. Negative values are rebates **credited** to the account (see `makerComission` on [`/api/v1/markets`](#markets)). `"0"` on non-trade events. |
+| `n` | DECIMAL | Commission for the last fill, as a signed decimal string. Negative values are rebates **credited** to the account (see `makerComission` on [`/api/v1/prediction/markets`](#prediction-markets)). `"0"` on non-trade events. |
 | `N` | STRING \| null | Commission asset symbol. `null` on non-trade events. |
-| `t` | STRING \| null | Trade id for the last fill. Identical to `tradeId` in [`GET /api/v1/trades`](#recent-trades) for the same match, so the private fill can be correlated with the public trade tape. `null` on non-trade events. |
+| `t` | STRING \| null | Trade id for the last fill. Identical to `tradeId` in [`GET /api/v1/prediction/trades`](#prediction-trades) for the same match, so the private fill can be correlated with the public trade tape. `null` on non-trade events. |
 | `m` | BOOLEAN \| null | `true` if this fill was on the maker side, `false` for taker, `null` on non-trade events. |
 | `O` | LONG | Order creation time, Unix ms. Stable across all events for the same order. |
 | `T` | LONG | Transaction time — when this specific event was produced on-chain, Unix ms. |
@@ -1784,7 +1950,7 @@ Field reference:
 | `REJECTED` | Order was rejected and never opened. `X` transitions to `REJECTED`; `i` is empty. |
 | `EXPIRED` | Order ran out under its `timeInForce` (e.g. `IOC` / `FOK` could not fill). `X` transitions to `CANCELED`. |
 
-`X` reuses [Order Status](#order-status) — the same enum returned by `GET /api/v1/orders`.
+`X` reuses [Order Status](#order-status) — the same enum returned by `GET /api/v1/prediction/orders`.
 
 ## Validation Rules
 
@@ -1792,14 +1958,14 @@ Order creation MUST validate:
 
 | Rule | Source |
 | --- | --- |
-| `marketAddress` exists | `/api/v1/markets` |
-| `symbol` exists within the selected market | `/api/v1/markets` |
-| The selected market has `status == "TRADING"` (any other phase rejects order placement) | `/api/v1/markets` |
-| For `LIMIT` orders, `price` decimal places do not exceed `pricePrecision` | `/api/v1/markets` |
-| For `LIMIT` orders, `price` is a multiple of `tickSize` | `/api/v1/markets` |
-| `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/markets` |
-| `quantity` is a multiple of `stepSize` | `/api/v1/markets` |
-| For `LIMIT` orders, `price * quantity` is at least `minNotional` | `/api/v1/markets` |
-| For `MARKET` buy orders, `quantity` in the market `quoteAsset` is at least `minNotional` | `/api/v1/markets` |
-| For `MARKET` buy orders, `quantityPrecision` and `stepSize` apply to the quote-asset spend amount, not to outcome-token units | `/api/v1/markets` |
+| `predictionMarketAddress` exists | `/api/v1/prediction/markets` |
+| `symbol` exists within the selected market | `/api/v1/prediction/markets` |
+| The selected market has `status == "TRADING"` (any other phase rejects order placement) | `/api/v1/prediction/markets` |
+| For `LIMIT` orders, `price` decimal places do not exceed `pricePrecision` | `/api/v1/prediction/markets` |
+| For `LIMIT` orders, `price` is a multiple of `tickSize` | `/api/v1/prediction/markets` |
+| `quantity` decimal places do not exceed `quantityPrecision` | `/api/v1/prediction/markets` |
+| `quantity` is a multiple of `stepSize` | `/api/v1/prediction/markets` |
+| For `LIMIT` orders, `price * quantity` is at least `minNotional` | `/api/v1/prediction/markets` |
+| For `MARKET` buy orders, `quantity` in the market `quoteAsset` is at least `minNotional` | `/api/v1/prediction/markets` |
+| For `MARKET` buy orders, `quantityPrecision` and `stepSize` apply to the quote-asset spend amount, not to outcome-token units | `/api/v1/prediction/markets` |
 | Account has enough available balance (collateral for buys, outcome tokens for sells) | `/api/v1/account`, `/api/v1/account/balances` |
