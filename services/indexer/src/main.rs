@@ -13,6 +13,7 @@ use dodex_infrastructure::graphql::EventEdge;
 use dodex_infrastructure::graphql::EventsPage;
 use dodex_infrastructure::graphql::GraphqlClient;
 use dodex_infrastructure::indexer_repo::IndexerRepository;
+use dodex_infrastructure::inference_reconciler::InferenceReconciler;
 use dodex_infrastructure::oracle_event_list_reconciler::OracleEventListReconciler;
 use dodex_infrastructure::reconciler::MarketReconciler;
 use dodex_infrastructure::signal::run_config_reload_loop;
@@ -88,6 +89,25 @@ async fn main() -> anyhow::Result<()> {
     info!(
         interval_ms = config.indexer.oracle_event_list_reconciliation_interval_ms,
         "oracle event list reconciler started"
+    );
+
+    let inf_graphql = GraphqlClient::new(
+        config.graphql.endpoint.clone(),
+        Duration::from_millis(config.graphql.request_timeout_ms),
+    )?;
+    let inference_reconciler = InferenceReconciler::new(
+        pool.clone(),
+        inf_graphql,
+        decoder.clone(),
+        Duration::from_millis(config.indexer.inference_reference_price_refresh_ms),
+        Duration::from_millis(config.indexer.inference_sweep_interval_ms),
+    );
+    let inf_interval =
+        Duration::from_millis(config.indexer.inference_reconciliation_interval_ms);
+    tokio::spawn(inference_reconciler.run_loop(inf_interval));
+    info!(
+        interval_ms = config.indexer.inference_reconciliation_interval_ms,
+        "inference reconciler started"
     );
 
     // OTLP metrics. `init()` returns `None` when no OTEL endpoint env var is

@@ -11,6 +11,7 @@ pub mod decoder;
 pub mod graphql;
 pub mod indexer_repo;
 pub mod inference_projectors;
+pub mod inference_reconciler;
 pub mod oracle_event_list_reconciler;
 pub mod pn_state_reader;
 pub mod postgres_repo;

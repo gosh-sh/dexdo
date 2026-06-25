@@ -181,7 +181,7 @@ here.
 
 ## Projection — inference order events
 
-> 🚧 **TODO — not implemented.** Inference projection and the inference reconciler (below) are specified but **not yet built** — no projector/reconciler code or migration exists yet. Forward-looking; safe to merge into `dev` as spec-only.
+> 🚧 **Partially implemented.** Inference projection and migration are complete. The inference reconciler Queue A (discovery: fill params/price, bounded phantom sweep, visibility stamp) is implemented (`inference_reconciler.rs`). Queue B (refresh) is in progress (Task 10).
 
 `InferenceOrderBook` events drive [`inference_orders`](data-schema.md#inference_orders), the per-order read model behind `/api/v1/inference/depth` (order-book depth). The shape mirrors [order events](#projection--order-events): one row per chain-side order, mutated in place, never deleted. The unit is a **tick** (one unit of inference); `price` is price-per-tick in SHELL atoms.
 
