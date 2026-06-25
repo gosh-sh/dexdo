@@ -213,49 +213,29 @@ impl InferenceReconciler {
                 Ok(DiscoveryOutcome::WaitingGates) => stats.waiting_gates += 1,
                 Ok(DiscoveryOutcome::NoBoc) => {
                     stats.skipped += 1;
-                    self.stamp_failure(&book.orderbook_address).await.ok();
+                    self.stamp_failure_logged(&book.orderbook_address).await;
                 }
                 Err(err) => {
                     stats.failed += 1;
                     warn!(ob = %book.orderbook_address, ?err, "discovery failed");
-                    self.stamp_failure(&book.orderbook_address).await.ok();
+                    self.stamp_failure_logged(&book.orderbook_address).await;
                 }
             }
         }
         // Queue B — refresh (price + phantom sweep on separate cadences).
-        let refresh: Vec<BookRow> = sqlx::query_as(&format!(
-            r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
-                 from inference_markets m
-                where last_reconciled_at is not null
-                  and (last_reconcile_failed_at is null
-                       or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
-                  and (
-                        (reference_price_at is null or reference_price_at < now() - make_interval(secs => $2))
-                     or ( (last_swept_at is null or last_swept_at < now() - make_interval(secs => $3))
-                          and exists (select 1 from inference_orders o
-                                       where o.orderbook_address = m.orderbook_address and o.status='OPEN') )
-                      )
-                order by reference_price_at nulls first
-                limit $1"#
-        ))
-        .bind(BATCH_SIZE)
-        .bind(self.reference_price_refresh.as_secs_f64())
-        .bind(self.sweep_interval.as_secs_f64())
-        .fetch_all(&self.pool)
-        .await
-        .context("select refresh candidates")?;
+        let refresh = self.select_refresh_books().await?;
         for book in &refresh {
             stats.scanned += 1;
             match self.reconcile_refresh(book).await {
                 Ok(DiscoveryOutcome::NoBoc) => {
                     stats.skipped += 1;
-                    self.stamp_failure(&book.orderbook_address).await.ok();
+                    self.stamp_failure_logged(&book.orderbook_address).await;
                 }
                 Ok(_) => stats.refreshed += 1,
                 Err(err) => {
                     stats.failed += 1;
                     warn!(ob = %book.orderbook_address, ?err, "refresh failed");
-                    self.stamp_failure(&book.orderbook_address).await.ok();
+                    self.stamp_failure_logged(&book.orderbook_address).await;
                 }
             }
         }
@@ -548,7 +528,21 @@ impl InferenceReconciler {
         Ok(())
     }
 
-    pub async fn select_refresh_candidates(&self) -> anyhow::Result<Vec<String>> {
+    /// Stamps the reconcile-failure backoff, logging — not swallowing — a write
+    /// error. If the backoff stamp itself fails, the book keeps re-entering the
+    /// queue every tick with no cooldown, so a silent drop would hide a book
+    /// spinning without backoff. Used by `run_once` where the outcome is already
+    /// a failure and there is nothing further to propagate.
+    async fn stamp_failure_logged(&self, ob: &str) {
+        if let Err(e) = self.stamp_failure(ob).await {
+            warn!(ob = %ob, ?e, "failed to stamp inference reconcile backoff");
+        }
+    }
+
+    /// Single source for the Queue B refresh SELECT, used by `run_once`. A book
+    /// is due when its reference price is stale, or its sweep cadence elapsed and
+    /// it still has OPEN rows; failed books are held out for the backoff window.
+    async fn select_refresh_books(&self) -> anyhow::Result<Vec<BookRow>> {
         let rows: Vec<BookRow> = sqlx::query_as(&format!(
             r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
                  from inference_markets m
@@ -570,7 +564,14 @@ impl InferenceReconciler {
         .fetch_all(&self.pool)
         .await
         .context("select refresh candidates")?;
-        Ok(rows.into_iter().map(|r| r.orderbook_address).collect())
+        Ok(rows)
+    }
+
+    /// Test-facing view of the Queue B selection: the addresses `run_once` would
+    /// refresh this tick. Wraps the same `select_refresh_books` query the loop
+    /// runs, so the selection test exercises the production query, not a copy.
+    pub async fn select_refresh_candidates(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self.select_refresh_books().await?.into_iter().map(|r| r.orderbook_address).collect())
     }
 
     fn price_due(&self, book: &BookRow) -> bool {
