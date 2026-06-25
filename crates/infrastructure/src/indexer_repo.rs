@@ -136,12 +136,27 @@ impl IndexerRepository {
         Ok(row.and_then(|(c,)| c))
     }
 
+    /// Returns `true` when the capture loop's most recent drain for `stream_name`
+    /// reached the head of the blockchain (i.e. `has_next_page` was `false`).
+    /// Returns `false` if the stream is unknown (no cursor row yet). Used by the
+    /// inference reconciler as sweep catch-up gate (i).
+    pub async fn at_head(&self, stream_name: &str) -> anyhow::Result<bool> {
+        let row: Option<(bool,)> =
+            sqlx::query_as("select at_head from indexer_cursors where stream_name = $1")
+                .bind(stream_name)
+                .fetch_optional(&self.pool)
+                .await
+                .context("select indexer_cursors.at_head")?;
+        Ok(row.map(|(b,)| b).unwrap_or(false))
+    }
+
     pub async fn persist_page(
         &self,
         stream_name: &str,
         edges: &[EventEdge],
         end_cursor: Option<&str>,
         decoder: &Decoder,
+        at_head: bool,
     ) -> anyhow::Result<PagePersistResult> {
         let mut result = PagePersistResult::default();
 
@@ -250,19 +265,20 @@ impl IndexerRepository {
             result.skipped = msg_ids.len() as u64 - inserted;
         }
 
-        if let Some(cursor) = end_cursor {
-            sqlx::query(
-                r#"insert into indexer_cursors (stream_name, cursor, updated_at)
-                   values ($1, $2, now())
-                   on conflict (stream_name)
-                   do update set cursor = excluded.cursor, updated_at = now()"#,
-            )
-            .bind(stream_name)
-            .bind(cursor)
-            .execute(&mut *tx)
-            .await
-            .context("upsert indexer_cursors")?;
-        }
+        sqlx::query(
+            r#"insert into indexer_cursors (stream_name, cursor, at_head, updated_at)
+               values ($1, $2, $3, now())
+               on conflict (stream_name) do update
+                 set cursor = coalesce(excluded.cursor, indexer_cursors.cursor),
+                     at_head = excluded.at_head,
+                     updated_at = now()"#,
+        )
+        .bind(stream_name)
+        .bind(end_cursor)
+        .bind(at_head)
+        .execute(&mut *tx)
+        .await
+        .context("upsert indexer_cursors")?;
 
         tx.commit().await.context("commit tx")?;
         Ok(result)

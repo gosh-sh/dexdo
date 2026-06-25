@@ -325,8 +325,10 @@ async fn drain_events(
         stats.foreign_skipped += filter_stats.foreign_skipped;
         stats.type_ignored += filter_stats.type_ignored;
 
+        let at_head = !page.page_info.has_next_page;
         let end_cursor = page.page_info.end_cursor.as_deref();
-        let persisted = repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder).await?;
+        let persisted =
+            repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder, at_head).await?;
         stats.inserted += persisted.inserted;
         stats.skipped += persisted.skipped;
         stats.decoded += persisted.decoded;

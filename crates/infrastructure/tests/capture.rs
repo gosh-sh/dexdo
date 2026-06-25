@@ -89,7 +89,7 @@ async fn captures_decodable_event_without_projecting() {
         Some(ORDER_PLACED_BODY),
     )];
     let result = repo
-        .persist_page("blockchain_events", &edges, Some("cursor-1"), &decoder)
+        .persist_page("blockchain_events", &edges, Some("cursor-1"), &decoder, false)
         .await
         .expect("persist_page");
 
@@ -157,7 +157,7 @@ async fn bulk_insert_counts_new_and_conflicting_and_dedups_within_page() {
 
     // Pre-insert `existing` so it conflicts on the next page.
     let pre = vec![edge(&existing, Some("5f80capture_counts_000000001"), &src, None)];
-    repo.persist_page("blockchain_events", &pre, None, &decoder).await.expect("pre-insert");
+    repo.persist_page("blockchain_events", &pre, None, &decoder, false).await.expect("pre-insert");
 
     // Page: the conflicting `existing`, a `fresh` row, and `dup` twice.
     let edges = vec![
@@ -167,7 +167,9 @@ async fn bulk_insert_counts_new_and_conflicting_and_dedups_within_page() {
         edge(&dup, Some("5f80capture_counts_000000003"), &src, None),
     ];
     let result =
-        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+        repo.persist_page("blockchain_events", &edges, None, &decoder, false)
+            .await
+            .expect("persist_page");
 
     // After in-page de-dup: 3 unique candidates (existing, fresh, dup); 1
     // conflicts (existing) → inserted 2 (fresh, dup), skipped 1.
@@ -195,7 +197,9 @@ async fn edge_missing_chain_order_is_dropped() {
 
     let edges = vec![edge(&msg_id, None, &src, None)];
     let result =
-        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+        repo.persist_page("blockchain_events", &edges, None, &decoder, false)
+            .await
+            .expect("persist_page");
 
     assert_eq!(result.inserted, 0, "an edge without msg_chain_order is not inserted");
     assert_eq!(result.undecoded, 1, "the dropped edge is counted as undecoded");
@@ -223,7 +227,7 @@ async fn persist_page_advances_cursor() {
         .await
         .expect("purge cursor");
 
-    repo.persist_page(stream, &[], Some("cursor-xyz"), &decoder).await.expect("persist_page");
+    repo.persist_page(stream, &[], Some("cursor-xyz"), &decoder, true).await.expect("persist_page");
 
     let cursor = repo.load_cursor(stream).await.expect("load_cursor");
     assert_eq!(cursor.as_deref(), Some("cursor-xyz"), "end_cursor must be persisted");
@@ -263,8 +267,10 @@ async fn persist_page_handles_mixed_decodable_and_undecodable_edges() {
         ),
         edge(&msg_undecodable, Some("5f80capture_mixed_00000000000002"), &orderbook, None),
     ];
-    let result =
-        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+    let result = repo
+        .persist_page("blockchain_events", &edges, None, &decoder, false)
+        .await
+        .expect("persist_page");
 
     assert_eq!(result.inserted, 2, "both edges must be inserted");
     assert_eq!(result.decoded, 1, "only the OrderPlaced body decodes");
