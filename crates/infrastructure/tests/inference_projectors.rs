@@ -183,6 +183,8 @@ use dodex_infrastructure::indexer_repo::IndexerRepository;
 
 // ingest_age_secs => raw_events.created_at; chain_age_secs => created_at_chain (independent),
 // so a test can make a row freshly-ingested yet ancient on chain.
+#[allow(clippy::too_many_arguments)]
+// Test helper with 8 intentional knobs (pool, msg, chain_order, ingest_age, chain_age, ob, event_type, decoded) for orphan tests
 async fn insert_raw(pool: &sqlx::PgPool, msg: &str, co: &str, ingest_age_secs: i64, chain_age_secs: i64, ob: &str, event_type: &str, decoded: serde_json::Value) {
     sqlx::query(
         "insert into raw_events (msg_id, chain_order, created_at_chain, created_at, src_address, dst_address, event_type, body_json, decoded)
