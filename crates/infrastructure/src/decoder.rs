@@ -62,9 +62,9 @@ struct Route {
 
 #[derive(Clone)]
 pub struct Decoder {
-    pub(crate) contracts: HashMap<&'static str, Contract>,
+    contracts: HashMap<&'static str, Contract>,
     /// id -> every (kind, event_name) that hashes to it. len > 1 means a collision.
-    pub(crate) event_index: HashMap<u32, Vec<(&'static str, String)>>,
+    event_index: HashMap<u32, Vec<(&'static str, String)>>,
     /// gateway-encoded dst string -> the (kind, event, expected_id) it routes to.
     routes: HashMap<String, Route>,
 }
