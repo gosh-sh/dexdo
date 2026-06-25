@@ -252,6 +252,21 @@ pub struct IndexerSection {
     /// field never costs us our own events). When unset, no dapp scoping runs.
     #[serde(default)]
     pub dapp_id: Option<String>,
+    /// Inference reconciler tick cadence (Queue A discovery + Queue B refresh).
+    #[serde(default = "default_inference_reconciliation_interval_ms")]
+    pub inference_reconciliation_interval_ms: u64,
+    /// How stale `inference_markets.reference_price_at` may get before Queue B
+    /// re-prices a book via `getWeeklyMedianPrice()`. The weekly median moves slowly.
+    #[serde(default = "default_inference_reference_price_refresh_ms")]
+    pub inference_reference_price_refresh_ms: u64,
+    /// Separate, shorter cadence for the phantom-order sweep (driven by
+    /// `last_swept_at`), decoupled from the price-refresh TTL so phantoms clear promptly.
+    #[serde(default = "default_inference_sweep_interval_ms")]
+    pub inference_sweep_interval_ms: u64,
+    /// Max ingest age (`now() - raw_events.created_at`) before an orphan inference
+    /// `Filled`/`OrderCancelled` is dropped (dead-letter) instead of deferred forever.
+    #[serde(default = "default_inference_orphan_cutoff_ms")]
+    pub inference_orphan_cutoff_ms: u64,
 }
 
 fn default_reprojection_batch_size() -> u32 {
@@ -260,6 +275,22 @@ fn default_reprojection_batch_size() -> u32 {
 
 fn default_oel_reconciliation_interval_ms() -> u64 {
     60_000
+}
+
+fn default_inference_reconciliation_interval_ms() -> u64 {
+    15_000
+}
+
+fn default_inference_reference_price_refresh_ms() -> u64 {
+    3_600_000
+}
+
+fn default_inference_sweep_interval_ms() -> u64 {
+    30_000
+}
+
+fn default_inference_orphan_cutoff_ms() -> u64 {
+    1_800_000
 }
 
 impl ApiConfig {
@@ -492,6 +523,14 @@ impl IndexerConfig {
             i.oracle_event_list_reconciliation_interval_ms > 0,
             "indexer.oracle_event_list_reconciliation_interval_ms must be > 0"
         );
+        anyhow::ensure!(i.inference_reconciliation_interval_ms > 0,
+            "indexer.inference_reconciliation_interval_ms must be > 0");
+        anyhow::ensure!(i.inference_reference_price_refresh_ms > 0,
+            "indexer.inference_reference_price_refresh_ms must be > 0");
+        anyhow::ensure!(i.inference_sweep_interval_ms > 0,
+            "indexer.inference_sweep_interval_ms must be > 0");
+        anyhow::ensure!(i.inference_orphan_cutoff_ms > 0,
+            "indexer.inference_orphan_cutoff_ms must be > 0");
         // `dapp_id: ""` deserializes to Some(""), which would enable the scope
         // filter and drop every edge with a real src_dapp_id while the cursor
         // still advances — silent, unrecoverable data loss. An empty string is
@@ -1576,5 +1615,26 @@ indexer:
         cfg.validate().expect("absent dapp_id validates");
         cfg.indexer.dapp_id = Some("dexdo-dapp".to_string());
         cfg.validate().expect("non-empty dapp_id validates");
+    }
+
+    #[test]
+    fn inference_knobs_default_and_validate() {
+        // Parse a minimal indexer config WITHOUT the inference keys; defaults apply.
+        let yaml = r#"
+polling_interval_ms: 1000
+depth_refresh_interval_ms: 1000
+reconciliation_interval_ms: 1000
+"#;
+        let section: IndexerSection = serde_yaml::from_str(yaml).unwrap();
+        assert!(section.inference_reconciliation_interval_ms > 0);
+        assert!(section.inference_reference_price_refresh_ms > 0);
+        assert!(section.inference_sweep_interval_ms > 0);
+        assert!(section.inference_orphan_cutoff_ms > 0);
+        // A zero knob must fail validation.
+        let mut bad = section.clone();
+        bad.inference_sweep_interval_ms = 0;
+        let mut cfg = indexer_cfg_with_ignored(&[]);
+        cfg.indexer = bad;
+        assert!(cfg.validate().is_err());
     }
 }
