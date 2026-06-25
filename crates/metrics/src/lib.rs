@@ -56,6 +56,11 @@ pub struct IndexerMetrics {
     projection_fallbacks: Arc<AtomicU64>,
     inference_orphans_dropped: Arc<AtomicU64>,
     decode_errors: Arc<AtomicU64>,
+    inference_markets_discovering: Arc<AtomicU64>,
+    inference_markets_visible: Arc<AtomicU64>,
+    inference_markets_failing: Arc<AtomicU64>,
+    inference_reference_price_lag_seconds: Arc<AtomicU64>,
+    inference_sweep_lag_seconds: Arc<AtomicU64>,
     // Retain the observable-counter and gauge handles for the lifetime of the
     // provider, mirroring the reference metrics setup. The observe callbacks
     // themselves are registered with the meter at `build()` time.
@@ -69,6 +74,9 @@ pub struct IndexerMetrics {
     _projection_fallbacks_counter: ObservableCounter<u64>,
     _inference_orphans_dropped_counter: ObservableCounter<u64>,
     _decode_errors_counter: ObservableCounter<u64>,
+    _inference_markets_gauge: ObservableGauge<u64>,
+    _inference_reference_price_lag_gauge: ObservableGauge<u64>,
+    _inference_sweep_lag_gauge: ObservableGauge<u64>,
 }
 
 impl IndexerMetrics {
@@ -83,6 +91,11 @@ impl IndexerMetrics {
         let projection_fallbacks = Arc::new(AtomicU64::new(0));
         let inference_orphans_dropped = Arc::new(AtomicU64::new(0));
         let decode_errors = Arc::new(AtomicU64::new(0));
+        let inference_markets_discovering = Arc::new(AtomicU64::new(0));
+        let inference_markets_visible = Arc::new(AtomicU64::new(0));
+        let inference_markets_failing = Arc::new(AtomicU64::new(0));
+        let inference_reference_price_lag_seconds = Arc::new(AtomicU64::new(0));
+        let inference_sweep_lag_seconds = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -183,6 +196,52 @@ impl IndexerMetrics {
             })
             .build();
 
+        let disc_cache = Arc::clone(&inference_markets_discovering);
+        let vis_cache = Arc::clone(&inference_markets_visible);
+        let fail_cache = Arc::clone(&inference_markets_failing);
+        let inference_markets_gauge = meter
+            .u64_observable_gauge("indexer_inference_markets")
+            .with_description(
+                "Inference order-book markets by lifecycle state: discovering (seeded, not yet visible), visible (served by the API), failing (invisible with a recorded reconcile failure)",
+            )
+            .with_callback(move |observer| {
+                observer.observe(
+                    disc_cache.load(Ordering::Relaxed),
+                    &[KeyValue::new("state", "discovering")],
+                );
+                observer.observe(
+                    vis_cache.load(Ordering::Relaxed),
+                    &[KeyValue::new("state", "visible")],
+                );
+                observer.observe(
+                    fail_cache.load(Ordering::Relaxed),
+                    &[KeyValue::new("state", "failing")],
+                );
+            })
+            .build();
+
+        let price_lag_cache = Arc::clone(&inference_reference_price_lag_seconds);
+        let inference_reference_price_lag_gauge = meter
+            .u64_observable_gauge("indexer_inference_reference_price_lag_seconds")
+            .with_description(
+                "Age in seconds of the most stale reference_price_at across visible inference markets; 0 when no market is visible",
+            )
+            .with_callback(move |observer| {
+                observer.observe(price_lag_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
+        let sweep_lag_cache = Arc::clone(&inference_sweep_lag_seconds);
+        let inference_sweep_lag_gauge = meter
+            .u64_observable_gauge("indexer_inference_sweep_lag_seconds")
+            .with_description(
+                "Age in seconds of the most stale last_swept_at across visible inference markets; 0 when no market is visible",
+            )
+            .with_callback(move |observer| {
+                observer.observe(sweep_lag_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
@@ -194,6 +253,11 @@ impl IndexerMetrics {
             projection_fallbacks,
             inference_orphans_dropped,
             decode_errors,
+            inference_markets_discovering,
+            inference_markets_visible,
+            inference_markets_failing,
+            inference_reference_price_lag_seconds,
+            inference_sweep_lag_seconds,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
             _projection_backlog_gauge: projection_backlog_gauge,
@@ -203,6 +267,9 @@ impl IndexerMetrics {
             _projection_fallbacks_counter: projection_fallbacks_counter,
             _inference_orphans_dropped_counter: inference_orphans_dropped_counter,
             _decode_errors_counter: decode_errors_counter,
+            _inference_markets_gauge: inference_markets_gauge,
+            _inference_reference_price_lag_gauge: inference_reference_price_lag_gauge,
+            _inference_sweep_lag_gauge: inference_sweep_lag_gauge,
         }
     }
 
@@ -254,6 +321,24 @@ impl IndexerMetrics {
     /// total of event bodies that failed to decode and were stored undecoded.
     pub fn set_decode_errors(&self, value: u64) {
         self.decode_errors.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the values reported by `indexer_inference_markets` — the count of
+    /// inference order-book markets in each lifecycle state.
+    pub fn set_inference_market_states(&self, discovering: u64, visible: u64, failing: u64) {
+        self.inference_markets_discovering.store(discovering, Ordering::Relaxed);
+        self.inference_markets_visible.store(visible, Ordering::Relaxed);
+        self.inference_markets_failing.store(failing, Ordering::Relaxed);
+    }
+
+    /// Set the value reported by `indexer_inference_reference_price_lag_seconds`.
+    pub fn set_inference_reference_price_lag_seconds(&self, value: u64) {
+        self.inference_reference_price_lag_seconds.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the value reported by `indexer_inference_sweep_lag_seconds`.
+    pub fn set_inference_sweep_lag_seconds(&self, value: u64) {
+        self.inference_sweep_lag_seconds.store(value, Ordering::Relaxed);
     }
 }
 
@@ -386,6 +471,9 @@ mod tests {
         metrics.set_projection_fallbacks(9);
         metrics.set_inference_orphans_dropped(4);
         metrics.set_decode_errors(6);
+        metrics.set_inference_market_states(11, 22, 33);
+        metrics.set_inference_reference_price_lag_seconds(444);
+        metrics.set_inference_sweep_lag_seconds(555);
 
         assert_eq!(metrics.orders_created.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.orders_partially_filled.load(Ordering::Relaxed), 3);
@@ -397,5 +485,13 @@ mod tests {
         assert_eq!(metrics.projection_fallbacks.load(Ordering::Relaxed), 9);
         assert_eq!(metrics.inference_orphans_dropped.load(Ordering::Relaxed), 4);
         assert_eq!(metrics.decode_errors.load(Ordering::Relaxed), 6);
+        assert_eq!(metrics.inference_markets_discovering.load(Ordering::Relaxed), 11);
+        assert_eq!(metrics.inference_markets_visible.load(Ordering::Relaxed), 22);
+        assert_eq!(metrics.inference_markets_failing.load(Ordering::Relaxed), 33);
+        assert_eq!(
+            metrics.inference_reference_price_lag_seconds.load(Ordering::Relaxed),
+            444
+        );
+        assert_eq!(metrics.inference_sweep_lag_seconds.load(Ordering::Relaxed), 555);
     }
 }
