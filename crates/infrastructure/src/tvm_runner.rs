@@ -42,6 +42,22 @@ use tvm_vm::SmartContractInfo;
 
 const GAS_LIMIT: i64 = 1_000_000_000;
 
+/// Typed error returned when TVM execution throws (i.e. the contract reverts).
+/// Wrapping in `anyhow::Error` preserves the existing `Result<Value>` signature
+/// while making the exit code downcastable for callers that need to distinguish
+/// specific codes (e.g. `ERR_NO_LIQUIDITY = 334`).
+#[derive(Debug, thiserror::Error)]
+#[error("tvm execution failed: code={exit_code}, msg={message}")]
+pub struct TvmGetterError {
+    pub exit_code: i32,
+    pub message: String,
+}
+
+/// Returns the TVM exit code if `err` (or its root cause) is a [`TvmGetterError`].
+pub fn tvm_exit_code(err: &anyhow::Error) -> Option<i32> {
+    err.downcast_ref::<TvmGetterError>().map(|e| e.exit_code)
+}
+
 /// Execute a contract getter against the supplied account state and decode the
 /// reply via the provided ABI.
 ///
@@ -210,13 +226,13 @@ fn call_tvm(account: &mut Account, config: &BlockchainConfig, stack: Stack) -> R
     if let Err(err) = engine.execute() {
         let exception =
             tvm_vm::error::tvm_exception(err).map_err(|e| anyhow!("tvm exception unwrap: {e}"))?;
-        return Err(anyhow!(
-            "tvm execution failed: code={}, msg={}",
-            exception
-                .custom_code()
-                .unwrap_or(exception.exception_code().map(|c| c as i32).unwrap_or(-1)),
-            exception
-        ));
+        let exit_code = exception
+            .custom_code()
+            .unwrap_or(exception.exception_code().map(|c| c as i32).unwrap_or(-1));
+        return Err(anyhow::Error::new(TvmGetterError {
+            exit_code,
+            message: exception.to_string(),
+        }));
     }
 
     Ok(engine)
@@ -231,6 +247,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn tvm_getter_error_carries_exit_code() {
+        let err: anyhow::Error =
+            anyhow::Error::new(TvmGetterError { exit_code: 334, message: "ERR_NO_LIQUIDITY".into() });
+        assert_eq!(tvm_exit_code(&err), Some(334));
+        assert!(err.to_string().contains("334"));
+        // A plain anyhow error has no exit code.
+        assert_eq!(tvm_exit_code(&anyhow::anyhow!("boom")), None);
+    }
 
     #[test]
     fn rejects_invalid_account_boc() {
