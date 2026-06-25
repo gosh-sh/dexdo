@@ -267,6 +267,10 @@ async fn filled_overrides_provisional_sweep_cancel_and_resets_discovery_cursor()
     // Discovery cursor reset so the reopened low id is re-checked before stamping.
     let cursor: Option<String> = sqlx::query_scalar("select sweep_cursor::text from inference_markets where orderbook_address=$1").bind(ob).fetch_one(&pool).await.unwrap();
     assert!(cursor.is_none(), "discovery sweep_cursor must reset to NULL on override");
+    // Task 9's first-tick visibility-stamp guard requires sweep_override_seq to bump.
+    let seq: i64 = sqlx::query_scalar("select sweep_override_seq from inference_markets where orderbook_address=$1")
+        .bind(ob).fetch_one(&pool).await.unwrap();
+    assert_eq!(seq, 1, "override during discovery must bump sweep_override_seq from its default 0 to 1");
 }
 
 #[tokio::test]
