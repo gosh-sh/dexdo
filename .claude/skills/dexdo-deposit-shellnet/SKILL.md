@@ -352,28 +352,29 @@ The multisig is Active. **Two giver flags matter, and you need BOTH:**
 
 ### 3a — compute funding from the NOTES list
 
+> **Shell note:** these snippets use only indexed arrays + scalars — **no bash associative arrays** (`declare -A` / `${!arr[@]}`), which break under zsh (the macOS default shell). They run as-is in bash *and* zsh.
+
 ```sh
 # decimals: nackl/shell = 9, usdc = 6.  gas voucher per note = 100 SHELL (ECC id 2).
-GAS_VOUCHER=100000000000        # 100 SHELL (1e11 nano) ECC gas voucher, one per note
-SHELL_RESERVE=300000000000      # 300 SHELL flat ECC reserve
-declare -A NEED; NEED[2]=$SHELL_RESERVE     # ECC id -> raw amount needed
-
+nackl_raw=0; usdc_raw=0; shell_dep=0; shell_voucher=0
 for spec in "${NOTES[@]}"; do
   tok=${spec%%:*}; units=${spec##*:}; units=${units#N}     # nackl:N10000 -> tok=nackl, units=10000
   case "$tok" in
-    nackl) id=1; scale=1000000000 ;;
-    shell) id=2; scale=1000000000 ;;
-    usdc)  id=3; scale=1000000 ;;
+    nackl) nackl_raw=$(( nackl_raw + units * 1000000000 )) ;;
+    usdc)  usdc_raw=$((  usdc_raw  + units * 1000000 )) ;;
+    shell) shell_dep=$(( shell_dep + units * 1000000000 )) ;;
     *) echo "bad token in NOTES: $tok"; exit 1 ;;
   esac
-  NEED[$id]=$(( ${NEED[$id]:-0} + units * scale ))    # deposit currency
-  NEED[2]=$((  ${NEED[2]:-0}  + GAS_VOUCHER ))        # + one SHELL gas voucher
+  shell_voucher=$(( shell_voucher + 100000000000 ))   # +100 SHELL gas voucher per note
 done
+shell_total=$(( shell_dep + shell_voucher + 300000000000 ))   # + 300 SHELL flat ECC reserve
 
-# ECC JSON for the flag=1 call.
-ECC_JSON="{"; sep=""
-for id in "${!NEED[@]}"; do ECC_JSON+="$sep\"$id\":${NEED[$id]}"; sep=","; done
-ECC_JSON+="}"
+# Build the ECC JSON for flag=1 — only the non-zero currencies.
+ecc=""
+[ "$nackl_raw"   -gt 0 ] && ecc="${ecc:+$ecc,}\"1\":$nackl_raw"
+[ "$shell_total" -gt 0 ] && ecc="${ecc:+$ecc,}\"2\":$shell_total"
+[ "$usdc_raw"    -gt 0 ] && ecc="${ecc:+$ecc,}\"3\":$usdc_raw"
+ECC_JSON="{$ecc}"
 echo "ecc (flag=1) = $ECC_JSON"
 
 # Native vmshell gas for the flag=16 call. Each note burns a few vmshell across its
@@ -430,13 +431,18 @@ The deposit + gas-voucher stages forward correctly because the Step-3 funds were
 
 ```sh
 cd "$WORKSPACE/dexdo/sdk"
-declare -A IDX
+# Per-token index counters (no associative arrays — zsh-safe).
+i_nackl=0; i_shell=0; i_usdc=0
 for spec in "${NOTES[@]}"; do
   tok=${spec%%:*}; nom=${spec##*:}
-  IDX[$tok]=$(( ${IDX[$tok]:-0} + 1 ))
-  note_dir="$WORKSPACE/notes/$tok-${IDX[$tok]}"
+  case "$tok" in
+    nackl) i_nackl=$(( i_nackl + 1 )); idx=$i_nackl ;;
+    shell) i_shell=$(( i_shell + 1 )); idx=$i_shell ;;
+    usdc)  i_usdc=$((  i_usdc  + 1 )); idx=$i_usdc ;;
+  esac
+  note_dir="$WORKSPACE/notes/$tok-$idx"
   mkdir -p "$note_dir"
-  echo "=== creating note $tok-${IDX[$tok]} ($nom) ==="
+  echo "=== creating note $tok-$idx ($nom) ==="
   cargo run --release --bin onboard_user_shellnet -- \
     --multisig-address "$MULTISIG_ADDRESS" \
     --multisig-keys-file "$WORKSPACE/multisig/Multisig.keys.json" \
