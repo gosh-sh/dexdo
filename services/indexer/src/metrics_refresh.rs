@@ -95,6 +95,7 @@ pub async fn run_refresh_loop(
             ),
             Err(err) => error!(?err, "inference order status metric refresh failed"),
         }
+        metrics.set_inference_reconcile_failures(repo.inference_reconcile_failures_count());
         tokio::time::sleep(interval).await;
     }
 }

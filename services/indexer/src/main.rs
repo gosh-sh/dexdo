@@ -101,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
         decoder.clone(),
         Duration::from_millis(config.indexer.inference_reference_price_refresh_ms),
         Duration::from_millis(config.indexer.inference_sweep_interval_ms),
-    );
+    )
+    .with_failure_counter(repo.inference_reconcile_failures_handle());
     let inf_interval =
         Duration::from_millis(config.indexer.inference_reconciliation_interval_ms);
     tokio::spawn(inference_reconciler.run_loop(inf_interval));

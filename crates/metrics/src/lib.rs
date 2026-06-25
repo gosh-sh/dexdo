@@ -64,6 +64,7 @@ pub struct IndexerMetrics {
     inference_orders_open: Arc<AtomicU64>,
     inference_orders_filled: Arc<AtomicU64>,
     inference_orders_cancelled: Arc<AtomicU64>,
+    inference_reconcile_failures: Arc<AtomicU64>,
     // Retain the observable-counter and gauge handles for the lifetime of the
     // provider, mirroring the reference metrics setup. The observe callbacks
     // themselves are registered with the meter at `build()` time.
@@ -81,6 +82,7 @@ pub struct IndexerMetrics {
     _inference_reference_price_lag_gauge: ObservableGauge<u64>,
     _inference_sweep_lag_gauge: ObservableGauge<u64>,
     _inference_orders_gauge: ObservableGauge<u64>,
+    _inference_reconcile_failures_counter: ObservableCounter<u64>,
 }
 
 impl IndexerMetrics {
@@ -103,6 +105,7 @@ impl IndexerMetrics {
         let inference_orders_open = Arc::new(AtomicU64::new(0));
         let inference_orders_filled = Arc::new(AtomicU64::new(0));
         let inference_orders_cancelled = Arc::new(AtomicU64::new(0));
+        let inference_reconcile_failures = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -273,6 +276,17 @@ impl IndexerMetrics {
             })
             .build();
 
+        let reconcile_failures_cache = Arc::clone(&inference_reconcile_failures);
+        let inference_reconcile_failures_counter = meter
+            .u64_observable_counter("indexer_inference_reconcile_failures")
+            .with_description(
+                "Hard inference reconcile failures (Err outcomes from discovery or refresh; excludes the benign NoBoc skip)",
+            )
+            .with_callback(move |observer| {
+                observer.observe(reconcile_failures_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
@@ -292,6 +306,7 @@ impl IndexerMetrics {
             inference_orders_open,
             inference_orders_filled,
             inference_orders_cancelled,
+            inference_reconcile_failures,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
             _projection_backlog_gauge: projection_backlog_gauge,
@@ -305,6 +320,7 @@ impl IndexerMetrics {
             _inference_reference_price_lag_gauge: inference_reference_price_lag_gauge,
             _inference_sweep_lag_gauge: inference_sweep_lag_gauge,
             _inference_orders_gauge: inference_orders_gauge,
+            _inference_reconcile_failures_counter: inference_reconcile_failures_counter,
         }
     }
 
@@ -382,6 +398,11 @@ impl IndexerMetrics {
         self.inference_orders_open.store(open, Ordering::Relaxed);
         self.inference_orders_filled.store(filled, Ordering::Relaxed);
         self.inference_orders_cancelled.store(cancelled, Ordering::Relaxed);
+    }
+
+    /// Set the cumulative value reported by `indexer_inference_reconcile_failures`.
+    pub fn set_inference_reconcile_failures(&self, value: u64) {
+        self.inference_reconcile_failures.store(value, Ordering::Relaxed);
     }
 }
 
@@ -518,6 +539,7 @@ mod tests {
         metrics.set_inference_reference_price_lag_seconds(444);
         metrics.set_inference_sweep_lag_seconds(555);
         metrics.set_inference_order_counts(60, 70, 80);
+        metrics.set_inference_reconcile_failures(99);
 
         assert_eq!(metrics.orders_created.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.orders_partially_filled.load(Ordering::Relaxed), 3);
@@ -540,5 +562,6 @@ mod tests {
         assert_eq!(metrics.inference_orders_open.load(Ordering::Relaxed), 60);
         assert_eq!(metrics.inference_orders_filled.load(Ordering::Relaxed), 70);
         assert_eq!(metrics.inference_orders_cancelled.load(Ordering::Relaxed), 80);
+        assert_eq!(metrics.inference_reconcile_failures.load(Ordering::Relaxed), 99);
     }
 }

@@ -5,6 +5,9 @@
 // gates, stamp last_reconciled_at (visibility) only on a clean bounded-sweep cycle.
 // Queue B (refresh): re-price + sweep phantoms on a separate cadence.
 
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -78,6 +81,10 @@ pub struct InferenceReconciler {
     // OPEN orders checked per sweep tick; SWEEP_BATCH_N in prod, smaller in tests.
     sweep_batch_n: i64,
     events_stream: String,
+    // Shared with IndexerRepository; bumped per hard reconcile failure for the
+    // indexer_inference_reconcile_failures counter. Defaults to a standalone
+    // atomic so tests and standalone construction work without wiring.
+    reconcile_failures: Arc<AtomicU64>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -133,6 +140,7 @@ impl InferenceReconciler {
             sweep_interval,
             sweep_batch_n: SWEEP_BATCH_N,
             events_stream: EVENTS_STREAM_NAME.to_string(),
+            reconcile_failures: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -143,6 +151,13 @@ impl InferenceReconciler {
 
     pub fn with_events_stream(mut self, s: impl Into<String>) -> Self {
         self.events_stream = s.into();
+        self
+    }
+
+    /// Share the inference-reconcile-failure counter with `IndexerRepository`,
+    /// so per-book `Err` outcomes are visible to the metrics-refresh poll.
+    pub fn with_failure_counter(mut self, counter: Arc<AtomicU64>) -> Self {
+        self.reconcile_failures = counter;
         self
     }
 
@@ -218,6 +233,7 @@ impl InferenceReconciler {
                 }
                 Err(err) => {
                     stats.failed += 1;
+                    self.reconcile_failures.fetch_add(1, Ordering::Relaxed);
                     warn!(ob = %book.orderbook_address, ?err, "discovery failed");
                     self.stamp_failure_logged(&book.orderbook_address).await;
                 }
@@ -235,6 +251,7 @@ impl InferenceReconciler {
                 Ok(_) => stats.refreshed += 1,
                 Err(err) => {
                     stats.failed += 1;
+                    self.reconcile_failures.fetch_add(1, Ordering::Relaxed);
                     warn!(ob = %book.orderbook_address, ?err, "refresh failed");
                     self.stamp_failure_logged(&book.orderbook_address).await;
                 }

@@ -64,6 +64,12 @@ pub struct IndexerRepository {
     /// here. A non-zero rate means ABI drift or malformed bodies for an otherwise
     /// known event. Shared across clones via `Arc`, like `projection_fallbacks`.
     decode_errors: Arc<AtomicU64>,
+    /// Running count of hard inference reconcile failures (`Err` outcomes from
+    /// discovery or refresh — not `NoBoc`, which is a benign skip). Bumped by the
+    /// `InferenceReconciler` through a cloned handle and polled here for
+    /// `indexer_inference_reconcile_failures`. Shared across clones via `Arc`,
+    /// like `inference_orphans_dropped`.
+    inference_reconcile_failures: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -110,6 +116,7 @@ impl IndexerRepository {
             inference_orphan_cutoff: std::time::Duration::from_millis(1_800_000), // default; overridden in main
             inference_orphans_dropped: Arc::new(AtomicU64::new(0)),
             decode_errors: Arc::new(AtomicU64::new(0)),
+            inference_reconcile_failures: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -129,6 +136,20 @@ impl IndexerRepository {
     /// undecoded. Polled by the metrics-refresh loop for `indexer_decode_errors`.
     pub fn decode_errors_count(&self) -> u64 {
         self.decode_errors.load(Ordering::Relaxed)
+    }
+
+    /// Running total of hard inference reconcile failures. Polled by the
+    /// metrics-refresh loop for `indexer_inference_reconcile_failures`.
+    pub fn inference_reconcile_failures_count(&self) -> u64 {
+        self.inference_reconcile_failures.load(Ordering::Relaxed)
+    }
+
+    /// A write-handle to the shared inference-reconcile-failure counter, for the
+    /// `InferenceReconciler` to bump. The handle and `inference_reconcile_failures_count`
+    /// read and write the same atomic, so a reconciler bump is visible to the
+    /// metrics-refresh poll.
+    pub fn inference_reconcile_failures_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.inference_reconcile_failures)
     }
 
     /// Returns `true` the first time `event_type` is seen as projector-unknown

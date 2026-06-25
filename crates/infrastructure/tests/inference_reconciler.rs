@@ -761,6 +761,62 @@ async fn refresh_selects_price_due_sweep_due_and_skips_fresh() {
     assert!(!picked.contains(&d.to_string()), "fresh book must NOT be selected");
 }
 
+// The reconciler bumps a write-handle; metrics-refresh reads the count getter.
+// Both must address the same atomic or the metric would always report 0.
+#[tokio::test]
+async fn reconcile_failures_handle_shares_state_with_count() {
+    let Some(pool) = setup().await else { return };
+    let repo = dodex_infrastructure::indexer_repo::IndexerRepository::new(pool);
+    let handle = repo.inference_reconcile_failures_handle();
+    assert_eq!(repo.inference_reconcile_failures_count(), 0);
+    handle.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(repo.inference_reconcile_failures_count(), 3);
+}
+
+// run_once bumps the shared counter by exactly stats.failed. Deterministic
+// under concurrency: each IndexerRepository instance owns its own counter Arc,
+// so only this reconciler writes it. The seeded discovery book guarantees the
+// for_test reconciler (unreachable GraphQL) records >= 1 failure; concurrent
+// discovery rows on the shared DB only add more, and the equality to
+// stats.failed still holds.
+#[tokio::test]
+async fn run_once_counts_hard_failures_into_shared_counter() {
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = dodex_infrastructure::indexer_repo::IndexerRepository::new(pool.clone());
+    let reconciler = dodex_infrastructure::inference_reconciler::InferenceReconciler::for_test(
+        pool.clone(),
+    )
+    .with_failure_counter(repo.inference_reconcile_failures_handle());
+
+    // A discovery book (never reconciled, never failed) the reconciler will
+    // scan and fail on BOC fetch. model_hash NULL avoids the UNIQUE partial index.
+    let ob = "inf_recon_fail_test.book";
+    sqlx::query("delete from inference_markets where orderbook_address = $1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .expect("purge");
+    sqlx::query("insert into inference_markets (orderbook_address) values ($1)")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .expect("seed discovery book");
+
+    let before = repo.inference_reconcile_failures_count();
+    let stats = reconciler.run_once().await.expect("run_once");
+    let after = repo.inference_reconcile_failures_count();
+
+    assert!(stats.failed >= 1, "seeded book should fail BOC fetch");
+    assert_eq!(after - before, stats.failed, "counter advances by exactly stats.failed");
+
+    sqlx::query("delete from inference_markets where orderbook_address = $1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 #[tokio::test]
 async fn failure_stamps_backoff_and_excludes_from_reselection() {
     let Some(pool) = setup().await else { return };
