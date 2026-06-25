@@ -127,6 +127,10 @@ Notable indexer config keys under `indexer:`:
 - `ignored_addresses` — source addresses dropped before `raw_events` insert and projection.
 - `dapp_id` — scopes ingestion to the DEXDO dapp; foreign events dropped before decode. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#scope-filter-indexerdapp_id).
 - `ignored_event_types` — event types dropped before decode, matched by `dst`. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#no-op-filter-indexerignored_event_types).
+- `inference_reconciliation_interval_ms` — how often the inference reconciler discovery queue (Queue A) runs. Default `15000`.
+- `inference_reference_price_refresh_ms` — minimum age before a book's weekly-median reference price is re-fetched. Default `3600000`.
+- `inference_sweep_interval_ms` — minimum age before a book's phantom-order sweep cycle re-runs. Default `30000`.
+- `inference_orphan_cutoff_ms` — dead-letter window for inference orphan events in the projection loop. Default `1800000`. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#inference-reconciler).
 
 Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
 (optional) makes each service also write rotated log files into a directory —
