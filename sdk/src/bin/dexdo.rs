@@ -43,7 +43,37 @@ use dodex_sdk::Dex;
 use dodex_sdk::DexConfig;
 use serde::Deserialize;
 
+// create-prediction-market deps (oracle + event + PMP deploy)
+use std::sync::Arc;
+use ackinacki_kit::contracts::account::AccountStatus;
+use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
+use ackinacki_kit::contracts::giver::v3::top_up_native_with_giver_if_below;
+use ackinacki_kit::contracts::traits::AccountAccessor;
+use ackinacki_kit::tvm_client::crypto;
+use ackinacki_kit::tvm_client::crypto::ParamsOfMnemonicDeriveSignKeys;
+use ackinacki_kit::tvm_client::crypto::ParamsOfMnemonicFromRandom;
+use ackinacki_kit::tvm_client::ClientConfig;
+use ackinacki_kit::tvm_client::ClientContext;
+use dodex_contracts::dex::oracle::Oracle;
+use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
+use dodex_contracts::dex::oracle_event_list::OracleEventList;
+use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
+use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::root_oracle::ParamsOfDeployOracle;
+use dodex_contracts::dex::root_oracle::RootOracle;
+use dodex_sdk::dex_contract_params;
+use dodex_sdk::proof;
+
 const DEFAULT_ENDPOINT: &str = "shellnet.ackinacki.org";
+
+// create-prediction-market constants (mirror the e2e setup defaults).
+const ORACLE_FEE: u128 = 100;
+const DEPLOYER_SEED_AMOUNT: u128 = 100_000_000_000; // 100 NACKL seeded per outcome
+const EVENT_DEADLINE: u64 = 2_000_000_000; // event service deadline (far future)
+const ROOT_ORACLE_NATIVE_TARGET: u64 = 120_000_000_000;
+const ROOT_ORACLE_NATIVE_THRESHOLD: u64 = 50_000_000_000;
 
 // ----------------------------- arg parsing -----------------------------
 
@@ -591,6 +621,261 @@ async fn cmd_withdraw(f: Flags) -> ExitCode {
     }
 }
 
+// ------------------- create-prediction-market helpers -------------------
+
+fn create_tvm_context(endpoint: &str) -> Arc<ClientContext> {
+    let mut config = ClientConfig::default();
+    config.network.endpoints = Some(vec![endpoint.to_string()]);
+    Arc::new(ClientContext::new(config).expect("create context"))
+}
+
+/// Fresh 24-word signing keypair (oracle / ephemeral deploy-signer).
+fn gen_keys(context: Arc<ClientContext>) -> KeyPair {
+    let phrase = crypto::mnemonic_from_random(
+        context.clone(),
+        ParamsOfMnemonicFromRandom { dictionary: None, word_count: Some(24) },
+    )
+    .expect("mnemonic")
+    .phrase;
+    crypto::mnemonic_derive_sign_keys(
+        context,
+        ParamsOfMnemonicDeriveSignKeys { phrase, path: None, dictionary: None, word_count: Some(24) },
+    )
+    .expect("derive keys")
+}
+
+async fn wait_active<T: AccountAccessor>(contract: &T, label: &str) -> Result<(), String> {
+    contract
+        .wait_account(ParamsOfWaitAccount {
+            status: AccountStatus::Active,
+            attempts: Some(30),
+            attempts_timeout: Some(2_000),
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("wait {label} active: {e:?}"))
+}
+
+/// `dexdo create-prediction-market` — deploy a fresh oracle + event + PMP
+/// (one prediction market) using a funded deployer note, then print the
+/// `predictionMarketAddress` + identity + staking window. The deployer note
+/// seeds the initial stakes, so after this it already holds positions —
+/// recover them with `cancel-stake` (while STAKING) + `withdraw`.
+async fn cmd_create_prediction_market(f: Flags) -> ExitCode {
+    let endpoint = f.endpoint();
+    let state = match f.require("pn-state-file") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let (pn_address, pn_keys) = match load_pn(&state) { Ok(v) => v, Err(e) => return fail(&e) };
+    let name_prefix = f.get("name").unwrap_or("dexdo-pm").to_string();
+    let outcomes_arg = f.get("outcomes").unwrap_or("Yes,No").to_string();
+    let outcome_list: Vec<String> =
+        outcomes_arg.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if outcome_list.len() < 2 {
+        return fail("need at least 2 outcomes (--outcomes \"Yes,No\")");
+    }
+    // Length of the STAKING window in seconds (result_start = now + this).
+    let stake_seconds: u64 = match f.get("stake-seconds").map(str::parse::<u64>) {
+        Some(Ok(v)) if v >= 60 => v,
+        Some(Ok(_)) => return fail("--stake-seconds must be >= 60"),
+        Some(Err(_)) => return fail("--stake-seconds must be an integer"),
+        None => 600,
+    };
+
+    let token_type = proof::TokenType::Nackl as u32;
+    let context = create_tvm_context(&endpoint);
+    let dx = match dex(&endpoint) { Ok(d) => d, Err(e) => return fail(&e) };
+
+    let oracle_keys = gen_keys(context.clone());
+    let ephemeral_keys = gen_keys(context.clone());
+    let run_id = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let oracle_name = format!("{name_prefix}-{run_id:x}");
+    eprintln!(
+        "[dexdo create-prediction-market] oracle={oracle_name} outcomes={outcome_list:?} deployer={pn_address}"
+    );
+
+    // RootOracle needs gas to materialize the Oracle.
+    let root_oracle =
+        RootOracle::new(context.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS));
+    if let Err(e) = wait_active(&root_oracle, "RootOracle").await { return fail(&e); }
+    if let Err(e) = top_up_native_with_giver_if_below(
+        context.clone(),
+        &root_oracle,
+        ROOT_ORACLE_NATIVE_TARGET,
+        ROOT_ORACLE_NATIVE_THRESHOLD,
+        "RootOracle",
+    )
+    .await
+    {
+        return fail(&format!("top up RootOracle: {e:?}"));
+    }
+
+    // 1. Deploy oracle (ephemeral signer; on-chain pubkey is the oracle key).
+    if let Err(e) = dx
+        .deploy_oracle(
+            ParamsOfDeployOracle {
+                oracle_pubkey: proof::pubkey_to_dec(&oracle_keys.public),
+                oracle_name: oracle_name.clone(),
+            },
+            Signer::Keys { keys: ephemeral_keys },
+        )
+        .await
+    {
+        return fail(&format!("deploy_oracle: {e:?}"));
+    }
+    let oracle_address = match dx.get_oracle_address(oracle_name.clone()).await {
+        Ok(a) => a,
+        Err(e) => return fail(&format!("get_oracle_address: {e:?}")),
+    };
+    let oracle_contract = Oracle::new(context.clone(), dex_contract_params(&oracle_address));
+    if let Err(e) = wait_active(&oracle_contract, "Oracle").await { return fail(&e); }
+    let el_address = match dx
+        .get_event_list_address(&oracle_address, ParamsOfGetEventListAddress { index: 0 })
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => return fail(&format!("get_event_list_address: {e:?}")),
+    };
+    let el_contract = OracleEventList::new(context.clone(), dex_contract_params(&el_address));
+    if let Err(e) = wait_active(&el_contract, "EventList").await { return fail(&e); }
+
+    // 2. Add the event.
+    let event_name = format!("Match {run_id:x}");
+    let outcome_names: HashMap<u32, String> =
+        outcome_list.iter().enumerate().map(|(i, n)| (i as u32, n.clone())).collect();
+    if let Err(e) = dx
+        .add_event(
+            &el_address,
+            ParamsOfAddEvent {
+                event_name: event_name.clone(),
+                oracle_fee: ORACLE_FEE,
+                deadline: EVENT_DEADLINE,
+                describe: "Who wins?".to_string(),
+                outcome_names,
+                trust_addr: None,
+            },
+            Signer::Keys { keys: oracle_keys.clone() },
+        )
+        .await
+    {
+        return fail(&format!("add_event: {e:?}"));
+    }
+    let mut event_id = String::new();
+    for _ in 0..20 {
+        if let Ok(evs) = dx.get_events(&el_address).await {
+            if let Some((id, _)) = evs
+                .events
+                .iter()
+                .find(|(_, e)| e.get("eventName").and_then(|v| v.as_str()) == Some(event_name.as_str()))
+            {
+                event_id = id.clone();
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    if event_id.is_empty() {
+        return fail("event did not appear after add_event");
+    }
+
+    // 3. Deploy the PMP (prediction market), signed by the deployer note;
+    //    it seeds the initial stakes for every outcome.
+    let initial_stakes = vec![DEPLOYER_SEED_AMOUNT; outcome_list.len()];
+    if let Err(e) = dx
+        .deploy_pmp(
+            &pn_address,
+            ParamsOfDeployPmp {
+                event_id: event_id.clone(),
+                oracle_fee: vec![ORACLE_FEE],
+                token_type,
+                names: vec![oracle_name.clone()],
+                index: vec![0u128],
+                initial_stakes,
+            },
+            Signer::Keys { keys: pn_keys },
+        )
+        .await
+    {
+        return fail(&format!("deploy_pmp: {e:?}"));
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let pmp_address = match dx.get_pmp_address(event_id.clone(), vec![oracle_name.clone()], token_type).await {
+        Ok(a) => a,
+        Err(e) => return fail(&format!("get_pmp_address: {e:?}")),
+    };
+    let pmp_contract = Pmp::new(context.clone(), dex_contract_params(&pmp_address));
+    if let Err(e) = wait_active(&pmp_contract, "PMP").await { return fail(&e); }
+
+    // 4. Wait until the PMP has confirmed the event with the oracle (the oracle
+    //    is registered as trust-addr) — only then will submitSetTimings apply.
+    eprintln!("[dexdo create-prediction-market] waiting for event confirmation…");
+    let mut confirmed = false;
+    for _ in 0..80 {
+        if let Ok(d) = dx.get_pmp_details(&pmp_address).await {
+            if d.number_of_oracle_events > 0 && d.approved_oracle_events >= d.number_of_oracle_events {
+                confirmed = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+    if !confirmed {
+        return fail("event confirmation never landed (PMP not approved by oracle) — cannot set timings");
+    }
+
+    // 5. Oracle sets the staking timings → market opens for STAKING.
+    //    result_start = now + window; the contract derives the stake window from it.
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let result_start = now + stake_seconds;
+    eprintln!("[dexdo create-prediction-market] submitSetTimings(result_start={result_start}, window={stake_seconds}s)…");
+    let mut timings_ok = false;
+    for attempt in 0..6 {
+        match dx
+            .submit_set_timings(
+                &pmp_address,
+                ParamsOfSubmitSetTimings { result_start },
+                Signer::Keys { keys: oracle_keys.clone() },
+            )
+            .await
+        {
+            Ok(_) => { timings_ok = true; break; }
+            Err(e) => {
+                eprintln!("[dexdo create-prediction-market] submit_set_timings attempt {} failed ({e:?}); retrying…", attempt + 1);
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+    if !timings_ok {
+        return fail("submit_set_timings failed (could not open STAKING window)");
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // 6. Re-read the market — should now be approved with an open STAKING window.
+    let details = match dx.get_pmp_details(&pmp_address).await {
+        Ok(d) => d,
+        Err(e) => return fail(&format!("get_pmp_details after timings: {e:?}")),
+    };
+
+    let out = serde_json::json!({
+        "predictionMarketAddress": pmp_address,
+        "oracleAddress": oracle_address,
+        "oracleName": oracle_name,
+        // KEEP SECRET — the oracle key is needed to `submit_resolve` this market later.
+        "oracleSecretHex": oracle_keys.secret,
+        "eventId": event_id,
+        "tokenType": token_type,
+        "outcomes": outcome_list,
+        "approved": details.approved,
+        "oracleListHash": details.oracle_list_hash,
+        "stakeStart": details.stake_start,
+        "stakeEnd": details.stake_end,
+        "resultStart": details.result_start,
+        "resultEnd": details.result_end,
+        "endpoint": endpoint,
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into()));
+    eprintln!("[dexdo create-prediction-market] DONE predictionMarketAddress={pmp_address} approved={}", details.approved);
+    ExitCode::SUCCESS
+}
+
 // ----------------------------- dispatch -----------------------------
 
 fn fail(msg: &str) -> ExitCode {
@@ -621,7 +906,13 @@ fn usage() -> String {
        withdraw      --pn-state-file <path> --dest 0:<multisig> [--dapp-id <id>]\n                  \
        Sweep the note's free collateral to a wallet (the multisig).\n  \
        pmp-details   --market-address 0:<pmp> [--endpoint host]\n                  \
-       Read a market's phase window, outcomes, and identity (read-only).\n\n\
+       Read a market's phase window, outcomes, and identity (read-only).\n  \
+       create-prediction-market  --pn-state-file <path> [--name <prefix>] \
+     [--outcomes \"A,B\"] [--stake-seconds N] [--endpoint host]\n                  \
+       Deploy a fresh oracle + event + PMP (one prediction market) using the funded \
+     deployer note, then open STAKING (oracle submitSetTimings). Prints \
+     predictionMarketAddress + oracleSecretHex (keep — needed to resolve) + windows. \
+     NOTE: the contract caps the STAKING window short (~90s), so stake promptly.\n\n\
      common flags:\n  \
        --endpoint    network host (default shellnet.ackinacki.org)\n"
         .to_string()
@@ -642,6 +933,7 @@ async fn dispatch(sub: &str, rest: &[String]) -> ExitCode {
         "claim" => cmd_claim(flags).await,
         "withdraw" => cmd_withdraw(flags).await,
         "pmp-details" => cmd_pmp_details(flags).await,
+        "create-prediction-market" => cmd_create_prediction_market(flags).await,
         other => fail(&format!("unknown subcommand `{other}`\n\n{}", usage())),
     }
 }
