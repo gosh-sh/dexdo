@@ -499,6 +499,7 @@ impl InferenceReconciler {
     /// NULL, an override that resets the cursor to NULL is invisible to the cursor-CAS,
     /// but it bumped the seq, so the guard fails and the stamp is blocked.
     /// Returns whether `last_reconciled_at` was stamped.
+    #[allow(clippy::too_many_arguments)]
     pub async fn advance_sweep_and_maybe_stamp(
         &self,
         ob: &str,
