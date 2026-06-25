@@ -34,7 +34,7 @@ pub async fn project_inference_event(
         "OrderPlaced" => apply_inference_order_placed(tx, event, node).await,
         "SubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
         "OrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
-        // "Filled" => apply_inference_filled(tx, event, node).await,   // Task 6
+        "Filled" => apply_inference_filled(tx, event, node).await,
         "Executed" | "Refunded" | "CycleForfeited" | "ForfeitClaimed" => Ok(ProjectionOutcome::Applied),
         other => {
             warn!(event_type = %event.event_type, other, "unknown InferenceOrderBook event; seeded only");
@@ -127,6 +127,100 @@ async fn apply_inference_subscription_placed(
     let chain_order = node_chain_order(node, "SubscriptionPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     upsert_resting_order(tx, ob, &order_id, true, &price, &ticks, true, note, &chain_order, chain_seconds).await?;
+    Ok(ProjectionOutcome::Applied)
+}
+
+#[derive(sqlx::FromRow)]
+struct LockedOrder { order_id: String, is_sweep_cancel: bool }
+
+async fn apply_inference_filled(
+    tx: &mut Transaction<'_, Postgres>, event: &DecodedEvent, node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let ob = node.src.as_deref().context("Filled: src missing")?;
+    let maker_id = uint_field_to_decimal(&event.value, "makerId")?;
+    let taker_id = uint_field_to_decimal(&event.value, "takerId")?;
+    let ticks = uint_field_to_decimal(&event.value, "ticks")?;
+    let chain_order = node_chain_order(node, "Filled")?;
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+
+    let ids = vec![maker_id.clone(), taker_id.clone()];
+
+    // Lock both named rows. ZERO writes before we know both are present.
+    let locked: Vec<LockedOrder> = sqlx::query_as(
+        r#"select order_id::text as order_id, (swept_at is not null) as is_sweep_cancel
+             from inference_orders
+            where orderbook_address = $1 and order_id = any($2::numeric[])
+            for update"#,
+    )
+    .bind(ob).bind(&ids)
+    .fetch_all(&mut **tx).await.context("Filled lock both rows")?;
+
+    let present: std::collections::HashSet<&str> = locked.iter().map(|r| r.order_id.as_str()).collect();
+    if !present.contains(maker_id.as_str()) || !present.contains(taker_id.as_str()) {
+        return Ok(ProjectionOutcome::Deferred); // parent(s) not seen yet — zero writes
+    }
+    let any_sweep_override = locked.iter().any(|r| r.is_sweep_cancel);
+
+    // Decrement both. Per-row CASE: FILLED and real-cancel (swept_at NULL) rows are
+    // terminal no-ops; a SELL offer (is_buy=false) closes on the first fill; a sweep-
+    // cancel (swept_at NOT NULL) is overridden (swept_at cleared, decremented).
+    sqlx::query(
+        r#"update inference_orders o
+              set amount_remaining = case
+                      when o.status = 'FILLED' then o.amount_remaining
+                      when o.status = 'CANCELLED' and o.swept_at is null then o.amount_remaining
+                      else greatest(o.amount_remaining - $3::numeric, 0::numeric)
+                  end,
+                  status = case
+                      when o.status = 'FILLED' then 'FILLED'
+                      when o.status = 'CANCELLED' and o.swept_at is null then 'CANCELLED'
+                      when o.is_buy = false then 'FILLED'
+                      when greatest(o.amount_remaining - $3::numeric, 0::numeric) = 0 then 'FILLED'
+                      else 'OPEN'
+                  end,
+                  swept_at = case
+                      when o.status = 'FILLED' then o.swept_at
+                      when o.status = 'CANCELLED' and o.swept_at is null then o.swept_at
+                      else null
+                  end,
+                  -- A terminal row (FILLED, or real-cancel CANCELLED+swept_at NULL) is a
+                  -- FULL no-op: a late/duplicate Filled must not advance its chain/bookkeeping
+                  -- columns either (mirrors projectors::apply_order_filled). Only OPEN rows
+                  -- and provisional sweep-cancels (swept_at NOT NULL, being overridden) mutate.
+                  last_chain_order = case
+                      when o.status = 'FILLED' or (o.status = 'CANCELLED' and o.swept_at is null) then o.last_chain_order
+                      else greatest(o.last_chain_order, $4)
+                  end,
+                  chain_updated_at = case
+                      when o.status = 'FILLED' or (o.status = 'CANCELLED' and o.swept_at is null) then o.chain_updated_at
+                      else greatest(o.chain_updated_at, to_timestamp($5::double precision))
+                  end,
+                  updated_at = case
+                      when o.status = 'FILLED' or (o.status = 'CANCELLED' and o.swept_at is null) then o.updated_at
+                      else now()
+                  end
+            where o.orderbook_address = $1 and o.order_id = any($2::numeric[])"#,
+    )
+    .bind(ob).bind(&ids).bind(&ticks).bind(&chain_order).bind(chain_seconds)
+    .execute(&mut **tx).await.context("Filled decrement both rows")?;
+
+    // If we overrode a provisional sweep-cancel while the book is still in discovery,
+    // reset the discovery sweep cursor so the reopened (lower) id is re-checked before
+    // the visibility stamp (reconciler Queue A step 5).
+    if any_sweep_override {
+        // Reset the discovery cursor (restart the cycle from the bottom) AND bump the
+        // monotonic override seq so the discovery completion stamp can detect this even
+        // on a first-tick (prev_cursor = NULL) cycle — see reconciler Task 9.
+        sqlx::query(
+            r#"update inference_markets
+                  set sweep_cursor = null,
+                      sweep_override_seq = sweep_override_seq + 1,
+                      updated_at = now()
+                where orderbook_address = $1 and last_reconciled_at is null"#,
+        )
+        .bind(ob).execute(&mut **tx).await.context("reset discovery sweep_cursor + bump override seq")?;
+    }
+
     Ok(ProjectionOutcome::Applied)
 }
 

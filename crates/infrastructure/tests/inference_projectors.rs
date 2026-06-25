@@ -176,3 +176,117 @@ async fn routes_by_event_type_when_event_name_is_empty() {
     let status: String = sqlx::query_scalar("select status from inference_orders where orderbook_address=$1 and order_id=7").bind(ob).fetch_one(&pool).await.unwrap();
     assert_eq!(status, "OPEN", "empty event_name must still reach the OrderPlaced handler");
 }
+
+// ---- Task 6: Filled handler helpers ----
+
+async fn place(pool:&sqlx::PgPool, tx:&mut sqlx::Transaction<'_,sqlx::Postgres>, ob:&str, id:&str, is_buy:bool, ticks:&str, co:&str) {
+    let _ = pool; // place via the projector for realism
+    let e = ev("OrderPlaced", serde_json::json!({"orderId":id,"isBuy":is_buy,"price":"1","ticks":ticks,"note":"0:n","tokenContract":"0:tc","deadline":"0"}));
+    project(tx, &e, &node(ob, co)).await;
+}
+async fn clean(pool:&sqlx::PgPool, ob:&str) {
+    sqlx::query("delete from inference_orders where orderbook_address=$1").bind(ob).execute(pool).await.unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address=$1").bind(ob).execute(pool).await.unwrap();
+}
+async fn status_rem(pool:&sqlx::PgPool, ob:&str, id:i64) -> (String,String) {
+    sqlx::query_as("select status, amount_remaining::text from inference_orders where orderbook_address=$1 and order_id=$2")
+        .bind(ob).bind(id).fetch_one(pool).await.unwrap()
+}
+
+#[tokio::test]
+async fn filled_closes_sell_offer_and_zeroes_buy_taker() {
+    let Some(pool)=setup().await else {return}; let ob="0:t_fill_both";
+    clean(&pool,ob).await;
+    let mut tx=pool.begin().await.unwrap();
+    place(&pool,&mut tx,ob,"1",false,"10","co-1").await; // SELL maker
+    place(&pool,&mut tx,ob,"2",true,"10","co-2").await;  // BUY taker
+    let f=ev("Filled",serde_json::json!({"makerId":"1","takerId":"2","ticks":"10","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}));
+    assert_eq!(project(&mut tx,&f,&node(ob,"co-3")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+    assert_eq!(status_rem(&pool,ob,1).await, ("FILLED".into(),"0".into())); // SELL one-deal
+    assert_eq!(status_rem(&pool,ob,2).await, ("FILLED".into(),"0".into())); // BUY taker zeroed
+}
+
+#[tokio::test]
+async fn buy_maker_fills_across_deals_to_filled_at_zero() {
+    let Some(pool)=setup().await else {return}; let ob="0:t_fill_across";
+    clean(&pool,ob).await;
+    let mut tx=pool.begin().await.unwrap();
+    place(&pool,&mut tx,ob,"10",true,"10","co-1").await;  // BUY maker
+    place(&pool,&mut tx,ob,"11",false,"6","co-2").await;  // SELL taker A
+    place(&pool,&mut tx,ob,"12",false,"4","co-3").await;  // SELL taker B
+    project(&mut tx,&ev("Filled",serde_json::json!({"makerId":"10","takerId":"11","ticks":"6","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-4")).await;
+    tx.commit().await.unwrap();
+    // Read via the pool only AFTER commit — a separate pooled connection cannot see uncommitted rows.
+    assert_eq!(status_rem(&pool,ob,10).await, ("OPEN".into(),"4".into())); // committed partial
+    let mut tx=pool.begin().await.unwrap();
+    project(&mut tx,&ev("Filled",serde_json::json!({"makerId":"10","takerId":"12","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-5")).await;
+    tx.commit().await.unwrap();
+    assert_eq!(status_rem(&pool,ob,10).await, ("FILLED".into(),"0".into()));
+}
+
+#[tokio::test]
+async fn filled_defers_zero_writes_when_one_side_absent_then_applies_once() {
+    let Some(pool)=setup().await else {return}; let ob="0:t_fill_defer";
+    clean(&pool,ob).await;
+    let mut tx=pool.begin().await.unwrap();
+    place(&pool,&mut tx,ob,"20",false,"5","co-1").await; // only the maker exists
+    let f=ev("Filled",serde_json::json!({"makerId":"20","takerId":"21","ticks":"5","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}));
+    assert_eq!(project(&mut tx,&f,&node(ob,"co-2")).await, ProjectionOutcome::Deferred);
+    tx.commit().await.unwrap();
+    assert_eq!(status_rem(&pool,ob,20).await, ("OPEN".into(),"5".into()), "present side must NOT be decremented");
+    // taker arrives, replay applies exactly once.
+    let mut tx=pool.begin().await.unwrap();
+    place(&pool,&mut tx,ob,"21",true,"5","co-3").await;
+    assert_eq!(project(&mut tx,&f,&node(ob,"co-4")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+    assert_eq!(status_rem(&pool,ob,20).await, ("FILLED".into(),"0".into()));
+    assert_eq!(status_rem(&pool,ob,21).await, ("FILLED".into(),"0".into()));
+}
+
+#[tokio::test]
+async fn filled_overrides_provisional_sweep_cancel_and_resets_discovery_cursor() {
+    let Some(pool)=setup().await else {return}; let ob="0:t_fill_override";
+    clean(&pool,ob).await;
+    let mut tx=pool.begin().await.unwrap();
+    place(&pool,&mut tx,ob,"30",true,"10","co-1").await;  // BUY maker
+    place(&pool,&mut tx,ob,"31",false,"4","co-2").await;  // SELL taker
+    tx.commit().await.unwrap();
+    // Simulate a provisional sweep-cancel of the BUY maker, and set the book in
+    // discovery with a non-null sweep_cursor mid-cycle.
+    sqlx::query("update inference_orders set status='CANCELLED', swept_at=now() where orderbook_address=$1 and order_id=30").bind(ob).execute(&pool).await.unwrap();
+    sqlx::query("update inference_markets set sweep_cursor=99, last_reconciled_at=null where orderbook_address=$1").bind(ob).execute(&pool).await.unwrap();
+    let mut tx=pool.begin().await.unwrap();
+    let f=ev("Filled",serde_json::json!({"makerId":"30","takerId":"31","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}));
+    assert_eq!(project(&mut tx,&f,&node(ob,"co-3")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+    // Override: maker reopened OPEN with remaining 6, swept_at cleared.
+    let (status, rem): (String,String) = status_rem(&pool,ob,30).await;
+    let swept_null: bool = sqlx::query_scalar("select swept_at is null from inference_orders where orderbook_address=$1 and order_id=30").bind(ob).fetch_one(&pool).await.unwrap();
+    assert_eq!((status.as_str(), rem.as_str(), swept_null), ("OPEN","6",true));
+    // Discovery cursor reset so the reopened low id is re-checked before stamping.
+    let cursor: Option<String> = sqlx::query_scalar("select sweep_cursor::text from inference_markets where orderbook_address=$1").bind(ob).fetch_one(&pool).await.unwrap();
+    assert!(cursor.is_none(), "discovery sweep_cursor must reset to NULL on override");
+}
+
+#[tokio::test]
+async fn filled_after_real_cancel_is_terminal_no_override() {
+    let Some(pool)=setup().await else {return}; let ob="0:t_fill_realcancel";
+    clean(&pool,ob).await;
+    let mut tx=pool.begin().await.unwrap();
+    place(&pool,&mut tx,ob,"40",true,"10","co-1").await;
+    place(&pool,&mut tx,ob,"41",false,"4","co-2").await;
+    tx.commit().await.unwrap();
+    // Real event-cancel: CANCELLED + swept_at NULL.
+    sqlx::query("update inference_orders set status='CANCELLED', swept_at=null where orderbook_address=$1 and order_id=40").bind(ob).execute(&pool).await.unwrap();
+    let mut tx=pool.begin().await.unwrap();
+    let f=ev("Filled",serde_json::json!({"makerId":"40","takerId":"41","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}));
+    project(&mut tx,&f,&node(ob,"co-3")).await;
+    tx.commit().await.unwrap();
+    assert_eq!(status_rem(&pool,ob,40).await, ("CANCELLED".into(),"10".into()), "real cancel stays terminal, remainder preserved");
+    // FULL no-op: the late Filled (co-3) must not advance the terminal row's chain order.
+    let lco: String = sqlx::query_scalar("select last_chain_order from inference_orders where orderbook_address=$1 and order_id=40").bind(ob).fetch_one(&pool).await.unwrap();
+    assert_eq!(lco, "co-1", "terminal row's last_chain_order must NOT be bumped by a late Filled");
+    // The live counter-party (order 41, SELL) DID fill — that is correct, not part of the guard.
+    assert_eq!(status_rem(&pool,ob,41).await, ("FILLED".into(),"0".into()));
+}
