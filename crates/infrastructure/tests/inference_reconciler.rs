@@ -235,7 +235,7 @@ static AT_HEAD_GATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 
 async fn set_at_head(pool: &sqlx::PgPool, v: bool) {
     sqlx::query(
-        "insert into indexer_cursors (stream_name, cursor, at_head) values ('blockchain_events','c',$1)
+        "insert into indexer_cursors (stream_name, cursor, at_head) values ('test_inference_at_head_stream','c',$1)
                  on conflict (stream_name) do update set at_head = excluded.at_head",
     )
     .bind(v)

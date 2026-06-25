@@ -77,6 +77,7 @@ pub struct InferenceReconciler {
     sweep_interval: Duration,
     // OPEN orders checked per sweep tick; SWEEP_BATCH_N in prod, smaller in tests.
     sweep_batch_n: i64,
+    events_stream: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -122,11 +123,24 @@ impl InferenceReconciler {
         reference_price_refresh: Duration,
         sweep_interval: Duration,
     ) -> Self {
-        Self { pool, graphql, getter, reference_price_refresh, sweep_interval, sweep_batch_n: SWEEP_BATCH_N }
+        Self {
+            pool,
+            graphql,
+            getter,
+            reference_price_refresh,
+            sweep_interval,
+            sweep_batch_n: SWEEP_BATCH_N,
+            events_stream: EVENTS_STREAM_NAME.to_string(),
+        }
     }
 
     pub fn with_sweep_batch_n(mut self, n: i64) -> Self {
         self.sweep_batch_n = n;
+        self
+    }
+
+    pub fn with_events_stream(mut self, s: impl Into<String>) -> Self {
+        self.events_stream = s.into();
         self
     }
 
@@ -138,6 +152,7 @@ impl InferenceReconciler {
             Duration::from_secs(3600),
             Duration::from_secs(30),
         )
+        .with_events_stream("test_inference_at_head_stream")
     }
 
     pub fn for_test_with_getter(
@@ -151,6 +166,7 @@ impl InferenceReconciler {
             Duration::from_secs(3600),
             Duration::from_secs(30),
         )
+        .with_events_stream("test_inference_at_head_stream")
     }
 
     pub async fn run_loop(self, interval: Duration) {
@@ -294,7 +310,7 @@ impl InferenceReconciler {
     async fn at_head(&self) -> anyhow::Result<bool> {
         let row: Option<(bool,)> =
             sqlx::query_as("select at_head from indexer_cursors where stream_name=$1")
-                .bind(EVENTS_STREAM_NAME)
+                .bind(self.events_stream.as_str())
                 .fetch_optional(&self.pool)
                 .await
                 .context("read at_head")?;
