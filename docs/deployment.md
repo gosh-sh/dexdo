@@ -401,6 +401,54 @@ Notes:
 - Verbosity is still controlled by `RUST_LOG` (set in the override) and
   `app.log_level` in config; the same filter applies to stdout and files.
 
+### Metrics & Grafana
+
+The **indexer** exports OpenTelemetry metrics over OTLP — but **only when an
+endpoint env var is set**: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (or the generic
+`OTEL_EXPORTER_OTLP_ENDPOINT`). With neither set, no meter provider is created and
+nothing is collected; the service runs unaffected. (The api does not export
+metrics.) Set it in your Compose override next to `APP_CONFIG`:
+
+```yaml
+  indexer:
+    environment:
+      APP_CONFIG: /app/config/indexer.prod.yaml
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+```
+
+The indexer refreshes its DB-derived metric caches every 15s and the OTLP reader
+pushes every 30s, under `service.name=dodex-indexer`. To see them in Grafana,
+route the OTLP stream into Prometheus (an OpenTelemetry Collector with a
+`prometheus` / `prometheusremotewrite` exporter) and point Grafana at that
+Prometheus. The full metric catalog — what each gauge and counter measures — is
+in [`docs/tech-specs/indexer.md`](tech-specs/indexer.md#metrics).
+
+The repository ships a ready dashboard and alert rules under `deploy/grafana/`:
+
+| File | What it is | How to use |
+| --- | --- | --- |
+| [`deploy/grafana/dodex-indexer-dashboard.json`](../deploy/grafana/dodex-indexer-dashboard.json) | Grafana dashboard covering every indexer metric — ingestion (`raw_events` counters), projection pipeline (backlog/lag/cursor age/fallbacks), DB pool, and inference markets (state, order depth, reconcile failures, price/sweep staleness) | Grafana → Dashboards → Import → Upload JSON; pick your Prometheus when prompted |
+| [`deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml`](../deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml) | 12 Grafana-managed alert rules (projection/cursor lag, decode errors, inference markets `failing`, reference-price & sweep staleness), warning→critical | Copy to Grafana's `/etc/grafana/provisioning/alerting/` and restart Grafana |
+
+Two setup notes, also documented in the files themselves:
+
+- **Counter suffix.** The OTel→Prometheus exporter appends `_total` to monotonic
+  counters by default (`add_metric_suffixes: true`). The dashboard exposes a
+  `counter_suffix` template variable (default `_total`; switch to `(none)` if your
+  collector disables it); the alert rules match `…(_total)?` so they fire either
+  way. Gauge metrics get no suffix.
+- **Alert data source UID.** Provisioned alert rules reference the Prometheus data
+  source by UID. Before installing, replace the placeholder with yours (found
+  under Connections → Data sources):
+  ```sh
+  sed -i 's/REPLACE_WITH_PROMETHEUS_DS_UID/<your-uid>/g' \
+    deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml
+  ```
+
+Alert thresholds (lag/age cutoffs, `failing > 0`, decode-error rate) mirror the
+dashboard's panel thresholds and are conservative starting points — retune them
+and the `for:` durations against your real traffic and SLOs.
+
 ### Upgrades
 
 Pull the new code and rebuild:

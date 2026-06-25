@@ -1,0 +1,416 @@
+# Grafana-managed alert rules for the dodex indexer, provisioned (apiVersion 1).
+# Grafana evaluates these itself by querying the Prometheus data source — they
+# appear under Alerting → Alert rules and link to the Dodex Indexer dashboard.
+#
+# Install: copy to Grafana's provisioning path and restart / reload:
+#   /etc/grafana/provisioning/alerting/dodex-indexer-alerts.yaml
+#
+# REQUIRED — set the Prometheus data source UID. Find it under
+# Connections → Data sources (the edit URL ends with the uid), then:
+#   sed -i 's/REPLACE_WITH_PROMETHEUS_DS_UID/<your-uid>/g' \
+#       deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml
+#
+# Each rule = a query node (refId A, instant) + a math condition node (refId C).
+# Counter alerts use a __name__=~"...(_total)?" matcher so they fire whether or
+# not the OTel→Prometheus exporter appends _total. Thresholds mirror the Grafana
+# dashboard (deploy/grafana/dodex-indexer-dashboard.json) and the Prometheus
+# rules (deploy/prometheus/dodex-indexer-alerts.yml). noDataState is OK so a
+# fully-down indexer (series gone) does not flap these — pair with a separate
+# `up == 0` liveness alert for that case.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: dodex-indexer-pipeline
+    folder: Dodex Indexer
+    interval: 1m
+    rules:
+      - uid: dodex-proj-lag-warn
+        title: Indexer projection lag elevated
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Indexer projection lag elevated"
+          description: "Oldest unprojected raw_events row is {{ $values.A.Value }}s old on {{ $labels.instance }} (warning >30s for 5m). Read-model is falling behind capture."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_projection_lag_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 30"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-proj-lag-crit
+        title: Indexer projection lag critical
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Indexer projection lag critical"
+          description: "Oldest unprojected raw_events row is {{ $values.A.Value }}s old on {{ $labels.instance }} (critical >120s for 5m). Check the projection loop and DB pool saturation."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_projection_lag_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 120"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-capture-cursor-warn
+        title: Indexer capture cursor not advancing
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Indexer capture cursor not advancing"
+          description: "Capture cursor last advanced {{ $values.A.Value }}s ago on {{ $labels.instance }} (warning >120s for 5m). Capture may be stalled."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_capture_cursor_age_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 120"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-capture-cursor-crit
+        title: Indexer capture cursor stuck
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Indexer capture cursor stuck"
+          description: "Capture cursor last advanced {{ $values.A.Value }}s ago on {{ $labels.instance }} (critical >300s for 5m). New chain events are not being ingested."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_capture_cursor_age_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 300"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-decode-errors-warn
+        title: Indexer decode errors occurring
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Indexer decode errors occurring"
+          description: "{{ $values.A.Value }}/s event bodies failing to decode on {{ $labels.instance }} over 5m. Likely ABI drift or a malformed cell for a known event."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: rate({__name__=~"indexer_decode_errors(_total)?"}[5m])
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-decode-errors-crit
+        title: Indexer decode errors at high rate
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Indexer decode errors at high rate"
+          description: "{{ $values.A.Value }}/s event bodies failing to decode on {{ $labels.instance }} (critical >0.1/s for 5m). A known event's ABI is likely out of sync."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: rate({__name__=~"indexer_decode_errors(_total)?"}[5m])
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0.1"
+              datasource: { type: __expr__, uid: __expr__ }
+
+  - orgId: 1
+    name: dodex-indexer-inference
+    folder: Dodex Indexer
+    interval: 1m
+    rules:
+      - uid: dodex-inf-failing-warn
+        title: Inference markets stuck failing
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Inference markets stuck failing"
+          description: "{{ $values.A.Value }} inference market(s) invisible with a recorded reconcile failure on {{ $labels.instance }} for 15m (ABI drift, or never-deployed / wrong-dApp address). Not served by the API."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_inference_markets{state="failing"}
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-inf-failing-crit
+        title: Inference markets failing for over an hour
+        condition: C
+        for: 1h
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Inference markets failing for over an hour"
+          description: "{{ $values.A.Value }} inference market(s) failing on {{ $labels.instance }} for 1h — reconciler backoff is not clearing them. Investigate the getter ABI / dApp deployment."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_inference_markets{state="failing"}
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-inf-price-lag-warn
+        title: Inference reference price stale
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Inference reference price stale"
+          description: "Most stale reference_price_at across visible markets is {{ $values.A.Value }}s old on {{ $labels.instance }} (warning >1h for 10m). Queue B price refresh is lagging."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_inference_reference_price_lag_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 3600"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-inf-price-lag-crit
+        title: Inference reference price very stale
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Inference reference price very stale"
+          description: "Most stale reference_price_at is {{ $values.A.Value }}s old on {{ $labels.instance }} (critical >24h for 10m). Served prices may be far out of date."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_inference_reference_price_lag_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 86400"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-inf-sweep-lag-warn
+        title: Inference order-book sweep lag elevated
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Inference order-book sweep lag elevated"
+          description: "Most stale last_swept_at across visible markets is {{ $values.A.Value }}s old on {{ $labels.instance }} (warning >5m for 10m). Order-book depth may be stale (phantom-liquidity risk)."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_inference_sweep_lag_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 300"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-inf-sweep-lag-crit
+        title: Inference order-book sweep lag critical
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Inference order-book sweep lag critical"
+          description: "Most stale last_swept_at is {{ $values.A.Value }}s old on {{ $labels.instance }} (critical >30m for 10m). Sweep is not revisiting OPEN rows."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: indexer_inference_sweep_lag_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 1800"
+              datasource: { type: __expr__, uid: __expr__ }
