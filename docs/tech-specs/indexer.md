@@ -201,7 +201,7 @@ The contract emits `OrderPlaced` *before* it knows whether the order will rest: 
 - **Explicitly cancelled** — `OrderCancelled` → `CANCELLED`. Correct from events alone.
 - **Placed-but-never-rested** (FOK/POST_ONLY rejected, IOC/MARKET leftover, expired subscription) — the only on-chain signal is a `Refunded` event that carries **no order id**, so the projector cannot close the specific row. Left untreated, the `OrderPlaced` row sits `OPEN` and pollutes depth (a phantom level).
 
-The inference reconciler closes this gap: for each recently-placed `OPEN` row it calls `InferenceOrderBook.getOrder(orderId)` and, when the order is no longer in the book (zero amount / zero note), flips the row to `CANCELLED`. This is the same getter-fills-what-events-miss pattern used by the market reconciler, bounded to recent OPEN rows so it stays cheap.
+The inference reconciler closes this gap: it sweeps the book's `OPEN` rows with a **bounded round-robin cursor** — each tick reads a fixed batch via `InferenceOrderBook.getOrder(orderId)` and, when an order is no longer in the book (zero amount / zero note), flips the row to `CANCELLED`. This is the same getter-fills-what-events-miss pattern used by the market reconciler. The cursor advances per tick and wraps at the cycle boundary, so every `OPEN` row — including long-lived subscriptions — is revisited over successive cycles without scanning the whole book in one pass. See [Inference reconciler](#inference-reconciler) for the cursor/cycle mechanics and the catch-up gates.
 
 > **Recommended contract-side follow-up.** Add `flags` to `OrderPlaced` (so a taker-only order is never recorded as resting), an `orderId` to `Refunded`, or an explicit `OrderClosed(orderId)` event. Any one removes the getter sweep and makes depth event-exact — the analogue of the [`REJECTED` follow-up](read-api.md#rejected-status) on the prediction-market side. Tracked as an open item because it touches `InferenceOrderBook` (and re-pins the note↔book code hash).
 
@@ -266,7 +266,7 @@ The inference reconciler is the third reconciler — a sixth long-running indexe
 | `inference_reconciliation_interval_ms` | `15000` | How often Queue A runs. |
 | `inference_reference_price_refresh_ms` | `3600000` | Minimum age before a book's `reference_price` is re-fetched. |
 | `inference_sweep_interval_ms` | `30000` | Minimum age before a book's sweep cycle re-runs. |
-| `inference_orphan_cutoff_ms` | `1800000` | Projection-loop dead-letter window: inference `OrderPlaced` events older than this are dropped without a projector (they cannot be orphan-healed and will never parent a `Filled`). Keyed on `raw_events.created_at` (wall-clock ingest time), not `created_at_chain`. |
+| `inference_orphan_cutoff_ms` | `1800000` | Projection-loop dead-letter window: an inference `Filled` or `OrderCancelled` whose parent `OrderPlaced` row is absent and whose ingest age exceeds this is dropped (marked `Applied`, with a counter increment) rather than deferred forever. Keyed on `raw_events.created_at` (wall-clock ingest time), not `created_at_chain`. |
 
 **Discovery pass (Queue A)**
 

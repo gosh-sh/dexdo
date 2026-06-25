@@ -210,7 +210,8 @@ async fn apply_inference_filled(
     if any_sweep_override {
         // Reset the discovery cursor (restart the cycle from the bottom) AND bump the
         // monotonic override seq so the discovery completion stamp can detect this even
-        // on a first-tick (prev_cursor = NULL) cycle — see reconciler Task 9.
+        // on a first-tick (prev_cursor = NULL) cycle — see the discovery sweep's
+        // visibility-stamp guard in the inference reconciler.
         sqlx::query(
             r#"update inference_markets
                   set sweep_cursor = null,

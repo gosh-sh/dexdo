@@ -53,7 +53,7 @@ async fn at_head_round_trips() {
     assert!(!repo.at_head("t_missing_stream").await.unwrap());
 }
 
-// ---- Task 9 helpers ----
+// ---- discovery / sweep helpers ----
 
 use dodex_infrastructure::inference_reconciler::InferenceReconciler;
 
@@ -91,7 +91,7 @@ async fn open_order(pool: &sqlx::PgPool, ob: &str, id: i64) {
     .unwrap();
 }
 
-// ---- Task 9 DB-side tests ----
+// ---- discovery / sweep DB-side tests ----
 
 #[tokio::test]
 async fn pending_events_gate_detects_unprojected_rows() {
@@ -212,7 +212,7 @@ async fn discovery_stamp_is_optimistic_blocks_on_override() {
     assert!(reconciled_at(pool.clone()).await.is_some());
 }
 
-// ---- Task 9 getter-seam tests ----
+// ---- getter-seam sweep tests ----
 
 use dodex_infrastructure::inference_reconciler::OrderBookGetter;
 use dodex_infrastructure::inference_reconciler::SweepStep;
@@ -598,7 +598,7 @@ async fn real_getter_failure_surfaces_as_err_not_silent_null() {
     );
 }
 
-// ---- Task 10 Queue B tests ----
+// ---- Queue B refresh tests ----
 
 #[tokio::test]
 async fn refresh_selects_price_due_sweep_due_and_skips_fresh() {

@@ -177,7 +177,7 @@ async fn routes_by_event_type_when_event_name_is_empty() {
     assert_eq!(status, "OPEN", "empty event_name must still reach the OrderPlaced handler");
 }
 
-// ---- Task 7: Orphan dead-letter helpers and test ----
+// ---- Orphan dead-letter helpers and test ----
 
 use dodex_infrastructure::indexer_repo::IndexerRepository;
 
@@ -232,7 +232,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
     sqlx::query("delete from raw_events where chain_order like '00orphan-%'").execute(&pool).await.unwrap();
 }
 
-// ---- Task 6: Filled handler helpers ----
+// ---- Filled handler helpers ----
 
 async fn place(pool:&sqlx::PgPool, tx:&mut sqlx::Transaction<'_,sqlx::Postgres>, ob:&str, id:&str, is_buy:bool, ticks:&str, co:&str) {
     let _ = pool; // place via the projector for realism
@@ -322,7 +322,7 @@ async fn filled_overrides_provisional_sweep_cancel_and_resets_discovery_cursor()
     // Discovery cursor reset so the reopened low id is re-checked before stamping.
     let cursor: Option<String> = sqlx::query_scalar("select sweep_cursor::text from inference_markets where orderbook_address=$1").bind(ob).fetch_one(&pool).await.unwrap();
     assert!(cursor.is_none(), "discovery sweep_cursor must reset to NULL on override");
-    // Task 9's first-tick visibility-stamp guard requires sweep_override_seq to bump.
+    // The first-tick visibility-stamp guard requires sweep_override_seq to bump.
     let seq: i64 = sqlx::query_scalar("select sweep_override_seq from inference_markets where orderbook_address=$1")
         .bind(ob).fetch_one(&pool).await.unwrap();
     assert_eq!(seq, 1, "override during discovery must bump sweep_override_seq from its default 0 to 1");

@@ -232,7 +232,6 @@ mod tests {
         // + 8 InferenceOrderBook events, but OrderCancelled collides with
         // OrderBook.OrderCancelled -> still 47 + 7 = 54 unique ids, but one id
         // has 2 entries. known_events() counts distinct ids = 54.
-        // The legacy assertion was 47 (DEX-only). Now DEX+inference = 54.
         assert_eq!(decoder.known_events(), 54, "unexpected total event id count");
 
         // sample lookups — find entries for PMP

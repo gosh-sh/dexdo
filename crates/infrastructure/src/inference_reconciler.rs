@@ -3,7 +3,7 @@
 // Sixth indexer loop: reconciles InferenceOrderBook state off-chain.
 // Queue A (discovery): fill params/constants/price, sweep phantoms behind idle+at-head
 // gates, stamp last_reconciled_at (visibility) only on a clean bounded-sweep cycle.
-// Queue B (refresh, Task 10): re-price + sweep phantoms on a separate cadence.
+// Queue B (refresh): re-price + sweep phantoms on a separate cadence.
 
 use std::time::Duration;
 
