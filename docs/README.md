@@ -24,7 +24,7 @@ Operational cutover notes for specific schema/projector changes live in [migrati
 
 ## Contracts
 
-- [contract-specs/](contract-specs/) — on-chain DEX.DO contracts. Event routing in [dex-events-routing.md](contract-specs/dex-events-routing.md); flow/object diagrams as HTML and drawio.
+- [contract-specs/](contract-specs/) — on-chain DEX.DO contracts. Event routing in [dex-events-routing.md](contract-specs/dex-events-routing.md); flow/object diagrams as HTML and drawio. The AI-inference registry (wrappers, SDK support, deploy specifics, e2e harness) is in [airegistry-inference.md](contract-specs/airegistry-inference.md).
 
 ## Conventions
 

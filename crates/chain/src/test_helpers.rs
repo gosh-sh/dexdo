@@ -14,9 +14,11 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 use dodex_contracts::airegistry::inference_order_book::InferenceOrderBook;
 use dodex_contracts::airegistry::inference_order_book::ParamsOfGetOrder as IobParamsOfGetOrder;
+use dodex_contracts::airegistry::inference_order_book::ParamsOfOrderId as IobParamsOfOrderId;
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetBestBidAsk;
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetOrder as IobOrder;
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetStats as IobStats;
+use dodex_contracts::airegistry::inference_order_book::ResultOfGetSubscription as IobSubscription;
 use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
 use dodex_contracts::airegistry::token_contract::ParamsOfWithdrawShell;
 use dodex_contracts::airegistry::token_contract::ResultOfGetParties as TcParties;
@@ -37,6 +39,7 @@ use dodex_contracts::dex::private_note::ParamsOfCancelInferenceOrder;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
+use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceSubscription;
 use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
 use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
@@ -311,6 +314,18 @@ impl Dex {
             .map_err(Into::into)
     }
 
+    pub async fn place_inference_subscription(
+        &self,
+        pn_address: &str,
+        params: ParamsOfPlaceInferenceSubscription,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .place_inference_subscription(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Buyer note stops the stream cleanly (`PrivateNote.streamStop`).
     pub async fn stream_stop(
         &self,
@@ -386,6 +401,28 @@ impl Dex {
         InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
             .get_best_bid_ask()
             .await
+            .map_err(Into::into)
+    }
+
+    pub async fn inference_get_subscription(
+        &self,
+        order_book_address: &str,
+        order_id: u128,
+    ) -> ChainResult<IobSubscription> {
+        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
+            .get_subscription(IobParamsOfOrderId { order_id })
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn inference_get_weekly_median_price(
+        &self,
+        order_book_address: &str,
+    ) -> ChainResult<String> {
+        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
+            .get_weekly_median_price()
+            .await
+            .map(|r| r.price)
             .map_err(Into::into)
     }
 

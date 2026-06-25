@@ -23,7 +23,7 @@ const INFERENCE_ORDER_BOOK_ABI: &str =
 
 const SAMPLE_ADDRESS: &str = "0:0000000000000000000000000000000000000000000000000000000000000001";
 
-fn abi_function<'a>(abi: &'a str, func: &str) -> Value {
+fn abi_function(abi: &str, func: &str) -> Value {
     let v: Value = serde_json::from_str(abi).expect("parse ABI");
     v["functions"]
         .as_array()

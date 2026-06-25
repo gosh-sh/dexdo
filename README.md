@@ -99,7 +99,7 @@ services/
 contracts/           # on-chain contracts (TVM), .sol + .abi.json side by side
   dex/               #   DEX.DO core: PrivateNote, OrderBook, PMP, Oracle, RootPN, Nullifier
   airegistry/        #   AI-inference registry (integrates with dex): SuperRoot/RootModel,
-                     #   ManifestMetadata, TokenContract, InferenceOrderBook, InferenceOracle
+                     #   ManifestMetadata, TokenContract, InferenceOrderBook
 sdk/                 # dodex-sdk: write-side DEX facade + halo2 voucher pipeline
                      # (separate workspace, excluded from the root build)
 tools/               # end-user CLIs (separate workspace; see tools/README.md)

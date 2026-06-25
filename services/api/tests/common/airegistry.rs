@@ -24,10 +24,13 @@ use std::sync::Arc;
 
 use ackinacki_kit::contracts::account::AccountStatus;
 use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
+use ackinacki_kit::contracts::dapp::SystemDapp;
+use ackinacki_kit::contracts::event::query_events;
 use ackinacki_kit::contracts::giver::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::contracts::giver::v3::GiverV3;
 use ackinacki_kit::contracts::giver::v3::ParamsOfSendCurrencyWithBody;
 use ackinacki_kit::contracts::traits::AccountAccessor;
+use ackinacki_kit::contracts::traits::FromEvent;
 use ackinacki_kit::contracts::traits::SendMessage;
 use ackinacki_kit::tvm_client::abi::encode_message;
 use ackinacki_kit::tvm_client::abi::encode_message_body;
@@ -41,7 +44,10 @@ use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
 use base64::Engine as _;
+use dodex_chain::dex_contract_params;
 use dodex_chain::self_rooted_contract_params;
+use dodex_contracts::airegistry::inference_order_book::InferenceOrderBook;
+use dodex_contracts::airegistry::inference_order_book_events::DecodedInferenceOrderBookEvent;
 use dodex_contracts::airegistry::token_contract::TokenContract;
 use serde_json::json;
 
@@ -129,27 +135,40 @@ pub async fn deploy_token_contract(
     .map_err(|e| anyhow!("encode TokenContract deploy: {e:?}"))?;
     let address = encoded.address;
 
-    // 2. Create + fund the address. It is the root of its own dApp, so the
-    //    giver credit must be ECC SHELL with flag 16 (native value would not
-    //    cross the dApp boundary); flag 16 lands it as the account's native gas.
-    let mut ecc = HashMap::new();
-    ecc.insert(SHELL_CURRENCY_ID, CREATION_SHELL);
-    send_currency_with_flag_from_default_giver(ctx.clone(), &address, 0, ecc, 16)
-        .await
-        .map_err(|e| anyhow!("giver fund TokenContract {address}: {e:?}"))?;
-
-    // 3. Address the contract under its own account id (self-rooted) and wait
-    //    for the giver credit to land (account exists, Uninit).
+    // 2-3. Create + fund the address under its own dApp (self-rooted). Native
+    //    value would not cross the dApp boundary, so the giver credit goes as
+    //    ECC SHELL with flag 16 (lands as native gas). Shellnet's giver can drop
+    //    a message under load (BM ~3 RPS), so re-send until the account exists.
     let tc = TokenContract::new(ctx.clone(), self_rooted_contract_params(address.clone()));
-    tc.wait_account(ParamsOfWaitAccount {
-        status: AccountStatus::Uninit,
-        attempts: Some(40),
-        attempts_timeout: Some(2_000),
-    })
-    .await
-    .map_err(|e| {
-        anyhow!("wait TokenContract {address} uninit (giver credit never landed): {e:?}")
-    })?;
+    let mut landed = false;
+    for attempt in 1..=3 {
+        let mut ecc = HashMap::new();
+        ecc.insert(SHELL_CURRENCY_ID, CREATION_SHELL);
+        send_currency_with_flag_from_default_giver(ctx.clone(), &address, 0, ecc, 16)
+            .await
+            .map_err(|e| anyhow!("giver fund TokenContract {address}: {e:?}"))?;
+        match tc
+            .wait_account(ParamsOfWaitAccount {
+                status: AccountStatus::Uninit,
+                attempts: Some(30),
+                attempts_timeout: Some(2_000),
+            })
+            .await
+        {
+            Ok(_) => {
+                landed = true;
+                break;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[deploy_token_contract] giver credit attempt {attempt} not landed: {e:?}"
+                )
+            }
+        }
+    }
+    if !landed {
+        return Err(anyhow!("giver credit never landed on {address} after retries"));
+    }
 
     // 4. Deploy the constructor (same precomputed address + deploy_set).
     tc.send_message(Some(ctor), Some(deploy_set), Signer::Keys { keys: deploy_keys })
@@ -216,4 +235,25 @@ pub async fn fund_probe_commission_via_giver(
         .await
         .map_err(|e| anyhow!("giver fundProbeCommission → {token_contract_addr}: {e:?}"))?;
     Ok(())
+}
+
+/// Fetch + decode the external events emitted by an `InferenceOrderBook`.
+///
+/// The book is deployed by the note (internal message), so it lives under the
+/// System dApp. Each ext-out event is routed to its own `makeAddrExtern(id)`
+/// address; the typed decoder keys on that id, so unknown/foreign events are
+/// dropped.
+pub async fn fetch_inference_events(
+    ctx: Arc<ClientContext>,
+    order_book_addr: &str,
+) -> anyhow::Result<Vec<DecodedInferenceOrderBookEvent>> {
+    let events =
+        query_events(ctx.clone(), order_book_addr, SystemDapp::System.dapp_id(), Some(100))
+            .await
+            .map_err(|e| anyhow!("query inference events {order_book_addr}: {e:?}"))?;
+    let book = InferenceOrderBook::new(ctx, dex_contract_params(order_book_addr));
+    Ok(events
+        .iter()
+        .filter_map(|event| DecodedInferenceOrderBookEvent::from_event(event, &book).ok())
+        .collect())
 }
