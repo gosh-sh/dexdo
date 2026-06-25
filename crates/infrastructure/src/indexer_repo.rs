@@ -693,6 +693,54 @@ impl IndexerRepository {
         Ok(secs)
     }
 
+    /// Inference order-book markets grouped by lifecycle state, backing
+    /// `indexer_inference_markets`. Returns `(discovering, visible, failing)`:
+    /// `discovering` is a seeded skeleton not yet visible and not currently
+    /// failing; `visible` has `last_reconciled_at` stamped and is served by the
+    /// API; `failing` is still invisible but the reconciler recorded a failure
+    /// — the bucket that surfaces an ABI-drift book or a never-deployed /
+    /// wrong-dApp address that would otherwise accrue `reconcile_attempts` with
+    /// nothing in metrics. The three buckets partition the table.
+    pub async fn inference_market_state_counts(&self) -> anyhow::Result<(i64, i64, i64)> {
+        let row: (i64, i64, i64) = sqlx::query_as(
+            r#"select
+                   count(*) filter (where last_reconciled_at is null
+                                      and last_reconcile_failed_at is null) as discovering,
+                   count(*) filter (where last_reconciled_at is not null) as visible,
+                   count(*) filter (where last_reconciled_at is null
+                                      and last_reconcile_failed_at is not null) as failing
+                 from inference_markets"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("inference market state counts")?;
+        Ok(row)
+    }
+
+    /// Worst-case data staleness in seconds across visible inference markets,
+    /// backing `indexer_inference_reference_price_lag_seconds` and
+    /// `indexer_inference_sweep_lag_seconds`. Each value is
+    /// `now() - min(ts)` over books with `last_reconciled_at` set — the oldest
+    /// timestamp yields the largest age. Visibility implies both
+    /// `reference_price_at` and `last_swept_at` are stamped (discovery refreshes
+    /// the price and completes a sweep cycle before stamping
+    /// `last_reconciled_at`), so `min` never skips a visible book. Returns
+    /// `(reference_price_lag, sweep_lag)`, each 0 when no book is visible yet.
+    /// Both values come from one query to keep it to a single round-trip.
+    pub async fn inference_staleness_seconds(&self) -> anyhow::Result<(i64, i64)> {
+        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+            r#"select
+                   extract(epoch from now() - min(reference_price_at))::bigint as price_lag,
+                   extract(epoch from now() - min(last_swept_at))::bigint as sweep_lag
+                 from inference_markets
+                where last_reconciled_at is not null"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("inference staleness seconds")?;
+        Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
+    }
+
     /// (in_use, idle) sqlx pool connections — cheap in-memory reads, no DB query.
     /// `size()` is total (in_use + idle); `num_idle()` is idle.
     pub fn pool_connection_stats(&self) -> (u64, u64) {
