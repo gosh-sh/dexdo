@@ -103,3 +103,51 @@ async fn state_counts_and_staleness_reflect_inserted_rows() {
         .await
         .expect("cleanup");
 }
+
+// Whole-table aggregate, so assert deltas (other rows in the shared test DB are
+// expected). Orders use a test-unique orderbook_address; status values exercise
+// each of the three buckets.
+#[tokio::test]
+async fn order_status_counts_reflect_inserted_rows() {
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let ob = "inf_metrics_test.orders";
+    sqlx::query("delete from inference_orders where orderbook_address = $1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .expect("purge");
+
+    let (o0, f0, c0) =
+        repo.inference_order_status_counts().await.expect("order counts before");
+
+    // One order in each status. Only the NOT NULL columns are set; order_id is
+    // the per-book PK component.
+    for (order_id, status) in [(1i64, "OPEN"), (2, "FILLED"), (3, "CANCELLED")] {
+        sqlx::query(
+            r#"insert into inference_orders
+                   (orderbook_address, order_id, is_buy, price, amount_initial,
+                    amount_remaining, status, last_chain_order)
+               values ($1, $2, true, 100, 100, 100, $3, $2::text)"#,
+        )
+        .bind(ob)
+        .bind(order_id)
+        .bind(status)
+        .execute(&pool)
+        .await
+        .expect("insert order");
+    }
+
+    let (o1, f1, c1) =
+        repo.inference_order_status_counts().await.expect("order counts after");
+    assert_eq!(o1 - o0, 1, "OPEN bucket should gain exactly 1");
+    assert_eq!(f1 - f0, 1, "FILLED bucket should gain exactly 1");
+    assert_eq!(c1 - c0, 1, "CANCELLED bucket should gain exactly 1");
+
+    sqlx::query("delete from inference_orders where orderbook_address = $1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}

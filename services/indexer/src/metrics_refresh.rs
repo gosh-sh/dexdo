@@ -87,6 +87,14 @@ pub async fn run_refresh_loop(
             }
             Err(err) => error!(?err, "inference staleness metric refresh failed"),
         }
+        match repo.inference_order_status_counts().await {
+            Ok((open, filled, cancelled)) => metrics.set_inference_order_counts(
+                open.max(0) as u64,
+                filled.max(0) as u64,
+                cancelled.max(0) as u64,
+            ),
+            Err(err) => error!(?err, "inference order status metric refresh failed"),
+        }
         tokio::time::sleep(interval).await;
     }
 }

@@ -741,6 +741,25 @@ impl IndexerRepository {
         Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
     }
 
+    /// Resting inference orders grouped by status, backing
+    /// `indexer_inference_orders`. Returns `(open, filled, cancelled)` — the
+    /// three values of the `inference_orders.status` check constraint. `OPEN` is
+    /// live depth; `FILLED` and `CANCELLED` are terminal. The three buckets
+    /// partition the table.
+    pub async fn inference_order_status_counts(&self) -> anyhow::Result<(i64, i64, i64)> {
+        let row: (i64, i64, i64) = sqlx::query_as(
+            r#"select
+                   count(*) filter (where status = 'OPEN') as open,
+                   count(*) filter (where status = 'FILLED') as filled,
+                   count(*) filter (where status = 'CANCELLED') as cancelled
+                 from inference_orders"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("inference order status counts")?;
+        Ok(row)
+    }
+
     /// (in_use, idle) sqlx pool connections — cheap in-memory reads, no DB query.
     /// `size()` is total (in_use + idle); `num_idle()` is idle.
     pub fn pool_connection_stats(&self) -> (u64, u64) {

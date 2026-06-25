@@ -61,6 +61,9 @@ pub struct IndexerMetrics {
     inference_markets_failing: Arc<AtomicU64>,
     inference_reference_price_lag_seconds: Arc<AtomicU64>,
     inference_sweep_lag_seconds: Arc<AtomicU64>,
+    inference_orders_open: Arc<AtomicU64>,
+    inference_orders_filled: Arc<AtomicU64>,
+    inference_orders_cancelled: Arc<AtomicU64>,
     // Retain the observable-counter and gauge handles for the lifetime of the
     // provider, mirroring the reference metrics setup. The observe callbacks
     // themselves are registered with the meter at `build()` time.
@@ -77,6 +80,7 @@ pub struct IndexerMetrics {
     _inference_markets_gauge: ObservableGauge<u64>,
     _inference_reference_price_lag_gauge: ObservableGauge<u64>,
     _inference_sweep_lag_gauge: ObservableGauge<u64>,
+    _inference_orders_gauge: ObservableGauge<u64>,
 }
 
 impl IndexerMetrics {
@@ -96,6 +100,9 @@ impl IndexerMetrics {
         let inference_markets_failing = Arc::new(AtomicU64::new(0));
         let inference_reference_price_lag_seconds = Arc::new(AtomicU64::new(0));
         let inference_sweep_lag_seconds = Arc::new(AtomicU64::new(0));
+        let inference_orders_open = Arc::new(AtomicU64::new(0));
+        let inference_orders_filled = Arc::new(AtomicU64::new(0));
+        let inference_orders_cancelled = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -242,6 +249,30 @@ impl IndexerMetrics {
             })
             .build();
 
+        let open_cache = Arc::clone(&inference_orders_open);
+        let filled_cache = Arc::clone(&inference_orders_filled);
+        let cancelled_cache = Arc::clone(&inference_orders_cancelled);
+        let inference_orders_gauge = meter
+            .u64_observable_gauge("indexer_inference_orders")
+            .with_description(
+                "Resting inference orders by status: open (live depth), filled, cancelled",
+            )
+            .with_callback(move |observer| {
+                observer.observe(
+                    open_cache.load(Ordering::Relaxed),
+                    &[KeyValue::new("status", "open")],
+                );
+                observer.observe(
+                    filled_cache.load(Ordering::Relaxed),
+                    &[KeyValue::new("status", "filled")],
+                );
+                observer.observe(
+                    cancelled_cache.load(Ordering::Relaxed),
+                    &[KeyValue::new("status", "cancelled")],
+                );
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
@@ -258,6 +289,9 @@ impl IndexerMetrics {
             inference_markets_failing,
             inference_reference_price_lag_seconds,
             inference_sweep_lag_seconds,
+            inference_orders_open,
+            inference_orders_filled,
+            inference_orders_cancelled,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
             _projection_backlog_gauge: projection_backlog_gauge,
@@ -270,6 +304,7 @@ impl IndexerMetrics {
             _inference_markets_gauge: inference_markets_gauge,
             _inference_reference_price_lag_gauge: inference_reference_price_lag_gauge,
             _inference_sweep_lag_gauge: inference_sweep_lag_gauge,
+            _inference_orders_gauge: inference_orders_gauge,
         }
     }
 
@@ -339,6 +374,14 @@ impl IndexerMetrics {
     /// Set the value reported by `indexer_inference_sweep_lag_seconds`.
     pub fn set_inference_sweep_lag_seconds(&self, value: u64) {
         self.inference_sweep_lag_seconds.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the values reported by `indexer_inference_orders` — the count of
+    /// resting inference orders in each status.
+    pub fn set_inference_order_counts(&self, open: u64, filled: u64, cancelled: u64) {
+        self.inference_orders_open.store(open, Ordering::Relaxed);
+        self.inference_orders_filled.store(filled, Ordering::Relaxed);
+        self.inference_orders_cancelled.store(cancelled, Ordering::Relaxed);
     }
 }
 
@@ -474,6 +517,7 @@ mod tests {
         metrics.set_inference_market_states(11, 22, 33);
         metrics.set_inference_reference_price_lag_seconds(444);
         metrics.set_inference_sweep_lag_seconds(555);
+        metrics.set_inference_order_counts(60, 70, 80);
 
         assert_eq!(metrics.orders_created.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.orders_partially_filled.load(Ordering::Relaxed), 3);
@@ -493,5 +537,8 @@ mod tests {
             444
         );
         assert_eq!(metrics.inference_sweep_lag_seconds.load(Ordering::Relaxed), 555);
+        assert_eq!(metrics.inference_orders_open.load(Ordering::Relaxed), 60);
+        assert_eq!(metrics.inference_orders_filled.load(Ordering::Relaxed), 70);
+        assert_eq!(metrics.inference_orders_cancelled.load(Ordering::Relaxed), 80);
     }
 }
