@@ -177,7 +177,7 @@ impl IndexerRepository {
                 continue;
             }
 
-            let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref());
+            let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref(), edge.node.dst.as_deref());
             if decoded.is_some() {
                 result.decoded += 1;
             } else {
@@ -796,9 +796,9 @@ fn pending_row_to_inputs(row: &PendingRow) -> Option<(DecodedEvent, EventNode)> 
     Some((event, node))
 }
 
-fn try_decode(decoder: &Decoder, msg_id: &str, body: Option<&Value>) -> Option<DecodedEvent> {
+fn try_decode(decoder: &Decoder, msg_id: &str, body: Option<&Value>, dst: Option<&str>) -> Option<DecodedEvent> {
     let body_str = body?.as_str()?;
-    match decoder.decode_event_body(body_str) {
+    match decoder.decode_event_body(body_str, dst) {
         Ok(decoded) => decoded,
         Err(err) => {
             warn!(msg_id, ?err, "decode body failed");
