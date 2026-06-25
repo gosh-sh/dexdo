@@ -85,6 +85,7 @@ struct BookRow {
     orderbook_address: String,
     model_hash: Option<String>,
     reference_price_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_swept_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 enum DiscoveryOutcome {
@@ -192,7 +193,7 @@ impl InferenceReconciler {
         let mut stats = InferenceReconcileStats::default();
         // Queue A — discovery.
         let pending: Vec<BookRow> = sqlx::query_as(&format!(
-            r#"select orderbook_address, model_hash::text as model_hash, reference_price_at
+            r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
                  from inference_markets
                 where last_reconciled_at is null
                   and (last_reconcile_failed_at is null
@@ -221,7 +222,43 @@ impl InferenceReconciler {
                 }
             }
         }
-        // Queue B — refresh: added in Task 10.
+        // Queue B — refresh (price + phantom sweep on separate cadences).
+        let refresh: Vec<BookRow> = sqlx::query_as(&format!(
+            r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
+                 from inference_markets m
+                where last_reconciled_at is not null
+                  and (last_reconcile_failed_at is null
+                       or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
+                  and (
+                        (reference_price_at is null or reference_price_at < now() - make_interval(secs => $2))
+                     or ( (last_swept_at is null or last_swept_at < now() - make_interval(secs => $3))
+                          and exists (select 1 from inference_orders o
+                                       where o.orderbook_address = m.orderbook_address and o.status='OPEN') )
+                      )
+                order by reference_price_at nulls first
+                limit $1"#
+        ))
+        .bind(BATCH_SIZE)
+        .bind(self.reference_price_refresh.as_secs_f64())
+        .bind(self.sweep_interval.as_secs_f64())
+        .fetch_all(&self.pool)
+        .await
+        .context("select refresh candidates")?;
+        for book in &refresh {
+            stats.scanned += 1;
+            match self.reconcile_refresh(book).await {
+                Ok(DiscoveryOutcome::NoBoc) => {
+                    stats.skipped += 1;
+                    self.stamp_failure(&book.orderbook_address).await.ok();
+                }
+                Ok(_) => stats.refreshed += 1,
+                Err(err) => {
+                    stats.failed += 1;
+                    warn!(ob = %book.orderbook_address, ?err, "refresh failed");
+                    self.stamp_failure(&book.orderbook_address).await.ok();
+                }
+            }
+        }
         Ok(stats)
     }
 
@@ -508,5 +545,81 @@ impl InferenceReconciler {
         .await
         .context("stamp inference reconcile failure")?;
         Ok(())
+    }
+
+    pub async fn select_refresh_candidates(&self) -> anyhow::Result<Vec<String>> {
+        let rows: Vec<BookRow> = sqlx::query_as(&format!(
+            r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
+                 from inference_markets m
+                where last_reconciled_at is not null
+                  and (last_reconcile_failed_at is null
+                       or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
+                  and (
+                        (reference_price_at is null or reference_price_at < now() - make_interval(secs => $2))
+                     or ( (last_swept_at is null or last_swept_at < now() - make_interval(secs => $3))
+                          and exists (select 1 from inference_orders o
+                                       where o.orderbook_address = m.orderbook_address and o.status='OPEN') )
+                      )
+                order by reference_price_at nulls first
+                limit $1"#
+        ))
+        .bind(BATCH_SIZE)
+        .bind(self.reference_price_refresh.as_secs_f64())
+        .bind(self.sweep_interval.as_secs_f64())
+        .fetch_all(&self.pool)
+        .await
+        .context("select refresh candidates")?;
+        Ok(rows.into_iter().map(|r| r.orderbook_address).collect())
+    }
+
+    fn price_due(&self, book: &BookRow) -> bool {
+        match book.reference_price_at {
+            None => true,
+            Some(at) => (chrono::Utc::now() - at)
+                .to_std()
+                .map(|a| a > self.reference_price_refresh)
+                .unwrap_or(true),
+        }
+    }
+
+    fn sweep_due_by_time(&self, book: &BookRow) -> bool {
+        match book.last_swept_at {
+            None => true,
+            Some(at) => (chrono::Utc::now() - at)
+                .to_std()
+                .map(|a| a > self.sweep_interval)
+                .unwrap_or(true),
+        }
+    }
+
+    async fn has_open_orders(&self, ob: &str) -> anyhow::Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "select exists(select 1 from inference_orders where orderbook_address=$1 and status='OPEN')",
+        )
+        .bind(ob)
+        .fetch_one(&self.pool)
+        .await
+        .context("has_open_orders probe")?;
+        Ok(exists)
+    }
+
+    async fn reconcile_refresh(&self, book: &BookRow) -> anyhow::Result<DiscoveryOutcome> {
+        let ob = &book.orderbook_address;
+        let Some(boc) = self.graphql.fetch_account_boc(ob).await.context("fetch boc (refresh)")? else {
+            return Ok(DiscoveryOutcome::NoBoc);
+        };
+        if self.price_due(book) {
+            self.refresh_price(ob, &boc).await?;
+        }
+        // Phantom sweep is due ONLY when the cadence is stale AND the book actually has an
+        // OPEN row (spec). A book selected solely for a price refresh (stale/NULL last_swept_at
+        // but no OPEN rows) must NOT enter run_sweep_step — that would spend getQueueSize/getStats
+        // getters and stamp last_swept_at for no work.
+        if self.sweep_due_by_time(book) && self.has_open_orders(ob).await? {
+            // run_sweep_step self-gates (idle + at-head + no-pending); on a gate miss it
+            // does not touch last_swept_at, so the book stays sweep-due next tick.
+            let _ = self.run_sweep_step(ob, &boc, /*discovery=*/ false).await?;
+        }
+        Ok(DiscoveryOutcome::Stamped) // "handled" — reuse the enum; mapped to `refreshed` in run_once
     }
 }

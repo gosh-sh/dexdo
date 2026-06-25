@@ -597,3 +597,109 @@ async fn real_getter_failure_surfaces_as_err_not_silent_null() {
             .is_err()
     );
 }
+
+// ---- Task 10 Queue B tests ----
+
+#[tokio::test]
+async fn refresh_selects_price_due_sweep_due_and_skips_fresh() {
+    let Some(pool) = setup().await else { return };
+    let r = InferenceReconciler::for_test(pool.clone()); // refresh=3600s, sweep=30s
+
+    // (a) price-due: reconciled, reference_price_at stale (2h old), no open rows.
+    let a = "0:t_qb_price";
+    seed_market(&pool, a, true).await;
+    sqlx::query("update inference_markets set reference_price_at = now() - interval '2 hours', last_swept_at = now() where orderbook_address=$1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // (b) sweep-due: reconciled, fresh price, has OPEN row, last_swept_at stale (1 min old).
+    let b = "0:t_qb_sweep";
+    seed_market(&pool, b, true).await;
+    open_order(&pool, b, 1).await;
+    sqlx::query("update inference_markets set reference_price_at = now(), last_swept_at = now() - interval '1 minute' where orderbook_address=$1")
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // (c) never-swept: reconciled, fresh price, has OPEN row, last_swept_at NULL ⇒ sweep-due (IS NULL arm).
+    let c = "0:t_qb_nullswept";
+    seed_market(&pool, c, true).await;
+    open_order(&pool, c, 1).await;
+    sqlx::query("update inference_markets set reference_price_at = now(), last_swept_at = null where orderbook_address=$1")
+        .bind(c)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // (d) fresh everything: reconciled, fresh price, fresh sweep ⇒ NOT selected.
+    let d = "0:t_qb_fresh";
+    seed_market(&pool, d, true).await;
+    open_order(&pool, d, 1).await;
+    sqlx::query("update inference_markets set reference_price_at = now(), last_swept_at = now() where orderbook_address=$1")
+        .bind(d)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let picked = r.select_refresh_candidates().await.unwrap();
+    assert!(picked.contains(&a.to_string()), "price-due must be selected");
+    assert!(picked.contains(&b.to_string()), "sweep-due must be selected");
+    assert!(picked.contains(&c.to_string()), "never-swept (last_swept_at NULL) must be selected");
+    assert!(!picked.contains(&d.to_string()), "fresh book must NOT be selected");
+}
+
+#[tokio::test]
+async fn failure_stamps_backoff_and_excludes_from_reselection() {
+    let Some(pool) = setup().await else { return };
+    let r = InferenceReconciler::for_test(pool.clone()); // refresh=3600s
+
+    let ob = "0:t_qb_backoff";
+    seed_market(&pool, ob, true).await;
+    // Price-due: stale reference_price_at so it qualifies for Queue B.
+    sqlx::query("update inference_markets set reference_price_at = now() - interval '2 hours', last_reconcile_failed_at = null, reconcile_attempts = 0 where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Confirm selected before any failure.
+    let before = r.select_refresh_candidates().await.unwrap();
+    assert!(before.contains(&ob.to_string()), "price-due book must be selected before failure");
+
+    // Stamp a failure.
+    r.stamp_failure(ob).await.unwrap();
+
+    // Within backoff window ⇒ must be excluded.
+    let after = r.select_refresh_candidates().await.unwrap();
+    assert!(
+        !after.contains(&ob.to_string()),
+        "within 5-min backoff ⇒ must be excluded from selection"
+    );
+
+    // Verify reconcile_attempts was incremented.
+    let attempts: i32 = sqlx::query_scalar(
+        "select reconcile_attempts from inference_markets where orderbook_address=$1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(attempts, 1, "stamp_failure must increment reconcile_attempts");
+
+    // Simulate backoff window expiry: set last_reconcile_failed_at > 5 min ago.
+    sqlx::query("update inference_markets set last_reconcile_failed_at = now() - interval '6 minutes' where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Must be selectable again.
+    let after_expiry = r.select_refresh_candidates().await.unwrap();
+    assert!(
+        after_expiry.contains(&ob.to_string()),
+        "after backoff window expires ⇒ must be selectable again"
+    );
+}
