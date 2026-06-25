@@ -247,7 +247,7 @@ The skill writes user-owned secrets to disk and submits real transactions. Run t
 ```
 [1] fetch multisig + giver artifacts from ackinacki-kit (Multisig.abi.json, Multisig.tvc, GiverV3.abi.json)
 [2] resolve the INPUT multisig → Multisig.keys.json + re-derived $MULTISIG_ADDRESS; assert it is Active on-chain
-[3] giver: fund the Active multisig (flag=1) with the aggregate of NOTES — deposit currency per note + a 100-SHELL gas voucher per note + SHELL reserve
+[3] giver: fund the Active multisig with the aggregate of NOTES — (flag=1) ECC: deposit currency per note + 100-SHELL gas voucher per note + SHELL reserve; AND (flag=16) native vmshell gas scaled to the note count (the multisig pays submitTransaction in native — skipping this makes a later note silently time out)
 [4] cargo run --bin onboard_user_shellnet once per NOTES entry — one PN per note, each in its own notes/<token>-<i>/ subdir: pn_state.json (resume) + <token>.account.json (POST /accounts body for the API)
 [5] handoff: summary of every PN created + where each account.json is + back-up checklist
 ```
@@ -343,14 +343,19 @@ Expected: `acc_type: Active`. If it shows `Uninit` or `acc_type: -` (not found) 
 
 ## Step 3 — Fund the multisig (aggregate of the NOTES list)
 
-The multisig is Active — use `flag=1` (to an Active recipient `flag=1` lands funds in the `ecc` balance; `flag=16` would burn SHELL into native vmshell, which we don't want).
+The multisig is Active. **Two giver flags matter, and you need BOTH:**
 
-Compute the funding **directly from the `NOTES` work-list** (built in [What to create](#what-to-create--the-notes-parameters)) — no hand-math. Per note: its deposit currency at its nominal, **plus** a 100-SHELL gas voucher (always SHELL, ECC id 2). Add a flat SHELL reserve for the multisig's own `submitTransaction` gas:
+- **`flag=1`** credits funds to the recipient's **ECC** balance — the deposit currencies and the SHELL gas vouchers each PrivateNote draws from.
+- **`flag=16`** credits SHELL as **native vmshell** — the gas the multisig itself spends on its own `submitTransaction` calls.
+
+> ⚠️ **The classic multi-note trap (this is a real bug if you skip it).** Each note costs the multisig **native vmshell** — it does two `submitTransaction`s (deposit voucher + gas voucher), and `submitTransaction` is paid in native, **not** ECC. Funding only ECC works for one or two notes, then the native balance drains and a later note **fails silently**: the external `submitTransaction` is accepted, but its internal message to `RootPN.generateVoucher` under-funds, no `VoucherGenerated` event is emitted, and the binary dies on a ~480s `"Timed out waiting for VoucherGenerated event"`. **That timeout is depleted native gas — NOT an indexer lag.** So fund native vmshell up front, scaled to the note count.
+
+### 3a — compute funding from the NOTES list
 
 ```sh
 # decimals: nackl/shell = 9, usdc = 6.  gas voucher per note = 100 SHELL (ECC id 2).
-GAS_VOUCHER=100000000000        # 100 SHELL (1e11 nano), one per note
-SHELL_RESERVE=300000000000      # 300 SHELL flat, for the multisig's submitTransaction gas
+GAS_VOUCHER=100000000000        # 100 SHELL (1e11 nano) ECC gas voucher, one per note
+SHELL_RESERVE=300000000000      # 300 SHELL flat ECC reserve
 declare -A NEED; NEED[2]=$SHELL_RESERVE     # ECC id -> raw amount needed
 
 for spec in "${NOTES[@]}"; do
@@ -365,47 +370,49 @@ for spec in "${NOTES[@]}"; do
   NEED[2]=$((  ${NEED[2]:-0}  + GAS_VOUCHER ))        # + one SHELL gas voucher
 done
 
-# Build the ecc JSON for the giver call.
+# ECC JSON for the flag=1 call.
 ECC_JSON="{"; sep=""
 for id in "${!NEED[@]}"; do ECC_JSON+="$sep\"$id\":${NEED[$id]}"; sep=","; done
 ECC_JSON+="}"
-echo "funding ecc = $ECC_JSON"
+echo "ecc (flag=1) = $ECC_JSON"
+
+# Native vmshell gas for the flag=16 call. Each note burns a few vmshell across its
+# two submitTransactions; provision generously (SHELL is free from the giver on
+# shellnet): 10 vmshell/note + 20 base.
+NATIVE_GAS=$(( (${#NOTES[@]} * 10 + 20) * 1000000000 ))
+echo "native vmshell (flag=16) = $NATIVE_GAS"
 ```
 
-> Example — `NOTES=(nackl:N10000 nackl:N10000 nackl:N10000)` → `{"1":30000000000000,"2":600000000000}` (30 000 NACKL deposits + 300 SHELL reserve + 3×100 SHELL gas vouchers).
+> Example — `NOTES=(nackl:N10000 nackl:N10000 nackl:N10000)` → ecc `{"1":30000000000000,"2":600000000000}` (30 000 NACKL + 300 SHELL reserve + 3×100 SHELL vouchers) **and** native `50000000000` (50 vmshell).
 
-> The wallet may already hold a SHELL reserve from the deploy skill's pre-deploy funding (native vmshell, not ecc). This Step adds the **ecc** balances the vouchers actually draw from, so run it regardless.
-
-Send it in one giver call:
+### 3b — two giver calls: ECC (flag=1) then native vmshell (flag=16)
 
 ```sh
-FUND_TX=$(tvm-cli -j -u shellnet.ackinacki.org callx \
-  --abi "$WORKSPACE/giver/GiverV3.abi.json" \
-  --addr "$GIVER_ADDR" \
-  -m sendCurrencyWithFlag \
-  '{"dest":"'"$MULTISIG_ADDRESS"'","value":0,"ecc":'"$ECC_JSON"',"flag":1}' \
-  | jq -r .tx_hash)
-echo "fund_tx=$FUND_TX"
-# Guard: a failed callx yields empty/"null" — polling that would spin forever.
-test -n "$FUND_TX" && [ "$FUND_TX" != "null" ] || { echo "giver callx returned no tx_hash — inspect the callx output above; stop and report"; exit 1; }
+fund() {  # $1 = ecc-json, $2 = flag — sends, then blocks until the tx confirms
+  local tx
+  tx=$(tvm-cli -j -u shellnet.ackinacki.org callx \
+    --abi "$WORKSPACE/giver/GiverV3.abi.json" --addr "$GIVER_ADDR" \
+    -m sendCurrencyWithFlag \
+    '{"dest":"'"$MULTISIG_ADDRESS"'","value":0,"ecc":'"$1"',"flag":'"$2"'}' | jq -r .tx_hash)
+  [ -n "$tx" ] && [ "$tx" != "null" ] || { echo "giver callx (flag=$2) returned no tx_hash; stop and report" >&2; return 1; }
+  until curl -sX POST https://shellnet.ackinacki.org/graphql -H 'Content-Type: application/json' \
+    --data "{\"query\":\"{blockchain{transaction(hash:\\\"$tx\\\"){now aborted}}}\"}" | grep -q '"now"'; do sleep 1; done
+  echo "flag=$2 fund tx=$tx confirmed"
+}
+
+fund "$ECC_JSON" 1            || exit 1   # deposits + SHELL vouchers -> ECC
+fund "{\"2\":$NATIVE_GAS}" 16 || exit 1   # SHELL -> native vmshell gas
 ```
 
-Confirm by polling the hash:
+> The `flag=16` call is the fix for the silent multi-note failure above. If a note ever still dies on the 480s `VoucherGenerated` timeout mid-run, the cure is the same: re-run the `flag=16` top-up (more native vmshell) and resume Step 4 — never assume it's the indexer.
 
-```sh
-until curl -sX POST https://shellnet.ackinacki.org/graphql -H 'Content-Type: application/json' \
-  --data "{\"query\":\"{blockchain{transaction(hash:\\\"$FUND_TX\\\"){now aborted}}}\"}" \
-  | grep -q '"now"'; do sleep 1; done
-echo "deposit fund confirmed"
-```
-
-Verify the funded currencies arrived:
+Verify both balances:
 
 ```sh
 tvm-cli -u shellnet.ackinacki.org account "$MS_ADDR" | grep -E 'acc_type|balance|ecc'
 ```
 
-Expected: the `ecc:` line contains the amounts from `$ECC_JSON` (raw nano). The native `balance` is whatever the wallet already held.
+Expected: the `ecc:` line contains the `$ECC_JSON` amounts (raw nano), and the native `balance` rose by ~`$NATIVE_GAS` nanovmshell.
 
 ## Step 4 — Create the notes (`onboard_user_shellnet`, once per NOTES entry)
 
