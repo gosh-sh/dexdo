@@ -55,6 +55,7 @@ pub struct IndexerMetrics {
     pool_idle: Arc<AtomicU64>,
     projection_fallbacks: Arc<AtomicU64>,
     inference_orphans_dropped: Arc<AtomicU64>,
+    decode_errors: Arc<AtomicU64>,
     // Retain the observable-counter and gauge handles for the lifetime of the
     // provider, mirroring the reference metrics setup. The observe callbacks
     // themselves are registered with the meter at `build()` time.
@@ -67,6 +68,7 @@ pub struct IndexerMetrics {
     _db_pool_connections_gauge: ObservableGauge<u64>,
     _projection_fallbacks_counter: ObservableCounter<u64>,
     _inference_orphans_dropped_counter: ObservableCounter<u64>,
+    _decode_errors_counter: ObservableCounter<u64>,
 }
 
 impl IndexerMetrics {
@@ -80,6 +82,7 @@ impl IndexerMetrics {
         let pool_idle = Arc::new(AtomicU64::new(0));
         let projection_fallbacks = Arc::new(AtomicU64::new(0));
         let inference_orphans_dropped = Arc::new(AtomicU64::new(0));
+        let decode_errors = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -169,6 +172,17 @@ impl IndexerMetrics {
             })
             .build();
 
+        let decode_errors_cache = Arc::clone(&decode_errors);
+        let decode_errors_counter = meter
+            .u64_observable_counter("indexer_decode_errors")
+            .with_description(
+                "Event bodies that failed to decode (decode_output/detokenize error) and were stored undecoded — distinct from an unknown/ambiguous event id, which is not an error",
+            )
+            .with_callback(move |observer| {
+                observer.observe(decode_errors_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
@@ -179,6 +193,7 @@ impl IndexerMetrics {
             pool_idle,
             projection_fallbacks,
             inference_orphans_dropped,
+            decode_errors,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
             _projection_backlog_gauge: projection_backlog_gauge,
@@ -187,6 +202,7 @@ impl IndexerMetrics {
             _db_pool_connections_gauge: db_pool_connections_gauge,
             _projection_fallbacks_counter: projection_fallbacks_counter,
             _inference_orphans_dropped_counter: inference_orphans_dropped_counter,
+            _decode_errors_counter: decode_errors_counter,
         }
     }
 
@@ -232,6 +248,12 @@ impl IndexerMetrics {
     /// parent OrderPlaced was never captured (orphan dead-letter).
     pub fn set_inference_orphans_dropped(&self, value: u64) {
         self.inference_orphans_dropped.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the cumulative value reported by `indexer_decode_errors` — the running
+    /// total of event bodies that failed to decode and were stored undecoded.
+    pub fn set_decode_errors(&self, value: u64) {
+        self.decode_errors.store(value, Ordering::Relaxed);
     }
 }
 
@@ -363,6 +385,7 @@ mod tests {
         metrics.set_pool_connections(3, 7);
         metrics.set_projection_fallbacks(9);
         metrics.set_inference_orphans_dropped(4);
+        metrics.set_decode_errors(6);
 
         assert_eq!(metrics.orders_created.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.orders_partially_filled.load(Ordering::Relaxed), 3);
@@ -373,5 +396,6 @@ mod tests {
         assert_eq!(metrics.pool_idle.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.projection_fallbacks.load(Ordering::Relaxed), 9);
         assert_eq!(metrics.inference_orphans_dropped.load(Ordering::Relaxed), 4);
+        assert_eq!(metrics.decode_errors.load(Ordering::Relaxed), 6);
     }
 }

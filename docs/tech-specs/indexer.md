@@ -346,6 +346,15 @@ All four ride the same OTLP path as the counters: exported only when `OTEL_EXPOR
 
 Unlike `orders_created_event_cnt` and `order_partially_filled_event_cnt` (read from `raw_events`), this is an in-process count: the projection loop increments it whenever an optimistic batch hits a projector error and falls back, and the refresh loop polls it like the gauges. A steadily climbing rate means the fast path is routinely aborting — each fallback adds one extra SAVEPOINT/RELEASE round-trip pair per row on top of each projector's own statements, a per-row cost the backlog/lag gauges only surface as a symptom (slower drain), so this pins the cause. The per-row failure is logged once: a `warn` from the savepointed replay for a deterministic error, or from the optimistic pass itself for a DB-layer/transient error (so a transient hiccup the replay silently recovers from is still visible). The deterministic fallback transition is otherwise `debug`-level, so the counter — not a log — is the dashboard signal for fallback frequency.
 
+### Decode + orphan counters
+
+| Metric | Type | What it measures | Source |
+| --- | --- | --- | --- |
+| `indexer_inference_orphans_dropped` | counter | Inference `Filled`/`OrderCancelled` events dead-lettered because their parent `OrderPlaced` never arrived within `inference_orphan_cutoff_ms` | in-process counter, polled each refresh |
+| `indexer_decode_errors` | counter | Event bodies that failed to decode (`decode_output`/`detokenize` error or an unparseable cell) and were stored undecoded | in-process counter, polled each refresh |
+
+Both are in-process counts polled by the refresh loop, like `indexer_projection_fallbacks`. `indexer_decode_errors` is the durable signal for a *hard* decode failure of a delivered body — distinct from an unknown/ambiguous event id, which is a normal, uncounted outcome (`Ok(None)` from the decoder). A non-zero rate means ABI drift or a malformed cell for an otherwise known event; the row is stored undecoded (`event_type`/`decoded` NULL), skipped by projection, and invisible to the inference sweep's `decoded IS NOT NULL` pending-events gate — so the counter, not a log, is the operator's signal.
+
 ## Schema invariants — write side
 
 | Invariant | Enforced by |

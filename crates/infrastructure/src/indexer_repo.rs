@@ -57,6 +57,13 @@ pub struct IndexerRepository {
     /// arrived within the cutoff window. Shared across clones via `Arc` — same
     /// pattern as `projection_fallbacks`.
     inference_orphans_dropped: Arc<AtomicU64>,
+    /// Running count of event bodies the decoder attempted but failed to decode
+    /// (`decode_output`/`detokenize` error, or an unparseable cell). These are
+    /// stored undecoded (`event_type`/`decoded` NULL) and skipped by projection
+    /// — byte-identical at rest to an unknown/ambiguous id, which is NOT counted
+    /// here. A non-zero rate means ABI drift or malformed bodies for an otherwise
+    /// known event. Shared across clones via `Arc`, like `projection_fallbacks`.
+    decode_errors: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -102,6 +109,7 @@ impl IndexerRepository {
             projection_fallbacks: Arc::new(AtomicU64::new(0)),
             inference_orphan_cutoff: std::time::Duration::from_millis(1_800_000), // default; overridden in main
             inference_orphans_dropped: Arc::new(AtomicU64::new(0)),
+            decode_errors: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -115,6 +123,12 @@ impl IndexerRepository {
     /// metrics-refresh loop for `indexer_inference_orphans_dropped`.
     pub fn inference_orphans_dropped_count(&self) -> u64 {
         self.inference_orphans_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Running total of event bodies that failed to decode and were stored
+    /// undecoded. Polled by the metrics-refresh loop for `indexer_decode_errors`.
+    pub fn decode_errors_count(&self) -> u64 {
+        self.decode_errors.load(Ordering::Relaxed)
     }
 
     /// Returns `true` the first time `event_type` is seen as projector-unknown
@@ -217,7 +231,13 @@ impl IndexerRepository {
                 continue;
             }
 
-            let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref(), edge.node.dst.as_deref());
+            let decoded = try_decode(
+                decoder,
+                &edge.node.msg_id,
+                edge.node.body.as_ref(),
+                edge.node.dst.as_deref(),
+                &self.decode_errors,
+            );
             if decoded.is_some() {
                 result.decoded += 1;
             } else {
@@ -866,11 +886,24 @@ fn pending_row_to_inputs(row: &PendingRow) -> Option<(DecodedEvent, EventNode)> 
     Some((event, node))
 }
 
-fn try_decode(decoder: &Decoder, msg_id: &str, body: Option<&Value>, dst: Option<&str>) -> Option<DecodedEvent> {
+fn try_decode(
+    decoder: &Decoder,
+    msg_id: &str,
+    body: Option<&Value>,
+    dst: Option<&str>,
+    decode_errors: &AtomicU64,
+) -> Option<DecodedEvent> {
     let body_str = body?.as_str()?;
     match decoder.decode_event_body(body_str, dst) {
         Ok(decoded) => decoded,
         Err(err) => {
+            // Hard decode failure of a body the gateway delivered — distinct from
+            // an unknown/ambiguous id, which returns Ok(None). Count it so ABI
+            // drift or a malformed cell on a known event is observable, not just a
+            // single warn line. The row is still stored undecoded and skipped by
+            // projection (and is invisible to the sweep's `decoded IS NOT NULL`
+            // pending-events gate), so the counter is the only durable signal.
+            decode_errors.fetch_add(1, Ordering::Relaxed);
             warn!(msg_id, ?err, "decode body failed");
             None
         }

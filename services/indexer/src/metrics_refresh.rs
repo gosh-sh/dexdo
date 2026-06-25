@@ -71,6 +71,7 @@ pub async fn run_refresh_loop(
         metrics.set_pool_connections(in_use, idle);
         metrics.set_projection_fallbacks(repo.projection_fallback_count());
         metrics.set_inference_orphans_dropped(repo.inference_orphans_dropped_count());
+        metrics.set_decode_errors(repo.decode_errors_count());
         tokio::time::sleep(interval).await;
     }
 }
