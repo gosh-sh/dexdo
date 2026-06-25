@@ -54,6 +54,7 @@ pub struct IndexerMetrics {
     pool_in_use: Arc<AtomicU64>,
     pool_idle: Arc<AtomicU64>,
     projection_fallbacks: Arc<AtomicU64>,
+    inference_orphans_dropped: Arc<AtomicU64>,
     // Retain the observable-counter and gauge handles for the lifetime of the
     // provider, mirroring the reference metrics setup. The observe callbacks
     // themselves are registered with the meter at `build()` time.
@@ -65,6 +66,7 @@ pub struct IndexerMetrics {
     _capture_cursor_age_seconds_gauge: ObservableGauge<u64>,
     _db_pool_connections_gauge: ObservableGauge<u64>,
     _projection_fallbacks_counter: ObservableCounter<u64>,
+    _inference_orphans_dropped_counter: ObservableCounter<u64>,
 }
 
 impl IndexerMetrics {
@@ -77,6 +79,7 @@ impl IndexerMetrics {
         let pool_in_use = Arc::new(AtomicU64::new(0));
         let pool_idle = Arc::new(AtomicU64::new(0));
         let projection_fallbacks = Arc::new(AtomicU64::new(0));
+        let inference_orphans_dropped = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -155,6 +158,17 @@ impl IndexerMetrics {
             })
             .build();
 
+        let orphans_cache = Arc::clone(&inference_orphans_dropped);
+        let inference_orphans_dropped_counter = meter
+            .u64_observable_counter("indexer_inference_orphans_dropped")
+            .with_description(
+                "Inference orderbook depth updates permanently dropped because their parent OrderPlaced was never captured",
+            )
+            .with_callback(move |observer| {
+                observer.observe(orphans_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
@@ -164,6 +178,7 @@ impl IndexerMetrics {
             pool_in_use,
             pool_idle,
             projection_fallbacks,
+            inference_orphans_dropped,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
             _projection_backlog_gauge: projection_backlog_gauge,
@@ -171,6 +186,7 @@ impl IndexerMetrics {
             _capture_cursor_age_seconds_gauge: capture_cursor_age_seconds_gauge,
             _db_pool_connections_gauge: db_pool_connections_gauge,
             _projection_fallbacks_counter: projection_fallbacks_counter,
+            _inference_orphans_dropped_counter: inference_orphans_dropped_counter,
         }
     }
 
@@ -209,6 +225,13 @@ impl IndexerMetrics {
     /// running total of projection batches that fell back to per-row savepoints.
     pub fn set_projection_fallbacks(&self, value: u64) {
         self.projection_fallbacks.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the cumulative value reported by `indexer_inference_orphans_dropped` — the
+    /// running total of inference depth updates permanently dropped because their
+    /// parent OrderPlaced was never captured (orphan dead-letter).
+    pub fn set_inference_orphans_dropped(&self, value: u64) {
+        self.inference_orphans_dropped.store(value, Ordering::Relaxed);
     }
 }
 
@@ -339,6 +362,7 @@ mod tests {
         metrics.set_capture_cursor_age_seconds(5);
         metrics.set_pool_connections(3, 7);
         metrics.set_projection_fallbacks(9);
+        metrics.set_inference_orphans_dropped(4);
 
         assert_eq!(metrics.orders_created.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.orders_partially_filled.load(Ordering::Relaxed), 3);
@@ -348,5 +372,6 @@ mod tests {
         assert_eq!(metrics.pool_in_use.load(Ordering::Relaxed), 3);
         assert_eq!(metrics.pool_idle.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.projection_fallbacks.load(Ordering::Relaxed), 9);
+        assert_eq!(metrics.inference_orphans_dropped.load(Ordering::Relaxed), 4);
     }
 }
