@@ -13,7 +13,7 @@ import "./libraries/DexLib.sol";
 contract PMP is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.4";
+    string constant version = "4.0.5";
 
     /// @notice PMP name (static, unique identifier)
     string _name;
