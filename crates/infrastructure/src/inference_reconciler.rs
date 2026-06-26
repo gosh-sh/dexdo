@@ -644,8 +644,22 @@ impl InferenceReconciler {
         else {
             return Ok(DiscoveryOutcome::NoBoc);
         };
+        self.refresh_against_boc(book, &boc).await
+    }
+
+    /// Execute one refresh pass for a selected book against a fetched BOC:
+    /// re-price iff the price cadence is due, and run one phantom-sweep step iff
+    /// the sweep cadence is due AND the book has an OPEN row. The two cadences
+    /// are decoupled — neither gates the other. Split out of `reconcile_refresh`
+    /// (which fetches the BOC) so tests can inject a BOC + getter.
+    async fn refresh_against_boc(
+        &self,
+        book: &BookRow,
+        boc: &str,
+    ) -> anyhow::Result<DiscoveryOutcome> {
+        let ob = &book.orderbook_address;
         if self.price_due(book) {
-            self.refresh_price(ob, &boc).await?;
+            self.refresh_price(ob, boc).await?;
         }
         // Phantom sweep is due ONLY when the cadence is stale AND the book actually has an
         // OPEN row (spec). A book selected solely for a price refresh (stale/NULL last_swept_at
@@ -654,8 +668,29 @@ impl InferenceReconciler {
         if self.sweep_due_by_time(book) && self.has_open_orders(ob).await? {
             // run_sweep_step self-gates (idle + at-head + no-pending); on a gate miss it
             // does not touch last_swept_at, so the book stays sweep-due next tick.
-            let _ = self.run_sweep_step(ob, &boc, /* discovery= */ false).await?;
+            let _ = self.run_sweep_step(ob, boc, /* discovery= */ false).await?;
         }
         Ok(DiscoveryOutcome::Stamped) // "handled" — reuse the enum; mapped to `refreshed` in run_once
+    }
+
+    /// Test seam mirroring `reconcile_discovery_with_boc` for the refresh path:
+    /// selects the current `BookRow` for `ob` (so a test controls the cadence
+    /// timestamps via the seeded row) and runs `refresh_against_boc` with an
+    /// injected BOC — exercising the price-vs-sweep cadence gating without the
+    /// (test-unreachable) GraphQL BOC fetch.
+    pub async fn reconcile_refresh_with_boc(
+        &self,
+        ob: &str,
+        boc: &str,
+    ) -> anyhow::Result<DiscoveryOutcome> {
+        let book: BookRow = sqlx::query_as(
+            r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
+                 from inference_markets where orderbook_address = $1"#,
+        )
+        .bind(ob)
+        .fetch_one(&self.pool)
+        .await
+        .context("select book for refresh-with-boc")?;
+        self.refresh_against_boc(&book, boc).await
     }
 }

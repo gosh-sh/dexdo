@@ -91,6 +91,21 @@ async fn open_order(pool: &sqlx::PgPool, ob: &str, id: i64) {
     .unwrap();
 }
 
+/// An OPEN subscription row (`is_subscription = true`) — the spec §6 sweep
+/// target: a long-lived subscription that only ever emitted `Refunded`, so the
+/// event stream never closes it and the phantom sweep must.
+async fn open_subscription_order(pool: &sqlx::PgPool, ob: &str, id: i64) {
+    sqlx::query(
+        "insert into inference_orders (orderbook_address, order_id, is_buy, is_subscription, price, amount_initial, amount_remaining, status, last_chain_order)
+                 values ($1,$2,true,true,1,5,5,'OPEN','co')",
+    )
+    .bind(ob)
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 // ---- discovery / sweep DB-side tests ----
 
 #[tokio::test]
@@ -881,5 +896,135 @@ async fn failure_stamps_backoff_and_excludes_from_reselection() {
     assert!(
         after_expiry.contains(&ob.to_string()),
         "after backoff window expires ⇒ must be selectable again"
+    );
+}
+
+// ---- Queue B refresh EXECUTION layer (price-vs-sweep cadence decoupling) ----
+// select_refresh_candidates (above) covers the SELECT; these drive the method
+// that acts on a selected book, asserting each cadence gates independently.
+
+#[tokio::test]
+async fn refresh_sweeps_due_book_without_repricing_fresh_price() {
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_refresh_sweep_only";
+    seed_market(&pool, ob, true).await;
+    open_order(&pool, ob, 1).await;
+    // Price FRESH (within the 3600s refresh interval) but sweep DUE (last swept
+    // 1h ago, past the 30s sweep interval). Sentinel price proves no re-price.
+    sqlx::query(
+        "update inference_markets
+            set reference_price = 12345, reference_price_at = now(),
+                last_swept_at = now() - interval '1 hour'
+          where orderbook_address = $1",
+    )
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1").bind(ob).execute(&pool).await.unwrap();
+
+    // getOrder reports the order empty (phantom ⇒ swept); getWeeklyMedianPrice
+    // returns a DIFFERENT price so a stray re-price would be detectable.
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
+        "getQueueSize" => Ok(json!({"value0":"0x0"})),
+        "getStats" => Ok(json!({"nextOrderId":"0xa"})),
+        "getOrder" => Ok(json!({"amount":"0x0","note":"0:0","isBuy":true})),
+        "getWeeklyMedianPrice" => Ok(json!({"value0":"0x270f"})), // 9999 — must NOT be written
+        _ => Ok(json!({})),
+    }));
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+    r.reconcile_refresh_with_boc(ob, "boc").await.unwrap();
+
+    let (status, swept, price): (String, bool, i64) = sqlx::query_as(
+        "select o.status, o.swept_at is not null, m.reference_price::bigint
+           from inference_orders o join inference_markets m using (orderbook_address)
+          where o.orderbook_address=$1 and o.order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), swept), ("CANCELLED", true), "sweep-due ⇒ phantom swept");
+    assert_eq!(price, 12345, "price fresh ⇒ reference_price NOT re-fetched");
+}
+
+#[tokio::test]
+async fn refresh_reprices_due_price_without_sweeping_fresh_book() {
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_refresh_price_only";
+    seed_market(&pool, ob, true).await;
+    open_order(&pool, ob, 1).await;
+    // Price DUE (2h old, past the 3600s interval) but sweep FRESH (just swept).
+    sqlx::query(
+        "update inference_markets
+            set reference_price = 12345, reference_price_at = now() - interval '2 hours',
+                last_swept_at = now()
+          where orderbook_address = $1",
+    )
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1").bind(ob).execute(&pool).await.unwrap();
+
+    // getWeeklyMedianPrice returns a new price; getOrder would report empty, but
+    // the sweep must NOT run (sweep fresh) so the OPEN row must survive.
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
+        "getQueueSize" => Ok(json!({"value0":"0x0"})),
+        "getStats" => Ok(json!({"nextOrderId":"0xa"})),
+        "getOrder" => Ok(json!({"amount":"0x0","note":"0:0","isBuy":true})),
+        "getWeeklyMedianPrice" => Ok(json!({"value0":"0x270f"})), // 9999 — MUST be written
+        _ => Ok(json!({})),
+    }));
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+    r.reconcile_refresh_with_boc(ob, "boc").await.unwrap();
+
+    let (status, price): (String, i64) = sqlx::query_as(
+        "select o.status, m.reference_price::bigint
+           from inference_orders o join inference_markets m using (orderbook_address)
+          where o.orderbook_address=$1 and o.order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(price, 9999, "price due ⇒ reference_price re-fetched");
+    assert_eq!(status, "OPEN", "sweep fresh ⇒ phantom NOT swept this tick");
+}
+
+#[tokio::test]
+async fn sweep_cancels_empty_subscription_order() {
+    // Spec §6: a long-lived OPEN subscription that only ever emitted Refunded is
+    // never closed by events; the phantom sweep must cancel it once empty on-chain.
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_sub_sweep";
+    seed_market(&pool, ob, true).await;
+    open_subscription_order(&pool, ob, 1).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1").bind(ob).execute(&pool).await.unwrap();
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
+        "getQueueSize" => Ok(json!({"value0":"0x0"})),
+        "getStats" => Ok(json!({"nextOrderId":"0xa"})),
+        "getOrder" => Ok(json!({"amount":"0x0","note":"0:0","isBuy":true})), // empty ⇒ phantom
+        _ => Ok(json!({})),
+    }));
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+    let _ = r.run_sweep_step(ob, "boc", false).await.unwrap();
+    let (status, swept, is_sub): (String, bool, bool) = sqlx::query_as(
+        "select status, swept_at is not null, is_subscription from inference_orders where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (status.as_str(), swept, is_sub),
+        ("CANCELLED", true, true),
+        "empty subscription phantom is swept (status/swept set; still flagged subscription)"
     );
 }
