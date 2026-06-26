@@ -234,6 +234,61 @@ async fn persist_page_advances_cursor() {
 }
 
 #[tokio::test]
+async fn persist_page_writes_at_head_flag() {
+    // The at_head argument must be written through to indexer_cursors (the
+    // inference sweep + orphan dead-letter gate on it). A regression binding a
+    // constant would silently freeze all sweeps or run them mid-backfill.
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let stream = "capture_at_head_test_stream";
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("purge cursor");
+
+    // has_next_page=false => at_head=true.
+    repo.persist_page(stream, &[], Some("c1"), &decoder, true).await.expect("persist at_head=true");
+    assert!(repo.at_head(stream).await.expect("read at_head"), "at_head=true must be written through");
+
+    // A later page with more to fetch => at_head=false.
+    repo.persist_page(stream, &[], Some("c2"), &decoder, false).await.expect("persist at_head=false");
+    assert!(
+        !repo.at_head(stream).await.expect("read at_head"),
+        "at_head must flip back to false when more pages follow"
+    );
+}
+
+#[tokio::test]
+async fn persist_page_with_null_cursor_preserves_prior_cursor() {
+    // The cursor upsert uses coalesce(excluded.cursor, prior): a page that yields
+    // no end_cursor must NOT reset the stream to genesis. A coalesce typo would
+    // silently null the cursor and replay the whole chain.
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let stream = "capture_coalesce_test_stream";
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("purge cursor");
+
+    repo.persist_page(stream, &[], Some("keep-me"), &decoder, false).await.expect("persist cursor");
+    assert_eq!(repo.load_cursor(stream).await.expect("load").as_deref(), Some("keep-me"));
+
+    repo.persist_page(stream, &[], None, &decoder, false).await.expect("persist null cursor");
+    assert_eq!(
+        repo.load_cursor(stream).await.expect("load").as_deref(),
+        Some("keep-me"),
+        "coalesce(excluded.cursor, prior) must preserve the cursor when end_cursor is NULL"
+    );
+}
+
+#[tokio::test]
 async fn persist_page_handles_mixed_decodable_and_undecodable_edges() {
     // One page with a decodable edge (ORDER_PLACED_BODY) and an undecodable
     // edge (body None). Asserts the counts and per-row DB state are correct —
