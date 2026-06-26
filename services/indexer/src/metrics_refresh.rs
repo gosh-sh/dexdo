@@ -72,6 +72,7 @@ pub async fn run_refresh_loop(
         metrics.set_projection_fallbacks(repo.projection_fallback_count());
         metrics.set_inference_orphans_dropped(repo.inference_orphans_dropped_count());
         metrics.set_decode_errors(repo.decode_errors_count());
+        metrics.set_decode_ambiguous_collisions(repo.decode_ambiguous_collisions_count());
         match repo.inference_market_state_counts().await {
             Ok((discovering, visible, failing)) => metrics.set_inference_market_states(
                 discovering.max(0) as u64,

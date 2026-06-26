@@ -56,6 +56,7 @@ pub struct IndexerMetrics {
     projection_fallbacks: Arc<AtomicU64>,
     inference_orphans_dropped: Arc<AtomicU64>,
     decode_errors: Arc<AtomicU64>,
+    decode_ambiguous_collisions: Arc<AtomicU64>,
     inference_markets_discovering: Arc<AtomicU64>,
     inference_markets_visible: Arc<AtomicU64>,
     inference_markets_failing: Arc<AtomicU64>,
@@ -78,6 +79,7 @@ pub struct IndexerMetrics {
     _projection_fallbacks_counter: ObservableCounter<u64>,
     _inference_orphans_dropped_counter: ObservableCounter<u64>,
     _decode_errors_counter: ObservableCounter<u64>,
+    _decode_ambiguous_collisions_counter: ObservableCounter<u64>,
     _inference_markets_gauge: ObservableGauge<u64>,
     _inference_reference_price_lag_gauge: ObservableGauge<u64>,
     _inference_sweep_lag_gauge: ObservableGauge<u64>,
@@ -97,6 +99,7 @@ impl IndexerMetrics {
         let projection_fallbacks = Arc::new(AtomicU64::new(0));
         let inference_orphans_dropped = Arc::new(AtomicU64::new(0));
         let decode_errors = Arc::new(AtomicU64::new(0));
+        let decode_ambiguous_collisions = Arc::new(AtomicU64::new(0));
         let inference_markets_discovering = Arc::new(AtomicU64::new(0));
         let inference_markets_visible = Arc::new(AtomicU64::new(0));
         let inference_markets_failing = Arc::new(AtomicU64::new(0));
@@ -206,6 +209,17 @@ impl IndexerMetrics {
             })
             .build();
 
+        let ambiguous_collisions_cache = Arc::clone(&decode_ambiguous_collisions);
+        let decode_ambiguous_collisions_counter = meter
+            .u64_observable_counter("indexer_decode_ambiguous_collisions")
+            .with_description(
+                "Event bodies left undecoded because their id collides across ABIs and no dst route disambiguated it — a colliding-ABI-without-route regression; distinct from a benign unknown id and from a hard decode error",
+            )
+            .with_callback(move |observer| {
+                observer.observe(ambiguous_collisions_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
         let disc_cache = Arc::clone(&inference_markets_discovering);
         let vis_cache = Arc::clone(&inference_markets_visible);
         let fail_cache = Arc::clone(&inference_markets_failing);
@@ -298,6 +312,7 @@ impl IndexerMetrics {
             projection_fallbacks,
             inference_orphans_dropped,
             decode_errors,
+            decode_ambiguous_collisions,
             inference_markets_discovering,
             inference_markets_visible,
             inference_markets_failing,
@@ -316,6 +331,7 @@ impl IndexerMetrics {
             _projection_fallbacks_counter: projection_fallbacks_counter,
             _inference_orphans_dropped_counter: inference_orphans_dropped_counter,
             _decode_errors_counter: decode_errors_counter,
+            _decode_ambiguous_collisions_counter: decode_ambiguous_collisions_counter,
             _inference_markets_gauge: inference_markets_gauge,
             _inference_reference_price_lag_gauge: inference_reference_price_lag_gauge,
             _inference_sweep_lag_gauge: inference_sweep_lag_gauge,
@@ -372,6 +388,12 @@ impl IndexerMetrics {
     /// total of event bodies that failed to decode and were stored undecoded.
     pub fn set_decode_errors(&self, value: u64) {
         self.decode_errors.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the cumulative value reported by `indexer_decode_ambiguous_collisions`
+    /// — bodies left undecoded due to a colliding event id with no dst route.
+    pub fn set_decode_ambiguous_collisions(&self, value: u64) {
+        self.decode_ambiguous_collisions.store(value, Ordering::Relaxed);
     }
 
     /// Set the values reported by `indexer_inference_markets` — the count of
@@ -535,6 +557,7 @@ mod tests {
         metrics.set_projection_fallbacks(9);
         metrics.set_inference_orphans_dropped(4);
         metrics.set_decode_errors(6);
+        metrics.set_decode_ambiguous_collisions(2);
         metrics.set_inference_market_states(11, 22, 33);
         metrics.set_inference_reference_price_lag_seconds(444);
         metrics.set_inference_sweep_lag_seconds(555);
@@ -551,6 +574,7 @@ mod tests {
         assert_eq!(metrics.projection_fallbacks.load(Ordering::Relaxed), 9);
         assert_eq!(metrics.inference_orphans_dropped.load(Ordering::Relaxed), 4);
         assert_eq!(metrics.decode_errors.load(Ordering::Relaxed), 6);
+        assert_eq!(metrics.decode_ambiguous_collisions.load(Ordering::Relaxed), 2);
         assert_eq!(metrics.inference_markets_discovering.load(Ordering::Relaxed), 11);
         assert_eq!(metrics.inference_markets_visible.load(Ordering::Relaxed), 22);
         assert_eq!(metrics.inference_markets_failing.load(Ordering::Relaxed), 33);

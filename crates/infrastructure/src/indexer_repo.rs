@@ -19,6 +19,7 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+use crate::decoder::DecodeOutcome;
 use crate::decoder::DecodedEvent;
 use crate::decoder::Decoder;
 use crate::graphql::EventEdge;
@@ -69,6 +70,13 @@ pub struct IndexerRepository {
     /// here. A non-zero rate means ABI drift or malformed bodies for an otherwise
     /// known event. Shared across clones via `Arc`, like `projection_fallbacks`.
     decode_errors: Arc<AtomicU64>,
+    /// Running count of event bodies left undecoded because their id collides
+    /// across ABIs and no `dst` route disambiguated it (the `AmbiguousCollision`
+    /// decode outcome). Distinct from a benign unknown id and from a hard decode
+    /// error. Unreachable today (the only colliding id, `OrderCancelled`, has a
+    /// route); a non-zero value means a new colliding ABI was added without a
+    /// route — alert on it. Shared across clones via `Arc`.
+    decode_ambiguous_collisions: Arc<AtomicU64>,
     /// Running count of hard inference reconcile failures (`Err` outcomes from
     /// discovery or refresh — not `NoBoc`, which is a benign skip). Bumped by the
     /// `InferenceReconciler` through a cloned handle and polled here for
@@ -128,6 +136,7 @@ impl IndexerRepository {
             inference_orphan_cutoff: std::time::Duration::from_millis(1_800_000), /* default; overridden in main */
             inference_orphans_dropped: Arc::new(AtomicU64::new(0)),
             decode_errors: Arc::new(AtomicU64::new(0)),
+            decode_ambiguous_collisions: Arc::new(AtomicU64::new(0)),
             inference_reconcile_failures: Arc::new(AtomicU64::new(0)),
             capture_stream: CAPTURE_STREAM.to_string(),
         }
@@ -157,6 +166,13 @@ impl IndexerRepository {
     /// undecoded. Polled by the metrics-refresh loop for `indexer_decode_errors`.
     pub fn decode_errors_count(&self) -> u64 {
         self.decode_errors.load(Ordering::Relaxed)
+    }
+
+    /// Running total of event bodies left undecoded due to an ambiguous event-id
+    /// collision with no `dst` route. Polled by the metrics-refresh loop for
+    /// `indexer_decode_ambiguous_collisions`.
+    pub fn decode_ambiguous_collisions_count(&self) -> u64 {
+        self.decode_ambiguous_collisions.load(Ordering::Relaxed)
     }
 
     /// Running total of hard inference reconcile failures. Polled by the
@@ -274,11 +290,11 @@ impl IndexerRepository {
             }
 
             let decoded = try_decode(
+                self,
                 decoder,
                 &edge.node.msg_id,
                 edge.node.body.as_ref(),
                 edge.node.dst.as_deref(),
-                &self.decode_errors,
             );
             if decoded.is_some() {
                 result.decoded += 1;
@@ -1077,23 +1093,49 @@ fn pending_row_to_inputs(row: &PendingRow) -> Option<(DecodedEvent, EventNode)> 
 }
 
 fn try_decode(
+    repo: &IndexerRepository,
     decoder: &Decoder,
     msg_id: &str,
     body: Option<&Value>,
     dst: Option<&str>,
-    decode_errors: &AtomicU64,
 ) -> Option<DecodedEvent> {
-    let body_str = body?.as_str()?;
+    let body_str = body.and_then(Value::as_str)?;
     match decoder.decode_event_body(body_str, dst) {
-        Ok(decoded) => decoded,
+        Ok(DecodeOutcome::Decoded(d)) => Some(d),
+        // Benign: a contract emitted an id the indexer does not index. Silent.
+        Ok(DecodeOutcome::UnknownId) => None,
+        Ok(DecodeOutcome::AmbiguousCollision { event_id }) => {
+            // A colliding id with no dst route — left undecoded (never first-ABI).
+            // Count it so a new-colliding-ABI-without-route regression is alertable
+            // (distinct from benign unknown-id noise), and route the repeat warn
+            // through the noise-dedup so a regression flood does not drown the main
+            // log. Keyed on a synthetic type so it reuses the no-handler dedup set.
+            repo.decode_ambiguous_collisions.fetch_add(1, Ordering::Relaxed);
+            let key = format!("ambiguous_collision:{event_id}");
+            if repo.first_unknown_sighting(&key) {
+                warn!(
+                    msg_id,
+                    event_id,
+                    "ambiguous event_id with no dst route; left undecoded (first sighting — repeats go to the noise log). A new colliding ABI likely needs a dst route in the decoder."
+                );
+            } else {
+                warn!(
+                    target: dodex_logging::EVENT_NOISE_TARGET,
+                    msg_id,
+                    event_id,
+                    "ambiguous event_id with no dst route; left undecoded"
+                );
+            }
+            None
+        }
         Err(err) => {
             // Hard decode failure of a body the gateway delivered — distinct from
-            // an unknown/ambiguous id, which returns Ok(None). Count it so ABI
-            // drift or a malformed cell on a known event is observable, not just a
-            // single warn line. The row is still stored undecoded and skipped by
-            // projection (and is invisible to the sweep's `decoded IS NOT NULL`
-            // pending-events gate), so the counter is the only durable signal.
-            decode_errors.fetch_add(1, Ordering::Relaxed);
+            // an unknown/ambiguous id. Count it so ABI drift or a malformed cell
+            // on a known event is observable, not just a single warn line. The
+            // row is still stored undecoded and skipped by projection (and is
+            // invisible to the sweep's `decoded IS NOT NULL` pending-events gate),
+            // so the counter is the only durable signal.
+            repo.decode_errors.fetch_add(1, Ordering::Relaxed);
             warn!(msg_id, ?err, "decode body failed");
             None
         }

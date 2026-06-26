@@ -60,6 +60,33 @@ struct Route {
     expected_id: u32,
 }
 
+/// Outcome of decoding one event body. Distinguishes the benign "this id is in
+/// no loaded ABI" case from an ambiguous-collision config regression (a
+/// colliding id with no dst route) so the latter is countable/alertable rather
+/// than lost in unknown-id noise.
+#[derive(Debug)]
+pub enum DecodeOutcome {
+    /// Body decoded against a resolved `(contract, event)`.
+    Decoded(DecodedEvent),
+    /// The event id is in no loaded ABI — normal (a contract emitted something
+    /// the indexer does not index). Benign, uncounted.
+    UnknownId,
+    /// The event id maps to multiple ABIs and no dst route disambiguated it.
+    /// Left undecoded (never silently first-ABI). A new colliding ABI was
+    /// likely added without a dst route — a regression worth alerting on.
+    AmbiguousCollision { event_id: u32 },
+}
+
+impl DecodeOutcome {
+    /// The decoded event, or `None` for `UnknownId` / `AmbiguousCollision`.
+    pub fn decoded(self) -> Option<DecodedEvent> {
+        match self {
+            DecodeOutcome::Decoded(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Decoder {
     contracts: HashMap<&'static str, Contract>,
@@ -146,7 +173,7 @@ impl Decoder {
         &self,
         body_base64: &str,
         dst: Option<&str>,
-    ) -> anyhow::Result<Option<DecodedEvent>> {
+    ) -> anyhow::Result<DecodeOutcome> {
         let bytes = BASE64_STANDARD.decode(body_base64).context("decode base64 body")?;
         let cell = read_single_root_boc(bytes).context("read boc")?;
         let slice = SliceData::load_cell(cell).map_err(|e| anyhow!("slice from cell: {e}"))?;
@@ -165,24 +192,18 @@ impl Decoder {
                     expected = route.expected_id,
                     "dst route id mismatch; leaving undecoded"
                 );
-                return Ok(None);
+                return Ok(DecodeOutcome::UnknownId);
             }
-            return self.decode_with(route.kind, &route.event, slice).map(Some);
+            return self.decode_with(route.kind, &route.event, slice).map(DecodeOutcome::Decoded);
         }
 
-        // (b) global id lookup — accept only if the id is unique.
+        // (b) global id lookup — accept only if the id is unique. A colliding id
+        // with no dst route is reported as AmbiguousCollision (never silently
+        // first-ABI); the caller counts and noise-dedups the warning.
         match self.event_index.get(&event_id).map(Vec::as_slice) {
-            Some([(kind, event)]) => self.decode_with(kind, event, slice).map(Some),
-            Some(multi) if multi.len() > 1 => {
-                warn!(
-                    event_id,
-                    dst = ?dst,
-                    candidates = ?multi,
-                    "ambiguous event_id with no known dst route; leaving undecoded"
-                );
-                Ok(None) // (c) ambiguous — never silently first-ABI.
-            }
-            _ => Ok(None), // unknown id
+            Some([(kind, event)]) => self.decode_with(kind, event, slice).map(DecodeOutcome::Decoded),
+            Some(multi) if multi.len() > 1 => Ok(DecodeOutcome::AmbiguousCollision { event_id }),
+            _ => Ok(DecodeOutcome::UnknownId),
         }
     }
 
@@ -264,15 +285,18 @@ mod tests {
         let ob_dst = crate::config::event_type_dst(144); // OB_ORDER_CANCELLED
         let inf_dst = crate::config::event_type_dst(1001); // InferenceOrderBook OrderCancelled
 
-        let inf = decoder.decode_event_body(&body, Some(&inf_dst)).unwrap().unwrap();
+        let inf = decoder.decode_event_body(&body, Some(&inf_dst)).unwrap().decoded().unwrap();
         assert_eq!(inf.event_type, "InferenceOrderBook.OrderCancelled");
 
-        let ob = decoder.decode_event_body(&body, Some(&ob_dst)).unwrap().unwrap();
+        let ob = decoder.decode_event_body(&body, Some(&ob_dst)).unwrap().decoded().unwrap();
         assert_eq!(ob.event_type, "OrderBook.OrderCancelled");
 
-        // Unknown dst on a colliding id => ambiguous => left undecoded (warn), never first-ABI.
+        // Unknown dst on a colliding id => ambiguous => left undecoded, never first-ABI.
         let ambiguous = decoder.decode_event_body(&body, Some(":dead")).unwrap();
-        assert!(ambiguous.is_none(), "colliding id with unknown dst must be left undecoded");
+        assert!(
+            matches!(ambiguous, DecodeOutcome::AmbiguousCollision { .. }),
+            "colliding id with unknown dst must be reported ambiguous, not silently first-ABI"
+        );
     }
 
     #[test]
@@ -280,7 +304,7 @@ mod tests {
         let decoder = Decoder::new().unwrap();
         // Filled has a unique id, so it resolves even with no dst route.
         let body = inference_filled_body_b64(&decoder);
-        let ev = decoder.decode_event_body(&body, None).unwrap().unwrap();
+        let ev = decoder.decode_event_body(&body, None).unwrap().decoded().unwrap();
         assert_eq!(ev.event_type, "InferenceOrderBook.Filled");
     }
 
@@ -321,7 +345,10 @@ mod tests {
         // Its event id is not in the dex ABIs, so we must return Ok(None).
         let body = "te6ccgEBAgEAOAABTiEI6kGAF2XiReIi2UGGm9TvRXJAgoqOxOYUQGiHnYczEQPg+AhhEAEAF6AAAAACMteYg9IABA==";
         let decoded = decoder.decode_event_body(body, None).unwrap();
-        assert!(decoded.is_none());
+        assert!(
+            matches!(decoded, DecodeOutcome::UnknownId),
+            "an id in no ABI is a benign unknown, not a decode error or ambiguous collision"
+        );
     }
 
     #[test]
@@ -347,7 +374,8 @@ mod tests {
         // descent, where the prefix offset has to be carried into the next cell.
         let body = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAACAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJGgAAAAAAAAAAAAAAAn+OzoAAAAAAAAAAAFcScEalnJSVsVKAm0LrR0TbuPbU18Mkb7ENEBG22bNzhvrIubdt2wtAAQAQAAAAAAAAAXM=";
 
-        let decoded = decoder.decode_event_body(body, None).unwrap().expect("event id is known");
+        let decoded =
+            decoder.decode_event_body(body, None).unwrap().decoded().expect("event id is known");
 
         assert_eq!(decoded.event_type, "OrderBook.OrderPlaced");
         assert_eq!(decoded.value["orderId"], "2");
