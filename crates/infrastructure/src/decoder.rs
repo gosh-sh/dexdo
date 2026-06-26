@@ -225,12 +225,12 @@ mod tests {
             assert!(decoder.contracts.contains_key(kind), "missing contract {kind}");
         }
 
-        // 13 PMP + 2 Oracle + 3 OracleEventList + 8 OrderBook + 1 RootOracle
-        // + 6 RootPN + 14 PrivateNote + 0 Nullifier = 47 DEX events
+        // 13 PMP + 2 Oracle + 4 OracleEventList + 8 OrderBook + 1 RootOracle
+        // + 6 RootPN + 14 PrivateNote + 0 Nullifier = 48 DEX events
         // + 8 InferenceOrderBook events, but OrderCancelled collides with
-        // OrderBook.OrderCancelled -> still 47 + 7 = 54 unique ids, but one id
-        // has 2 entries. known_events() counts distinct ids = 54.
-        assert_eq!(decoder.known_events(), 54, "unexpected total event id count");
+        // OrderBook.OrderCancelled -> still 48 + 7 = 55 unique ids, but one id
+        // has 2 entries. known_events() counts distinct ids = 55.
+        assert_eq!(decoder.known_events(), 55, "unexpected total event id count");
 
         // sample lookups — find entries for PMP
         let pmp_event_ids: Vec<_> = decoder
@@ -251,10 +251,10 @@ mod tests {
     fn registers_inference_orderbook_and_counts_unique_ids() {
         let decoder = Decoder::new().unwrap();
         assert!(decoder.contracts.contains_key("InferenceOrderBook"), "inference abi missing");
-        // 47 DEX unique ids + 8 inference events, of which OrderCancelled collides
+        // 48 DEX unique ids + 8 inference events, of which OrderCancelled collides
         // with OrderBook.OrderCancelled (same (uint128,uint128) signature) => +7 new ids.
-        // Total distinct ids = 54 (47 + 7). The colliding id has 2 entries.
-        assert_eq!(decoder.unique_event_ids(), 54, "unexpected unique event-id count");
+        // Total distinct ids = 55 (48 + 7). The colliding id has 2 entries.
+        assert_eq!(decoder.unique_event_ids(), 55, "unexpected unique event-id count");
     }
 
     #[test]
