@@ -26,6 +26,11 @@ use crate::graphql::EventNode;
 use crate::projectors;
 use crate::projectors::ProjectionOutcome;
 
+/// The capture loop's cursor stream name. The orphan dead-letter reads its
+/// `at_head` flag to avoid dropping an orphan whose parent may still be ahead of
+/// the cursor during a backfill (see `is_expired_inference_orphan`).
+pub const CAPTURE_STREAM: &str = "blockchain_events";
+
 #[derive(Debug, Clone)]
 pub struct IndexerRepository {
     pool: PgPool,
@@ -70,6 +75,13 @@ pub struct IndexerRepository {
     /// `indexer_inference_reconcile_failures`. Shared across clones via `Arc`,
     /// like `inference_orphans_dropped`.
     inference_reconcile_failures: Arc<AtomicU64>,
+    /// Capture cursor stream whose `at_head` gates the inference orphan
+    /// dead-letter (an orphan is only dropped once capture has drained to the
+    /// chain tip, so a parent that is merely still-ahead-in-backfill is not
+    /// mistaken for a permanently dropped one). Defaults to `CAPTURE_STREAM`;
+    /// overridable in tests via `with_capture_stream` so they need not race the
+    /// shared live cursor row.
+    capture_stream: String,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -117,11 +129,20 @@ impl IndexerRepository {
             inference_orphans_dropped: Arc::new(AtomicU64::new(0)),
             decode_errors: Arc::new(AtomicU64::new(0)),
             inference_reconcile_failures: Arc::new(AtomicU64::new(0)),
+            capture_stream: CAPTURE_STREAM.to_string(),
         }
     }
 
     pub fn with_inference_orphan_cutoff(mut self, cutoff: std::time::Duration) -> Self {
         self.inference_orphan_cutoff = cutoff;
+        self
+    }
+
+    /// Override the capture cursor stream whose `at_head` gates orphan
+    /// dead-lettering. Tests use a unique stream so they do not race the shared
+    /// `blockchain_events` cursor row.
+    pub fn with_capture_stream(mut self, stream: impl Into<String>) -> Self {
+        self.capture_stream = stream.into();
         self
     }
 
@@ -376,11 +397,28 @@ impl IndexerRepository {
         after_chain_order: Option<&str>,
         until_chain_order: Option<&str>,
     ) -> anyhow::Result<ReprojectionStats> {
-        match self.reproject_batch_fast(batch_size, after_chain_order, until_chain_order).await? {
+        // Gate orphan dead-lettering on the capture stream reaching head. While
+        // capture is still backfilling, a missing parent may simply not be
+        // ingested yet, so we must not declare it permanently dropped. On a read
+        // error, default to `false` (skip drops this pass) — never abort the
+        // batch, which may still apply non-orphan rows; the next pass retries.
+        let capture_at_head = self.at_head(&self.capture_stream).await.unwrap_or_else(|err| {
+            debug!(?err, stream = %self.capture_stream, "at_head read failed; deferring orphan drops");
+            false
+        });
+        match self
+            .reproject_batch_fast(batch_size, after_chain_order, until_chain_order, capture_at_head)
+            .await?
+        {
             Some(stats) => Ok(stats),
             None => {
-                self.reproject_batch_savepointed(batch_size, after_chain_order, until_chain_order)
-                    .await
+                self.reproject_batch_savepointed(
+                    batch_size,
+                    after_chain_order,
+                    until_chain_order,
+                    capture_at_head,
+                )
+                .await
             }
         }
     }
@@ -395,6 +433,7 @@ impl IndexerRepository {
         batch_size: u32,
         after_chain_order: Option<&str>,
         until_chain_order: Option<&str>,
+        capture_at_head: bool,
     ) -> anyhow::Result<Option<ReprojectionStats>> {
         let mut tx: Transaction<'_, Postgres> =
             self.pool.begin().await.context("reproject(fast) tx begin")?;
@@ -425,12 +464,39 @@ impl IndexerRepository {
                     stats.applied += 1;
                 }
                 Ok(ProjectionOutcome::Deferred) => {
-                    if Self::is_expired_inference_orphan(&row, self.inference_orphan_cutoff) {
-                        warn!(msg_id = %row.msg_id, event_type = ?row.event_type,
-                            "inference orphan exceeded cutoff; dropping order row (dead-letter; no inference_orders write — discovered market kept)");
-                        self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
-                        to_mark.push(row.id); // mark processed so it stops looping; the handler wrote no order row
-                        stats.applied += 1;
+                    if Self::is_expired_inference_orphan(
+                        &row,
+                        self.inference_orphan_cutoff,
+                        capture_at_head,
+                    ) {
+                        // Repair the present resting leg(s) before dropping the row
+                        // whose parent will never arrive (the repair emits the warn
+                        // naming the data consequence). A repair DB error aborts this
+                        // optimistic batch like a projector error; the savepointed
+                        // replay then isolates the row.
+                        match crate::inference_projectors::repair_expired_inference_orphan(
+                            &mut tx, &event, &node,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
+                                to_mark.push(row.id); // mark processed so it stops looping
+                                stats.applied += 1;
+                            }
+                            Err(err) => {
+                                self.projection_fallbacks.fetch_add(1, Ordering::Relaxed);
+                                let rollback_error = tx.rollback().await.err();
+                                warn!(
+                                    msg_id = %row.msg_id,
+                                    event_type = ?event.event_type,
+                                    ?err,
+                                    ?rollback_error,
+                                    "expired-orphan repair errored in optimistic batch; falling back to per-row savepoints"
+                                );
+                                return Ok(None);
+                            }
+                        }
                     } else {
                         stats.deferred += 1;
                     }
@@ -493,6 +559,7 @@ impl IndexerRepository {
         batch_size: u32,
         after_chain_order: Option<&str>,
         until_chain_order: Option<&str>,
+        capture_at_head: bool,
     ) -> anyhow::Result<ReprojectionStats> {
         let mut tx: Transaction<'_, Postgres> =
             self.pool.begin().await.context("reproject tx begin")?;
@@ -522,14 +589,39 @@ impl IndexerRepository {
                     stats.applied += 1;
                 }
                 Ok(ProjectionOutcome::Deferred) => {
-                    sp.commit().await.context("reproject savepoint release")?;
-                    if Self::is_expired_inference_orphan(&row, self.inference_orphan_cutoff) {
-                        warn!(msg_id = %row.msg_id, event_type = ?row.event_type,
-                            "inference orphan exceeded cutoff; dropping order row (dead-letter; no inference_orders write — discovered market kept)");
-                        self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
-                        to_mark.push(row.id); // mark processed so it stops looping; the handler wrote no order row
-                        stats.applied += 1;
+                    if Self::is_expired_inference_orphan(
+                        &row,
+                        self.inference_orphan_cutoff,
+                        capture_at_head,
+                    ) {
+                        // Repair the present leg(s) inside this row's savepoint, then
+                        // release it; a repair error rolls back only this row.
+                        match crate::inference_projectors::repair_expired_inference_orphan(
+                            &mut sp, &event, &node,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                sp.commit().await.context("reproject savepoint release")?;
+                                self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
+                                to_mark.push(row.id); // mark processed so it stops looping
+                                stats.applied += 1;
+                            }
+                            Err(err) => {
+                                drop(sp);
+                                stats.failed += 1;
+                                warn!(
+                                    msg_id = %row.msg_id,
+                                    event_type = ?event.event_type,
+                                    ?err,
+                                    "expired-orphan repair failed; raw event still pending, savepoint rolled back"
+                                );
+                            }
+                        }
                     } else {
+                        // Not an expired orphan: release the savepoint so the seed
+                        // skeleton written during project_event survives.
+                        sp.commit().await.context("reproject savepoint release")?;
                         stats.deferred += 1;
                     }
                 }
@@ -558,11 +650,21 @@ impl IndexerRepository {
     }
 
     /// Returns `true` when the row is an inference event whose parent
-    /// `OrderPlaced` has not arrived and the row's **ingest** age
-    /// (`now() - raw_events.created_at`) exceeds the configured cutoff.
-    /// DEX rows (non-`InferenceOrderBook.*`) always return `false`.
-    fn is_expired_inference_orphan(row: &PendingRow, cutoff: std::time::Duration) -> bool {
-        row.event_type.as_deref().is_some_and(|t| t.starts_with("InferenceOrderBook."))
+    /// `OrderPlaced` has not arrived, the row's **ingest** age
+    /// (`now() - raw_events.created_at`) exceeds the configured cutoff, AND the
+    /// capture stream has drained to the chain tip (`capture_at_head`). The
+    /// `at_head` requirement keeps a parent that is merely still-ahead in an
+    /// in-progress backfill from being mistaken for one that was permanently
+    /// dropped at capture — "the parent will never arrive" is only declared once
+    /// capture has reached head. DEX rows (non-`InferenceOrderBook.*`) always
+    /// return `false`.
+    fn is_expired_inference_orphan(
+        row: &PendingRow,
+        cutoff: std::time::Duration,
+        capture_at_head: bool,
+    ) -> bool {
+        capture_at_head
+            && row.event_type.as_deref().is_some_and(|t| t.starts_with("InferenceOrderBook."))
             && (chrono::Utc::now() - row.created_at)
                 .to_std()
                 .map(|age| age > cutoff)

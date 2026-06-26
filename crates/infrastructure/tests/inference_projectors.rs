@@ -333,6 +333,32 @@ async fn raw_processed(pool: &sqlx::PgPool, msg: &str) -> bool {
     .unwrap()
     .is_some()
 }
+// Upsert the capture-stream cursor's `at_head` flag. The orphan dead-letter only
+// fires once capture has drained to head; tests use a unique stream (via
+// `with_capture_stream`) so they never race the shared live `blockchain_events` row.
+async fn set_cursor_at_head(pool: &sqlx::PgPool, stream: &str, at_head: bool) {
+    sqlx::query(
+        "insert into indexer_cursors (stream_name, cursor, at_head, updated_at)
+           values ($1, 'x', $2, now())
+         on conflict (stream_name) do update set at_head = excluded.at_head, updated_at = now()",
+    )
+    .bind(stream)
+    .bind(at_head)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+async fn order_amount_status(pool: &sqlx::PgPool, ob: &str, order_id: &str) -> Option<(i64, String)> {
+    sqlx::query_as::<_, (i64, String)>(
+        "select amount_remaining::bigint, status from inference_orders
+          where orderbook_address=$1 and order_id=$2::numeric",
+    )
+    .bind(ob)
+    .bind(order_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
 
 #[tokio::test]
 async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
@@ -397,7 +423,11 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
     )
     .await;
 
+    // Orphan dead-lettering only fires once capture has reached head.
+    let stream = "orphan_drop_athead_stream";
+    set_cursor_at_head(&pool, stream, true).await;
     IndexerRepository::new(pool.clone())
+        .with_capture_stream(stream)
         .with_inference_orphan_cutoff(Duration::from_secs(60))
         .reproject_pending_from(50, Some("00orphan-"), Some("00orphan-z"))
         .await
@@ -423,6 +453,103 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
     // Cleanup residual pending rows so they do not pollute other tests that
     // query max_pending_chain_order / has_pending_above globally.
     sqlx::query("delete from raw_events where chain_order like '00orphan-%'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn expired_orphan_not_dropped_until_capture_at_head() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_orphan_nh_ob";
+    let stream = "orphan_not_athead_stream";
+    sqlx::query("delete from raw_events where chain_order like '00orphnh-%'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let filled = serde_json::json!({"makerId":"800","takerId":"801","ticks":"1","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"});
+    // Aged ingest (1h) — well past the 60s cutoff — so only the at_head gate decides.
+    insert_raw(&pool, "orphnh-fill", "00orphnh-a", 3600, 0, ob, "InferenceOrderBook.Filled", filled).await;
+
+    let repo = IndexerRepository::new(pool.clone())
+        .with_capture_stream(stream)
+        .with_inference_orphan_cutoff(Duration::from_secs(60));
+
+    // at_head = false: a missing parent may still be ahead in the backfill, so the
+    // aged orphan must NOT be declared permanently dropped yet.
+    set_cursor_at_head(&pool, stream, false).await;
+    repo.reproject_pending_from(50, Some("00orphnh-"), Some("00orphnh-z")).await.unwrap();
+    assert!(
+        !raw_processed(&pool, "orphnh-fill").await,
+        "aged orphan must stay pending while capture is still backfilling (at_head=false)"
+    );
+
+    // Same row, same age; only at_head flips to true — now it is dead-lettered.
+    set_cursor_at_head(&pool, stream, true).await;
+    repo.reproject_pending_from(50, Some("00orphnh-"), Some("00orphnh-z")).await.unwrap();
+    assert!(
+        raw_processed(&pool, "orphnh-fill").await,
+        "once capture reaches head, the aged orphan is dead-lettered"
+    );
+
+    sqlx::query("delete from raw_events where chain_order like '00orphnh-%'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn expired_filled_orphan_decrements_present_leg() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_orphan_leg_ob";
+    let stream = "orphan_leg_athead_stream";
+    sqlx::query("delete from raw_events where chain_order like '00orphld-%'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Seed a resting BUY maker (id 700) with 10 ticks of depth via the real placement projector.
+    let mut tx = pool.begin().await.unwrap();
+    let placed =
+        ev("OrderPlaced", serde_json::json!({"orderId":"700","isBuy":true,"price":"5","ticks":"10","note":"0:n"}));
+    assert_eq!(project(&mut tx, &placed, &node(ob, "00seed-700")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+    assert_eq!(order_amount_status(&pool, ob, "700").await, Some((10, "OPEN".into())));
+
+    // Aged Filled orphan: maker 700 is present and resting; taker 701's OrderPlaced was dropped.
+    let filled = serde_json::json!({"makerId":"700","takerId":"701","ticks":"3","clearingPrice":"5","sellerTC":"0:s","buyerNote":"0:b"});
+    insert_raw(&pool, "orphld-fill", "00orphld-a", 3600, 0, ob, "InferenceOrderBook.Filled", filled).await;
+
+    set_cursor_at_head(&pool, stream, true).await;
+    IndexerRepository::new(pool.clone())
+        .with_capture_stream(stream)
+        .with_inference_orphan_cutoff(Duration::from_secs(60))
+        .reproject_pending_from(50, Some("00orphld-"), Some("00orphld-z"))
+        .await
+        .unwrap();
+
+    // The orphan is dead-lettered...
+    assert!(raw_processed(&pool, "orphld-fill").await, "aged Filled orphan dead-lettered");
+    // ...but the present maker's depth is corrected (10 - 3 = 7), not left permanently stale.
+    assert_eq!(
+        order_amount_status(&pool, ob, "700").await,
+        Some((7, "OPEN".into())),
+        "present resting leg decremented by the fill before the drop"
+    );
+    // The missing taker leg is not fabricated.
+    assert_eq!(order_amount_status(&pool, ob, "701").await, None, "missing leg is not created");
+
+    sqlx::query("delete from raw_events where chain_order like '00orphld-%'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
         .execute(&pool)
         .await
         .unwrap();

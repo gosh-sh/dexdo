@@ -188,7 +188,7 @@ impl IndexerMetrics {
         let inference_orphans_dropped_counter = meter
             .u64_observable_counter("indexer_inference_orphans_dropped")
             .with_description(
-                "Inference orderbook depth updates permanently dropped because their parent OrderPlaced was never captured",
+                "Inference orphan events (Filled/OrderCancelled) dead-lettered after their parent OrderPlaced never arrived within the cutoff. A Filled first decrements any present resting leg, so book depth stays correct; what is unrecorded is the missing counterparty (Filled) or the lost cancel (OrderCancelled)",
             )
             .with_callback(move |observer| {
                 observer.observe(orphans_cache.load(Ordering::Relaxed), &[]);

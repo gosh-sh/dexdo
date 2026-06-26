@@ -183,41 +183,64 @@ struct LockedOrder {
     is_sweep_cancel: bool,
 }
 
-async fn apply_inference_filled(
+/// Parsed `Filled` event fields, shared by the normal projector and the
+/// expired-orphan repair so both run the identical decrement.
+struct FilledFields {
+    ob: String,
+    maker_id: String,
+    taker_id: String,
+    ticks: String,
+    chain_order: String,
+    chain_seconds: Option<f64>,
+    /// `[maker_id, taker_id]` — the row ids the decrement touches.
+    ids: Vec<String>,
+}
+
+impl FilledFields {
+    fn parse(event: &DecodedEvent, node: &EventNode) -> anyhow::Result<Self> {
+        let ob = node.src.as_deref().context("Filled: src missing")?.to_string();
+        let maker_id = uint_field_to_decimal(&event.value, "makerId")?;
+        let taker_id = uint_field_to_decimal(&event.value, "takerId")?;
+        let ticks = uint_field_to_decimal(&event.value, "ticks")?;
+        let chain_order = node_chain_order(node, "Filled")?;
+        let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+        let ids = vec![maker_id.clone(), taker_id.clone()];
+        Ok(Self { ob, maker_id, taker_id, ticks, chain_order, chain_seconds, ids })
+    }
+}
+
+/// Lock the maker/taker rows `FOR UPDATE` (whichever exist) and report whether
+/// each was a provisional sweep-cancel.
+async fn lock_filled_rows(
     tx: &mut Transaction<'_, Postgres>,
-    event: &DecodedEvent,
-    node: &EventNode,
-) -> anyhow::Result<ProjectionOutcome> {
-    let ob = node.src.as_deref().context("Filled: src missing")?;
-    let maker_id = uint_field_to_decimal(&event.value, "makerId")?;
-    let taker_id = uint_field_to_decimal(&event.value, "takerId")?;
-    let ticks = uint_field_to_decimal(&event.value, "ticks")?;
-    let chain_order = node_chain_order(node, "Filled")?;
-    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
-
-    let ids = vec![maker_id.clone(), taker_id.clone()];
-
-    // Lock both named rows. ZERO writes before we know both are present.
-    let locked: Vec<LockedOrder> = sqlx::query_as(
+    ob: &str,
+    ids: &[String],
+) -> anyhow::Result<Vec<LockedOrder>> {
+    sqlx::query_as(
         r#"select order_id::text as order_id, (swept_at is not null) as is_sweep_cancel
              from inference_orders
             where orderbook_address = $1 and order_id = any($2::numeric[])
             for update"#,
     )
     .bind(ob)
-    .bind(&ids)
+    .bind(ids)
     .fetch_all(&mut **tx)
     .await
-    .context("Filled lock both rows")?;
+    .context("Filled lock rows")
+}
 
-    let present: std::collections::HashSet<&str> =
-        locked.iter().map(|r| r.order_id.as_str()).collect();
-    if !present.contains(maker_id.as_str()) || !present.contains(taker_id.as_str()) {
-        return Ok(ProjectionOutcome::Deferred); // parent(s) not seen yet — zero writes
-    }
+/// Apply the fill decrement to whichever of the named rows exist (`any($2)` only
+/// touches present rows). The normal projector calls this once both legs are
+/// present; the expired-orphan repair calls it for the present leg(s) when the
+/// missing leg's `OrderPlaced` was dropped at capture and will never arrive.
+async fn apply_filled_decrement(
+    tx: &mut Transaction<'_, Postgres>,
+    f: &FilledFields,
+    locked: &[LockedOrder],
+) -> anyhow::Result<()> {
     let any_sweep_override = locked.iter().any(|r| r.is_sweep_cancel);
 
-    // Decrement both. Per-row CASE: FILLED and real-cancel (swept_at NULL) rows are
+    // Decrement present rows. Per-row CASE: FILLED and real-cancel (swept_at NULL) rows are
     // terminal no-ops; a SELL offer (is_buy=false) closes on the first fill; a sweep-
     // cancel (swept_at NOT NULL) is overridden (swept_at cleared, decremented).
     sqlx::query(
@@ -257,8 +280,8 @@ async fn apply_inference_filled(
                   end
             where o.orderbook_address = $1 and o.order_id = any($2::numeric[])"#,
     )
-    .bind(ob).bind(&ids).bind(&ticks).bind(&chain_order).bind(chain_seconds)
-    .execute(&mut **tx).await.context("Filled decrement both rows")?;
+    .bind(&f.ob).bind(&f.ids).bind(&f.ticks).bind(&f.chain_order).bind(f.chain_seconds)
+    .execute(&mut **tx).await.context("Filled decrement rows")?;
 
     // If we overrode a provisional sweep-cancel while the book is still in discovery,
     // reset the discovery sweep cursor so the reopened (lower) id is re-checked before
@@ -275,13 +298,104 @@ async fn apply_inference_filled(
                       updated_at = now()
                 where orderbook_address = $1 and last_reconciled_at is null"#,
         )
-        .bind(ob)
+        .bind(&f.ob)
         .execute(&mut **tx)
         .await
         .context("reset discovery sweep_cursor + bump override seq")?;
     }
 
+    Ok(())
+}
+
+async fn apply_inference_filled(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let f = FilledFields::parse(event, node)?;
+
+    // Lock both named rows. ZERO writes before we know both are present.
+    let locked = lock_filled_rows(tx, &f.ob, &f.ids).await?;
+    let present: std::collections::HashSet<&str> =
+        locked.iter().map(|r| r.order_id.as_str()).collect();
+    if !present.contains(f.maker_id.as_str()) || !present.contains(f.taker_id.as_str()) {
+        return Ok(ProjectionOutcome::Deferred); // parent(s) not seen yet — zero writes
+    }
+    apply_filled_decrement(tx, &f, &locked).await?;
     Ok(ProjectionOutcome::Applied)
+}
+
+/// What the dead-letter repair did to the read model for one expired inference
+/// orphan, used to log the actual data consequence (and asserted in tests).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpiredOrphanOutcome {
+    /// A `Filled` orphan whose present resting leg(s) were decremented, so depth
+    /// is corrected before the drop. `legs` is how many of maker/taker existed
+    /// (1 in the usual taker-only-missing case). The missing counterparty's
+    /// `OrderPlaced` was dropped at capture and is not recorded.
+    FilledDepthRepaired { legs: usize },
+    /// A `Filled` orphan with neither leg present (both `OrderPlaced` dropped):
+    /// nothing to decrement.
+    FilledNoLegPresent,
+    /// An `OrderCancelled` orphan: the order to cancel was never placed (its
+    /// `OrderPlaced` was dropped), so the authoritative cancel is lost. If a late
+    /// placement re-opens the order the phantom sweep reconciles it.
+    CancelLost,
+    /// Any other inference event past cutoff with no resting row to repair.
+    Nothing,
+}
+
+/// Best-effort read-model repair for an inference orphan that has exceeded the
+/// dead-letter cutoff: at least one leg's parent `OrderPlaced` was dropped at
+/// capture and will never arrive (so the projector returned `Deferred` forever).
+/// For a `Filled`, decrement whichever resting leg IS present so its depth is
+/// corrected rather than left permanently too-high (the phantom sweep cannot
+/// heal a partial fill — it only cancels rows that read zero on chain). For an
+/// `OrderCancelled` there is no row to cancel, so this only records the loss.
+/// Emits one `warn` naming the actual consequence and returns the outcome.
+pub async fn repair_expired_inference_orphan(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ExpiredOrphanOutcome> {
+    let suffix = event
+        .event_type
+        .strip_prefix("InferenceOrderBook.")
+        .unwrap_or(event.event_type.as_str());
+    let outcome = match suffix {
+        "Filled" => {
+            let f = FilledFields::parse(event, node)?;
+            let locked = lock_filled_rows(tx, &f.ob, &f.ids).await?;
+            if locked.is_empty() {
+                ExpiredOrphanOutcome::FilledNoLegPresent
+            } else {
+                apply_filled_decrement(tx, &f, &locked).await?;
+                ExpiredOrphanOutcome::FilledDepthRepaired { legs: locked.len() }
+            }
+        }
+        "OrderCancelled" => ExpiredOrphanOutcome::CancelLost,
+        _ => ExpiredOrphanOutcome::Nothing,
+    };
+
+    match &outcome {
+        ExpiredOrphanOutcome::FilledDepthRepaired { legs } => warn!(
+            msg_id = %node.msg_id, event_type = %event.event_type, legs,
+            "inference Filled orphan past cutoff: decremented present resting leg(s) so depth stays correct; the missing counterparty's OrderPlaced was dropped at capture and is not recorded"
+        ),
+        ExpiredOrphanOutcome::FilledNoLegPresent => warn!(
+            msg_id = %node.msg_id, event_type = %event.event_type,
+            "inference Filled orphan past cutoff: neither leg present (both OrderPlaced dropped); nothing to repair"
+        ),
+        ExpiredOrphanOutcome::CancelLost => warn!(
+            msg_id = %node.msg_id, event_type = %event.event_type,
+            "inference OrderCancelled orphan past cutoff: authoritative cancel lost (its OrderPlaced was dropped); the phantom sweep reconciles it if a late placement re-opens the order"
+        ),
+        ExpiredOrphanOutcome::Nothing => warn!(
+            msg_id = %node.msg_id, event_type = %event.event_type,
+            "inference orphan past cutoff dead-lettered; no resting row to repair"
+        ),
+    }
+    Ok(outcome)
 }
 
 async fn apply_inference_order_cancelled(
