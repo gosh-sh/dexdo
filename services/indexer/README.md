@@ -23,7 +23,7 @@ Config sections:
 - `app`: environment name and log level.
 - `database`: Postgres URL and pool settings.
 - `graphql`: gateway endpoint, page size, request timeout.
-- `indexer`: polling/reconciliation intervals, `reprojection_batch_size`, `ignored_addresses`, `dapp_id` (scopes ingestion to the DEXDO dapp; foreign events dropped before decode; see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#scope-filter-indexerdapp_id)), and `ignored_event_types` (event types dropped before decode, matched by `dst`; see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#no-op-filter-indexerignored_event_types)).
+- `indexer`: polling/reconciliation intervals, `reprojection_batch_size`, `ignored_addresses`, `dapp_id` (scopes ingestion to the DEXDO dapp; foreign events dropped before decode; see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#scope-filter-indexerdapp_id)), `ignored_event_types` (event types dropped before decode, matched by `dst`; see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#no-op-filter-indexerignored_event_types)), and the inference reconciler knobs: `inference_reconciliation_interval_ms`, `inference_reference_price_refresh_ms`, `inference_sweep_interval_ms`, `inference_orphan_cutoff_ms` (see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#inference-reconciler)).
 
 Logging is configured by environment variables, not YAML: `RUST_LOG` sets the
 filter (default `info`), and `LOG_DIR` (optional) makes the service additionally

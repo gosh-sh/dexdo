@@ -70,6 +70,33 @@ pub async fn run_refresh_loop(
         let (in_use, idle) = repo.pool_connection_stats();
         metrics.set_pool_connections(in_use, idle);
         metrics.set_projection_fallbacks(repo.projection_fallback_count());
+        metrics.set_inference_orphans_dropped(repo.inference_orphans_dropped_count());
+        metrics.set_decode_errors(repo.decode_errors_count());
+        metrics.set_decode_ambiguous_collisions(repo.decode_ambiguous_collisions_count());
+        match repo.inference_market_state_counts().await {
+            Ok((discovering, visible, failing)) => metrics.set_inference_market_states(
+                discovering.max(0) as u64,
+                visible.max(0) as u64,
+                failing.max(0) as u64,
+            ),
+            Err(err) => error!(?err, "inference market state metric refresh failed"),
+        }
+        match repo.inference_staleness_seconds().await {
+            Ok((price_lag, sweep_lag)) => {
+                metrics.set_inference_reference_price_lag_seconds(price_lag.max(0) as u64);
+                metrics.set_inference_sweep_lag_seconds(sweep_lag.max(0) as u64);
+            }
+            Err(err) => error!(?err, "inference staleness metric refresh failed"),
+        }
+        match repo.inference_order_status_counts().await {
+            Ok((open, filled, cancelled)) => metrics.set_inference_order_counts(
+                open.max(0) as u64,
+                filled.max(0) as u64,
+                cancelled.max(0) as u64,
+            ),
+            Err(err) => error!(?err, "inference order status metric refresh failed"),
+        }
+        metrics.set_inference_reconcile_failures(repo.inference_reconcile_failures_count());
         tokio::time::sleep(interval).await;
     }
 }

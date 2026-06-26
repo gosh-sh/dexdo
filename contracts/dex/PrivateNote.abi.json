@@ -101,7 +101,8 @@
 				{"name":"pricePerTick","type":"uint128"},
 				{"name":"maxTicks","type":"uint128"},
 				{"name":"tokenContract","type":"address"},
-				{"name":"flags","type":"uint8"}
+				{"name":"flags","type":"uint8"},
+				{"name":"nonce","type":"uint64"}
 			],
 			"outputs": [
 			]

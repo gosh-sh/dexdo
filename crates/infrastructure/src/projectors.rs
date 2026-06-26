@@ -71,6 +71,11 @@ pub async fn project_event(
         | "OrderBook.Queued"
         | "OrderBook.Rejected"
         | "OrderBook.CallbackBounced" => Ok(ProjectionOutcome::Applied),
+        et if et.starts_with("InferenceOrderBook.") => {
+            crate::inference_projectors::project_inference_event(tx, event, node)
+                .await
+                .with_context(|| format!("project {}", et))
+        }
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }
@@ -1068,7 +1073,7 @@ async fn apply_order_cancelled(
     Ok(ProjectionOutcome::Applied)
 }
 
-fn uint_field_to_decimal(value: &Value, key: &str) -> anyhow::Result<String> {
+pub(crate) fn uint_field_to_decimal(value: &Value, key: &str) -> anyhow::Result<String> {
     let raw = field_str(value, key)?;
     if raw.starts_with("0x") || raw.starts_with("0X") {
         uint256_hex_to_decimal(raw)
@@ -1096,13 +1101,13 @@ fn node_unix_seconds(node: &EventNode) -> Option<i64> {
 /// `pending_row_to_inputs` pulls it out of the NOT NULL column. Bubble up as
 /// an error so the projector fails the row instead of silently writing a
 /// stale value.
-fn node_chain_order(node: &EventNode, event_label: &str) -> anyhow::Result<String> {
+pub(crate) fn node_chain_order(node: &EventNode, event_label: &str) -> anyhow::Result<String> {
     node.msg_chain_order
         .clone()
         .with_context(|| format!("{event_label}: msg_chain_order missing on EventNode"))
 }
 
-fn field_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
+pub(crate) fn field_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
     value.get(key).and_then(Value::as_str).with_context(|| format!("missing field `{key}`"))
 }
 

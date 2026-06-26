@@ -1,20 +1,22 @@
 ---
 name: dexdo-deposit-shellnet
-description: Deposit onto DEXDO on Acki Nacki Shellnet by creating PrivateNotes (one per currency — SHELL / NACKL / USDC) from an ALREADY-DEPLOYED multisig. The multisig is an INPUT, supplied either as a 12-word seed phrase or as a key pair (keys.json file or 64-hex secret key); the skill re-derives the address, funds the wallet with the deposit currencies from the public giver, then deploys and funds the PrivateNotes. Load when the user wants to deposit, create PrivateNotes, fund a note, or trade — and already has a multisig (if they don't, run `dexdo-deploy-multisig-shellnet` first).
+description: Deposit onto DEXDO on Acki Nacki Shellnet by creating exactly the PrivateNotes the user asks for — any count, of any currency (NACKL / SHELL / USDC) at any nominal (e.g. "3 notes of 10000 NACKL", or one note per currency) — from an ALREADY-DEPLOYED multisig. The multisig is an INPUT, supplied either as a 12-word seed phrase or as a key pair (keys.json file or 64-hex secret key); the skill re-derives the address, funds the wallet with the needed currencies from the public giver, then deploys and funds each PrivateNote (each with its own random key). Load when the user wants to deposit, create one or more PrivateNotes, fund notes, or trade — and already has a multisig (if they don't, run `dexdo-deploy-multisig-shellnet` first).
 ---
 
 # DEXDO — Deposit / Create PrivateNotes (Shellnet)
 
-Skill **#0b** in the series. It takes an **already-deployed multisig as input** and produces **a list of PrivateNotes** (one per currency: SHELL / NACKL / USDC), saved to files, usable two ways:
+Skill **#0b** in the series. It takes an **already-deployed multisig as input** and produces **exactly the PrivateNotes the user asked for** — any number, of any currency, at any nominal (see [What to create](#what-to-create--the-notes-parameters)). Each note is saved to files, usable two ways:
 
 - **directly with the libraries** (`dodex-sdk` / `ackinacki-kit`) — sign on-chain operations with each note's key from its file;
-- **loaded into the API service** — each `notes/<tt>.account.json` is a ready-to-send `POST /api/v1/accounts` body.
+- **loaded into the API service** — each note's `account.json` is a ready-to-send `POST /api/v1/accounts` body.
 
 After the run the user has:
 
-- three deployed PrivateNotes (PN) — one per currency (SHELL / NACKL / USDC), each with its own deposit;
+- the requested PrivateNotes (PN) deployed — each with its own random key and its own deposit at the requested nominal;
 - each PN topped up with vmshell (gas) for trading operations;
 - the multisig holding a SHELL reserve for future trading calls.
+
+> **Default (no spec given):** if the user just says "onboard / deposit" with no count/currency, fall back to the classic full onboarding — **one `N100` note each of SHELL, NACKL, USDC**. Any explicit request ("3 notes of 10000 NACKL") overrides this.
 
 ## Input — the multisig (required)
 
@@ -28,6 +30,39 @@ The multisig is supplied **one of two ways** (the user picks whichever they have
 Both reduce to the same thing: a `Multisig.keys.json` keypair, from which the skill re-derives the on-chain address with `genaddr`. The seed phrase and the key pair are equivalent — either uniquely controls the wallet. Resolving the input is **Step 2**.
 
 > The address is **not** asked for separately — it is deterministically recomputed from the keypair + the `Multisig.tvc` (`v2.1.0`). This is why both skills must use the same artifact tag.
+
+## What to create — the notes (parameters)
+
+Resolve **what to create** from the user's request, then build a `NOTES` work-list the rest of the skill consumes. Three things define each note:
+
+| Parameter | Meaning | Values | Default |
+|---|---|---|---|
+| **count** | how many notes | any `N ≥ 1` | — |
+| **token** | deposit currency of each note | `nackl` / `shell` / `usdc` | — |
+| **nominal** | deposit per note | `N100` / `N1000` / `N10000` (= 100 / 1 000 / 10 000 units) | `N100` |
+
+Examples:
+
+- "3 notes of 10000 NACKL" → `count=3, token=nackl, nominal=N10000`.
+- "a note with 1000 USDC" → `count=1, token=usdc, nominal=N1000`.
+- "onboard me" / no spec → the default full set: one `N100` note each of shell, nackl, usdc.
+
+**Each note is an independent PrivateNote with its own random key** — the binary calls `generate_random_sign_keys` once per fresh `--output`, so creating N notes of the *same* `(token, nominal)` with distinct state files yields N distinct notes (distinct DIH, distinct address). No special index/derivation flag is needed.
+
+Build the work-list as `token:nominal` entries — **one entry per note to create**. This single array drives both funding (Step 3) and creation (Step 4):
+
+```sh
+# Fill this from the user's request. One entry per note.
+# Example — "3 notes of 10000 NACKL":
+NOTES=(nackl:N10000 nackl:N10000 nackl:N10000)
+# Example — default full onboarding (one per currency at N100):
+# NOTES=(shell:N100 nackl:N100 usdc:N100)
+# Example — a mix is fine too:
+# NOTES=(nackl:N10000 nackl:N10000 shell:N1000)
+echo "will create ${#NOTES[@]} note(s): ${NOTES[*]}"
+```
+
+Nominal → units: `N100`=100, `N1000`=1 000, `N10000`=10 000. Raw on-chain value = `units × 10^decimals` (NACKL & SHELL: 9 decimals; USDC: 6).
 
 ## When to run
 
@@ -45,7 +80,7 @@ If the user does **not** have a multisig yet → run **`dexdo-deploy-multisig-sh
 
 - **Network:** Shellnet only. Mainnet has no public giver and needs a different funding flow — out of scope.
 - **Wallet:** a standard `Multisig` with **a single custodian** (`reqConfirms=1`), already Active. Multi-custodian configs require extra `confirmTransaction` calls and are not covered here.
-- **Currency:** a single run creates **three PNs** — one each for SHELL / NACKL / USDC (Step 4 runs the binary three times). Don't need a currency — drop it from the loop in Step 4 and from the funding in Step 3.
+- **What to create:** whatever the `NOTES` work-list says (see [What to create](#what-to-create--the-notes-parameters)) — any count, any currency, any nominal. Step 4 runs the binary once per `NOTES` entry; Step 3 funds the aggregate. The old "always three, one per currency" behaviour is just the default `NOTES=(shell:N100 nackl:N100 usdc:N100)`.
 
 ## Out of scope
 
@@ -64,13 +99,13 @@ Target layout after setup:
 <WORKSPACE>/
 ├── dexdo/        gosh-sh/dexdo @ dev (default branch)
 ├── multisig/     wallet keypair (INPUT): Multisig.keys.json + Multisig.abi.json + Multisig.tvc (artifacts)
-├── notes/        PrivateNotes (SECRET): pn_state.<tt>.json (resume) + <tt>.account.json (POST /accounts body for loading into the API)
+├── notes/        PrivateNotes (SECRET): one subdir per note — <token>-<i>/pn_state.json (resume) + <token>-<i>/<token>.account.json (POST /accounts body for loading into the API)
 └── giver/        GiverV3.abi.json — shellnet-only funding artifact (no such folder on mainnet)
 ```
 
-`multisig/` and `notes/` are the universal layout (same on mainnet); `giver/` is network-specific (shellnet). Secrecy is per-file: recovery-critical are `Multisig.keys.json` and all `pn_state.*.json` (they go into the back-up checklist in Step 5); `*.abi.json`/`*.tvc` are disposable and re-downloadable.
+`multisig/` and `notes/` are the universal layout (same on mainnet); `giver/` is network-specific (shellnet). Secrecy is per-file: recovery-critical are `Multisig.keys.json` and every note's `pn_state.json` (they go into the back-up checklist in Step 5); `*.abi.json`/`*.tvc` are disposable and re-downloadable.
 
-`pn_state.<tt>.json` and `<tt>.account.json` hold the note's **secret key** (`pnSeckeyHex`), so `onboard_user_shellnet` writes them **mode 0600** (owner-only). If you copy or regenerate them by other means, keep `0600` (`chmod 600 notes/*.json`) — never leave a note's key world-readable, and never commit these files.
+Each note's `pn_state.json` and `<token>.account.json` hold the note's **secret key** (`pnSeckeyHex`), so `onboard_user_shellnet` writes them **mode 0600** (owner-only). If you copy or regenerate them by other means, keep `0600` (`chmod 600 notes/*/*.json`) — never leave a note's key world-readable, and never commit these files.
 
 The dexdo SDK pulls `ackinacki-kit` as a git dependency (tag `v2.1.0`) — cargo clones the kit into its own cache at build time. We do **not** clone the kit locally: the three ABI/TVC artifacts are downloaded straight from `raw.githubusercontent` of that tag (Step 1).
 
@@ -195,7 +230,7 @@ If the build fails resolving `ackinacki-kit` — check that the kit's `v2.1.0` t
 After setup the body of the skill operates on:
 - `$WORKSPACE/dexdo` — for the repo,
 - `$WORKSPACE/multisig` — wallet: `Multisig.keys.json` (resolved in Step 2) + `Multisig.abi.json` + `Multisig.tvc`,
-- `$WORKSPACE/notes` — `pn_state.{shell,nackl,usdc}.json` (secret),
+- `$WORKSPACE/notes` — one subdir per note: `<token>-<i>/pn_state.json` (secret),
 - `$WORKSPACE/giver` — `GiverV3.abi.json`,
 - `$MULTISIG_ADDRESS` — derived in Step 2.
 
@@ -204,7 +239,7 @@ After setup the body of the skill operates on:
 The skill writes user-owned secrets to disk and submits real transactions. Run the flow without gating prompts — the user who requested the deposit has thereby already authorized the full set of on-chain actions in the "Overall flow" below. The constraints that remain:
 
 - **Show every command in full** before executing. No silent work — this is about transparency, not consent. **Exception:** when the user pastes a seed phrase or secret key as the input, do NOT echo it back into the chat or into a logged command — write it to the keys file and refer to it by file path thereafter (see Step 2).
-- `multisig/Multisig.keys.json` (multisig keypair) and all `notes/pn_state.<tt>.json` (PN keypair + state, one file per currency) live **only** in `$WORKSPACE/multisig/` and `$WORKSPACE/notes/` (mode 0700) on the user's machine. Don't copy them into the chat log, the paste buffer, or anywhere else.
+- `multisig/Multisig.keys.json` (multisig keypair) and every `notes/<token>-<i>/pn_state.json` (PN keypair + state, one subdir per note) live **only** in `$WORKSPACE/multisig/` and `$WORKSPACE/notes/` (mode 0700) on the user's machine. Don't copy them into the chat log, the paste buffer, or anywhere else.
 - If a step fails mid-way — **stop and report**. Don't retry blindly: partial on-chain state may need inspection before the next attempt. This is an error stop, not a consent request.
 
 ## Overall flow
@@ -212,9 +247,9 @@ The skill writes user-owned secrets to disk and submits real transactions. Run t
 ```
 [1] fetch multisig + giver artifacts from ackinacki-kit (Multisig.abi.json, Multisig.tvc, GiverV3.abi.json)
 [2] resolve the INPUT multisig → Multisig.keys.json + re-derived $MULTISIG_ADDRESS; assert it is Active on-chain
-[3] giver: 1000 SHELL + 100 NACKL + 100 USDC to the Active multisig (flag=1) — deposit + gas vouchers for 3 PNs
-[4] cargo run --bin onboard_user_shellnet × 3 (shell, nackl, usdc) — three PNs; per PN: pn_state.<tt>.json (resume) + <tt>.account.json (POST /accounts body for the API)
-[5] handoff: summary of the three PNs + where the <tt>.account.json files are + back-up checklist
+[3] giver: fund the Active multisig with the aggregate of NOTES — (flag=1) ECC: deposit currency per note + 100-SHELL gas voucher per note + SHELL reserve; AND (flag=16) native vmshell gas scaled to the note count (the multisig pays submitTransaction in native — skipping this makes a later note silently time out)
+[4] cargo run --bin onboard_user_shellnet once per NOTES entry — one PN per note, each in its own notes/<token>-<i>/ subdir: pn_state.json (resume) + <token>.account.json (POST /accounts body for the API)
+[5] handoff: summary of every PN created + where each account.json is + back-up checklist
 ```
 
 ## Step 1 — Prepare artifacts
@@ -306,127 +341,161 @@ tvm-cli -u shellnet.ackinacki.org account "$MS_ADDR" | grep -E 'acc_type|balance
 
 Expected: `acc_type: Active`. If it shows `Uninit` or `acc_type: -` (not found) — **stop and report**: the keypair/seed is for an undeployed wallet. Direct the user to run `dexdo-deploy-multisig-shellnet` (or supply the correct seed/keypair). Do not attempt to deploy here — that's the other skill's job.
 
-## Step 3 — Fund the multisig (all three deposit currencies)
+## Step 3 — Fund the multisig (aggregate of the NOTES list)
 
-The multisig is Active — use `flag=1`. Fund **all three ECC currencies** in one giver call: SHELL (currency 2), NACKL (currency 1), USDC (currency 3). With `flag=1` to an Active recipient they all land correctly in the `ecc` balance (verified empirically — with `flag=16` SHELL would go into native vmshell, which we don't want here).
+The multisig is Active. **Two giver flags matter, and you need BOTH:**
 
-Per-currency breakdown — sized for 3 PNs (one per token) with deposit nominal N100 + a 100-SHELL gas voucher per PN:
+- **`flag=1`** credits funds to the recipient's **ECC** balance — the deposit currencies and the SHELL gas vouchers each PrivateNote draws from.
+- **`flag=16`** credits SHELL as **native vmshell** — the gas the multisig itself spends on its own `submitTransaction` calls.
 
-| Currency | id | decimals | Amount funded | Why |
-|---|---|---|---|---|
-| SHELL | 2 | 9 | **1000 SHELL** (`1_000_000_000_000` nano) | 100 for its own deposit voucher + 3×100 for the gas vouchers of all PNs + ~600 reserve for trading `submitTransaction`s |
-| NACKL | 1 | 9 | **100 NACKL** (`100_000_000_000` nano) | N100 deposit voucher for the NACKL PN |
-| USDC  | 3 | 6 | **100 USDC** (`100_000_000` nano) | N100 deposit voucher for the USDC PN |
+> ⚠️ **The classic multi-note trap (this is a real bug if you skip it).** Each note costs the multisig **native vmshell** — it does two `submitTransaction`s (deposit voucher + gas voucher), and `submitTransaction` is paid in native, **not** ECC. Funding only ECC works for one or two notes, then the native balance drains and a later note **fails silently**: the external `submitTransaction` is accepted, but its internal message to `RootPN.generateVoucher` under-funds, no `VoucherGenerated` event is emitted, and the binary dies on a ~480s `"Timed out waiting for VoucherGenerated event"`. **That timeout is depleted native gas — NOT an indexer lag.** So fund native vmshell up front, scaled to the note count.
 
-If you want larger nominals (N1000 / N10000) — scale: each PN at the desired nominal is 10/100× more. SHELL = 100 (own deposit, if there's a SHELL PN at the same nominal) + 100×N (gas voucher) + reserve.
+### 3a — compute funding from the NOTES list
 
-> The wallet may already hold a SHELL reserve from the deploy skill's pre-deploy funding (it sat in native vmshell, not ecc). This Step adds the **ecc** balances the PN vouchers actually draw from, so run it even if the native balance looks healthy.
-
-Send it all in one giver call:
+> **Shell note:** these snippets use only indexed arrays + scalars — **no bash associative arrays** (`declare -A` / `${!arr[@]}`), which break under zsh (the macOS default shell). They run as-is in bash *and* zsh.
 
 ```sh
-FUND_TX=$(tvm-cli -j -u shellnet.ackinacki.org callx \
-  --abi "$WORKSPACE/giver/GiverV3.abi.json" \
-  --addr "$GIVER_ADDR" \
-  -m sendCurrencyWithFlag \
-  '{"dest":"'"$MULTISIG_ADDRESS"'","value":0,"ecc":{"1":100000000000,"2":1000000000000,"3":100000000},"flag":1}' \
-  | jq -r .tx_hash)
-echo "fund_tx=$FUND_TX"
-# Guard: a failed callx yields empty/"null" — polling that would spin forever.
-test -n "$FUND_TX" && [ "$FUND_TX" != "null" ] || { echo "giver callx returned no tx_hash — inspect the callx output above; stop and report"; exit 1; }
+# decimals: nackl/shell = 9, usdc = 6.  gas voucher per note = 100 SHELL (ECC id 2).
+nackl_raw=0; usdc_raw=0; shell_dep=0; shell_voucher=0
+for spec in "${NOTES[@]}"; do
+  tok=${spec%%:*}; units=${spec##*:}; units=${units#N}     # nackl:N10000 -> tok=nackl, units=10000
+  case "$tok" in
+    nackl) nackl_raw=$(( nackl_raw + units * 1000000000 )) ;;
+    usdc)  usdc_raw=$((  usdc_raw  + units * 1000000 )) ;;
+    shell) shell_dep=$(( shell_dep + units * 1000000000 )) ;;
+    *) echo "bad token in NOTES: $tok"; exit 1 ;;
+  esac
+  shell_voucher=$(( shell_voucher + 100000000000 ))   # +100 SHELL gas voucher per note
+done
+shell_total=$(( shell_dep + shell_voucher + 300000000000 ))   # + 300 SHELL flat ECC reserve
+
+# Build the ECC JSON for flag=1 — only the non-zero currencies.
+ecc=""
+[ "$nackl_raw"   -gt 0 ] && ecc="${ecc:+$ecc,}\"1\":$nackl_raw"
+[ "$shell_total" -gt 0 ] && ecc="${ecc:+$ecc,}\"2\":$shell_total"
+[ "$usdc_raw"    -gt 0 ] && ecc="${ecc:+$ecc,}\"3\":$usdc_raw"
+ECC_JSON="{$ecc}"
+echo "ecc (flag=1) = $ECC_JSON"
+
+# Native vmshell gas for the flag=16 call. Each note burns a few vmshell across its
+# two submitTransactions; provision generously (SHELL is free from the giver on
+# shellnet): 10 vmshell/note + 20 base.
+NATIVE_GAS=$(( (${#NOTES[@]} * 10 + 20) * 1000000000 ))
+echo "native vmshell (flag=16) = $NATIVE_GAS"
 ```
 
-Confirm by polling the hash:
+> Example — `NOTES=(nackl:N10000 nackl:N10000 nackl:N10000)` → ecc `{"1":30000000000000,"2":600000000000}` (30 000 NACKL + 300 SHELL reserve + 3×100 SHELL vouchers) **and** native `50000000000` (50 vmshell).
+
+### 3b — two giver calls: ECC (flag=1) then native vmshell (flag=16)
 
 ```sh
-until curl -sX POST https://shellnet.ackinacki.org/graphql -H 'Content-Type: application/json' \
-  --data "{\"query\":\"{blockchain{transaction(hash:\\\"$FUND_TX\\\"){now aborted}}}\"}" \
-  | grep -q '"now"'; do sleep 1; done
-echo "deposit fund confirmed"
+fund() {  # $1 = ecc-json, $2 = flag — sends, then blocks until the tx confirms
+  local tx
+  tx=$(tvm-cli -j -u shellnet.ackinacki.org callx \
+    --abi "$WORKSPACE/giver/GiverV3.abi.json" --addr "$GIVER_ADDR" \
+    -m sendCurrencyWithFlag \
+    '{"dest":"'"$MULTISIG_ADDRESS"'","value":0,"ecc":'"$1"',"flag":'"$2"'}' | jq -r .tx_hash)
+  [ -n "$tx" ] && [ "$tx" != "null" ] || { echo "giver callx (flag=$2) returned no tx_hash; stop and report" >&2; return 1; }
+  until curl -sX POST https://shellnet.ackinacki.org/graphql -H 'Content-Type: application/json' \
+    --data "{\"query\":\"{blockchain{transaction(hash:\\\"$tx\\\"){now aborted}}}\"}" | grep -q '"now"'; do sleep 1; done
+  echo "flag=$2 fund tx=$tx confirmed"
+}
+
+fund "$ECC_JSON" 1            || exit 1   # deposits + SHELL vouchers -> ECC
+fund "{\"2\":$NATIVE_GAS}" 16 || exit 1   # SHELL -> native vmshell gas
 ```
 
-Verify all three currencies arrived:
+> The `flag=16` call is the fix for the silent multi-note failure above. If a note ever still dies on the 480s `VoucherGenerated` timeout mid-run, the cure is the same: re-run the `flag=16` top-up (more native vmshell) and resume Step 4 — never assume it's the indexer.
+
+Verify both balances:
 
 ```sh
 tvm-cli -u shellnet.ackinacki.org account "$MS_ADDR" | grep -E 'acc_type|balance|ecc'
 ```
 
-Expected: the `ecc:` line contains `{"1":"100000000000","2":"1000000000000","3":"100000000"}` (raw nominals). The native `balance` is whatever the wallet already held.
+Expected: the `ecc:` line contains the `$ECC_JSON` amounts (raw nano), and the native `balance` rose by ~`$NATIVE_GAS` nanovmshell.
 
-## Step 4 — Run `onboard_user_shellnet` (three times, one PN per currency)
+## Step 4 — Create the notes (`onboard_user_shellnet`, once per NOTES entry)
 
-The binary takes a single `--token-type` per invocation and creates one PN. To get three PNs — run it three times, each with a different `--token-type` and its own `--output` (a separate state file so they don't overwrite each other). Each run goes through **three steps** (the binary prints `step 1/3 … 3/3`), state is idempotent:
+The binary creates **one PN per run** — a single `--token-type` + `--nominal`, with its own `--output`. Loop over `NOTES`: each entry gets its own **subdirectory** `notes/<token>-<i>/`. Each run does three idempotent steps (it prints `step 1/3 … 3/3`):
 
 ```
-step 1/3  deposit voucher (via multisig.submitTransaction) + RootPN.deployPrivateNote
-step 2/3  SHELL gas voucher (via multisig.submitTransaction) + RootPN.sendEccShellToPrivateNote
+step 1/3  deposit voucher (multisig.submitTransaction) + RootPN.deployPrivateNote
+step 2/3  SHELL gas voucher (multisig.submitTransaction) + RootPN.sendEccShellToPrivateNote
 step 3/3  PrivateNote.getDetails — sanity check
 ```
 
-Both multisig stages (in steps 1/3 and 2/3) go through `multisig.submitTransaction`: after Step 3 the multisig holds ECC SHELL (currency 2) in `ecc[2]`, plus the needed deposit token in `ecc[1|3]`. The ECC currencies forward through correctly because incoming funds with `flag=1` are credited as ECC, not burned into native.
+The deposit + gas-voucher stages forward correctly because the Step-3 funds were credited as ECC (`flag=1`), not burned into native vmshell.
 
-Run for all three currencies (order doesn't matter — each run is self-contained):
+> **Why a subdirectory per note (do not skip).** The binary writes the API file as `<token>.account.json` **next to `--output`, named by currency only — no index**. Two notes of the *same* currency in the *same* directory would therefore overwrite each other's `account.json`. A dedicated `notes/<token>-<i>/` per note keeps both files isolated and keeps `--output` stable for resume. (PN keys themselves never collide — each fresh `--output` gets a new random key.)
 
 ```sh
 cd "$WORKSPACE/dexdo/sdk"
-
-for TT in shell nackl usdc; do
+# Per-token index counters (no associative arrays — zsh-safe).
+i_nackl=0; i_shell=0; i_usdc=0
+for spec in "${NOTES[@]}"; do
+  tok=${spec%%:*}; nom=${spec##*:}
+  case "$tok" in
+    nackl) i_nackl=$(( i_nackl + 1 )); idx=$i_nackl ;;
+    shell) i_shell=$(( i_shell + 1 )); idx=$i_shell ;;
+    usdc)  i_usdc=$((  i_usdc  + 1 )); idx=$i_usdc ;;
+  esac
+  note_dir="$WORKSPACE/notes/$tok-$idx"
+  mkdir -p "$note_dir"
+  echo "=== creating note $tok-$idx ($nom) ==="
   cargo run --release --bin onboard_user_shellnet -- \
     --multisig-address "$MULTISIG_ADDRESS" \
     --multisig-keys-file "$WORKSPACE/multisig/Multisig.keys.json" \
-    --nominal N100 \
-    --token-type "$TT" \
+    --nominal "$nom" \
+    --token-type "$tok" \
     --endpoint shellnet.ackinacki.org \
-    --output "$WORKSPACE/notes/pn_state.$TT.json"
+    --output "$note_dir/pn_state.json"
 done
 ```
 
-After the runs, `$WORKSPACE/notes/` will hold **two** files per currency:
+After the loop, each `notes/<token>-<i>/` holds **two** files:
 
-- `pn_state.<tt>.json` — the binary's resume state (address, PN keys, DIH in decimal, checkpoints). **Not loaded into the API.**
-- `<tt>.account.json` — the `POST /api/v1/accounts` request body (`pnAddress`/`pnPubkeyHex`/`pnSeckeyHex`/`pnDihHex`, **DIH in hex**). This is the artifact for loading the PN into the API service later (by hand or via the registration endpoint). **This skill sends it nowhere** — it only saves it.
+- `pn_state.json` — the binary's resume state (PN address, PN keys, DIH in decimal, checkpoints). **Not loaded into the API.**
+- `<token>.account.json` — the `POST /api/v1/accounts` body (`pnAddress`/`pnPubkeyHex`/`pnSeckeyHex`/`pnDihHex`, **DIH in hex**). The artifact for loading the PN into the API later. **This skill sends it nowhere** — it only saves it.
 
-So: `shell.account.json`, `nackl.account.json`, `usdc.account.json` + three `pn_state.*.json`.
+E.g. `NOTES=(nackl:N10000 nackl:N10000 nackl:N10000)` → `notes/nackl-1/`, `notes/nackl-2/`, `notes/nackl-3/`, each with `pn_state.json` + `nackl.account.json`.
 
 Notes for the agent:
 
-- The **first** run generates the KZG SRS (~64 MB, ~30 s CPU) under `./params/`. The next two reuse it → faster.
-- The halo2 deposit-voucher step is slow (several seconds per stage). Don't treat silence in the output as a hang for at least a few minutes.
-- The tool **persists state after each successful step**. If one of the three runs fails — re-run with the same `--output`/`--multisig-address`/`--nominal`/`--token-type`/`--endpoint` and it resumes from the first incomplete step. Changing any of them for an existing `--output` is rejected (common case: a stale state file from a previous multisig — the binary fails with `existing state multisig_address … != requested …`; remove/rename the old state and re-run).
-- Both `pn_state.<tt>.json` and `<tt>.account.json` contain the PN's **secret key** (`pnSeckeyHex`). Treat them all as user secrets — don't commit, don't paste.
-- If a PN isn't needed for some currency — just drop it from `for TT in ...` and don't fund the corresponding entry in Step 3.
+- The **first** run generates the KZG SRS (~64 MB, ~30 s CPU) under `./params/`; later runs reuse it → faster.
+- The halo2 voucher steps are slow (several seconds per stage). Silence in the output is not a hang for at least a few minutes.
+- State persists after each successful step. If a run fails — re-run with the **same** `--output`/`--multisig-address`/`--nominal`/`--token-type`/`--endpoint` and it resumes from the first incomplete step. Changing any of them for an existing `--output` is rejected (common case: a stale state file from a previous multisig — `existing state multisig_address … != requested …`; remove/rename that note's subdir and re-run).
+- Every `pn_state.json` and `<token>.account.json` holds the PN's **secret key** (`pnSeckeyHex`). Treat them all as user secrets — don't commit, don't paste.
 
 ## Step 5 — Handoff
 
-Read the three `pn_state.<tt>.json` files and show a summary table:
+Read every `notes/<token>-<i>/pn_state.json` and show one row per note created:
 
+```sh
+# Summary table from the per-note state files.
+printf '\nDEXDO deposit complete (Shellnet).\n\nMultisig wallet:   %s\n\n' "$MULTISIG_ADDRESS"
+printf '%-12s | %-3s | %-50s | %s\n' "Dir" "Tok" "PrivateNote address" "API file to load"
+for d in "$WORKSPACE"/notes/*/; do
+  [ -f "$d/pn_state.json" ] || continue
+  addr=$(jq -r '.pn_address // .pnAddress // "?"' "$d/pn_state.json")
+  acct=$(ls "$d"/*.account.json 2>/dev/null | head -1)
+  printf '%-12s | %-3s | %-50s | %s\n' "$(basename "$d")" "${d%/}" "$addr" "$acct"
+done
+printf '\nKeys file:         %s\n' "$WORKSPACE/multisig/Multisig.keys.json"
 ```
-DEXDO deposit complete (Shellnet).
 
-Multisig wallet:   <multisig_address>
-
-Token       | PrivateNote address              | Nominal | API file to load
-------------|----------------------------------|---------|--------------------------
-SHELL (2)   | <pn_address from shell state>    | N100    | $WORKSPACE/notes/shell.account.json
-NACKL (1)   | <pn_address from nackl state>    | N100    | $WORKSPACE/notes/nackl.account.json
-USDC (3)    | <pn_address from usdc state>     | N100    | $WORKSPACE/notes/usdc.account.json
-
-Each <tt>.account.json is a ready POST /api/v1/accounts body (load into the API
-later; this skill sends nothing). Alongside it sits pn_state.<tt>.json (resume).
-
-Keys file:         $WORKSPACE/multisig/Multisig.keys.json
-```
+Render it for the user as a clean table — one line per note: its directory (`<token>-<i>`), PrivateNote address, nominal, and the path to its `<token>.account.json`. Each `account.json` is a ready `POST /api/v1/accounts` body (load into the API later; this skill sends nothing); alongside it sits `pn_state.json` (resume).
 
 **Back-up checklist** (show the user at the end as a reminder; don't gate later skills on these items):
 
 - [ ] `$WORKSPACE/multisig/Multisig.keys.json` (and the seed phrase it came from) copied somewhere safe — wallet loss = funds loss
-- [ ] `$WORKSPACE/notes/` in full (`pn_state.*.json` + `*.account.json`) copied somewhere safe — both file types contain PN secret keys
+- [ ] `$WORKSPACE/notes/` in full (every `<token>-<i>/pn_state.json` + `<token>.account.json`) copied somewhere safe — both file types contain PN secret keys
 
-The PN keys (`pnSeckeyHex`) inside `<tt>.account.json` / `pn_state.<tt>.json` are what the API/trading skill signs orders with. `<tt>.account.json` is what you load into the API service once you get to trading.
+The PN keys (`pnSeckeyHex`) inside each note's `account.json` / `pn_state.json` are what the API/trading skill signs orders with. The `account.json` is what you load into the API service once you get to trading.
 
 ## What the user has after the skill
 
-Three funded on-chain PrivateNotes (one per currency: SHELL / NACKL / USDC) under user-held keys, ready to:
+The requested set of funded on-chain PrivateNotes (whatever `NOTES` specified — N notes of one currency, one per currency, or a mix) under user-held keys, ready to:
 
 - place bets on prediction markets;
 - buy/sell full sets of outcome tokens;

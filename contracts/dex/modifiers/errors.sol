@@ -216,4 +216,8 @@ abstract contract Errors {
     /// @notice An inference-market stream/dispute lock is held; withdraw / split
     ///         / merge are gated until the deal releases it (spec §4.3).
     uint16 constant ERR_STREAM_LOCKED = 405;
+    /// @notice The `tokenContract` passed to `postSellOffer` is not a canonical
+    ///         TokenContract derived from the pinned code + the seller note's key
+    ///         (an attacker could otherwise route the buyer's SHELL to a fake).
+    uint16 constant ERR_BAD_TOKEN_CONTRACT = 406;
 }

@@ -13,6 +13,7 @@ use dodex_infrastructure::graphql::EventEdge;
 use dodex_infrastructure::graphql::EventsPage;
 use dodex_infrastructure::graphql::GraphqlClient;
 use dodex_infrastructure::indexer_repo::IndexerRepository;
+use dodex_infrastructure::inference_reconciler::InferenceReconciler;
 use dodex_infrastructure::oracle_event_list_reconciler::OracleEventListReconciler;
 use dodex_infrastructure::reconciler::MarketReconciler;
 use dodex_infrastructure::signal::run_config_reload_loop;
@@ -23,7 +24,9 @@ use tracing::warn;
 
 mod metrics_refresh;
 
-const STREAM_NAME: &str = "blockchain_events";
+// Single source of truth shared with the repo, whose orphan dead-letter reads
+// this stream's `at_head` — they must name the same cursor row.
+const STREAM_NAME: &str = dodex_infrastructure::indexer_repo::CAPTURE_STREAM;
 const MAX_PAGES_PER_TICK: u32 = 100;
 
 #[tokio::main]
@@ -63,7 +66,9 @@ async fn main() -> anyhow::Result<()> {
     // rows once their parent lands. Continuous-drain with an idle pause of
     // polling_interval_ms — no point polling for pending rows faster than
     // capture produces them.
-    let projector = repo.clone();
+    let projector = repo.clone().with_inference_orphan_cutoff(Duration::from_millis(
+        config.indexer.inference_orphan_cutoff_ms,
+    ));
     let projection_idle_interval = Duration::from_millis(config.indexer.polling_interval_ms);
     let projection_batch_size = config.indexer.reprojection_batch_size;
     tokio::spawn(projector.run_reprojection_loop(projection_idle_interval, projection_batch_size));
@@ -87,6 +92,25 @@ async fn main() -> anyhow::Result<()> {
     info!(
         interval_ms = config.indexer.oracle_event_list_reconciliation_interval_ms,
         "oracle event list reconciler started"
+    );
+
+    let inf_graphql = GraphqlClient::new(
+        config.graphql.endpoint.clone(),
+        Duration::from_millis(config.graphql.request_timeout_ms),
+    )?;
+    let inference_reconciler = InferenceReconciler::new(
+        pool.clone(),
+        inf_graphql,
+        decoder.clone(),
+        Duration::from_millis(config.indexer.inference_reference_price_refresh_ms),
+        Duration::from_millis(config.indexer.inference_sweep_interval_ms),
+    )
+    .with_failure_counter(repo.inference_reconcile_failures_handle());
+    let inf_interval = Duration::from_millis(config.indexer.inference_reconciliation_interval_ms);
+    tokio::spawn(inference_reconciler.run_loop(inf_interval));
+    info!(
+        interval_ms = config.indexer.inference_reconciliation_interval_ms,
+        "inference reconciler started"
     );
 
     // OTLP metrics. `init()` returns `None` when no OTEL endpoint env var is
@@ -325,8 +349,10 @@ async fn drain_events(
         stats.foreign_skipped += filter_stats.foreign_skipped;
         stats.type_ignored += filter_stats.type_ignored;
 
+        let at_head = !page.page_info.has_next_page;
         let end_cursor = page.page_info.end_cursor.as_deref();
-        let persisted = repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder).await?;
+        let persisted =
+            repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder, at_head).await?;
         stats.inserted += persisted.inserted;
         stats.skipped += persisted.skipped;
         stats.decoded += persisted.decoded;

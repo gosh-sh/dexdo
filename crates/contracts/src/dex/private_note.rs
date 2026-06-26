@@ -462,6 +462,11 @@ pub struct ParamsOfPostSellOffer {
     pub max_ticks: u128,
     pub token_contract: String,
     pub flags: u8,
+    /// Deal nonce. The contract verifies `token_contract` is the canonical
+    /// TokenContract derived from the pinned code + the seller note's key and
+    /// this nonce (else the offer reverts with `ERR_BAD_TOKEN_CONTRACT`); it
+    /// must match the nonce the `token_contract` address was computed from.
+    pub nonce: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1539,6 +1544,7 @@ mod inference_abi_tests {
                 max_ticks: 1,
                 token_contract: "0:1".into(),
                 flags: 0,
+                nonce: 0,
             }),
             abi_input_names("postSellOffer")
         );

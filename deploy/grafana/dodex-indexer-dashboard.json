@@ -1,0 +1,861 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "All OTLP metrics exported by the dodex indexer (service.name=dodex-indexer), via a Prometheus data source. Counters carry the OTel-default _total suffix; flip the 'counter_suffix' variable to empty if your collector sets add_metric_suffixes:false.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["dodex", "indexer", "inference"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": { "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(indexer_projection_backlog, job)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "job",
+        "multi": true,
+        "name": "job",
+        "options": [],
+        "query": {
+          "query": "label_values(indexer_projection_backlog, job)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(indexer_projection_backlog{job=~\"$job\"}, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(indexer_projection_backlog{job=~\"$job\"}, instance)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "text": "_total", "value": "_total" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Counter suffix (OTel→Prom)",
+        "multi": false,
+        "name": "counter_suffix",
+        "options": [
+          { "selected": true, "text": "_total", "value": "_total" },
+          { "selected": false, "text": "(none)", "value": "" }
+        ],
+        "query": "_total,",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Dodex Indexer",
+  "uid": "dodex-indexer",
+  "version": 1,
+  "weekStart": "",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Overview — health at a glance",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Projection backlog",
+      "description": "raw_events rows waiting for the projection loop (typed + decoded, processed_at NULL).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "id": 2,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 500 },
+              { "color": "red", "value": 5000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "sum(indexer_projection_backlog{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "backlog",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Projection lag",
+      "description": "Wall-clock age of the oldest eligible-but-unprojected raw_events row; read-model staleness.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "id": 3,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "red", "value": 120 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "max(indexer_projection_lag_seconds{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "lag",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Capture cursor age",
+      "description": "Seconds since the capture cursor last advanced; 0 when capture has not started.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "id": 4,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 120 },
+              { "color": "red", "value": 300 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "max(indexer_capture_cursor_age_seconds{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "cursor age",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Inference markets — visible",
+      "description": "Inference markets with last_reconciled_at stamped (served by the API).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "id": 5,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "sum(indexer_inference_markets{state=\"visible\",job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "visible",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Inference markets — failing",
+      "description": "Invisible inference markets with a recorded reconcile failure (ABI drift, never-deployed / wrong-dApp residual). Any non-zero value warrants a look.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "id": 6,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "sum(indexer_inference_markets{state=\"failing\",job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "failing",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Decode errors (total)",
+      "description": "Event bodies that failed to decode and were stored undecoded — distinct from a benign unknown/ambiguous event id. Non-zero means ABI drift or a malformed cell.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 7,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "sum(indexer_decode_errors${counter_suffix}{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "decode errors",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Ingestion — raw_events counters",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 8,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "OrderPlaced rate",
+      "description": "rate() of orders_created_event_cnt — OrderBook.OrderPlaced events across all markets and users.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 6 },
+      "id": 9,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "rate(orders_created_event_cnt${counter_suffix}{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "OrderPlaced/s",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "PartialFill rate",
+      "description": "rate() of order_partially_filled_event_cnt — OrderBook.PartialFill events across all markets and users.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 6 },
+      "id": 10,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "rate(order_partially_filled_event_cnt${counter_suffix}{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "PartialFill/s",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cumulative event totals",
+      "description": "Raw monotonic counters (recovered from raw_events after restart): total OrderPlaced and PartialFill events.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
+      "id": 11,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "sum(orders_created_event_cnt${counter_suffix}{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "OrderPlaced total",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "sum(order_partially_filled_event_cnt${counter_suffix}{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "PartialFill total",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Projection pipeline & resources",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 12,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Projection backlog",
+      "description": "raw_events rows waiting for the projection loop (typed + decoded, processed_at NULL).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 15 },
+      "id": 13,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "sum(indexer_projection_backlog{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "backlog",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Projection lag (seconds)",
+      "description": "Wall-clock age of the oldest eligible-but-unprojected raw_events row.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 15 },
+      "id": 14,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "red", "value": 120 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "max(indexer_projection_lag_seconds{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "lag",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Capture cursor age (seconds)",
+      "description": "Seconds since the capture cursor last advanced. Small here while projection lag is large = capture healthy, projection behind.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 15 },
+      "id": 15,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 120 },
+              { "color": "red", "value": 300 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "max(indexer_capture_cursor_age_seconds{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "cursor age",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Projection fallbacks rate",
+      "description": "rate() of indexer_projection_fallbacks — batches that aborted the optimistic pass and replayed with per-row savepoints. A climbing rate means the fast path is routinely aborting.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 23 },
+      "id": 16,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "rate(indexer_projection_fallbacks${counter_suffix}{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "fallbacks/s",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "DB pool connections",
+      "description": "sqlx DB pool connections by state (in_use / idle). Backlog rising + in_use at max = projection stalled on connection exhaustion.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 23 },
+      "id": 17,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 25, "lineWidth": 1, "showPoints": "never", "stacking": { "group": "A", "mode": "normal" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "in_use" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "idle" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "indexer_db_pool_connections{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{state}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Decode failures rate",
+      "description": "rate() of indexer_decode_errors (hard decode failures — ABI drift / malformed cell) and indexer_decode_ambiguous_collisions (a colliding event id with no dst route — should be flat zero; non-zero means a new colliding ABI was added without a decoder dst route, and those events are silently dropped). Both leave the row undecoded and skipped by projection.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
+      "id": 18,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.001 }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "rate(indexer_decode_errors${counter_suffix}{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "decode errors/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "rate(indexer_decode_ambiguous_collisions${counter_suffix}{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "ambiguous collisions/s",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Inference markets",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "id": 19,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Markets by lifecycle state",
+      "description": "indexer_inference_markets{state}: discovering (seeded, not yet visible), visible (served by the API), failing (invisible with a recorded reconcile failure).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "id": 20,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 25, "lineWidth": 1, "showPoints": "never", "stacking": { "group": "A", "mode": "normal" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "visible" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "discovering" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "failing" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "indexer_inference_markets{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{state}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Resting orders by status",
+      "description": "indexer_inference_orders{status}: open (live order-book depth), filled, cancelled.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+      "id": 21,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 25, "lineWidth": 1, "showPoints": "never", "stacking": { "group": "A", "mode": "normal" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "open" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "filled" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "cancelled" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "indexer_inference_orders{job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{status}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile failures rate",
+      "description": "rate() of indexer_inference_reconcile_failures — hard Err outcomes from a discovery or refresh tick (excludes the benign NoBoc skip). A climbing rate points at a getter ABI mismatch or a persistently unreachable dApp. Note: counts per-book Err only, not a tick-level query failure.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+      "id": 22,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.001 }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "rate(indexer_inference_reconcile_failures${counter_suffix}{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "reconcile failures/s",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reference price lag (seconds)",
+      "description": "indexer_inference_reference_price_lag_seconds — age of the most stale reference_price_at across visible markets; price-refresh (Queue B) staleness.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 40 },
+      "id": 23,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 3600 }, { "color": "red", "value": 86400 }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "max(indexer_inference_reference_price_lag_seconds{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "price lag",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sweep lag (seconds)",
+      "description": "indexer_inference_sweep_lag_seconds — age of the most stale last_swept_at across visible markets; order-book-depth staleness (phantom-liquidity risk).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 40 },
+      "id": 24,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 300 }, { "color": "red", "value": 1800 }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "max(indexer_inference_sweep_lag_seconds{job=~\"$job\",instance=~\"$instance\"})",
+          "legendFormat": "sweep lag",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Orphans dropped rate",
+      "description": "rate() of indexer_inference_orphans_dropped — inference Filled/OrderCancelled events dead-lettered because their parent OrderPlaced never arrived within the orphan cutoff.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 40 },
+      "id": 25,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.001 }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "rate(indexer_inference_orphans_dropped${counter_suffix}{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "orphans dropped/s",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

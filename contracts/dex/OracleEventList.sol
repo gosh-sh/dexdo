@@ -16,7 +16,7 @@ interface IInferenceOB {
 contract OracleEventList is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.3";
+    string constant version = "4.0.5";
 
     // ── Range events (numeric outcomes): the price is resolved on-chain from an
     // InferenceOrderBook's weekly median, mapped to a numeric range = outcome.
@@ -63,6 +63,15 @@ contract OracleEventList is Modifiers {
     /// @param eventId Event identifier hash.
     /// @param pmpAddress PMP address that received confirmation.
     event EventConfirmed(uint256 eventId, address pmpAddress);
+
+    /// @notice Emitted when a RANGE event is added — carries the bound
+    ///         InferenceOrderBook so an indexer can identify the linked
+    ///         prediction-market (which book's price this PMP resolves on)
+    ///         straight from the log, without a per-event getter call.
+    /// @param eventId Event identifier hash.
+    /// @param ob InferenceOrderBook whose weekly median resolves the range.
+    /// @param bounds Numeric range bounds (ascending) bracketing the outcomes.
+    event RangeEventAdded(uint256 eventId, address ob, uint256[] bounds);
 
     /// @notice Emitted when the list description is updated via setDescription.
     /// @param description New description string.
@@ -205,6 +214,7 @@ contract OracleEventList is Modifiers {
         _rangeData[eventId] = RangeData({bounds: bounds, ob: ob, exists: true});
 
         emit EventAdded{dest: address.makeAddrExtern(ORACLE_EVENT_ADDED, bitCntAddress)}(eventId, eventName, oracleFee, deadline);
+        emit RangeEventAdded{dest: address.makeAddrExtern(ORACLE_RANGE_EVENT_ADDED, bitCntAddress)}(eventId, ob, bounds);
     }
 
     /// @notice Confirms an event for a PMP after fee and deadline checks.

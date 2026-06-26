@@ -13,6 +13,7 @@ import "../Oracle.sol";
 import "../OracleEventList.sol";
 import "../OrderBook.sol";
 import "../../airegistry/InferenceOrderBook.sol";
+import "../../airegistry/TokenContract.sol";
 
 /// @title DexLib
 /// @notice Utility library for deterministic address and StateInit/code construction.
@@ -188,6 +189,28 @@ library DexLib {
         s.skip(5);
         s.loadRef();
         return s.loadRef();
+    }
+
+    /// @notice Deterministic inference TokenContract address from its pinned code
+    ///         hash/depth + the seller's statics. `_rootModelAddress` is fixed to
+    ///         `address(0)` (the inference deal convention — no RootModel registry).
+    ///         Mirrors RootModel._calculateTokenContractAddress; used by the seller
+    ///         note to verify a `postSellOffer`'s `tokenContract` is a genuine TC.
+    /// @param codeHash TokenContract canonical code hash.
+    /// @param codeDepth TokenContract canonical code depth.
+    /// @param sellerPubkey Seller key (= the seller note's ephemeral pubkey).
+    /// @param nonce Deal nonce.
+    /// @return TokenContract deterministic address.
+    function computeTokenContractAddressFromHash(
+        uint256 codeHash, uint16 codeDepth, uint256 sellerPubkey, uint64 nonce
+    ) public returns (address) {
+        TvmCell dummyCode;
+        TvmCell si = abi.encodeStateInit({
+            code: dummyCode, contr: TokenContract, pubkey: sellerPubkey,
+            varInit: { _sellerPubkey: sellerPubkey, _rootModelAddress: address(0), _nonce: nonce }
+        });
+        TvmCell dataCell = _extractDataCell(si);
+        return address.makeAddrStd(0, abi.stateInitHash(codeHash, tvm.hash(dataCell), codeDepth, dataCell.depth()));
     }
 
     /// @notice Computes deterministic PMP address from salted code hash/depth.

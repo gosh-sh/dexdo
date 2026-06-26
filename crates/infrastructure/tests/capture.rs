@@ -89,7 +89,7 @@ async fn captures_decodable_event_without_projecting() {
         Some(ORDER_PLACED_BODY),
     )];
     let result = repo
-        .persist_page("blockchain_events", &edges, Some("cursor-1"), &decoder)
+        .persist_page("blockchain_events", &edges, Some("cursor-1"), &decoder, false)
         .await
         .expect("persist_page");
 
@@ -157,7 +157,7 @@ async fn bulk_insert_counts_new_and_conflicting_and_dedups_within_page() {
 
     // Pre-insert `existing` so it conflicts on the next page.
     let pre = vec![edge(&existing, Some("5f80capture_counts_000000001"), &src, None)];
-    repo.persist_page("blockchain_events", &pre, None, &decoder).await.expect("pre-insert");
+    repo.persist_page("blockchain_events", &pre, None, &decoder, false).await.expect("pre-insert");
 
     // Page: the conflicting `existing`, a `fresh` row, and `dup` twice.
     let edges = vec![
@@ -166,8 +166,10 @@ async fn bulk_insert_counts_new_and_conflicting_and_dedups_within_page() {
         edge(&dup, Some("5f80capture_counts_000000003"), &src, None),
         edge(&dup, Some("5f80capture_counts_000000003"), &src, None),
     ];
-    let result =
-        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+    let result = repo
+        .persist_page("blockchain_events", &edges, None, &decoder, false)
+        .await
+        .expect("persist_page");
 
     // After in-page de-dup: 3 unique candidates (existing, fresh, dup); 1
     // conflicts (existing) → inserted 2 (fresh, dup), skipped 1.
@@ -194,8 +196,10 @@ async fn edge_missing_chain_order_is_dropped() {
     purge(&pool, &[("delete from raw_events where msg_id = $1", msg_id.as_str())]).await;
 
     let edges = vec![edge(&msg_id, None, &src, None)];
-    let result =
-        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+    let result = repo
+        .persist_page("blockchain_events", &edges, None, &decoder, false)
+        .await
+        .expect("persist_page");
 
     assert_eq!(result.inserted, 0, "an edge without msg_chain_order is not inserted");
     assert_eq!(result.undecoded, 1, "the dropped edge is counted as undecoded");
@@ -223,10 +227,70 @@ async fn persist_page_advances_cursor() {
         .await
         .expect("purge cursor");
 
-    repo.persist_page(stream, &[], Some("cursor-xyz"), &decoder).await.expect("persist_page");
+    repo.persist_page(stream, &[], Some("cursor-xyz"), &decoder, true).await.expect("persist_page");
 
     let cursor = repo.load_cursor(stream).await.expect("load_cursor");
     assert_eq!(cursor.as_deref(), Some("cursor-xyz"), "end_cursor must be persisted");
+}
+
+#[tokio::test]
+async fn persist_page_writes_at_head_flag() {
+    // The at_head argument must be written through to indexer_cursors (the
+    // inference sweep + orphan dead-letter gate on it). A regression binding a
+    // constant would silently freeze all sweeps or run them mid-backfill.
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let stream = "capture_at_head_test_stream";
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("purge cursor");
+
+    // has_next_page=false => at_head=true.
+    repo.persist_page(stream, &[], Some("c1"), &decoder, true).await.expect("persist at_head=true");
+    assert!(
+        repo.at_head(stream).await.expect("read at_head"),
+        "at_head=true must be written through"
+    );
+
+    // A later page with more to fetch => at_head=false.
+    repo.persist_page(stream, &[], Some("c2"), &decoder, false)
+        .await
+        .expect("persist at_head=false");
+    assert!(
+        !repo.at_head(stream).await.expect("read at_head"),
+        "at_head must flip back to false when more pages follow"
+    );
+}
+
+#[tokio::test]
+async fn persist_page_with_null_cursor_preserves_prior_cursor() {
+    // The cursor upsert uses coalesce(excluded.cursor, prior): a page that yields
+    // no end_cursor must NOT reset the stream to genesis. A coalesce typo would
+    // silently null the cursor and replay the whole chain.
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+
+    let stream = "capture_coalesce_test_stream";
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("purge cursor");
+
+    repo.persist_page(stream, &[], Some("keep-me"), &decoder, false).await.expect("persist cursor");
+    assert_eq!(repo.load_cursor(stream).await.expect("load").as_deref(), Some("keep-me"));
+
+    repo.persist_page(stream, &[], None, &decoder, false).await.expect("persist null cursor");
+    assert_eq!(
+        repo.load_cursor(stream).await.expect("load").as_deref(),
+        Some("keep-me"),
+        "coalesce(excluded.cursor, prior) must preserve the cursor when end_cursor is NULL"
+    );
 }
 
 #[tokio::test]
@@ -263,8 +327,10 @@ async fn persist_page_handles_mixed_decodable_and_undecodable_edges() {
         ),
         edge(&msg_undecodable, Some("5f80capture_mixed_00000000000002"), &orderbook, None),
     ];
-    let result =
-        repo.persist_page("blockchain_events", &edges, None, &decoder).await.expect("persist_page");
+    let result = repo
+        .persist_page("blockchain_events", &edges, None, &decoder, false)
+        .await
+        .expect("persist_page");
 
     assert_eq!(result.inserted, 2, "both edges must be inserted");
     assert_eq!(result.decoded, 1, "only the OrderPlaced body decodes");

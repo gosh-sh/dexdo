@@ -93,12 +93,15 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
         .expect("getInferenceOrderBookAddress");
     wait_book_live(&dex, &ob).await;
 
+    // postSellOffer verifies token_contract derives from the seller key + this
+    // nonce, so the offer must pass the SAME nonce the TokenContract was deployed with.
+    let nonce = (suffix % 1_000_000_000) as u64 + 1;
     let tc = deploy_token_contract(
         dex.context(),
         &note.owner_public_key_hex,
         &note.address,
         &note.address,
-        (suffix % 1_000_000_000) as u64 + 1,
+        nonce,
         TokenDeal {
             model_name: "e2e-stream".to_string(),
             tick_size: 1,
@@ -120,6 +123,7 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
             max_ticks: DEAL_TICKS,
             token_contract: tc.clone(),
             flags: 0,
+            nonce,
         },
         signer(),
     )

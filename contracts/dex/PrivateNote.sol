@@ -23,7 +23,14 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.3";
+    string constant version = "4.0.5";
+
+    /// @notice Canonical inference TokenContract code (deal contract). `postSellOffer`
+    ///         verifies its `tokenContract` derives from this pinned code + the seller
+    ///         note's key — else a fill would route the buyer's SHELL to a fake TC
+    ///         (no streaming / dispute / reclaim protections). Re-pin on TC rebuild.
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x9afa03cce53a7bd0d1129b2ed466873ac9a564cd229fac84d3feeac6310da5c3;
+    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
 
     /// @notice Owner escape hatch: stale stream/dispute locks can be force
     ///         cleared after this many seconds since the last lock change, so a
@@ -483,15 +490,24 @@ contract PrivateNote is Modifiers, ReplayProtection {
         uint128 pricePerTick,
         uint128 maxTicks,
         address tokenContract,
-        uint8   flags
+        uint8   flags,
+        uint64  nonce
     ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         // No fee attached: the platform fee is buyer-side & by-fact (§5.1); the
         // seller posts fee-free (§2.1, no no-show penalty). Owner = this note
         // (the OB uses msg.sender for ownership/handover).
         ensureBalance();
+        // The deal contract must be a CANONICAL TokenContract bound to this note's
+        // seller key (`_sellerPubkey == _ephemeralPubkey`, `_rootModelAddress == 0`,
+        // `_nonce == nonce`). Otherwise a malicious seller could point `tokenContract`
+        // at a fake address, and the matched fill would forward the BUYER's SHELL
+        // there (bounce:false) with no streaming / dispute / reclaim protections.
+        require(tokenContract == DexLib.computeTokenContractAddressFromHash(
+            TOKEN_CONTRACT_CODE_HASH, TOKEN_CONTRACT_CODE_DEPTH, _ephemeralPubkey, nonce),
+            ERR_BAD_TOKEN_CONTRACT);
         address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
         InferenceOrderBook(orderBook).placeSellOffer{value: 1 vmshell, flag: 1, bounce: false}(
-            pricePerTick, maxTicks, tokenContract, flags);
+            pricePerTick, maxTicks, tokenContract, flags, _ephemeralPubkey, nonce);
     }
 
     /// @notice Send a BUY order from this note with SHELL escrow (spec §2.3).

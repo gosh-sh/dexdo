@@ -81,7 +81,7 @@ Intended use: shed confirmed observability-only floods (e.g. `OrderBook.Queued`,
 
 1. If `indexer.dapp_id` is set and the edge's `src_dapp_id` does not match (and is not absent), drop the edge. The page cursor still advances (step 4). `foreign_skipped` is incremented.
 2. If the edge's `dst` matches a configured `indexer.ignored_event_types` entry, drop the edge. The page cursor still advances (step 4). `type_ignored` is incremented.
-3. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). On success, store the decoded JSON payload alongside `event_type`.
+3. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). The decoder is **route-aware**: `event_type` is resolved by the message's `dst` address (the external `makeAddrExtern(EVENT_ID, 256)` in the message header) rather than a flat event-name scan. This resolves a collision between `OrderBook.OrderCancelled` and `InferenceOrderBook.OrderCancelled`, which share the same event name but carry a distinct `EVENT_ID` and therefore distinct `dst` addresses. The decoder does **not** assume event ids are globally unique: its id index tolerates collisions (one id may map to several `(contract, event)` entries), and the colliding pair is disambiguated by a small `dst` route table. Each route records the event's expected id, so a decoded body whose own id does not match its route is left undecoded with a warning rather than mis-attributed; events with a unique id resolve directly by id. On success, store the decoded JSON payload alongside `event_type`.
 4. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches.
 5. After the page commits, persist the resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). The cursor tracks capture progress, not projection; a restart resumes capture from it while the projection loop independently drains whatever rows remain `processed_at NULL`.
 
@@ -181,8 +181,6 @@ here.
 
 ## Projection — inference order events
 
-> 🚧 **TODO — not implemented.** Inference projection and the inference reconciler (below) are specified but **not yet built** — no projector/reconciler code or migration exists yet. Forward-looking; safe to merge into `dev` as spec-only.
-
 `InferenceOrderBook` events drive [`inference_orders`](data-schema.md#inference_orders), the per-order read model behind `/api/v1/inference/depth` (order-book depth). The shape mirrors [order events](#projection--order-events): one row per chain-side order, mutated in place, never deleted. The unit is a **tick** (one unit of inference); `price` is price-per-tick in SHELL atoms.
 
 | Event | Effect |
@@ -203,13 +201,13 @@ The contract emits `OrderPlaced` *before* it knows whether the order will rest: 
 - **Explicitly cancelled** — `OrderCancelled` → `CANCELLED`. Correct from events alone.
 - **Placed-but-never-rested** (FOK/POST_ONLY rejected, IOC/MARKET leftover, expired subscription) — the only on-chain signal is a `Refunded` event that carries **no order id**, so the projector cannot close the specific row. Left untreated, the `OrderPlaced` row sits `OPEN` and pollutes depth (a phantom level).
 
-The inference reconciler closes this gap: for each recently-placed `OPEN` row it calls `InferenceOrderBook.getOrder(orderId)` and, when the order is no longer in the book (zero amount / zero note), flips the row to `CANCELLED`. This is the same getter-fills-what-events-miss pattern used by the market reconciler, bounded to recent OPEN rows so it stays cheap.
+The inference reconciler closes this gap: it sweeps the book's `OPEN` rows with a **bounded round-robin cursor** — each tick reads a fixed batch via `InferenceOrderBook.getOrder(orderId)` and, when an order is no longer in the book (`getOrder` reports zero amount), flips the row to `CANCELLED`. This is the same getter-fills-what-events-miss pattern used by the market reconciler. The cursor advances per tick and resets to the start once a batch returns fewer rows than the batch size (the `(cursor, max]` range is exhausted), so every `OPEN` row — including long-lived subscriptions — is revisited over successive cycles without scanning the whole book in one pass. See [Inference reconciler](#inference-reconciler) for the cursor/cycle mechanics and the catch-up gates.
 
 > **Recommended contract-side follow-up.** Add `flags` to `OrderPlaced` (so a taker-only order is never recorded as resting), an `orderId` to `Refunded`, or an explicit `OrderClosed(orderId)` event. Any one removes the getter sweep and makes depth event-exact — the analogue of the [`REJECTED` follow-up](read-api.md#rejected-status) on the prediction-market side. Tracked as an open item because it touches `InferenceOrderBook` (and re-pins the note↔book code hash).
 
 ## Reconciliation
 
-Three reconcilers fill metadata that the event stream alone does not carry. All run on a fixed cadence (`reconciliation_interval_ms`, `oracle_event_list_reconciliation_interval_ms`, `inference_reconciliation_interval_ms` in `config/indexer.*.yaml`) and share a failure-backoff pattern (`last_reconcile_failed_at`, `reconcile_attempts` on the parent row) so a permanently broken contract cannot starve the queue.
+Three reconcilers (market, OracleEventList, inference) fill metadata that the event stream alone does not carry. All run on a fixed cadence (configured under `indexer:` in `config/indexer.<env>.yaml`) and share a failure-backoff pattern (`last_reconcile_failed_at`, `reconcile_attempts` on the parent row) so a permanently broken contract cannot starve the queue. The inference reconciler additionally exposes three cadence knobs (`inference_reference_price_refresh_ms`, `inference_sweep_interval_ms`, `inference_orphan_cutoff_ms`) beyond its base interval; see [Inference reconciler](#inference-reconciler) for the full table.
 
 ### Market reconciler
 
@@ -256,18 +254,50 @@ Two anti-starvation outcomes share the failure-backoff path with the market reco
 
 ### Inference reconciler
 
-For each [`inference_markets`](data-schema.md#inference_markets) row, the inference reconciler fetches the `InferenceOrderBook` account BOC and runs getters off-chain through the local TVM emulator:
+The inference reconciler is the third reconciler — a sixth long-running indexer loop alongside capture, projection, the market and OracleEventList reconcilers, and metrics. It manages two work queues with separate cadences:
 
-1. `getParams()` → `model_hash`, `platform_fee_bps`. On the first pass it also fills the fixed precision/quote columns (`quote_token_type = SHELL`, `price_precision`, `quantity_precision = 0`, `tick_size`, `step_size`, `min_notional`).
-2. `getWeeklyMedianPrice()` → `reference_price` (+ `reference_price_at`). The getter **reverts `ERR_NO_LIQUIDITY`** on a dry book; the reconciler treats that revert as a normal outcome and writes `reference_price = NULL` (the API renders `referencePrice: null`) — it is not a reconcile failure.
-3. Stamps `last_reconciled_at`. The market becomes visible to the API only after this point (mirrors the [market reconciler](#market-reconciler) visibility gate).
+- **Queue A — Discovery** (`last_reconciled_at IS NULL`): newly seeded books that need identity + static columns filled.
+- **Queue B — Refresh** (already-reconciled rows): periodic re-fetch of the reference price and sweep of phantom open orders.
 
-Two passes with different cadence/triggers share the row:
+**Config knobs** (all under `indexer:` in `config/indexer.<env>.yaml`):
 
-- **Discovery completion** (`last_reconciled_at IS NULL`): the one-time fill of identity + static columns. `model_ref` / `producer` / `model_name` / `version` are resolved from the model's `ManifestMetadata` manifest and may stay NULL on this pass — they do not block visibility (a market is usable by hash alone).
-- **Refresh** (already-reconciled rows, on cadence): re-reads `getWeeklyMedianPrice()` because `reference_price` moves with trading, and runs the [non-resting-order](#non-resting-orders) `getOrder()` sweep over recent `OPEN` [`inference_orders`](data-schema.md#inference_orders) to close phantom rows. Unlike `markets.orderbook_address` (write-once), these fields are intentionally re-queued.
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `inference_reconciliation_interval_ms` | `15000` | How often Queue A runs. |
+| `inference_reference_price_refresh_ms` | `3600000` | Minimum age before a book's `reference_price` is re-fetched. |
+| `inference_sweep_interval_ms` | `30000` | Minimum age before a book's sweep cycle re-runs. |
+| `inference_orphan_cutoff_ms` | `1800000` | Projection-loop dead-letter window: an inference `Filled` or `OrderCancelled` whose parent `OrderPlaced` row is absent and whose ingest age exceeds this is dropped (marked `Applied`, with a counter increment) rather than deferred forever. Keyed on `raw_events.created_at` (wall-clock ingest time), not `created_at_chain`. |
 
-> **Open question — model-id source.** The order book carries only `model_hash`; the human `producer--model--version` is not on the book. This spec assumes the reconciler resolves it from the model's `ManifestMetadata` manifest (linked via the model registry — `SuperRoot` → `RootModel` / `ManifestMetadata`). If the manifest does not carry a parseable model id, `model_ref` stays NULL and the API exposes the model by `model_hash` only. Confirm the manifest schema / registry-walk before implementation.
+**Discovery pass (Queue A)**
+
+For each `inference_markets` row with `last_reconciled_at IS NULL`, the reconciler:
+
+1. Fetches the `InferenceOrderBook` account BOC from chain.
+2. Runs `getParams()` off-chain → writes `model_hash`, `platform_fee_bps`. Also sets the **constant** precision/quote columns that do not come from the getter but are protocol-fixed: `quote_token_type = SHELL (2)`, `price_precision = 9`, `quantity_precision = 0`, `tick_size = "0.000000001"`, `step_size = "1"`, `min_notional = "0.000000001"`. Note: `getParams()` no longer returns `tickSize`/`stepSize`/`minNotional` — these are reconciler-set constants, not getter-sourced.
+3. Runs `getWeeklyMedianPrice()` → writes `reference_price` (+ `reference_price_at`). The getter **reverts with TVM exit code `ERR_NO_LIQUIDITY`** on a dry book; the reconciler recognises this typed revert, writes `reference_price = NULL` (the API surfaces `referencePrice: null`), and continues — it is not a failure.
+4. Runs a **bounded round-robin phantom-cancel sweep** over `OPEN` [`inference_orders`](data-schema.md#inference_orders) for the book (see [Non-resting orders](#non-resting-orders)). Each tick advances `sweep_cursor`; the cycle completes when a batch returns fewer than `sweep_batch_n` OPEN rows in `(sweep_cursor, sweep_cycle_max]` (the range is exhausted), which resets `sweep_cursor` to NULL so the next cycle restarts from the lowest `order_id`. Completion is *not* keyed on the cursor reaching `sweep_cycle_max`: `sweep_cycle_max` is `nextOrderId` and normally has no OPEN row at the boundary, so an equality test would never reset and would starve long-lived rows. Newly-minted orders above `sweep_cycle_max` (the snapshot of the highest `order_id` at cycle start) are deferred to the next cycle.
+5. The sweep runs only when **all three** catch-up gates pass:
+   - **(i) idle gate**: `getQueueSize() == 0` — the book has no in-flight queue continuation. A book with a pending queue item must not be swept yet.
+   - **(ii) `at_head` gate**: `indexer_cursors.at_head = true` — the capture loop is caught up to the chain tip. If false, the indexer is still replaying old pages; a sweep firing now would cancel orders that have already been filled by events not yet projected.
+   - **(iii) pending-events gate**: no `raw_events` row for this book remains `processed_at IS NULL` (checked via `raw_events_pending_src_idx`). An unprocessed event could be a `Filled` that closes the phantom order the sweep would otherwise cancel.
+6. **All-or-nothing visibility stamp**: stamps `last_reconciled_at` only after a complete sweep cycle (not mid-cycle). The stamp is guarded by a CAS on `sweep_override_seq` — if a `Filled` event overrode a provisionally cancelled order mid-cycle (bumping `sweep_override_seq`), the stamp is deferred until a fresh cycle completes cleanly. This prevents a book from becoming API-visible with phantom `CANCELLED` rows that events will later re-open.
+
+**Provisional sweep-cancel**
+
+When `getOrder(orderId)` confirms an order is no longer in the book (zero amount), the reconciler writes `status = 'CANCELLED'` and stamps `swept_at`. This is provisional: a `Filled` or `OrderCancelled` event that arrives later will advance the row normally. Terminal-row guards ensure a late event on an already-`FILLED` row is a no-op.
+
+**Refresh pass (Queue B)**
+
+For each already-reconciled book (`last_reconciled_at IS NOT NULL`) that is due for refresh:
+
+1. If the price cadence is due (reference_price_at stale), re-fetches `getWeeklyMedianPrice()` → updates `reference_price` / `reference_price_at`. The `ERR_NO_LIQUIDITY` revert maps to NULL as on the discovery pass.
+2. Runs the phantom-cancel sweep under the same `at_head` + pending-events gates, over OPEN rows only (the sweep is a no-op if there are no open orders).
+
+**Orphan dead-letter (projection loop)**
+
+The projection loop applies the `inference_orphan_cutoff_ms` window as a dead-letter for inference events that have waited beyond the cutoff without their parent arriving. Specifically: an `InferenceOrderBook.Filled` or `InferenceOrderBook.OrderCancelled` event whose `raw_events.created_at` (wall-clock ingest time) is older than `inference_orphan_cutoff_ms` and whose parent `OrderPlaced` row is absent is dropped (marked `Applied` with a counter increment) rather than deferred forever. The cutoff is keyed on ingest time — a row with an old `created_at_chain` but recent `created_at` (e.g. a late-arriving event) is not dropped.
+
+> 🚧 **Deferred — model-id source.** The order book carries only `model_hash`; the human `producer--model--version` is not on the book. Filling `model_ref` / `producer` / `model_name` / `version` requires a registry walk (`SuperRoot` → `RootModel` / `ManifestMetadata`) that is not yet implemented. These columns stay NULL; the API exposes the book by `model_hash` only until the manifest linkage is added.
 
 ## Failure handling
 
@@ -315,6 +345,34 @@ All four ride the same OTLP path as the counters: exported only when `OTEL_EXPOR
 | `indexer_projection_fallbacks` | counter | Projection batches that aborted the optimistic (savepoint-free) pass and replayed with per-row savepoints | in-process counter, polled each refresh |
 
 Unlike `orders_created_event_cnt` and `order_partially_filled_event_cnt` (read from `raw_events`), this is an in-process count: the projection loop increments it whenever an optimistic batch hits a projector error and falls back, and the refresh loop polls it like the gauges. A steadily climbing rate means the fast path is routinely aborting — each fallback adds one extra SAVEPOINT/RELEASE round-trip pair per row on top of each projector's own statements, a per-row cost the backlog/lag gauges only surface as a symptom (slower drain), so this pins the cause. The per-row failure is logged once: a `warn` from the savepointed replay for a deterministic error, or from the optimistic pass itself for a DB-layer/transient error (so a transient hiccup the replay silently recovers from is still visible). The deterministic fallback transition is otherwise `debug`-level, so the counter — not a log — is the dashboard signal for fallback frequency.
+
+### Decode + orphan counters
+
+| Metric | Type | What it measures | Source |
+| --- | --- | --- | --- |
+| `indexer_inference_orphans_dropped` | counter | Inference `Filled`/`OrderCancelled` events dead-lettered because their parent `OrderPlaced` never arrived within `inference_orphan_cutoff_ms` | in-process counter, polled each refresh |
+| `indexer_decode_errors` | counter | Event bodies that failed to decode (`decode_output`/`detokenize` error or an unparseable cell) and were stored undecoded | in-process counter, polled each refresh |
+
+Both are in-process counts polled by the refresh loop, like `indexer_projection_fallbacks`. `indexer_decode_errors` is the durable signal for a *hard* decode failure of a delivered body — distinct from an unknown/ambiguous event id, which is a normal, uncounted outcome (`Ok(None)` from the decoder). A non-zero rate means ABI drift or a malformed cell for an otherwise known event; the row is stored undecoded (`event_type`/`decoded` NULL), skipped by projection, and invisible to the inference sweep's `decoded IS NOT NULL` pending-events gate — so the counter, not a log, is the operator's signal.
+
+### Inference market gauges
+
+| Metric | Type | What it measures | Source |
+| --- | --- | --- | --- |
+| `indexer_inference_markets{state=discovering\|visible\|failing}` | gauge | Inference order-book markets by lifecycle state | `count(*) filter (…)` over `inference_markets` |
+| `indexer_inference_reference_price_lag_seconds` | gauge | Age of the most stale `reference_price_at` across visible markets; price-refresh (Queue B) staleness | `extract(epoch from now() - min(reference_price_at))` over visible rows |
+| `indexer_inference_sweep_lag_seconds` | gauge | Age of the most stale `last_swept_at` across visible markets; order-book-depth staleness | `extract(epoch from now() - min(last_swept_at))` over visible rows |
+| `indexer_inference_orders{status=open\|filled\|cancelled}` | gauge | Resting inference orders by status; `open` is live order-book depth | `count(*) filter (…)` over `inference_orders` |
+
+These ride the same OTLP path and `REFRESH_INTERVAL` (15s) as the other gauges. `discovering` is a seeded skeleton not yet stamped visible; `visible` has `last_reconciled_at` set and is served by the API; `failing` is still invisible but the reconciler has recorded a failure (`last_reconcile_failed_at` set) — the bucket where an ABI-drift book or a never-deployed / wrong-dApp address surfaces instead of accruing `reconcile_attempts` silently. The two lag gauges read `now() - min(ts)` over visible markets (oldest timestamp = largest age) and report 0 when nothing is visible yet; a visible book always has both timestamps stamped because discovery refreshes the price and completes a sweep cycle before stamping visibility.
+
+### Inference reconcile counter
+
+| Metric | Type | What it measures | Source |
+| --- | --- | --- | --- |
+| `indexer_inference_reconcile_failures` | counter | Hard inference reconcile failures — `Err` outcomes from a discovery or refresh tick | in-process counter, polled each refresh |
+
+In-process count like `indexer_projection_fallbacks`: the inference reconciler bumps it on each per-book `Err` (a BOC-fetch error, a getter error, or a write error during discovery/refresh). It excludes the benign `NoBoc` skip (a book whose account is not on chain) — that case is already visible as the `failing` bucket of `indexer_inference_markets`. A climbing rate points at a getter ABI mismatch or a persistently unreachable dApp, distinct from the steady-state staleness the lag gauges track.
 
 ## Schema invariants — write side
 

@@ -19,12 +19,18 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+use crate::decoder::DecodeOutcome;
 use crate::decoder::DecodedEvent;
 use crate::decoder::Decoder;
 use crate::graphql::EventEdge;
 use crate::graphql::EventNode;
 use crate::projectors;
 use crate::projectors::ProjectionOutcome;
+
+/// The capture loop's cursor stream name. The orphan dead-letter reads its
+/// `at_head` flag to avoid dropping an orphan whose parent may still be ahead of
+/// the cursor during a backfill (see `is_expired_inference_orphan`).
+pub const CAPTURE_STREAM: &str = "blockchain_events";
 
 #[derive(Debug, Clone)]
 pub struct IndexerRepository {
@@ -47,6 +53,43 @@ pub struct IndexerRepository {
     /// the fast path — a throughput regression the backlog/lag gauges only show
     /// as a symptom.
     projection_fallbacks: Arc<AtomicU64>,
+    /// How long an inference `Filled`/`OrderCancelled` row may remain `Deferred`
+    /// (measured from its ingest timestamp `raw_events.created_at`) before it is
+    /// treated as a permanent orphan and dead-lettered. Applies ONLY to inference
+    /// event types (`InferenceOrderBook.*`); DEX deferral is unaffected.
+    inference_orphan_cutoff: std::time::Duration,
+    /// Running count of inference orphan rows dead-lettered (marked processed
+    /// without an order-table write) because their parent `OrderPlaced` never
+    /// arrived within the cutoff window. Shared across clones via `Arc` — same
+    /// pattern as `projection_fallbacks`.
+    inference_orphans_dropped: Arc<AtomicU64>,
+    /// Running count of event bodies the decoder attempted but failed to decode
+    /// (`decode_output`/`detokenize` error, or an unparseable cell). These are
+    /// stored undecoded (`event_type`/`decoded` NULL) and skipped by projection
+    /// — byte-identical at rest to an unknown/ambiguous id, which is NOT counted
+    /// here. A non-zero rate means ABI drift or malformed bodies for an otherwise
+    /// known event. Shared across clones via `Arc`, like `projection_fallbacks`.
+    decode_errors: Arc<AtomicU64>,
+    /// Running count of event bodies left undecoded because their id collides
+    /// across ABIs and no `dst` route disambiguated it (the `AmbiguousCollision`
+    /// decode outcome). Distinct from a benign unknown id and from a hard decode
+    /// error. Unreachable today (the only colliding id, `OrderCancelled`, has a
+    /// route); a non-zero value means a new colliding ABI was added without a
+    /// route — alert on it. Shared across clones via `Arc`.
+    decode_ambiguous_collisions: Arc<AtomicU64>,
+    /// Running count of hard inference reconcile failures (`Err` outcomes from
+    /// discovery or refresh — not `NoBoc`, which is a benign skip). Bumped by the
+    /// `InferenceReconciler` through a cloned handle and polled here for
+    /// `indexer_inference_reconcile_failures`. Shared across clones via `Arc`,
+    /// like `inference_orphans_dropped`.
+    inference_reconcile_failures: Arc<AtomicU64>,
+    /// Capture cursor stream whose `at_head` gates the inference orphan
+    /// dead-letter (an orphan is only dropped once capture has drained to the
+    /// chain tip, so a parent that is merely still-ahead-in-backfill is not
+    /// mistaken for a permanently dropped one). Defaults to `CAPTURE_STREAM`;
+    /// overridable in tests via `with_capture_stream` so they need not race the
+    /// shared live cursor row.
+    capture_stream: String,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -81,6 +124,7 @@ struct PendingRow {
     event_type: Option<String>,
     decoded: Option<Value>,
     ts: Option<f64>,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl IndexerRepository {
@@ -89,7 +133,60 @@ impl IndexerRepository {
             pool,
             seen_unknown_event_types: Arc::new(Mutex::new(HashSet::new())),
             projection_fallbacks: Arc::new(AtomicU64::new(0)),
+            inference_orphan_cutoff: std::time::Duration::from_millis(1_800_000), /* default; overridden in main */
+            inference_orphans_dropped: Arc::new(AtomicU64::new(0)),
+            decode_errors: Arc::new(AtomicU64::new(0)),
+            decode_ambiguous_collisions: Arc::new(AtomicU64::new(0)),
+            inference_reconcile_failures: Arc::new(AtomicU64::new(0)),
+            capture_stream: CAPTURE_STREAM.to_string(),
         }
+    }
+
+    pub fn with_inference_orphan_cutoff(mut self, cutoff: std::time::Duration) -> Self {
+        self.inference_orphan_cutoff = cutoff;
+        self
+    }
+
+    /// Override the capture cursor stream whose `at_head` gates orphan
+    /// dead-lettering. Tests use a unique stream so they do not race the shared
+    /// `blockchain_events` cursor row.
+    pub fn with_capture_stream(mut self, stream: impl Into<String>) -> Self {
+        self.capture_stream = stream.into();
+        self
+    }
+
+    /// Running total of inference orphan rows that exceeded the cutoff and were
+    /// dead-lettered (marked processed with no order-table write). Polled by the
+    /// metrics-refresh loop for `indexer_inference_orphans_dropped`.
+    pub fn inference_orphans_dropped_count(&self) -> u64 {
+        self.inference_orphans_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Running total of event bodies that failed to decode and were stored
+    /// undecoded. Polled by the metrics-refresh loop for `indexer_decode_errors`.
+    pub fn decode_errors_count(&self) -> u64 {
+        self.decode_errors.load(Ordering::Relaxed)
+    }
+
+    /// Running total of event bodies left undecoded due to an ambiguous event-id
+    /// collision with no `dst` route. Polled by the metrics-refresh loop for
+    /// `indexer_decode_ambiguous_collisions`.
+    pub fn decode_ambiguous_collisions_count(&self) -> u64 {
+        self.decode_ambiguous_collisions.load(Ordering::Relaxed)
+    }
+
+    /// Running total of hard inference reconcile failures. Polled by the
+    /// metrics-refresh loop for `indexer_inference_reconcile_failures`.
+    pub fn inference_reconcile_failures_count(&self) -> u64 {
+        self.inference_reconcile_failures.load(Ordering::Relaxed)
+    }
+
+    /// A write-handle to the shared inference-reconcile-failure counter, for the
+    /// `InferenceReconciler` to bump. The handle and `inference_reconcile_failures_count`
+    /// read and write the same atomic, so a reconciler bump is visible to the
+    /// metrics-refresh poll.
+    pub fn inference_reconcile_failures_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.inference_reconcile_failures)
     }
 
     /// Returns `true` the first time `event_type` is seen as projector-unknown
@@ -136,12 +233,27 @@ impl IndexerRepository {
         Ok(row.and_then(|(c,)| c))
     }
 
+    /// Returns `true` when the capture loop's most recent drain for `stream_name`
+    /// reached the head of the blockchain (i.e. `has_next_page` was `false`).
+    /// Returns `false` if the stream is unknown (no cursor row yet). Used by the
+    /// inference reconciler as sweep catch-up gate (i).
+    pub async fn at_head(&self, stream_name: &str) -> anyhow::Result<bool> {
+        let row: Option<(bool,)> =
+            sqlx::query_as("select at_head from indexer_cursors where stream_name = $1")
+                .bind(stream_name)
+                .fetch_optional(&self.pool)
+                .await
+                .context("select indexer_cursors.at_head")?;
+        Ok(row.map(|(b,)| b).unwrap_or(false))
+    }
+
     pub async fn persist_page(
         &self,
         stream_name: &str,
         edges: &[EventEdge],
         end_cursor: Option<&str>,
         decoder: &Decoder,
+        at_head: bool,
     ) -> anyhow::Result<PagePersistResult> {
         let mut result = PagePersistResult::default();
 
@@ -177,7 +289,13 @@ impl IndexerRepository {
                 continue;
             }
 
-            let decoded = try_decode(decoder, &edge.node.msg_id, edge.node.body.as_ref());
+            let decoded = try_decode(
+                self,
+                decoder,
+                &edge.node.msg_id,
+                edge.node.body.as_ref(),
+                edge.node.dst.as_deref(),
+            );
             if decoded.is_some() {
                 result.decoded += 1;
             } else {
@@ -250,19 +368,20 @@ impl IndexerRepository {
             result.skipped = msg_ids.len() as u64 - inserted;
         }
 
-        if let Some(cursor) = end_cursor {
-            sqlx::query(
-                r#"insert into indexer_cursors (stream_name, cursor, updated_at)
-                   values ($1, $2, now())
-                   on conflict (stream_name)
-                   do update set cursor = excluded.cursor, updated_at = now()"#,
-            )
-            .bind(stream_name)
-            .bind(cursor)
-            .execute(&mut *tx)
-            .await
-            .context("upsert indexer_cursors")?;
-        }
+        sqlx::query(
+            r#"insert into indexer_cursors (stream_name, cursor, at_head, updated_at)
+               values ($1, $2, $3, now())
+               on conflict (stream_name) do update
+                 set cursor = coalesce(excluded.cursor, indexer_cursors.cursor),
+                     at_head = excluded.at_head,
+                     updated_at = now()"#,
+        )
+        .bind(stream_name)
+        .bind(end_cursor)
+        .bind(at_head)
+        .execute(&mut *tx)
+        .await
+        .context("upsert indexer_cursors")?;
 
         tx.commit().await.context("commit tx")?;
         Ok(result)
@@ -294,11 +413,28 @@ impl IndexerRepository {
         after_chain_order: Option<&str>,
         until_chain_order: Option<&str>,
     ) -> anyhow::Result<ReprojectionStats> {
-        match self.reproject_batch_fast(batch_size, after_chain_order, until_chain_order).await? {
+        // Gate orphan dead-lettering on the capture stream reaching head. While
+        // capture is still backfilling, a missing parent may simply not be
+        // ingested yet, so we must not declare it permanently dropped. On a read
+        // error, default to `false` (skip drops this pass) — never abort the
+        // batch, which may still apply non-orphan rows; the next pass retries.
+        let capture_at_head = self.at_head(&self.capture_stream).await.unwrap_or_else(|err| {
+            debug!(?err, stream = %self.capture_stream, "at_head read failed; deferring orphan drops");
+            false
+        });
+        match self
+            .reproject_batch_fast(batch_size, after_chain_order, until_chain_order, capture_at_head)
+            .await?
+        {
             Some(stats) => Ok(stats),
             None => {
-                self.reproject_batch_savepointed(batch_size, after_chain_order, until_chain_order)
-                    .await
+                self.reproject_batch_savepointed(
+                    batch_size,
+                    after_chain_order,
+                    until_chain_order,
+                    capture_at_head,
+                )
+                .await
             }
         }
     }
@@ -313,6 +449,7 @@ impl IndexerRepository {
         batch_size: u32,
         after_chain_order: Option<&str>,
         until_chain_order: Option<&str>,
+        capture_at_head: bool,
     ) -> anyhow::Result<Option<ReprojectionStats>> {
         let mut tx: Transaction<'_, Postgres> =
             self.pool.begin().await.context("reproject(fast) tx begin")?;
@@ -343,7 +480,42 @@ impl IndexerRepository {
                     stats.applied += 1;
                 }
                 Ok(ProjectionOutcome::Deferred) => {
-                    stats.deferred += 1;
+                    if Self::is_expired_inference_orphan(
+                        &row,
+                        self.inference_orphan_cutoff,
+                        capture_at_head,
+                    ) {
+                        // Repair the present resting leg(s) before dropping the row
+                        // whose parent will never arrive (the repair emits the warn
+                        // naming the data consequence). A repair DB error aborts this
+                        // optimistic batch like a projector error; the savepointed
+                        // replay then isolates the row.
+                        match crate::inference_projectors::repair_expired_inference_orphan(
+                            &mut tx, &event, &node,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
+                                to_mark.push(row.id); // mark processed so it stops looping
+                                stats.applied += 1;
+                            }
+                            Err(err) => {
+                                self.projection_fallbacks.fetch_add(1, Ordering::Relaxed);
+                                let rollback_error = tx.rollback().await.err();
+                                warn!(
+                                    msg_id = %row.msg_id,
+                                    event_type = ?event.event_type,
+                                    ?err,
+                                    ?rollback_error,
+                                    "expired-orphan repair errored in optimistic batch; falling back to per-row savepoints"
+                                );
+                                return Ok(None);
+                            }
+                        }
+                    } else {
+                        stats.deferred += 1;
+                    }
                 }
                 Ok(ProjectionOutcome::Unknown) => {
                     unknown_warnings.push((row.msg_id.clone(), event.event_type.clone()));
@@ -403,6 +575,7 @@ impl IndexerRepository {
         batch_size: u32,
         after_chain_order: Option<&str>,
         until_chain_order: Option<&str>,
+        capture_at_head: bool,
     ) -> anyhow::Result<ReprojectionStats> {
         let mut tx: Transaction<'_, Postgres> =
             self.pool.begin().await.context("reproject tx begin")?;
@@ -432,8 +605,41 @@ impl IndexerRepository {
                     stats.applied += 1;
                 }
                 Ok(ProjectionOutcome::Deferred) => {
-                    sp.commit().await.context("reproject savepoint release")?;
-                    stats.deferred += 1;
+                    if Self::is_expired_inference_orphan(
+                        &row,
+                        self.inference_orphan_cutoff,
+                        capture_at_head,
+                    ) {
+                        // Repair the present leg(s) inside this row's savepoint, then
+                        // release it; a repair error rolls back only this row.
+                        match crate::inference_projectors::repair_expired_inference_orphan(
+                            &mut sp, &event, &node,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                sp.commit().await.context("reproject savepoint release")?;
+                                self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
+                                to_mark.push(row.id); // mark processed so it stops looping
+                                stats.applied += 1;
+                            }
+                            Err(err) => {
+                                drop(sp);
+                                stats.failed += 1;
+                                warn!(
+                                    msg_id = %row.msg_id,
+                                    event_type = ?event.event_type,
+                                    ?err,
+                                    "expired-orphan repair failed; raw event still pending, savepoint rolled back"
+                                );
+                            }
+                        }
+                    } else {
+                        // Not an expired orphan: release the savepoint so the seed
+                        // skeleton written during project_event survives.
+                        sp.commit().await.context("reproject savepoint release")?;
+                        stats.deferred += 1;
+                    }
                 }
                 Ok(ProjectionOutcome::Unknown) => {
                     self.warn_unknown(&row.msg_id, &event.event_type);
@@ -457,6 +663,28 @@ impl IndexerRepository {
         Self::mark_processed(&mut tx, &to_mark).await?;
         tx.commit().await.context("reproject tx commit")?;
         Ok(stats)
+    }
+
+    /// Returns `true` when the row is an inference event whose parent
+    /// `OrderPlaced` has not arrived, the row's **ingest** age
+    /// (`now() - raw_events.created_at`) exceeds the configured cutoff, AND the
+    /// capture stream has drained to the chain tip (`capture_at_head`). The
+    /// `at_head` requirement keeps a parent that is merely still-ahead in an
+    /// in-progress backfill from being mistaken for one that was permanently
+    /// dropped at capture — "the parent will never arrive" is only declared once
+    /// capture has reached head. DEX rows (non-`InferenceOrderBook.*`) always
+    /// return `false`.
+    fn is_expired_inference_orphan(
+        row: &PendingRow,
+        cutoff: std::time::Duration,
+        capture_at_head: bool,
+    ) -> bool {
+        capture_at_head
+            && row.event_type.as_deref().is_some_and(|t| t.starts_with("InferenceOrderBook."))
+            && (chrono::Utc::now() - row.created_at)
+                .to_std()
+                .map(|age| age > cutoff)
+                .unwrap_or(false)
     }
 
     /// The unknown-event warning: normal target on the first sighting of an
@@ -495,7 +723,8 @@ impl IndexerRepository {
                       dst_address,
                       event_type,
                       decoded,
-                      extract(epoch from created_at_chain)::double precision as ts
+                      extract(epoch from created_at_chain)::double precision as ts,
+                      created_at
                  from raw_events
                 where processed_at is null
                   and event_type is not null
@@ -601,6 +830,73 @@ impl IndexerRepository {
         .await
         .context("cursor age seconds")?;
         Ok(secs)
+    }
+
+    /// Inference order-book markets grouped by lifecycle state, backing
+    /// `indexer_inference_markets`. Returns `(discovering, visible, failing)`:
+    /// `discovering` is a seeded skeleton not yet visible and not currently
+    /// failing; `visible` has `last_reconciled_at` stamped and is served by the
+    /// API; `failing` is still invisible but the reconciler recorded a failure
+    /// — the bucket that surfaces an ABI-drift book or a never-deployed /
+    /// wrong-dApp address that would otherwise accrue `reconcile_attempts` with
+    /// nothing in metrics. The three buckets partition the table.
+    pub async fn inference_market_state_counts(&self) -> anyhow::Result<(i64, i64, i64)> {
+        let row: (i64, i64, i64) = sqlx::query_as(
+            r#"select
+                   count(*) filter (where last_reconciled_at is null
+                                      and last_reconcile_failed_at is null) as discovering,
+                   count(*) filter (where last_reconciled_at is not null) as visible,
+                   count(*) filter (where last_reconciled_at is null
+                                      and last_reconcile_failed_at is not null) as failing
+                 from inference_markets"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("inference market state counts")?;
+        Ok(row)
+    }
+
+    /// Worst-case data staleness in seconds across visible inference markets,
+    /// backing `indexer_inference_reference_price_lag_seconds` and
+    /// `indexer_inference_sweep_lag_seconds`. Each value is
+    /// `now() - min(ts)` over books with `last_reconciled_at` set — the oldest
+    /// timestamp yields the largest age. Visibility implies both
+    /// `reference_price_at` and `last_swept_at` are stamped (discovery refreshes
+    /// the price and completes a sweep cycle before stamping
+    /// `last_reconciled_at`), so `min` never skips a visible book. Returns
+    /// `(reference_price_lag, sweep_lag)`, each 0 when no book is visible yet.
+    /// Both values come from one query to keep it to a single round-trip.
+    pub async fn inference_staleness_seconds(&self) -> anyhow::Result<(i64, i64)> {
+        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+            r#"select
+                   extract(epoch from now() - min(reference_price_at))::bigint as price_lag,
+                   extract(epoch from now() - min(last_swept_at))::bigint as sweep_lag
+                 from inference_markets
+                where last_reconciled_at is not null"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("inference staleness seconds")?;
+        Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
+    }
+
+    /// Resting inference orders grouped by status, backing
+    /// `indexer_inference_orders`. Returns `(open, filled, cancelled)` — the
+    /// three values of the `inference_orders.status` check constraint. `OPEN` is
+    /// live depth; `FILLED` and `CANCELLED` are terminal. The three buckets
+    /// partition the table.
+    pub async fn inference_order_status_counts(&self) -> anyhow::Result<(i64, i64, i64)> {
+        let row: (i64, i64, i64) = sqlx::query_as(
+            r#"select
+                   count(*) filter (where status = 'OPEN') as open,
+                   count(*) filter (where status = 'FILLED') as filled,
+                   count(*) filter (where status = 'CANCELLED') as cancelled
+                 from inference_orders"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("inference order status counts")?;
+        Ok(row)
     }
 
     /// (in_use, idle) sqlx pool connections — cheap in-memory reads, no DB query.
@@ -796,11 +1092,50 @@ fn pending_row_to_inputs(row: &PendingRow) -> Option<(DecodedEvent, EventNode)> 
     Some((event, node))
 }
 
-fn try_decode(decoder: &Decoder, msg_id: &str, body: Option<&Value>) -> Option<DecodedEvent> {
-    let body_str = body?.as_str()?;
-    match decoder.decode_event_body(body_str) {
-        Ok(decoded) => decoded,
+fn try_decode(
+    repo: &IndexerRepository,
+    decoder: &Decoder,
+    msg_id: &str,
+    body: Option<&Value>,
+    dst: Option<&str>,
+) -> Option<DecodedEvent> {
+    let body_str = body.and_then(Value::as_str)?;
+    match decoder.decode_event_body(body_str, dst) {
+        Ok(DecodeOutcome::Decoded(d)) => Some(d),
+        // Benign: a contract emitted an id the indexer does not index. Silent.
+        Ok(DecodeOutcome::UnknownId) => None,
+        Ok(DecodeOutcome::AmbiguousCollision { event_id }) => {
+            // A colliding id with no dst route — left undecoded (never first-ABI).
+            // Count it so a new-colliding-ABI-without-route regression is alertable
+            // (distinct from benign unknown-id noise), and route the repeat warn
+            // through the noise-dedup so a regression flood does not drown the main
+            // log. Keyed on a synthetic type so it reuses the no-handler dedup set.
+            repo.decode_ambiguous_collisions.fetch_add(1, Ordering::Relaxed);
+            let key = format!("ambiguous_collision:{event_id}");
+            if repo.first_unknown_sighting(&key) {
+                warn!(
+                    msg_id,
+                    event_id,
+                    "ambiguous event_id with no dst route; left undecoded (first sighting — repeats go to the noise log). A new colliding ABI likely needs a dst route in the decoder."
+                );
+            } else {
+                warn!(
+                    target: dodex_logging::EVENT_NOISE_TARGET,
+                    msg_id,
+                    event_id,
+                    "ambiguous event_id with no dst route; left undecoded"
+                );
+            }
+            None
+        }
         Err(err) => {
+            // Hard decode failure of a body the gateway delivered — distinct from
+            // an unknown/ambiguous id. Count it so ABI drift or a malformed cell
+            // on a known event is observable, not just a single warn line. The
+            // row is still stored undecoded and skipped by projection (and is
+            // invisible to the sweep's `decoded IS NOT NULL` pending-events gate),
+            // so the counter is the only durable signal.
+            repo.decode_errors.fetch_add(1, Ordering::Relaxed);
             warn!(msg_id, ?err, "decode body failed");
             None
         }
@@ -931,6 +1266,7 @@ mod tests {
             event_type: event_type.map(str::to_string),
             decoded,
             ts,
+            created_at: chrono::Utc::now(),
         }
     }
 

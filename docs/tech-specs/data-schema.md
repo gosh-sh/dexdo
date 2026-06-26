@@ -71,6 +71,7 @@ Indices:
 | `raw_events_created_at_chain_idx` (desc) | Time-window queries (analytics only). |
 | `raw_events_chain_order_idx` | Backs the projection loop's `ORDER BY chain_order ASC`. |
 | `raw_events_pending_chain_order_idx` (partial: `processed_at IS NULL AND event_type IS NOT NULL AND decoded IS NOT NULL`) | Backs the projection loop's keyset scan (`crates/infrastructure/src/indexer_repo.rs::reproject_pending_from`). Added by migration `0004`; replaces the former `raw_events_pending_projection_idx` which was keyed on `(created_at_chain, id)`. |
+| `raw_events_pending_src_idx` (partial: `processed_at IS NULL AND event_type IS NOT NULL AND decoded IS NOT NULL`) | Indexed on `src_address`. Allows the inference reconciler's sweep catch-up gate to probe "are there any pending events for this book?" as an index probe on `src_address = orderbook_address`, rather than a full-table scan. Added by migration `0005`. |
 
 ### `indexer_cursors`
 
@@ -81,6 +82,7 @@ Resume-points per ingestion stream. The indexer's main fetch loop persists the c
 | `stream_name` | `text` PK | Logical stream identifier (e.g. one per filter-set the indexer subscribes to). |
 | `cursor` | `text` | Opaque cursor returned by GraphQL server. |
 | `updated_at` | `timestamptz` | Last successful page commit. |
+| `at_head` | `boolean` NOT NULL default `false` | Set to `true` by the capture loop after a drain that returned `has_next_page=false` (the cursor is caught up to the chain tip); reset to `false` whenever more pages follow. Read by the inference reconciler as the `at_head` sweep catch-up gate: phantom-cancel sweeps must not fire while the gateway still has older pages ahead of the cursor. Added by migration `0006`. |
 
 ## Read-model — discovery
 
@@ -309,9 +311,9 @@ Reserved table for cached depth snapshots. Not used by the current depth handler
 
 ## Read-model — inference markets
 
-> 🚧 **TODO — not implemented.** These tables (`inference_markets`, `inference_orders`) and the `oracle_events.range_ob_address` / `range_bounds_jsonb` columns back the inference market, which is **not yet built**. No migration ships them yet; this is a forward-looking schema. Safe to merge into `dev` as spec-only.
-
 The inference side tracks the per-model order books of the private-inference market (`contracts/airegistry/InferenceOrderBook.sol` — one book per model) and the resting orders inside them. These tables back `/api/v1/inference/markets` (list, plus single-market via `?inferenceOrderBookAddress=`) and `/api/v1/inference/depth` (order book). Inference-settled **prediction** markets add no table of their own — `/api/v1/prediction/markets?resolvesFrom=` reuses [`markets`](#prediction-markets) joined to the range-event columns on [`oracle_events`](#oracle_events) (`range_ob_address`). As on the prediction-market side, a row is hidden from the public API until the inference reconciler stamps `last_reconciled_at`.
+
+Both tables are created by migration `0005_inference_orderbook.sql`.
 
 ### `inference_markets`
 
@@ -322,33 +324,38 @@ One row per `InferenceOrderBook` contract observed on chain — equivalently, on
 | `id` | `bigserial` PK | Internal FK target. |
 | `orderbook_address` | `text` UNIQUE | The InferenceOrderBook contract address. Exposed as `inferenceOrderBookAddress` — the public market id. |
 | `model_hash` | `numeric(78,0)` UNIQUE | On-chain model identity (`_modelHash` static), from `getParams()`. The only model identifier the order book itself carries. NULL only during the pre-reconcile window; the visibility gate guarantees it is set on every market the API returns. |
-| `model_ref` | `text` (nullable) | Human-readable model id `producer--model--version`. Reconciler-filled from the model's `ManifestMetadata` manifest (the order book carries only the hash). NULL when the manifest is not yet indexed or carries no model id — the API then surfaces the model by hash alone. See the [open question](indexer.md#inference-reconciler) on the model-id source. |
-| `producer` / `model_name` / `version` | `text` (nullable) | Parsed components of `model_ref`, for the `model.{producer,name,version}` render. Filled together with `model_ref`. |
-| `manifest_address` | `text` (nullable) | The model's `ManifestMetadata` contract address — the reconcile source for `model_ref`. NULL until linked. |
-| `root_model_address` | `text` (nullable) | The model's `RootModel` address. Diagnostic / reconcile aid. |
-| `owner_pubkey` | `numeric(78,0)` (nullable) | Model-owner pubkey (`RootModel` / `ManifestMetadata.getOwnerPubkey()`). |
-| `platform_fee_bps` | `integer` | Platform fee in basis points (`getParams().platformFeeBps`, e.g. `250`). Renders the buyer-side `takerCommission` (÷ 10 000 → `"0.025"`). The seller-side `makerCommission` is the rebate cap `−REBATE_MAX_BPS` (`−0.02`), a protocol constant; like `/api/v1/prediction/markets`, commissions are rendered (not stored per-row). |
-| `quote_token_type` | `integer` FK → `ref_tokens(token_type)` | Quote asset of the book. Always SHELL (`token_type = 2`); stored to source `decimals` / precision at render. |
-| `price_precision` | `integer` | Decimal places for price-per-tick at API render (SHELL `decimals = 9`). |
-| `quantity_precision` | `integer` | Decimal places for tick quantity. Ticks are integer units, so `0`. |
-| `tick_size` | `text` | Minimum price-per-tick increment as a decimal string. |
-| `step_size` | `text` | Minimum tick-quantity increment as a decimal string (`"1"`). |
-| `min_notional` | `text` | Minimum order notional as a decimal string. |
-| `reference_price` | `numeric(78,0)` (nullable) | Weekly-median reference price in SHELL atoms (`getWeeklyMedianPrice()`, spec §6.2). Reconciler-filled. **NULL when the book is dry** — the getter reverts `ERR_NO_LIQUIDITY` on insufficient volume, the reconciler records NULL, and the API surfaces `referencePrice: null`. |
+| `model_ref` | `text` (nullable) | 🚧 Human-readable model id `producer--model--version`. Reconciler-filled from the model's `ManifestMetadata` manifest (the order book carries only the hash). NULL when the manifest is not yet indexed or carries no model id — the API then surfaces the model by hash alone. Resolution from the model registry is deferred. |
+| `producer` / `model_name` / `version` | `text` (nullable) | 🚧 Parsed components of `model_ref`, for the `model.{producer,name,version}` render. Filled together with `model_ref`; NULL until `model_ref` is resolved. |
+| `manifest_address` | `text` (nullable) | 🚧 The model's `ManifestMetadata` contract address — the reconcile source for `model_ref`. NULL until linked. |
+| `root_model_address` | `text` (nullable) | 🚧 The model's `RootModel` address. Diagnostic / reconcile aid. NULL until linked. |
+| `owner_pubkey` | `numeric(78,0)` (nullable) | 🚧 Model-owner pubkey (`RootModel` / `ManifestMetadata.getOwnerPubkey()`). NULL until resolved. Note: `buyerPubkey` is present on-chain but is intentionally not stored — there is no per-order ownership column on `inference_orders`. |
+| `platform_fee_bps` | `integer` | Platform fee in basis points (`getParams().platformFeeBps`, e.g. `250`). Filled by the inference reconciler on the first discovery pass from `InferenceOrderBook.getParams()`. Renders the buyer-side `takerCommission` (÷ 10 000 → `"0.025"`). The seller-side `makerCommission` is the rebate cap `−REBATE_MAX_BPS` (`−0.02`), a protocol constant; like `/api/v1/prediction/markets`, commissions are rendered (not stored per-row). |
+| `quote_token_type` | `integer` FK → `ref_tokens(token_type)` | Quote asset of the book. Reconciler sets this to SHELL (`token_type = 2`) as a **constant** on the discovery pass — it is not sourced from a getter field. |
+| `price_precision` | `integer` | Decimal places for price-per-tick at API render. Reconciler sets this to the **constant** `9` (SHELL `decimals`) on the discovery pass. |
+| `quantity_precision` | `integer` | Decimal places for tick quantity. Reconciler sets this to the **constant** `0` (ticks are integer units) on the discovery pass. |
+| `tick_size` | `text` | Minimum price-per-tick increment as a decimal string. Reconciler sets this to the **constant** `"0.000000001"` (1 SHELL atom) on the discovery pass. |
+| `step_size` | `text` | Minimum tick-quantity increment as a decimal string. Reconciler sets this to the **constant** `"1"` on the discovery pass. |
+| `min_notional` | `text` | Minimum order notional as a decimal string. Reconciler sets this to the **constant** `"0.000000001"` on the discovery pass. |
+| `reference_price` | `numeric(78,0)` (nullable) | Weekly-median reference price in SHELL atoms (`getWeeklyMedianPrice()`). Reconciler-filled on the discovery pass and re-fetched on the reference-price refresh cadence. **NULL when the book is dry** — the getter reverts `ERR_NO_LIQUIDITY` on insufficient volume, the reconciler records NULL, and the API surfaces `referencePrice: null`. |
 | `reference_price_at` | `timestamptz` (nullable) | When `reference_price` was last refreshed. |
-| `created_at_chain` | `bigint` (nullable) | Block time the book was first observed. Drives `createdAt`. |
-| `last_reconciled_at` | `timestamptz` | Stamped by the inference reconciler after a successful pass. The public API filters on `last_reconciled_at IS NOT NULL` — books without this are invisible to clients (mirrors [`markets`](#prediction-markets)). |
+| `created_at_chain` | `timestamptz` (nullable) | On-chain block time the book was first observed (from the seed event's `created_at_chain`). Drives `createdAt`. |
+| `last_reconciled_at` | `timestamptz` | Stamped by the inference reconciler after a successful discovery pass. The public API filters on `last_reconciled_at IS NOT NULL` — books without this are invisible to clients (mirrors [`markets`](#prediction-markets)). |
 | `last_reconcile_failed_at` | `timestamptz` | Backoff bookkeeping for the inference reconciler. |
 | `reconcile_attempts` | `integer` default `0` | Diagnostic counter. |
+| `last_swept_at` | `timestamptz` (nullable) | Stamped `now()` on every sweep batch tick that passes the catch-up gates — not only on cycle completion. It drives the Queue B sweep cadence (`now() - last_swept_at >= inference_sweep_interval_ms`), so it must advance each tick. NULL until the first sweep. Used with `inference_markets_sweep_idx` to drive Queue B sweep scheduling. |
+| `sweep_cursor` | `numeric(78,0)` (nullable) | The `order_id` cursor for the current bounded round-robin sweep of `OPEN` orders. NULL at cycle start (or after a reset). The sweep resumes from this cursor on the next tick; NULL means start from the lowest `order_id`. |
+| `sweep_cycle_max` | `numeric(78,0)` (nullable) | Snapshot of the highest `order_id` at sweep-cycle start. Newly-minted orders above this bound are deferred to the next cycle — they cannot be phantoms yet when the book just accepted them. NULL when no cycle is in progress. |
+| `sweep_override_seq` | `bigint` NOT NULL default `0` | Monotonic counter bumped whenever a `Filled` event overrides a provisionally sweep-cancelled order while the book is still in the discovery phase. The discovery visibility stamp (transition to `last_reconciled_at IS NOT NULL`) is CAS-guarded on this counter being unchanged across the completing sweep tick, preventing a premature stamp when an override reset `sweep_cursor` to NULL at the start of a cycle where a plain cursor-CAS cannot distinguish reset-from-NULL from a normal start-of-cycle-NULL. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Indices:
 
 | Index | Purpose |
 | --- | --- |
-| `inference_markets_model_hash_idx` (UNIQUE) | Lookup / dedup by on-chain model identity. |
-| `inference_markets_producer_idx` | Backs the `producer` filter on `/api/v1/inference/markets`. |
-| `inference_markets_pending_reconcile_idx` (partial: `last_reconciled_at IS NULL`) | Drives the inference reconciler's pending-row SELECT. |
+| `inference_markets_model_hash_idx` (partial UNIQUE: `model_hash IS NOT NULL`) | Lookup / dedup by on-chain model identity. Partial to tolerate NULL during the pre-reconcile window. |
+| `inference_markets_pending_reconcile_idx` (partial: `last_reconciled_at IS NULL`) | Drives the inference reconciler Queue A (discovery) SELECT, ordered by `last_reconcile_failed_at NULLS FIRST, id`. |
+| `inference_markets_refresh_idx` (partial: `last_reconciled_at IS NOT NULL`) | Drives the inference reconciler Queue B (reference-price refresh) SELECT, ordered by `reference_price_at NULLS FIRST`. |
+| `inference_markets_sweep_idx` (partial: `last_reconciled_at IS NOT NULL`) | Drives the inference reconciler Queue B sweep scheduling, ordered by `last_swept_at NULLS FIRST`. |
 
 `reference_price` re-queues independently of the discovery reconcile: it moves with trading, so the reconciler refreshes it on a cadence (it is not a write-once field like `markets.orderbook_address`). See [indexer.md](indexer.md#inference-reconciler).
 
@@ -366,12 +373,18 @@ Per-order read model backing `/api/v1/inference/depth` (order-book depth). One r
 | `amount_remaining` | `numeric(78,0)` | Ticks not yet filled. Set by `OrderPlaced`, decremented by `Filled`. `OrderCancelled` preserves the current value; depth ignores the row because `status != 'OPEN'`. |
 | `is_subscription` | `boolean` default `false` | `true` when the resting buy came from `SubscriptionPlaced` (spec §8 — a standing bid throttled by a weekly budget). Rests in the book like any other bid; flagged for diagnostics. |
 | `status` | `text` CHECK `IN ('OPEN','FILLED','CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. A SELL offer is a one-deal slot consumed on match; a BUY maker reduces across fills. |
+| `swept_at` | `timestamptz` (nullable) | Stamped by the reconciler sweep when `getOrder()` confirms the order is no longer in the book and the row is provisionally cancelled. NULL while the order has not yet been swept. |
 | `note_address` | `text` (nullable) | Owner note address (`OrderPlaced.note`). Not on the public hot path; kept for diagnostics and cancel attribution. |
 | `last_chain_order` | `text` NOT NULL | Chain-order key of the most recent book event that touched this order. Lex-monotonic via `greatest(existing, new)`. Feeds `lastUpdateId` in depth responses as a STRING. |
 | `chain_created_at` / `chain_updated_at` | `timestamptz` | On-chain block times of the originating `OrderPlaced` and the most recent touch. Display / diagnostic only. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
-Index: `inference_orders_open_book_idx` — partial index on `(orderbook_address, is_buy, price DESC)` with predicate `status = 'OPEN'`. Sized for the depth query: top-N price levels per side for one book.
+Indices:
+
+| Index | Purpose |
+| --- | --- |
+| `inference_orders_open_book_idx` (partial: `status = 'OPEN'`) | `(orderbook_address, is_buy, price DESC)`. Sized for the depth query: top-N price levels per side for one book. |
+| `inference_orders_sweep_idx` (partial: `status = 'OPEN'`) | `(orderbook_address, order_id)`. Backs the reconciler's bounded round-robin sweep SELECT over OPEN rows, keyed by book + cursor position. |
 
 ## Authentication and credentials
 

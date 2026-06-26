@@ -93,12 +93,15 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
 
     // 2. Deploy the seller's TokenContract externally (giver-funded). Self-trade
     //    ⇒ seller pubkey/note are this note; root model is a harmless placeholder.
+    // postSellOffer verifies token_contract derives from the seller key + this
+    // nonce, so the offer must pass the SAME nonce the TokenContract was deployed with.
+    let nonce = (suffix % 1_000_000_000) as u64 + 1;
     let tc = deploy_token_contract(
         dex.context(),
         &note.owner_public_key_hex,
         &note.address,
         &note.address,
-        (suffix % 1_000_000_000) as u64 + 1,
+        nonce,
         TokenDeal {
             model_name: "e2e-model".to_string(),
             tick_size: 1,
@@ -120,6 +123,7 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
             max_ticks: OFFER_TICKS,
             token_contract: tc.clone(),
             flags: 0,
+            nonce,
         },
         signer(),
     )

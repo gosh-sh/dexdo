@@ -26,3 +26,9 @@ indexer:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
   ignored_event_types:
     - "OrderBook.Queued"
+  # Inference reconciler/sweep/orphan-cutoff knobs. Time-based cadences (not
+  # round-trip-bound), so the same values as config/indexer.local.yaml.
+  inference_reconciliation_interval_ms: 15000
+  inference_reference_price_refresh_ms: 3600000
+  inference_sweep_interval_ms: 30000
+  inference_orphan_cutoff_ms: 1800000
