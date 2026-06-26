@@ -1,4 +1,4 @@
-// End-to-end smoke test for `DELETE /api/v1/batchOrders` against a real
+// End-to-end smoke test for `DELETE /api/v1/prediction/batchOrders` against a real
 // shellnet OrderBook. Deploys a fresh PMP + OrderBook, provisions an
 // HMAC api_key, posts a two-item batch of BUY LIMIT GTC orders, polls
 // the chain until both surface in `getOrdersByOwner`, drives the
@@ -129,7 +129,7 @@ async fn cancel_batch_orders_against_shellnet() {
     let coid_a = fresh_coid(1).to_string();
     let coid_b = fresh_coid(2).to_string();
     let place_body = serde_json::to_vec(&json!({
-        "marketAddress": market.pmp_address,
+        "predictionMarketAddress": market.pmp_address,
         "symbol": symbol,
         "orders": [
             {
@@ -156,7 +156,7 @@ async fn cancel_batch_orders_against_shellnet() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(&secret_hex, &canonical, &place_body);
 
-    let mut place_resp = TestClient::post("http://test/api/v1/batchOrders")
+    let mut place_resp = TestClient::post("http://test/api/v1/prediction/batchOrders")
         .add_header("X-DODEX-APIKEY", api_key.clone(), true)
         .add_header("content-type", "application/json", true)
         .query("recvWindow", "5000")
@@ -170,7 +170,7 @@ async fn cancel_batch_orders_against_shellnet() {
     assert_eq!(
         place_status,
         Some(StatusCode::OK),
-        "POST /api/v1/batchOrders; body: {place_resp_body}",
+        "POST /api/v1/prediction/batchOrders; body: {place_resp_body}",
     );
 
     let coid_a_u128: u128 = coid_a.parse().expect("coid_a u128");
@@ -249,12 +249,12 @@ async fn cancel_batch_orders_against_shellnet() {
             .expect("seed live_orders row");
         }
 
-        // ---- Phase 2: drive DELETE /api/v1/batchOrders through the
+        // ---- Phase 2: drive DELETE /api/v1/prediction/batchOrders through the
         // ---- handler. Body carries both orderIds as strings; the auth
         // ---- hoop signs over the body bytes plus the canonical query.
         let cancel_ts = now_ms();
         let cancel_body = serde_json::to_vec(&json!({
-            "marketAddress": market.pmp_address,
+            "predictionMarketAddress": market.pmp_address,
             "symbol": symbol,
             "orderIds": [order_id_a.to_string(), order_id_b.to_string()],
         }))
@@ -263,7 +263,7 @@ async fn cancel_batch_orders_against_shellnet() {
             canonical_query(&[("recvWindow", "5000"), ("timestamp", &cancel_ts.to_string())]);
         let cancel_sig = sign(&secret_hex, &cancel_canonical, &cancel_body);
 
-        let mut cancel_resp = TestClient::delete("http://test/api/v1/batchOrders")
+        let mut cancel_resp = TestClient::delete("http://test/api/v1/prediction/batchOrders")
             .add_header("X-DODEX-APIKEY", api_key.clone(), true)
             .add_header("content-type", "application/json", true)
             .query("recvWindow", "5000")
@@ -277,7 +277,7 @@ async fn cancel_batch_orders_against_shellnet() {
 
         if cancel_status != Some(StatusCode::OK) {
             failures.push(format!(
-                "DELETE /api/v1/batchOrders status={cancel_status:?}; body: {cancel_resp_body}",
+                "DELETE /api/v1/prediction/batchOrders status={cancel_status:?}; body: {cancel_resp_body}",
             ));
         } else {
             #[derive(Deserialize)]
@@ -367,7 +367,7 @@ async fn cancel_batch_orders_against_shellnet() {
                 PollOutcome::Found(()) => {}
                 PollOutcome::NotFound => failures.push(format!(
                     "cancellation of coid_a={coid_a} / coid_b={coid_b} did not remove the orders \
-                     from getOrdersByOwner within 60s after DELETE /api/v1/batchOrders — chain \
+                     from getOrdersByOwner within 60s after DELETE /api/v1/prediction/batchOrders — chain \
                      may have queued cancel but not yet executed it",
                 )),
                 PollOutcome::ChainSilent => failures.push(

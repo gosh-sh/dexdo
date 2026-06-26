@@ -1,7 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
-// HTTP-level integration tests for `POST /api/v1/buyFullSet` that
+// HTTP-level integration tests for `POST /api/v1/prediction/buyFullSet` that
 // exercise the handler + use case end to end **without** a database or
 // a real chain. Mirrors the triad in `cancel_order_http.rs`: a fake
 // `Authenticator` short-circuits HMAC, a fake `MarketReadRepository`
@@ -291,7 +291,7 @@ fn auth_envelope() -> Vec<(&'static str, String)> {
 }
 
 async fn send_post(service: &Service, body: serde_json::Value) -> salvo::Response {
-    let mut req = TestClient::post("http://test/api/v1/buyFullSet").add_header(
+    let mut req = TestClient::post("http://test/api/v1/prediction/buyFullSet").add_header(
         "X-DODEX-APIKEY",
         "fake",
         true,
@@ -303,7 +303,7 @@ async fn send_post(service: &Service, body: serde_json::Value) -> salvo::Respons
 }
 
 fn full_body(collateral: &str) -> serde_json::Value {
-    json!({ "marketAddress": MARKET_ADDRESS, "collateral": collateral })
+    json!({ "predictionMarketAddress": MARKET_ADDRESS, "collateral": collateral })
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +316,7 @@ struct ErrorBody {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BuyFullSetBody {
+    #[serde(rename = "predictionMarketAddress")]
     market_address: String,
     transact_time: i64,
 }
@@ -380,7 +381,7 @@ async fn missing_collateral_returns_400_minus_1102() {
     let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
     let service = setup_with(repo, sender);
 
-    let body = json!({ "marketAddress": MARKET_ADDRESS });
+    let body = json!({ "predictionMarketAddress": MARKET_ADDRESS });
     let mut resp = send_post(&service, body).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
@@ -390,14 +391,14 @@ async fn missing_collateral_returns_400_minus_1102() {
 #[tokio::test]
 async fn blank_market_address_returns_400_minus_1102() {
     // `non_empty` trims at the boundary, so a whitespace-only
-    // `marketAddress` collapses to `None` — pinned here so the trim
+    // `predictionMarketAddress` collapses to `None` — pinned here so the trim
     // can't silently drift to a permissive accept on this destructive
     // write surface (mirrors the same guard on cancelBatchOrders).
     let repo: SharedRepo = Arc::new(FakeRepo::with(market(MarketStatus::Trading)));
     let sender: SharedChainSender = Arc::new(RecordingSplitFullSetSender::ok());
     let service = setup_with(repo, sender);
 
-    let body = json!({ "marketAddress": "   ", "collateral": "10" });
+    let body = json!({ "predictionMarketAddress": "   ", "collateral": "10" });
     let mut resp = send_post(&service, body).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
@@ -423,7 +424,7 @@ async fn blank_collateral_returns_400_minus_1102() {
 #[tokio::test]
 async fn unknown_field_in_body_returns_400_minus_1130() {
     // `#[serde(deny_unknown_fields)]` surfaces caller typos (e.g.
-    // `marketAddres` vs `marketAddress`) as a structural reject
+    // `marketAddres` vs `predictionMarketAddress`) as a structural reject
     // (-1130 InvalidParameter via the body-parse path), not as a
     // misleading `MissingParameter` from the now-silently-`None`
     // real field. Pins the strict-input contract on this
@@ -433,7 +434,7 @@ async fn unknown_field_in_body_returns_400_minus_1130() {
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "collateral": "10",
         "marketAddres": "typo",
     });

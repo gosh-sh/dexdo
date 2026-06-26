@@ -487,7 +487,7 @@ async fn orderfilled_deferred_replays_after_orderplaced() {
     // Locks in the OrderBook deferred-replay contract: an OrderFilled that
     // arrives before its OrderPlaced must stay queued (processed_at = null),
     // and the next reprojection sweep — once the live_orders row exists —
-    // must apply it. Without this, /api/v1/depth would inflate liquidity by
+    // must apply it. Without this, /api/v1/prediction/depth would inflate liquidity by
     // ignoring fills that landed out of order on the wire.
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
@@ -3195,7 +3195,7 @@ async fn fast_path_rolls_back_partial_mutation() {
 /// transaction rolls back with the trade insert, no trade row appears, and
 /// `processed_at` stays null so a fixed payload can replay. A partial apply
 /// would decrement the order while writing no trade — a silent divergence
-/// between /api/v1/orders and /api/v1/trades.
+/// between /api/v1/prediction/orders and /api/v1/prediction/trades.
 #[tokio::test]
 async fn taker_orderfilled_without_clearing_price_rolls_back_atomically() {
     let _guard = REPROJECTION_LOCK.lock().await;
@@ -3266,7 +3266,7 @@ async fn taker_orderfilled_without_clearing_price_rolls_back_atomically() {
 }
 
 /// A taker OrderFilled whose raw event carries no chain timestamp still
-/// records the trade, but with `chain_time = NULL`: the /api/v1/trades read
+/// records the trade, but with `chain_time = NULL`: the /api/v1/prediction/trades read
 /// query filters `chain_time IS NOT NULL`, so the row is invisible to the
 /// public tape until the timestamp is healed. The projection itself applies —
 /// `processed_at` is stamped and live_orders advances.

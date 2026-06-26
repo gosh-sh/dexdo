@@ -132,8 +132,8 @@ pub struct ChainSection {
     pub cancel_batch_timeout_ms: u64,
     #[serde(default = "default_split_full_set_timeout_ms")]
     pub split_full_set_timeout_ms: u64,
-    /// Batch-length cap for `POST`/`DELETE /api/v1/batchOrders`,
-    /// advertised as `maxBatchSize` in `/api/v1/markets`. Manually
+    /// Batch-length cap for `POST`/`DELETE /api/v1/prediction/batchOrders`,
+    /// advertised as `maxBatchSize` in `/api/v1/prediction/markets`. Manually
     /// mirrors the chain's compiled-in per-side `MAX_BATCH_SIZE`
     /// (`contracts/dex/modifiers/modifiers.sol`, 10 today) — the chain
     /// exposes no getter for it. Must not exceed the chain value:
@@ -977,7 +977,7 @@ graphql:
     #[test]
     fn api_validate_rejects_empty_chain_endpoint() {
         // The handler hits `chain.gateway_endpoint` on every order
-        // submission. An empty value silently means "POST /api/v1/order
+        // submission. An empty value silently means "POST /api/v1/prediction/order
         // 500s on every request" — the validator MUST catch this at
         // boot rather than at the first trade.
         let raw = format!(

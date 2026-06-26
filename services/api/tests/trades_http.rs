@@ -1,7 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
-// HTTP integration tests for GET /api/v1/trades through the production router.
+// HTTP integration tests for GET /api/v1/prediction/trades through the production router.
 // Gated on TEST_DATABASE_URL via common::setup(); see services/api/README.md
 // and docker-compose.test.yml. Each test seeds a uniquely-named market so the
 // shared test DB can be exercised in parallel, and cleans up after itself.
@@ -122,10 +122,11 @@ async fn happy_path_returns_bare_array_newest_first_without_auth() {
     seed_trade(&pool, "http-2", book, "6150", "1000000", true, 1_710_000_008.0).await;
 
     // No auth headers: a public route must not be 401-gated.
-    let mut resp =
-        TestClient::get(format!("http://test/api/v1/trades?marketAddress={pmp}&symbol={symbol}"))
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/prediction/trades?predictionMarketAddress={pmp}&symbol={symbol}"
+    ))
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK), "public trades route returns 200");
     let trades: Vec<TradeBody> = resp.take_json().await.expect("bare JSON array");
     assert_eq!(trades.len(), 2);
@@ -156,7 +157,7 @@ async fn happy_path_respects_limit_newest_first() {
     seed_trade(&pool, "http-limit-2", book, "6150", "1000000", true, 1_710_000_002.0).await;
 
     let mut resp = TestClient::get(format!(
-        "http://test/api/v1/trades?marketAddress={pmp}&symbol={symbol}&limit=2"
+        "http://test/api/v1/prediction/trades?predictionMarketAddress={pmp}&symbol={symbol}&limit=2"
     ))
     .send(&service)
     .await;
@@ -177,10 +178,11 @@ async fn empty_tape_is_bare_empty_array() {
     purge(&pool, pmp, book).await;
     seed_market(&pool, pmp, symbol, book, false).await;
 
-    let mut resp =
-        TestClient::get(format!("http://test/api/v1/trades?marketAddress={pmp}&symbol={symbol}"))
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/prediction/trades?predictionMarketAddress={pmp}&symbol={symbol}"
+    ))
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let trades: Vec<TradeBody> = resp.take_json().await.expect("bare JSON array");
     assert!(trades.is_empty(), "a reconciled market with no trades returns []");
@@ -191,9 +193,11 @@ async fn empty_tape_is_bare_empty_array() {
 #[tokio::test]
 async fn missing_symbol_is_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    let mut resp = TestClient::get("http://test/api/v1/trades?marketAddress=0:trades_http_x")
-        .send(&service)
-        .await;
+    let mut resp = TestClient::get(
+        "http://test/api/v1/prediction/trades?predictionMarketAddress=0:trades_http_x",
+    )
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("error body");
     assert_eq!(body["code"], -1102);
@@ -202,8 +206,9 @@ async fn missing_symbol_is_1102() {
 #[tokio::test]
 async fn missing_market_address_is_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    let mut resp =
-        TestClient::get("http://test/api/v1/trades?symbol=TRADES_HTTP_YES").send(&service).await;
+    let mut resp = TestClient::get("http://test/api/v1/prediction/trades?symbol=TRADES_HTTP_YES")
+        .send(&service)
+        .await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("error body");
     assert_eq!(body["code"], -1102);
@@ -219,7 +224,7 @@ async fn limit_out_of_range_is_1102() {
     seed_market(&pool, pmp, symbol, book, false).await;
 
     let mut resp = TestClient::get(format!(
-        "http://test/api/v1/trades?marketAddress={pmp}&symbol={symbol}&limit=1001"
+        "http://test/api/v1/prediction/trades?predictionMarketAddress={pmp}&symbol={symbol}&limit=1001"
     ))
     .send(&service)
     .await;
@@ -240,7 +245,7 @@ async fn non_numeric_limit_is_1130() {
     seed_market(&pool, pmp, symbol, book, false).await;
 
     let mut resp = TestClient::get(format!(
-        "http://test/api/v1/trades?marketAddress={pmp}&symbol={symbol}&limit=abc"
+        "http://test/api/v1/prediction/trades?predictionMarketAddress={pmp}&symbol={symbol}&limit=abc"
     ))
     .send(&service)
     .await;
@@ -255,7 +260,7 @@ async fn non_numeric_limit_is_1130() {
 async fn unknown_pair_is_1121() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     let mut resp =
-        TestClient::get("http://test/api/v1/trades?marketAddress=0:trades_http_nope&symbol=NOPE")
+        TestClient::get("http://test/api/v1/prediction/trades?predictionMarketAddress=0:trades_http_nope&symbol=NOPE")
             .send(&service)
             .await;
     assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
@@ -277,10 +282,11 @@ async fn blank_orderbook_is_1500() {
         .expect("purge blank-orderbook residue");
     seed_market(&pool, pmp, symbol, blank, false).await;
 
-    let mut resp =
-        TestClient::get(format!("http://test/api/v1/trades?marketAddress={pmp}&symbol={symbol}"))
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/prediction/trades?predictionMarketAddress={pmp}&symbol={symbol}"
+    ))
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
     let body: Value = resp.take_json().await.expect("error body");
     assert_eq!(body["code"], -1500);
@@ -300,10 +306,11 @@ async fn terminal_market_still_serves_tape() {
     seed_market(&pool, pmp, symbol, book, true).await;
     seed_trade(&pool, "term-1", book, "6150", "1000000", true, 1_710_000_008.0).await;
 
-    let mut resp =
-        TestClient::get(format!("http://test/api/v1/trades?marketAddress={pmp}&symbol={symbol}"))
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get(format!(
+        "http://test/api/v1/prediction/trades?predictionMarketAddress={pmp}&symbol={symbol}"
+    ))
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK), "terminal market still serves its tape");
     let trades: Vec<TradeBody> = resp.take_json().await.expect("bare JSON array");
     assert_eq!(trades.len(), 1);

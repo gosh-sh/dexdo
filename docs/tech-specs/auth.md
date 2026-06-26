@@ -75,8 +75,8 @@ Each api_key carries a subset of `{USER_DATA, TRADE}`, matching the security lev
 
 | Permission | Endpoints |
 | --- | --- |
-| `USER_DATA` | Read-only account endpoints (`/account`, `/account/balances`, `/orders`) |
-| `TRADE` | Order placement and cancellation (`/order`, `/batchOrders`, `/openOrders DELETE`) |
+| `USER_DATA` | Read-only account endpoints (`/account`, `/account/balances`, `/prediction/orders`) |
+| `TRADE` | Order placement and cancellation (`/prediction/order`, `/prediction/batchOrders`, `/prediction/openOrders DELETE`) |
 
 A `USER_DATA`-only key on a `TRADE` endpoint returns `-1002`. This separation lets a user issue read-only keys (for a dashboard) and trading keys (for a bot) under the same account.
 

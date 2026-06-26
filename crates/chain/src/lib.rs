@@ -30,6 +30,7 @@ mod test_helpers;
 
 pub use client::Dex;
 pub use dapp::dex_contract_params;
+pub use dapp::self_rooted_contract_params;
 pub use dto::OwnedOrder;
 pub use dto::OwnedOrders;
 pub use error::ChainError;

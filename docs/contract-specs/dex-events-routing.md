@@ -1,6 +1,6 @@
 # DEX.DO Event Routing
 
-This document catalogs every `event` defined under `contracts`: when it is emitted, which `dst` address it is routed to, and which events are currently declared only and not actually emitted.
+This document catalogs every `event` defined under `contracts/dex`: when it is emitted, which `dst` address it is routed to, and which events are currently declared only and not actually emitted. The AI-inference registry under `contracts/airegistry` has its own events (id ranges and typed decoders) — see [airegistry-inference.md](airegistry-inference.md).
 
 ## General principle
 

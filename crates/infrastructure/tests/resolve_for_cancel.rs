@@ -1,7 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Integration tests for PostgresReadModelRepository::resolve_for_cancel
-// — the single-SELECT order-resolution query for DELETE /api/v1/order.
+// — the single-SELECT order-resolution query for DELETE /api/v1/prediction/order.
 // Gated on TEST_DATABASE_URL.
 
 use std::env;
@@ -544,7 +544,7 @@ async fn resolve_for_cancel_derives_non_trading_status_for_caller_check() {
 
 // ---- resolve_for_cancel_batch -------------------------------------------
 //
-// Bulk variant for DELETE /api/v1/batchOrders. The SQL mirrors
+// Bulk variant for DELETE /api/v1/prediction/batchOrders. The SQL mirrors
 // `resolve_for_cancel`'s predicate set (status='OPEN', amount_remaining>0,
 // owner_pn_address match, m.last_reconciled_at IS NOT NULL) but filters
 // `live_orders.order_id` with `= ANY($3::text[])` and returns matched

@@ -46,6 +46,8 @@ pub use adapters::native::Dex;
 pub use adapters::wasm;
 pub use client::DexConfig;
 pub use dapp::dex_contract_params;
+pub use rate_limiter::maybe_acquire;
+pub use rate_limiter::RateLimiter;
 #[cfg(not(target_arch = "wasm32"))]
 pub use services::halo2;
 #[cfg(not(target_arch = "wasm32"))]

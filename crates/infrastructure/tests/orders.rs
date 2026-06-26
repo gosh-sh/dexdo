@@ -591,7 +591,7 @@ async fn filters_rows_missing_chain_timestamps_before_decoding() {
 }
 
 /// Pre-attribution rows (`owner_pn_address IS NULL`) must not surface in
-/// `/api/v1/orders`. Between `OrderBook.OrderPlaced` and
+/// `/api/v1/prediction/orders`. Between `OrderBook.OrderPlaced` and
 /// `PrivateNote.OrderPlacedConfirmed` the row lives in `live_orders` with
 /// a NULL owner; visibility is enforced by the `owner_pn_address = $1`
 /// equality (NULL ≠ any value) and the partial index

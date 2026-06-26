@@ -1,6 +1,6 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
-// HTTP coverage for GET /api/v1/orders through the production router.
+// HTTP coverage for GET /api/v1/prediction/orders through the production router.
 
 mod common;
 
@@ -32,6 +32,7 @@ struct ErrorBody {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OrderBody {
+    #[serde(rename = "predictionMarketAddress")]
     market_address: String,
     symbol: String,
     order_id: String,
@@ -264,16 +265,16 @@ async fn readonly_user_data_key_can_fetch_orders() {
     let ts = now_ms();
     let canonical_market = canonical_market_address(&scope.pmp);
     let canonical = canonical_query(&[
-        ("marketAddress", &canonical_market),
+        ("predictionMarketAddress", &canonical_market),
         ("recvWindow", "5000"),
         ("symbol", &scope.symbol),
         ("timestamp", &ts.to_string()),
     ]);
     let sig = sign(&scope.api_secret_hex, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true)
-        .query("marketAddress", scope.pmp.as_str())
+        .query("predictionMarketAddress", scope.pmp.as_str())
         .query("symbol", scope.symbol.as_str())
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
@@ -353,7 +354,7 @@ async fn status_filter_narrows_orders_through_http() {
     let ts = now_ms();
     let canonical_market = canonical_market_address(&scope.pmp);
     let canonical = canonical_query(&[
-        ("marketAddress", &canonical_market),
+        ("predictionMarketAddress", &canonical_market),
         ("recvWindow", "5000"),
         ("status", "FILLED"),
         ("symbol", &scope.symbol),
@@ -361,9 +362,9 @@ async fn status_filter_narrows_orders_through_http() {
     ]);
     let sig = sign(&scope.api_secret_hex, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true)
-        .query("marketAddress", scope.pmp.as_str())
+        .query("predictionMarketAddress", scope.pmp.as_str())
         .query("symbol", scope.symbol.as_str())
         .query("status", "FILLED")
         .query("recvWindow", "5000")
@@ -407,7 +408,7 @@ async fn partially_filled_status_filter_narrows_orders_through_http() {
     let ts = now_ms();
     let canonical_market = canonical_market_address(&scope.pmp);
     let canonical = canonical_query(&[
-        ("marketAddress", &canonical_market),
+        ("predictionMarketAddress", &canonical_market),
         ("recvWindow", "5000"),
         ("status", "PARTIALLY_FILLED"),
         ("symbol", &scope.symbol),
@@ -415,9 +416,9 @@ async fn partially_filled_status_filter_narrows_orders_through_http() {
     ]);
     let sig = sign(&scope.api_secret_hex, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true)
-        .query("marketAddress", scope.pmp.as_str())
+        .query("predictionMarketAddress", scope.pmp.as_str())
         .query("symbol", scope.symbol.as_str())
         .query("status", "PARTIALLY_FILLED")
         .query("recvWindow", "5000")
@@ -463,7 +464,7 @@ async fn multi_token_status_csv_narrows_orders_through_http() {
     // TestClient::query would re-encode and break the signature, so the
     // URL is built manually (mirrors empty_cursor_returns_minus_1102).
     let canonical = canonical_query(&[
-        ("marketAddress", &canonical_market),
+        ("predictionMarketAddress", &canonical_market),
         ("recvWindow", "5000"),
         ("status", "NEW%2CFILLED"),
         ("symbol", &scope.symbol),
@@ -472,7 +473,7 @@ async fn multi_token_status_csv_narrows_orders_through_http() {
     let sig = sign(&scope.api_secret_hex, &canonical, b"");
 
     let url = format!(
-        "http://test/api/v1/orders?marketAddress={canonical_market}&recvWindow=5000&status=NEW%2CFILLED&symbol={}&timestamp={ts}&signature={sig}",
+        "http://test/api/v1/prediction/orders?predictionMarketAddress={canonical_market}&recvWindow=5000&status=NEW%2CFILLED&symbol={}&timestamp={ts}&signature={sig}",
         scope.symbol,
     );
     let mut resp = TestClient::get(url)
@@ -518,16 +519,16 @@ async fn foreign_owner_rows_are_filtered_out() {
     let ts = now_ms();
     let canonical_market = canonical_market_address(&scope.pmp);
     let canonical = canonical_query(&[
-        ("marketAddress", &canonical_market),
+        ("predictionMarketAddress", &canonical_market),
         ("recvWindow", "5000"),
         ("symbol", &scope.symbol),
         ("timestamp", &ts.to_string()),
     ]);
     let sig = sign(&scope.api_secret_hex, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", scope.api_key.as_str(), true)
-        .query("marketAddress", scope.pmp.as_str())
+        .query("predictionMarketAddress", scope.pmp.as_str())
         .query("symbol", scope.symbol.as_str())
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
@@ -545,7 +546,7 @@ async fn foreign_owner_rows_are_filtered_out() {
     assert!(body.next_cursor.is_none());
 }
 
-// Half-supplied (marketAddress, symbol) pair → -1102 / 400. Both
+// Half-supplied (predictionMarketAddress, symbol) pair → -1102 / 400. Both
 // directions are pinned: the use case's invariant is "either both or
 // neither", and a regression that loosens it in one direction must
 // surface immediately.
@@ -557,15 +558,15 @@ async fn market_address_without_symbol_returns_minus_1102() {
     let market = "0:orders_one_sided";
     let canonical_market = canonical_market_address(market);
     let canonical = canonical_query(&[
-        ("marketAddress", &canonical_market),
+        ("predictionMarketAddress", &canonical_market),
         ("recvWindow", "5000"),
         ("timestamp", &ts.to_string()),
     ]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
-        .query("marketAddress", market)
+        .query("predictionMarketAddress", market)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -589,7 +590,7 @@ async fn symbol_without_market_address_returns_minus_1102() {
     ]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
         .query("recvWindow", "5000")
         .query("symbol", symbol)
@@ -603,9 +604,9 @@ async fn symbol_without_market_address_returns_minus_1102() {
     assert_eq!(body.code, -1102);
 }
 
-// Present-but-blank `marketAddress` / `symbol` trips -1102 instead of
+// Present-but-blank `predictionMarketAddress` / `symbol` trips -1102 instead of
 // silently collapsing to "no filter". Mirrors the cursor contract — a
-// client sending `?marketAddress=&symbol=` is signalling an unbound
+// client sending `?predictionMarketAddress=&symbol=` is signalling an unbound
 // template variable, not "all markets". The HMAC verifier signs the
 // raw query bytes, so the URL is built manually to keep blank values
 // intact (TestClient::query would re-encode and break the signature).
@@ -616,7 +617,7 @@ async fn blank_market_address_with_symbol_returns_minus_1102() {
     let ts = now_ms();
     let symbol = "ORDERS_BLANK_MA";
     let canonical = canonical_query(&[
-        ("marketAddress", ""),
+        ("predictionMarketAddress", ""),
         ("recvWindow", "5000"),
         ("symbol", symbol),
         ("timestamp", &ts.to_string()),
@@ -624,7 +625,7 @@ async fn blank_market_address_with_symbol_returns_minus_1102() {
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
     let url = format!(
-        "http://test/api/v1/orders?marketAddress=&recvWindow=5000&symbol={symbol}&timestamp={ts}&signature={sig}",
+        "http://test/api/v1/prediction/orders?predictionMarketAddress=&recvWindow=5000&symbol={symbol}&timestamp={ts}&signature={sig}",
     );
     let mut resp = TestClient::get(url)
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
@@ -643,7 +644,7 @@ async fn blank_symbol_with_market_address_returns_minus_1102() {
     let market = "0:orders_blank_symbol";
     let canonical_market = canonical_market_address(market);
     let canonical = canonical_query(&[
-        ("marketAddress", &canonical_market),
+        ("predictionMarketAddress", &canonical_market),
         ("recvWindow", "5000"),
         ("symbol", ""),
         ("timestamp", &ts.to_string()),
@@ -651,7 +652,7 @@ async fn blank_symbol_with_market_address_returns_minus_1102() {
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
     let url = format!(
-        "http://test/api/v1/orders?marketAddress={canonical_market}&recvWindow=5000&symbol=&timestamp={ts}&signature={sig}",
+        "http://test/api/v1/prediction/orders?predictionMarketAddress={canonical_market}&recvWindow=5000&symbol=&timestamp={ts}&signature={sig}",
     );
     let mut resp = TestClient::get(url)
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
@@ -668,7 +669,7 @@ async fn both_blank_market_pair_returns_minus_1102() {
     let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
     let canonical = canonical_query(&[
-        ("marketAddress", ""),
+        ("predictionMarketAddress", ""),
         ("recvWindow", "5000"),
         ("symbol", ""),
         ("timestamp", &ts.to_string()),
@@ -676,7 +677,7 @@ async fn both_blank_market_pair_returns_minus_1102() {
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
     let url = format!(
-        "http://test/api/v1/orders?marketAddress=&recvWindow=5000&symbol=&timestamp={ts}&signature={sig}",
+        "http://test/api/v1/prediction/orders?predictionMarketAddress=&recvWindow=5000&symbol=&timestamp={ts}&signature={sig}",
     );
     let mut resp = TestClient::get(url)
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
@@ -698,16 +699,16 @@ async fn unknown_market_pair_returns_minus_1121() {
     let symbol = "ORDERS_UNKNOWN_PAIR";
     let canonical_market = canonical_market_address(market);
     let canonical = canonical_query(&[
-        ("marketAddress", &canonical_market),
+        ("predictionMarketAddress", &canonical_market),
         ("recvWindow", "5000"),
         ("symbol", symbol),
         ("timestamp", &ts.to_string()),
     ]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
-        .query("marketAddress", market)
+        .query("predictionMarketAddress", market)
         .query("symbol", symbol)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
@@ -737,7 +738,7 @@ async fn unknown_status_token_returns_minus_1130() {
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
     let url = format!(
-        "http://test/api/v1/orders?recvWindow=5000&status=NEW%2CWRONG_TOKEN&timestamp={ts}&signature={sig}",
+        "http://test/api/v1/prediction/orders?recvWindow=5000&status=NEW%2CWRONG_TOKEN&timestamp={ts}&signature={sig}",
     );
     let mut resp = TestClient::get(url)
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
@@ -763,7 +764,7 @@ async fn pending_new_status_token_returns_minus_1130() {
     ]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
         .query("status", "PENDING_NEW")
         .query("recvWindow", "5000")
@@ -790,7 +791,7 @@ async fn pending_cancel_status_token_returns_minus_1130() {
     ]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
         .query("status", "PENDING_CANCEL")
         .query("recvWindow", "5000")
@@ -823,7 +824,7 @@ async fn empty_cursor_returns_minus_1102() {
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
     let url = format!(
-        "http://test/api/v1/orders?cursor=%20&recvWindow=5000&timestamp={ts}&signature={sig}",
+        "http://test/api/v1/prediction/orders?cursor=%20&recvWindow=5000&timestamp={ts}&signature={sig}",
     );
     let mut resp = TestClient::get(url)
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
@@ -851,7 +852,7 @@ async fn limit_out_of_range_returns_minus_1102() {
         ]);
         let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-        let mut resp = TestClient::get("http://test/api/v1/orders")
+        let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
             .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
             .query("limit", "501")
             .query("recvWindow", "5000")
@@ -874,7 +875,7 @@ async fn limit_out_of_range_returns_minus_1102() {
         ]);
         let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-        let mut resp = TestClient::get("http://test/api/v1/orders")
+        let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
             .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
             .query("limit", "0")
             .query("recvWindow", "5000")
@@ -897,7 +898,7 @@ async fn limit_out_of_range_returns_minus_1102() {
         ]);
         let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-        let mut resp = TestClient::get("http://test/api/v1/orders")
+        let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
             .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
             .query("limit", "-1")
             .query("recvWindow", "5000")
@@ -921,7 +922,7 @@ async fn limit_out_of_range_returns_minus_1102() {
         ]);
         let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-        let mut resp = TestClient::get("http://test/api/v1/orders")
+        let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
             .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
             .query("limit", "65536")
             .query("recvWindow", "5000")
@@ -949,7 +950,7 @@ async fn non_numeric_limit_returns_minus_1130() {
     ]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
         .query("limit", "abc")
         .query("recvWindow", "5000")
@@ -964,7 +965,7 @@ async fn non_numeric_limit_returns_minus_1130() {
 
 // pagination round-trip in DESC order
 
-/// Fetch one page of `/api/v1/orders` for a market-scoped query with
+/// Fetch one page of `/api/v1/prediction/orders` for a market-scoped query with
 /// an optional cursor. Hides the canonical-query + sign + TestClient
 /// boilerplate so the test bodies above stay focused on what they
 /// assert. Returns the parsed `OrdersPageBody`.
@@ -986,14 +987,14 @@ async fn get_orders_page(
         params.push(("cursor", c));
     }
     params.push(("limit", limit_string.as_str()));
-    params.push(("marketAddress", canonical_market.as_str()));
+    params.push(("predictionMarketAddress", canonical_market.as_str()));
     params.push(("recvWindow", "5000"));
     params.push(("symbol", scope.symbol.as_str()));
     params.push(("timestamp", ts_string.as_str()));
     let canonical = canonical_query(&params);
     let sig = sign(&scope.api_secret_hex, &canonical, b"");
 
-    let mut req = TestClient::get("http://test/api/v1/orders").add_header(
+    let mut req = TestClient::get("http://test/api/v1/prediction/orders").add_header(
         "X-DODEX-APIKEY",
         scope.api_key.as_str(),
         true,
@@ -1003,7 +1004,7 @@ async fn get_orders_page(
     }
     let mut resp = req
         .query("limit", limit_string.as_str())
-        .query("marketAddress", scope.pmp.as_str())
+        .query("predictionMarketAddress", scope.pmp.as_str())
         .query("symbol", scope.symbol.as_str())
         .query("recvWindow", "5000")
         .query("timestamp", ts_string.as_str())
@@ -1062,7 +1063,7 @@ async fn missing_auth_returns_minus_1003() {
     let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", common::SEED_API_KEY, true)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
@@ -1090,7 +1091,7 @@ async fn trade_only_key_returns_minus_1002() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(trade_secret_hex, &canonical, b"");
 
-    let mut resp = TestClient::get("http://test/api/v1/orders")
+    let mut resp = TestClient::get("http://test/api/v1/prediction/orders")
         .add_header("X-DODEX-APIKEY", trade_key.as_str(), true)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())

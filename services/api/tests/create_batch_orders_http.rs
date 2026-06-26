@@ -1,7 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
-// HTTP-level integration tests for `POST /api/v1/batchOrders` that
+// HTTP-level integration tests for `POST /api/v1/prediction/batchOrders` that
 // exercise the handler + use case end to end **without** a database or
 // a real chain. Three fakes plug into the boundaries the production
 // router takes by trait: a fake `Authenticator` short-circuits HMAC,
@@ -375,7 +375,7 @@ fn valid_item(client_order_id: &str) -> serde_json::Value {
 
 fn valid_body_with(orders: Vec<serde_json::Value>) -> serde_json::Value {
     json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL,
         "orders": orders,
     })
@@ -387,7 +387,7 @@ fn auth_envelope() -> Vec<(&'static str, String)> {
 
 fn post_batch(_service: &Service, body: serde_json::Value) -> RequestBuilder {
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
-    let mut req = TestClient::post("http://test/api/v1/batchOrders")
+    let mut req = TestClient::post("http://test/api/v1/prediction/batchOrders")
         .add_header("X-DODEX-APIKEY", "fake", true)
         .add_header("content-type", "application/json", true);
     for (k, v) in auth_envelope() {
@@ -476,7 +476,7 @@ async fn multi_outcome_market_routes_to_symbol_outcome() {
     let service = setup_with(repo, chain_sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL_NO,
         "orders": [valid_item("11"), valid_item("22")],
     });
@@ -529,7 +529,7 @@ async fn malformed_json_body_returns_400_minus_1130() {
     let service = setup_with(repo, sender);
 
     let body = b"{not valid json".to_vec();
-    let mut req = TestClient::post("http://test/api/v1/batchOrders")
+    let mut req = TestClient::post("http://test/api/v1/prediction/batchOrders")
         .add_header("X-DODEX-APIKEY", "fake", true)
         .add_header("content-type", "application/json", true);
     for (k, v) in auth_envelope() {
@@ -559,7 +559,7 @@ async fn missing_market_address_returns_400_minus_1102() {
 
 #[tokio::test]
 async fn empty_market_address_returns_400_minus_1102() {
-    // Present-but-blank `marketAddress` collapses through `non_empty`
+    // Present-but-blank `predictionMarketAddress` collapses through `non_empty`
     // to the same -1102 the missing-field path returns. Locks the
     // NonEmpty boundary so a future refactor that swaps the helper for
     // a raw `Option::is_some` check doesn't quietly accept `""`.
@@ -568,7 +568,7 @@ async fn empty_market_address_returns_400_minus_1102() {
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": "",
+        "predictionMarketAddress": "",
         "symbol": SYMBOL,
         "orders": [valid_item("11")],
     });
@@ -585,7 +585,7 @@ async fn missing_symbol_returns_400_minus_1102() {
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "orders": [valid_item("11")],
     });
     let mut resp = post_batch(&service, body).send(&service).await;
@@ -601,7 +601,7 @@ async fn missing_orders_field_returns_400_minus_1102() {
     let service = setup_with(repo, sender);
 
     let body = json!({
-        "marketAddress": MARKET_ADDRESS,
+        "predictionMarketAddress": MARKET_ADDRESS,
         "symbol": SYMBOL,
     });
     let mut resp = post_batch(&service, body).send(&service).await;

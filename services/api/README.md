@@ -8,7 +8,7 @@ Postgres and hosts authenticated private API routes.
 - Functional REST requirements: [docs/api-spec.md](../../docs/api-spec.md).
 - Authentication implementation: [docs/tech-specs/auth.md](../../docs/tech-specs/auth.md).
 - Read API implementation (all `GET` endpoints): [docs/tech-specs/read-api.md](../../docs/tech-specs/read-api.md).
-- Write API implementation (order placement / cancellation / batching / position writes): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md). Covers `POST /api/v1/order`, `DELETE /api/v1/order`, `POST /api/v1/batchOrders`, `DELETE /api/v1/batchOrders`, and `POST /api/v1/buyFullSet` today; `DELETE /api/v1/openOrders` is a stub section inside that doc.
+- Write API implementation (order placement / cancellation / batching / position writes): [docs/tech-specs/write-api.md](../../docs/tech-specs/write-api.md). Covers `POST /api/v1/prediction/order`, `DELETE /api/v1/prediction/order`, `POST /api/v1/prediction/batchOrders`, `DELETE /api/v1/prediction/batchOrders`, and `POST /api/v1/prediction/buyFullSet` today; `DELETE /api/v1/prediction/openOrders` is a stub section inside that doc.
 - Data schema: [docs/tech-specs/data-schema.md](../../docs/tech-specs/data-schema.md).
 
 Implementation details belong in the tech specs above, not in this README.
@@ -67,7 +67,7 @@ Smoke checks:
 
 ```sh
 curl -s 'http://localhost:8080/readiness'
-curl -s 'http://localhost:8080/api/v1/markets?limit=5' | jq
+curl -s 'http://localhost:8080/api/v1/prediction/markets?limit=5' | jq
 ```
 
 ## Tests

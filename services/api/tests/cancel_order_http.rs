@@ -1,7 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 
-// HTTP-level integration tests for `DELETE /api/v1/order` that
+// HTTP-level integration tests for `DELETE /api/v1/prediction/order` that
 // exercise the handler + use case end to end **without** a database or
 // a real chain. Mirrors the triad in `create_order_http.rs`: a fake
 // `Authenticator` short-circuits HMAC, a fake `MarketReadRepository`
@@ -10,7 +10,7 @@
 // handler would dispatch in production.
 //
 // The matching per-row coverage for the cancel error-mapping table in
-// `docs/tech-specs/write-api.md §DELETE /api/v1/order` lives here.
+// `docs/tech-specs/write-api.md §DELETE /api/v1/prediction/order` lives here.
 
 mod common;
 
@@ -280,8 +280,11 @@ fn auth_envelope() -> Vec<(&'static str, String)> {
 /// omit or override individual fields without copy-pasting the auth
 /// envelope wiring.
 async fn send_delete(service: &Service, params: Vec<(&'static str, String)>) -> salvo::Response {
-    let mut req =
-        TestClient::delete("http://test/api/v1/order").add_header("X-DODEX-APIKEY", "fake", true);
+    let mut req = TestClient::delete("http://test/api/v1/prediction/order").add_header(
+        "X-DODEX-APIKEY",
+        "fake",
+        true,
+    );
     for (k, v) in auth_envelope() {
         req = req.query(k, v);
     }
@@ -293,7 +296,7 @@ async fn send_delete(service: &Service, params: Vec<(&'static str, String)>) -> 
 
 fn full_params(order_id: &str) -> Vec<(&'static str, String)> {
     vec![
-        ("marketAddress", MARKET_ADDRESS.into()),
+        ("predictionMarketAddress", MARKET_ADDRESS.into()),
         ("symbol", SYMBOL.into()),
         ("orderId", order_id.into()),
     ]
@@ -376,7 +379,8 @@ async fn missing_symbol_returns_400_minus_1102() {
     let sender: SharedChainSender = Arc::new(RecordingCancelSender::ok());
     let service = setup_with(repo, sender);
 
-    let params = vec![("marketAddress", MARKET_ADDRESS.into()), ("orderId", ORDER_ID.to_string())];
+    let params =
+        vec![("predictionMarketAddress", MARKET_ADDRESS.into()), ("orderId", ORDER_ID.to_string())];
     let mut resp = send_delete(&service, params).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");
@@ -389,7 +393,8 @@ async fn missing_order_id_returns_400_minus_1102() {
     let sender: SharedChainSender = Arc::new(RecordingCancelSender::ok());
     let service = setup_with(repo, sender);
 
-    let params = vec![("marketAddress", MARKET_ADDRESS.into()), ("symbol", SYMBOL.into())];
+    let params =
+        vec![("predictionMarketAddress", MARKET_ADDRESS.into()), ("symbol", SYMBOL.into())];
     let mut resp = send_delete(&service, params).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let err = resp.take_json::<ErrorBody>().await.expect("error body");

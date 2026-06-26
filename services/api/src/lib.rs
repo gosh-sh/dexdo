@@ -121,7 +121,7 @@ pub struct AppState {
     /// don't care about timeouts can ignore it.
     pub(crate) request_timeout: Duration,
     /// `chain.max_batch_size` from api config: the batch-length cap the
-    /// batch use cases enforce and `/api/v1/markets` advertises as
+    /// batch use cases enforce and `/api/v1/prediction/markets` advertises as
     /// `maxBatchSize`. `AppState::new` defaults it to the config
     /// default; tests pin a different cap via `with_max_batch_size`.
     pub(crate) max_batch_size: u16,
@@ -197,9 +197,11 @@ struct MarketsResponse {
 #[serde(rename_all = "camelCase")]
 struct MarketDto {
     /// Stable market identifier.
+    #[serde(rename = "predictionMarketAddress")]
     market_address: String,
     /// Deterministic order-book address. Always present; trading
     /// availability depends on `status`.
+    #[serde(rename = "predictionOrderBookAddress")]
     order_book_address: String,
     /// Technical market name. Not the user-facing title; see
     /// `event.eventName`.
@@ -365,11 +367,12 @@ struct OracleOutcomeDto {
 #[serde(rename_all = "camelCase")]
 struct DepthResponse {
     /// Market address.
+    #[serde(rename = "predictionMarketAddress")]
     market_address: String,
     /// Outcome-token symbol.
     symbol: String,
     /// Opaque lex-comparable chain-order cursor; a larger string means
-    /// a newer event has touched this `(marketAddress, symbol)`. Empty
+    /// a newer event has touched this `(predictionMarketAddress, symbol)`. Empty
     /// string when no order event has landed yet. Do not parse as an
     /// integer.
     last_update_id: String,
@@ -409,6 +412,7 @@ fn depth_asks_schema() -> salvo_oapi::schema::Array {
 #[serde(rename_all = "camelCase")]
 struct OrderResponse {
     /// Market address.
+    #[serde(rename = "predictionMarketAddress")]
     market_address: String,
     /// Outcome-token symbol.
     symbol: String,
@@ -447,7 +451,7 @@ struct OrdersPageResponse {
     next_cursor: Option<String>,
 }
 
-/// One public trade in the `GET /api/v1/trades` tape. The endpoint returns a
+/// One public trade in the `GET /api/v1/prediction/trades` tape. The endpoint returns a
 /// bare JSON array of these, newest first.
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -509,6 +513,7 @@ impl AccountResponse {
 #[serde(rename_all = "camelCase")]
 struct MarketBalancesResponse {
     /// Market address.
+    #[serde(rename = "predictionMarketAddress")]
     market_address: String,
     /// Unix milliseconds. When the balances snapshot was assembled.
     update_time: i64,
@@ -763,12 +768,12 @@ async fn readiness() -> &'static str {
 const DEFAULT_LIMIT: u16 = 50;
 const MAX_LIMIT: u16 = 200;
 
-/// List markets or look up a single market by `marketAddress`.
+/// List markets or look up a single market by `predictionMarketAddress`.
 #[endpoint(
     tags("market-data"),
     summary = "List markets",
     parameters(
-        ("marketAddress" = Option<String>, Query, description = "Single-market lookup. Mutually exclusive with listing filters and pagination."),
+        ("predictionMarketAddress" = Option<String>, Query, description = "Single-market lookup. Mutually exclusive with listing filters and pagination."),
         ("status" = Option<Vec<dto::MarketStatus>>, Query, style = Form, explode = false, description = "Comma-separated MarketStatus filter."),
         ("quoteAsset" = Option<String>, Query, description = "Filter by quote asset symbol."),
         ("oracleName" = Option<String>, Query, description = "Filter by oracle name."),
@@ -810,7 +815,7 @@ async fn get_markets(
 }
 
 fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, ApiError> {
-    let market_address = non_empty_query(req, "marketAddress");
+    let market_address = non_empty_query(req, "predictionMarketAddress");
     let status = non_empty_query(req, "status");
     let quote_asset = non_empty_query(req, "quoteAsset");
     let oracle_name = non_empty_query(req, "oracleName");
@@ -1023,12 +1028,12 @@ fn oracle_event_to_dto(e: dodex_domain::OracleEventEntry) -> OracleEventDto {
     }
 }
 
-/// Order book depth snapshot for a (marketAddress, symbol).
+/// Order book depth snapshot for a (predictionMarketAddress, symbol).
 #[endpoint(
     tags("market-data"),
     summary = "Order book depth",
     parameters(
-        ("marketAddress" = String, Query, description = "Market address."),
+        ("predictionMarketAddress" = String, Query, description = "Market address."),
         ("symbol" = String, Query, description = "Outcome-token symbol."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 1000, description = "Levels per side. Default 100, max 1000; out-of-range values clamp."),
     ),
@@ -1043,7 +1048,7 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
         })?
         .clone();
 
-    let market_address = non_empty_query(req, "marketAddress")
+    let market_address = non_empty_query(req, "predictionMarketAddress")
         .ok_or(ApiError::from(DomainError::MissingParameter))?;
     let symbol =
         non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
@@ -1071,12 +1076,12 @@ async fn get_depth(req: &mut Request, depot: &mut Depot) -> Result<Json<DepthRes
     }))
 }
 
-/// Most recent public trades for a (marketAddress, symbol) outcome.
+/// Most recent public trades for a (predictionMarketAddress, symbol) outcome.
 #[endpoint(
     tags("market-data"),
     summary = "Recent trades",
     parameters(
-        ("marketAddress" = String, Query, description = "Market address."),
+        ("predictionMarketAddress" = String, Query, description = "Market address."),
         ("symbol" = String, Query, description = "Outcome-token symbol."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 1000, description = "Number of trades, newest first. Default 20, max 1000."),
     ),
@@ -1094,9 +1099,9 @@ async fn get_trades(
         })?
         .clone();
 
-    // marketAddress / symbol are mandatory: missing or blank is -1102, the
+    // predictionMarketAddress / symbol are mandatory: missing or blank is -1102, the
     // same contract as depth applies via `non_empty_query`.
-    let market_address = non_empty_query(req, "marketAddress")
+    let market_address = non_empty_query(req, "predictionMarketAddress")
         .ok_or(ApiError::from(DomainError::MissingParameter))?;
     let symbol =
         non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
@@ -1105,7 +1110,7 @@ async fn get_trades(
     // blank (`limit=`) falls through to the use case's default page size;
     // present-but-unparseable (e.g. `limit=abc`) is -1130 here; an
     // out-of-range number comes back as -1102 from the use case's
-    // [1, TRADES_MAX_LIMIT] bound check — matching /api/v1/orders' split.
+    // [1, TRADES_MAX_LIMIT] bound check — matching /api/v1/prediction/orders' split.
     let limit = optional_typed_query::<i64>(req, "limit")?;
 
     let use_case = GetTradesUseCase::new(state.repo);
@@ -1135,8 +1140,8 @@ fn trade_to_dto(trade: Trade) -> TradeResponse {
         ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
         ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
         ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
-        ("marketAddress" = Option<String>, Query, description = "Market filter. Must pair with symbol when set."),
-        ("symbol" = Option<String>, Query, description = "Symbol filter. Must pair with marketAddress."),
+        ("predictionMarketAddress" = Option<String>, Query, description = "Market filter. Must pair with symbol when set."),
+        ("symbol" = Option<String>, Query, description = "Symbol filter. Must pair with predictionMarketAddress."),
         ("status" = Option<Vec<dto::QueryableOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated OrderStatus filter. PENDING_NEW and PENDING_CANCEL are not queryable. Default: all statuses."),
         ("limit" = Option<i64>, Query, minimum = 1, maximum = 500, description = "Page size, 1..=500. Default 100."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor."),
@@ -1156,7 +1161,7 @@ async fn get_orders(
         })?
         .clone();
 
-    let market_address = non_blank_query(req, "marketAddress")?.map(MarketAddress);
+    let market_address = non_blank_query(req, "predictionMarketAddress")?.map(MarketAddress);
     let symbol = non_blank_query(req, "symbol")?.map(Symbol);
     let market_filter = OrdersMarketFilter::pair(market_address, symbol).map_err(ApiError::from)?;
     // status: raw CSV, validated by OrderStatusFilter::from_csv inside the
@@ -1174,7 +1179,7 @@ async fn get_orders(
     // cursor: raw string forwarded to `OrdersCursor::new` inside the
     // use case, which trims and rejects blank as `MissingParameter`.
     // The blank-rejects-loudly contract lives in the cursor type, not
-    // at this call site; `marketAddress` / `symbol` enforce the same
+    // at this call site; `predictionMarketAddress` / `symbol` enforce the same
     // contract one layer up via `non_blank_query` because the use
     // case never sees their raw strings.
     let cursor = req.query::<String>("cursor");
@@ -1239,7 +1244,7 @@ fn non_empty_query(req: &mut Request, key: &str) -> Option<String> {
 /// Strict variant of [`non_empty_query`]: a present-but-blank value is
 /// rejected as `MissingParameter` instead of being silently collapsed
 /// to "absent". Mirrors `OrdersCursor::new`'s contract — a client that
-/// sends `?marketAddress=&symbol=` is signalling a bug (an unbound
+/// sends `?predictionMarketAddress=&symbol=` is signalling a bug (an unbound
 /// template variable), not "no filter". See read-api.md §error table.
 fn non_blank_query(req: &mut Request, key: &str) -> Result<Option<String>, ApiError> {
     let Some(raw) = req.query::<String>(key) else {
@@ -1271,7 +1276,7 @@ fn optional_typed_query<T: std::str::FromStr>(
     trimmed.parse::<T>().map(Some).map_err(|_| ApiError::from(DomainError::InvalidParameter))
 }
 
-// Request body for `POST /api/v1/order`. Field names match
+// Request body for `POST /api/v1/prediction/order`. Field names match
 // docs/api-spec.md §New Order verbatim; `type` is the reserved keyword
 // we rename for serde and rebind to `order_type` internally.
 // Every field is `Option` at runtime so the handler can distinguish
@@ -1285,6 +1290,7 @@ fn optional_typed_query<T: std::str::FromStr>(
 struct CreateOrderRequest {
     /// Market address.
     #[salvo(schema(value_type = String))]
+    #[serde(rename = "predictionMarketAddress")]
     market_address: Option<String>,
     /// Outcome-token symbol.
     #[salvo(schema(value_type = String))]
@@ -1310,7 +1316,7 @@ struct CreateOrderRequest {
 // `clientOrderId` may have been generated by the backend, `transactTime`
 // is the moment we accepted, `status` is always `PENDING_NEW` because the
 // order has only entered the chain queue at this point. The full order
-// shape with chain-assigned `orderId` arrives later via `GET /api/v1/orders`
+// shape with chain-assigned `orderId` arrives later via `GET /api/v1/prediction/orders`
 // once `OrderBook.OrderPlaced` projects.
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1327,7 +1333,7 @@ struct CreateOrderResponse {
 // Minimal by design, parallel to CreateOrderResponse. `clientOrderId` is
 // the value recorded on placement, useful for correlating with the prior
 // POST. Final state — CANCELED, or FILLED if matching raced the cancel —
-// becomes visible later via `GET /api/v1/orders`.
+// becomes visible later via `GET /api/v1/prediction/orders`.
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CancelOrderResponse {
@@ -1345,13 +1351,14 @@ struct CancelOrderResponse {
 // One market+symbol per request; every item is placed on that single
 // book — matches the chain ABI's `PrivateNote.placeBatch(eventId,
 // oracleListHash, tokenType, OrderBookOrder[])`. Per-item field names
-// mirror `POST /api/v1/order` so a client can reuse the same type for
+// mirror `POST /api/v1/prediction/order` so a client can reuse the same type for
 // both endpoints.
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchOrdersRequest {
     /// Market address.
     #[salvo(schema(value_type = String))]
+    #[serde(rename = "predictionMarketAddress")]
     market_address: Option<String>,
     /// Outcome-token symbol shared by every item.
     #[salvo(schema(value_type = String))]
@@ -1399,7 +1406,7 @@ struct BatchOrderResponseItem {
     status: dto::OrderStatus,
 }
 
-/// Request body for `DELETE /api/v1/batchOrders`. One market+symbol per
+/// Request body for `DELETE /api/v1/prediction/batchOrders`. One market+symbol per
 /// request, every id is cancelled on that single book — matches the
 /// chain ABI's `PrivateNote.placeBatch(eventId, oracleListHash,
 /// tokenType, orders = [], cancelIds: uint128[])`.
@@ -1414,6 +1421,7 @@ struct BatchOrderResponseItem {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CancelBatchOrdersRequest {
+    #[serde(rename = "predictionMarketAddress")]
     market_address: Option<String>,
     symbol: Option<String>,
     order_ids: Option<Vec<String>>,
@@ -1441,7 +1449,7 @@ impl ToSchema for CancelBatchOrdersRequest {
         use salvo_oapi::Object;
         Object::new()
             .property(
-                "marketAddress",
+                "predictionMarketAddress",
                 Object::new().schema_type(BasicType::String).description("Market address."),
             )
             .property(
@@ -1456,7 +1464,7 @@ impl ToSchema for CancelBatchOrdersRequest {
                     .items(Object::new().schema_type(BasicType::String))
                     .description("Chain-assigned order ids, u64 decimal strings. Cancelled atomically; at most `outcome.maxBatchSize` ids."),
             )
-            .required("marketAddress")
+            .required("predictionMarketAddress")
             .required("symbol")
             .required("orderIds")
             .additional_properties(AdditionalProperties::FreeForm(false))
@@ -1464,7 +1472,7 @@ impl ToSchema for CancelBatchOrdersRequest {
     }
 }
 
-// Response item for `DELETE /api/v1/batchOrders`. Same `PENDING_CANCEL`
+// Response item for `DELETE /api/v1/prediction/batchOrders`. Same `PENDING_CANCEL`
 // envelope as the single-order DELETE — see `CancelOrderResponse`
 // for the rationale. Returned in request order; the array has one
 // element per accepted id.
@@ -1482,7 +1490,7 @@ struct CancelBatchOrderResponseItem {
     status: dto::OrderStatus,
 }
 
-/// Request body for `POST /api/v1/buyFullSet`. Field names match
+/// Request body for `POST /api/v1/prediction/buyFullSet`. Field names match
 /// docs/api-spec.md §Buy Full Set verbatim. `deny_unknown_fields` is
 /// strict on this destructive write surface — same rationale as
 /// `CancelBatchOrdersRequest`: a typo like `marketAddres` would
@@ -1492,6 +1500,7 @@ struct CancelBatchOrderResponseItem {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BuyFullSetRequest {
+    #[serde(rename = "predictionMarketAddress")]
     market_address: Option<String>,
     collateral: Option<String>,
 }
@@ -1514,7 +1523,7 @@ impl ToSchema for BuyFullSetRequest {
         use salvo_oapi::Object;
         Object::new()
             .property(
-                "marketAddress",
+                "predictionMarketAddress",
                 Object::new().schema_type(BasicType::String).description("Market address."),
             )
             .property(
@@ -1523,7 +1532,7 @@ impl ToSchema for BuyFullSetRequest {
                     .schema_type(BasicType::String)
                     .description("Quote-asset amount to spend, as a decimal string. Spent from the caller's free balance; any remainder that does not divide evenly is refunded."),
             )
-            .required("marketAddress")
+            .required("predictionMarketAddress")
             .required("collateral")
             .additional_properties(AdditionalProperties::FreeForm(false))
             .into()
@@ -1538,7 +1547,8 @@ impl ToSchema for BuyFullSetRequest {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct BuyFullSetResponse {
-    /// Echo of the request's `marketAddress`.
+    /// Echo of the request's `predictionMarketAddress`.
+    #[serde(rename = "predictionMarketAddress")]
     market_address: String,
     /// Unix milliseconds. The moment the request was accepted.
     transact_time: i64,
@@ -1607,7 +1617,7 @@ async fn parse_strict_body<T: serde::de::DeserializeOwned>(
 // request + `AuthContext` into a `NewOrderInput`, hands the use case
 // off, and shapes the three-field response. The chain-assigned
 // `orderId` is not in this response by design — it arrives later via
-// `GET /api/v1/orders` once the indexer projects `OrderBook.OrderPlaced`.
+// `GET /api/v1/prediction/orders` once the indexer projects `OrderBook.OrderPlaced`.
 #[endpoint(
     tags("trading"),
     summary = "Submit a new order",
@@ -1636,7 +1646,7 @@ async fn create_order(
     // Body has been HMAC-verified upstream; `parse_strict_body` tags the
     // failure mode in the warn so ops can grep `reason=malformed` vs
     // `reason=transport` etc.
-    let body: CreateOrderRequest = parse_strict_body(req, "POST /api/v1/order").await?;
+    let body: CreateOrderRequest = parse_strict_body(req, "POST /api/v1/prediction/order").await?;
 
     let (now_seconds, now_ms) = now_pair();
     let input = build_new_order_input(body, ctx, now_seconds, now_ms)?;
@@ -1708,7 +1718,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
         ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
         ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
         ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
-        ("marketAddress" = String, Query, description = "Market address."),
+        ("predictionMarketAddress" = String, Query, description = "Market address."),
         ("symbol" = String, Query, description = "Outcome-token symbol."),
         ("orderId" = String, Query, description = "Chain-assigned order id, u64 decimal string."),
     ),
@@ -1727,7 +1737,7 @@ async fn delete_order(
         })?
         .clone();
 
-    let market_address = non_empty_query(req, "marketAddress")
+    let market_address = non_empty_query(req, "predictionMarketAddress")
         .ok_or(ApiError::from(DomainError::MissingParameter))?;
     let symbol =
         non_empty_query(req, "symbol").ok_or(ApiError::from(DomainError::MissingParameter))?;
@@ -1762,7 +1772,7 @@ async fn delete_order(
     }))
 }
 
-// Parses one (marketAddress, symbol) plus `orders[]`, hands off to
+// Parses one (predictionMarketAddress, symbol) plus `orders[]`, hands off to
 // the batch-create use case, and shapes a flat array of `PENDING_NEW`
 // envelopes. The use case enforces non-empty `orders[]` and the
 // configured `max_batch_size` cap; the chain enforces atomic placement.
@@ -1791,7 +1801,8 @@ async fn create_batch_orders(
         })?
         .clone();
 
-    let body: BatchOrdersRequest = parse_strict_body(req, "POST /api/v1/batchOrders").await?;
+    let body: BatchOrdersRequest =
+        parse_strict_body(req, "POST /api/v1/prediction/batchOrders").await?;
 
     let (now_seconds, now_ms) = now_pair();
     let input = build_batch_orders_input(body, ctx, now_seconds, now_ms)?;
@@ -1813,7 +1824,7 @@ async fn create_batch_orders(
 }
 
 /// Translate the parsed body + auth context into a
-/// `CreateBatchOrdersInput`. The top-level (`marketAddress`, `symbol`)
+/// `CreateBatchOrdersInput`. The top-level (`predictionMarketAddress`, `symbol`)
 /// resolves once for the whole request; per-item fields go through
 /// the same trim+enum-parse the single-order handler runs. Any
 /// missing or unknown enum value on any item collapses the whole
@@ -1906,7 +1917,7 @@ fn build_batch_orders_input(
     })
 }
 
-// Parses one `(marketAddress, symbol)` plus `orderIds[]`, hands off
+// Parses one `(predictionMarketAddress, symbol)` plus `orderIds[]`, hands off
 // to `CancelBatchOrdersUseCase`, and shapes a flat array of
 // `PENDING_CANCEL` envelopes. The use case enforces non-empty
 // `orderIds[]`, intra-batch dedup, the configured `max_batch_size` cap,
@@ -1939,7 +1950,7 @@ async fn delete_batch_orders(
         .clone();
 
     let body: CancelBatchOrdersRequest =
-        parse_strict_body(req, "DELETE /api/v1/batchOrders").await?;
+        parse_strict_body(req, "DELETE /api/v1/prediction/batchOrders").await?;
 
     let (now_seconds, now_ms) = now_pair();
     let input = build_cancel_batch_orders_input(body, ctx, now_seconds, now_ms)?;
@@ -2066,7 +2077,8 @@ async fn buy_full_set(
         })?
         .clone();
 
-    let body: BuyFullSetRequest = parse_strict_body(req, "POST /api/v1/buyFullSet").await?;
+    let body: BuyFullSetRequest =
+        parse_strict_body(req, "POST /api/v1/prediction/buyFullSet").await?;
 
     let market_address =
         non_empty(body.market_address).ok_or(ApiError::from(DomainError::MissingParameter))?;
@@ -2193,7 +2205,7 @@ async fn get_account(
         ("timestamp" = i64, Query, description = "Unix milliseconds. Included in the signed payload."),
         ("recvWindow" = Option<i64>, Query, description = "Request validity window in milliseconds. Default 5000, max 60000."),
         ("signature" = String, Query, description = "Hex HMAC SHA-256 of canonicalQueryString + canonicalRequestBody."),
-        ("marketAddress" = String, Query, description = "Market address."),
+        ("predictionMarketAddress" = String, Query, description = "Market address."),
     ),
     security(("apiKey" = [])),
 )]
@@ -2210,7 +2222,7 @@ async fn get_account_balances(
         })?
         .clone();
 
-    let market_address = non_blank_query(req, "marketAddress")?
+    let market_address = non_blank_query(req, "predictionMarketAddress")?
         .ok_or(ApiError::from(DomainError::MissingParameter))?;
 
     let now_ms = now_pair().1;
@@ -2284,10 +2296,10 @@ pub fn build_router(state: AppState) -> Router {
         // chain — runs inside its budget.
         .hoop(timeout_hoop::enforce_request_timeout)
         .push(Router::with_path("readiness").get(readiness))
-        .push(Router::with_path("api/v1/markets").get(get_markets))
-        .push(Router::with_path("api/v1/depth").get(get_depth))
+        .push(Router::with_path("api/v1/prediction/markets").get(get_markets))
+        .push(Router::with_path("api/v1/prediction/depth").get(get_depth))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
-        .push(Router::with_path("api/v1/trades").get(get_trades))
+        .push(Router::with_path("api/v1/prediction/trades").get(get_trades))
         // Registration is public — a client has no API key yet, so it
         // lives outside the auth subrouter. Always available (unlike the
         // config-gated seeder); the note's custody keys are the capability.
@@ -2300,19 +2312,19 @@ pub fn build_router(state: AppState) -> Router {
             Router::new()
                 .hoop(auth_hoop::authenticate)
                 .push(
-                    Router::with_path("api/v1/order")
+                    Router::with_path("api/v1/prediction/order")
                         .post(create_order)
                         .delete(delete_order),
                 )
-                .push(Router::with_path("api/v1/orders").get(get_orders))
+                .push(Router::with_path("api/v1/prediction/orders").get(get_orders))
                 .push(
-                    Router::with_path("api/v1/batchOrders")
+                    Router::with_path("api/v1/prediction/batchOrders")
                         .post(create_batch_orders)
                         .delete(delete_batch_orders),
                 )
                 .push(Router::with_path("api/v1/account").get(get_account))
                 .push(Router::with_path("api/v1/account/balances").get(get_account_balances))
-                .push(Router::with_path("api/v1/buyFullSet").post(buy_full_set)),
+                .push(Router::with_path("api/v1/prediction/buyFullSet").post(buy_full_set)),
         )
 }
 
@@ -2329,21 +2341,21 @@ pub fn openapi_doc() -> OpenApi {
 
     let router = Router::new()
         .push(Router::with_path("readiness").get(readiness))
-        .push(Router::with_path("api/v1/markets").get(get_markets))
-        .push(Router::with_path("api/v1/depth").get(get_depth))
+        .push(Router::with_path("api/v1/prediction/markets").get(get_markets))
+        .push(Router::with_path("api/v1/prediction/depth").get(get_depth))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
-        .push(Router::with_path("api/v1/trades").get(get_trades))
+        .push(Router::with_path("api/v1/prediction/trades").get(get_trades))
         .push(Router::with_path("api/v1/accounts").post(register_account))
-        .push(Router::with_path("api/v1/order").post(create_order).delete(delete_order))
-        .push(Router::with_path("api/v1/orders").get(get_orders))
+        .push(Router::with_path("api/v1/prediction/order").post(create_order).delete(delete_order))
+        .push(Router::with_path("api/v1/prediction/orders").get(get_orders))
         .push(
-            Router::with_path("api/v1/batchOrders")
+            Router::with_path("api/v1/prediction/batchOrders")
                 .post(create_batch_orders)
                 .delete(delete_batch_orders),
         )
         .push(Router::with_path("api/v1/account").get(get_account))
         .push(Router::with_path("api/v1/account/balances").get(get_account_balances))
-        .push(Router::with_path("api/v1/buyFullSet").post(buy_full_set));
+        .push(Router::with_path("api/v1/prediction/buyFullSet").post(buy_full_set));
 
     OpenApi::new("Dodex REST API", env!("CARGO_PKG_VERSION"))
         .info(
@@ -2554,12 +2566,26 @@ mod dto_tests {
             }],
         });
         let v = serde_json::to_value(&resp).unwrap();
-        assert_eq!(v["marketAddress"], "0:m");
+        assert_eq!(v["predictionMarketAddress"], "0:m");
         assert_eq!(v["updateTime"], 1_710_000_000_000i64);
         assert_eq!(v["balances"][0]["outcomeId"], 1);
         assert_eq!(v["balances"][0]["symbol"], "PM-X-YES");
         assert_eq!(v["balances"][0]["free"], "5.50");
         assert_eq!(v["balances"][0]["lockedInOrders"], "1000.00");
+    }
+
+    #[test]
+    fn depth_response_uses_prediction_market_address() {
+        let resp = DepthResponse {
+            market_address: "0:m".into(),
+            symbol: "PM-X-YES".into(),
+            last_update_id: String::new(),
+            bids: vec![],
+            asks: vec![],
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["predictionMarketAddress"], "0:m");
+        assert_eq!(v["symbol"], "PM-X-YES");
     }
 
     #[test]
@@ -2594,6 +2620,9 @@ mod dto_tests {
         };
         let dto = market_to_dto(market, 10);
         let v = serde_json::to_value(&dto).unwrap();
+        // Wire fields renamed under the /api/v1/prediction/ namespace.
+        assert_eq!(v["predictionMarketAddress"], "0:m");
+        assert_eq!(v["predictionOrderBookAddress"], "0:ob");
         // Snapshot: literals catch silent drift in the domain constants.
         assert_eq!(v["makerCommission"], "-0.0003375");
         assert_eq!(v["takerCommission"], "0.0004500");

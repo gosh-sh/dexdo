@@ -34,6 +34,11 @@ deploy plus its write path — each deploy spends ~300 NACKL, so budget for
 the whole suite, not one test. Top it up via `mint_pn_pool` when the balance
 runs low. The pool needs only one funded PN.
 
+The AI-inference e2e tests (`e2e_inference*`) additionally need the note to
+hold SHELL for order escrow and a reachable giver (shellnet only); the
+streaming test sleeps out the 180s on-chain settle window (~4 min). See
+[`docs/contract-specs/airegistry-inference.md`](../../docs/contract-specs/airegistry-inference.md).
+
 ## Run the e2e suite single-threaded
 
 ```sh

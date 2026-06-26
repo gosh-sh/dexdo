@@ -1,5 +1,5 @@
 // HTTP-level integration tests for the auth hoop and the permission
-// gate on `POST /api/v1/order`. Each test sends a real request through
+// gate on `POST /api/v1/prediction/order`. Each test sends a real request through
 // the production router (constructed by `dodex_api::build_router`)
 // against the test DB seeded via `seed::seed_accounts_from_notes`, then asserts
 // on status + spec error body.
@@ -35,10 +35,10 @@ struct ErrorBody {
 
 /// Minimal valid request body — well-formed JSON with every required
 /// field present so request parsing succeeds and the handler attempts
-/// market resolution. The `marketAddress` is intentionally fictitious;
+/// market resolution. The `predictionMarketAddress` is intentionally fictitious;
 /// no row matches it in the test DB, so the use case 404s with -1121.
 const HANDLER_REACHABLE_BODY: &str = concat!(
-    r#"{"marketAddress":"0:no-such-market","#,
+    r#"{"predictionMarketAddress":"0:no-such-market","#,
     r#""symbol":"NO-SUCH-SYMBOL","#,
     r#""side":"BUY","#,
     r#""quantity":"1","#,
@@ -56,7 +56,7 @@ async fn missing_apikey_header_returns_1003() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -73,7 +73,7 @@ async fn missing_signature_returns_1003() {
     let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
     let ts = now_ms();
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
@@ -89,7 +89,7 @@ async fn missing_signature_returns_1003() {
 async fn missing_timestamp_returns_1003() {
     let Some((service, _pool, _kek, _pn_reader)) = common::setup().await else { return };
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "5000")
         .query("signature", "deadbeef")
@@ -112,7 +112,7 @@ async fn unknown_apikey_returns_1002() {
     // The server can't find a row and returns -1002 before HMAC compute.
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", "dk_live_unknown_999", true)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
@@ -135,7 +135,7 @@ async fn stale_timestamp_returns_1021() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
@@ -157,7 +157,7 @@ async fn wrong_signature_returns_1022() {
     let canonical_wrong = canonical_query(&[("recvWindow", "5000"), ("timestamp", "0")]);
     let bad_sig = sign(SEED_API_SECRET, &canonical_wrong, b"");
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
@@ -183,7 +183,7 @@ async fn recv_window_overshoot_silently_clamps() {
     let body = HANDLER_REACHABLE_BODY.as_bytes();
     let sig = sign(SEED_API_SECRET, &canonical, body);
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .add_header("content-type", "application/json", true)
         .query("recvWindow", "999999")
@@ -211,7 +211,7 @@ async fn malformed_recv_window_returns_1003() {
     let canonical = canonical_query(&[("recvWindow", "abc"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .query("recvWindow", "abc")
         .query("timestamp", ts.to_string())
@@ -236,7 +236,7 @@ async fn body_exceeding_cap_returns_1009() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, &body);
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .add_header("content-type", "application/octet-stream", true)
         .query("recvWindow", "5000")
@@ -266,7 +266,7 @@ async fn valid_signature_reaches_handler() {
     let body = HANDLER_REACHABLE_BODY.as_bytes();
     let sig = sign(SEED_API_SECRET, &canonical, body);
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
         .add_header("content-type", "application/json", true)
         .query("recvWindow", "5000")
@@ -303,7 +303,7 @@ async fn user_data_only_key_returns_1002_on_trade_route() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(readonly_secret_hex, &canonical, b"");
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", readonly_api_key.as_str(), true)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())

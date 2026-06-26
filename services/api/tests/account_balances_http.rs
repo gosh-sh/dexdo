@@ -22,7 +22,7 @@ use sqlx::PgPool;
 
 #[derive(Debug, Deserialize)]
 struct BalancesBody {
-    #[serde(rename = "marketAddress")]
+    #[serde(rename = "predictionMarketAddress")]
     market_address: String,
     #[serde(rename = "updateTime")]
     update_time: i64,
@@ -67,8 +67,11 @@ fn pct_encode(value: &str) -> String {
 
 fn sign_get(api_secret: &str, recv: &str, ts: &str, market: &str) -> String {
     let market_enc = pct_encode(market);
-    let canonical =
-        canonical_query(&[("marketAddress", &market_enc), ("recvWindow", recv), ("timestamp", ts)]);
+    let canonical = canonical_query(&[
+        ("predictionMarketAddress", &market_enc),
+        ("recvWindow", recv),
+        ("timestamp", ts),
+    ]);
     sign(api_secret, &canonical, b"")
 }
 
@@ -185,7 +188,7 @@ async fn happy_path_returns_outcomes_sorted_by_id() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -219,7 +222,7 @@ async fn no_stake_yields_zero_free_with_nonzero_locked() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -239,7 +242,7 @@ async fn no_stake_yields_zero_free_with_nonzero_locked() {
 async fn missing_market_address_returns_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     let ts = now_ms();
-    // Don't pass marketAddress to the canonical-query helper either —
+    // Don't pass predictionMarketAddress to the canonical-query helper either —
     // signature must match what we actually send.
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(SEED_API_SECRET, &canonical, b"");
@@ -264,7 +267,7 @@ async fn unknown_market_returns_1121() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), market);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", market)
+        .query("predictionMarketAddress", market)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -288,7 +291,7 @@ async fn stake_array_mismatch_returns_1500() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -323,7 +326,7 @@ async fn terminal_market_serves_balances() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -347,7 +350,7 @@ async fn stake_fetch_failure_collapses_to_1500() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -365,7 +368,7 @@ async fn missing_apikey_returns_1003() {
     let market = "0:any-market";
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), market);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
-        .query("marketAddress", market)
+        .query("predictionMarketAddress", market)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -403,7 +406,7 @@ async fn cross_tenant_isolation_excludes_other_owner_orders() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -443,7 +446,7 @@ async fn cross_tenant_isolation_symmetric_from_second_account() {
     let sig = sign_get(SEED_API_SECRET_2, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY_2, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -483,7 +486,7 @@ async fn cross_tenant_isolation_free_side_does_not_leak_other_pn_stake() {
     let sig = sign_get(SEED_API_SECRET_2, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY_2, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -531,7 +534,7 @@ async fn production_hasher_is_wired_to_stake_lookup() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -569,7 +572,7 @@ async fn stake_registered_at_wrong_hash_yields_zero_free() {
     let sig = sign_get(SEED_API_SECRET, "5000", &ts.to_string(), &pmp);
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", SEED_API_KEY, true)
-        .query("marketAddress", &pmp)
+        .query("predictionMarketAddress", &pmp)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
@@ -599,7 +602,7 @@ async fn trade_only_key_returns_1002_on_account_balances_route() {
 
     let mut resp = TestClient::get("http://test/api/v1/account/balances")
         .add_header("X-DODEX-APIKEY", trade_only_key.as_str(), true)
-        .query("marketAddress", market)
+        .query("predictionMarketAddress", market)
         .query("recvWindow", "5000")
         .query("timestamp", ts.to_string())
         .query("signature", sig)
