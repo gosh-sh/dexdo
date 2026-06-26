@@ -58,6 +58,7 @@ use dodex_contracts::dex::oracle::Oracle;
 use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
 use dodex_contracts::dex::oracle_event_list::OracleEventList;
 use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
 use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
 use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
@@ -684,6 +685,13 @@ async fn cmd_create_prediction_market(f: Flags) -> ExitCode {
         Some(Err(_)) => return fail("--result-start must be a unix timestamp (seconds)"),
         None => None,
     };
+    // Relative convenience: result_start = (now, measured AFTER deploy) + this.
+    // Lets you control the resolve gap without guessing the deploy duration.
+    let result_in: Option<u64> = match f.get("result-in").map(str::parse::<u64>) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(_)) => return fail("--result-in must be an integer (seconds from now)"),
+        None => None,
+    };
 
     let token_type = proof::TokenType::Nackl as u32;
     let context = create_tvm_context(&endpoint);
@@ -829,7 +837,11 @@ async fn cmd_create_prediction_market(f: Flags) -> ExitCode {
     // 5. Oracle sets the staking timings → market opens for STAKING.
     //    result_start = now + window; the contract derives the stake window from it.
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let result_start = result_start_override.unwrap_or(now + DEFAULT_RESULT_GAP);
+    let result_start = match (result_start_override, result_in) {
+        (Some(v), _) => v,
+        (None, Some(rin)) => now + rin,
+        (None, None) => now + DEFAULT_RESULT_GAP,
+    };
     // Mirror the contract's first-call guard so we fail early with a clear message.
     if result_start < now + MIN_RESULT_GAP {
         return fail(&format!(
@@ -869,12 +881,28 @@ async fn cmd_create_prediction_market(f: Flags) -> ExitCode {
         Err(e) => return fail(&format!("get_pmp_details after timings: {e:?}")),
     };
 
+    // Persist the oracle keypair next to the deployer note so this market can be
+    // resolved later with `dexdo submit-resolve --oracle-keys <file>`.
+    let keys_path = std::path::Path::new(&state)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!("{oracle_name}.oracle.keys.json"));
+    let keys_json =
+        serde_json::json!({ "public": oracle_keys.public, "secret": oracle_keys.secret });
+    if let Err(e) =
+        std::fs::write(&keys_path, serde_json::to_string_pretty(&keys_json).unwrap_or_default())
+    {
+        eprintln!("[dexdo create-prediction-market] WARN could not write oracle keys file: {e}");
+    }
+
     let out = serde_json::json!({
         "predictionMarketAddress": pmp_address,
         "oracleAddress": oracle_address,
         "oracleName": oracle_name,
         // KEEP SECRET — the oracle key is needed to `submit_resolve` this market later.
+        "oraclePublicHex": oracle_keys.public,
         "oracleSecretHex": oracle_keys.secret,
+        "oracleKeysFile": keys_path.display().to_string(),
         "eventId": event_id,
         "tokenType": token_type,
         "outcomes": outcome_list,
@@ -889,6 +917,57 @@ async fn cmd_create_prediction_market(f: Flags) -> ExitCode {
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into()));
     eprintln!("[dexdo create-prediction-market] DONE predictionMarketAddress={pmp_address} approved={}", details.approved);
     ExitCode::SUCCESS
+}
+
+/// Load the oracle keypair for `submit-resolve`: from `--oracle-keys <file>`
+/// (a JSON `{public, secret}`, e.g. the one `create-prediction-market` writes)
+/// or from explicit `--oracle-public <hex> --oracle-secret <hex>`.
+fn load_oracle_keys(f: &Flags) -> Result<KeyPair, String> {
+    if let Some(path) = f.get("oracle-keys") {
+        let raw = std::fs::read_to_string(path).map_err(|e| format!("read --oracle-keys {path}: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
+        let public = v.get("public").and_then(|x| x.as_str()).ok_or("oracle-keys file missing `public`")?;
+        let secret = v.get("secret").and_then(|x| x.as_str()).ok_or("oracle-keys file missing `secret`")?;
+        return Ok(KeyPair { public: public.to_string(), secret: secret.to_string() });
+    }
+    let public = f.get("oracle-public").ok_or("need --oracle-keys <file> or --oracle-public/--oracle-secret")?;
+    let secret = f.get("oracle-secret").ok_or("need --oracle-secret with --oracle-public")?;
+    Ok(KeyPair { public: public.to_string(), secret: secret.to_string() })
+}
+
+/// `dexdo submit-resolve` — resolve a market you hold the oracle key for.
+/// Sends `PMP.submitResolve(outcomeId)` signed by the oracle key. The single
+/// oracle is a quorum of 1, so one call resolves the market. Valid only in the
+/// resolve window: `resultStart <= now <= resultStart + GRACE_PERIOD` (else the
+/// contract reverts ERR_RESULT_NOT_STARTED / ERR_RESULT_ENDED).
+async fn cmd_submit_resolve(f: Flags) -> ExitCode {
+    let endpoint = f.endpoint();
+    let market = match f.require("market-address") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let outcome: u32 = match f.require("outcome").map(str::parse::<u32>) {
+        Ok(Ok(v)) => v,
+        Ok(Err(_)) => return fail("--outcome must be a non-negative integer"),
+        Err(e) => return fail(&e),
+    };
+    let keys = match load_oracle_keys(&f) { Ok(k) => k, Err(e) => return fail(&e) };
+    let dx = match dex(&endpoint) { Ok(d) => d, Err(e) => return fail(&e) };
+    eprintln!("[dexdo submit-resolve] market={market} outcome={outcome}");
+    match dx
+        .submit_resolve(&market, ParamsOfSubmitResolve { outcome_id: outcome }, Signer::Keys { keys })
+        .await
+    {
+        Ok(_) => {
+            let out = serde_json::json!({
+                "predictionMarketAddress": market,
+                "resolvedOutcomeId": outcome,
+                "status": "submitResolve sent (quorum 1 → resolved)",
+            });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into()));
+            eprintln!("[dexdo submit-resolve] DONE outcome={outcome}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&format!("submit_resolve: {e:?}")),
+    }
 }
 
 // ----------------------------- dispatch -----------------------------
@@ -923,14 +1002,19 @@ fn usage() -> String {
        pmp-details   --market-address 0:<pmp> [--endpoint host]\n                  \
        Read a market's phase window, outcomes, and identity (read-only).\n  \
        create-prediction-market  --pn-state-file <path> [--name <prefix>] \
-     [--outcomes \"A,B\"] [--result-start <unix>] [--endpoint host]\n                  \
+     [--outcomes \"A,B\"] [--result-start <unix> | --result-in <secs>] [--endpoint host]\n                  \
        Deploy a fresh oracle + event + PMP (one prediction market) using the funded \
      deployer note, then open STAKING (oracle submitSetTimings). Prints \
      predictionMarketAddress + oracleSecretHex (keep — needed to resolve) + windows.\n                  \
        --result-start is the contract's resultStart param (unix seconds); must be \
      >= now + 120 (MIN_RESULT_GAP). The contract derives stakeEnd = stakeStart + \
      (resultStart-stakeStart)/10 and resultEnd = resultStart + 86400, so the STAKING \
-     window is ~1/10 of (resultStart - now). Default: now + 3000 (~5-min window).\n\n\
+     window is ~1/10 of (resultStart - now). Default: now + 3000 (~5-min window).\n  \
+       submit-resolve  --market-address 0:<pmp> --outcome <id> \
+     (--oracle-keys <file> | --oracle-public <hex> --oracle-secret <hex>) [--endpoint host]\n                  \
+       Resolve a market you own the oracle key for (PMP.submitResolve, quorum 1). \
+     Valid only in the resolve window: resultStart <= now <= resultStart + 86400. \
+     After it resolves, stakers claim then withdraw.\n\n\
      common flags:\n  \
        --endpoint    network host (default shellnet.ackinacki.org)\n"
         .to_string()
@@ -952,6 +1036,7 @@ async fn dispatch(sub: &str, rest: &[String]) -> ExitCode {
         "withdraw" => cmd_withdraw(flags).await,
         "pmp-details" => cmd_pmp_details(flags).await,
         "create-prediction-market" => cmd_create_prediction_market(flags).await,
+        "submit-resolve" => cmd_submit_resolve(flags).await,
         other => fail(&format!("unknown subcommand `{other}`\n\n{}", usage())),
     }
 }
