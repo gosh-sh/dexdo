@@ -24,7 +24,9 @@ use tracing::warn;
 
 mod metrics_refresh;
 
-const STREAM_NAME: &str = "blockchain_events";
+// Single source of truth shared with the repo, whose orphan dead-letter reads
+// this stream's `at_head` — they must name the same cursor row.
+const STREAM_NAME: &str = dodex_infrastructure::indexer_repo::CAPTURE_STREAM;
 const MAX_PAGES_PER_TICK: u32 = 100;
 
 #[tokio::main]
