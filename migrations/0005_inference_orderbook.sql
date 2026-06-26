@@ -78,7 +78,7 @@ create index inference_orders_open_book_idx
 create index inference_orders_sweep_idx
     on inference_orders (orderbook_address, order_id) where status = 'OPEN';
 
--- Sweep catch-up gate (ii) probes "any row the projector still owes this book"
+-- The pending-events sweep catch-up gate probes "any row the projector still owes this book"
 -- by src_address = orderbook_address over the projection-loop predicate. The
 -- existing raw_events_pending_projection_idx leads on (created_at_chain, id), so
 -- a per-book equality probe can't use it; this partial index makes it an index probe.

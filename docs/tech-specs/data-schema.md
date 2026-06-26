@@ -82,7 +82,7 @@ Resume-points per ingestion stream. The indexer's main fetch loop persists the c
 | `stream_name` | `text` PK | Logical stream identifier (e.g. one per filter-set the indexer subscribes to). |
 | `cursor` | `text` | Opaque cursor returned by GraphQL server. |
 | `updated_at` | `timestamptz` | Last successful page commit. |
-| `at_head` | `boolean` NOT NULL default `false` | Set to `true` by the capture loop after a drain that returned `has_next_page=false` (the cursor is caught up to the chain tip); reset to `false` whenever more pages follow. Read by the inference reconciler as sweep catch-up gate (i): phantom-cancel sweeps must not fire while the gateway still has older pages ahead of the cursor. Added by migration `0006`. |
+| `at_head` | `boolean` NOT NULL default `false` | Set to `true` by the capture loop after a drain that returned `has_next_page=false` (the cursor is caught up to the chain tip); reset to `false` whenever more pages follow. Read by the inference reconciler as the `at_head` sweep catch-up gate: phantom-cancel sweeps must not fire while the gateway still has older pages ahead of the cursor. Added by migration `0006`. |
 
 ## Read-model — discovery
 
