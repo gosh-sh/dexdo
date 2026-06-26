@@ -1544,6 +1544,7 @@ mod inference_abi_tests {
                 max_ticks: 1,
                 token_contract: "0:1".into(),
                 flags: 0,
+                nonce: 0,
             }),
             abi_input_names("postSellOffer")
         );
