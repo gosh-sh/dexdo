@@ -1,4 +1,4 @@
-// End-to-end smoke test for `POST /api/v1/order` against a real
+// End-to-end smoke test for `POST /api/v1/prediction/order` against a real
 // shellnet OrderBook. Deploys a fresh PMP + OrderBook per run, drives
 // the production router (real `DexChainSender`, real
 // `PostgresAuthenticator`, real `PostgresReadModelRepository`), places
@@ -133,7 +133,7 @@ async fn buy_limit_gtc_against_shellnet() {
     // 30 NACKL of outcome at price 0.5 (probability; encodes to 5000 bps).
     // Notional = 30 * 0.5 = 15 NACKL, above MIN_ORDER_NOTIONAL_NACKL = 10.
     let body = serde_json::to_vec(&json!({
-        "marketAddress": market.pmp_address,
+        "predictionMarketAddress": market.pmp_address,
         "symbol": symbol,
         "newOrderClientId": coid,
         "side": "BUY",
@@ -148,7 +148,7 @@ async fn buy_limit_gtc_against_shellnet() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(&secret_hex, &canonical, &body);
 
-    let mut resp = TestClient::post("http://test/api/v1/order")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/order")
         .add_header("X-DODEX-APIKEY", api_key, true)
         .add_header("content-type", "application/json", true)
         .query("recvWindow", "5000")
@@ -171,7 +171,7 @@ async fn buy_limit_gtc_against_shellnet() {
     // would leak collateral on the trading PN.
     let mut failures: Vec<String> = Vec::new();
     if !post_ok {
-        failures.push(format!("POST /api/v1/order status={status:?}; body: {body}"));
+        failures.push(format!("POST /api/v1/prediction/order status={status:?}; body: {body}"));
     }
 
     #[derive(Deserialize)]

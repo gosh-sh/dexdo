@@ -1,4 +1,4 @@
-// End-to-end smoke test for `POST /api/v1/buyFullSet` against a real
+// End-to-end smoke test for `POST /api/v1/prediction/buyFullSet` against a real
 // shellnet OrderBook. Deploys a fresh PMP + OrderBook per run
 // (which itself runs an initial `splitFullSet` to seed MM liquidity
 // and bring the market into `TRADING`), then drives the production
@@ -176,7 +176,7 @@ async fn buy_full_set_against_shellnet() {
     eprintln!("[e2e_buy_full_set] pre-stake amounts = {pre_stake:?}");
 
     let body = serde_json::to_vec(&json!({
-        "marketAddress": market.pmp_address,
+        "predictionMarketAddress": market.pmp_address,
         "collateral": COLLATERAL_HUMAN,
     }))
     .unwrap();
@@ -185,7 +185,7 @@ async fn buy_full_set_against_shellnet() {
     let canonical = canonical_query(&[("recvWindow", "5000"), ("timestamp", &ts.to_string())]);
     let sig = sign(&secret_hex, &canonical, &body);
 
-    let mut resp = TestClient::post("http://test/api/v1/buyFullSet")
+    let mut resp = TestClient::post("http://test/api/v1/prediction/buyFullSet")
         .add_header("X-DODEX-APIKEY", api_key, true)
         .add_header("content-type", "application/json", true)
         .query("recvWindow", "5000")
@@ -206,12 +206,13 @@ async fn buy_full_set_against_shellnet() {
     assert_eq!(
         status,
         Some(StatusCode::OK),
-        "POST /api/v1/buyFullSet status={status:?}; body: {body}",
+        "POST /api/v1/prediction/buyFullSet status={status:?}; body: {body}",
     );
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct OkBody {
+        #[serde(rename = "predictionMarketAddress")]
         market_address: String,
         transact_time: i64,
     }

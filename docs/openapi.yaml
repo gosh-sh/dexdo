@@ -91,7 +91,7 @@ paths:
         required: true
         schema:
           type: string
-      - name: marketAddress
+      - name: predictionMarketAddress
         in: query
         description: Market address.
         required: true
@@ -158,7 +158,71 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
-  /api/v1/batchOrders:
+  /api/v1/oracles:
+    get:
+      tags:
+      - market-data
+      summary: List oracles
+      operationId: get_oracles
+      parameters:
+      - name: oracleAddress
+        in: query
+        description: Filter by oracle address.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: eventId
+        in: query
+        description: Return only the event list containing this event id; events[] is narrowed to it.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: deadlineBefore
+        in: query
+        description: Include only events with deadline < deadlineBefore (unix seconds).
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: cursor
+        in: query
+        description: Opaque pagination cursor returned from a previous page.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: limit
+        in: query
+        description: Number of oracles. Default 50, max 200.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OraclesResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
+  /api/v1/prediction/batchOrders:
     post:
       tags:
       - trading
@@ -256,18 +320,18 @@ paths:
             schema:
               type: object
               required:
-              - marketAddress
+              - predictionMarketAddress
               - symbol
               - orderIds
               properties:
-                marketAddress:
-                  type: string
-                  description: Market address.
                 orderIds:
                   type: array
                   items:
                     type: string
                   description: Chain-assigned order ids, u64 decimal strings. Cancelled atomically; at most `outcome.maxBatchSize` ids.
+                predictionMarketAddress:
+                  type: string
+                  description: Market address.
                 symbol:
                   type: string
                   description: Outcome-token symbol shared by every id.
@@ -290,7 +354,7 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - apiKey: []
-  /api/v1/buyFullSet:
+  /api/v1/prediction/buyFullSet:
     post:
       tags:
       - positions
@@ -331,13 +395,13 @@ paths:
             schema:
               type: object
               required:
-              - marketAddress
+              - predictionMarketAddress
               - collateral
               properties:
                 collateral:
                   type: string
                   description: Quote-asset amount to spend, as a decimal string. Spent from the caller's free balance; any remainder that does not divide evenly is refunded.
-                marketAddress:
+                predictionMarketAddress:
                   type: string
                   description: Market address.
               additionalProperties: false
@@ -357,14 +421,14 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - apiKey: []
-  /api/v1/depth:
+  /api/v1/prediction/depth:
     get:
       tags:
       - market-data
       summary: Order book depth
       operationId: get_depth
       parameters:
-      - name: marketAddress
+      - name: predictionMarketAddress
         in: query
         description: Market address.
         required: true
@@ -402,14 +466,14 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
-  /api/v1/markets:
+  /api/v1/prediction/markets:
     get:
       tags:
       - market-data
       summary: List markets
       operationId: get_markets
       parameters:
-      - name: marketAddress
+      - name: predictionMarketAddress
         in: query
         description: Single-market lookup. Mutually exclusive with listing filters and pagination.
         required: false
@@ -496,71 +560,7 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
-  /api/v1/oracles:
-    get:
-      tags:
-      - market-data
-      summary: List oracles
-      operationId: get_oracles
-      parameters:
-      - name: oracleAddress
-        in: query
-        description: Filter by oracle address.
-        required: false
-        schema:
-          type:
-          - string
-          - 'null'
-      - name: eventId
-        in: query
-        description: Return only the event list containing this event id; events[] is narrowed to it.
-        required: false
-        schema:
-          type:
-          - string
-          - 'null'
-      - name: deadlineBefore
-        in: query
-        description: Include only events with deadline < deadlineBefore (unix seconds).
-        required: false
-        schema:
-          type:
-          - integer
-          - 'null'
-          format: int64
-      - name: cursor
-        in: query
-        description: Opaque pagination cursor returned from a previous page.
-        required: false
-        schema:
-          type:
-          - string
-          - 'null'
-      - name: limit
-        in: query
-        description: Number of oracles. Default 50, max 200.
-        required: false
-        schema:
-          type:
-          - integer
-          - 'null'
-          format: int64
-      responses:
-        '200':
-          description: Response with json format data
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OraclesResponse'
-        default:
-          description: Error response
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorBody'
-      security:
-      - {}
-  /api/v1/order:
+  /api/v1/prediction/order:
     post:
       tags:
       - trading
@@ -650,7 +650,7 @@ paths:
         required: true
         schema:
           type: string
-      - name: marketAddress
+      - name: predictionMarketAddress
         in: query
         description: Market address.
         required: true
@@ -683,7 +683,7 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - apiKey: []
-  /api/v1/orders:
+  /api/v1/prediction/orders:
     get:
       tags:
       - trading
@@ -718,7 +718,7 @@ paths:
         required: true
         schema:
           type: string
-      - name: marketAddress
+      - name: predictionMarketAddress
         in: query
         description: Market filter. Must pair with symbol when set.
         required: false
@@ -728,7 +728,7 @@ paths:
           - 'null'
       - name: symbol
         in: query
-        description: Symbol filter. Must pair with marketAddress.
+        description: Symbol filter. Must pair with predictionMarketAddress.
         required: false
         schema:
           type:
@@ -780,14 +780,14 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - apiKey: []
-  /api/v1/trades:
+  /api/v1/prediction/trades:
     get:
       tags:
       - market-data
       summary: Recent trades
       operationId: get_trades
       parameters:
-      - name: marketAddress
+      - name: predictionMarketAddress
         in: query
         description: Market address.
         required: true
@@ -900,13 +900,10 @@ components:
     BatchOrdersRequest:
       type: object
       required:
-      - marketAddress
+      - predictionMarketAddress
       - symbol
       - orders
       properties:
-        marketAddress:
-          type: string
-          description: Market address.
         orders:
           type: array
           items:
@@ -914,6 +911,9 @@ components:
           description: |-
             Orders to place atomically. At most `outcome.maxBatchSize`
             items.
+        predictionMarketAddress:
+          type: string
+          description: Market address.
         symbol:
           type: string
           description: Outcome-token symbol shared by every item.
@@ -951,12 +951,12 @@ components:
     BuyFullSetResponse:
       type: object
       required:
-      - marketAddress
+      - predictionMarketAddress
       - transactTime
       properties:
-        marketAddress:
+        predictionMarketAddress:
           type: string
-          description: Echo of the request's `marketAddress`.
+          description: Echo of the request's `predictionMarketAddress`.
         transactTime:
           type: integer
           format: int64
@@ -1016,14 +1016,11 @@ components:
     CreateOrderRequest:
       type: object
       required:
-      - marketAddress
+      - predictionMarketAddress
       - symbol
       - side
       - quantity
       properties:
-        marketAddress:
-          type: string
-          description: Market address.
         newOrderClientId:
           type:
           - string
@@ -1031,6 +1028,9 @@ components:
           description: |-
             Client-supplied order id. Auto-generated by the backend when
             omitted.
+        predictionMarketAddress:
+          type: string
+          description: Market address.
         price:
           type:
           - string
@@ -1073,7 +1073,7 @@ components:
     DepthResponse:
       type: object
       required:
-      - marketAddress
+      - predictionMarketAddress
       - symbol
       - lastUpdateId
       - bids
@@ -1101,10 +1101,10 @@ components:
           type: string
           description: |-
             Opaque lex-comparable chain-order cursor; a larger string means
-            a newer event has touched this `(marketAddress, symbol)`. Empty
+            a newer event has touched this `(predictionMarketAddress, symbol)`. Empty
             string when no order event has landed yet. Do not parse as an
             integer.
-        marketAddress:
+        predictionMarketAddress:
           type: string
           description: Market address.
         symbol:
@@ -1161,7 +1161,7 @@ components:
     MarketBalancesResponse:
       type: object
       required:
-      - marketAddress
+      - predictionMarketAddress
       - updateTime
       - balances
       properties:
@@ -1170,7 +1170,7 @@ components:
           items:
             $ref: '#/components/schemas/OutcomeBalanceItem'
           description: Per-outcome balances on this market.
-        marketAddress:
+        predictionMarketAddress:
           type: string
           description: Market address.
         updateTime:
@@ -1180,8 +1180,8 @@ components:
     MarketDto:
       type: object
       required:
-      - marketAddress
-      - orderBookAddress
+      - predictionMarketAddress
+      - predictionOrderBookAddress
       - marketName
       - status
       - quoteAsset
@@ -1203,24 +1203,24 @@ components:
           description: |-
             Maker fee rate as a signed decimal string. A negative value is
             a maker rebate credited to the maker.
-        marketAddress:
-          type: string
-          description: Stable market identifier.
         marketName:
           type: string
           description: |-
             Technical market name. Not the user-facing title; see
             `event.eventName`.
-        orderBookAddress:
-          type: string
-          description: |-
-            Deterministic order-book address. Always present; trading
-            availability depends on `status`.
         outcomes:
           type: array
           items:
             $ref: '#/components/schemas/OutcomeDto'
           description: Outcome-token descriptors.
+        predictionMarketAddress:
+          type: string
+          description: Stable market identifier.
+        predictionOrderBookAddress:
+          type: string
+          description: |-
+            Deterministic order-book address. Always present; trading
+            availability depends on `status`.
         quoteAsset:
           type: string
           description: Quote-asset symbol for display.
@@ -1289,7 +1289,7 @@ components:
     MarketsSort:
       type: string
       description: |-
-        Sort order for `GET /api/v1/markets`: `resultStart` ascending
+        Sort order for `GET /api/v1/prediction/markets`: `resultStart` ascending
         (default) or `createdAt` descending.
       enum:
       - resultStart
@@ -1423,7 +1423,7 @@ components:
     OrderResponse:
       type: object
       required:
-      - marketAddress
+      - predictionMarketAddress
       - symbol
       - orderId
       - clientOrderId
@@ -1445,9 +1445,6 @@ components:
           description: |-
             Filled quantity. Can be `> 0` for `CANCELED` orders that filled
             partially before cancellation.
-        marketAddress:
-          type: string
-          description: Market address.
         orderId:
           type: string
           description: |-
@@ -1458,6 +1455,9 @@ components:
           description: |-
             Original order quantity, scaled by the outcome quantity
             precision.
+        predictionMarketAddress:
+          type: string
+          description: Market address.
         price:
           type: string
           description: Limit price, scaled by the outcome price precision.
@@ -1493,7 +1493,7 @@ components:
       description: |-
         Order lifecycle status. `PENDING_NEW` / `PENDING_CANCEL` are
         write-side acceptance states: they appear only in synchronous
-        POST/DELETE responses, never in `GET /api/v1/orders` rows.
+        POST/DELETE responses, never in `GET /api/v1/prediction/orders` rows.
       enum:
       - PENDING_NEW
       - NEW
@@ -1600,7 +1600,7 @@ components:
     QueryableOrderStatus:
       type: string
       description: |-
-        Order statuses accepted by the `GET /api/v1/orders` `status` filter.
+        Order statuses accepted by the `GET /api/v1/prediction/orders` `status` filter.
         Excludes the write-side acceptance states `PENDING_NEW` /
         `PENDING_CANCEL`, which never appear in stored rows.
       enum:
@@ -1715,7 +1715,7 @@ components:
     TradeResponse:
       type: object
       description: |-
-        One public trade in the `GET /api/v1/trades` tape. The endpoint returns a
+        One public trade in the `GET /api/v1/prediction/trades` tape. The endpoint returns a
         bare JSON array of these, newest first.
       required:
       - tradeId

@@ -1657,6 +1657,7 @@ dependencies = [
  "ackinacki-kit",
  "anyhow",
  "async-trait",
+ "base64",
  "dodex-application",
  "dodex-chain",
  "dodex-contracts",

@@ -205,7 +205,7 @@ def cmd_register(args):
 
 def cmd_markets(args):
     params = [
-        ("marketAddress", args.market_address),
+        ("predictionMarketAddress", args.market_address),
         ("status", args.status),
         ("quoteAsset", args.quote_asset),
         ("oracleName", args.oracle_name),
@@ -213,7 +213,7 @@ def cmd_markets(args):
         ("cursor", args.cursor),
         ("limit", args.limit),
     ]
-    _emit(*public_get(args, "/api/v1/markets", params))
+    _emit(*public_get(args, "/api/v1/prediction/markets", params))
 
 
 def cmd_oracles(args):
@@ -228,26 +228,26 @@ def cmd_oracles(args):
 
 def cmd_depth(args):
     params = [
-        ("marketAddress", args.market_address),
+        ("predictionMarketAddress", args.market_address),
         ("symbol", args.symbol),
         ("limit", args.limit),
     ]
-    _emit(*public_get(args, "/api/v1/depth", params))
+    _emit(*public_get(args, "/api/v1/prediction/depth", params))
 
 
 def cmd_trades(args):
     params = [
-        ("marketAddress", args.market_address),
+        ("predictionMarketAddress", args.market_address),
         ("symbol", args.symbol),
         ("limit", args.limit),
     ]
-    _emit(*public_get(args, "/api/v1/trades", params))
+    _emit(*public_get(args, "/api/v1/prediction/trades", params))
 
 
 def cmd_price(args):
     """Convenience: best bid/ask/mid/spread from depth + last public trade."""
-    ds, dt = public_get(args, "/api/v1/depth",
-                        [("marketAddress", args.market_address), ("symbol", args.symbol), ("limit", 1)])
+    ds, dt = public_get(args, "/api/v1/prediction/depth",
+                        [("predictionMarketAddress", args.market_address), ("symbol", args.symbol), ("limit", 1)])
     try:
         depth = json.loads(dt)
     except ValueError:
@@ -273,8 +273,8 @@ def cmd_price(args):
 
     # trades is a best-effort leg: a failure degrades to lastTrade=null with a
     # note rather than failing the whole quote.
-    ts, tt = public_get(args, "/api/v1/trades",
-                        [("marketAddress", args.market_address), ("symbol", args.symbol), ("limit", 1)])
+    ts, tt = public_get(args, "/api/v1/prediction/trades",
+                        [("predictionMarketAddress", args.market_address), ("symbol", args.symbol), ("limit", 1)])
     last = None
     trades_error = None
     try:
@@ -287,7 +287,7 @@ def cmd_price(args):
         last = {"price": trades[0].get("price"), "qty": trades[0].get("qty"),
                 "time": trades[0].get("time"), "isBuyerMaker": trades[0].get("isBuyerMaker")}
     out = {
-        "marketAddress": args.market_address,
+        "predictionMarketAddress": args.market_address,
         "symbol": args.symbol,
         "bestBid": best_bid,
         "bestAsk": best_ask,
@@ -307,7 +307,7 @@ def cmd_account(args):
 
 def cmd_balances(args):
     _emit(*signed_request(args, "GET", "/api/v1/account/balances",
-                          query_params=[("marketAddress", args.market_address)]))
+                          query_params=[("predictionMarketAddress", args.market_address)]))
 
 
 def cmd_orders(args):
@@ -315,17 +315,17 @@ def cmd_orders(args):
     if args.open and not status:
         status = "NEW,PARTIALLY_FILLED"
     params = [
-        ("marketAddress", args.market_address),
+        ("predictionMarketAddress", args.market_address),
         ("symbol", args.symbol),
         ("status", status),
         ("limit", args.limit),
         ("cursor", args.cursor),
     ]
-    _emit(*signed_request(args, "GET", "/api/v1/orders", query_params=params))
+    _emit(*signed_request(args, "GET", "/api/v1/prediction/orders", query_params=params))
 
 
 def cmd_order(args):
-    body = {"marketAddress": args.market_address, "symbol": args.symbol, "side": args.side}
+    body = {"predictionMarketAddress": args.market_address, "symbol": args.symbol, "side": args.side}
     if args.client_id:
         body["newOrderClientId"] = args.client_id
     body["quantity"] = args.quantity
@@ -335,21 +335,21 @@ def cmd_order(args):
         body["type"] = args.type
     if args.tif:
         body["timeInForce"] = args.tif
-    _emit(*signed_request(args, "POST", "/api/v1/order", body_obj=body))
+    _emit(*signed_request(args, "POST", "/api/v1/prediction/order", body_obj=body))
 
 
 def cmd_cancel_order(args):
     params = [
-        ("marketAddress", args.market_address),
+        ("predictionMarketAddress", args.market_address),
         ("symbol", args.symbol),
         ("orderId", args.order_id),
     ]
-    _emit(*signed_request(args, "DELETE", "/api/v1/order", query_params=params))
+    _emit(*signed_request(args, "DELETE", "/api/v1/prediction/order", query_params=params))
 
 
 def cmd_buy_full_set(args):
-    body = {"marketAddress": args.market_address, "collateral": args.collateral}
-    _emit(*signed_request(args, "POST", "/api/v1/buyFullSet", body_obj=body))
+    body = {"predictionMarketAddress": args.market_address, "collateral": args.collateral}
+    _emit(*signed_request(args, "POST", "/api/v1/prediction/buyFullSet", body_obj=body))
 
 
 def build_parser():
@@ -383,7 +383,7 @@ def build_parser():
     sp.add_argument("--save-creds", help="write the returned credential here (mode 0600)")
     sp.set_defaults(func=cmd_register)
 
-    sp = sub.add_parser("markets", help="GET /api/v1/markets (public)", parents=[common])
+    sp = sub.add_parser("markets", help="GET /api/v1/prediction/markets (public)", parents=[common])
     sp.add_argument("--market-address")
     sp.add_argument("--status", help="comma list e.g. STAKING,TRADING")
     sp.add_argument("--quote-asset")
@@ -400,13 +400,13 @@ def build_parser():
     sp.add_argument("--limit", type=int)
     sp.set_defaults(func=cmd_oracles)
 
-    sp = sub.add_parser("depth", help="GET /api/v1/depth (public)", parents=[common])
+    sp = sub.add_parser("depth", help="GET /api/v1/prediction/depth (public)", parents=[common])
     sp.add_argument("--market-address", required=True)
     sp.add_argument("--symbol", required=True)
     sp.add_argument("--limit", type=int)
     sp.set_defaults(func=cmd_depth)
 
-    sp = sub.add_parser("trades", help="GET /api/v1/trades (public)", parents=[common])
+    sp = sub.add_parser("trades", help="GET /api/v1/prediction/trades (public)", parents=[common])
     sp.add_argument("--market-address", required=True)
     sp.add_argument("--symbol", required=True)
     sp.add_argument("--limit", type=int)
@@ -424,7 +424,7 @@ def build_parser():
     sp.add_argument("--market-address", required=True)
     sp.set_defaults(func=cmd_balances)
 
-    sp = sub.add_parser("orders", help="GET /api/v1/orders (signed)", parents=[common])
+    sp = sub.add_parser("orders", help="GET /api/v1/prediction/orders (signed)", parents=[common])
     sp.add_argument("--market-address")
     sp.add_argument("--symbol")
     sp.add_argument("--status", help="comma list NEW,PARTIALLY_FILLED,FILLED,CANCELED,REJECTED")
@@ -433,7 +433,7 @@ def build_parser():
     sp.add_argument("--cursor")
     sp.set_defaults(func=cmd_orders)
 
-    sp = sub.add_parser("order", help="POST /api/v1/order (signed, TRADE)", parents=[common])
+    sp = sub.add_parser("order", help="POST /api/v1/prediction/order (signed, TRADE)", parents=[common])
     sp.add_argument("--market-address", required=True)
     sp.add_argument("--symbol", required=True)
     sp.add_argument("--side", required=True, choices=["BUY", "SELL"])
@@ -445,13 +445,13 @@ def build_parser():
     sp.add_argument("--client-id")
     sp.set_defaults(func=cmd_order)
 
-    sp = sub.add_parser("cancel-order", help="DELETE /api/v1/order (signed, TRADE)", parents=[common])
+    sp = sub.add_parser("cancel-order", help="DELETE /api/v1/prediction/order (signed, TRADE)", parents=[common])
     sp.add_argument("--market-address", required=True)
     sp.add_argument("--symbol", required=True)
     sp.add_argument("--order-id", required=True)
     sp.set_defaults(func=cmd_cancel_order)
 
-    sp = sub.add_parser("buy-full-set", help="POST /api/v1/buyFullSet (signed, TRADE)", parents=[common])
+    sp = sub.add_parser("buy-full-set", help="POST /api/v1/prediction/buyFullSet (signed, TRADE)", parents=[common])
     sp.add_argument("--market-address", required=True)
     sp.add_argument("--collateral", required=True, help="quote-asset amount to split")
     sp.set_defaults(func=cmd_buy_full_set)

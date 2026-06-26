@@ -52,7 +52,9 @@ use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::halo2::giver_voucher::mint_voucher_via_giver;
 use dodex_sdk::halo2::Halo2Paths;
+use dodex_sdk::maybe_acquire;
 use dodex_sdk::proof;
+use dodex_sdk::RateLimiter;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -164,6 +166,10 @@ struct Args {
     token_type: TokenTypeArg,
     /// `https://{endpoint}` form for halo2 stage A (witness export).
     network_url: String,
+    /// Cap on outbound TVM requests per second. `None` disables pacing.
+    /// The shellnet BM rejects bursts above ~3 rps with HTTP 429, so the
+    /// default keeps a single run under that ceiling.
+    max_rps: Option<u32>,
 }
 
 impl Args {
@@ -173,6 +179,7 @@ impl Args {
         let mut endpoint = "shellnet.ackinacki.org".to_string();
         let mut nominal = NominalArg::N10000;
         let mut token_type = TokenTypeArg::Nackl;
+        let mut max_rps: Option<u32> = Some(3);
 
         let mut argv = std::env::args().skip(1);
         while let Some(arg) = argv.next() {
@@ -198,6 +205,11 @@ impl Args {
                     let v = argv.next().ok_or("--token-type requires a value")?;
                     token_type = TokenTypeArg::parse(&v)?;
                 }
+                "--max-rps" => {
+                    let v = argv.next().ok_or("--max-rps requires a value")?;
+                    let rps: u32 = v.parse().map_err(|e| format!("--max-rps: {e}"))?;
+                    max_rps = (rps > 0).then_some(rps);
+                }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown arg `{other}`\n\n{}", usage())),
             }
@@ -209,18 +221,19 @@ impl Args {
             format!("https://{endpoint}")
         };
 
-        Ok(Args { count, output, endpoint, nominal, token_type, network_url })
+        Ok(Args { count, output, endpoint, nominal, token_type, network_url, max_rps })
     }
 }
 
 fn usage() -> String {
     "usage: mint_pn_pool [--count N] [--output path] [--endpoint host] \
-         [--nominal N100|N1000|N10000] [--token-type nackl|shell|usdc]\n\n  \
+         [--nominal N100|N1000|N10000] [--token-type nackl|shell|usdc] [--max-rps N]\n\n  \
          --count       number of PrivateNotes to deploy (default 5)\n  \
          --output      JSON output path (default ./pn_pool.json)\n  \
          --endpoint    network host (default shellnet.ackinacki.org)\n  \
          --nominal     PN deposit nominal (default N10000)\n  \
-         --token-type  deposit currency (default nackl)\n\n  \
+         --token-type  deposit currency (default nackl)\n  \
+         --max-rps     cap outbound TVM requests/sec (default 3; 0 disables)\n\n  \
          Also writes <output>.seed_notes.json (api seeder / e2e format) beside the pool."
         .to_string()
 }
@@ -384,9 +397,13 @@ fn load_or_init_pool(path: &Path, args: &Args) -> Result<Pool, String> {
     Ok(existing)
 }
 
-async fn ensure_root_pn_funded(context: &Arc<ClientContext>) -> Result<(), String> {
+async fn ensure_root_pn_funded(
+    context: &Arc<ClientContext>,
+    rl: Option<&RateLimiter>,
+) -> Result<(), String> {
     let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     eprintln!("[pool] waiting for RootPN ({}) to be Active…", root_pn.address());
+    maybe_acquire(rl).await;
     root_pn
         .wait_account(ackinacki_kit::contracts::account::ParamsOfWaitAccount {
             status: ackinacki_kit::contracts::account::AccountStatus::Active,
@@ -397,6 +414,7 @@ async fn ensure_root_pn_funded(context: &Arc<ClientContext>) -> Result<(), Strin
         .map_err(|e| format!("wait RootPN active: {e:?}"))?;
 
     eprintln!("[pool] topping up RootPN native gas…");
+    maybe_acquire(rl).await;
     top_up_native_with_giver_if_below(
         context.clone(),
         &root_pn,
@@ -410,6 +428,7 @@ async fn ensure_root_pn_funded(context: &Arc<ClientContext>) -> Result<(), Strin
     eprintln!("[pool] sending SHELL ECC budget to RootPN…");
     let mut ecc = std::collections::HashMap::new();
     ecc.insert(CURRENCY_ID_SHELL, ROOTPN_SHELL_BUDGET);
+    maybe_acquire(rl).await;
     send_currency_with_flag_from_default_giver(
         context.clone(),
         RootPn::DEFAULT_ADDRESS,
@@ -430,11 +449,13 @@ async fn deploy_one_pn(
     token_type: TokenTypeArg,
     nominal_raw: u64,
     keys: KeyPair,
+    rl: Option<&RateLimiter>,
 ) -> Result<PoolNote, String> {
     let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
 
     // 1. Halo2 deposit voucher in the chosen currency.
     eprintln!("    halo2 {} deposit voucher (this is the slow step)…", token_type.label());
+    maybe_acquire(rl).await;
     let deposit_zk = mint_voucher_via_giver(
         context.clone(),
         network_url.to_string(),
@@ -452,6 +473,7 @@ async fn deploy_one_pn(
 
     // 2. Deploy PN against the deposit proof.
     eprintln!("    RootPN.deployPrivateNote…");
+    maybe_acquire(rl).await;
     root_pn
         .deploy_private_note(
             ParamsOfDeployPrivateNote {
@@ -472,6 +494,7 @@ async fn deploy_one_pn(
         .await
         .map_err(|e| format!("deploy_private_note: {e:?}"))?;
 
+    maybe_acquire(rl).await;
     let pn_address = root_pn
         .get_private_note_address(ParamsOfGetPrivateNoteAddress {
             deposit_identifier_hash: dih_dec.clone(),
@@ -482,6 +505,7 @@ async fn deploy_one_pn(
 
     let pn = PrivateNote::new(context.clone(), dex_contract_params(&pn_address));
     eprintln!("    waiting for PN {pn_address} to be Active…");
+    maybe_acquire(rl).await;
     pn.wait_account(ackinacki_kit::contracts::account::ParamsOfWaitAccount {
         status: ackinacki_kit::contracts::account::AccountStatus::Active,
         attempts: Some(60),
@@ -503,6 +527,7 @@ async fn deploy_one_pn(
     // 3. Halo2 SHELL gas voucher (sequentially, NOT in parallel — see header
     //    comment).
     eprintln!("    halo2 SHELL gas voucher…");
+    maybe_acquire(rl).await;
     let gas_zk = mint_voucher_via_giver(
         context.clone(),
         network_url.to_string(),
@@ -516,6 +541,7 @@ async fn deploy_one_pn(
     .map_err(|e| format!("mint_voucher_via_giver (gas): {e:?}"))?;
 
     eprintln!("    RootPN.sendEccShellToPrivateNote…");
+    maybe_acquire(rl).await;
     root_pn
         .send_ecc_shell_to_private_note(
             ParamsOfSendEccShellToPrivateNote {
@@ -541,6 +567,7 @@ async fn deploy_one_pn(
 
     // 4. Native gas top-up so the PN can execute internal messages.
     eprintln!("    giver native gas top-up…");
+    maybe_acquire(rl).await;
     send_currency_with_flag_from_default_giver(
         context.clone(),
         &pn_address,
@@ -577,6 +604,11 @@ async fn main() -> ExitCode {
     eprintln!("[pool] writing to {}", args.output.display());
 
     let context = create_tvm_context(&args.endpoint);
+    let rate_limiter = RateLimiter::optional(args.max_rps);
+    match args.max_rps {
+        Some(rps) => eprintln!("[pool] rate limit: {rps} req/s"),
+        None => eprintln!("[pool] rate limit: disabled"),
+    }
     let paths = Halo2Paths::from_env();
     if !paths.srs_exists() {
         eprintln!(
@@ -591,7 +623,7 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if let Err(e) = ensure_root_pn_funded(&context).await {
+    if let Err(e) = ensure_root_pn_funded(&context, rate_limiter.as_ref()).await {
         eprintln!("[pool] failed to fund RootPN: {e}");
         return ExitCode::FAILURE;
     }
@@ -635,6 +667,7 @@ async fn main() -> ExitCode {
             args.token_type,
             args.nominal.raw_value(args.token_type),
             keys,
+            rate_limiter.as_ref(),
         )
         .await
         {

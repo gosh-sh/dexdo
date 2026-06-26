@@ -12,13 +12,13 @@ whole point:
 | Want to… | Market phase | How |
 |---|---|---|
 | **Stake / bet on a side** (back one outcome) | **STAKING** | on-chain `PrivateNote.setStake` via the **`dexdo` SDK CLI** (`dexdo stake`, §0). The REST API has **no** staking endpoint. |
-| Take a position via the book (market/limit order) | **TRADING** | signed REST `POST /api/v1/order` (§2/§3) |
-| Full split collateral into all outcomes | AWAITING_FREEZE / TRADING | signed REST `POST /api/v1/buyFullSet` (§4) |
-| Cancel an order | TRADING | signed REST `DELETE /api/v1/order` (§5) |
+| Take a position via the book (market/limit order) | **TRADING** | signed REST `POST /api/v1/prediction/order` (§2/§3) |
+| Full split collateral into all outcomes | AWAITING_FREEZE / TRADING | signed REST `POST /api/v1/prediction/buyFullSet` (§4) |
+| Cancel an order | TRADING | signed REST `DELETE /api/v1/prediction/order` (§5) |
 
 > **The #1 thing to get right:** "make a stake into a market" (`сделать стейк в маркет`)
 > during the **STAKING** phase is **NOT** a REST/order operation. The order book is
-> closed in STAKING, so `POST /api/v1/order` and `buyFullSet` both return `-2010`.
+> closed in STAKING, so `POST /api/v1/prediction/order` and `buyFullSet` both return `-2010`.
 > Staking is an on-chain library call — use `dexdo stake` (§0). Only once the market
 > reaches **TRADING** do the order-book endpoints (§2–§5) apply.
 
@@ -243,7 +243,7 @@ from `orders`, and cancelling it returns `PENDING_CANCEL` and frees the locked
 collateral. Order attribution is eventually consistent, so if a just-placed order
 isn't listed yet, retry the cancel once it appears (it surfaced within seconds on the
 post-restart deployment, but can lag under indexer backlog).
-(`DELETE /api/v1/openOrders` "cancel all on symbol", `sellFullSet`, and `claim` are
+(`DELETE /api/v1/prediction/openOrders` "cancel all on symbol", `sellFullSet`, and `claim` are
 in the draft spec but **not deployed** on dev — don't call them.)
 
 ## Network rate limit (429) — pace on-chain SENDS
@@ -266,7 +266,7 @@ itself issue a few chain queries, so leave margin rather than racing the limit.)
 Trade endpoints submit an on-chain transaction before responding and can take tens
 of seconds; the client waits up to 90s (`--timeout` / `$DEXDO_HTTP_TIMEOUT`). On a
 client timeout the operation **may still have been accepted** — do not blindly
-resubmit. For `POST /api/v1/order`, resubmit with the **same** `--client-id`; the
+resubmit. For `POST /api/v1/prediction/order`, resubmit with the **same** `--client-id`; the
 exchange deduplicates on the coid. For `buyFullSet`, verify via `account` before any
 retry. API `-1007` carries the same "may have been accepted" meaning; `-2014`
 (trading note busy) means retry shortly.

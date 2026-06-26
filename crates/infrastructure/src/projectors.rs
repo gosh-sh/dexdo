@@ -519,7 +519,7 @@ async fn apply_order_placed(
 
     // chain_created_at / chain_updated_at survive sub-second precision via
     // to_timestamp(::double precision). They are display-only — the primary
-    // sort key for /api/v1/orders is placed_chain_order (bound from
+    // sort key for /api/v1/prediction/orders is placed_chain_order (bound from
     // chain_order, $8), which is globally unique and lex-monotonic by
     // gateway design. node.created_at collides on a shared chain second
     // and is not safe as a sort key.
@@ -933,7 +933,7 @@ async fn apply_order_filled(
                 msg_id = %node.msg_id,
                 chain_order = %chain_order,
                 created_at = ?node.created_at,
-                "taker OrderFilled has no parseable chain time; the trade row lands with NULL chain_time, hidden from /api/v1/trades until repaired (data-schema.md#trades)",
+                "taker OrderFilled has no parseable chain time; the trade row lands with NULL chain_time, hidden from /api/v1/prediction/trades until repaired (data-schema.md#trades)",
             );
         }
         let result = sqlx::query(

@@ -12,6 +12,19 @@
 
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
+use dodex_contracts::airegistry::inference_order_book::InferenceOrderBook;
+use dodex_contracts::airegistry::inference_order_book::ParamsOfGetOrder as IobParamsOfGetOrder;
+use dodex_contracts::airegistry::inference_order_book::ParamsOfOrderId as IobParamsOfOrderId;
+use dodex_contracts::airegistry::inference_order_book::ResultOfGetBestBidAsk;
+use dodex_contracts::airegistry::inference_order_book::ResultOfGetOrder as IobOrder;
+use dodex_contracts::airegistry::inference_order_book::ResultOfGetStats as IobStats;
+use dodex_contracts::airegistry::inference_order_book::ResultOfGetSubscription as IobSubscription;
+use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
+use dodex_contracts::airegistry::token_contract::ParamsOfWithdrawShell;
+use dodex_contracts::airegistry::token_contract::ResultOfGetParties as TcParties;
+use dodex_contracts::airegistry::token_contract::ResultOfGetProbe as TcProbe;
+use dodex_contracts::airegistry::token_contract::ResultOfGetState as TcState;
+use dodex_contracts::airegistry::token_contract::TokenContract;
 use dodex_contracts::dex::oracle::Oracle;
 use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
 use dodex_contracts::dex::oracle_event_list::OracleEventList;
@@ -21,8 +34,15 @@ use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
 use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
 use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::pmp::ResultOfGetDetails as PmpKitDetails;
+use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
+use dodex_contracts::dex::private_note::ParamsOfCancelInferenceOrder;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
+use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
+use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceSubscription;
+use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
 use dodex_contracts::dex::private_note::PrivateNote;
 use dodex_contracts::dex::private_note::ResultOfGetDetails as PnDetails;
 use dodex_contracts::dex::private_note::ResultOfGetStakes as PnStakesRaw;
@@ -34,6 +54,7 @@ use dodex_contracts::dex::root_pn::RootPn;
 
 use super::client::Dex;
 use super::dapp::dex_contract_params;
+use super::dapp::self_rooted_contract_params;
 use super::error::ChainResult;
 
 /// Shape returned by `Pmp.getDetails`. Aliased so call sites don't
@@ -206,6 +227,309 @@ impl Dex {
         OracleEventList::new(self.ctx.clone(), dex_contract_params(event_list_address))
             .get_events()
             .await
+            .map_err(Into::into)
+    }
+}
+
+// ── AI Registry: inference market (spec §2-§8) ───────────────────────────
+//
+// The note (`PrivateNote`) is the on-chain participant — it deploys the
+// per-model `InferenceOrderBook`, posts SELL offers backed by a
+// `TokenContract`, and places BUY orders with SHELL escrow. Settlement runs
+// on the `TokenContract` (open → advance → stop/dispute/reclaim). These all
+// stay behind `test-helpers`: there are no inference request handlers yet,
+// so they would otherwise be dead weight in the prod binary.
+impl Dex {
+    // ── PrivateNote (inference participant write-path) ────────────────
+
+    pub async fn deploy_inference_order_book(
+        &self,
+        pn_address: &str,
+        params: ParamsOfInferenceOrderBook,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .deploy_inference_order_book(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_inference_order_book_address(
+        &self,
+        pn_address: &str,
+        params: ParamsOfInferenceOrderBook,
+    ) -> ChainResult<String> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .get_inference_order_book_address(params)
+            .await
+            .map(|r| r.address)
+            .map_err(Into::into)
+    }
+
+    pub async fn post_sell_offer(
+        &self,
+        pn_address: &str,
+        params: ParamsOfPostSellOffer,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .post_sell_offer(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn place_inference_buy(
+        &self,
+        pn_address: &str,
+        params: ParamsOfPlaceInferenceBuy,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .place_inference_buy(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn cancel_inference_order(
+        &self,
+        pn_address: &str,
+        params: ParamsOfCancelInferenceOrder,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .cancel_inference_order(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn cancel_all_inference_orders(
+        &self,
+        pn_address: &str,
+        params: ParamsOfCancelAllInferenceOrders,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .cancel_all_inference_orders(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn place_inference_subscription(
+        &self,
+        pn_address: &str,
+        params: ParamsOfPlaceInferenceSubscription,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .place_inference_subscription(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Buyer note stops the stream cleanly (`PrivateNote.streamStop`).
+    pub async fn stream_stop(
+        &self,
+        pn_address: &str,
+        params: ParamsOfStreamDeal,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .stream_stop(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Buyer note disputes the current ticks (`PrivateNote.streamDispute`).
+    pub async fn stream_dispute(
+        &self,
+        pn_address: &str,
+        params: ParamsOfStreamDeal,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .stream_dispute(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Buyer note reclaims a probe tick on seller no-show
+    /// (`PrivateNote.streamReclaim`).
+    pub async fn stream_reclaim(
+        &self,
+        pn_address: &str,
+        params: ParamsOfStreamDeal,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .stream_reclaim(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    // ── InferenceOrderBook (read-only assertions) ─────────────────────
+
+    pub async fn inference_get_order(
+        &self,
+        order_book_address: &str,
+        order_id: u128,
+    ) -> ChainResult<IobOrder> {
+        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
+            .get_order(IobParamsOfGetOrder { id: order_id })
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn inference_get_stats(&self, order_book_address: &str) -> ChainResult<IobStats> {
+        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
+            .get_stats()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn inference_get_queue_size(&self, order_book_address: &str) -> ChainResult<u8> {
+        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
+            .get_queue_size()
+            .await
+            .map(|r| r.size)
+            .map_err(Into::into)
+    }
+
+    pub async fn inference_get_best_bid_ask(
+        &self,
+        order_book_address: &str,
+    ) -> ChainResult<ResultOfGetBestBidAsk> {
+        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
+            .get_best_bid_ask()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn inference_get_subscription(
+        &self,
+        order_book_address: &str,
+        order_id: u128,
+    ) -> ChainResult<IobSubscription> {
+        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
+            .get_subscription(IobParamsOfOrderId { order_id })
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn inference_get_weekly_median_price(
+        &self,
+        order_book_address: &str,
+    ) -> ChainResult<String> {
+        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
+            .get_weekly_median_price()
+            .await
+            .map(|r| r.price)
+            .map_err(Into::into)
+    }
+
+    // ── TokenContract (streaming-deal settlement) ─────────────────────
+
+    /// Seller opens the stream and freezes the probe tick
+    /// (`TokenContract.open`).
+    pub async fn token_contract_open(
+        &self,
+        token_contract_address: &str,
+        params: ParamsOfOpen,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .open(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Seller advances one tick (`TokenContract.advance`).
+    pub async fn token_contract_advance(
+        &self,
+        token_contract_address: &str,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .advance(signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Seller posts the probe commission (`TokenContract.fundProbeCommission`).
+    pub async fn token_contract_fund_probe_commission(
+        &self,
+        token_contract_address: &str,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .fund_probe_commission(signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Seller resolves a dispute after the dispute window
+    /// (`TokenContract.resolveDisputeTimeout`).
+    pub async fn token_contract_resolve_dispute_timeout(
+        &self,
+        token_contract_address: &str,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .resolve_dispute_timeout(signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Seller withdraws finalized SHELL (`TokenContract.withdrawShell`).
+    pub async fn token_contract_withdraw_shell(
+        &self,
+        token_contract_address: &str,
+        params: ParamsOfWithdrawShell,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .withdraw_shell(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn token_contract_get_state(
+        &self,
+        token_contract_address: &str,
+    ) -> ChainResult<TcState> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .get_state()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn token_contract_get_probe(
+        &self,
+        token_contract_address: &str,
+    ) -> ChainResult<TcProbe> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .get_probe()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn token_contract_get_parties(
+        &self,
+        token_contract_address: &str,
+    ) -> ChainResult<TcParties> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .get_parties()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn token_contract_get_shell_balance(
+        &self,
+        token_contract_address: &str,
+    ) -> ChainResult<u128> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .get_shell_balance()
+            .await
+            .map(|r| r.value)
             .map_err(Into::into)
     }
 }

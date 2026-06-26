@@ -48,7 +48,7 @@ impl From<dodex_domain::MarketStatus> for MarketStatus {
 
 /// Order lifecycle status. `PENDING_NEW` / `PENDING_CANCEL` are
 /// write-side acceptance states: they appear only in synchronous
-/// POST/DELETE responses, never in `GET /api/v1/orders` rows.
+/// POST/DELETE responses, never in `GET /api/v1/prediction/orders` rows.
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum OrderStatus {
@@ -174,7 +174,7 @@ impl From<dodex_domain::CancelReason> for CancelReason {
     }
 }
 
-/// Sort order for `GET /api/v1/markets`: `resultStart` ascending
+/// Sort order for `GET /api/v1/prediction/markets`: `resultStart` ascending
 /// (default) or `createdAt` descending.
 // Documentation-only: referenced from `#[endpoint(parameters(...))]`
 // as a schema type, never constructed at runtime (the handler parses
@@ -187,7 +187,7 @@ pub(crate) enum MarketsSort {
     CreatedAt,
 }
 
-/// Order statuses accepted by the `GET /api/v1/orders` `status` filter.
+/// Order statuses accepted by the `GET /api/v1/prediction/orders` `status` filter.
 /// Excludes the write-side acceptance states `PENDING_NEW` /
 /// `PENDING_CANCEL`, which never appear in stored rows.
 // Documentation-only, same rationale as `MarketsSort`.

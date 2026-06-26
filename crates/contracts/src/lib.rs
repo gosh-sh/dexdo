@@ -8,6 +8,7 @@
 //! `dex` holds the DEX contracts; `airegistry` wrappers land here too as they
 //! are authored.
 
+pub mod airegistry;
 pub mod dex;
 
 #[cfg(test)]

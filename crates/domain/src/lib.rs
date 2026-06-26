@@ -189,7 +189,7 @@ pub struct Market {
     pub order_book_address: String,
     /// `0x`-prefixed hex of `PMP.getDetails().oracleListHash`, stamped
     /// by the market reconciler. Required by `placeOrder` / `placeBatch`
-    /// chain calls; the public `/api/v1/markets` DTO does not surface
+    /// chain calls; the public `/api/v1/prediction/markets` DTO does not surface
     /// it. Empty string on a reconciled row is treated as
     /// `MarketInconsistent` → HTTP 503 by the trading path.
     pub oracle_list_hash: String,
@@ -235,7 +235,7 @@ pub struct DepthSnapshot {
 }
 
 /// One public trade: a maker↔taker match projected from an
-/// `OrderBook.OrderFilled` event, as served by `GET /api/v1/trades`.
+/// `OrderBook.OrderFilled` event, as served by `GET /api/v1/prediction/trades`.
 /// All money fields are pre-rendered decimal strings at API-render scale
 /// (`price` at `price_precision`, `qty` at `quantity_precision`, `quote_qty`
 /// at the quote asset's `decimals`); `time` is Unix milliseconds.
@@ -542,7 +542,7 @@ pub struct OracleEventListEntry {
 }
 
 /// One available event offered by an event list. Maps to api-spec `OracleEvent`.
-/// `event_id` is the `0x`-hex rendering (same as `/api/v1/markets`
+/// `event_id` is the `0x`-hex rendering (same as `/api/v1/prediction/markets`
 /// `event.eventId`). `description` / `trust_address` are reconciler-filled and
 /// may be NULL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -688,9 +688,9 @@ impl TimeInForce {
 /// `PrivateNote.placeOrder` accepts (synchronous return of
 /// `dodex_chain::Dex::place_order`) and the moment `OrderBook.OrderPlaced`
 /// projects into `live_orders` with a chain-assigned `orderId`. The
-/// HTTP response to a successful `POST /api/v1/order` always carries
+/// HTTP response to a successful `POST /api/v1/prediction/order` always carries
 /// `PendingNew`; the indexer-projected row in `live_orders` then
-/// surfaces as `NEW` through `GET /api/v1/orders`.
+/// surfaces as `NEW` through `GET /api/v1/prediction/orders`.
 ///
 /// Variant declaration order is pinned by a regression test so the public
 /// wire sequence stays deliberate. SQL status-filter composition uses
@@ -700,7 +700,7 @@ impl TimeInForce {
 /// `PrivateNote.cancelOrder` accepts and forwards to `OrderBook`, the
 /// HTTP response carries `PendingCancel`; the book-side removal lands
 /// asynchronously via `OrderBook.OrderCancelled`, after which the order
-/// surfaces in `/api/v1/orders` as `Canceled` (or `Filled` if matching
+/// surfaces in `/api/v1/prediction/orders` as `Canceled` (or `Filled` if matching
 /// raced the cancel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

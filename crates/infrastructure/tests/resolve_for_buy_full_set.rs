@@ -1,7 +1,7 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 // Integration tests for PostgresReadModelRepository::resolve_for_buy_full_set
-// — the market-level resolver feeding `POST /api/v1/buyFullSet`. Unlike
+// — the market-level resolver feeding `POST /api/v1/prediction/buyFullSet`. Unlike
 // `resolve_for_new_order`, this one does not join `market_outcomes`:
 // `splitFullSet` is a market-level chain op, so the tests seed
 // markets-only rows to prove no implicit join leaked in. Gated on
@@ -154,7 +154,7 @@ async fn unknown_market_is_typed_miss() {
 #[tokio::test]
 async fn pre_reconcile_market_is_invisible() {
     // `last_reconciled_at IS NULL` markets are hidden symmetric with
-    // `/api/v1/markets`. The trading-path resolver must collapse to
+    // `/api/v1/prediction/markets`. The trading-path resolver must collapse to
     // InvalidMarketOrSymbol just like for unknown rows; differentiating
     // would expose the pre-reconcile bucket to callers.
     let Some(pool) = setup().await else { return };

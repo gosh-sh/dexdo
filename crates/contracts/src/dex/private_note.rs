@@ -443,19 +443,21 @@ pub struct ParamsOfStreamLock {
 #[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.deployInferenceOrderBook` and
 /// `PrivateNote.getInferenceOrderBookAddress`.
+///
+/// Keyed only by `model_hash`: the canonical `InferenceOrderBook` code is
+/// baked into the note at deploy (`_inferenceOrderBookCode`), so the book
+/// address is `tvm.hash(code, modelHash)` and the note derives it itself.
 pub struct ParamsOfInferenceOrderBook {
-    /// Canonical `InferenceOrderBook` code as a base64 BOC string (`cell`).
-    pub inference_order_book_code: String,
     /// `uint256` model hash, decimal/hex string.
     pub model_hash: String,
-    pub tick_size: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.postSellOffer`.
 pub struct ParamsOfPostSellOffer {
-    pub order_book: String,
+    /// `uint256` model hash, decimal/hex string — identifies the book.
+    pub model_hash: String,
     pub price_per_tick: u128,
     pub max_ticks: u128,
     pub token_contract: String,
@@ -471,7 +473,8 @@ pub struct ParamsOfPostSellOffer {
 #[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.placeInferenceBuy`.
 pub struct ParamsOfPlaceInferenceBuy {
-    pub order_book: String,
+    /// `uint256` model hash, decimal/hex string — identifies the book.
+    pub model_hash: String,
     pub max_price_per_tick: u128,
     pub ticks: u128,
     pub escrow: u128,
@@ -484,7 +487,8 @@ pub struct ParamsOfPlaceInferenceBuy {
 #[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.placeInferenceSubscription`.
 pub struct ParamsOfPlaceInferenceSubscription {
-    pub order_book: String,
+    /// `uint256` model hash, decimal/hex string — identifies the book.
+    pub model_hash: String,
     pub max_price_per_tick: u128,
     pub ticks: u128,
     pub escrow: u128,
@@ -495,7 +499,8 @@ pub struct ParamsOfPlaceInferenceSubscription {
 #[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.cancelInferenceOrder`.
 pub struct ParamsOfCancelInferenceOrder {
-    pub order_book: String,
+    /// `uint256` model hash, decimal/hex string — identifies the book.
+    pub model_hash: String,
     pub order_id: u128,
 }
 
@@ -503,7 +508,8 @@ pub struct ParamsOfCancelInferenceOrder {
 #[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.cancelAllInferenceOrders`.
 pub struct ParamsOfCancelAllInferenceOrders {
-    pub order_book: String,
+    /// `uint256` model hash, decimal/hex string — identifies the book.
+    pub model_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1253,7 +1259,7 @@ impl PrivateNote {
     /// Original contract method: `deployInferenceOrderBook`
     ///
     /// Should be signed with PrivateNote owner keys. Permissionless at the
-    /// deterministic `(model, tick)` address.
+    /// deterministic per-model address.
     pub async fn deploy_inference_order_book(
         &self,
         params: ParamsOfInferenceOrderBook,
@@ -1393,6 +1399,24 @@ impl PrivateNote {
         self.send_message(Some(call_set), None, signer).await
     }
 
+    /// # Buyer note reclaims a probe tick after the stream timeout (no-show)
+    ///
+    /// Original contract method: `streamReclaim`
+    ///
+    /// Should be signed with PrivateNote owner keys.
+    pub async fn stream_reclaim(
+        &self,
+        params: ParamsOfStreamDeal,
+        signer: Signer,
+    ) -> KitResult<ResultOfSendMessage> {
+        let call_set = CallSet {
+            function_name: "streamReclaim".to_string(),
+            header: None,
+            input: Some(json!(params)),
+        };
+        self.send_message(Some(call_set), None, signer).await
+    }
+
     // ─── Getters ──────────────────────────────────────────────────────
 
     /// # Get salted PMP code and hash
@@ -1450,7 +1474,7 @@ impl PrivateNote {
         self.call_get_method::<ResultOfGetStreamLocks>("getStreamLocks").await
     }
 
-    /// # Get deterministic InferenceOrderBook address for `(model, tick)`
+    /// # Get deterministic InferenceOrderBook address for a model
     ///
     /// Original contract method: `getInferenceOrderBookAddress`
     pub async fn get_inference_order_book_address(
@@ -1462,5 +1486,108 @@ impl PrivateNote {
             params,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod inference_abi_tests {
+    //! Guards the inference / stream-deal `Params` structs against the bundled
+    //! `PrivateNote.abi.json`: each must serialize to exactly the ABI input
+    //! names. The inference methods are keyed by `modelHash` (the book code is
+    //! baked into the note), not by an order-book address.
+
+    use std::collections::BTreeSet;
+
+    use serde::Serialize;
+
+    use super::*;
+
+    fn abi_input_names(func: &str) -> BTreeSet<String> {
+        let v: serde_json::Value = serde_json::from_str(ABI).expect("parse PrivateNote ABI");
+        v["functions"]
+            .as_array()
+            .expect("functions array")
+            .iter()
+            .find(|f| f["name"].as_str() == Some(func))
+            .unwrap_or_else(|| panic!("function `{func}` not in ABI"))["inputs"]
+            .as_array()
+            .expect("inputs array")
+            .iter()
+            .map(|i| i["name"].as_str().expect("input name").to_string())
+            .collect()
+    }
+
+    fn keys<T: Serialize>(params: &T) -> BTreeSet<String> {
+        serde_json::to_value(params)
+            .expect("serialize")
+            .as_object()
+            .expect("object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn inference_params_match_abi() {
+        assert_eq!(
+            keys(&ParamsOfInferenceOrderBook { model_hash: "1".into() }),
+            abi_input_names("deployInferenceOrderBook")
+        );
+        assert_eq!(
+            keys(&ParamsOfInferenceOrderBook { model_hash: "1".into() }),
+            abi_input_names("getInferenceOrderBookAddress")
+        );
+        assert_eq!(
+            keys(&ParamsOfPostSellOffer {
+                model_hash: "1".into(),
+                price_per_tick: 1,
+                max_ticks: 1,
+                token_contract: "0:1".into(),
+                flags: 0,
+            }),
+            abi_input_names("postSellOffer")
+        );
+        assert_eq!(
+            keys(&ParamsOfPlaceInferenceBuy {
+                model_hash: "1".into(),
+                max_price_per_tick: 1,
+                ticks: 1,
+                escrow: 1,
+                flags: 0,
+                deadline: 0,
+            }),
+            abi_input_names("placeInferenceBuy")
+        );
+        assert_eq!(
+            keys(&ParamsOfPlaceInferenceSubscription {
+                model_hash: "1".into(),
+                max_price_per_tick: 1,
+                ticks: 1,
+                escrow: 1,
+                auto_renew: true,
+            }),
+            abi_input_names("placeInferenceSubscription")
+        );
+        assert_eq!(
+            keys(&ParamsOfCancelInferenceOrder { model_hash: "1".into(), order_id: 1 }),
+            abi_input_names("cancelInferenceOrder")
+        );
+        assert_eq!(
+            keys(&ParamsOfCancelAllInferenceOrders { model_hash: "1".into() }),
+            abi_input_names("cancelAllInferenceOrders")
+        );
+    }
+
+    #[test]
+    fn stream_deal_params_match_abi() {
+        assert_eq!(
+            keys(&ParamsOfStreamDeal { token_contract: "0:1".into() }),
+            abi_input_names("streamStop")
+        );
+        assert_eq!(
+            keys(&ParamsOfStreamDeal { token_contract: "0:1".into() }),
+            abi_input_names("streamReclaim")
+        );
+        assert_eq!(keys(&ParamsOfStreamLock { deal: "0:1".into() }), abi_input_names("streamLock"));
     }
 }
