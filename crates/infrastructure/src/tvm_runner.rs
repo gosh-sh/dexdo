@@ -250,8 +250,10 @@ mod tests {
 
     #[test]
     fn tvm_getter_error_carries_exit_code() {
-        let err: anyhow::Error =
-            anyhow::Error::new(TvmGetterError { exit_code: 334, message: "ERR_NO_LIQUIDITY".into() });
+        let err: anyhow::Error = anyhow::Error::new(TvmGetterError {
+            exit_code: 334,
+            message: "ERR_NO_LIQUIDITY".into(),
+        });
         assert_eq!(tvm_exit_code(&err), Some(334));
         assert!(err.to_string().contains("334"));
         // A plain anyhow error has no exit code.

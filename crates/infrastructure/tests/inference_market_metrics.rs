@@ -47,16 +47,14 @@ async fn state_counts_and_staleness_reflect_inserted_rows() {
     let visible = "inf_metrics_test.visible";
     let failing = "inf_metrics_test.failing";
 
-    let addrs =
-        vec![discovering.to_string(), visible.to_string(), failing.to_string()];
+    let addrs = vec![discovering.to_string(), visible.to_string(), failing.to_string()];
     sqlx::query("delete from inference_markets where orderbook_address = any($1)")
         .bind(&addrs)
         .execute(&pool)
         .await
         .expect("purge");
 
-    let (d0, v0, f0) =
-        repo.inference_market_state_counts().await.expect("state counts before");
+    let (d0, v0, f0) = repo.inference_market_state_counts().await.expect("state counts before");
 
     // discovering: seeded, never reconciled, never failed.
     sqlx::query("insert into inference_markets (orderbook_address) values ($1)")
@@ -83,8 +81,7 @@ async fn state_counts_and_staleness_reflect_inserted_rows() {
     .await
     .expect("insert failing");
 
-    let (d1, v1, f1) =
-        repo.inference_market_state_counts().await.expect("state counts after");
+    let (d1, v1, f1) = repo.inference_market_state_counts().await.expect("state counts after");
     assert_eq!(d1 - d0, 1, "discovering bucket should gain exactly 1");
     assert_eq!(v1 - v0, 1, "visible bucket should gain exactly 1");
     assert_eq!(f1 - f0, 1, "failing bucket should gain exactly 1");
@@ -92,8 +89,7 @@ async fn state_counts_and_staleness_reflect_inserted_rows() {
     // Our visible row makes the oldest reference_price_at at least 1000s old and
     // the oldest last_swept_at at least 500s old; any other visible row can only
     // be older (larger lag), never younger — so these lower bounds always hold.
-    let (price_lag, sweep_lag) =
-        repo.inference_staleness_seconds().await.expect("staleness");
+    let (price_lag, sweep_lag) = repo.inference_staleness_seconds().await.expect("staleness");
     assert!(price_lag >= 1000, "price_lag {price_lag} should be >= 1000");
     assert!(sweep_lag >= 500, "sweep_lag {sweep_lag} should be >= 500");
 
@@ -119,8 +115,7 @@ async fn order_status_counts_reflect_inserted_rows() {
         .await
         .expect("purge");
 
-    let (o0, f0, c0) =
-        repo.inference_order_status_counts().await.expect("order counts before");
+    let (o0, f0, c0) = repo.inference_order_status_counts().await.expect("order counts before");
 
     // One order in each status. Only the NOT NULL columns are set; order_id is
     // the per-book PK component.
@@ -139,8 +134,7 @@ async fn order_status_counts_reflect_inserted_rows() {
         .expect("insert order");
     }
 
-    let (o1, f1, c1) =
-        repo.inference_order_status_counts().await.expect("order counts after");
+    let (o1, f1, c1) = repo.inference_order_status_counts().await.expect("order counts after");
     assert_eq!(o1 - o0, 1, "OPEN bucket should gain exactly 1");
     assert_eq!(f1 - f0, 1, "FILLED bucket should gain exactly 1");
     assert_eq!(c1 - c0, 1, "CANCELLED bucket should gain exactly 1");

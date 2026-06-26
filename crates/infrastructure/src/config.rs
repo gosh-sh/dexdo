@@ -523,14 +523,22 @@ impl IndexerConfig {
             i.oracle_event_list_reconciliation_interval_ms > 0,
             "indexer.oracle_event_list_reconciliation_interval_ms must be > 0"
         );
-        anyhow::ensure!(i.inference_reconciliation_interval_ms > 0,
-            "indexer.inference_reconciliation_interval_ms must be > 0");
-        anyhow::ensure!(i.inference_reference_price_refresh_ms > 0,
-            "indexer.inference_reference_price_refresh_ms must be > 0");
-        anyhow::ensure!(i.inference_sweep_interval_ms > 0,
-            "indexer.inference_sweep_interval_ms must be > 0");
-        anyhow::ensure!(i.inference_orphan_cutoff_ms > 0,
-            "indexer.inference_orphan_cutoff_ms must be > 0");
+        anyhow::ensure!(
+            i.inference_reconciliation_interval_ms > 0,
+            "indexer.inference_reconciliation_interval_ms must be > 0"
+        );
+        anyhow::ensure!(
+            i.inference_reference_price_refresh_ms > 0,
+            "indexer.inference_reference_price_refresh_ms must be > 0"
+        );
+        anyhow::ensure!(
+            i.inference_sweep_interval_ms > 0,
+            "indexer.inference_sweep_interval_ms must be > 0"
+        );
+        anyhow::ensure!(
+            i.inference_orphan_cutoff_ms > 0,
+            "indexer.inference_orphan_cutoff_ms must be > 0"
+        );
         // `dapp_id: ""` deserializes to Some(""), which would enable the scope
         // filter and drop every edge with a real src_dapp_id while the cursor
         // still advances — silent, unrecoverable data loss. An empty string is

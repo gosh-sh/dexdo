@@ -64,10 +64,8 @@ pub struct DecoderGetter {
 
 impl OrderBookGetter for DecoderGetter {
     fn call(&self, boc: &str, name: &str, args: &Value) -> anyhow::Result<Value> {
-        let contract = self
-            .decoder
-            .contract(KIND)
-            .ok_or_else(|| anyhow!("InferenceOrderBook abi missing"))?;
+        let contract =
+            self.decoder.contract(KIND).ok_or_else(|| anyhow!("InferenceOrderBook abi missing"))?;
         run_getter(contract, boc, name, args)
     }
 }
@@ -172,10 +170,7 @@ impl InferenceReconciler {
         .with_events_stream("test_inference_at_head_stream")
     }
 
-    pub fn for_test_with_getter(
-        pool: PgPool,
-        getter: std::sync::Arc<dyn OrderBookGetter>,
-    ) -> Self {
+    pub fn for_test_with_getter(pool: PgPool, getter: std::sync::Arc<dyn OrderBookGetter>) -> Self {
         Self::with_getter(
             pool,
             GraphqlClient::new("http://127.0.0.1:0/graphql", Duration::from_secs(1)).unwrap(),
@@ -306,9 +301,8 @@ impl InferenceReconciler {
     pub async fn fill_params(&self, ob: &str, boc: &str) -> anyhow::Result<()> {
         let params = self.call_getter(boc, "getParams", &json!({})).context("getParams")?;
         let model_hash = uint_field_to_decimal(&params, "modelHash")?;
-        let fee: i32 = uint_field_to_decimal(&params, "platformFeeBps")?
-            .parse()
-            .context("platformFeeBps")?;
+        let fee: i32 =
+            uint_field_to_decimal(&params, "platformFeeBps")?.parse().context("platformFeeBps")?;
         self.write_params(ob, &model_hash, fee).await
     }
 
@@ -627,10 +621,9 @@ impl InferenceReconciler {
     fn sweep_due_by_time(&self, book: &BookRow) -> bool {
         match book.last_swept_at {
             None => true,
-            Some(at) => (chrono::Utc::now() - at)
-                .to_std()
-                .map(|a| a > self.sweep_interval)
-                .unwrap_or(true),
+            Some(at) => {
+                (chrono::Utc::now() - at).to_std().map(|a| a > self.sweep_interval).unwrap_or(true)
+            }
         }
     }
 
@@ -647,7 +640,8 @@ impl InferenceReconciler {
 
     async fn reconcile_refresh(&self, book: &BookRow) -> anyhow::Result<DiscoveryOutcome> {
         let ob = &book.orderbook_address;
-        let Some(boc) = self.graphql.fetch_account_boc(ob).await.context("fetch boc (refresh)")? else {
+        let Some(boc) = self.graphql.fetch_account_boc(ob).await.context("fetch boc (refresh)")?
+        else {
             return Ok(DiscoveryOutcome::NoBoc);
         };
         if self.price_due(book) {
@@ -660,7 +654,7 @@ impl InferenceReconciler {
         if self.sweep_due_by_time(book) && self.has_open_orders(ob).await? {
             // run_sweep_step self-gates (idle + at-head + no-pending); on a gate miss it
             // does not touch last_swept_at, so the book stays sweep-due next tick.
-            let _ = self.run_sweep_step(ob, &boc, /*discovery=*/ false).await?;
+            let _ = self.run_sweep_step(ob, &boc, /* discovery= */ false).await?;
         }
         Ok(DiscoveryOutcome::Stamped) // "handled" — reuse the enum; mapped to `refreshed` in run_once
     }

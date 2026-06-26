@@ -171,10 +171,8 @@ async fn discovery_stamp_is_optimistic_blocks_on_override() {
     .execute(&pool)
     .await
     .unwrap();
-    let stamped = r
-        .advance_sweep_and_maybe_stamp(ob, Some("5"), "10", None, true, true, 0)
-        .await
-        .unwrap();
+    let stamped =
+        r.advance_sweep_and_maybe_stamp(ob, Some("5"), "10", None, true, true, 0).await.unwrap();
     assert!(!stamped, "mid-cycle override ⇒ stamp blocked");
     assert!(reconciled_at(pool.clone()).await.is_none());
 
@@ -188,11 +186,12 @@ async fn discovery_stamp_is_optimistic_blocks_on_override() {
     .execute(&pool)
     .await
     .unwrap();
-    let stamped = r
-        .advance_sweep_and_maybe_stamp(ob, None, "10", None, true, true, 0)
-        .await
-        .unwrap();
-    assert!(!stamped, "first-tick (NULL prev) override must still block the stamp via the seq guard");
+    let stamped =
+        r.advance_sweep_and_maybe_stamp(ob, None, "10", None, true, true, 0).await.unwrap();
+    assert!(
+        !stamped,
+        "first-tick (NULL prev) override must still block the stamp via the seq guard"
+    );
     assert!(reconciled_at(pool.clone()).await.is_none());
 
     // (3) Clean completion (cursor + seq unchanged) ⇒ stamps.
@@ -204,10 +203,8 @@ async fn discovery_stamp_is_optimistic_blocks_on_override() {
     .execute(&pool)
     .await
     .unwrap();
-    let stamped = r
-        .advance_sweep_and_maybe_stamp(ob, Some("5"), "10", None, true, true, 0)
-        .await
-        .unwrap();
+    let stamped =
+        r.advance_sweep_and_maybe_stamp(ob, Some("5"), "10", None, true, true, 0).await.unwrap();
     assert!(stamped);
     assert!(reconciled_at(pool.clone()).await.is_some());
 }
@@ -275,7 +272,10 @@ async fn refresh_price_err_no_liquidity_is_null_success_writes() {
     // Dry book ⇒ ERR_NO_LIQUIDITY (334) ⇒ price NULL but reference_price_at stamped.
     let dry = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| {
         if name == "getWeeklyMedianPrice" {
-            Err(anyhow::Error::new(TvmGetterError { exit_code: 334, message: "ERR_NO_LIQUIDITY".into() }))
+            Err(anyhow::Error::new(TvmGetterError {
+                exit_code: 334,
+                message: "ERR_NO_LIQUIDITY".into(),
+            }))
         } else {
             Ok(json!({}))
         }
@@ -371,7 +371,11 @@ async fn sweep_cancels_empty_order_when_gates_open() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!((status.as_str(), swept), ("CANCELLED", true), "empty getOrder ⇒ provisional sweep-cancel");
+    assert_eq!(
+        (status.as_str(), swept),
+        ("CANCELLED", true),
+        "empty getOrder ⇒ provisional sweep-cancel"
+    );
 }
 
 struct RecGetter {
@@ -432,7 +436,8 @@ async fn r_run(pool: &sqlx::PgPool, g: std::sync::Arc<RecGetter>, ob: &str) {
 }
 
 #[tokio::test]
-async fn discovery_sweep_bounded_advances_across_ticks_resumes_after_restart_stamps_on_completion() {
+async fn discovery_sweep_bounded_advances_across_ticks_resumes_after_restart_stamps_on_completion()
+{
     let Some(pool) = setup().await else { return };
     let _guard = AT_HEAD_GATE_LOCK.lock().await;
     let ob = "0:t_bounded";
@@ -505,7 +510,11 @@ async fn sweep_wraps_against_fixed_boundary_not_live_next_order_id() {
     // Cycle 1: snapshot boundary = nextOrderId = 3 ⇒ id=10 (>3) is excluded THIS cycle.
     let g1 = RecGetter::new(0, 3, &[]); // default batch 50 ⇒ one batch covers (−1,3]
     let _ = r_run(&pool, g1.clone(), ob).await;
-    assert_eq!(g1.order_ids(), vec!["1", "2"], "id minted past the snapshot boundary is NOT probed this cycle");
+    assert_eq!(
+        g1.order_ids(),
+        vec!["1", "2"],
+        "id minted past the snapshot boundary is NOT probed this cycle"
+    );
     // Cycle complete ⇒ cursor reset; next cycle re-snapshots a higher boundary ⇒ id=10 now probed.
     let g2 = RecGetter::new(0, 11, &[]);
     let _ = r_run(&pool, g2.clone(), ob).await;
@@ -582,7 +591,10 @@ async fn real_getter_failure_surfaces_as_err_not_silent_null() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(at.is_none(), "a real failure must NOT stamp reference_price_at (unlike ERR_NO_LIQUIDITY)");
+    assert!(
+        at.is_none(),
+        "a real failure must NOT stamp reference_price_at (unlike ERR_NO_LIQUIDITY)"
+    );
     // fill_params likewise surfaces a getter error.
     let boom_params = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| {
         if name == "getParams" {
@@ -591,12 +603,10 @@ async fn real_getter_failure_surfaces_as_err_not_silent_null() {
             Ok(json!({}))
         }
     }));
-    assert!(
-        InferenceReconciler::for_test_with_getter(pool.clone(), boom_params)
-            .fill_params(ob, "boc")
-            .await
-            .is_err()
-    );
+    assert!(InferenceReconciler::for_test_with_getter(pool.clone(), boom_params)
+        .fill_params(ob, "boc")
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -621,8 +631,8 @@ async fn discovery_composes_params_price_phantom_cancel_then_stamps_visibility()
         // model_hash is UNIQUE across markets — use a value no other test writes.
         "getParams" => Ok(json!({"modelHash": "0x2329", "platformFeeBps": "0x1e"})), // 9001, 30
         "getWeeklyMedianPrice" => Ok(json!({"value0": "0x64"})),                     // 100
-        "getStats" => Ok(json!({"nextOrderId": "0xa"})),                           // boundary 10
-        "getOrder" => Ok(json!({"note": "0:0", "amount": "0x0", "isBuy": true})),  // empty ⇒ phantom
+        "getStats" => Ok(json!({"nextOrderId": "0xa"})),                             // boundary 10
+        "getOrder" => Ok(json!({"note": "0:0", "amount": "0x0", "isBuy": true})), /* empty ⇒ phantom */
         _ => Ok(json!({})),
     }));
     let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
@@ -658,7 +668,11 @@ async fn discovery_composes_params_price_phantom_cancel_then_stamps_visibility()
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!((status.as_str(), swept), ("CANCELLED", true), "phantom swept-cancelled in the same pass");
+    assert_eq!(
+        (status.as_str(), swept),
+        ("CANCELLED", true),
+        "phantom swept-cancelled in the same pass"
+    );
 }
 
 #[tokio::test]
@@ -699,12 +713,13 @@ async fn discovery_with_busy_queue_fills_params_but_leaves_book_invisible() {
         .unwrap();
     assert_eq!(model_hash.as_deref(), Some("9002"), "params fill before the sweep gate");
     assert!(reconciled.is_none(), "busy queue ⇒ last_reconciled_at stays NULL");
-    let status: String =
-        sqlx::query_scalar("select status from inference_orders where orderbook_address=$1 and order_id=1")
-            .bind(ob)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let status: String = sqlx::query_scalar(
+        "select status from inference_orders where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(status, "OPEN", "no sweep ran ⇒ order untouched");
 }
 
@@ -784,10 +799,9 @@ async fn run_once_counts_hard_failures_into_shared_counter() {
     let _guard = AT_HEAD_GATE_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
     let repo = dodex_infrastructure::indexer_repo::IndexerRepository::new(pool.clone());
-    let reconciler = dodex_infrastructure::inference_reconciler::InferenceReconciler::for_test(
-        pool.clone(),
-    )
-    .with_failure_counter(repo.inference_reconcile_failures_handle());
+    let reconciler =
+        dodex_infrastructure::inference_reconciler::InferenceReconciler::for_test(pool.clone())
+            .with_failure_counter(repo.inference_reconcile_failures_handle());
 
     // A discovery book (never reconciled, never failed) the reconciler will
     // scan and fail on BOC fetch. model_hash NULL avoids the UNIQUE partial index.

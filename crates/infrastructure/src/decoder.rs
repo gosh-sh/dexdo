@@ -192,8 +192,7 @@ impl Decoder {
         event: &str,
         slice: SliceData,
     ) -> anyhow::Result<DecodedEvent> {
-        let contract =
-            self.contracts.get(kind).expect("contract index consistent with abi list");
+        let contract = self.contracts.get(kind).expect("contract index consistent with abi list");
 
         let decoded = contract
             .decode_output(slice, true, true)
@@ -203,8 +202,7 @@ impl Decoder {
             .map_err(|e| anyhow!("detokenize {kind}.{event}: {e}"))?;
 
         // Reuse the &'static str key from the contracts map for contract_kind.
-        let contract_kind =
-            self.contracts.keys().find(|k| **k == kind).copied().unwrap_or("");
+        let contract_kind = self.contracts.keys().find(|k| **k == kind).copied().unwrap_or("");
 
         Ok(DecodedEvent {
             contract_kind,
@@ -373,12 +371,17 @@ mod tests {
 
     // --- Test helpers: encode event bodies from the loaded contracts ---
 
-    fn encode_event_body_b64(decoder: &Decoder, kind: &str, event_name: &str, tokens_json: serde_json::Value) -> String {
-        use tvm_abi::token::Tokenizer;
+    fn encode_event_body_b64(
+        decoder: &Decoder,
+        kind: &str,
+        event_name: &str,
+        tokens_json: serde_json::Value,
+    ) -> String {
         use tvm_abi::token::TokenValue;
+        use tvm_abi::token::Tokenizer;
+        use tvm_types::write_boc;
         use tvm_types::BuilderData;
         use tvm_types::IBitstring;
-        use tvm_types::write_boc;
 
         let contract = decoder.contracts.get(kind).unwrap();
         let events = contract.events();

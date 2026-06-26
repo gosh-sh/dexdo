@@ -113,7 +113,7 @@ impl IndexerRepository {
             pool,
             seen_unknown_event_types: Arc::new(Mutex::new(HashSet::new())),
             projection_fallbacks: Arc::new(AtomicU64::new(0)),
-            inference_orphan_cutoff: std::time::Duration::from_millis(1_800_000), // default; overridden in main
+            inference_orphan_cutoff: std::time::Duration::from_millis(1_800_000), /* default; overridden in main */
             inference_orphans_dropped: Arc::new(AtomicU64::new(0)),
             decode_errors: Arc::new(AtomicU64::new(0)),
             inference_reconcile_failures: Arc::new(AtomicU64::new(0)),

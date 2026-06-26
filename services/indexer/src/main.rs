@@ -64,8 +64,9 @@ async fn main() -> anyhow::Result<()> {
     // rows once their parent lands. Continuous-drain with an idle pause of
     // polling_interval_ms — no point polling for pending rows faster than
     // capture produces them.
-    let projector = repo.clone()
-        .with_inference_orphan_cutoff(Duration::from_millis(config.indexer.inference_orphan_cutoff_ms));
+    let projector = repo.clone().with_inference_orphan_cutoff(Duration::from_millis(
+        config.indexer.inference_orphan_cutoff_ms,
+    ));
     let projection_idle_interval = Duration::from_millis(config.indexer.polling_interval_ms);
     let projection_batch_size = config.indexer.reprojection_batch_size;
     tokio::spawn(projector.run_reprojection_loop(projection_idle_interval, projection_batch_size));
@@ -103,8 +104,7 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_millis(config.indexer.inference_sweep_interval_ms),
     )
     .with_failure_counter(repo.inference_reconcile_failures_handle());
-    let inf_interval =
-        Duration::from_millis(config.indexer.inference_reconciliation_interval_ms);
+    let inf_interval = Duration::from_millis(config.indexer.inference_reconciliation_interval_ms);
     tokio::spawn(inference_reconciler.run_loop(inf_interval));
     info!(
         interval_ms = config.indexer.inference_reconciliation_interval_ms,

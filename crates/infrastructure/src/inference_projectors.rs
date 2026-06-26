@@ -6,13 +6,17 @@
 // batch tx even on Deferred — see indexer_repo.rs).
 
 use anyhow::Context;
-use sqlx::{Postgres, Transaction};
+use sqlx::Postgres;
+use sqlx::Transaction;
 use tracing::warn;
 
 use crate::decoder::DecodedEvent;
 use crate::graphql::EventNode;
 use crate::indexer_repo::parse_unix_seconds;
-use crate::projectors::{field_str, node_chain_order, uint_field_to_decimal, ProjectionOutcome};
+use crate::projectors::field_str;
+use crate::projectors::node_chain_order;
+use crate::projectors::uint_field_to_decimal;
+use crate::projectors::ProjectionOutcome;
 
 pub async fn project_inference_event(
     tx: &mut Transaction<'_, Postgres>,
@@ -29,13 +33,16 @@ pub async fn project_inference_event(
     // (only event_type is stored in raw_events), so matching on event_name would
     // send every live captured row to the seed-only path. event_type is set in both
     // the live loop and the direct tests.
-    let suffix = event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
+    let suffix =
+        event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
     match suffix {
         "OrderPlaced" => apply_inference_order_placed(tx, event, node).await,
         "SubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
         "OrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
         "Filled" => apply_inference_filled(tx, event, node).await,
-        "Executed" | "Refunded" | "CycleForfeited" | "ForfeitClaimed" => Ok(ProjectionOutcome::Applied),
+        "Executed" | "Refunded" | "CycleForfeited" | "ForfeitClaimed" => {
+            Ok(ProjectionOutcome::Applied)
+        }
         other => {
             warn!(event_type = %event.event_type, other, "unknown InferenceOrderBook event; seeded only");
             Ok(ProjectionOutcome::Applied)
@@ -44,7 +51,9 @@ pub async fn project_inference_event(
 }
 
 async fn seed_market_skeleton(
-    tx: &mut Transaction<'_, Postgres>, _event: &DecodedEvent, node: &EventNode,
+    tx: &mut Transaction<'_, Postgres>,
+    _event: &DecodedEvent,
+    node: &EventNode,
 ) -> anyhow::Result<()> {
     let ob = node.src.as_deref().context("inference event: src missing")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
@@ -68,8 +77,15 @@ async fn seed_market_skeleton(
 #[allow(clippy::too_many_arguments)]
 async fn upsert_resting_order(
     tx: &mut Transaction<'_, Postgres>,
-    ob: &str, order_id: &str, is_buy: bool, price: &str, ticks: &str,
-    is_subscription: bool, note: Option<&str>, chain_order: &str, chain_seconds: Option<f64>,
+    ob: &str,
+    order_id: &str,
+    is_buy: bool,
+    price: &str,
+    ticks: &str,
+    is_subscription: bool,
+    note: Option<&str>,
+    chain_order: &str,
+    chain_seconds: Option<f64>,
 ) -> anyhow::Result<()> {
     sqlx::query(
         r#"insert into inference_orders
@@ -101,23 +117,42 @@ async fn upsert_resting_order(
 }
 
 async fn apply_inference_order_placed(
-    tx: &mut Transaction<'_, Postgres>, event: &DecodedEvent, node: &EventNode,
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let ob = node.src.as_deref().context("OrderPlaced: src missing")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
-    let is_buy = event.value.get("isBuy").and_then(serde_json::Value::as_bool)
+    let is_buy = event
+        .value
+        .get("isBuy")
+        .and_then(serde_json::Value::as_bool)
         .context("OrderPlaced: missing isBuy")?;
     let price = uint_field_to_decimal(&event.value, "price")?;
     let ticks = uint_field_to_decimal(&event.value, "ticks")?;
     let note = field_str(&event.value, "note").ok();
     let chain_order = node_chain_order(node, "OrderPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
-    upsert_resting_order(tx, ob, &order_id, is_buy, &price, &ticks, false, note, &chain_order, chain_seconds).await?;
+    upsert_resting_order(
+        tx,
+        ob,
+        &order_id,
+        is_buy,
+        &price,
+        &ticks,
+        false,
+        note,
+        &chain_order,
+        chain_seconds,
+    )
+    .await?;
     Ok(ProjectionOutcome::Applied)
 }
 
 async fn apply_inference_subscription_placed(
-    tx: &mut Transaction<'_, Postgres>, event: &DecodedEvent, node: &EventNode,
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let ob = node.src.as_deref().context("SubscriptionPlaced: src missing")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
@@ -126,15 +161,32 @@ async fn apply_inference_subscription_placed(
     let note = field_str(&event.value, "buyerNote").ok();
     let chain_order = node_chain_order(node, "SubscriptionPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
-    upsert_resting_order(tx, ob, &order_id, true, &price, &ticks, true, note, &chain_order, chain_seconds).await?;
+    upsert_resting_order(
+        tx,
+        ob,
+        &order_id,
+        true,
+        &price,
+        &ticks,
+        true,
+        note,
+        &chain_order,
+        chain_seconds,
+    )
+    .await?;
     Ok(ProjectionOutcome::Applied)
 }
 
 #[derive(sqlx::FromRow)]
-struct LockedOrder { order_id: String, is_sweep_cancel: bool }
+struct LockedOrder {
+    order_id: String,
+    is_sweep_cancel: bool,
+}
 
 async fn apply_inference_filled(
-    tx: &mut Transaction<'_, Postgres>, event: &DecodedEvent, node: &EventNode,
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let ob = node.src.as_deref().context("Filled: src missing")?;
     let maker_id = uint_field_to_decimal(&event.value, "makerId")?;
@@ -152,10 +204,14 @@ async fn apply_inference_filled(
             where orderbook_address = $1 and order_id = any($2::numeric[])
             for update"#,
     )
-    .bind(ob).bind(&ids)
-    .fetch_all(&mut **tx).await.context("Filled lock both rows")?;
+    .bind(ob)
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Filled lock both rows")?;
 
-    let present: std::collections::HashSet<&str> = locked.iter().map(|r| r.order_id.as_str()).collect();
+    let present: std::collections::HashSet<&str> =
+        locked.iter().map(|r| r.order_id.as_str()).collect();
     if !present.contains(maker_id.as_str()) || !present.contains(taker_id.as_str()) {
         return Ok(ProjectionOutcome::Deferred); // parent(s) not seen yet — zero writes
     }
@@ -219,14 +275,19 @@ async fn apply_inference_filled(
                       updated_at = now()
                 where orderbook_address = $1 and last_reconciled_at is null"#,
         )
-        .bind(ob).execute(&mut **tx).await.context("reset discovery sweep_cursor + bump override seq")?;
+        .bind(ob)
+        .execute(&mut **tx)
+        .await
+        .context("reset discovery sweep_cursor + bump override seq")?;
     }
 
     Ok(ProjectionOutcome::Applied)
 }
 
 async fn apply_inference_order_cancelled(
-    tx: &mut Transaction<'_, Postgres>, event: &DecodedEvent, node: &EventNode,
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let ob = node.src.as_deref().context("OrderCancelled: src missing")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;

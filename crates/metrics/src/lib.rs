@@ -554,10 +554,7 @@ mod tests {
         assert_eq!(metrics.inference_markets_discovering.load(Ordering::Relaxed), 11);
         assert_eq!(metrics.inference_markets_visible.load(Ordering::Relaxed), 22);
         assert_eq!(metrics.inference_markets_failing.load(Ordering::Relaxed), 33);
-        assert_eq!(
-            metrics.inference_reference_price_lag_seconds.load(Ordering::Relaxed),
-            444
-        );
+        assert_eq!(metrics.inference_reference_price_lag_seconds.load(Ordering::Relaxed), 444);
         assert_eq!(metrics.inference_sweep_lag_seconds.load(Ordering::Relaxed), 555);
         assert_eq!(metrics.inference_orders_open.load(Ordering::Relaxed), 60);
         assert_eq!(metrics.inference_orders_filled.load(Ordering::Relaxed), 70);
