@@ -12,7 +12,7 @@ import "./libraries/DexLib.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.3";
+    string constant version = "4.0.4";
 
     /// @notice Stored code of PrivateNote contract
     TvmCell _privateNoteCode;
@@ -387,7 +387,19 @@ contract RootPN is Modifiers {
         tvm.accept();
         ensureBalance();
         tvm.resetStorage();
-        (_pmpCode, _privateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _orderBookCode, _inferenceOrderBookCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
+        // 6 codes + pubkey only. The InferenceOrderBook code is set separately via
+        // setInferenceOrderBookCode — keeps this upgrade cell small enough to POST
+        // to the shellnet BM gateway (a 7-code cell overflows the JSON-body limit).
+        (_pmpCode, _privateNoteCode, _nullifierCode, _oracleCode, _oracleEventListCode, _orderBookCode, _ownerPubkey) = abi.decode(cell, (TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, TvmCell, uint256));
+    }
+
+    /// @notice Owner-only setter for the InferenceOrderBook code (§8 inference
+    ///         market). Kept out of `onCodeUpgrade` so the upgrade message stays
+    ///         small; this sets/updates just the one code in a tiny message.
+    /// @param inferenceOrderBookCode New InferenceOrderBook code baked into notes.
+    function setInferenceOrderBookCode(TvmCell inferenceOrderBookCode) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        _inferenceOrderBookCode = inferenceOrderBookCode;
     }
 
     /// @notice Returns the salted PrivateNote contract code

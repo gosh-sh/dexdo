@@ -62,6 +62,14 @@
 			]
 		},
 		{
+			"name": "setInferenceOrderBookCode",
+			"inputs": [
+				{"name":"inferenceOrderBookCode","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "getPrivateNoteCode",
 			"inputs": [
 			],

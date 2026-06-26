@@ -87,6 +87,8 @@ abstract contract Modifiers is Errors {
     uint128 constant ORACLE_EVENT_ADDED = 133;
     /// @notice Reserved external event id for oracle event publishing.
     uint128 constant ORACLE_EVENT_PUBLISHED = 134;
+    /// @notice External event id for `OracleEventList.RangeEventAdded` (PMP↔OB binding).
+    uint128 constant ORACLE_RANGE_EVENT_ADDED = 162;
 
     // Vault events
     /// @notice External event id for `RootPN.VoucherGenerated`.

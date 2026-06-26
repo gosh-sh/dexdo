@@ -149,6 +149,16 @@
 			]
 		},
 		{
+			"name": "RangeEventAdded",
+			"inputs": [
+				{"name":"eventId","type":"uint256"},
+				{"name":"ob","type":"address"},
+				{"name":"bounds","type":"uint256[]"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "DescriptionUpdated",
 			"inputs": [
 				{"name":"description","type":"string"}

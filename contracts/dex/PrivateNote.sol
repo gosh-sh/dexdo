@@ -23,7 +23,7 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.3";
+    string constant version = "4.0.4";
 
     /// @notice Owner escape hatch: stale stream/dispute locks can be force
     ///         cleared after this many seconds since the last lock change, so a
