@@ -13,8 +13,7 @@
 # Each rule = a query node (refId A, instant) + a math condition node (refId C).
 # Counter alerts use a __name__=~"...(_total)?" matcher so they fire whether or
 # not the OTel→Prometheus exporter appends _total. Thresholds mirror the Grafana
-# dashboard (deploy/grafana/dodex-indexer-dashboard.json) and the Prometheus
-# rules (deploy/prometheus/dodex-indexer-alerts.yml). noDataState is OK so a
+# dashboard (deploy/grafana/dodex-indexer-dashboard.json). noDataState is OK so a
 # fully-down indexer (series gone) does not flap these — pair with a separate
 # `up == 0` liveness alert for that case.
 
@@ -413,4 +412,43 @@ groups:
               refId: C
               type: math
               expression: "$A > 1800"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      # Guard for the zero-visible blind spot: the reference-price and sweep lag
+      # gauges read `now() - min(ts)` over VISIBLE markets and report 0 when none
+      # are visible, so a stuck reconciler (e.g. the missing-CA-certs incident
+      # class) that leaves every market in discovering/failing silently suppresses
+      # both lag alerts above. This fires instead when markets exist but none are
+      # API-visible. The `and ... > 0` clause keeps it quiet on a fresh deploy
+      # before any market is discovered (noDataState OK when no series exist).
+      - uid: dodex-inf-none-visible
+        title: Inference markets discovered but none visible
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Inference markets discovered but none visible"
+          description: "Inference markets exist on {{ $labels.instance }} but none reached API-visible for 15m — the reconciler is likely stuck (the lag gauges read 0 in this state and their alerts cannot fire). Check reconciler health (getter ABI, TLS trust store, dApp deployment)."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: (sum(indexer_inference_markets{state="visible"}) == bool 0) and (sum(indexer_inference_markets) > 0)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
               datasource: { type: __expr__, uid: __expr__ }
