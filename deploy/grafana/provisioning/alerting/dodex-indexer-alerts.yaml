@@ -217,6 +217,38 @@ groups:
               expression: "$A > 0.1"
               datasource: { type: __expr__, uid: __expr__ }
 
+      - uid: dodex-decode-ambiguous-collisions
+        title: Indexer ambiguous decode collisions
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Indexer ambiguous decode collisions"
+          description: "{{ $values.A.Value }}/s event bodies left undecoded because their id collides across ABIs with no dst route, on {{ $labels.instance }}. This should be flat zero — a non-zero rate means a new colliding ABI was added without a decoder dst route, so those events are silently dropped. Add the route in decoder.rs."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: rate({__name__=~"indexer_decode_ambiguous_collisions(_total)?"}[5m])
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
   - orgId: 1
     name: dodex-indexer-inference
     folder: Dodex Indexer

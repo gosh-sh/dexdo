@@ -625,8 +625,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Decode errors rate",
-      "description": "rate() of indexer_decode_errors — hard decode failures of delivered bodies (ABI drift / malformed cell). The row is stored undecoded and skipped by projection.",
+      "title": "Decode failures rate",
+      "description": "rate() of indexer_decode_errors (hard decode failures — ABI drift / malformed cell) and indexer_decode_ambiguous_collisions (a colliding event id with no dst route — should be flat zero; non-zero means a new colliding ABI was added without a decoder dst route, and those events are silently dropped). Both leave the row undecoded and skipped by projection.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
       "id": 18,
@@ -650,6 +650,14 @@
           "legendFormat": "decode errors/s",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "editorMode": "code",
+          "expr": "rate(indexer_decode_ambiguous_collisions${counter_suffix}{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "ambiguous collisions/s",
+          "range": true,
+          "refId": "B"
         }
       ]
     },
