@@ -30,7 +30,6 @@ use ackinacki_kit::contracts::giver::send_currency_with_flag_from_default_giver;
 use ackinacki_kit::contracts::giver::v3::GiverV3;
 use ackinacki_kit::contracts::giver::v3::ParamsOfSendCurrencyWithBody;
 use ackinacki_kit::contracts::traits::AccountAccessor;
-use ackinacki_kit::contracts::traits::FromEvent;
 use ackinacki_kit::contracts::traits::SendMessage;
 use ackinacki_kit::tvm_client::abi::encode_message;
 use ackinacki_kit::tvm_client::abi::encode_message_body;
@@ -44,10 +43,7 @@ use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
 use base64::Engine as _;
-use dodex_chain::dex_contract_params;
 use dodex_chain::self_rooted_contract_params;
-use dodex_contracts::airegistry::inference_order_book::InferenceOrderBook;
-use dodex_contracts::airegistry::inference_order_book_events::DecodedInferenceOrderBookEvent;
 use dodex_contracts::airegistry::token_contract::TokenContract;
 use serde_json::json;
 
@@ -58,9 +54,11 @@ const TOKEN_CONTRACT_ABI: &str =
 
 /// ECC currency id for SHELL.
 const SHELL_CURRENCY_ID: u32 = 2;
-/// SHELL sent (as ECC, flag 16) to create + gas the fresh account. Generous —
-/// the giver is shellnet-only and the contract also self-mints its MIN_BALANCE.
-const CREATION_SHELL: u64 = 1_000_000_000_000;
+/// SHELL sent (as ECC, flag 16) to create + gas the fresh account. The ctor
+/// self-mints its MIN_BALANCE via `gosh.mintshellq`, so the giver only needs to
+/// cover deploy compute + the ctor's internal register-callback forward — keep
+/// it modest so a run does not drain the shared shellnet giver.
+const CREATION_SHELL: u64 = 200_000_000_000;
 
 /// Immutable deal config passed to the `TokenContract` constructor.
 pub struct TokenDeal {
@@ -237,23 +235,25 @@ pub async fn fund_probe_commission_via_giver(
     Ok(())
 }
 
-/// Fetch + decode the external events emitted by an `InferenceOrderBook`.
+/// Fetch the routing ids of the external events an `InferenceOrderBook` emitted.
+/// Each ext-out event is routed to `makeAddrExtern(id)`, so the `dst` alone
+/// identifies the event type (ids match `airegistry/modifiers/modifiers.sol`).
 ///
-/// The book is deployed by the note (internal message), so it lives under the
-/// System dApp. Each ext-out event is routed to its own `makeAddrExtern(id)`
-/// address; the typed decoder keys on that id, so unknown/foreign events are
-/// dropped.
-pub async fn fetch_inference_events(
+/// The body is intentionally NOT decoded here: typed payload decode of these
+/// ext-out event bodies through the kit path (`decode_message_body`, the same
+/// `is_internal:false, allow_partial:true` the dex events use) currently returns
+/// tvm error 304 ("body does not match the specified ABI") against shellnet —
+/// for every IOB event, including single-cell ones, so it is not the multi-cell
+/// off-by-32 case. Tracked separately; the routing id still proves emission.
+pub async fn fetch_inference_event_ids(
     ctx: Arc<ClientContext>,
     order_book_addr: &str,
-) -> anyhow::Result<Vec<DecodedInferenceOrderBookEvent>> {
-    let events =
-        query_events(ctx.clone(), order_book_addr, SystemDapp::System.dapp_id(), Some(100))
-            .await
-            .map_err(|e| anyhow!("query inference events {order_book_addr}: {e:?}"))?;
-    let book = InferenceOrderBook::new(ctx, dex_contract_params(order_book_addr));
+) -> anyhow::Result<Vec<u128>> {
+    let events = query_events(ctx, order_book_addr, SystemDapp::System.dapp_id(), Some(100))
+        .await
+        .map_err(|e| anyhow!("query inference events {order_book_addr}: {e:?}"))?;
     Ok(events
         .iter()
-        .filter_map(|event| DecodedInferenceOrderBookEvent::from_event(event, &book).ok())
+        .filter_map(|e| u128::from_str_radix(&e.dst.replace(':', ""), 16).ok())
         .collect())
 }

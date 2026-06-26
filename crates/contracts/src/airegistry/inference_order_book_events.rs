@@ -205,6 +205,9 @@ pub struct FilledData {
     pub ticks: u128,
     /// `uint256` represented as returned by ABI.
     pub clearing_price: String,
+    /// ABI field is `sellerTC` (both caps); `rename_all = camelCase` would emit
+    /// `sellerTc`, so the name is pinned explicitly.
+    #[serde(rename = "sellerTC")]
     pub seller_tc: String,
     pub buyer_note: String,
 }

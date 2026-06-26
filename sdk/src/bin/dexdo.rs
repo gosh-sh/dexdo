@@ -485,10 +485,10 @@ async fn stake_key_op(f: Flags, which: &str) -> ExitCode {
         token_type: d.token_type,
     };
     eprintln!("[dexdo {which}] market {market} via note {pn_address}");
-    let res = if which == "claim" {
-        dex.claim(&pn_address, key, Signer::Keys { keys }).await
-    } else {
-        dex.cancel_stake(&pn_address, key, Signer::Keys { keys }).await
+    let res = match which {
+        "claim" => dex.claim(&pn_address, key, Signer::Keys { keys }).await,
+        "delete-stake" => dex.delete_stake(&pn_address, key, Signer::Keys { keys }).await,
+        _ => dex.cancel_stake(&pn_address, key, Signer::Keys { keys }).await,
     };
     match res {
         Ok(r) => { println!("[dexdo {which}] DONE: {r:?}"); ExitCode::SUCCESS }
@@ -638,6 +638,7 @@ async fn dispatch(sub: &str, rest: &[String]) -> ExitCode {
         "place-order" => cmd_place_order(flags).await,
         "cancel-all-orders" => cmd_cancel_all_orders(flags).await,
         "cancel-stake" => cmd_cancel_stake(flags).await,
+        "delete-stake" => stake_key_op(flags, "delete-stake").await,
         "merge-full-set" => cmd_merge_full_set(flags).await,
         "claim" => cmd_claim(flags).await,
         "withdraw" => cmd_withdraw(flags).await,
