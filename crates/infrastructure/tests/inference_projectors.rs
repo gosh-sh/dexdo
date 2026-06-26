@@ -348,7 +348,11 @@ async fn set_cursor_at_head(pool: &sqlx::PgPool, stream: &str, at_head: bool) {
     .await
     .unwrap();
 }
-async fn order_amount_status(pool: &sqlx::PgPool, ob: &str, order_id: &str) -> Option<(i64, String)> {
+async fn order_amount_status(
+    pool: &sqlx::PgPool,
+    ob: &str,
+    order_id: &str,
+) -> Option<(i64, String)> {
     sqlx::query_as::<_, (i64, String)>(
         "select amount_remaining::bigint, status from inference_orders
           where orderbook_address=$1 and order_id=$2::numeric",
@@ -469,7 +473,17 @@ async fn expired_orphan_not_dropped_until_capture_at_head() {
         .unwrap();
     let filled = serde_json::json!({"makerId":"800","takerId":"801","ticks":"1","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"});
     // Aged ingest (1h) — well past the 60s cutoff — so only the at_head gate decides.
-    insert_raw(&pool, "orphnh-fill", "00orphnh-a", 3600, 0, ob, "InferenceOrderBook.Filled", filled).await;
+    insert_raw(
+        &pool,
+        "orphnh-fill",
+        "00orphnh-a",
+        3600,
+        0,
+        ob,
+        "InferenceOrderBook.Filled",
+        filled,
+    )
+    .await;
 
     let repo = IndexerRepository::new(pool.clone())
         .with_capture_stream(stream)
@@ -515,15 +529,30 @@ async fn expired_filled_orphan_decrements_present_leg() {
 
     // Seed a resting BUY maker (id 700) with 10 ticks of depth via the real placement projector.
     let mut tx = pool.begin().await.unwrap();
-    let placed =
-        ev("OrderPlaced", serde_json::json!({"orderId":"700","isBuy":true,"price":"5","ticks":"10","note":"0:n"}));
-    assert_eq!(project(&mut tx, &placed, &node(ob, "00seed-700")).await, ProjectionOutcome::Applied);
+    let placed = ev(
+        "OrderPlaced",
+        serde_json::json!({"orderId":"700","isBuy":true,"price":"5","ticks":"10","note":"0:n"}),
+    );
+    assert_eq!(
+        project(&mut tx, &placed, &node(ob, "00seed-700")).await,
+        ProjectionOutcome::Applied
+    );
     tx.commit().await.unwrap();
     assert_eq!(order_amount_status(&pool, ob, "700").await, Some((10, "OPEN".into())));
 
     // Aged Filled orphan: maker 700 is present and resting; taker 701's OrderPlaced was dropped.
     let filled = serde_json::json!({"makerId":"700","takerId":"701","ticks":"3","clearingPrice":"5","sellerTC":"0:s","buyerNote":"0:b"});
-    insert_raw(&pool, "orphld-fill", "00orphld-a", 3600, 0, ob, "InferenceOrderBook.Filled", filled).await;
+    insert_raw(
+        &pool,
+        "orphld-fill",
+        "00orphld-a",
+        3600,
+        0,
+        ob,
+        "InferenceOrderBook.Filled",
+        filled,
+    )
+    .await;
 
     set_cursor_at_head(&pool, stream, true).await;
     IndexerRepository::new(pool.clone())

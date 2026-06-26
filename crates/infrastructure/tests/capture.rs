@@ -251,10 +251,15 @@ async fn persist_page_writes_at_head_flag() {
 
     // has_next_page=false => at_head=true.
     repo.persist_page(stream, &[], Some("c1"), &decoder, true).await.expect("persist at_head=true");
-    assert!(repo.at_head(stream).await.expect("read at_head"), "at_head=true must be written through");
+    assert!(
+        repo.at_head(stream).await.expect("read at_head"),
+        "at_head=true must be written through"
+    );
 
     // A later page with more to fetch => at_head=false.
-    repo.persist_page(stream, &[], Some("c2"), &decoder, false).await.expect("persist at_head=false");
+    repo.persist_page(stream, &[], Some("c2"), &decoder, false)
+        .await
+        .expect("persist at_head=false");
     assert!(
         !repo.at_head(stream).await.expect("read at_head"),
         "at_head must flip back to false when more pages follow"

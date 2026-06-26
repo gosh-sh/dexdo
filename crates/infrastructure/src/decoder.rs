@@ -201,7 +201,9 @@ impl Decoder {
         // with no dst route is reported as AmbiguousCollision (never silently
         // first-ABI); the caller counts and noise-dedups the warning.
         match self.event_index.get(&event_id).map(Vec::as_slice) {
-            Some([(kind, event)]) => self.decode_with(kind, event, slice).map(DecodeOutcome::Decoded),
+            Some([(kind, event)]) => {
+                self.decode_with(kind, event, slice).map(DecodeOutcome::Decoded)
+            }
             Some(multi) if multi.len() > 1 => Ok(DecodeOutcome::AmbiguousCollision { event_id }),
             _ => Ok(DecodeOutcome::UnknownId),
         }

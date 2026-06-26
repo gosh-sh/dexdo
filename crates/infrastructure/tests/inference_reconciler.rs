@@ -923,7 +923,11 @@ async fn refresh_sweeps_due_book_without_repricing_fresh_price() {
     .await
     .unwrap();
     set_at_head(&pool, true).await;
-    sqlx::query("delete from raw_events where src_address=$1").bind(ob).execute(&pool).await.unwrap();
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // getOrder reports the order empty (phantom ⇒ swept); getWeeklyMedianPrice
     // returns a DIFFERENT price so a stray re-price would be detectable.
@@ -969,7 +973,11 @@ async fn refresh_reprices_due_price_without_sweeping_fresh_book() {
     .await
     .unwrap();
     set_at_head(&pool, true).await;
-    sqlx::query("delete from raw_events where src_address=$1").bind(ob).execute(&pool).await.unwrap();
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // getWeeklyMedianPrice returns a new price; getOrder would report empty, but
     // the sweep must NOT run (sweep fresh) so the OPEN row must survive.
@@ -1006,7 +1014,11 @@ async fn sweep_cancels_empty_subscription_order() {
     seed_market(&pool, ob, true).await;
     open_subscription_order(&pool, ob, 1).await;
     set_at_head(&pool, true).await;
-    sqlx::query("delete from raw_events where src_address=$1").bind(ob).execute(&pool).await.unwrap();
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
     let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
         "getQueueSize" => Ok(json!({"value0":"0x0"})),
         "getStats" => Ok(json!({"nextOrderId":"0xa"})),

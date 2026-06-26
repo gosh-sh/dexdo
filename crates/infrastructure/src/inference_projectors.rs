@@ -374,10 +374,8 @@ pub async fn repair_expired_inference_orphan(
     event: &DecodedEvent,
     node: &EventNode,
 ) -> anyhow::Result<ExpiredOrphanOutcome> {
-    let suffix = event
-        .event_type
-        .strip_prefix("InferenceOrderBook.")
-        .unwrap_or(event.event_type.as_str());
+    let suffix =
+        event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
     let outcome = match suffix {
         "Filled" => {
             let f = FilledFields::parse(event, node)?;
