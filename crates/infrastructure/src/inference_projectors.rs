@@ -87,7 +87,7 @@ async fn upsert_resting_order(
     chain_order: &str,
     chain_seconds: Option<f64>,
 ) -> anyhow::Result<()> {
-    sqlx::query(
+    let res = sqlx::query(
         r#"insert into inference_orders
                (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining,
                 is_subscription, note_address, status, last_chain_order,
@@ -113,6 +113,22 @@ async fn upsert_resting_order(
     .bind(ob).bind(order_id).bind(is_buy).bind(price).bind(ticks)
     .bind(is_subscription).bind(note).bind(chain_order).bind(chain_seconds)
     .execute(&mut **tx).await.context("upsert inference_orders resting")?;
+
+    // rows_affected = 0 only when the conflict arm's WHERE rejected the update:
+    // the placement replay hit a terminal row, or a partially-filled OPEN row,
+    // and the projector refused to overwrite mutated state. Surface it (the
+    // handler still reports Applied — the event was processed by being
+    // intentionally dropped) so an operator-replay cutover or out-of-order
+    // delivery is diagnosable from logs. Mirrors projectors::apply_order_placed.
+    if res.rows_affected() == 0 {
+        warn!(
+            orderbook_address = ob,
+            order_id = %order_id,
+            chain_order = %chain_order,
+            is_subscription,
+            "inference placement replay refused on mutated row (terminal status or partial fill); partial-replay cutover suspected",
+        );
+    }
     Ok(())
 }
 
