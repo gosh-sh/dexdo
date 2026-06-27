@@ -164,6 +164,10 @@ struct Args {
     endpoint: String,
     nominal: NominalArg,
     token_type: TokenTypeArg,
+    /// #65: SHELL gas-voucher amount per PN, raw nano (`--deposit-shells N` → `N × 1e9`). Defaults to
+    /// `ECC_SHELL_DEPOSIT_RAW`. This is the note's deploy-funding ECC[2] SHELL budget — sizes how many
+    /// `TokenContract`/deals the note serves before re-funding.
+    ecc_shell_deposit_raw: u64,
     /// `https://{endpoint}` form for halo2 stage A (witness export).
     network_url: String,
     /// Cap on outbound TVM requests per second. `None` disables pacing.
@@ -180,6 +184,7 @@ impl Args {
         let mut nominal = NominalArg::N10000;
         let mut token_type = TokenTypeArg::Nackl;
         let mut max_rps: Option<u32> = Some(3);
+        let mut ecc_shell_deposit_raw = ECC_SHELL_DEPOSIT_RAW;
 
         let mut argv = std::env::args().skip(1);
         while let Some(arg) = argv.next() {
@@ -210,6 +215,18 @@ impl Args {
                     let rps: u32 = v.parse().map_err(|e| format!("--max-rps: {e}"))?;
                     max_rps = (rps > 0).then_some(rps);
                 }
+                "--deposit-shells" => {
+                    // #65: note SHELL gas budget in vmshell → raw nano. Fail-closed:
+                    // non-zero + overflow-checked (this funds live on-chain gas).
+                    let v = argv.next().ok_or("--deposit-shells requires a value")?;
+                    let n: u64 = v.parse().map_err(|e| format!("--deposit-shells: {e}"))?;
+                    if n == 0 {
+                        return Err("--deposit-shells must be ≥ 1 vmshell".into());
+                    }
+                    ecc_shell_deposit_raw = n
+                        .checked_mul(1_000_000_000)
+                        .ok_or("--deposit-shells: overflows u64 raw nano range")?;
+                }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown arg `{other}`\n\n{}", usage())),
             }
@@ -221,19 +238,29 @@ impl Args {
             format!("https://{endpoint}")
         };
 
-        Ok(Args { count, output, endpoint, nominal, token_type, network_url, max_rps })
+        Ok(Args {
+            count,
+            output,
+            endpoint,
+            nominal,
+            token_type,
+            ecc_shell_deposit_raw,
+            network_url,
+            max_rps,
+        })
     }
 }
 
 fn usage() -> String {
     "usage: mint_pn_pool [--count N] [--output path] [--endpoint host] \
-         [--nominal N100|N1000|N10000] [--token-type nackl|shell|usdc] [--max-rps N]\n\n  \
-         --count       number of PrivateNotes to deploy (default 5)\n  \
-         --output      JSON output path (default ./pn_pool.json)\n  \
-         --endpoint    network host (default shellnet.ackinacki.org)\n  \
-         --nominal     PN deposit nominal (default N10000)\n  \
-         --token-type  deposit currency (default nackl)\n  \
-         --max-rps     cap outbound TVM requests/sec (default 3; 0 disables)\n\n  \
+         [--nominal N100|N1000|N10000] [--token-type nackl|shell|usdc] [--deposit-shells N] [--max-rps N]\n\n  \
+         --count          number of PrivateNotes to deploy (default 5)\n  \
+         --output         JSON output path (default ./pn_pool.json)\n  \
+         --endpoint       network host (default shellnet.ackinacki.org)\n  \
+         --nominal        PN deposit nominal (default N10000)\n  \
+         --token-type     deposit currency (default nackl)\n  \
+         --deposit-shells note SHELL gas budget in vmshell (default 100; #65 — fund generously for many deals)\n  \
+         --max-rps        cap outbound TVM requests/sec (default 3; 0 disables)\n\n  \
          Also writes <output>.seed_notes.json (api seeder / e2e format) beside the pool."
         .to_string()
 }
@@ -350,7 +377,7 @@ fn load_or_init_pool(path: &Path, args: &Args) -> Result<Pool, String> {
             nominal: args.nominal.label().to_string(),
             token_type: want_tt,
             raw_value_per_pn: args.nominal.raw_value(args.token_type),
-            ecc_shell_deposit_per_pn: ECC_SHELL_DEPOSIT_RAW,
+            ecc_shell_deposit_per_pn: args.ecc_shell_deposit_raw,
             notes: Vec::with_capacity(args.count),
         });
     }
@@ -388,10 +415,11 @@ fn load_or_init_pool(path: &Path, args: &Args) -> Result<Pool, String> {
             existing.raw_value_per_pn, want_raw,
         ));
     }
-    if existing.ecc_shell_deposit_per_pn != ECC_SHELL_DEPOSIT_RAW {
+    if existing.ecc_shell_deposit_per_pn != args.ecc_shell_deposit_raw {
         return Err(format!(
-            "existing pool ecc_shell_deposit_per_pn `{}` != expected `{ECC_SHELL_DEPOSIT_RAW}`",
-            existing.ecc_shell_deposit_per_pn,
+            "existing pool ecc_shell_deposit_per_pn `{}` != requested `{}` (--deposit-shells); \
+             pass --output to a fresh path",
+            existing.ecc_shell_deposit_per_pn, args.ecc_shell_deposit_raw,
         ));
     }
     Ok(existing)
@@ -448,6 +476,7 @@ async fn deploy_one_pn(
     paths: &Halo2Paths,
     token_type: TokenTypeArg,
     nominal_raw: u64,
+    ecc_shell_deposit_raw: u64,
     keys: KeyPair,
     rl: Option<&RateLimiter>,
 ) -> Result<PoolNote, String> {
@@ -533,7 +562,7 @@ async fn deploy_one_pn(
         network_url.to_string(),
         &keys.public,
         CURRENCY_ID_SHELL,
-        ECC_SHELL_DEPOSIT_RAW,
+        ecc_shell_deposit_raw,
         true,
         paths,
     )
@@ -666,6 +695,7 @@ async fn main() -> ExitCode {
             &paths,
             args.token_type,
             args.nominal.raw_value(args.token_type),
+            args.ecc_shell_deposit_raw,
             keys,
             rate_limiter.as_ref(),
         )
