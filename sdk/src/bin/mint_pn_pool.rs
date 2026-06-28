@@ -65,6 +65,29 @@ const CURRENCY_ID_SHELL: u32 = 2;
 /// for typical orderbook ops.
 const ECC_SHELL_DEPOSIT_RAW: u64 = 100_000_000_000;
 
+/// On-chain-allowed SHELL voucher nominals (`--deposit-shells N` picks one).
+/// `RootPN.generateVoucher` requires `isAllowedNominal(N × tokenDecimals, SHELL)`
+/// — `ALLOWED_NOMINALS = [100, 1000, 10000, 100000, 1000000]` ×
+/// `tokenDecimals(SHELL)=1e9` (contracts/dex/modifiers/modifiers.sol). An
+/// off-list value reverts `ERR_NOT_ALLOWED` → no `VoucherGenerated` → the mint
+/// silently times out, so reject it client-side here instead.
+const ALLOWED_DEPOSIT_NOMINALS: [u64; 5] = [100, 1000, 10000, 100000, 1000000];
+
+/// Validate `--deposit-shells N` against the on-chain voucher-nominal whitelist
+/// and convert to raw nano (`N × 1e9`). Fail-closed: an off-list `N` (e.g. 2000)
+/// reverts `RootPN.generateVoucher` with `ERR_NOT_ALLOWED` and emits no
+/// `VoucherGenerated`, so the mint would just time out — reject it here instead.
+fn deposit_nominal_to_raw(n: u64) -> Result<u64, String> {
+    if !ALLOWED_DEPOSIT_NOMINALS.contains(&n) {
+        return Err(format!(
+            "--deposit-shells {n}: not an on-chain-allowed SHELL voucher nominal; \
+             choose one of {ALLOWED_DEPOSIT_NOMINALS:?} (RootPN.isAllowedNominal)"
+        ));
+    }
+    n.checked_mul(1_000_000_000)
+        .ok_or_else(|| "--deposit-shells: overflows u64 raw nano range".to_string())
+}
+
 /// Deposit currency for the PN pool. Mirrors `proof::TokenType` but kept
 /// local so the CLI doesn't pull in the full enum surface.
 #[derive(Debug, Clone, Copy)]
@@ -216,16 +239,11 @@ impl Args {
                     max_rps = (rps > 0).then_some(rps);
                 }
                 "--deposit-shells" => {
-                    // #65: note SHELL gas budget in vmshell → raw nano. Fail-closed:
-                    // non-zero + overflow-checked (this funds live on-chain gas).
+                    // #65: note SHELL gas budget (vmshell). Fail-closed on the
+                    // on-chain voucher-nominal whitelist (see deposit_nominal_to_raw).
                     let v = argv.next().ok_or("--deposit-shells requires a value")?;
                     let n: u64 = v.parse().map_err(|e| format!("--deposit-shells: {e}"))?;
-                    if n == 0 {
-                        return Err("--deposit-shells must be ≥ 1 vmshell".into());
-                    }
-                    ecc_shell_deposit_raw = n
-                        .checked_mul(1_000_000_000)
-                        .ok_or("--deposit-shells: overflows u64 raw nano range")?;
+                    ecc_shell_deposit_raw = deposit_nominal_to_raw(n)?;
                 }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown arg `{other}`\n\n{}", usage())),
@@ -259,7 +277,7 @@ fn usage() -> String {
          --endpoint       network host (default shellnet.ackinacki.org)\n  \
          --nominal        PN deposit nominal (default N10000)\n  \
          --token-type     deposit currency (default nackl)\n  \
-         --deposit-shells note SHELL gas budget in vmshell (default 100; #65 — fund generously for many deals)\n  \
+         --deposit-shells note SHELL gas budget, vmshell — allowed nominals 100|1000|10000|100000|1000000 (default 100)\n  \
          --max-rps        cap outbound TVM requests/sec (default 3; 0 disables)\n\n  \
          Also writes <output>.seed_notes.json (api seeder / e2e format) beside the pool."
         .to_string()
@@ -738,4 +756,37 @@ async fn main() -> ExitCode {
         args.output.display(),
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deposit_nominal_accepts_whitelisted() {
+        // The five on-chain ALLOWED_NOMINALS × tokenDecimals(SHELL)=1e9.
+        assert_eq!(deposit_nominal_to_raw(100).unwrap(), 100_000_000_000);
+        assert_eq!(deposit_nominal_to_raw(1_000).unwrap(), 1_000_000_000_000);
+        assert_eq!(deposit_nominal_to_raw(10_000).unwrap(), 10_000_000_000_000);
+        assert_eq!(deposit_nominal_to_raw(100_000).unwrap(), 100_000_000_000_000);
+        assert_eq!(deposit_nominal_to_raw(1_000_000).unwrap(), 1_000_000_000_000_000);
+    }
+
+    #[test]
+    fn deposit_nominal_rejects_offlist() {
+        // 2000/3000 are the values that silently timed out the mint live (#65);
+        // they must now fail closed in the CLI, not as a late on-chain revert.
+        for n in [0u64, 1, 99, 101, 200, 2_000, 3_000, 5_000, 999_999, 2_000_000] {
+            assert!(
+                deposit_nominal_to_raw(n).is_err(),
+                "off-list nominal {n} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn default_deposit_is_a_whitelisted_nominal() {
+        // The hardcoded default must itself round-trip through the same whitelist.
+        assert_eq!(ECC_SHELL_DEPOSIT_RAW, deposit_nominal_to_raw(100).unwrap());
+    }
 }
