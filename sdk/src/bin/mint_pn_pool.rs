@@ -239,7 +239,7 @@ impl Args {
                     max_rps = (rps > 0).then_some(rps);
                 }
                 "--deposit-shells" => {
-                    // #65: note SHELL gas budget (vmshell). Fail-closed on the
+                    // #65: note SHELL (ECC[2]) voucher nominal. Fail-closed on the
                     // on-chain voucher-nominal whitelist (see deposit_nominal_to_raw).
                     let v = argv.next().ok_or("--deposit-shells requires a value")?;
                     let n: u64 = v.parse().map_err(|e| format!("--deposit-shells: {e}"))?;
@@ -277,7 +277,7 @@ fn usage() -> String {
          --endpoint       network host (default shellnet.ackinacki.org)\n  \
          --nominal        PN deposit nominal (default N10000)\n  \
          --token-type     deposit currency (default nackl)\n  \
-         --deposit-shells note SHELL gas budget, vmshell — allowed nominals 100|1000|10000|100000|1000000 (default 100)\n  \
+         --deposit-shells note SHELL (ECC[2]) voucher nominal; allowed 100|1000|10000|100000|1000000 (default 100)\n  \
          --max-rps        cap outbound TVM requests/sec (default 3; 0 disables)\n\n  \
          Also writes <output>.seed_notes.json (api seeder / e2e format) beside the pool."
         .to_string()
