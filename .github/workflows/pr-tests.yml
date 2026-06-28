@@ -1,12 +1,13 @@
 name: PR Tests
 
-# Runs on every PR and on push to dev. Three parallel jobs — wall-clock
-# is the slowest one (usually `tests`). A new push to the same ref
-# cancels the previous run.
+# AGENTS.md §7: GitHub Actions trigger ONLY on push to `main` — never on
+# feature-branch pushes or pull_request. Validate feature branches LOCALLY
+# (cargo fmt/clippy/test). Three parallel jobs — wall-clock is the slowest
+# one (usually `tests`). A new push to the same ref cancels the previous run.
 on:
-  pull_request:
   push:
-    branches: [dev]
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: pr-tests-${{ github.ref }}

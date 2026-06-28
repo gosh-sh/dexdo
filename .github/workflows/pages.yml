@@ -1,9 +1,10 @@
 name: Deploy OpenAPI docs to GitHub Pages
 
 on:
+  # AGENTS.md §7: only on push to `main` (+ manual dispatch).
   push:
     branches:
-      - dev
+      - main
     paths:
       - 'docs/**'
       - '.github/workflows/pages.yml'

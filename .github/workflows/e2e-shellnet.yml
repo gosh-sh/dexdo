@@ -5,13 +5,11 @@ name: e2e (shellnet)
 # and spend test NACKL. Separate from pr-tests.yml (its `tests` job skips
 # these — nextest does not run `#[ignore]` tests by default).
 on:
-  # Called by pr-tests.yml after its unit/integration jobs pass, so e2e gates
-  # a PR only once everything else is green. Also runs standalone nightly and
-  # on demand.
+  # AGENTS.md §7: triggered ONLY via pr-tests.yml (which runs on push to `main`)
+  # or manual dispatch — no schedule/PR/feature-push triggers. `workflow_call`
+  # is required so pr-tests.yml can invoke it as the gated e2e stage on main.
   workflow_call:
   workflow_dispatch:
-  schedule:
-    - cron: "0 3 * * *" # nightly ~03:00 UTC
 
 # Never interrupt a run mid-deploy — a half-applied shellnet deploy leaves
 # orphan contracts. One e2e run at a time.
