@@ -428,7 +428,7 @@ One row per finalized tick within a deal. Written by the SETTLEMENT projector on
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `token_contract_address` | `text` NOT NULL (part of PK) | Parent deal's `TokenContract` address. FK-like reference to `inference_deals`. |
+| `token_contract_address` | `text` NOT NULL (part of PK) FK → `inference_deals(token_contract_address)` ON DELETE CASCADE | Parent deal's `TokenContract` address. The projector always inserts the parent `inference_deals` row before any tick insert, so the FK is always satisfiable at runtime. `ON DELETE CASCADE` makes test cleanup order-independent. |
 | `chain_order` | `text` NOT NULL (part of PK) | The `chain_order` of the `TickFinalized` event. Uniquely identifies each tick within a deal. |
 | `finalized_owed` | `numeric(78,0)` NOT NULL | Amount owed for this tick (quote token units). |
 | `deposit` | `numeric(78,0)` NOT NULL | Deposit snapshot at tick finalization. |

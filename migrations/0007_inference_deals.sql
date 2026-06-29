@@ -30,7 +30,7 @@ create index inference_deals_seller_idx on inference_deals (seller_note);
 create index inference_deals_buyer_idx on inference_deals (buyer_note);
 
 create table inference_ticks (
-    token_contract_address text not null,
+    token_contract_address text not null references inference_deals(token_contract_address) on delete cascade,
     chain_order text not null,
     finalized_owed numeric(78, 0) not null,
     deposit numeric(78, 0) not null,
