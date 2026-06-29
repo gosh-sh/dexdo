@@ -377,3 +377,87 @@ async fn listing_paginates_null_chain_time_last() {
         purge(&pool, ob).await;
     }
 }
+
+async fn seed_order(
+    pool: &PgPool,
+    ob: &str,
+    order_id: i64,
+    is_buy: bool,
+    price: &str,
+    amount: &str,
+    chain_order: &str,
+) {
+    sqlx::query(
+        r#"insert into inference_orders
+               (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining,
+                status, last_chain_order)
+           values ($1, $2::numeric, $3, $4::numeric, $5::numeric, $5::numeric, 'OPEN', $6)"#,
+    )
+    .bind(ob)
+    .bind(order_id)
+    .bind(is_buy)
+    .bind(price)
+    .bind(amount)
+    .bind(chain_order)
+    .execute(pool)
+    .await
+    .expect("seed inference_order");
+}
+
+#[tokio::test]
+async fn depth_aggregates_scales_and_reports_last_update_id() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:inf_repo_depth";
+    purge(&pool, ob).await;
+    seed_market(&pool, ob, Some("r"), None, None, None, None, Some(1)).await;
+    // price_precision 9 -> raw "1000000000" => "1.000000000"; quantity_precision 0 -> raw passes through.
+    seed_order(&pool, ob, 1, true, "1000000000", "5", "co-01").await;
+    seed_order(&pool, ob, 2, true, "990000000", "3", "co-02").await;
+    seed_order(&pool, ob, 3, false, "1050000000", "7", "co-03").await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let snap = repo.get_inference_depth(ob, 100).await.expect("depth");
+
+    assert_eq!(snap.orderbook_address, ob);
+    assert_eq!(snap.last_update_id, "co-03"); // max chain order
+    assert_eq!(
+        snap.bids,
+        vec![
+            dodex_domain::PriceLevel { price: "1.000000000".into(), quantity: "5".into() },
+            dodex_domain::PriceLevel { price: "0.990000000".into(), quantity: "3".into() },
+        ]
+    );
+    assert_eq!(
+        snap.asks,
+        vec![dodex_domain::PriceLevel { price: "1.050000000".into(), quantity: "7".into() }]
+    );
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn depth_empty_book_is_ok_with_blank_last_update_id() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:inf_repo_depth_empty";
+    purge(&pool, ob).await;
+    seed_market(&pool, ob, Some("r"), None, None, None, None, Some(1)).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let snap = repo.get_inference_depth(ob, 100).await.unwrap();
+    assert!(snap.bids.is_empty());
+    assert!(snap.asks.is_empty());
+    assert_eq!(snap.last_update_id, "");
+
+    purge(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn depth_unknown_book_is_invalid_market_or_symbol() {
+    let Some(pool) = setup().await else { return };
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo.get_inference_depth("0:inf_repo_depth_missing", 100).await.unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<dodex_domain::DomainError>(),
+        Some(dodex_domain::DomainError::InvalidMarketOrSymbol)
+    ));
+}

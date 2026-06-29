@@ -262,16 +262,83 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
     })
 }
 
-// Implemented in Task 4.
 async fn get_inference_depth_impl(
-    _repo: &PostgresReadModelRepository,
-    _orderbook_address: &str,
-    _limit: u16,
+    repo: &PostgresReadModelRepository,
+    orderbook_address: &str,
+    limit: u16,
 ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
+    // Resolve + visibility gate. A missing row is a client miss (-1121); a
+    // reconciled row with NULL precision is corruption (-1500 via inference_scale).
+    let precisions: Option<(Option<i32>, Option<i32>)> = sqlx::query_as(
+        "select price_precision, quantity_precision from inference_markets \
+         where orderbook_address = $1 and last_reconciled_at is not null",
+    )
+    .bind(orderbook_address)
+    .fetch_optional(repo.pool())
+    .await
+    .context("resolve inference market for depth")?;
+    let Some((price_precision, quantity_precision)) = precisions else {
+        return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
+    };
+    let price_scale = inference_scale(price_precision, orderbook_address, "price_precision")?;
+    let quantity_scale = inference_scale(quantity_precision, orderbook_address, "quantity_precision")?;
+
+    let limit = limit.max(1) as i64;
+    let rows: Vec<InferenceDepthLevelRow> = sqlx::query_as(
+        r#"(select true  as is_buy, price::text as price,
+                   sum(amount_remaining)::text as quantity
+              from inference_orders
+             where orderbook_address = $1 and status = 'OPEN' and amount_remaining > 0 and is_buy
+             group by price order by price desc limit $2)
+           union all
+           (select false as is_buy, price::text as price,
+                   sum(amount_remaining)::text as quantity
+              from inference_orders
+             where orderbook_address = $1 and status = 'OPEN' and amount_remaining > 0 and not is_buy
+             group by price order by price asc limit $2)"#,
+    )
+    .bind(orderbook_address)
+    .bind(limit)
+    .fetch_all(repo.pool())
+    .await
+    .context("aggregate inference_orders for depth")?;
+
+    // Re-sort each side by exact numeric value (UNION ALL drops inner ordering).
+    // A non-numeric raw price is read-model corruption — fail closed.
+    let mut bids: Vec<(BigUint, PriceLevel)> = Vec::new();
+    let mut asks: Vec<(BigUint, PriceLevel)> = Vec::new();
+    for row in rows {
+        let key = BigUint::parse_bytes(row.price.as_bytes(), 10).ok_or_else(|| {
+            warn!(orderbook = %orderbook_address, raw = %row.price, "inference_orders.price is not a non-negative integer");
+            anyhow!(DomainError::MarketInconsistent)
+        })?;
+        let level = PriceLevel {
+            price: scale_uint_to_decimal(&row.price, price_scale),
+            quantity: scale_uint_to_decimal(&row.quantity, quantity_scale),
+        };
+        if row.is_buy {
+            bids.push((key, level));
+        } else {
+            asks.push((key, level));
+        }
+    }
+    bids.sort_by(|a, b| b.0.cmp(&a.0));
+    asks.sort_by(|a, b| a.0.cmp(&b.0));
+    let bids = bids.into_iter().map(|(_, l)| l).collect();
+    let asks = asks.into_iter().map(|(_, l)| l).collect();
+
+    let last_update_id: Option<String> = sqlx::query_scalar(
+        "select max(last_chain_order) from inference_orders where orderbook_address = $1",
+    )
+    .bind(orderbook_address)
+    .fetch_one(repo.pool())
+    .await
+    .context("compute inference last_update_id")?;
+
     Ok(InferenceDepthSnapshot {
-        orderbook_address: _orderbook_address.to_string(),
-        last_update_id: String::new(),
-        bids: vec![],
-        asks: vec![],
+        orderbook_address: orderbook_address.to_string(),
+        last_update_id: last_update_id.unwrap_or_default(),
+        bids,
+        asks,
     })
 }
