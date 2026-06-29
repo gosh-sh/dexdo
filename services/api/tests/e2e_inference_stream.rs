@@ -32,6 +32,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
 use common::airegistry::fund_probe_commission_via_giver;
+use common::airegistry::model_hash_for;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
@@ -72,8 +73,11 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
 
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex::from_endpoints");
     let suffix = unique_suffix();
-    let model_hash = format!("{}", 0x005E_1A20_0000_0000_u128.wrapping_add(suffix));
-    eprintln!("[e2e_stream] note={} model_hash={model_hash}", note.address);
+    // Book ctor requires modelHash == sha256(modelName); derive the hash from a
+    // per-run name so each run deploys a fresh book.
+    let model_name = format!("e2e-stream-{suffix}");
+    let model_hash = model_hash_for(&model_name);
+    eprintln!("[e2e_stream] note={} model_name={model_name} model_hash={model_hash}", note.address);
 
     let mut failures: Vec<String> = Vec::new();
 
@@ -82,7 +86,7 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
         &note.address,
         ParamsOfDeployInferenceOrderBook {
             model_hash: model_hash.clone(),
-            model_name: String::new(),
+            model_name: model_name.clone(),
         },
         signer(),
     )
@@ -107,7 +111,7 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
         &note.address,
         nonce,
         TokenDeal {
-            model_name: "e2e-stream".to_string(),
+            model_name: model_name.clone(),
             tick_size: 1,
             price_per_tick: PRICE_PER_TICK,
             max_ticks: 8,
