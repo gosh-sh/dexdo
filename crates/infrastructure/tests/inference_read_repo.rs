@@ -461,3 +461,60 @@ async fn depth_unknown_book_is_invalid_market_or_symbol() {
         Some(dodex_domain::DomainError::InvalidMarketOrSymbol)
     ));
 }
+
+// Regression test: a far-future `created_at_chain` (epoch seconds above the
+// i64 overflow threshold when multiplied by 1_000_000) must not cause a
+// Postgres "bigint out of range" error. Before the epoch-clamp fix every query
+// that evaluated `(extract(epoch from created_at_chain) * 1000000)::bigint`
+// over such a row would raise ERROR and surface as HTTP 500 — including the
+// listing ORDER BY which runs across ALL candidate rows before LIMIT.
+//
+// Seed value: 9_223_372_036_855 seconds (one above the overflow boundary
+// 9_223_372_036_854). to_timestamp() accepts it (Postgres timestamptz max ≈
+// year 294276). After the clamp (cap = 4_102_444_800 = 2100-01-01 UTC) the
+// micros expression returns 4_102_444_800_000_000 — well within i64 range.
+#[tokio::test]
+async fn far_future_created_at_chain_does_not_overflow() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:inf_repo_ff_overflow";
+    let prod = "inf_ff_overflow_producer";
+    purge(&pool, ob).await;
+
+    // Seed a reconciled, visible market with created_at_chain in the overflow band.
+    seed_market(
+        &pool,
+        ob,
+        Some("far-future-model"),
+        Some(prod),
+        Some("ff-model"),
+        Some("v1"),
+        None,
+        Some(9_223_372_036_855_i64),
+    )
+    .await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    // Single-lookup must succeed (before the fix: Err from bigint overflow).
+    let page = repo
+        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: ob.into() })
+        .await
+        .expect("single-lookup of far-future market must not overflow");
+    assert_eq!(page.markets.len(), 1);
+    assert_eq!(page.markets[0].orderbook_address, ob);
+
+    // Listing filtered by the unique producer must also succeed and contain the row.
+    let listing_page = repo
+        .list_inference_markets(&InferenceMarketsRequest::Listing(InferenceMarketsListing {
+            filter: InferenceMarketsFilter { producer: Some(prod.to_string()) },
+            sort: InferenceMarketsSort::CreatedAtDesc,
+            cursor: None,
+            limit: 50,
+        }))
+        .await
+        .expect("listing of far-future market must not overflow");
+    assert_eq!(listing_page.markets.len(), 1);
+    assert_eq!(listing_page.markets[0].orderbook_address, ob);
+
+    purge(&pool, ob).await;
+}

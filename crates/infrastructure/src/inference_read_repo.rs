@@ -65,7 +65,7 @@ const INFERENCE_MARKET_COLUMNS: &str = r#"
     model_name, version, platform_fee_bps, price_precision, quantity_precision,
     tick_size, step_size, min_notional, reference_price::text as reference_price,
     coalesce(extract(epoch from created_at_chain)::bigint, 0) as created_at,
-    coalesce((extract(epoch from created_at_chain) * 1000000)::bigint, 0) as created_at_micros
+    coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) as created_at_micros
 "#;
 
 impl PostgresReadModelRepository {
@@ -112,9 +112,9 @@ impl PostgresReadModelRepository {
              where last_reconciled_at is not null \
                and ($1::text is null or producer = $1) \
                and ($2::bigint is null \
-                    or (coalesce((extract(epoch from created_at_chain) * 1000000)::bigint, 0), id) \
+                    or (coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0), id) \
                        < ($2, $3)) \
-             order by coalesce((extract(epoch from created_at_chain) * 1000000)::bigint, 0) desc, \
+             order by coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) desc, \
                       id desc \
              limit $4"
         );
