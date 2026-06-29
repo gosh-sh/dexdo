@@ -51,8 +51,12 @@ read-model: `inference_deals` (one row per TokenContract / deal) and
 (`sellerTC` + `buyerNote` + the SELL leg's note); per-tick rows and the
 `finalized_ticks` / `finalized_owed_total` aggregates come from `TickFinalized`;
 `close_kind` + `clean_settlement` + `settled_at_chain` from the stream-close
-events (`StreamStopped` = clean; `DisputeResolved` / `StreamReclaimed` /
-`ContractDestroyed` = not clean).
+events: `StreamStopped` sets `clean_settlement = true`; `DisputeResolved` and
+`StreamReclaimed` set it to `false`; `ContractDestroyed` sets only
+`close_kind = 'DESTROYED'` and `settled_at_chain` — `clean_settlement` is left
+unchanged (remains `NULL` if no prior close event set it). Consumers should
+treat `clean_settlement IS NOT TRUE` as "not a clean settlement" to cover both
+the `false` and `NULL` cases.
 
 ## On-chain deploy specifics (Acki Nacki)
 
