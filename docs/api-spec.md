@@ -220,8 +220,8 @@ envelope field failed or why a credential was rejected.
 | List oracles and their available events | `GET` | `/api/v1/oracles` | `NONE` |
 | Fetch prediction order book | `GET` | `/api/v1/prediction/depth` | `NONE` |
 | Fetch recent prediction trades | `GET` | `/api/v1/prediction/trades` | `NONE` |
-| 🚧 TODO — List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
-| 🚧 TODO — Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
+| List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
+| Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
@@ -816,8 +816,6 @@ Response fields:
 | `outcomeName` | STRING | Human-readable outcome label. |
 
 ## Inference Market Data
-
-> 🚧 **TODO — not implemented.** The inference market (endpoints, indexer, and read-model below) is specified but **not yet built**. This section is a forward-looking contract; the endpoints are not served until the inference indexer/API ships. Safe to merge into `dev` as spec-only.
 
 Market data for the **private-inference market**: tradable AI models and the prediction markets settled from their prices. The unit of trade is an **inference tick** — one unit of model generation — priced **per tick in `SHELL`**. Each model has exactly one order book; there is no `symbol` dimension (unlike prediction-market depth, which is per outcome).
 

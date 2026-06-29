@@ -2371,7 +2371,9 @@ pub fn openapi_doc() -> OpenApi {
         )
         .push(Router::with_path("api/v1/account").get(get_account))
         .push(Router::with_path("api/v1/account/balances").get(get_account_balances))
-        .push(Router::with_path("api/v1/prediction/buyFullSet").post(buy_full_set));
+        .push(Router::with_path("api/v1/prediction/buyFullSet").post(buy_full_set))
+        .push(Router::with_path("api/v1/inference/markets").get(inference::get_inference_markets))
+        .push(Router::with_path("api/v1/inference/depth").get(inference::get_inference_depth));
 
     OpenApi::new("Dodex REST API", env!("CARGO_PKG_VERSION"))
         .info(

@@ -158,6 +158,118 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
+  /api/v1/inference/depth:
+    get:
+      tags:
+      - inference-market-data
+      summary: Inference order book depth
+      operationId: get_inference_depth
+      parameters:
+      - name: inferenceOrderBookAddress
+        in: query
+        description: The model's order-book address.
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Levels per side. Default 100, max 1000; out-of-range values clamp.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          maximum: 1000.0
+          minimum: 1.0
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferenceDepthResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
+  /api/v1/inference/markets:
+    get:
+      tags:
+      - inference-market-data
+      summary: List inference markets
+      operationId: get_inference_markets
+      parameters:
+      - name: inferenceOrderBookAddress
+        in: query
+        description: Single-market lookup. Mutually exclusive with filters and pagination.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: producer
+        in: query
+        description: Filter by model producer.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: status
+        in: query
+        description: Comma-separated statuses to include. Currently only TRADING.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: sort
+        in: query
+        description: Sort field. createdAt (default, DESC).
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: cursor
+        in: query
+        description: Opaque pagination cursor from a previous call.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: limit
+        in: query
+        description: Page size. Default 50, max 200; out-of-range values clamp.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          maximum: 200.0
+          minimum: 1.0
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferenceMarketsResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
   /api/v1/oracles:
     get:
       tags:
@@ -1158,6 +1270,134 @@ components:
           description: |-
             One entry per oracle that confirmed this market. Empty when no
             confirmation has landed yet.
+    InferenceDepthResponse:
+      type: object
+      required:
+      - inferenceOrderBookAddress
+      - lastUpdateId
+      - bids
+      - asks
+      properties:
+        asks:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+            maxItems: 2
+            minItems: 2
+          description: Price levels as [pricePerTick, ticks] decimal-string pairs, best ask first.
+        bids:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+            maxItems: 2
+            minItems: 2
+          description: Price levels as [pricePerTick, ticks] decimal-string pairs, best bid first.
+        inferenceOrderBookAddress:
+          type: string
+        lastUpdateId:
+          type: string
+          description: Opaque lex-comparable chain-order cursor; empty when no order has landed.
+    InferenceMarketDto:
+      type: object
+      required:
+      - inferenceOrderBookAddress
+      - model
+      - status
+      - quoteAsset
+      - makerCommission
+      - takerCommission
+      - pricePrecision
+      - quantityPrecision
+      - tickSize
+      - stepSize
+      - minNotional
+      - createdAt
+      properties:
+        createdAt:
+          type: integer
+          format: int64
+        inferenceOrderBookAddress:
+          type: string
+        makerCommission:
+          type: string
+          description: Signed decimal string; the seller rebate cap (negative).
+        minNotional:
+          type: string
+        model:
+          $ref: '#/components/schemas/InferenceModelDto'
+        pricePrecision:
+          type: integer
+          format: int32
+          minimum: 0.0
+        quantityPrecision:
+          type: integer
+          format: int32
+          minimum: 0.0
+        quoteAsset:
+          type: string
+        referencePrice:
+          type:
+          - string
+          - 'null'
+          description: Weekly-median price per tick; `null` when the book has no recent liquidity.
+        status:
+          $ref: '#/components/schemas/InferenceMarketStatusDto'
+        stepSize:
+          type: string
+        takerCommission:
+          type: string
+          description: Decimal string; the buyer fee `platform_fee_bps / 10000`.
+        tickSize:
+          type: string
+    InferenceMarketStatusDto:
+      type: string
+      description: Reserved for future inactive states; clients treat it as opaque.
+      enum:
+      - TRADING
+    InferenceMarketsResponse:
+      type: object
+      required:
+      - serverTime
+      - hasMore
+      - markets
+      properties:
+        hasMore:
+          type: boolean
+        markets:
+          type: array
+          items:
+            $ref: '#/components/schemas/InferenceMarketDto'
+        nextCursor:
+          type:
+          - string
+          - 'null'
+        serverTime:
+          type: integer
+          format: int64
+    InferenceModelDto:
+      type: object
+      required:
+      - ref
+      properties:
+        name:
+          type:
+          - string
+          - 'null'
+        producer:
+          type:
+          - string
+          - 'null'
+        ref:
+          type: string
+          description: Canonical `producer--name--version`, or the model hash when unknown.
+        version:
+          type:
+          - string
+          - 'null'
     MarketBalancesResponse:
       type: object
       required:
