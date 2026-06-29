@@ -213,7 +213,7 @@ pub struct MarketsPage {
     pub has_more: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceLevel {
     pub price: String,
     pub quantity: String,
@@ -232,6 +232,101 @@ pub struct DepthSnapshot {
     pub last_update_id: String,
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
+}
+
+/// Model identity for an inference market. `model_ref` is the canonical
+/// `producer--name--version`, or the raw `model_hash` when the human-readable
+/// name is unknown. `producer` / `name` / `version` are populated only when
+/// `model_ref` parsed into exactly three `--`-separated parts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceModel {
+    pub producer: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub model_ref: String,
+}
+
+/// Inference market phase. Reserved for future inactive states; clients
+/// treat it as opaque. Only `Trading` exists today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum InferenceMarketStatus {
+    Trading,
+}
+
+impl InferenceMarketStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Trading => "TRADING",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "TRADING" => Some(Self::Trading),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceMarket {
+    pub orderbook_address: String,
+    pub model: InferenceModel,
+    pub status: InferenceMarketStatus,
+    pub quote_asset: String,
+    pub maker_commission: String,
+    pub taker_commission: String,
+    pub price_precision: u8,
+    pub quantity_precision: u8,
+    pub tick_size: String,
+    pub step_size: String,
+    pub min_notional: String,
+    /// `None` when the book has no recent liquidity (dry book).
+    pub reference_price: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceMarketsPage {
+    pub markets: Vec<InferenceMarket>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceDepthSnapshot {
+    pub orderbook_address: String,
+    /// Opaque lex-comparable chain-order cursor (max `inference_orders.last_chain_order`
+    /// for this book). Empty string when no order event has landed yet.
+    pub last_update_id: String,
+    pub bids: Vec<PriceLevel>,
+    pub asks: Vec<PriceLevel>,
+}
+
+/// Seller rebate cap in bps (the contract's `REBATE_MAX_BPS`). Rendered as the
+/// negative `makerCommission` `"-0.02"`.
+pub const INFERENCE_MAKER_REBATE_CAP_BPS: u16 = 200;
+
+/// Render a fee rate in basis points as a signed decimal string `bps / 10_000`
+/// with trailing fractional zeros trimmed: `250 -> "0.025"`, `200 -> "0.02"`,
+/// `-200 -> "-0.02"`, `0 -> "0"`, `10_000 -> "1"`.
+pub fn bps_to_decimal_string(bps: i32) -> String {
+    let neg = bps < 0;
+    let abs = bps.unsigned_abs();
+    let whole = abs / 10_000;
+    let frac = abs % 10_000;
+    let body = if frac == 0 {
+        whole.to_string()
+    } else {
+        let frac = format!("{frac:04}");
+        format!("{whole}.{}", frac.trim_end_matches('0'))
+    };
+    if neg {
+        format!("-{body}")
+    } else {
+        body
+    }
 }
 
 /// One public trade: a maker↔taker match projected from an
@@ -1872,5 +1967,20 @@ mod tests {
         assert_eq!(v["symbol"], "PM-X-YES");
         assert_eq!(v["free"], "5.50");
         assert_eq!(v["lockedInOrders"], "1000.00");
+    }
+}
+
+#[cfg(test)]
+mod inference_fee_tests {
+    use super::bps_to_decimal_string;
+
+    #[test]
+    fn bps_to_decimal_string_renders_signed_and_trimmed() {
+        assert_eq!(bps_to_decimal_string(250), "0.025");
+        assert_eq!(bps_to_decimal_string(200), "0.02");
+        assert_eq!(bps_to_decimal_string(-200), "-0.02");
+        assert_eq!(bps_to_decimal_string(0), "0");
+        assert_eq!(bps_to_decimal_string(10_000), "1");
+        assert_eq!(bps_to_decimal_string(12_345), "1.2345");
     }
 }
