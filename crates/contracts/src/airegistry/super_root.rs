@@ -26,8 +26,8 @@ const ABI: &str = include_str!("../../../../contracts/airegistry/SuperRoot.abi.j
 
 #[derive(Debug, Clone)]
 /// Wrapper for the AI Registry `SuperRoot` contract — the per-network root
-/// factory that registers `RootModel` and `ManifestMetadata` children at
-/// deterministic addresses derived from an owner pubkey.
+/// factory that registers `RootModel` children at deterministic addresses
+/// derived from an owner pubkey.
 pub struct SuperRoot {
     base: ContractBase,
 }
@@ -90,8 +90,7 @@ pub struct ParamsOfGetRootModelAddress {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-/// Result of the address-derivation getters
-/// (`getRootModelAddress`, `getManifestAddress`).
+/// Result of the address-derivation getter (`getRootModelAddress`).
 pub struct ResultOfGetAddress {
     #[serde(rename = "value0")]
     pub address: String,

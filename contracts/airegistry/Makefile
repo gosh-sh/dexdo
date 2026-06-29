@@ -1,3 +1,3 @@
-TVCS := SuperRoot RootModel ManifestMetadata TokenContract InferenceOrderBook InferenceOracle
+TVCS := SuperRoot RootModel TokenContract InferenceOrderBook
 
 include ../Makefile.inc

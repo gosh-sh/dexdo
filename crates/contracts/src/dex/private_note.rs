@@ -459,8 +459,9 @@ pub struct ParamsOfInferenceOrderBook {
 /// `sha256(modelName) == modelHash` on deploy, so the human-readable name must
 /// be supplied (the getter still derives the address from `model_hash` alone).
 pub struct ParamsOfDeployInferenceOrderBook {
-    /// `uint256` model hash, decimal/hex string.
+    /// `uint256` model hash, decimal/hex string — identifies the book.
     pub model_hash: String,
+    /// Human-readable model name (ABI `modelName`, `string`).
     pub model_name: String,
 }
 
