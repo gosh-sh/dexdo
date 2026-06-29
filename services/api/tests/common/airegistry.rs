@@ -44,8 +44,12 @@ use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
 use base64::Engine as _;
 use dodex_chain::self_rooted_contract_params;
+use dodex_contracts::airegistry::super_root::ParamsOfGetRootModelAddress;
+use dodex_contracts::airegistry::super_root::SuperRoot;
 use dodex_contracts::airegistry::token_contract::TokenContract;
 use serde_json::json;
+
+use super::e2e_setup::model_hash_dec;
 
 const TOKEN_CONTRACT_TVC: &[u8] =
     include_bytes!("../../../../contracts/airegistry/TokenContract.tvc");
@@ -60,6 +64,13 @@ const SHELL_CURRENCY_ID: u32 = 2;
 /// it modest so a run does not drain the shared shellnet giver.
 const CREATION_SHELL: u64 = 200_000_000_000;
 
+/// Canonical shellnet `SuperRoot` — the `SUPER_ROOT_ADDR` baked into the 4.0.x
+/// `InferenceOrderBook` (`contracts/airegistry/InferenceOrderBook.sol`). A
+/// SuperRoot-code / RootModel rotation re-pins this; keep it in sync with the
+/// contract constant.
+const SUPER_ROOT_ADDR: &str =
+    "0:312d7665b9e262a2e5b2e77953912abf69c89f652562cc11ca97778a74c329cf";
+
 /// Immutable deal config passed to the `TokenContract` constructor.
 pub struct TokenDeal {
     pub model_name: String,
@@ -68,24 +79,42 @@ pub struct TokenDeal {
     pub max_ticks: u128,
 }
 
+/// Deterministic RootModel address for a seller pubkey (`0x…` hex), via the
+/// canonical SuperRoot getter. This is the value the book pins as the deal
+/// contract's `_rootModelAddress` when it recomputes
+/// `_tokenContractAddr(sellerPubkey, nonce)`, so the TC must be deployed here.
+async fn canonical_root_model_address(
+    ctx: Arc<ClientContext>,
+    seller_pubkey: &str,
+) -> anyhow::Result<String> {
+    SuperRoot::new(ctx, self_rooted_contract_params(SUPER_ROOT_ADDR))
+        .get_root_model_address(ParamsOfGetRootModelAddress {
+            owner_pubkey: seller_pubkey.to_string(),
+        })
+        .await
+        .map(|r| r.address)
+        .map_err(|e| anyhow!("getRootModelAddress({seller_pubkey}): {e:?}"))
+}
+
 /// Deploy a standalone `TokenContract` and return its address.
 ///
 /// `seller_pubkey_hex` is the seller note's owner pubkey (hex, with or without
 /// `0x`); it becomes the `_sellerPubkey` static so the note's key can sign the
-/// owner ops (`open`/`advance`/…). `root_model_addr` is a placeholder for the
-/// CLOB-only path — the ctor's `registerTokenContract` callback to it bounces
-/// harmlessly; `fundFromOrderBook` has no root-model dependency.
+/// owner ops (`open`/`advance`/…). `_rootModelAddress` is derived from the
+/// canonical SuperRoot (not a placeholder): the book's `placeSellOffer` recomputes
+/// the TC address from `(sellerPubkey, nonce)` pinned to that RootModel, so the
+/// deployed TC must sit at the matching address or the offer reverts.
 pub async fn deploy_token_contract(
     ctx: Arc<ClientContext>,
     seller_pubkey_hex: &str,
     seller_note_addr: &str,
-    root_model_addr: &str,
     nonce: u64,
     deal: TokenDeal,
     deploy_keys: KeyPair,
 ) -> anyhow::Result<String> {
     let pubkey = format!("0x{}", seller_pubkey_hex.trim_start_matches("0x"));
     let abi = Abi::Json(TOKEN_CONTRACT_ABI.to_string());
+    let root_model_addr = canonical_root_model_address(ctx.clone(), &pubkey).await?;
 
     let deploy_set = DeploySet {
         tvc: Some(base64::engine::general_purpose::STANDARD.encode(TOKEN_CONTRACT_TVC)),
@@ -108,6 +137,10 @@ pub async fn deploy_token_contract(
         header: None,
         input: Some(json!({
             "modelName": deal.model_name,
+            // The ctor verifies `sha256(modelName) == modelHash`, so bind the hash
+            // to the name's preimage — otherwise the deploy reverts and the TC is
+            // never funded.
+            "modelHash": model_hash_dec(&deal.model_name),
             "tickSize": deal.tick_size.to_string(),
             "pricePerTick": deal.price_per_tick.to_string(),
             "maxTicks": deal.max_ticks.to_string(),

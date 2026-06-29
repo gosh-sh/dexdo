@@ -33,6 +33,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
 use common::airegistry::TokenDeal;
+use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
@@ -69,8 +70,11 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
 
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex::from_endpoints");
     let suffix = unique_suffix();
-    let model_hash = format!("{}", 0x000A_1E2E_0000_0000_u128.wrapping_add(suffix));
-    eprintln!("[e2e_match] note={} model_hash={model_hash}", note.address);
+    // The book ctor enforces `sha256(modelName) == _modelHash`; uniqueness now
+    // rides the name (the hash is its preimage), not an arbitrary number.
+    let model_name = format!("e2e-model--{suffix}");
+    let model_hash = model_hash_dec(&model_name);
+    eprintln!("[e2e_match] note={} model_name={model_name} model_hash={model_hash}", note.address);
 
     let mut failures: Vec<String> = Vec::new();
 
@@ -79,7 +83,7 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
         &note.address,
         ParamsOfDeployInferenceOrderBook {
             model_hash: model_hash.clone(),
-            model_name: "e2e-model".to_string(),
+            model_name: model_name.clone(),
         },
         signer(),
     )
@@ -104,10 +108,9 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
         dex.context(),
         &note.owner_public_key_hex,
         &note.address,
-        &note.address,
         nonce,
         TokenDeal {
-            model_name: "e2e-model".to_string(),
+            model_name: model_name.clone(),
             tick_size: 1,
             price_per_tick: PRICE_PER_TICK,
             max_ticks: 5,

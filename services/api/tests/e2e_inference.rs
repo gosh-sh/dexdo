@@ -33,6 +33,7 @@ use std::time::UNIX_EPOCH;
 
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
+use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
@@ -44,12 +45,13 @@ use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45; // 90s budget — book deploy is an internal message.
 
-/// A per-run model hash so each run deploys a fresh book (the address is
-/// `tvm.hash(bakedCode, modelHash)`), keeping order-count assertions clean.
-fn unique_model_hash() -> String {
+/// A per-run model name so each run deploys a fresh book — its address derives
+/// from `sha256(modelName)`, so a unique name keeps order-count assertions clean.
+/// The ctor enforces `sha256(modelName) == _modelHash`, so the hash must be
+/// `model_hash_dec(&this)`, never an arbitrary value.
+fn unique_model_name() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    // Decimal uint256 string; the high prefix keeps it clear of small ids.
-    format!("{}", 0x0E2E_0000_0000_0000_u128.wrapping_add(nanos))
+    format!("e2e--{nanos}")
 }
 
 #[tokio::test]
@@ -69,8 +71,9 @@ async fn inference_order_book_buy_then_cancel_against_shellnet() {
     let signer = || Signer::Keys { keys: keys.clone() };
 
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex::from_endpoints");
-    let model_hash = unique_model_hash();
-    eprintln!("[e2e_inference] note={} model_hash={model_hash}", note.address);
+    let model_name = unique_model_name();
+    let model_hash = model_hash_dec(&model_name);
+    eprintln!("[e2e_inference] note={} model_name={model_name} model_hash={model_hash}", note.address);
 
     let mut failures: Vec<String> = Vec::new();
 
@@ -79,7 +82,7 @@ async fn inference_order_book_buy_then_cancel_against_shellnet() {
         &note.address,
         ParamsOfDeployInferenceOrderBook {
             model_hash: model_hash.clone(),
-            model_name: "e2e".to_string(),
+            model_name: model_name.clone(),
         },
         signer(),
     )

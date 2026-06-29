@@ -25,6 +25,7 @@ use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
 use common::airegistry::fetch_inference_event_ids;
 use common::airegistry::TokenDeal;
+use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
@@ -49,9 +50,12 @@ fn note_and_signer() -> (common::test_pns::TestPn, KeyPair) {
     (note, keys)
 }
 
-fn unique_model_hash(tag: u128) -> String {
+/// A per-run model name; the book address derives from `sha256(modelName)` and
+/// the ctor enforces `sha256(modelName) == _modelHash`, so uniqueness rides the
+/// name and the hash is always `model_hash_dec(&name)`.
+fn unique_model_name(tag: &str) -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    format!("{}", tag.wrapping_add(nanos))
+    format!("{tag}--{nanos}")
 }
 
 /// A fresh TokenContract nonce per call — the deploy address is deterministic in
@@ -63,12 +67,18 @@ fn unique_nonce() -> u64 {
     (nanos % 1_000_000_000) as u64 + 1
 }
 
-async fn deploy_book(dex: &Dex, note_addr: &str, model_hash: &str, signer: Signer) -> String {
+async fn deploy_book(
+    dex: &Dex,
+    note_addr: &str,
+    model_name: &str,
+    signer: Signer,
+) -> (String, String) {
+    let model_hash = model_hash_dec(model_name);
     dex.deploy_inference_order_book(
         note_addr,
         ParamsOfDeployInferenceOrderBook {
-            model_hash: model_hash.to_string(),
-            model_name: "e2e-clob".to_string(),
+            model_hash: model_hash.clone(),
+            model_name: model_name.to_string(),
         },
         signer,
     )
@@ -77,14 +87,14 @@ async fn deploy_book(dex: &Dex, note_addr: &str, model_hash: &str, signer: Signe
     let ob = dex
         .get_inference_order_book_address(
             note_addr,
-            ParamsOfInferenceOrderBook { model_hash: model_hash.to_string() },
+            ParamsOfInferenceOrderBook { model_hash: model_hash.clone() },
         )
         .await
         .expect("getInferenceOrderBookAddress");
     for _ in 0..POLL_TICKS {
         tokio::time::sleep(POLL_TICK).await;
         if dex.inference_get_stats(&ob).await.is_ok() {
-            return ob;
+            return (ob, model_hash);
         }
     }
     panic!("InferenceOrderBook did not become live within budget");
@@ -97,19 +107,18 @@ async fn inference_partial_fill_leaves_remainder() {
     let (note, keys) = note_and_signer();
     let signer = || Signer::Keys { keys: keys.clone() };
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex");
-    let suffix = unique_model_hash(0x0C10_B000_0000_0000);
+    let model_name = unique_model_name("e2e-clob-partial");
     let mut failures: Vec<String> = Vec::new();
 
-    let ob = deploy_book(&dex, &note.address, &suffix, signer()).await;
+    let (ob, model_hash) = deploy_book(&dex, &note.address, &model_name, signer()).await;
     let nonce = unique_nonce();
     let tc = deploy_token_contract(
         dex.context(),
         &note.owner_public_key_hex,
         &note.address,
-        &note.address,
         nonce,
         TokenDeal {
-            model_name: "e2e-clob".to_string(),
+            model_name: model_name.clone(),
             tick_size: 1,
             price_per_tick: PRICE_PER_TICK,
             max_ticks: 4,
@@ -124,7 +133,7 @@ async fn inference_partial_fill_leaves_remainder() {
     dex.post_sell_offer(
         &note.address,
         ParamsOfPostSellOffer {
-            model_hash: suffix.clone(),
+            model_hash: model_hash.clone(),
             price_per_tick: PRICE_PER_TICK,
             max_ticks: 2,
             token_contract: tc.clone(),
@@ -147,7 +156,7 @@ async fn inference_partial_fill_leaves_remainder() {
     dex.place_inference_buy(
         &note.address,
         ParamsOfPlaceInferenceBuy {
-            model_hash: suffix.clone(),
+            model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 4,
             escrow: 6_000_000,
@@ -208,7 +217,7 @@ async fn inference_partial_fill_leaves_remainder() {
         Err(err) => failures.push(format!("getWeeklyMedianPrice: {err:?}")),
     }
 
-    cleanup(&dex, &note.address, &suffix, &keys).await;
+    cleanup(&dex, &note.address, &model_hash, &keys).await;
     assert!(failures.is_empty(), "e2e_clob partial-fill failures: {failures:#?}");
 }
 
@@ -219,17 +228,17 @@ async fn inference_subscription_place_and_read() {
     let (note, keys) = note_and_signer();
     let signer = || Signer::Keys { keys: keys.clone() };
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex");
-    let suffix = unique_model_hash(0x05_0B5C_0000_0000);
+    let model_name = unique_model_name("e2e-clob-sub");
     let mut failures: Vec<String> = Vec::new();
 
-    let ob = deploy_book(&dex, &note.address, &suffix, signer()).await;
+    let (ob, model_hash) = deploy_book(&dex, &note.address, &model_name, signer()).await;
     eprintln!("[e2e_clob] subscription order_book={ob}");
 
     // escrow must be >= ticks * (price + platform fee); 8 * (1M + 2.5%) = 8.2M.
     dex.place_inference_subscription(
         &note.address,
         ParamsOfPlaceInferenceSubscription {
-            model_hash: suffix.clone(),
+            model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 8,
             escrow: 10_000_000,
@@ -276,7 +285,7 @@ async fn inference_subscription_place_and_read() {
         failures.push("subscription never surfaced via getSubscription".to_string());
     }
 
-    cleanup(&dex, &note.address, &suffix, &keys).await;
+    cleanup(&dex, &note.address, &model_hash, &keys).await;
     assert!(failures.is_empty(), "e2e_clob subscription failures: {failures:#?}");
 }
 
@@ -287,19 +296,18 @@ async fn inference_match_emits_filled_event() {
     let (note, keys) = note_and_signer();
     let signer = || Signer::Keys { keys: keys.clone() };
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex");
-    let suffix = unique_model_hash(0x0F11_1ED0_0000_0000);
+    let model_name = unique_model_name("e2e-clob-match");
     let mut failures: Vec<String> = Vec::new();
 
-    let ob = deploy_book(&dex, &note.address, &suffix, signer()).await;
+    let (ob, model_hash) = deploy_book(&dex, &note.address, &model_name, signer()).await;
     let nonce = unique_nonce();
     let tc = deploy_token_contract(
         dex.context(),
         &note.owner_public_key_hex,
         &note.address,
-        &note.address,
         nonce,
         TokenDeal {
-            model_name: "e2e-clob".to_string(),
+            model_name: model_name.clone(),
             tick_size: 1,
             price_per_tick: PRICE_PER_TICK,
             max_ticks: 4,
@@ -312,7 +320,7 @@ async fn inference_match_emits_filled_event() {
     dex.post_sell_offer(
         &note.address,
         ParamsOfPostSellOffer {
-            model_hash: suffix.clone(),
+            model_hash: model_hash.clone(),
             price_per_tick: PRICE_PER_TICK,
             max_ticks: 2,
             token_contract: tc.clone(),
@@ -333,7 +341,7 @@ async fn inference_match_emits_filled_event() {
     dex.place_inference_buy(
         &note.address,
         ParamsOfPlaceInferenceBuy {
-            model_hash: suffix.clone(),
+            model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 2,
             escrow: 3_000_000,
@@ -370,7 +378,7 @@ async fn inference_match_emits_filled_event() {
         failures.push("no Filled event (routing id) surfaced from the match".to_string());
     }
 
-    cleanup(&dex, &note.address, &suffix, &keys).await;
+    cleanup(&dex, &note.address, &model_hash, &keys).await;
     assert!(failures.is_empty(), "e2e_clob filled-event failures: {failures:#?}");
 }
 
