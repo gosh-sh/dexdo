@@ -49,7 +49,7 @@ read-model: `inference_deals` (one row per TokenContract / deal) and
 `inference_ticks` (one row per finalized tick). The deal's `orderbook_address`,
 `seller_note`, and `buyer_note` are linked from `InferenceOrderBook.Filled`
 (`sellerTC` + `buyerNote` + the SELL leg's note); per-tick rows and the
-`finalized_ticks` / `finalized_owed_total` aggregates come from `TickFinalized`;
+`finalized_ticks` aggregate comes from `TickFinalized` (per-tick `finalized_owed` is stored on each `inference_ticks` row — it is the contract's cumulative `_finalizedOwed`, not a per-tick delta);
 `close_kind` + `clean_settlement` + `settled_at_chain` from the stream-close
 events: `StreamStopped` sets `clean_settlement = true`; `DisputeResolved` and
 `StreamReclaimed` set it to `false`; `ContractDestroyed` sets only

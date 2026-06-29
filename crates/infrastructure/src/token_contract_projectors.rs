@@ -150,21 +150,20 @@ async fn apply_tick_finalized(
     .await
     .context("insert inference_ticks")?;
 
-    // Bump the deal aggregate ONLY on a real insert, so a replay of an
-    // already-recorded tick does not double-count.
+    // Bump the finalized-tick COUNT only on a real insert, so a replay of an
+    // already-recorded tick does not double-count. (finalized_ticks counts
+    // TickFinalized events; it is not the contract's on-chain _ticksFinalized.)
     if res.rows_affected() == 1 {
         sqlx::query(
             r#"update inference_deals
                   set finalized_ticks = finalized_ticks + 1,
-                      finalized_owed_total = finalized_owed_total + $2::numeric,
                       updated_at = now()
                 where token_contract_address = $1"#,
         )
         .bind(tc)
-        .bind(&finalized_owed)
         .execute(&mut **tx)
         .await
-        .context("bump inference_deals tick aggregate")?;
+        .context("bump inference_deals finalized_ticks")?;
     }
     Ok(ProjectionOutcome::Applied)
 }

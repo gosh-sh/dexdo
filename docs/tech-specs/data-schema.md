@@ -403,12 +403,11 @@ One row per `TokenContract` address. Seeded as a skeleton from the first observe
 | `buyer_note` | `text` (nullable) | PrivateNote address of the buyer. Filled from `InferenceOrderBook.Filled`. |
 | `deposit` | `numeric(78,0)` (nullable) | Initial deposit amount (quote token units). |
 | `price_per_tick` | `numeric(78,0)` (nullable) | Agreed price per finalized tick (quote token units). |
-| `finalized_ticks` | `integer` NOT NULL default `0` | Running count of finalized ticks. Incremented by the SETTLEMENT projector on each `TokenContract.TickFinalized` event. |
-| `finalized_owed_total` | `numeric(78,0)` NOT NULL default `0` | Cumulative owed amount across all finalized ticks. |
+| `finalized_ticks` | `integer` NOT NULL default `0` | Count of `TokenContract.TickFinalized` events for this deal (= number of `inference_ticks` rows). NOT the contract's on-chain `_ticksFinalized`, which additionally counts the probe-accept tick (`ProbeAccepted`) and the closing tick (folded into `StreamStopped`/`StreamReclaimed`/`DisputeResolved`), neither emitted as `TickFinalized`. |
 | `funded_at_chain` | `timestamptz` (nullable) | Chain timestamp of the funding event. |
 | `opened_at_chain` | `timestamptz` (nullable) | Chain timestamp when the deal was opened. |
 | `settled_at_chain` | `timestamptz` (nullable) | Chain timestamp when the deal closed cleanly or was resolved. |
-| `close_kind` | `text` (nullable) | Terminal close type: one of `STOPPED`, `DISPUTE_RESOLVED`, `RECLAIMED`, `DESTROYED`. Enforced by a CHECK constraint. |
+| `close_kind` | `text` (nullable) | Terminal close type: one of `STOPPED`, `DISPUTE_RESOLVED`, `RECLAIMED`, `DESTROYED`, `PROBE_BURNED`. Enforced by a CHECK constraint. |
 | `clean_settlement` | `boolean` (nullable) | `true` if the deal closed without a dispute; `false` or `null` otherwise. |
 | `disputed_at_chain` | `timestamptz` (nullable) | Chain timestamp of the dispute event, if any. |
 | `last_chain_order` | `text` (nullable) | The `chain_order` of the most recent `InferenceOrderBook.Filled` cross-link that wrote this row. Advanced via `greatest(existing, new)` by the `Filled` handler; not read or advanced by any `TokenContract` handler. |
@@ -430,7 +429,7 @@ One row per finalized tick within a deal. Written by the SETTLEMENT projector on
 | --- | --- | --- |
 | `token_contract_address` | `text` NOT NULL (part of PK) FK → `inference_deals(token_contract_address)` ON DELETE CASCADE | Parent deal's `TokenContract` address. The projector always inserts the parent `inference_deals` row before any tick insert, so the FK is always satisfiable at runtime. `ON DELETE CASCADE` makes test cleanup order-independent. |
 | `chain_order` | `text` NOT NULL (part of PK) | The `chain_order` of the `TickFinalized` event. Uniquely identifies each tick within a deal. |
-| `finalized_owed` | `numeric(78,0)` NOT NULL | Amount owed for this tick (quote token units). |
+| `finalized_owed` | `numeric(78,0)` NOT NULL | Cumulative SHELL-to-seller total (`_finalizedOwed`) as carried by the `TickFinalized` event — a running total at the moment of this tick, NOT a per-tick delta. Do not sum across rows. |
 | `deposit` | `numeric(78,0)` NOT NULL | Deposit snapshot at tick finalization. |
 | `chain_at` | `timestamptz` (nullable) | Chain timestamp of the finalization event. |
 | `created_at` | `timestamptz` NOT NULL default `now()` | Bookkeeping. |

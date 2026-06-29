@@ -149,11 +149,14 @@ async fn tick_finalized_counts_each_tick_once_under_replay() {
     project(&mut tx, &tick1, &node(tc, "co-1")).await;
     tx.commit().await.unwrap();
 
-    let (ticks, owed): (i32, String) = sqlx::query_as(
-        "select finalized_ticks, finalized_owed_total::text from inference_deals where token_contract_address=$1")
-        .bind(tc).fetch_one(&pool).await.unwrap();
-    assert_eq!(ticks, 2, "each distinct tick counted once");
-    assert_eq!(owed, "20");
+    let ticks: i32 = sqlx::query_scalar(
+        "select finalized_ticks from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ticks, 2, "each distinct TickFinalized event counted once");
     let rows: i64 =
         sqlx::query_scalar("select count(*) from inference_ticks where token_contract_address=$1")
             .bind(tc)
