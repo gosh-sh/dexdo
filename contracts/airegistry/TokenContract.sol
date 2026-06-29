@@ -53,7 +53,13 @@ import "./interfaces.sol";
 ///         4c.`reclaimOnTimeout()` — seller no-show after `STREAM_TIMEOUT`.
 ///         5. `withdrawShell`/`destroy` — seller pulls finalized SHELL (§3.5).
 contract TokenContract is AiRegistryModifiers {
-    string constant version = "4.0.3";
+    string constant version = "4.0.10";
+
+    // Native value attached to THIS contract's cross-dapp messages (register / stream-lock /
+    // payout). Tunable; recipients self-fund via `accept`/`ensureBalance`, so this
+    // only needs to cover what a non-accepting hop requires. (TC/RM-local — NOT the shared
+    // REGISTER_FORWARD_VALUE the IOB also uses for its SHELL handover.)
+    varuint16 constant DAPP_MSG_VALUE = 0.01 vmshell;
 
     event ContractDeployed(address self);
     event StreamFunded(address buyer, uint128 deposit);
@@ -76,6 +82,7 @@ contract TokenContract is AiRegistryModifiers {
 
     // Immutable deal config (constructor).
     string  _modelName;
+    uint256 _modelHash;       // sha256(_modelName), verified in the ctor — on-chain authoritative id
     uint128 _tickSize;        // tokens per tick (informational for the buyer)
     uint128 _pricePerTick;    // SHELL per tick (P)
     uint128 _maxTicks;        // upper bound on ticks this deal serves
@@ -105,9 +112,12 @@ contract TokenContract is AiRegistryModifiers {
     uint64  _prepaidTime;     // when `_prepaid`/probe was set (settle window)
     uint64  _lastAdvance;     // last seller activity (stream timeout)
     uint64  _disputeTime;     // when the dispute opened
+    uint64  _settleWindow;    // per-deal advance window W = f(pricePerTick), §9.1
+    uint64  _streamTimeout;   // per-deal reclaim window = W + grace, §9.1
 
     constructor(
         string  modelName,
+        uint256 modelHash,
         uint128 tickSize,
         uint128 pricePerTick,
         uint128 maxTicks,
@@ -117,19 +127,34 @@ contract TokenContract is AiRegistryModifiers {
         require(tickSize > 0, ERR_BAD_PARAM);
         require(pricePerTick > 0, ERR_BAD_PARAM);
         require(maxTicks >= 2, ERR_BAD_PARAM);
+        // On-chain authoritative model id: same single-cell sha256 invariant as the order book.
+        // Binds this deal contract's modelHash to the verified `producer--model--version` preimage
+        // (so an indexer reading the TC alone gets the genuine model name, not a free-text label).
+        require(modelName.byteLength() <= 127, ERR_BAD_PARAM);
+        require(sha256(modelName) == modelHash, ERR_BAD_PARAM);
 
         _modelName    = modelName;
+        _modelHash    = modelHash;
         _tickSize     = tickSize;
         _pricePerTick = pricePerTick;
         _maxTicks     = maxTicks;
         _sellerNote   = sellerNote;
+
+        // Per-deal advance window scaled by tick price (caps idle drain to the
+        // slope), clamped to [SETTLE_WINDOW, STREAM_WINDOW_MAX]; the reclaim
+        // window is W + grace so reclaim is always strictly after advance (§9.1).
+        uint64 w = uint64(uint256(pricePerTick) * uint256(STREAM_WINDOW_SECS_PER_SHELL) / uint256(SHELL_UNIT));
+        if (w < SETTLE_WINDOW) { w = SETTLE_WINDOW; }
+        if (w > STREAM_WINDOW_MAX) { w = STREAM_WINDOW_MAX; }
+        _settleWindow  = w;
+        _streamTimeout = w + STREAM_TIMEOUT_GRACE;
 
         ensureBalance();
 
         address selfExtern = address.makeAddrExtern(ContractDeployedEmit, bitCntAddress);
         emit ContractDeployed{dest: selfExtern}(address(this));
 
-        IRootModelRegistry(_rootModelAddress).registerTokenContract{value: REGISTER_FORWARD_VALUE, flag: 1}(_sellerPubkey, _nonce);
+        IRootModelRegistry(_rootModelAddress).registerTokenContract{value: DAPP_MSG_VALUE, flag: 1}(_sellerPubkey, _nonce);
     }
 
     function ensureBalance() private pure {
@@ -141,7 +166,7 @@ contract TokenContract is AiRegistryModifiers {
         if (amount == 0) { return; }
         mapping(uint32 => varuint32) ecc;
         ecc[SHELL_ECC_ID] = varuint32(amount);
-        to.transfer({value: 1 vmshell, bounce: false, flag: 1, currencies: ecc});
+        to.transfer({value: DAPP_MSG_VALUE, bounce: false, flag: 1, currencies: ecc});
     }
 
     /// @notice Burn SHELL via gosh.burnecc (spec §5.4). uint64-bounded like _settleFees.
@@ -224,11 +249,20 @@ contract TokenContract is AiRegistryModifiers {
     ///         threads it through the match (§3.1.1, gateway auth).
     function fundFromOrderBook(address buyerNote, uint256 buyerPubkey) public {
         ensureBalance();
-        require(!_funded, ERR_ALREADY_FUNDED);
         mapping(uint32 => varuint32) currencies = msg.currencies;
-        require(currencies.exists(SHELL_ECC_ID), ERR_NO_SHELL);
+        if (!currencies.exists(SHELL_ECC_ID)) { return; }
         tvm.accept();
-        _recordFunding(buyerNote, buyerPubkey, uint128(currencies[SHELL_ECC_ID]));
+        uint128 paid = uint128(currencies[SHELL_ECC_ID]);
+        // The book forwards bounce:false, so a revert here would STRAND the buyer's SHELL on this
+        // contract (then be sweepable by the seller). Instead, on any non-fundable fill — already
+        // funded (nonce reuse), under 2 ticks, or over maxTicks — refund the buyer note IN FULL and
+        // do not fund. Same accept-then-refund pattern as the placement-reject fix (#91).
+        uint128 unit = _pricePerTick + _fee(_pricePerTick);
+        if (_funded || paid < 2 * unit || paid > _maxTicks * unit) {
+            _payShell(buyerNote, paid);
+            return;
+        }
+        _recordFunding(buyerNote, buyerPubkey, paid);
     }
 
     // ========================================================
@@ -287,7 +321,7 @@ contract TokenContract is AiRegistryModifiers {
         _lastAdvance   = uint64(block.timestamp);
         _opened        = true;
 
-        IStreamNote(_buyer).streamLock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
+        IStreamNote(_buyer).streamLock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
 
         emit StreamOpened{dest: address.makeAddrExtern(StreamOpenedEmit, bitCntAddress)}(_buyer, _pricePerTick);
     }
@@ -306,7 +340,9 @@ contract TokenContract is AiRegistryModifiers {
         ensureBalance();
         require(_opened, ERR_NOT_OPEN);
         require(!_disputed, ERR_DISPUTED);
-        require(uint64(block.timestamp) >= _prepaidTime + SETTLE_WINDOW, ERR_SETTLE_WINDOW_OPEN);
+        // Probe phase: fixed short PROBE_WINDOW; streaming: per-deal _settleWindow.
+        uint64 advanceWindow = _probeAccepted ? _settleWindow : PROBE_WINDOW;
+        require(uint64(block.timestamp) >= _prepaidTime + advanceWindow, ERR_SETTLE_WINDOW_OPEN);
 
         uint128 fee = _fee(_pricePerTick);
 
@@ -369,6 +405,36 @@ contract TokenContract is AiRegistryModifiers {
     }
 
     // ========================================================
+    // 4. Shared streaming close (spec §4.1 under the optimistic §3.3 rule)
+    // ========================================================
+
+    /// @notice Window-gated close of the streaming phase, shared by `stop()` and
+    ///         `resolveDisputeTimeout()` so the split is IDENTICAL on every streaming close
+    ///         (directive 92). The current prepaid tick is finalized to the seller ONLY if its
+    ///         acceptance window (`_settleWindow`) has elapsed (silence = consent, §3.3); otherwise it
+    ///         is not accepted and refunds to the buyer (no fee charged for it). On the dispute-timeout
+    ///         path this prevents an overpay when `_settleWindow > DISPUTE_WINDOW` (the timeout can fire
+    ///         before the window elapses). Updates the finalized/fee/tick counters and zeroes the escrow
+    ///         buckets; the caller does its own `_settleFees(clean)` + unlock + payout.
+    function _settleStreamingClose() private returns (uint128 toSeller, uint128 refundB) {
+        bool tickAccepted = _prepaid > 0 && uint64(block.timestamp) >= _prepaidTime + _settleWindow;
+        if (tickAccepted) {
+            uint128 fee = _fee(_pricePerTick);
+            _finalizedOwed  += _prepaid;
+            _feeAccrued     += fee;
+            _ticksFinalized += 1;
+            _deposit        -= fee;            // fee by-fact, only for the kept tick (§5.1)
+            toSeller = _prepaid;
+            refundB  = _frozen + _deposit;
+        } else {
+            // Window still open (or nothing prepaid) → buyer keeps the unaccepted tick.
+            toSeller = 0;
+            refundB  = _prepaid + _frozen + _deposit;
+        }
+        _prepaid = 0; _frozen = 0; _deposit = 0;
+    }
+
+    // ========================================================
     // 4a. Stop — buyer exit (probe burn §3.1.2 / standard split §4.1)
     // ========================================================
 
@@ -392,29 +458,21 @@ contract TokenContract is AiRegistryModifiers {
             _burnShell(burnedProbe);
             _burnShell(burnedCommission);
 
-            IStreamNote(_buyer).streamUnlock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
+            IStreamNote(_buyer).streamUnlock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
             _payShell(_buyer, refund);
 
             emit ProbeBurned{dest: address.makeAddrExtern(ProbeBurnedEmit, bitCntAddress)}(_buyer, burnedProbe, burnedCommission, refund);
             return;
         }
 
-        // Standard split (§4.1): finalize the delivered tick (P → seller, fee
-        // by-fact), refund the buffer + remaining deposit to the buyer.
-        uint128 fee = _fee(_pricePerTick);
-        _finalizedOwed  += _prepaid;
-        _feeAccrued     += fee;
-        _ticksFinalized += 1;
-        _deposit        -= fee;
-
-        uint128 toSeller = _prepaid;
-        uint128 refundB  = _frozen + _deposit;
-        _prepaid = 0; _frozen = 0; _deposit = 0;
-        _opened  = false;
+        // Standard split (§4.1) under the optimistic rule (§3.3) — the shared close window-gates the
+        // current tick (same gate as advance()) and is reused by resolveDisputeTimeout (directive 92).
+        (uint128 toSeller, uint128 refundB) = _settleStreamingClose();
+        _opened = false;
 
         _settleFees(true);   // clean amicable close → rebate to seller, burn net (§5.3/§5.4)
 
-        IStreamNote(_buyer).streamUnlock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
+        IStreamNote(_buyer).streamUnlock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
         _payShell(_buyer, refundB);
 
         emit StreamStopped{dest: address.makeAddrExtern(StreamStoppedEmit, bitCntAddress)}(_buyer, toSeller, refundB);
@@ -435,8 +493,8 @@ contract TokenContract is AiRegistryModifiers {
         _everDisputed = true;   // a dispute ever opened → seller forfeits rebate (§5.3)
         _disputeTime  = uint64(block.timestamp);
 
-        IStreamNote(_buyer).streamDisputeLock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
-        IStreamNote(_sellerNote).streamDisputeLock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
+        IStreamNote(_buyer).streamDisputeLock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
+        IStreamNote(_sellerNote).streamDisputeLock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
 
         emit StreamDisputed{dest: address.makeAddrExtern(StreamDisputedEmit, bitCntAddress)}(_buyer, _disputeTime);
     }
@@ -507,17 +565,10 @@ contract TokenContract is AiRegistryModifiers {
             return;
         }
 
-        // Standard split: delivered tick → seller (P + fee by-fact), buffer +
-        // remaining deposit → buyer. Disputed, so no rebate.
-        uint128 fee = _fee(_pricePerTick);
-        _finalizedOwed  += _prepaid;
-        _feeAccrued     += fee;
-        _ticksFinalized += 1;
-        _deposit        -= fee;
-
-        uint128 toSeller = _prepaid;
-        uint128 refundB  = _frozen + _deposit;
-        _prepaid = 0; _frozen = 0; _deposit = 0;
+        // Standard split — the SAME window-gated streaming close as stop() (directive 92): the disputed
+        // tick goes to the seller ONLY if its acceptance window has elapsed by the timeout, else it
+        // refunds to the buyer (no overpay when _settleWindow > DISPUTE_WINDOW). Disputed → no rebate.
+        (uint128 toSeller, uint128 refundB) = _settleStreamingClose();
         _disputed = false; _opened = false;
 
         _settleFees(false);   // disputed → no rebate, burn net (§5.3)
@@ -529,9 +580,9 @@ contract TokenContract is AiRegistryModifiers {
     }
 
     function _unlockBoth() private view {
-        IStreamNote(_buyer).streamDisputeUnlock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
-        IStreamNote(_buyer).streamUnlock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
-        IStreamNote(_sellerNote).streamDisputeUnlock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
+        IStreamNote(_buyer).streamDisputeUnlock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
+        IStreamNote(_buyer).streamUnlock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
+        IStreamNote(_sellerNote).streamDisputeUnlock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
     }
 
     // ========================================================
@@ -543,7 +594,7 @@ contract TokenContract is AiRegistryModifiers {
         require(_opened, ERR_NOT_OPEN);
         require(msg.sender == _buyer, ERR_NOT_BUYER);
         require(!_disputed, ERR_DISPUTED);
-        require(uint64(block.timestamp) >= _lastAdvance + STREAM_TIMEOUT, ERR_STREAM_TIMEOUT_OPEN);
+        require(uint64(block.timestamp) >= _lastAdvance + _streamTimeout, ERR_STREAM_TIMEOUT_OPEN);
         tvm.accept();
 
         if (!_probeAccepted) {
@@ -558,7 +609,7 @@ contract TokenContract is AiRegistryModifiers {
             _frozen = 0; _deposit = 0;
             _opened = false;
 
-            IStreamNote(_buyer).streamUnlock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
+            IStreamNote(_buyer).streamUnlock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
             _payShell(_buyer, refund);
 
             emit StreamReclaimed{dest: address.makeAddrExtern(StreamReclaimedEmit, bitCntAddress)}(_buyer, refund);
@@ -579,7 +630,7 @@ contract TokenContract is AiRegistryModifiers {
 
         _settleFees(false);   // seller abandoned → no rebate, burn net
 
-        IStreamNote(_buyer).streamUnlock{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(address(this));
+        IStreamNote(_buyer).streamUnlock{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(address(this));
         _payShell(_buyer, refundB);
 
         emit StreamReclaimed{dest: address.makeAddrExtern(StreamReclaimedEmit, bitCntAddress)}(_buyer, refundB);
@@ -631,6 +682,17 @@ contract TokenContract is AiRegistryModifiers {
     function destroy(address payoutAddress) public onlyOwnerPubkey(_sellerPubkey) accept {
         require(!_opened, ERR_STILL_OPEN);
         require(!_disputed, ERR_DISPUTED);
+        // Never selfdestruct over a live buyer deposit: a matched-but-unopened deal
+        // (_funded && !_opened) still holds the buyer's escrowed SHELL, which selfdestruct would
+        // sweep to the seller-chosen payoutAddress. Refund the buyer (and return the seller's probe
+        // commission) first, mirroring cleanupUnopened, so the sweep only takes residual native gas.
+        if (_funded) {
+            uint128 refund     = _deposit;
+            uint128 commission = _sellerProbeLocked;
+            _deposit = 0; _sellerProbeLocked = 0; _funded = false; _sellerProbeFunded = false;
+            _payShell(_buyer, refund);
+            _payShell(_sellerNote, commission);
+        }
         emit ContractDestroyed{dest: address.makeAddrExtern(ContractDestroyedEmit, bitCntAddress)}(address(this));
         selfdestruct(payoutAddress);
     }
@@ -654,10 +716,10 @@ contract TokenContract is AiRegistryModifiers {
         return (_sellerProbeFunded, _sellerProbeLocked, _probeCommission());
     }
 
-    function getConfig() external pure returns (
+    function getConfig() external view returns (
         uint16 platformFeeBps, uint64 settleWindow, uint64 streamTimeout, uint64 disputeWindow
     ) {
-        return (PLATFORM_FEE_BPS, SETTLE_WINDOW, STREAM_TIMEOUT, DISPUTE_WINDOW);
+        return (PLATFORM_FEE_BPS, _settleWindow, _streamTimeout, DISPUTE_WINDOW);
     }
 
     /// @notice Fee state (spec §5): accrued fee, finalized-tick count (rebate n),
@@ -684,6 +746,7 @@ contract TokenContract is AiRegistryModifiers {
     function getEndpointCipher() external view returns (bytes) { return _endpointCipher; }
 
     function getModelName() external view returns (string) { return _modelName; }
+    function getModelHash() external view returns (uint256) { return _modelHash; }
 
     function getShellBalance() external view returns (uint128) {
         return uint128(address(this).currencies[SHELL_ECC_ID]);
