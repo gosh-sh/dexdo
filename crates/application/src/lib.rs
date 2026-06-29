@@ -13,6 +13,8 @@ use dodex_domain::notional_meets_minimum;
 use dodex_domain::precision_within;
 use dodex_domain::DepthSnapshot;
 use dodex_domain::DomainError;
+use dodex_domain::InferenceDepthSnapshot;
+use dodex_domain::InferenceMarketsPage;
 use dodex_domain::MarketAddress;
 use dodex_domain::MarketStatus;
 use dodex_domain::MarketsPage;
@@ -129,6 +131,31 @@ pub struct MarketsListing {
 pub enum MarketsRequest {
     One { market_address: MarketAddress, now: i64 },
     Listing(MarketsListing),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub enum InferenceMarketsSort {
+    #[default]
+    CreatedAtDesc,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InferenceMarketsFilter {
+    pub producer: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InferenceMarketsListing {
+    pub filter: InferenceMarketsFilter,
+    pub sort: InferenceMarketsSort,
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+#[derive(Debug, Clone)]
+pub enum InferenceMarketsRequest {
+    One { orderbook_address: String },
+    Listing(InferenceMarketsListing),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -478,6 +505,43 @@ impl<T: ?Sized + MarketReadRepository> MarketReadRepository for Arc<T> {
 
     async fn list_oracles(&self, request: &OraclesRequest) -> Result<OraclesPage, anyhow::Error> {
         (**self).list_oracles(request).await
+    }
+}
+
+#[async_trait]
+pub trait InferenceReadRepository: Send + Sync {
+    /// List visible inference markets (or one by `orderbook_address`).
+    /// Misses on the single-market path collapse to
+    /// `DomainError::InvalidMarketOrSymbol`.
+    async fn list_inference_markets(
+        &self,
+        request: &InferenceMarketsRequest,
+    ) -> Result<InferenceMarketsPage, anyhow::Error>;
+
+    /// Resting bids/asks for one book. Unknown / unreconciled address →
+    /// `InvalidMarketOrSymbol`; corrupt read-model data → `MarketInconsistent`.
+    async fn get_inference_depth(
+        &self,
+        orderbook_address: &str,
+        limit: u16,
+    ) -> Result<InferenceDepthSnapshot, anyhow::Error>;
+}
+
+#[async_trait]
+impl<T: ?Sized + InferenceReadRepository> InferenceReadRepository for Arc<T> {
+    async fn list_inference_markets(
+        &self,
+        request: &InferenceMarketsRequest,
+    ) -> Result<InferenceMarketsPage, anyhow::Error> {
+        (**self).list_inference_markets(request).await
+    }
+
+    async fn get_inference_depth(
+        &self,
+        orderbook_address: &str,
+        limit: u16,
+    ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
+        (**self).get_inference_depth(orderbook_address, limit).await
     }
 }
 
@@ -859,6 +923,56 @@ where
 {
     pub async fn execute(&self, query: GetDepthQuery) -> Result<DepthSnapshot, anyhow::Error> {
         self.repo.get_depth(&query.market_address, &query.symbol, query.limit).await
+    }
+}
+
+pub struct GetInferenceMarketsUseCase<R> {
+    repo: R,
+}
+
+impl<R> GetInferenceMarketsUseCase<R> {
+    pub fn new(repo: R) -> Self {
+        Self { repo }
+    }
+}
+
+impl<R> GetInferenceMarketsUseCase<R>
+where
+    R: InferenceReadRepository,
+{
+    pub async fn execute(
+        &self,
+        request: InferenceMarketsRequest,
+    ) -> Result<InferenceMarketsPage, anyhow::Error> {
+        self.repo.list_inference_markets(&request).await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GetInferenceDepthQuery {
+    pub orderbook_address: String,
+    pub limit: u16,
+}
+
+pub struct GetInferenceDepthUseCase<R> {
+    repo: R,
+}
+
+impl<R> GetInferenceDepthUseCase<R> {
+    pub fn new(repo: R) -> Self {
+        Self { repo }
+    }
+}
+
+impl<R> GetInferenceDepthUseCase<R>
+where
+    R: InferenceReadRepository,
+{
+    pub async fn execute(
+        &self,
+        query: GetInferenceDepthQuery,
+    ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
+        self.repo.get_inference_depth(&query.orderbook_address, query.limit).await
     }
 }
 
@@ -6717,5 +6831,73 @@ mod buy_full_set_use_case_tests {
         let uc = BuyFullSetUseCase::new(repo, usdc_refs(), sender);
         let err = uc.execute(input("10")).await.unwrap_err();
         assert_eq!(err, DomainError::OrderPnBusy);
+    }
+}
+
+#[cfg(test)]
+mod inference_usecase_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use dodex_domain::InferenceDepthSnapshot;
+    use dodex_domain::InferenceMarketsPage;
+
+    use super::GetInferenceDepthQuery;
+    use super::GetInferenceDepthUseCase;
+    use super::GetInferenceMarketsUseCase;
+    use super::InferenceMarketsRequest;
+    use super::InferenceReadRepository;
+
+    struct StubRepo;
+
+    #[async_trait]
+    impl InferenceReadRepository for StubRepo {
+        async fn list_inference_markets(
+            &self,
+            request: &InferenceMarketsRequest,
+        ) -> Result<InferenceMarketsPage, anyhow::Error> {
+            // Echo back the request shape so the test can assert pass-through.
+            let next_cursor = match request {
+                InferenceMarketsRequest::One { orderbook_address } => {
+                    Some(orderbook_address.clone())
+                }
+                InferenceMarketsRequest::Listing(_) => None,
+            };
+            Ok(InferenceMarketsPage { markets: vec![], next_cursor, has_more: false })
+        }
+
+        async fn get_inference_depth(
+            &self,
+            orderbook_address: &str,
+            limit: u16,
+        ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
+            Ok(InferenceDepthSnapshot {
+                orderbook_address: orderbook_address.to_string(),
+                last_update_id: limit.to_string(),
+                bids: vec![],
+                asks: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn markets_use_case_passes_request_through() {
+        let uc = GetInferenceMarketsUseCase::new(Arc::new(StubRepo));
+        let page = uc
+            .execute(InferenceMarketsRequest::One { orderbook_address: "0:ob".into() })
+            .await
+            .unwrap();
+        assert_eq!(page.next_cursor.as_deref(), Some("0:ob"));
+    }
+
+    #[tokio::test]
+    async fn depth_use_case_passes_args_through() {
+        let uc = GetInferenceDepthUseCase::new(Arc::new(StubRepo));
+        let snap = uc
+            .execute(GetInferenceDepthQuery { orderbook_address: "0:ob".into(), limit: 7 })
+            .await
+            .unwrap();
+        assert_eq!(snap.orderbook_address, "0:ob");
+        assert_eq!(snap.last_update_id, "7");
     }
 }
