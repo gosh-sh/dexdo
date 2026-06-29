@@ -40,6 +40,7 @@ pub async fn project_inference_event(
         "SubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
         "OrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
         "Filled" => apply_inference_filled(tx, event, node).await,
+        "InferenceOrderBookDeployed" => apply_inference_orderbook_deployed(tx, event, node).await,
         "Executed" | "Refunded" | "CycleForfeited" | "ForfeitClaimed" => {
             Ok(ProjectionOutcome::Applied)
         }
@@ -410,6 +411,92 @@ pub async fn repair_expired_inference_orphan(
         ),
     }
     Ok(outcome)
+}
+
+async fn apply_inference_orderbook_deployed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let ob = node.src.as_deref().context("InferenceOrderBookDeployed: src missing")?;
+    let model_hash = uint_field_to_decimal(&event.value, "modelHash")?;
+    let model_name = field_str(&event.value, "modelName").unwrap_or("");
+    let (model_ref, producer, name, version) = parse_model_ref(model_name);
+
+    // The skeleton pre-step guarantees the row exists. `coalesce(model_hash, ...)`
+    // so this and the reconciler's getParams write agree on the same on-chain
+    // value without clobbering.
+    sqlx::query(
+        r#"update inference_markets
+              set model_hash = coalesce(model_hash, $2::numeric),
+                  model_ref = $3, producer = $4, model_name = $5, version = $6,
+                  updated_at = now()
+            where orderbook_address = $1"#,
+    )
+    .bind(ob)
+    .bind(&model_hash)
+    .bind(model_ref)
+    .bind(producer)
+    .bind(name)
+    .bind(version)
+    .execute(&mut **tx)
+    .await
+    .context("update inference_markets identity")?;
+    Ok(ProjectionOutcome::Applied)
+}
+
+/// Map the on-chain `modelName` to (ref, producer, name, version). Empty →
+/// all `None` (API falls back to `model_hash`). Splits on `"--"`: exactly three
+/// non-empty parts fill producer/name/version; otherwise only `ref` is set.
+pub(crate) fn parse_model_ref(
+    model_name: &str,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let trimmed = model_name.trim();
+    if trimmed.is_empty() {
+        return (None, None, None, None);
+    }
+    let model_ref = Some(trimmed.to_string());
+    let parts: Vec<&str> = trimmed.split("--").collect();
+    if parts.len() == 3 && parts.iter().all(|p| !p.is_empty()) {
+        (
+            model_ref,
+            Some(parts[0].to_string()),
+            Some(parts[1].to_string()),
+            Some(parts[2].to_string()),
+        )
+    } else {
+        (model_ref, None, None, None)
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::parse_model_ref;
+
+    #[test]
+    fn three_parts_fill_all() {
+        let (r, p, n, v) = parse_model_ref("qwen--qwen2.5-32b--instruct");
+        assert_eq!(r.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
+        assert_eq!(p.as_deref(), Some("qwen"));
+        assert_eq!(n.as_deref(), Some("qwen2.5-32b"));
+        assert_eq!(v.as_deref(), Some("instruct"));
+    }
+
+    #[test]
+    fn non_three_parts_keep_only_ref() {
+        let (r, p, n, v) = parse_model_ref("just-a-name");
+        assert_eq!(r.as_deref(), Some("just-a-name"));
+        assert!(p.is_none() && n.is_none() && v.is_none());
+
+        let (r2, ..) = parse_model_ref("a--b"); // 2 parts
+        assert_eq!(r2.as_deref(), Some("a--b"));
+    }
+
+    #[test]
+    fn empty_yields_all_none() {
+        let (r, p, n, v) = parse_model_ref("   ");
+        assert!(r.is_none() && p.is_none() && n.is_none() && v.is_none());
+    }
 }
 
 async fn apply_inference_order_cancelled(

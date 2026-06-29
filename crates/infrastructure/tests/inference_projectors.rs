@@ -771,3 +771,126 @@ async fn filled_after_real_cancel_is_terminal_no_override() {
     // The live counter-party (order 41, SELL) DID fill — that is correct, not part of the guard.
     assert_eq!(status_rem(&pool, ob, 41).await, ("FILLED".into(), "0".into()));
 }
+
+async fn purge_market(pool: &PgPool, ob: &str) {
+    sqlx::query("delete from inference_orders where orderbook_address = $1")
+        .bind(ob)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address = $1")
+        .bind(ob)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn identity(
+    pool: &PgPool,
+    ob: &str,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) {
+    sqlx::query_as(
+        "select model_hash::text, model_ref, producer, model_name, version \
+         from inference_markets where orderbook_address = $1",
+    )
+    .bind(ob)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn deployed_fills_identity_three_part() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_deployed_3part";
+    purge_market(&pool, ob).await;
+    let mut tx = pool.begin().await.unwrap();
+    let e = ev(
+        "InferenceOrderBookDeployed",
+        serde_json::json!({"note":"0:n","modelHash":"42","modelName":"qwen--qwen2.5-32b--instruct"}),
+    );
+    assert_eq!(project(&mut tx, &e, &node(ob, "co-1")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+
+    let (mh, mref, producer, name, version) = identity(&pool, ob).await;
+    assert_eq!(mh.as_deref(), Some("42"));
+    assert_eq!(mref.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
+    assert_eq!(producer.as_deref(), Some("qwen"));
+    assert_eq!(name.as_deref(), Some("qwen2.5-32b"));
+    assert_eq!(version.as_deref(), Some("instruct"));
+
+    purge_market(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn deployed_non_three_part_keeps_only_ref() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_deployed_freeform";
+    purge_market(&pool, ob).await;
+    let mut tx = pool.begin().await.unwrap();
+    let e = ev(
+        "InferenceOrderBookDeployed",
+        serde_json::json!({"note":"0:n","modelHash":"7","modelName":"freeform name"}),
+    );
+    project(&mut tx, &e, &node(ob, "co-1")).await;
+    tx.commit().await.unwrap();
+
+    let (mh, mref, producer, name, version) = identity(&pool, ob).await;
+    assert_eq!(mh.as_deref(), Some("7"));
+    assert_eq!(mref.as_deref(), Some("freeform name"));
+    assert!(producer.is_none() && name.is_none() && version.is_none());
+
+    purge_market(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn deployed_empty_name_leaves_ref_null() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_deployed_empty";
+    purge_market(&pool, ob).await;
+    let mut tx = pool.begin().await.unwrap();
+    let e = ev(
+        "InferenceOrderBookDeployed",
+        serde_json::json!({"note":"0:n","modelHash":"9","modelName":""}),
+    );
+    project(&mut tx, &e, &node(ob, "co-1")).await;
+    tx.commit().await.unwrap();
+
+    let (mh, mref, ..) = identity(&pool, ob).await;
+    assert_eq!(mh.as_deref(), Some("9"));
+    assert!(mref.is_none());
+
+    purge_market(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn deployed_after_order_placed_upserts_identity() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_deployed_after_order";
+    purge_market(&pool, ob).await;
+
+    // First an OrderPlaced (seeds skeleton, model_hash stays NULL).
+    let mut tx = pool.begin().await.unwrap();
+    let placed = ev(
+        "OrderPlaced",
+        serde_json::json!({"orderId":"1","isBuy":true,"price":"100","ticks":"10","note":"0:n","tokenContract":"0:tc","deadline":"0"}),
+    );
+    project(&mut tx, &placed, &node(ob, "co-1")).await;
+    tx.commit().await.unwrap();
+
+    // Then the deploy event fills identity on the existing row.
+    let mut tx = pool.begin().await.unwrap();
+    let deployed = ev(
+        "InferenceOrderBookDeployed",
+        serde_json::json!({"note":"0:n","modelHash":"5","modelName":"a--b--c"}),
+    );
+    assert_eq!(project(&mut tx, &deployed, &node(ob, "co-2")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+
+    let (mh, mref, producer, ..) = identity(&pool, ob).await;
+    assert_eq!(mh.as_deref(), Some("5"));
+    assert_eq!(mref.as_deref(), Some("a--b--c"));
+    assert_eq!(producer.as_deref(), Some("a"));
+
+    purge_market(&pool, ob).await;
+}
