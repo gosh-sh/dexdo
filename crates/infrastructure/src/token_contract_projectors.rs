@@ -41,11 +41,12 @@ pub async fn project_token_contract_event(
         "StreamStopped" => apply_close(tx, node, "STOPPED", true).await,
         "DisputeResolved" => apply_close(tx, node, "DISPUTE_RESOLVED", false).await,
         "StreamReclaimed" => apply_close(tx, node, "RECLAIMED", false).await,
-        "ContractDestroyed" => apply_destroyed(tx, node).await,
+        "ContractDestroyed" => apply_terminal_close(tx, node, "DESTROYED").await,
         "StreamDisputed" => apply_disputed(tx, node).await,
-        // Probe-tick + withdrawal events carry no deal-level state the SETTLEMENT
-        // read-model needs; the skeleton seed already recorded the deal.
-        "ProbeCommissionFunded" | "ProbeAccepted" | "ProbeBurned" | "ShellWithdrawn" => {
+        "ProbeBurned" => apply_terminal_close(tx, node, "PROBE_BURNED").await,
+        // Probe commission / accept / withdrawal carry no deal-level state the
+        // SETTLEMENT read-model needs; the skeleton seed already recorded the deal.
+        "ProbeCommissionFunded" | "ProbeAccepted" | "ShellWithdrawn" => {
             Ok(ProjectionOutcome::Applied)
         }
         _ => Ok(ProjectionOutcome::Unknown),
@@ -212,23 +213,29 @@ async fn apply_disputed(
     Ok(ProjectionOutcome::Applied)
 }
 
-async fn apply_destroyed(
+/// Terminal close that records `close_kind` + `settled_at_chain` but does NOT
+/// set `clean_settlement` (it stays NULL/false — not a clean settlement). Used
+/// by `ContractDestroyed` and `ProbeBurned`, both of which terminate the deal
+/// without a clean stop.
+async fn apply_terminal_close(
     tx: &mut Transaction<'_, Postgres>,
     node: &EventNode,
+    close_kind: &str,
 ) -> anyhow::Result<ProjectionOutcome> {
-    let tc = node.src.as_deref().context("ContractDestroyed: src missing")?;
+    let tc = node.src.as_deref().context("terminal close: src missing")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     sqlx::query(
         r#"update inference_deals
               set settled_at_chain = coalesce(settled_at_chain, to_timestamp($2::double precision)),
-                  close_kind = coalesce(close_kind, 'DESTROYED'),
+                  close_kind = coalesce(close_kind, $3),
                   updated_at = now()
             where token_contract_address = $1"#,
     )
     .bind(tc)
     .bind(chain_seconds)
+    .bind(close_kind)
     .execute(&mut **tx)
     .await
-    .context("apply ContractDestroyed")?;
+    .context("apply terminal close")?;
     Ok(ProjectionOutcome::Applied)
 }

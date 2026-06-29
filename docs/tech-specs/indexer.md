@@ -223,7 +223,8 @@ The projector seeds a skeleton `inference_deals` row on the **first** `TokenCont
 | `StreamReclaimed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'RECLAIMED'`, `clean_settlement = false` (first-write-wins). |
 | `StreamDisputed` | Sets `disputed_at_chain` (first-write-wins), `clean_settlement = false`. |
 | `ContractDestroyed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'DESTROYED'`. |
-| `ProbeCommissionFunded` / `ProbeAccepted` / `ProbeBurned` / `ShellWithdrawn` | No-op beyond skeleton seed — these carry no deal-level state the SETTLEMENT read-model needs. |
+| `ProbeBurned` | Terminal close (buyer stop before probe-accept, or dispute-burn): sets `close_kind = 'PROBE_BURNED'` + `settled_at_chain` (first-write-wins). Does NOT set `clean_settlement` (stays NULL → not a clean settlement, no settlement-complete reward). |
+| `ProbeCommissionFunded` / `ProbeAccepted` / `ShellWithdrawn` | No-op beyond skeleton seed — these carry no deal-level state the SETTLEMENT read-model needs. |
 
 The projector never returns `Deferred`; the skeleton seed ensures the row always exists before the event-specific handler runs. All close columns use `coalesce(existing, new)` first-write-wins so late or replayed close events cannot overwrite an already-settled row.
 

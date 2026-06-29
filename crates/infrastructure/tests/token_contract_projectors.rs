@@ -499,6 +499,29 @@ async fn token_contract_event_seeds_skeleton_then_filled_enriches() {
 }
 
 #[tokio::test]
+async fn probe_burned_is_terminal_close() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_probe_burned";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc).execute(&pool).await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let ev_pb = ev(
+        "ProbeBurned",
+        serde_json::json!({"buyer":"0:b","burnedProbe":"10","burnedCommission":"5","refundToBuyer":"85"}),
+    );
+    assert_eq!(project(&mut tx, &ev_pb, &node(tc, "co-1")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+
+    let (kind, settled, clean): (Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<bool>) =
+        sqlx::query_as("select close_kind, settled_at_chain, clean_settlement from inference_deals where token_contract_address=$1")
+        .bind(tc).fetch_one(&pool).await.unwrap();
+    assert_eq!(kind.as_deref(), Some("PROBE_BURNED"));
+    assert!(settled.is_some(), "probe-burn is terminal: settled_at_chain must be set");
+    assert!(clean.is_none(), "probe-burn is not a clean settlement: clean_settlement stays NULL");
+}
+
+#[tokio::test]
 async fn unknown_token_contract_event_returns_unknown() {
     let Some(pool) = setup().await else { return };
     let tc = "0:tc_unknown_event";
