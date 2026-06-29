@@ -30,6 +30,7 @@ flowchart LR
     projectors --> markets[markets]
     projectors --> orders[live_orders]
     projectors --> inf_orders[inference_orders]
+    projectors --> inf_deals[inference_deals / inference_ticks]
 
     chain_state[GraphQL account BOC lookup] --> market_reconciler[Market reconciler]
     chain_state --> oel_reconciler[OracleEventList reconciler]
@@ -225,6 +226,8 @@ The projector seeds a skeleton `inference_deals` row on the **first** `TokenCont
 | `ProbeCommissionFunded` / `ProbeAccepted` / `ProbeBurned` / `ShellWithdrawn` | No-op beyond skeleton seed — these carry no deal-level state the SETTLEMENT read-model needs. |
 
 The projector never returns `Deferred`; the skeleton seed ensures the row always exists before the event-specific handler runs. All close columns use `coalesce(existing, new)` first-write-wins so late or replayed close events cannot overwrite an already-settled row.
+
+**Read-model contract for the rewards service.** Given a deal's `TokenContract` address, a single query — `SELECT orderbook_address, seller_note, buyer_note, finalized_ticks, clean_settlement, settled_at_chain FROM inference_deals WHERE token_contract_address = $1` — resolves the originating order book, both parties, and the tick/settlement outcome without replaying raw events. `inference_ticks` provides per-tick granularity (one row per finalized tick) for tick-level scoring such as "Tick выдан / Tick потрачен".
 
 ## Reconciliation
 
