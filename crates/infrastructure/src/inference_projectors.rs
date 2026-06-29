@@ -43,10 +43,7 @@ pub async fn project_inference_event(
         "Executed" | "Refunded" | "CycleForfeited" | "ForfeitClaimed" => {
             Ok(ProjectionOutcome::Applied)
         }
-        other => {
-            warn!(event_type = %event.event_type, other, "unknown InferenceOrderBook event; seeded only");
-            Ok(ProjectionOutcome::Applied)
-        }
+        _ => Ok(ProjectionOutcome::Unknown),
     }
 }
 
@@ -342,12 +339,22 @@ async fn apply_filled_decrement(
 /// (`sellerTC`) ↔ its market (`orderbook_address`), seller note (the SELL leg,
 /// `is_buy=false`), and buyer note (`buyerNote`). Upserts so the row survives
 /// whether the deal was first seen here or via an earlier TokenContract.* event.
-/// No-op when the event omits `sellerTC` (e.g. an orphan-repair replay).
+/// On a well-formed `Filled`, `sellerTC` is always present; its absence signals
+/// ABI drift (logged as a warning). The caller continues with `Ok(())` regardless
+/// because `apply_filled_decrement` has already mutated rows in this transaction —
+/// propagating an error would roll back the decrement and wedge projection.
 async fn link_deal_from_filled(
     tx: &mut Transaction<'_, Postgres>,
     f: &FilledFields,
 ) -> anyhow::Result<()> {
-    let Some(seller_tc) = f.seller_tc.as_deref() else { return Ok(()) };
+    let Some(seller_tc) = f.seller_tc.as_deref() else {
+        warn!(
+            orderbook_address = %f.ob,
+            chain_order = %f.chain_order,
+            "Filled event missing mandatory sellerTC field; inference_deals orderbook/seller link skipped — possible ABI drift"
+        );
+        return Ok(());
+    };
 
     // Seller = the note on the SELL leg (is_buy=false) of this match.
     let seller_note: Option<String> = sqlx::query_scalar(

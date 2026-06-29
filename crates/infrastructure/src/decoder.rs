@@ -408,7 +408,7 @@ mod tests {
             assert_eq!(
                 entries.len(),
                 1,
-                "TokenContract.{name} signature id collides with another ABI: {entries:?} — add a dst route via event_type_dst(<700s id from token_contract_events.rs>)"
+                "TokenContract.{name} signature id collides with another ABI: {entries:?} — add a dst route via event_type_dst(the event's `TokenContractEvent` discriminant in token_contract_events.rs)"
             );
             assert_eq!(entries[0].0, "TokenContract", "{name} resolves to the wrong contract");
         }

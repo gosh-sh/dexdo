@@ -12,7 +12,6 @@
 use anyhow::Context;
 use sqlx::Postgres;
 use sqlx::Transaction;
-use tracing::warn;
 
 use crate::decoder::DecodedEvent;
 use crate::graphql::EventNode;
@@ -49,10 +48,7 @@ pub async fn project_token_contract_event(
         "ProbeCommissionFunded" | "ProbeAccepted" | "ProbeBurned" | "ShellWithdrawn" => {
             Ok(ProjectionOutcome::Applied)
         }
-        other => {
-            warn!(event_type = %event.event_type, other, "unknown TokenContract event; seeded only");
-            Ok(ProjectionOutcome::Applied)
-        }
+        _ => Ok(ProjectionOutcome::Unknown),
     }
 }
 
@@ -85,7 +81,7 @@ async fn apply_stream_funded(
     sqlx::query(
         r#"update inference_deals
               set buyer_note = coalesce(buyer_note, $2),
-                  deposit = $3::numeric,
+                  deposit = coalesce(deposit, $3::numeric),
                   funded_at_chain = coalesce(funded_at_chain, to_timestamp($4::double precision)),
                   updated_at = now()
             where token_contract_address = $1"#,
@@ -112,7 +108,7 @@ async fn apply_stream_opened(
     sqlx::query(
         r#"update inference_deals
               set buyer_note = coalesce(buyer_note, $2),
-                  price_per_tick = $3::numeric,
+                  price_per_tick = coalesce(price_per_tick, $3::numeric),
                   opened_at_chain = coalesce(opened_at_chain, to_timestamp($4::double precision)),
                   updated_at = now()
             where token_contract_address = $1"#,
