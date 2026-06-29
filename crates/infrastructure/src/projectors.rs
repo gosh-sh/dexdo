@@ -71,6 +71,11 @@ pub async fn project_event(
         | "OrderBook.Queued"
         | "OrderBook.Rejected"
         | "OrderBook.CallbackBounced" => Ok(ProjectionOutcome::Applied),
+        et if et.starts_with("TokenContract.") => {
+            crate::token_contract_projectors::project_token_contract_event(tx, event, node)
+                .await
+                .with_context(|| format!("project {}", et))
+        }
         et if et.starts_with("InferenceOrderBook.") => {
             crate::inference_projectors::project_inference_event(tx, event, node)
                 .await

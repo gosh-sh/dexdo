@@ -205,6 +205,27 @@ The inference reconciler closes this gap: it sweeps the book's `OPEN` rows with 
 
 > **Recommended contract-side follow-up.** Add `flags` to `OrderPlaced` (so a taker-only order is never recorded as resting), an `orderId` to `Refunded`, or an explicit `OrderClosed(orderId)` event. Any one removes the getter sweep and makes depth event-exact — the analogue of the [`REJECTED` follow-up](read-api.md#rejected-status) on the prediction-market side. Tracked as an open item because it touches `InferenceOrderBook` (and re-pins the note↔book code hash).
 
+## Projection — TokenContract SETTLEMENT events
+
+`TokenContract.*` events drive [`inference_deals`](data-schema.md#inference_deals) and [`inference_ticks`](data-schema.md#inference_ticks) — the per-deal read model for the inference SETTLEMENT phase. A `TokenContract` is deployed per matched SELL offer; its address is the PK for `inference_deals`.
+
+The projector seeds a skeleton `inference_deals` row on the **first** `TokenContract.*` event it sees for a given address (keyed by `src_address = event.src`), so out-of-order or early delivery still records the deal. The `orderbook_address` and `seller_note` link is filled by the `InferenceOrderBook.Filled` handler (the only event carrying `sellerTC` + `buyerNote` together); the SETTLEMENT projector does not touch those columns.
+
+| Event | Effect |
+| --- | --- |
+| `ContractDeployed` | Seeds the `inference_deals` skeleton only; no additional columns. |
+| `StreamFunded` | Sets `buyer_note` (first-write-wins), `deposit`, `funded_at_chain` (first-write-wins). |
+| `StreamOpened` | Sets `buyer_note` (first-write-wins), `price_per_tick`, `opened_at_chain` (first-write-wins). |
+| `TickFinalized` | Inserts one `inference_ticks` row keyed by `(token_contract_address, chain_order)` — idempotent on replay via `ON CONFLICT DO NOTHING`. Increments `finalized_ticks` and `finalized_owed_total` on `inference_deals` **only** when the `inference_ticks` insert was a real insert (rows affected = 1), preventing double-counting under replay. |
+| `StreamStopped` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'STOPPED'`, `clean_settlement = true` (first-write-wins). |
+| `DisputeResolved` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'DISPUTE_RESOLVED'`, `clean_settlement = false` (first-write-wins). |
+| `StreamReclaimed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'RECLAIMED'`, `clean_settlement = false` (first-write-wins). |
+| `StreamDisputed` | Sets `disputed_at_chain` (first-write-wins), `clean_settlement = false`. |
+| `ContractDestroyed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'DESTROYED'`. |
+| `ProbeCommissionFunded` / `ProbeAccepted` / `ProbeBurned` / `ShellWithdrawn` | No-op beyond skeleton seed — these carry no deal-level state the SETTLEMENT read-model needs. |
+
+The projector never returns `Deferred`; the skeleton seed ensures the row always exists before the event-specific handler runs. All close columns use `coalesce(existing, new)` first-write-wins so late or replayed close events cannot overwrite an already-settled row.
+
 ## Reconciliation
 
 Three reconcilers (market, OracleEventList, inference) fill metadata that the event stream alone does not carry. All run on a fixed cadence (configured under `indexer:` in `config/indexer.<env>.yaml`) and share a failure-backoff pattern (`last_reconcile_failed_at`, `reconcile_attempts` on the parent row) so a permanently broken contract cannot starve the queue. The inference reconciler additionally exposes three cadence knobs (`inference_reference_price_refresh_ms`, `inference_sweep_interval_ms`, `inference_orphan_cutoff_ms`) beyond its base interval; see [Inference reconciler](#inference-reconciler) for the full table.
