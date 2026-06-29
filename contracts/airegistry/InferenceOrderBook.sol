@@ -7,6 +7,13 @@ import "./interfaces.sol";
 // Deploy guard only: the real PrivateNote type gives the stateInit data layout so
 // we can recompute a note's address from its pinned CODE HASH.
 import "../dex/PrivateNote.sol";
+// Sell-offer guard: the TokenContract type gives the stateInit data layout so we can
+// recompute a deal contract's address from its pinned CODE HASH (placeSellOffer).
+import "./TokenContract.sol";
+// Sell-offer guard (cont.): the RootModel type gives the stateInit data layout so we can
+// recompute the seller's RootModel address (the TC's `_rootModelAddress`) from its pinned
+// CODE HASH + the canonical SuperRoot — see `_rootModelAddr` / `_tokenContractAddr`.
+import "./RootModel.sol";
 
 /// @notice Handover: the matched seller's `token_contract` receives the deal's
 ///         SHELL and binds the buyer note (spec §2.3).
@@ -38,13 +45,38 @@ interface IWeeklyMedianSink {
 ///         quote/base + collateral, event-resolution shutdown, and PN callbacks
 ///         (inference order entry is fire-and-forget; the note tracks via getters).
 contract InferenceOrderBook is AiRegistryModifiers {
-    string constant version = "4.0.3";
+    string constant version = "4.0.10";
 
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x2ec623bd486262595af6f9a1e14694f7c5f0778e8cf7c2338ca25d2cbed56161;
-    uint16  constant NOTE_CODE_DEPTH = 19;
+    uint256 constant NOTE_CODE_HASH  = 0x18fd4b046bb8679fb92abd5262555232071c71003ad05af9a0c61f1c21822217;
+    uint16  constant NOTE_CODE_DEPTH = 18;
+
+    // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
+    // the sell offer's `tokenContract` derives from this pinned code + the seller's
+    // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
+    // contract that forwards SHELL on a fill, so the check must live HERE, not only in
+    // the note: placeSellOffer is public and a direct call would bypass a note check).
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xefa8df3f7e10a66678bbe194ff001252885114d28e907b9e512f47d5e67a3d65;
+    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
+
+    // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
+    // (its `_rootModelAddress` static is the seller's RootModel, NOT address(0)). To verify a
+    // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
+    // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
+    // Re-pin whenever airegistry/RootModel is recompiled.
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0x573211b372bb2a58349cc8d7ea3b93498bbb1ef5e02ef626a25146b3541cfb85;
+    uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
+
+    // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its
+    // `_superRootAddress` static, so it is the anchor for the RootModel-address derivation. Must
+    // match the live SuperRoot the sellers' RootModels were deployed under; re-pin if the SuperRoot
+    // is redeployed at a different address.
+    // SHELLNET build: code-derived (NOT fixed) = stateInitHash(SuperRoot code, owner d6e958fe). The
+    // version / RootModel change rotates the SuperRoot code → re-pin + redeploy at the new address.
+    // (LOCAL/MAINNET would instead FIX it at the vanity 0:0c0c… genesis — see dexdo-specs/shellnet-update.md.)
+    uint256 constant SUPER_ROOT_ADDR = 0x312d7665b9e262a2e5b2e77953912abf69c89f652562cc11ca97778a74c329cf;
 
     // Local errors (NOT in shared AiRegistryErrors — avoids rippling RootModel/TC/SuperRoot pins).
     uint16 constant ERR_NOT_DEPLOYER_NOTE = 333;
@@ -56,6 +88,9 @@ contract InferenceOrderBook is AiRegistryModifiers {
     uint16 constant ERR_NOTHING_TO_CLAIM  = 339;
     uint16 constant ERR_QUEUE_FULL        = 340;
     uint16 constant ERR_NOT_SELF          = 341;
+    uint16 constant ERR_BAD_TOKEN_CONTRACT = 342;
+    uint16 constant ERR_NAME_TOO_LONG      = 343;
+    uint16 constant ERR_BAD_MODEL_NAME     = 344;
 
     // Order-type flags (spec §8 / dex parity).
     uint8 constant FLAG_IOC       = 0x01;
@@ -87,6 +122,11 @@ contract InferenceOrderBook is AiRegistryModifiers {
 
     // Static — address derivation: one book per model.
     uint256 static _modelHash;
+
+    // On-chain authoritative model id `producer--model--version`: the ctor requires
+    // `sha256(_modelName) == _modelHash`, so this string is the genuine preimage of the
+    // address-defining hash (split on `--` for the three fields). Capped at one cell (<=127 B).
+    string _modelName;
 
     // ── Order book ──
     struct Order {
@@ -165,14 +205,17 @@ contract InferenceOrderBook is AiRegistryModifiers {
 
     address _deployerNote;
 
-    event OrderPlaced(uint128 orderId, bool isBuy, uint256 price, uint128 ticks, address note, address tokenContract, uint64 deadline);
-    event OrderCancelled(uint128 orderId, uint128 refundedShell);
-    event Filled(uint128 makerId, uint128 takerId, uint128 ticks, uint256 clearingPrice, address sellerTC, address buyerNote);
-    event Executed(uint128 ticks, uint256 clearingPrice, uint128 cost);
-    event Refunded(address note, uint128 amount);
-    event SubscriptionPlaced(uint128 orderId, address buyerNote, uint128 maxPrice, uint128 ticks, uint128 cycleBudget, bool autoRenew);
-    event CycleForfeited(uint128 orderId, uint8 cycle, uint128 forfeited, uint128 fundedTicks);
-    event ForfeitClaimed(uint128 orderId, uint8 cycle, address sellerNote, uint128 amount);
+    event InferenceOrderPlaced(uint128 orderId, bool isBuy, uint256 price, uint128 ticks, address note, address tokenContract, uint64 deadline);
+    event InferenceOrderCancelled(uint128 orderId, uint128 refunded, address note);
+    event InferenceFilled(uint128 makerId, uint128 takerId, uint128 ticks, uint256 clearingPrice, address sellerTC, address buyerNote, address sellerNote);
+    event InferenceExecuted(uint128 ticks, uint256 clearingPrice, uint128 cost);
+    event InferenceRefunded(address note, uint128 amount);
+    event InferenceSubscriptionPlaced(uint128 orderId, address buyerNote, uint128 maxPrice, uint128 ticks, uint128 cycleBudget, bool autoRenew);
+    event InferenceCycleForfeited(uint128 orderId, uint8 cycle, uint128 forfeited, uint128 fundedTicks);
+    event InferenceForfeitClaimed(uint128 orderId, uint8 cycle, address sellerNote, uint128 amount);
+    /// @notice Emitted once at book deploy — lets an indexer map `modelHash` → the verified model name
+    ///         (and which note opened the market). `modelName` is the genuine sha256 preimage.
+    event InferenceOrderBookDeployed(address note, uint256 modelHash, string modelName);
 
     // ========================================================
     // Deploy guard (spec §2/§8)
@@ -192,10 +235,59 @@ contract InferenceOrderBook is AiRegistryModifiers {
             0, abi.stateInitHash(NOTE_CODE_HASH, tvm.hash(dataCell), NOTE_CODE_DEPTH, dataCell.depth()));
     }
 
-    constructor(uint256 depositHash) {
+    /// @notice Deterministic RootModel address for `ownerPubkey` from its pinned code hash/depth +
+    ///         the canonical SuperRoot. Mirrors `SuperRoot._calculateRootModelAddress` (varInit
+    ///         `{_ownerPubkey, _superRootAddress}`, tvm pubkey = ownerPubkey). The seller's RootModel
+    ///         owner pubkey IS the seller pubkey (one RootModel per seller key).
+    function _rootModelAddr(uint256 ownerPubkey) private returns (address) {
+        TvmCell dummyCode;
+        TvmCell si = abi.encodeStateInit({
+            code: dummyCode, contr: RootModel, pubkey: ownerPubkey,
+            varInit: {
+                _ownerPubkey: ownerPubkey,
+                _superRootAddress: address.makeAddrStd(0, SUPER_ROOT_ADDR)
+            }
+        });
+        TvmSlice s = si.toSlice();
+        s.skip(5);
+        s.loadRef();
+        TvmCell dataCell = s.loadRef();
+        return address.makeAddrStd(
+            0, abi.stateInitHash(ROOT_MODEL_CODE_HASH, tvm.hash(dataCell), ROOT_MODEL_CODE_DEPTH, dataCell.depth()));
+    }
+
+    /// @notice Deterministic inference TokenContract address from its pinned code hash/depth + the
+    ///         seller's statics. `_rootModelAddress` is the seller's REAL RootModel (derived via
+    ///         `_rootModelAddr`), matching `RootModel._calculateTokenContractAddress` and the
+    ///         on-chain deploy — NOT address(0). A fake/foreign deal contract can't pass the
+    ///         placeSellOffer check, so a fill never routes the buyer's SHELL off a canonical TC.
+    function _tokenContractAddr(uint256 sellerPubkey, uint64 nonce) private returns (address) {
+        address rootModel = _rootModelAddr(sellerPubkey);
+        TvmCell dummyCode;
+        TvmCell si = abi.encodeStateInit({
+            code: dummyCode, contr: TokenContract, pubkey: sellerPubkey,
+            varInit: { _sellerPubkey: sellerPubkey, _rootModelAddress: rootModel, _nonce: nonce }
+        });
+        TvmSlice s = si.toSlice();
+        s.skip(5);
+        s.loadRef();
+        TvmCell dataCell = s.loadRef();
+        return address.makeAddrStd(
+            0, abi.stateInitHash(TOKEN_CONTRACT_CODE_HASH, tvm.hash(dataCell), TOKEN_CONTRACT_CODE_DEPTH, dataCell.depth()));
+    }
+
+    constructor(uint256 depositHash, string modelName) {
         require(msg.sender == _noteAddrFromHash(depositHash), ERR_NOT_DEPLOYER_NOTE);
+        // On-chain authoritative model name: it must be the preimage of the address-defining
+        // modelHash. `sha256`/SHA256U hashes a single cell, so the id must fit one (<=127 bytes) —
+        // a longer name would hash only its first cell and never match `_modelHash`.
+        require(modelName.byteLength() <= 127, ERR_NAME_TOO_LONG);
+        require(sha256(modelName) == _modelHash, ERR_BAD_MODEL_NAME);
         tvm.accept();
         _deployerNote = msg.sender;
+        _modelName = modelName;
+        emit InferenceOrderBookDeployed{dest: address.makeAddrExtern(InferenceOBDeployedEmit, bitCntAddress)}(
+            msg.sender, _modelHash, modelName);
         _nextOrderId = 1;
         ensureBalance();
     }
@@ -283,7 +375,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // Fill settlement (spec §2.3 → §3)
     // ========================================================
 
-    function _settleFill(uint128 makerId, uint128 takerId, address buyerNote, uint256 buyerPubkey, address sellerTC, uint128 trade, uint256 clearing) private returns (uint128) {
+    function _settleFill(uint128 makerId, uint128 takerId, address buyerNote, address sellerNote, uint256 buyerPubkey, address sellerTC, uint128 trade, uint256 clearing) private returns (uint128) {
         uint128 cost = uint128(uint256(trade) * _unit(clearing));
         mapping(uint32 => varuint32) ecc;
         ecc[SHELL_ECC_ID] = varuint32(cost);
@@ -294,8 +386,8 @@ contract InferenceOrderBook is AiRegistryModifiers {
         _executedTicks    += trade;
         _matchSeq += 1;
         _recordTrade(uint128(clearing), trade);
-        emit Filled{dest: address.makeAddrExtern(MatchedEmit, bitCntAddress)}(makerId, takerId, trade, clearing, sellerTC, buyerNote);
-        emit Executed{dest: address.makeAddrExtern(ExecutedEmit, bitCntAddress)}(trade, clearing, cost);
+        emit InferenceFilled{dest: address.makeAddrExtern(MatchedEmit, bitCntAddress)}(makerId, takerId, trade, clearing, sellerTC, buyerNote, sellerNote);
+        emit InferenceExecuted{dest: address.makeAddrExtern(ExecutedEmit, bitCntAddress)}(trade, clearing, cost);
         return cost;
     }
 
@@ -354,10 +446,11 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 uint128 trade = remaining < mk.amount ? remaining : mk.amount;
 
                 address buyerNote;
+                address sellerNote;
                 address sellerTC;
                 uint256 buyerPubkey;
-                if (takerIsBuy) { buyerNote = takerNote; buyerPubkey = takerBuyerPubkey; sellerTC = mk.tokenContract; }
-                else            { buyerNote = mk.note;   buyerPubkey = mk.buyerPubkey;   sellerTC = takerTC; }
+                if (takerIsBuy) { buyerNote = takerNote; sellerNote = mk.note;  buyerPubkey = takerBuyerPubkey; sellerTC = mk.tokenContract; }
+                else            { buyerNote = mk.note;   sellerNote = takerNote; buyerPubkey = mk.buyerPubkey;   sellerTC = takerTC; }
 
                 uint256 unit = _unit(clearing);
                 uint128 budget = takerIsBuy ? leftoverEscrow : mk.escrow;
@@ -376,7 +469,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                     continue;
                 }
 
-                uint128 cost = _settleFill(takerIsBuy ? cur : takerId, takerIsBuy ? takerId : cur, buyerNote, buyerPubkey, sellerTC, trade, clearing);
+                uint128 cost = _settleFill(takerIsBuy ? cur : takerId, takerIsBuy ? takerId : cur, buyerNote, sellerNote, buyerPubkey, sellerTC, trade, clearing);
 
                 if (takerIsBuy) { leftoverEscrow -= cost; } else { _orders[cur].escrow = mk.escrow - cost; }
 
@@ -412,7 +505,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         Order o = _orders[orderId];
         uint128 refund = o.escrow;
         _removeFromBook(orderId);
-        if (refund > 0) { _payShell(o.note, refund); emit Refunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(o.note, refund); }
+        if (refund > 0) { _payShell(o.note, refund); emit InferenceRefunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(o.note, refund); }
     }
 
     /// @notice Rest leftover (limit) or refund (taker-only / market) after a match completes.
@@ -423,7 +516,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         bool takerOnly = (flags & FLAG_MARKET) != 0 || (flags & (FLAG_IOC | FLAG_FOK)) != 0;
         if (isBuy) {
             if (remaining == 0 || takerOnly) {
-                if (leftover > 0) { _payShell(note, leftover); emit Refunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(note, leftover); }
+                if (leftover > 0) { _payShell(note, leftover); emit InferenceRefunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(note, leftover); }
                 return;
             }
             _insertIntoBook(orderId, Order({
@@ -531,7 +624,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         bool isMarket = (e.flags & FLAG_MARKET) != 0;
 
         if (firstRun) {
-            emit OrderPlaced{dest: address.makeAddrExtern(OfferPlacedEmit, bitCntAddress)}(
+            emit InferenceOrderPlaced{dest: address.makeAddrExtern(OfferPlacedEmit, bitCntAddress)}(
                 orderId, e.isBuy, e.price, e.amount, e.owner, e.tokenContract, e.deadline);
 
             // POST_ONLY: reject if it would cross.
@@ -575,7 +668,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         if (o.note != owner) { return; }
         uint128 refund = o.escrow;
         _removeFromBook(orderId);
-        emit OrderCancelled{dest: address.makeAddrExtern(OfferCancelledEmit, bitCntAddress)}(orderId, refund);
+        emit InferenceOrderCancelled{dest: address.makeAddrExtern(OfferCancelledEmit, bitCntAddress)}(orderId, refund, owner);
         _payShell(owner, refund);
     }
 
@@ -587,7 +680,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
             uint128 next = o.nextInOwner;
             uint128 refund = o.escrow;
             _removeFromBook(cur);
-            emit OrderCancelled{dest: address.makeAddrExtern(OfferCancelledEmit, bitCntAddress)}(cur, refund);
+            emit InferenceOrderCancelled{dest: address.makeAddrExtern(OfferCancelledEmit, bitCntAddress)}(cur, refund, owner);
             if (refund > 0) { _payShell(owner, refund); }
             cur = next;
             cancelled++;
@@ -598,13 +691,19 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // Public order entry (enqueue + drain)
     // ========================================================
 
-    function placeSellOffer(uint128 pricePerTick, uint128 maxTicks, address tokenContract, uint8 flags) public {
+    function placeSellOffer(uint128 pricePerTick, uint128 maxTicks, address tokenContract, uint8 flags, uint256 sellerPubkey, uint64 nonce) public {
         ensureBalance();
         require(maxTicks > 0, ERR_BAD_PARAM);
         require((flags & FLAG_POST_ONLY) == 0 || (flags & TAKER_FLAGS) == 0, ERR_BAD_FLAGS);
         require((flags & FLAG_IOC) == 0 || (flags & FLAG_FOK) == 0, ERR_BAD_FLAGS);
         bool isMarket = (flags & FLAG_MARKET) != 0;
         require(isMarket || pricePerTick > 0, ERR_BAD_PARAM);
+        // The deal contract MUST be a canonical TokenContract — else a fill forwards
+        // the BUYER's matched SHELL to a fake (no streaming/dispute/reclaim). Verified
+        // HERE because placeSellOffer is public: a direct call would bypass the seller
+        // note's own check. Derivation from the canonical code hash forces any caller
+        // (note or attacker) to point at a genuine TC for (sellerPubkey, nonce).
+        require(tokenContract == _tokenContractAddr(sellerPubkey, nonce), ERR_BAD_TOKEN_CONTRACT);
         tvm.accept();
         _enqueuePlace(msg.sender, 0, false, flags, isMarket ? 0 : pricePerTick, maxTicks, 0, tokenContract, 0);
         _processHeadCore();
@@ -676,7 +775,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
             periodStart: uint64(block.timestamp), curCycle: 0,
             cycleBudget: cycleBudget, cycleSpent: 0, autoRenew: autoRenew, exists: true
         });
-        emit SubscriptionPlaced{dest: address.makeAddrExtern(SubscriptionPlacedEmit, bitCntAddress)}(orderId, buyerNote, maxPricePerTick, ticks, cycleBudget, autoRenew);
+        emit InferenceSubscriptionPlaced{dest: address.makeAddrExtern(SubscriptionPlacedEmit, bitCntAddress)}(orderId, buyerNote, maxPricePerTick, ticks, cycleBudget, autoRenew);
     }
 
     function _subTouch(uint128 orderId) private {
@@ -689,7 +788,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 if (o.escrow < unspent) { unspent = o.escrow; }
                 _orders[orderId].escrow = o.escrow - unspent;
                 _forfeitPool[orderId][s.curCycle] += unspent;
-                emit CycleForfeited{dest: address.makeAddrExtern(CycleForfeitedEmit, bitCntAddress)}(orderId, s.curCycle, unspent, _cycleFundedTicks[orderId][s.curCycle]);
+                emit InferenceCycleForfeited{dest: address.makeAddrExtern(CycleForfeitedEmit, bitCntAddress)}(orderId, s.curCycle, unspent, _cycleFundedTicks[orderId][s.curCycle]);
             }
             s.cycleSpent = 0;
             s.curCycle += 1;
@@ -703,7 +802,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         uint128 refund = o.escrow;
         _removeFromBook(orderId);
         delete _subs[orderId];
-        if (refund > 0) { _payShell(o.note, refund); emit Refunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(o.note, refund); }
+        if (refund > 0) { _payShell(o.note, refund); emit InferenceRefunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(o.note, refund); }
     }
 
     function pokeSubscription(uint128 orderId) public {
@@ -726,7 +825,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         _forfeitPool[orderId][cycle]      = pool - share;
         _cycleFundedTicks[orderId][cycle] = total - mine;
         _payShell(seller, share);
-        emit ForfeitClaimed{dest: address.makeAddrExtern(ForfeitClaimedEmit, bitCntAddress)}(orderId, cycle, seller, share);
+        emit InferenceForfeitClaimed{dest: address.makeAddrExtern(ForfeitClaimedEmit, bitCntAddress)}(orderId, cycle, seller, share);
     }
 
     // ========================================================
@@ -815,6 +914,9 @@ contract InferenceOrderBook is AiRegistryModifiers {
     function getParams() external view returns (uint256 modelHash, uint16 platformFeeBps) {
         return (_modelHash, PLATFORM_FEE_BPS);
     }
+
+    /// @notice The verified canonical model id `producer--model--version` (sha256 == _modelHash).
+    function getModelName() external view returns (string) { return _modelName; }
 
     function getVersion() external pure returns (string, string) {
         return (version, "InferenceOrderBook");

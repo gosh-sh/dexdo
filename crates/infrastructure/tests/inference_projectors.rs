@@ -16,11 +16,15 @@ use sqlx::PgPool;
 use sqlx::Postgres;
 use sqlx::Transaction;
 
+// Call sites pass the bare event name (e.g. "OrderPlaced"); since v4.0.10 the
+// inference book emits every event with an `Inference` prefix, so the on-wire
+// name is `Inference{name}` — apply it here so every fixture stays in one place.
 fn ev(event_name: &str, value: serde_json::Value) -> DecodedEvent {
+    let full = format!("Inference{event_name}");
     DecodedEvent {
         contract_kind: "InferenceOrderBook",
-        event_name: event_name.to_string(),
-        event_type: format!("InferenceOrderBook.{event_name}"),
+        event_type: format!("InferenceOrderBook.{full}"),
+        event_name: full,
         value,
     }
 }
@@ -283,7 +287,7 @@ async fn routes_by_event_type_when_event_name_is_empty() {
     let loop_shaped = DecodedEvent {
         contract_kind: "",
         event_name: String::new(), // <-- as the live loop builds it
-        event_type: "InferenceOrderBook.OrderPlaced".to_string(),
+        event_type: "InferenceOrderBook.InferenceOrderPlaced".to_string(),
         value: serde_json::json!({"orderId":"7","isBuy":true,"price":"1","ticks":"3","note":"0:n","tokenContract":"0:tc","deadline":"0"}),
     };
     assert_eq!(project(&mut tx, &loop_shaped, &node(ob, "co-1")).await, ProjectionOutcome::Applied);
@@ -387,7 +391,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         3600,
         0,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled.clone(),
     )
     .await;
@@ -398,7 +402,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         3600,
         0,
         ob,
-        "InferenceOrderBook.OrderCancelled",
+        "InferenceOrderBook.InferenceOrderCancelled",
         cancel.clone(),
     )
     .await;
@@ -410,7 +414,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         0,
         86400,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled.clone(),
     )
     .await;
@@ -422,7 +426,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         0,
         0,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled.clone(),
     )
     .await;
@@ -480,7 +484,7 @@ async fn expired_orphan_not_dropped_until_capture_at_head() {
         3600,
         0,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled,
     )
     .await;
@@ -549,7 +553,7 @@ async fn expired_filled_orphan_decrements_present_leg() {
         3600,
         0,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled,
     )
     .await;

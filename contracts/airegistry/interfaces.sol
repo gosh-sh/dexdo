@@ -2,7 +2,6 @@ pragma gosh-solidity >=0.76.1;
 
 interface ISuperRootRegistry {
     function registerRoot(uint256 ownerPubkey) external;
-    function registerManifest(uint256 ownerPubkey, address rootModelAddress) external;
 }
 
 interface IRootModelRegistry {

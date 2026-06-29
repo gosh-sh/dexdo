@@ -111,9 +111,7 @@ fn sample_event_json(abi: &str, event: &str) -> Value {
 
 #[test]
 fn super_root_params_match_abi() {
-    use super::super_root::ParamsOfGetManifestAddress;
     use super::super_root::ParamsOfGetRootModelAddress;
-    use super::super_root::ParamsOfRegisterManifest;
     use super::super_root::ParamsOfSetPubkey;
 
     assert_eq!(
@@ -123,20 +121,6 @@ fn super_root_params_match_abi() {
     assert_eq!(
         serialized_keys(&ParamsOfGetRootModelAddress { owner_pubkey: "1".into() }),
         abi_input_names(SUPER_ROOT_ABI, "getRootModelAddress")
-    );
-    assert_eq!(
-        serialized_keys(&ParamsOfRegisterManifest {
-            owner_pubkey: "1".into(),
-            root_model_address: SAMPLE_ADDRESS.into(),
-        }),
-        abi_input_names(SUPER_ROOT_ABI, "registerManifest")
-    );
-    assert_eq!(
-        serialized_keys(&ParamsOfGetManifestAddress {
-            owner_pubkey: "1".into(),
-            root_model_address: SAMPLE_ADDRESS.into(),
-        }),
-        abi_input_names(SUPER_ROOT_ABI, "getManifestAddress")
     );
 }
 
@@ -277,6 +261,8 @@ fn inference_order_book_params_match_abi() {
             max_ticks: 1,
             token_contract: SAMPLE_ADDRESS.into(),
             flags: 0,
+            seller_pubkey: "1".into(),
+            nonce: 1,
         }),
         abi_input_names(INFERENCE_ORDER_BOOK_ABI, "placeSellOffer")
     );
@@ -359,7 +345,6 @@ fn event_ids_match_modifiers() {
     use super::token_contract_events::TokenContractEvent as Tc;
 
     assert_eq!(Sr::RootRegistered as u128, 700);
-    assert_eq!(Sr::ManifestRegistered as u128, 701);
 
     assert_eq!(Rm::TokenContractRegistered as u128, 702);
     assert_eq!(Rm::ContractDeployed as u128, 703);
@@ -386,6 +371,7 @@ fn event_ids_match_modifiers() {
     assert_eq!(Iob::SubscriptionPlaced as u128, 1005);
     assert_eq!(Iob::CycleForfeited as u128, 1006);
     assert_eq!(Iob::ForfeitClaimed as u128, 1007);
+    assert_eq!(Iob::OrderBookDeployed as u128, 1008);
 }
 
 #[test]
@@ -423,17 +409,19 @@ fn event_payloads_decode_abi_shape() {
         };
     }
 
-    // InferenceOrderBook (1000-range). `Filled.sellerTC` is the field whose
-    // camelCase would mis-derive to `sellerTc`, so assert it explicitly.
-    decodes!(iob::OrderPlacedData, INFERENCE_ORDER_BOOK_ABI, "OrderPlaced");
-    decodes!(iob::OrderCancelledData, INFERENCE_ORDER_BOOK_ABI, "OrderCancelled");
-    let filled = decodes!(iob::FilledData, INFERENCE_ORDER_BOOK_ABI, "Filled");
+    // InferenceOrderBook (1000-range). Events carry an `Inference` prefix since
+    // v4.0.10. `InferenceFilled.sellerTC` is the field whose camelCase would
+    // mis-derive to `sellerTc`, so assert it explicitly.
+    decodes!(iob::OrderPlacedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderPlaced");
+    decodes!(iob::OrderCancelledData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderCancelled");
+    let filled = decodes!(iob::FilledData, INFERENCE_ORDER_BOOK_ABI, "InferenceFilled");
     assert_eq!(filled.seller_tc, SAMPLE_ADDRESS);
-    decodes!(iob::ExecutedData, INFERENCE_ORDER_BOOK_ABI, "Executed");
-    decodes!(iob::RefundedData, INFERENCE_ORDER_BOOK_ABI, "Refunded");
-    decodes!(iob::SubscriptionPlacedData, INFERENCE_ORDER_BOOK_ABI, "SubscriptionPlaced");
-    decodes!(iob::CycleForfeitedData, INFERENCE_ORDER_BOOK_ABI, "CycleForfeited");
-    decodes!(iob::ForfeitClaimedData, INFERENCE_ORDER_BOOK_ABI, "ForfeitClaimed");
+    decodes!(iob::ExecutedData, INFERENCE_ORDER_BOOK_ABI, "InferenceExecuted");
+    decodes!(iob::RefundedData, INFERENCE_ORDER_BOOK_ABI, "InferenceRefunded");
+    decodes!(iob::SubscriptionPlacedData, INFERENCE_ORDER_BOOK_ABI, "InferenceSubscriptionPlaced");
+    decodes!(iob::CycleForfeitedData, INFERENCE_ORDER_BOOK_ABI, "InferenceCycleForfeited");
+    decodes!(iob::ForfeitClaimedData, INFERENCE_ORDER_BOOK_ABI, "InferenceForfeitClaimed");
+    decodes!(iob::OrderBookDeployedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderBookDeployed");
 
     // TokenContract (700-range streaming).
     decodes!(tc::StreamFundedData, TOKEN_CONTRACT_ABI, "StreamFunded");

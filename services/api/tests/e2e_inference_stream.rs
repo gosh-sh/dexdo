@@ -37,6 +37,7 @@ use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
 use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
+use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
@@ -79,7 +80,10 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
     // 1-2. Book + TokenContract.
     dex.deploy_inference_order_book(
         &note.address,
-        ParamsOfInferenceOrderBook { model_hash: model_hash.clone() },
+        ParamsOfDeployInferenceOrderBook {
+            model_hash: model_hash.clone(),
+            model_name: "e2e-stream".to_string(),
+        },
         signer(),
     )
     .await

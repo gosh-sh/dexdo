@@ -30,6 +30,7 @@ use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
 use dodex_contracts::airegistry::inference_order_book_events::InferenceOrderBookEvent;
 use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
+use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceSubscription;
@@ -65,7 +66,10 @@ fn unique_nonce() -> u64 {
 async fn deploy_book(dex: &Dex, note_addr: &str, model_hash: &str, signer: Signer) -> String {
     dex.deploy_inference_order_book(
         note_addr,
-        ParamsOfInferenceOrderBook { model_hash: model_hash.to_string() },
+        ParamsOfDeployInferenceOrderBook {
+            model_hash: model_hash.to_string(),
+            model_name: "e2e-clob".to_string(),
+        },
         signer,
     )
     .await
@@ -97,12 +101,13 @@ async fn inference_partial_fill_leaves_remainder() {
     let mut failures: Vec<String> = Vec::new();
 
     let ob = deploy_book(&dex, &note.address, &suffix, signer()).await;
+    let nonce = unique_nonce();
     let tc = deploy_token_contract(
         dex.context(),
         &note.owner_public_key_hex,
         &note.address,
         &note.address,
-        unique_nonce(),
+        nonce,
         TokenDeal {
             model_name: "e2e-clob".to_string(),
             tick_size: 1,
@@ -124,6 +129,7 @@ async fn inference_partial_fill_leaves_remainder() {
             max_ticks: 2,
             token_contract: tc.clone(),
             flags: 0,
+            nonce,
         },
         signer(),
     )
@@ -285,12 +291,13 @@ async fn inference_match_emits_filled_event() {
     let mut failures: Vec<String> = Vec::new();
 
     let ob = deploy_book(&dex, &note.address, &suffix, signer()).await;
+    let nonce = unique_nonce();
     let tc = deploy_token_contract(
         dex.context(),
         &note.owner_public_key_hex,
         &note.address,
         &note.address,
-        unique_nonce(),
+        nonce,
         TokenDeal {
             model_name: "e2e-clob".to_string(),
             tick_size: 1,
@@ -310,6 +317,7 @@ async fn inference_match_emits_filled_event() {
             max_ticks: 2,
             token_contract: tc.clone(),
             flags: 0,
+            nonce,
         },
         signer(),
     )

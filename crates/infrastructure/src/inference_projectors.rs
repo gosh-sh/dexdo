@@ -36,13 +36,15 @@ pub async fn project_inference_event(
     let suffix =
         event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
     match suffix {
-        "OrderPlaced" => apply_inference_order_placed(tx, event, node).await,
-        "SubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
-        "OrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
-        "Filled" => apply_inference_filled(tx, event, node).await,
-        "Executed" | "Refunded" | "CycleForfeited" | "ForfeitClaimed" => {
-            Ok(ProjectionOutcome::Applied)
-        }
+        "InferenceOrderPlaced" => apply_inference_order_placed(tx, event, node).await,
+        "InferenceSubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
+        "InferenceOrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
+        "InferenceFilled" => apply_inference_filled(tx, event, node).await,
+        "InferenceExecuted"
+        | "InferenceRefunded"
+        | "InferenceCycleForfeited"
+        | "InferenceForfeitClaimed"
+        | "InferenceOrderBookDeployed" => Ok(ProjectionOutcome::Applied),
         other => {
             warn!(event_type = %event.event_type, other, "unknown InferenceOrderBook event; seeded only");
             Ok(ProjectionOutcome::Applied)
@@ -377,7 +379,7 @@ pub async fn repair_expired_inference_orphan(
     let suffix =
         event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
     let outcome = match suffix {
-        "Filled" => {
+        "InferenceFilled" => {
             let f = FilledFields::parse(event, node)?;
             let locked = lock_filled_rows(tx, &f.ob, &f.ids).await?;
             if locked.is_empty() {
@@ -387,7 +389,7 @@ pub async fn repair_expired_inference_orphan(
                 ExpiredOrphanOutcome::FilledDepthRepaired { legs: locked.len() }
             }
         }
-        "OrderCancelled" => ExpiredOrphanOutcome::CancelLost,
+        "InferenceOrderCancelled" => ExpiredOrphanOutcome::CancelLost,
         _ => ExpiredOrphanOutcome::Nothing,
     };
 

@@ -36,6 +36,7 @@ use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::pmp::ResultOfGetDetails as PmpKitDetails;
 use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
 use dodex_contracts::dex::private_note::ParamsOfCancelInferenceOrder;
+use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
@@ -245,7 +246,7 @@ impl Dex {
     pub async fn deploy_inference_order_book(
         &self,
         pn_address: &str,
-        params: ParamsOfInferenceOrderBook,
+        params: ParamsOfDeployInferenceOrderBook,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
         PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))

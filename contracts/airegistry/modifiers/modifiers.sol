@@ -23,11 +23,21 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     // on the order of the platform fee on one tick. Returned to the seller on
     // probe acceptance / no-show; burned with the probe tick on a probe stop.
     uint16 constant SELLER_PROBE_COMMISSION_BPS = 250;   // 2.5% of P
-    // Streaming-deal timing (spec §9.1).
-    uint64 constant SETTLE_WINDOW   = 180;        // optimistic-accept window (s)
-    uint64 constant STREAM_TIMEOUT  = 600;        // seller inactivity (heartbeat) reclaim (s)
-    uint64 constant DISPUTE_WINDOW  = 600;        // dispute -> split timeout (s)
-    uint64 constant MATCH_OPEN_TIMEOUT = 600;     // funded-but-unopened cleanup (no-show, §2.1)
+    // Streaming-deal timing (spec §9.1). The advance window is PER-DEAL, scaled by
+    // tick price so an idle stream drains at most ~0.1 SHELL/min (slope), capped:
+    //   W = clamp(pricePerTick * STREAM_WINDOW_SECS_PER_SHELL / SHELL_UNIT,
+    //             SETTLE_WINDOW, STREAM_WINDOW_MAX)
+    // computed once in the TokenContract ctor (-> _settleWindow); the reclaim
+    // window is W + grace (-> _streamTimeout). The probe phase uses a fixed short
+    // PROBE_WINDOW (a scammed buyer should stop()+burn, not wait a long W).
+    uint64  constant SETTLE_WINDOW   = 180;        // dynamic advance-window FLOOR (s)
+    uint64  constant PROBE_WINDOW    = 180;        // fixed probe-phase advance window (s)
+    uint64  constant STREAM_WINDOW_MAX = 3600;     // W_MAX hard cap (1h)
+    uint64  constant STREAM_WINDOW_SECS_PER_SHELL = 600;  // slope = 0.1 SHELL/min
+    uint128 constant SHELL_UNIT      = 1_000_000_000;     // minimal units per 1 SHELL
+    uint64  constant STREAM_TIMEOUT_GRACE = 300;   // reclaim = advance W + grace (s)
+    uint64  constant DISPUTE_WINDOW  = 600;        // dispute -> split timeout (s)
+    uint64  constant MATCH_OPEN_TIMEOUT = 600;     // funded-but-unopened cleanup (no-show, §2.1)
 
     // Forwarded value for child -> parent registration messages.
     varuint16 constant REGISTER_FORWARD_VALUE = 5 vmshell;
@@ -35,10 +45,8 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     // External address constants for directed events (off-chain subscribers).
     uint constant bitCntAddress = 256;
     uint128 constant RootRegisteredEmit          = 700;
-    uint128 constant ManifestRegisteredEmit      = 701;
     uint128 constant TokenContractRegisteredEmit = 702;
     uint128 constant ContractDeployedEmit        = 703;
-    uint128 constant ManifestUpdatedEmit         = 704;
     uint128 constant TokensPurchasedEmit         = 705;
     uint128 constant TokensConsumedEmit          = 706;
     uint128 constant FeeBurnedEmit               = 707;
@@ -72,6 +80,7 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant SubscriptionPlacedEmit      = 1005;
     uint128 constant CycleForfeitedEmit          = 1006;
     uint128 constant ForfeitClaimedEmit          = 1007;
+    uint128 constant InferenceOBDeployedEmit     = 1008;
 
     modifier accept() {
         tvm.accept();

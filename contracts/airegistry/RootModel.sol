@@ -10,7 +10,12 @@ import "./TokenContract.sol";
 /// @notice Per-AI-model root. Stores the TokenContract code and registers
 ///         TokenContracts that anyone deploys with this RootModel as parent.
 contract RootModel is AiRegistryModifiers {
-    string constant version = "4.0.3";
+    string constant version = "4.0.10";
+
+    // Native value attached to THIS contract's cross-dapp message (registerRoot).
+    // Tunable; recipients self-fund via `accept`, so it only covers a non-accepting hop.
+    // (TC/RM-local — NOT the shared REGISTER_FORWARD_VALUE the IOB also uses.)
+    varuint16 constant DAPP_MSG_VALUE = 0.01 vmshell;
 
     /// @notice Canonical code hash of `TokenContract`. The constructor
     ///         rejects any caller-supplied code whose `tvm.hash` does not
@@ -18,7 +23,7 @@ contract RootModel is AiRegistryModifiers {
     ///         specific TokenContract bytecode. To bump versions, rebuild
     ///         TokenContract, recompute the hash below, recompile
     ///         RootModel, and redeploy.
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x59fe283c8e4e943db55aeaafacfee650b78535c3843b1f48a099dfa561a748f6;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xefa8df3f7e10a66678bbe194ff001252885114d28e907b9e512f47d5e67a3d65;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
 
     event ContractDeployed(address self);
@@ -44,7 +49,7 @@ contract RootModel is AiRegistryModifiers {
         address selfExtern = address.makeAddrExtern(ContractDeployedEmit, bitCntAddress);
         emit ContractDeployed{dest: selfExtern}(address(this));
 
-        ISuperRootRegistry(_superRootAddress).registerRoot{value: REGISTER_FORWARD_VALUE, flag: 1}(_ownerPubkey);
+        ISuperRootRegistry(_superRootAddress).registerRoot{value: DAPP_MSG_VALUE, flag: 1}(_ownerPubkey);
     }
 
     function ensureBalance() private pure {

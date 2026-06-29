@@ -8,9 +8,8 @@ with, but separate from, the DEX.DO prediction-market core under `contracts/dex/
 
 | Contract | Role |
 | --- | --- |
-| `SuperRoot` | Per-network root factory. Registers a `RootModel` and a `ManifestMetadata` at deterministic addresses derived from an owner pubkey. |
+| `SuperRoot` | Per-network root factory. Registers a `RootModel` at a deterministic address derived from an owner pubkey. (The per-model `ManifestMetadata` contract and SuperRoot's `registerManifest` / `getManifestAddress` were removed upstream in v4.0.10.) |
 | `RootModel` | Per-owner model registry. Derives + registers `TokenContract` children at deterministic `(sellerPubkey, nonce)` addresses. |
-| `ManifestMetadata` | Per-model manifest. |
 | `TokenContract` | Per-deal streaming escrow. Holds the buyer's SHELL deposit and settles ticks one at a time (probe-tick model, spec §3.1.2): `open → advance → stop / dispute / reclaim`. |
 | `InferenceOrderBook` | Per-model CLOB. Matches SELL offers (each backed by a `TokenContract`) against BUY orders and subscriptions paid in SHELL escrow. Deployed per `(model)` from a `PrivateNote`. |
 

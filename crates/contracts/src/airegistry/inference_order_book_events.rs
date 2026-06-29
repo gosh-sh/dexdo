@@ -30,6 +30,7 @@ pub enum InferenceOrderBookEvent {
     SubscriptionPlaced = 1005,
     CycleForfeited = 1006,
     ForfeitClaimed = 1007,
+    OrderBookDeployed = 1008,
 }
 
 impl TryFrom<String> for InferenceOrderBookEvent {
@@ -54,6 +55,7 @@ impl TryFrom<String> for InferenceOrderBookEvent {
             1005 => Ok(InferenceOrderBookEvent::SubscriptionPlaced),
             1006 => Ok(InferenceOrderBookEvent::CycleForfeited),
             1007 => Ok(InferenceOrderBookEvent::ForfeitClaimed),
+            1008 => Ok(InferenceOrderBookEvent::OrderBookDeployed),
             _ => Err(KitError::new(
                 KitModule::Event,
                 KitErrorCode::UnknownEvent,
@@ -85,6 +87,7 @@ pub enum DecodedInferenceOrderBookEvent {
     SubscriptionPlaced { event: Event, kind: InferenceOrderBookEvent, data: SubscriptionPlacedData },
     CycleForfeited { event: Event, kind: InferenceOrderBookEvent, data: CycleForfeitedData },
     ForfeitClaimed { event: Event, kind: InferenceOrderBookEvent, data: ForfeitClaimedData },
+    OrderBookDeployed { event: Event, kind: InferenceOrderBookEvent, data: OrderBookDeployedData },
 }
 
 impl FromEvent for DecodedInferenceOrderBookEvent {
@@ -139,6 +142,14 @@ impl FromEvent for DecodedInferenceOrderBookEvent {
                     data,
                 })
             }
+            InferenceOrderBookEvent::OrderBookDeployed => {
+                let data = decode_or_err::<OrderBookDeployedData>(event, contract)?;
+                Ok(DecodedInferenceOrderBookEvent::OrderBookDeployed {
+                    event: event.clone(),
+                    kind,
+                    data,
+                })
+            }
         }
     }
 }
@@ -181,7 +192,8 @@ pub struct OrderCancelledData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub order_id: u128,
     #[serde(deserialize_with = "deserialize_u128")]
-    pub refunded_shell: u128,
+    pub refunded: u128,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -210,6 +222,7 @@ pub struct FilledData {
     #[serde(rename = "sellerTC")]
     pub seller_tc: String,
     pub buyer_note: String,
+    pub seller_note: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -265,4 +278,14 @@ pub struct ForfeitClaimedData {
     pub seller_note: String,
     #[serde(deserialize_with = "deserialize_u128")]
     pub amount: u128,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// Payload of `InferenceOrderBookEvent::OrderBookDeployed`.
+pub struct OrderBookDeployedData {
+    pub note: String,
+    /// `uint256` represented as returned by ABI.
+    pub model_hash: String,
+    pub model_name: String,
 }

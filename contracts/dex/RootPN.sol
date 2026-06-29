@@ -12,7 +12,7 @@ import "./libraries/DexLib.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.5";
+    string constant version = "4.0.10";
 
     /// @notice Stored code of PrivateNote contract
     TvmCell _privateNoteCode;

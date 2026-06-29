@@ -37,6 +37,7 @@ use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
 use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
+use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 
@@ -76,7 +77,10 @@ async fn inference_order_book_buy_then_cancel_against_shellnet() {
     // 1. Note deploys the per-model InferenceOrderBook (internal message).
     dex.deploy_inference_order_book(
         &note.address,
-        ParamsOfInferenceOrderBook { model_hash: model_hash.clone() },
+        ParamsOfDeployInferenceOrderBook {
+            model_hash: model_hash.clone(),
+            model_name: "e2e".to_string(),
+        },
         signer(),
     )
     .await

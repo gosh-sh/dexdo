@@ -6,7 +6,8 @@
 		{
 			"name": "constructor",
 			"inputs": [
-				{"name":"depositHash","type":"uint256"}
+				{"name":"depositHash","type":"uint256"},
+				{"name":"modelName","type":"string"}
 			],
 			"outputs": [
 			]
@@ -24,7 +25,9 @@
 				{"name":"pricePerTick","type":"uint128"},
 				{"name":"maxTicks","type":"uint128"},
 				{"name":"tokenContract","type":"address"},
-				{"name":"flags","type":"uint8"}
+				{"name":"flags","type":"uint8"},
+				{"name":"sellerPubkey","type":"uint256"},
+				{"name":"nonce","type":"uint64"}
 			],
 			"outputs": [
 			]
@@ -184,6 +187,14 @@
 			]
 		},
 		{
+			"name": "getModelName",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"string"}
+			]
+		},
+		{
 			"name": "getVersion",
 			"inputs": [
 			],
@@ -195,7 +206,7 @@
 	],
 	"events": [
 		{
-			"name": "OrderPlaced",
+			"name": "InferenceOrderPlaced",
 			"inputs": [
 				{"name":"orderId","type":"uint128"},
 				{"name":"isBuy","type":"bool"},
@@ -209,29 +220,31 @@
 			]
 		},
 		{
-			"name": "OrderCancelled",
+			"name": "InferenceOrderCancelled",
 			"inputs": [
 				{"name":"orderId","type":"uint128"},
-				{"name":"refundedShell","type":"uint128"}
+				{"name":"refunded","type":"uint128"},
+				{"name":"note","type":"address"}
 			],
 			"outputs": [
 			]
 		},
 		{
-			"name": "Filled",
+			"name": "InferenceFilled",
 			"inputs": [
 				{"name":"makerId","type":"uint128"},
 				{"name":"takerId","type":"uint128"},
 				{"name":"ticks","type":"uint128"},
 				{"name":"clearingPrice","type":"uint256"},
 				{"name":"sellerTC","type":"address"},
-				{"name":"buyerNote","type":"address"}
+				{"name":"buyerNote","type":"address"},
+				{"name":"sellerNote","type":"address"}
 			],
 			"outputs": [
 			]
 		},
 		{
-			"name": "Executed",
+			"name": "InferenceExecuted",
 			"inputs": [
 				{"name":"ticks","type":"uint128"},
 				{"name":"clearingPrice","type":"uint256"},
@@ -241,7 +254,7 @@
 			]
 		},
 		{
-			"name": "Refunded",
+			"name": "InferenceRefunded",
 			"inputs": [
 				{"name":"note","type":"address"},
 				{"name":"amount","type":"uint128"}
@@ -250,7 +263,7 @@
 			]
 		},
 		{
-			"name": "SubscriptionPlaced",
+			"name": "InferenceSubscriptionPlaced",
 			"inputs": [
 				{"name":"orderId","type":"uint128"},
 				{"name":"buyerNote","type":"address"},
@@ -263,7 +276,7 @@
 			]
 		},
 		{
-			"name": "CycleForfeited",
+			"name": "InferenceCycleForfeited",
 			"inputs": [
 				{"name":"orderId","type":"uint128"},
 				{"name":"cycle","type":"uint8"},
@@ -274,12 +287,22 @@
 			]
 		},
 		{
-			"name": "ForfeitClaimed",
+			"name": "InferenceForfeitClaimed",
 			"inputs": [
 				{"name":"orderId","type":"uint128"},
 				{"name":"cycle","type":"uint8"},
 				{"name":"sellerNote","type":"address"},
 				{"name":"amount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "InferenceOrderBookDeployed",
+			"inputs": [
+				{"name":"note","type":"address"},
+				{"name":"modelHash","type":"uint256"},
+				{"name":"modelName","type":"string"}
 			],
 			"outputs": [
 			]
@@ -290,6 +313,7 @@
 		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
 		{"init":true,"name":"_modelHash","type":"uint256"},
+		{"init":false,"name":"_modelName","type":"string"},
 		{"components":[{"name":"note","type":"address"},{"name":"buyerPubkey","type":"uint256"},{"name":"tokenContract","type":"address"},{"name":"price","type":"uint256"},{"name":"amount","type":"uint128"},{"name":"initialAmount","type":"uint128"},{"name":"filledAccum","type":"uint128"},{"name":"escrow","type":"uint128"},{"name":"deadline","type":"uint64"},{"name":"ts","type":"uint64"},{"name":"flags","type":"uint8"},{"name":"isBuy","type":"bool"},{"name":"nextAtPrice","type":"uint128"},{"name":"prevAtPrice","type":"uint128"},{"name":"nextInOwner","type":"uint128"},{"name":"prevInOwner","type":"uint128"}],"init":false,"name":"_orders","type":"map(uint128,tuple)"},
 		{"init":false,"name":"_nextOrderId","type":"uint128"},
 		{"init":false,"name":"_orderCount","type":"uint128"},

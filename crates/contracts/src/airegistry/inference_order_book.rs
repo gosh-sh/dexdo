@@ -79,6 +79,11 @@ pub struct ParamsOfPlaceSellOffer {
     pub max_ticks: u128,
     pub token_contract: String,
     pub flags: u8,
+    /// Seller note owner pubkey (`uint256`, decimal/hex) — pins the offer to the
+    /// seller key the canonical TokenContract derives from.
+    pub seller_pubkey: String,
+    /// Deal nonce — must match the nonce `token_contract` was derived from.
+    pub nonce: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
