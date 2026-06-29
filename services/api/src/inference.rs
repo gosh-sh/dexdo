@@ -2,6 +2,8 @@
 //
 // Handlers + DTOs for the public inference market-data endpoints.
 
+use dodex_application::GetInferenceDepthQuery;
+use dodex_application::GetInferenceDepthUseCase;
 use dodex_application::GetInferenceMarketsUseCase;
 use dodex_application::InferenceMarketsFilter;
 use dodex_application::InferenceMarketsListing;
@@ -202,4 +204,89 @@ fn inference_market_to_dto(m: InferenceMarket) -> InferenceMarketDto {
         reference_price: m.reference_price,
         created_at: m.created_at,
     }
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceDepthResponse {
+    #[serde(rename = "inferenceOrderBookAddress")]
+    orderbook_address: String,
+    /// Opaque lex-comparable chain-order cursor; empty when no order has landed.
+    last_update_id: String,
+    #[salvo(schema(schema_with = inference_depth_bids_schema))]
+    bids: Vec<[String; 2]>,
+    #[salvo(schema(schema_with = inference_depth_asks_schema))]
+    asks: Vec<[String; 2]>,
+}
+
+// `[String; 2]` derives as an unbounded array; pin the [price, quantity] shape.
+fn inference_depth_levels_schema(description: &str) -> salvo_oapi::schema::Array {
+    use salvo_oapi::Array;
+    use salvo_oapi::BasicType;
+    use salvo_oapi::Object;
+    Array::new()
+        .items(
+            Array::new()
+                .items(Object::new().schema_type(BasicType::String))
+                .min_items(2)
+                .max_items(2),
+        )
+        .description(description)
+}
+
+fn inference_depth_bids_schema() -> salvo_oapi::schema::Array {
+    inference_depth_levels_schema(
+        "Price levels as [pricePerTick, ticks] decimal-string pairs, best bid first.",
+    )
+}
+
+fn inference_depth_asks_schema() -> salvo_oapi::schema::Array {
+    inference_depth_levels_schema(
+        "Price levels as [pricePerTick, ticks] decimal-string pairs, best ask first.",
+    )
+}
+
+/// Order-book depth for one model's book.
+#[endpoint(
+    tags("inference-market-data"),
+    summary = "Inference order book depth",
+    parameters(
+        ("inferenceOrderBookAddress" = String, Query, description = "The model's order-book address."),
+        ("limit" = Option<i64>, Query, minimum = 1, maximum = 1000, description = "Levels per side. Default 100, max 1000; out-of-range values clamp."),
+    ),
+    security(()),
+)]
+pub(crate) async fn get_inference_depth(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<InferenceDepthResponse>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+    let inference_repo = state.inference_repo.clone().ok_or_else(|| {
+        error!("inference_repo not wired in AppState");
+        ApiError::from(DomainError::Unexpected)
+    })?;
+
+    let address = non_empty_query(req, "inferenceOrderBookAddress")
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let limit =
+        optional_typed_query::<i64>(req, "limit")?.map(|v| v.clamp(1, 1000) as u16).unwrap_or(100);
+
+    let use_case = GetInferenceDepthUseCase::new(inference_repo);
+    let snapshot = use_case
+        .execute(GetInferenceDepthQuery { orderbook_address: address, limit })
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "get_inference_depth"))?;
+
+    Ok(Json(InferenceDepthResponse {
+        orderbook_address: snapshot.orderbook_address,
+        last_update_id: snapshot.last_update_id,
+        bids: snapshot.bids.into_iter().map(|l| [l.price, l.quantity]).collect(),
+        asks: snapshot.asks.into_iter().map(|l| [l.price, l.quantity]).collect(),
+    }))
 }
