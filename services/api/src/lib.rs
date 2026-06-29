@@ -3,6 +3,7 @@
 
 mod auth_hoop;
 mod dto;
+mod inference;
 #[doc(hidden)]
 pub mod testkit;
 mod timeout_hoop;
@@ -106,6 +107,8 @@ pub type SharedPnReader = Arc<dyn dodex_application::PnStateReader>;
 pub type SharedRefRepo = Arc<dyn dodex_application::ReferenceRepository>;
 #[doc(hidden)]
 pub type SharedRegistry = Arc<dyn AccountRegistry>;
+#[doc(hidden)]
+pub type SharedInferenceRepo = Arc<dyn dodex_application::InferenceReadRepository>;
 
 #[doc(hidden)]
 #[derive(Clone)]
@@ -130,6 +133,10 @@ pub struct AppState {
     /// register an account need not construct one; `run` always wires the
     /// Postgres registry, and the handler 500s if it is somehow absent.
     pub(crate) registry: Option<SharedRegistry>,
+    /// Read side of the inference endpoints. Builder-set (default `None`) like
+    /// `registry`, so existing `AppState::new` call sites need no change; `run`
+    /// and the test harness wire it, and the handlers 500 if it is absent.
+    pub(crate) inference_repo: Option<SharedInferenceRepo>,
 }
 
 impl AppState {
@@ -156,6 +163,7 @@ impl AppState {
             request_timeout: Duration::ZERO,
             max_batch_size: 10,
             registry: None,
+            inference_repo: None,
         }
     }
 
@@ -174,6 +182,12 @@ impl AppState {
     #[doc(hidden)]
     pub fn with_max_batch_size(mut self, max_batch_size: u16) -> Self {
         self.max_batch_size = max_batch_size;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_inference_repo(mut self, repo: SharedInferenceRepo) -> Self {
+        self.inference_repo = Some(repo);
         self
     }
 }
@@ -2298,6 +2312,7 @@ pub fn build_router(state: AppState) -> Router {
         .push(Router::with_path("readiness").get(readiness))
         .push(Router::with_path("api/v1/prediction/markets").get(get_markets))
         .push(Router::with_path("api/v1/prediction/depth").get(get_depth))
+        .push(Router::with_path("api/v1/inference/markets").get(inference::get_inference_markets))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
         .push(Router::with_path("api/v1/prediction/trades").get(get_trades))
         // Registration is public — a client has no API key yet, so it
@@ -2407,7 +2422,9 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     info!("api running with postgres read-model repository");
-    let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
+    let read_model = Arc::new(PostgresReadModelRepository::new(pool.clone()));
+    let repo: SharedRepo = read_model.clone();
+    let inference_repo: SharedInferenceRepo = read_model;
     let registry: SharedRegistry =
         Arc::new(PostgresAccountRegistry::new(pool.clone(), kek.clone()));
     let authenticator: SharedAuth =
@@ -2432,7 +2449,8 @@ pub async fn run() -> anyhow::Result<()> {
     let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
         .with_request_timeout(Duration::from_millis(config.server.request_timeout_ms))
         .with_max_batch_size(config.chain.max_batch_size)
-        .with_account_registry(registry);
+        .with_account_registry(registry)
+        .with_inference_repo(inference_repo);
 
     // The API is intentionally restart-to-reconfigure. None of the live
     // request paths read runtime config — pool, server bind, request_timeout

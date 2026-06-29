@@ -105,7 +105,9 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>, Arc<FakePnStateReader
         .await
         .expect("seed credentials");
 
-    let repo: SharedRepo = Arc::new(PostgresReadModelRepository::new(pool.clone()));
+    let read_model = Arc::new(PostgresReadModelRepository::new(pool.clone()));
+    let repo: SharedRepo = read_model.clone();
+    let inference_repo: dodex_api::testkit::SharedInferenceRepo = read_model;
     let auth_config = AuthSection {
         kek_hex: "ab".repeat(32),
         default_recv_window_ms: 5_000,
@@ -126,7 +128,8 @@ pub async fn setup() -> Option<(Service, PgPool, Arc<Kek>, Arc<FakePnStateReader
     let registry: dodex_api::testkit::SharedRegistry =
         Arc::new(PostgresAccountRegistry::new(pool.clone(), kek.clone()));
     let state = AppState::new(repo, authenticator, chain_sender, pn_reader, ref_repo)
-        .with_account_registry(registry);
+        .with_account_registry(registry)
+        .with_inference_repo(inference_repo);
     let service = Service::new(build_router(state));
     Some((service, pool, kek, pn_reader_inner))
 }
