@@ -251,7 +251,7 @@ mod tests {
             assert!(decoder.contracts.contains_key(kind), "missing contract {kind}");
         }
 
-        // 48 DEX unique ids + 7 new InferenceOrderBook ids (OrderCancelled collides
+        // 48 DEX unique ids + 7 net InferenceOrderBook ids (OrderCancelled collides
         // with OrderBook.OrderCancelled) + 13 TokenContract ids = 68 distinct ids.
         assert_eq!(decoder.known_events(), 68, "unexpected total event id count");
 

@@ -393,7 +393,7 @@ The inference settlement side tracks the lifecycle of each deal escrow (`TokenCo
 
 ### `inference_deals`
 
-One row per `TokenContract` address. Seeded as a skeleton from the first observed `TokenContract.*` event (keyed by `src_address`); remaining columns filled by the SETTLEMENT projector as `InferenceOrderBook.Filled`, `TokenContract.Opened`, `TokenContract.Closed`, and related events arrive.
+One row per `TokenContract` address. Seeded as a skeleton from the first observed `TokenContract.*` event (keyed by `src_address`); remaining columns filled by the SETTLEMENT projector as `InferenceOrderBook.Filled`, `TokenContract.StreamOpened`, and the stream-close events (`StreamStopped`/`DisputeResolved`/`StreamReclaimed`/`ContractDestroyed`), and related events arrive.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -403,7 +403,7 @@ One row per `TokenContract` address. Seeded as a skeleton from the first observe
 | `buyer_note` | `text` (nullable) | PrivateNote address of the buyer. Filled from `InferenceOrderBook.Filled`. |
 | `deposit` | `numeric(78,0)` (nullable) | Initial deposit amount (quote token units). |
 | `price_per_tick` | `numeric(78,0)` (nullable) | Agreed price per finalized tick (quote token units). |
-| `finalized_ticks` | `integer` NOT NULL default `0` | Running count of finalized ticks. Incremented by the SETTLEMENT projector on each `TokenContract.FinalizedTick` event. |
+| `finalized_ticks` | `integer` NOT NULL default `0` | Running count of finalized ticks. Incremented by the SETTLEMENT projector on each `TokenContract.TickFinalized` event. |
 | `finalized_owed_total` | `numeric(78,0)` NOT NULL default `0` | Cumulative owed amount across all finalized ticks. |
 | `funded_at_chain` | `timestamptz` (nullable) | Chain timestamp of the funding event. |
 | `opened_at_chain` | `timestamptz` (nullable) | Chain timestamp when the deal was opened. |
@@ -411,7 +411,7 @@ One row per `TokenContract` address. Seeded as a skeleton from the first observe
 | `close_kind` | `text` (nullable) | Terminal close type: one of `STOPPED`, `DISPUTE_RESOLVED`, `RECLAIMED`, `DESTROYED`. Enforced by a CHECK constraint. |
 | `clean_settlement` | `boolean` (nullable) | `true` if the deal closed without a dispute; `false` or `null` otherwise. |
 | `disputed_at_chain` | `timestamptz` (nullable) | Chain timestamp of the dispute event, if any. |
-| `last_chain_order` | `text` (nullable) | Latest `chain_order` seen for this deal; used as a monotonic watermark for idempotent projector upserts. |
+| `last_chain_order` | `text` (nullable) | The `chain_order` of the most recent `InferenceOrderBook.Filled` cross-link that wrote this row. Advanced via `greatest(existing, new)` by the `Filled` handler; not read or advanced by any `TokenContract` handler. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Indices:
@@ -424,12 +424,12 @@ Indices:
 
 ### `inference_ticks`
 
-One row per finalized tick within a deal. Written by the SETTLEMENT projector on each `TokenContract.FinalizedTick` event. The composite PK `(token_contract_address, chain_order)` is idempotent against redelivery.
+One row per finalized tick within a deal. Written by the SETTLEMENT projector on each `TokenContract.TickFinalized` event. The composite PK `(token_contract_address, chain_order)` is idempotent against redelivery.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `token_contract_address` | `text` NOT NULL (part of PK) | Parent deal's `TokenContract` address. FK-like reference to `inference_deals`. |
-| `chain_order` | `text` NOT NULL (part of PK) | The `chain_order` of the `FinalizedTick` event. Uniquely identifies each tick within a deal. |
+| `chain_order` | `text` NOT NULL (part of PK) | The `chain_order` of the `TickFinalized` event. Uniquely identifies each tick within a deal. |
 | `finalized_owed` | `numeric(78,0)` NOT NULL | Amount owed for this tick (quote token units). |
 | `deposit` | `numeric(78,0)` NOT NULL | Deposit snapshot at tick finalization. |
 | `chain_at` | `timestamptz` (nullable) | Chain timestamp of the finalization event. |
