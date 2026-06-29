@@ -777,22 +777,43 @@ async fn filled_links_deal_to_orderbook_seller_buyer() {
     let Some(pool) = setup().await else { return };
     let ob = "0:t_deal_link_ob";
     let tc = "0:tc_deal_link";
-    sqlx::query("delete from inference_deals where token_contract_address=$1").bind(tc).execute(&pool).await.unwrap();
-    sqlx::query("delete from inference_orders where orderbook_address=$1").bind(ob).execute(&pool).await.unwrap();
-    sqlx::query("delete from inference_markets where orderbook_address=$1").bind(ob).execute(&pool).await.unwrap();
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     // SELL leg (is_buy=false) by the seller note; order_id 1.
-    let sell = ev("OrderPlaced", serde_json::json!({
-        "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0"}));
+    let sell = ev(
+        "OrderPlaced",
+        serde_json::json!({
+        "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0"}),
+    );
     project(&mut tx, &sell, &node(ob, "co-1")).await;
     // BUY leg by the buyer note; order_id 2.
-    let buy = ev("OrderPlaced", serde_json::json!({
-        "orderId":"2","isBuy":true,"price":"100","ticks":"10","note":"0:buyer","tokenContract":"0:none","deadline":"0"}));
+    let buy = ev(
+        "OrderPlaced",
+        serde_json::json!({
+        "orderId":"2","isBuy":true,"price":"100","ticks":"10","note":"0:buyer","tokenContract":"0:none","deadline":"0"}),
+    );
     project(&mut tx, &buy, &node(ob, "co-2")).await;
     // Filled crossing them; carries sellerTC + buyerNote.
-    let filled = ev("Filled", serde_json::json!({
-        "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}));
+    let filled = ev(
+        "Filled",
+        serde_json::json!({
+        "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}),
+    );
     assert_eq!(project(&mut tx, &filled, &node(ob, "co-3")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();
 

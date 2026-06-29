@@ -90,8 +90,13 @@ async fn apply_stream_funded(
                   updated_at = now()
             where token_contract_address = $1"#,
     )
-    .bind(tc).bind(buyer).bind(&deposit).bind(chain_seconds)
-    .execute(&mut **tx).await.context("apply StreamFunded")?;
+    .bind(tc)
+    .bind(buyer)
+    .bind(&deposit)
+    .bind(chain_seconds)
+    .execute(&mut **tx)
+    .await
+    .context("apply StreamFunded")?;
     Ok(ProjectionOutcome::Applied)
 }
 
@@ -112,8 +117,13 @@ async fn apply_stream_opened(
                   updated_at = now()
             where token_contract_address = $1"#,
     )
-    .bind(tc).bind(buyer).bind(&ppt).bind(chain_seconds)
-    .execute(&mut **tx).await.context("apply StreamOpened")?;
+    .bind(tc)
+    .bind(buyer)
+    .bind(&ppt)
+    .bind(chain_seconds)
+    .execute(&mut **tx)
+    .await
+    .context("apply StreamOpened")?;
     Ok(ProjectionOutcome::Applied)
 }
 
@@ -135,8 +145,14 @@ async fn apply_tick_finalized(
            values ($1, $2, $3::numeric, $4::numeric, to_timestamp($5::double precision))
            on conflict (token_contract_address, chain_order) do nothing"#,
     )
-    .bind(tc).bind(&chain_order).bind(&finalized_owed).bind(&deposit).bind(chain_seconds)
-    .execute(&mut **tx).await.context("insert inference_ticks")?;
+    .bind(tc)
+    .bind(&chain_order)
+    .bind(&finalized_owed)
+    .bind(&deposit)
+    .bind(chain_seconds)
+    .execute(&mut **tx)
+    .await
+    .context("insert inference_ticks")?;
 
     // Bump the deal aggregate ONLY on a real insert, so a replay of an
     // already-recorded tick does not double-count.
@@ -148,8 +164,11 @@ async fn apply_tick_finalized(
                       updated_at = now()
                 where token_contract_address = $1"#,
         )
-        .bind(tc).bind(&finalized_owed)
-        .execute(&mut **tx).await.context("bump inference_deals tick aggregate")?;
+        .bind(tc)
+        .bind(&finalized_owed)
+        .execute(&mut **tx)
+        .await
+        .context("bump inference_deals tick aggregate")?;
     }
     Ok(ProjectionOutcome::Applied)
 }
@@ -170,8 +189,13 @@ async fn apply_close(
                   updated_at = now()
             where token_contract_address = $1"#,
     )
-    .bind(tc).bind(chain_seconds).bind(close_kind).bind(clean)
-    .execute(&mut **tx).await.context("apply deal close")?;
+    .bind(tc)
+    .bind(chain_seconds)
+    .bind(close_kind)
+    .bind(clean)
+    .execute(&mut **tx)
+    .await
+    .context("apply deal close")?;
     Ok(ProjectionOutcome::Applied)
 }
 
@@ -206,7 +230,10 @@ async fn apply_destroyed(
                   updated_at = now()
             where token_contract_address = $1"#,
     )
-    .bind(tc).bind(chain_seconds)
-    .execute(&mut **tx).await.context("apply ContractDestroyed")?;
+    .bind(tc)
+    .bind(chain_seconds)
+    .execute(&mut **tx)
+    .await
+    .context("apply ContractDestroyed")?;
     Ok(ProjectionOutcome::Applied)
 }

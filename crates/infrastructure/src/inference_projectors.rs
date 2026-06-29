@@ -226,7 +226,17 @@ impl FilledFields {
         let seller_tc = field_str(&event.value, "sellerTC").ok().map(str::to_string);
         let buyer_note = field_str(&event.value, "buyerNote").ok().map(str::to_string);
         let ids = vec![maker_id.clone(), taker_id.clone()];
-        Ok(Self { ob, maker_id, taker_id, ticks, chain_order, chain_seconds, ids, seller_tc, buyer_note })
+        Ok(Self {
+            ob,
+            maker_id,
+            taker_id,
+            ticks,
+            chain_order,
+            chain_seconds,
+            ids,
+            seller_tc,
+            buyer_note,
+        })
     }
 }
 

@@ -42,10 +42,8 @@ const DEX_ABIS: &[(&str, &str)] = &[
     ("Nullifier", ABI_NULLIFIER),
 ];
 
-const INFERENCE_ABIS: &[(&str, &str)] = &[
-    ("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK),
-    ("TokenContract", ABI_TOKEN_CONTRACT),
-];
+const INFERENCE_ABIS: &[(&str, &str)] =
+    &[("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK), ("TokenContract", ABI_TOKEN_CONTRACT)];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DecodedEvent {
@@ -402,10 +400,7 @@ mod tests {
     #[test]
     fn registers_token_contract_events_uniquely() {
         let decoder = Decoder::new().unwrap();
-        assert!(
-            decoder.contracts.contains_key("TokenContract"),
-            "token contract abi missing"
-        );
+        assert!(decoder.contracts.contains_key("TokenContract"), "token contract abi missing");
         let tc = decoder.contracts.get("TokenContract").expect("token contract abi loaded");
         for (name, event) in tc.events() {
             let entries =

@@ -35,7 +35,11 @@ fn node(src: &str, chain_order: &str) -> EventNode {
         created_at: Some(serde_json::json!(1_700_000_000)),
     }
 }
-async fn project(tx: &mut Transaction<'_, Postgres>, e: &DecodedEvent, n: &EventNode) -> ProjectionOutcome {
+async fn project(
+    tx: &mut Transaction<'_, Postgres>,
+    e: &DecodedEvent,
+    n: &EventNode,
+) -> ProjectionOutcome {
     project_event(tx, e, n).await.unwrap()
 }
 async fn setup() -> Option<PgPool> {
@@ -62,15 +66,28 @@ async fn stream_funded_then_opened_records_buyer_deposit_price() {
     let Some(pool) = setup().await else { return };
     let tc = "0:tc_fund_open";
     sqlx::query("delete from inference_deals where token_contract_address=$1")
-        .bind(tc).execute(&pool).await.unwrap();
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
-        project(&mut tx, &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer1","deposit":"5000"})), &node(tc, "co-1")).await,
+        project(
+            &mut tx,
+            &ev("StreamFunded", serde_json::json!({"buyer":"0:buyer1","deposit":"5000"})),
+            &node(tc, "co-1")
+        )
+        .await,
         ProjectionOutcome::Applied
     );
     assert_eq!(
-        project(&mut tx, &ev("StreamOpened", serde_json::json!({"buyer":"0:buyer1","pricePerTick":"10"})), &node(tc, "co-2")).await,
+        project(
+            &mut tx,
+            &ev("StreamOpened", serde_json::json!({"buyer":"0:buyer1","pricePerTick":"10"})),
+            &node(tc, "co-2")
+        )
+        .await,
         ProjectionOutcome::Applied
     );
     tx.commit().await.unwrap();
@@ -87,8 +104,16 @@ async fn stream_funded_then_opened_records_buyer_deposit_price() {
 async fn tick_finalized_counts_each_tick_once_under_replay() {
     let Some(pool) = setup().await else { return };
     let tc = "0:tc_ticks";
-    sqlx::query("delete from inference_ticks where token_contract_address=$1").bind(tc).execute(&pool).await.unwrap();
-    sqlx::query("delete from inference_deals where token_contract_address=$1").bind(tc).execute(&pool).await.unwrap();
+    sqlx::query("delete from inference_ticks where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     let tick1 = ev("TickFinalized", serde_json::json!({"finalizedOwed":"10","deposit":"4990"}));
@@ -104,8 +129,12 @@ async fn tick_finalized_counts_each_tick_once_under_replay() {
         .bind(tc).fetch_one(&pool).await.unwrap();
     assert_eq!(ticks, 2, "each distinct tick counted once");
     assert_eq!(owed, "20");
-    let rows: i64 = sqlx::query_scalar("select count(*) from inference_ticks where token_contract_address=$1")
-        .bind(tc).fetch_one(&pool).await.unwrap();
+    let rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_ticks where token_contract_address=$1")
+            .bind(tc)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(rows, 2);
 }
 
@@ -113,10 +142,22 @@ async fn tick_finalized_counts_each_tick_once_under_replay() {
 async fn stream_stopped_marks_clean_settlement() {
     let Some(pool) = setup().await else { return };
     let tc = "0:tc_stop";
-    sqlx::query("delete from inference_deals where token_contract_address=$1").bind(tc).execute(&pool).await.unwrap();
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    project(&mut tx, &ev("StreamStopped", serde_json::json!({"buyer":"0:b","toSeller":"40","refundToBuyer":"60"})), &node(tc, "co-9")).await;
+    project(
+        &mut tx,
+        &ev(
+            "StreamStopped",
+            serde_json::json!({"buyer":"0:b","toSeller":"40","refundToBuyer":"60"}),
+        ),
+        &node(tc, "co-9"),
+    )
+    .await;
     tx.commit().await.unwrap();
 
     let (kind, clean, settled): (Option<String>, Option<bool>, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
