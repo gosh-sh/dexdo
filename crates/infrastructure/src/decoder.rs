@@ -28,6 +28,8 @@ const ABI_NULLIFIER: &str = include_str!("../../../contracts/dex/Nullifier.abi.j
 
 const ABI_INFERENCE_ORDER_BOOK: &str =
     include_str!("../../../contracts/airegistry/InferenceOrderBook.abi.json");
+const ABI_TOKEN_CONTRACT: &str =
+    include_str!("../../../contracts/airegistry/TokenContract.abi.json");
 
 const DEX_ABIS: &[(&str, &str)] = &[
     ("RootOracle", ABI_ROOT_ORACLE),
@@ -40,7 +42,10 @@ const DEX_ABIS: &[(&str, &str)] = &[
     ("Nullifier", ABI_NULLIFIER),
 ];
 
-const INFERENCE_ABIS: &[(&str, &str)] = &[("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK)];
+const INFERENCE_ABIS: &[(&str, &str)] = &[
+    ("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK),
+    ("TokenContract", ABI_TOKEN_CONTRACT),
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DecodedEvent {
@@ -248,12 +253,9 @@ mod tests {
             assert!(decoder.contracts.contains_key(kind), "missing contract {kind}");
         }
 
-        // 13 PMP + 2 Oracle + 4 OracleEventList + 8 OrderBook + 1 RootOracle
-        // + 6 RootPN + 14 PrivateNote + 0 Nullifier = 48 DEX events
-        // + 8 InferenceOrderBook events, but OrderCancelled collides with
-        // OrderBook.OrderCancelled -> still 48 + 7 = 55 unique ids, but one id
-        // has 2 entries. known_events() counts distinct ids = 55.
-        assert_eq!(decoder.known_events(), 55, "unexpected total event id count");
+        // 48 DEX unique ids + 7 new InferenceOrderBook ids (OrderCancelled collides
+        // with OrderBook.OrderCancelled) + 13 TokenContract ids = 68 distinct ids.
+        assert_eq!(decoder.known_events(), 68, "unexpected total event id count");
 
         // sample lookups — find entries for PMP
         let pmp_event_ids: Vec<_> = decoder
@@ -274,10 +276,8 @@ mod tests {
     fn registers_inference_orderbook_and_counts_unique_ids() {
         let decoder = Decoder::new().unwrap();
         assert!(decoder.contracts.contains_key("InferenceOrderBook"), "inference abi missing");
-        // 48 DEX unique ids + 8 inference events, of which OrderCancelled collides
-        // with OrderBook.OrderCancelled (same (uint128,uint128) signature) => +7 new ids.
-        // Total distinct ids = 55 (48 + 7). The colliding id has 2 entries.
-        assert_eq!(decoder.unique_event_ids(), 55, "unexpected unique event-id count");
+        // 48 DEX + 7 inference (OrderCancelled collides) + 13 TokenContract = 68.
+        assert_eq!(decoder.unique_event_ids(), 68, "unexpected unique event-id count");
     }
 
     #[test]
@@ -397,6 +397,26 @@ mod tests {
         );
         // opNonce is the sole field in the continuation cell.
         assert_eq!(decoded.value["opNonce"], "371");
+    }
+
+    #[test]
+    fn registers_token_contract_events_uniquely() {
+        let decoder = Decoder::new().unwrap();
+        assert!(
+            decoder.contracts.contains_key("TokenContract"),
+            "token contract abi missing"
+        );
+        let tc = decoder.contracts.get("TokenContract").expect("token contract abi loaded");
+        for (name, event) in tc.events() {
+            let entries =
+                decoder.event_index.get(&event.get_id()).map(Vec::as_slice).unwrap_or(&[]);
+            assert_eq!(
+                entries.len(),
+                1,
+                "TokenContract.{name} signature id collides with another ABI: {entries:?} — add a dst route via event_type_dst(<700s id from token_contract_events.rs>)"
+            );
+            assert_eq!(entries[0].0, "TokenContract", "{name} resolves to the wrong contract");
+        }
     }
 
     // --- Test helpers: encode event bodies from the loaded contracts ---
