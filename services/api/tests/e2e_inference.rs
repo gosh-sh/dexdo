@@ -73,7 +73,10 @@ async fn inference_order_book_buy_then_cancel_against_shellnet() {
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex::from_endpoints");
     let model_name = unique_model_name();
     let model_hash = model_hash_dec(&model_name);
-    eprintln!("[e2e_inference] note={} model_name={model_name} model_hash={model_hash}", note.address);
+    eprintln!(
+        "[e2e_inference] note={} model_name={model_name} model_hash={model_hash}",
+        note.address
+    );
 
     let mut failures: Vec<String> = Vec::new();
 
