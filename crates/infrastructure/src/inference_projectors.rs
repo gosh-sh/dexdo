@@ -340,9 +340,11 @@ async fn apply_filled_decrement(
 /// `is_buy=false`), and buyer note (`buyerNote`). Upserts so the row survives
 /// whether the deal was first seen here or via an earlier TokenContract.* event.
 /// On a well-formed `Filled`, `sellerTC` is always present; its absence signals
-/// ABI drift (logged as a warning). The caller continues with `Ok(())` regardless
-/// because `apply_filled_decrement` has already mutated rows in this transaction —
-/// propagating an error would roll back the decrement and wedge projection.
+/// ABI drift, so that one case alone is logged and skipped with `Ok(())` (not
+/// `Err`): `apply_filled_decrement` has already mutated rows in this transaction,
+/// and failing the event over a decoder/ABI mismatch would defer it forever. A
+/// genuine DB error in the queries below still propagates — the reprojection
+/// savepoint isolates and retries the event.
 async fn link_deal_from_filled(
     tx: &mut Transaction<'_, Postgres>,
     f: &FilledFields,
