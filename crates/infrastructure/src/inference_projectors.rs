@@ -469,36 +469,6 @@ pub(crate) fn parse_model_ref(
     }
 }
 
-#[cfg(test)]
-mod parse_tests {
-    use super::parse_model_ref;
-
-    #[test]
-    fn three_parts_fill_all() {
-        let (r, p, n, v) = parse_model_ref("qwen--qwen2.5-32b--instruct");
-        assert_eq!(r.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
-        assert_eq!(p.as_deref(), Some("qwen"));
-        assert_eq!(n.as_deref(), Some("qwen2.5-32b"));
-        assert_eq!(v.as_deref(), Some("instruct"));
-    }
-
-    #[test]
-    fn non_three_parts_keep_only_ref() {
-        let (r, p, n, v) = parse_model_ref("just-a-name");
-        assert_eq!(r.as_deref(), Some("just-a-name"));
-        assert!(p.is_none() && n.is_none() && v.is_none());
-
-        let (r2, ..) = parse_model_ref("a--b"); // 2 parts
-        assert_eq!(r2.as_deref(), Some("a--b"));
-    }
-
-    #[test]
-    fn empty_yields_all_none() {
-        let (r, p, n, v) = parse_model_ref("   ");
-        assert!(r.is_none() && p.is_none() && n.is_none() && v.is_none());
-    }
-}
-
 async fn apply_inference_order_cancelled(
     tx: &mut Transaction<'_, Postgres>,
     event: &DecodedEvent,
@@ -533,5 +503,35 @@ async fn apply_inference_order_cancelled(
     match prior {
         None => Ok(ProjectionOutcome::Deferred), // parent OrderPlaced not seen yet
         Some(_) => Ok(ProjectionOutcome::Applied),
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::parse_model_ref;
+
+    #[test]
+    fn three_parts_fill_all() {
+        let (r, p, n, v) = parse_model_ref("qwen--qwen2.5-32b--instruct");
+        assert_eq!(r.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
+        assert_eq!(p.as_deref(), Some("qwen"));
+        assert_eq!(n.as_deref(), Some("qwen2.5-32b"));
+        assert_eq!(v.as_deref(), Some("instruct"));
+    }
+
+    #[test]
+    fn non_three_parts_keep_only_ref() {
+        let (r, p, n, v) = parse_model_ref("just-a-name");
+        assert_eq!(r.as_deref(), Some("just-a-name"));
+        assert!(p.is_none() && n.is_none() && v.is_none());
+
+        let (r2, ..) = parse_model_ref("a--b"); // 2 parts
+        assert_eq!(r2.as_deref(), Some("a--b"));
+    }
+
+    #[test]
+    fn empty_yields_all_none() {
+        let (r, p, n, v) = parse_model_ref("   ");
+        assert!(r.is_none() && p.is_none() && n.is_none() && v.is_none());
     }
 }
