@@ -11,7 +11,7 @@ Tables fall into five buckets:
 | Read-model — discovery | `oracles`, `oracle_event_lists`, `oracle_events` | Indexer projectors + OracleEventList reconciler. |
 | Read-model — markets | `markets`, `market_outcomes`, `live_orders`, `order_book_snapshots` | Indexer projectors + market reconciler. |
 | Read-model — inference markets | `inference_markets`, `inference_orders` | Indexer projectors + inference reconciler. |
-| Read-model — inference deals | `inference_deals`, `inference_ticks` | Inference SETTLEMENT projector + rewards service. |
+| Read-model — inference deals | `inference_deals`, `inference_ticks` | Inference SETTLEMENT projector (writer). Intended to back the forthcoming rewards service (reader). |
 | Authentication and credentials | `accounts`, `api_keys` | Operator-provisioned; read on every signed request by the auth middleware. |
 
 ## Glossary
@@ -389,7 +389,7 @@ Indices:
 
 ## Read-model — inference deals
 
-The inference settlement side tracks the lifecycle of each deal escrow (`TokenContract` — a per-deal streaming-payment contract auto-deployed when a SELL offer is matched) and the individual finalized ticks within it. These tables back the rewards service and are written by the SETTLEMENT projector. Both tables are created by migration `0007_inference_deals.sql`.
+The inference settlement side tracks the lifecycle of each deal escrow (`TokenContract` — a per-deal streaming-payment contract auto-deployed when a SELL offer is matched) and the individual finalized ticks within it. These tables are written by the SETTLEMENT projector and are intended to back the forthcoming rewards service as its primary read-model. Both tables are created by migration `0007_inference_deals.sql`.
 
 ### `inference_deals`
 
@@ -419,7 +419,7 @@ Indices:
 | Index | Purpose |
 | --- | --- |
 | `inference_deals_orderbook_idx` | Lookup all deals for a given `InferenceOrderBook`. |
-| `inference_deals_seller_idx` | Lookup all deals by seller PrivateNote — backs the rewards service per-seller aggregation. |
+| `inference_deals_seller_idx` | Lookup all deals by seller PrivateNote — sized for per-seller aggregation queries (e.g. by the forthcoming rewards service). |
 | `inference_deals_buyer_idx` | Lookup all deals by buyer PrivateNote. |
 
 ### `inference_ticks`
