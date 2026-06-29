@@ -9,6 +9,8 @@ import "./RootPN.sol";
 import "./OrderBook.sol";
 import "./libraries/DexLib.sol";
 import "../airegistry/InferenceOrderBook.sol";
+import "../airegistry/RootModel.sol";
+import "../airegistry/TokenContract.sol";
 
 /// @notice Buyer-side calls into an inference streaming deal (TokenContract).
 ///         Both are gated on `msg.sender == _buyer` in TokenContract, so this
@@ -17,20 +19,29 @@ interface IInferenceDeal {
     function stop() external;
     function dispute() external;
     function reclaimOnTimeout() external;
+    function fundProbeCommission() external;
 }
 
 /// @notice Wallet that can deploy and interact with PMP contracts
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.5";
+    string constant version = "4.0.10";
 
-    /// @notice Canonical inference TokenContract code (deal contract). `postSellOffer`
-    ///         verifies its `tokenContract` derives from this pinned code + the seller
-    ///         note's key — else a fill would route the buyer's SHELL to a fake TC
-    ///         (no streaming / dispute / reclaim protections). Re-pin on TC rebuild.
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x9afa03cce53a7bd0d1129b2ed466873ac9a564cd229fac84d3feeac6310da5c3;
+    /// @notice Canonical-deal derivation pins (#58 note-funded model). `fundDeployShell` /
+    ///         `postProbeCommission` send SHELL ONLY to the seller's canonical RootModel / per-deal
+    ///         TokenContract — DERIVED here from this note's own key (+nonce), never a caller-supplied
+    ///         address (same guard the IOB enforces in placeSellOffer, review #39). Re-pin whenever
+    ///         TokenContract/RootModel is rebuilt or the SuperRoot is redeployed.
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xefa8df3f7e10a66678bbe194ff001252885114d28e907b9e512f47d5e67a3d65;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0x573211b372bb2a58349cc8d7ea3b93498bbb1ef5e02ef626a25146b3541cfb85;
+    uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
+    // Canonical AI SuperRoot account id (workchain 0) — anchor for the RootModel-address derivation.
+    // SHELLNET build: code-derived (NOT fixed) = stateInitHash(SuperRoot code, owner d6e958fe). The
+    // version / RootModel change rotates the SuperRoot code → re-pin + redeploy at the new address.
+    // (LOCAL/MAINNET would instead FIX it at the vanity 0:0c0c… genesis — see dexdo-specs/shellnet-update.md.)
+    uint256 constant SUPER_ROOT_ADDR           = 0x312d7665b9e262a2e5b2e77953912abf69c89f652562cc11ca97778a74c329cf;
 
     /// @notice Owner escape hatch: stale stream/dispute locks can be force
     ///         cleared after this many seconds since the last lock change, so a
@@ -454,14 +465,15 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///         (spec §8), so a given model maps to exactly one book.
     ///         Permissionless: any note holder may (re)deploy the canonical book
     ///         at its deterministic address.
-    function deployInferenceOrderBook(uint256 modelHash)
+    function deployInferenceOrderBook(uint256 modelHash, string modelName)
         public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
     {
         ensureBalance();
         TvmCell stateInit = DexLib.buildInferenceOrderBookStateInit(_inferenceOrderBookCode, modelHash);
-        // The book's ctor verifies the deployer is a genuine note by recomputing
-        // this address from its pinned NOTE_CODE_HASH + our depositHash.
-        new InferenceOrderBook{stateInit: stateInit, value: 5 vmshell, flag: 1, bounce: false}(_depositIdentifierHash);
+        // The book's ctor verifies the deployer is a genuine note (NOTE_CODE_HASH + depositHash)
+        // AND that `sha256(modelName) == modelHash` — so the on-chain model name is the genuine
+        // `producer--model--version` preimage of the address-defining hash, not a free-text label.
+        new InferenceOrderBook{stateInit: stateInit, value: 5 vmshell, flag: 1, bounce: false}(_depositIdentifierHash, modelName);
     }
 
     /// @notice Deterministic address of the InferenceOrderBook for the given
@@ -497,14 +509,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // seller posts fee-free (§2.1, no no-show penalty). Owner = this note
         // (the OB uses msg.sender for ownership/handover).
         ensureBalance();
-        // The deal contract must be a CANONICAL TokenContract bound to this note's
-        // seller key (`_sellerPubkey == _ephemeralPubkey`, `_rootModelAddress == 0`,
-        // `_nonce == nonce`). Otherwise a malicious seller could point `tokenContract`
-        // at a fake address, and the matched fill would forward the BUYER's SHELL
-        // there (bounce:false) with no streaming / dispute / reclaim protections.
-        require(tokenContract == DexLib.computeTokenContractAddressFromHash(
-            TOKEN_CONTRACT_CODE_HASH, TOKEN_CONTRACT_CODE_DEPTH, _ephemeralPubkey, nonce),
-            ERR_BAD_TOKEN_CONTRACT);
+        // The CANONICAL-TokenContract check is enforced authoritatively in
+        // `InferenceOrderBook.placeSellOffer` (review #39): the IOB derives the seller's REAL
+        // RootModel from `sellerPubkey` (under the canonical SuperRoot) and then the bound TC
+        // address from `(sellerPubkey, nonce)`, rejecting a fake/foreign `tokenContract` with
+        // ERR_BAD_TOKEN_CONTRACT. A note-side pre-check is redundant — and the old one derived the
+        // TC with `_rootModelAddress == 0`, which no longer matches the real deploy (RootModel
+        // registry), so it would reject legit offers. `placeSellOffer` is public, so the IOB must
+        // be (and is) the gate; the note just forwards `(_ephemeralPubkey, nonce)`.
         address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
         InferenceOrderBook(orderBook).placeSellOffer{value: 1 vmshell, flag: 1, bounce: false}(
             pricePerTick, maxTicks, tokenContract, flags, _ephemeralPubkey, nonce);
@@ -532,7 +544,11 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // contract (the gateway authenticates the buyer against it). SHELL escrow
         // goes to the derived canonical book, never a caller-supplied address.
         address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
-        InferenceOrderBook(orderBook).placeBuyOrder{value: 2 vmshell, flag: 1, bounce: false, currencies: ecc}(
+        // bounce:true — if the book rejects the placement (expired / bad flags / insufficient
+        // deposit), the SHELL escrow bounces straight back to this note instead of stranding on
+        // the book (#91). onBounce safely no-ops here (msg.sender != _busy) and the ECC is
+        // re-credited on accept.
+        InferenceOrderBook(orderBook).placeBuyOrder{value: 2 vmshell, flag: 1, bounce: true, currencies: ecc}(
             maxPricePerTick, ticks, flags, deadline, _ephemeralPubkey);
     }
 
@@ -551,7 +567,8 @@ contract PrivateNote is Modifiers, ReplayProtection {
         ecc[CURRENCIES_ID_SHELL] = varuint32(escrow);
         // §3.1.1: forward this note's pubkey (gateway auth, recorded in the deal).
         address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
-        InferenceOrderBook(orderBook).placeSubscription{value: 2 vmshell, flag: 1, bounce: false, currencies: ecc}(
+        // bounce:true — escrow returns to this note if the book rejects the placement (#91).
+        InferenceOrderBook(orderBook).placeSubscription{value: 2 vmshell, flag: 1, bounce: true, currencies: ecc}(
             maxPricePerTick, ticks, autoRenew, _ephemeralPubkey);
     }
 
@@ -594,6 +611,81 @@ contract PrivateNote is Modifiers, ReplayProtection {
     function streamReclaim(address tokenContract) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
         IInferenceDeal(tokenContract).reclaimOnTimeout{value: 1 vmshell, flag: 1, bounce: false}();
+    }
+
+    /// @notice Deterministic RootModel address for `ownerPubkey` from the pinned code hash/depth +
+    ///         the canonical SuperRoot (mirrors SuperRoot._calculateRootModelAddress / IOB._rootModelAddr).
+    function _rootModelAddr(uint256 ownerPubkey) private returns (address) {
+        TvmCell dummyCode;
+        TvmCell si = abi.encodeStateInit({
+            code: dummyCode, contr: RootModel, pubkey: ownerPubkey,
+            varInit: { _ownerPubkey: ownerPubkey, _superRootAddress: address.makeAddrStd(0, SUPER_ROOT_ADDR) }
+        });
+        TvmSlice s = si.toSlice();
+        s.skip(5);
+        s.loadRef();
+        TvmCell dataCell = s.loadRef();
+        return address.makeAddrStd(
+            0, abi.stateInitHash(ROOT_MODEL_CODE_HASH, tvm.hash(dataCell), ROOT_MODEL_CODE_DEPTH, dataCell.depth()));
+    }
+
+    /// @notice Deterministic per-deal TokenContract address from the pinned code hash/depth + the
+    ///         seller's statics (sellerPubkey, real RootModel, nonce) — mirrors IOB._tokenContractAddr
+    ///         and the on-chain deploy. The ONLY address the note-funded helpers below ever pay.
+    function _tokenContractAddr(uint256 sellerPubkey, uint64 nonce) private returns (address) {
+        address rootModel = _rootModelAddr(sellerPubkey);
+        TvmCell dummyCode;
+        TvmCell si = abi.encodeStateInit({
+            code: dummyCode, contr: TokenContract, pubkey: sellerPubkey,
+            varInit: { _sellerPubkey: sellerPubkey, _rootModelAddress: rootModel, _nonce: nonce }
+        });
+        TvmSlice s = si.toSlice();
+        s.skip(5);
+        s.loadRef();
+        TvmCell dataCell = s.loadRef();
+        return address.makeAddrStd(
+            0, abi.stateInitHash(TOKEN_CONTRACT_CODE_HASH, tvm.hash(dataCell), TOKEN_CONTRACT_CODE_DEPTH, dataCell.depth()));
+    }
+
+    /// @notice (#58 / 1a, note-funded model) Owner pre-funds the seller's UNINIT cross-dapp deploy
+    ///         targets — the canonical RootModel (per-seller) and/or per-deal TokenContract — with
+    ///         SHELL (ECC[2]) straight from this note, so no external operational wallet (one-seed)
+    ///         is needed; the seller-signed deploy message then lands on the funded address.
+    /// @dev    Targets are DERIVED from THIS note's own key (`_ephemeralPubkey`) + `nonce`, never a
+    ///         caller-supplied address — SHELL can only ever reach the seller's canonical RootModel /
+    ///         TokenContract (review #39 parity). ONE `flag:16` send per target (mirrors the giver
+    ///         `fund_deploy_address`): flag 16 carries the ECC[2] to an UNINIT cross-dapp address so the
+    ///         seller-signed deploy then lands + activates (flag 1 funds the balance but the cross-dapp
+    ///         deploy would not activate). `bounce:false` is REQUIRED (uninit target). amount 0 = skip.
+    function fundDeployShell(uint64 nonce, uint128 rootModelShell, uint128 tcShell)
+        public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
+    {
+        ensureBalance();
+        if (rootModelShell > 0) {
+            mapping(uint32 => varuint32) rmEcc;
+            rmEcc[CURRENCIES_ID_SHELL] = varuint32(rootModelShell);
+            _rootModelAddr(_ephemeralPubkey).transfer({value: 1 vmshell, bounce: false, flag: 16, currencies: rmEcc});
+        }
+        if (tcShell > 0) {
+            mapping(uint32 => varuint32) tcEcc;
+            tcEcc[CURRENCIES_ID_SHELL] = varuint32(tcShell);
+            _tokenContractAddr(_ephemeralPubkey, nonce).transfer({value: 1 vmshell, bounce: false, flag: 16, currencies: tcEcc});
+        }
+    }
+
+    /// @notice (#58 / 1b, note-funded model) Owner funds the seller's probe commission into the
+    ///         per-deal TokenContract straight from this note — the seller mirror of the buyer's
+    ///         `placeInferenceBuy` escrow (no external operational wallet).
+    /// @dev    The target is the DERIVED canonical TC for `(this note's seller key, nonce)` — never a
+    ///         caller-supplied address (review #39 parity). `tc.fundProbeCommission` consumes the
+    ///         attached ECC[2] (`require >= probeCommission`, excess refunded to this note).
+    function postProbeCommission(uint64 nonce, uint128 amount)
+        public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
+    {
+        ensureBalance();
+        mapping(uint32 => varuint32) ecc;
+        ecc[CURRENCIES_ID_SHELL] = varuint32(amount);
+        IInferenceDeal(_tokenContractAddr(_ephemeralPubkey, nonce)).fundProbeCommission{value: 2 vmshell, flag: 1, bounce: false, currencies: ecc}();
     }
 
     /// @notice Deploys a new PMP contract for a prediction market event.
