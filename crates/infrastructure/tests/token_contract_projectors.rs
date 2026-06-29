@@ -503,7 +503,10 @@ async fn probe_burned_is_terminal_close() {
     let Some(pool) = setup().await else { return };
     let tc = "0:tc_probe_burned";
     sqlx::query("delete from inference_deals where token_contract_address=$1")
-        .bind(tc).execute(&pool).await.unwrap();
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     let ev_pb = ev(
