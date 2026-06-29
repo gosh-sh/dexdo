@@ -451,12 +451,17 @@ pub async fn repair_expired_inference_orphan(
         "Filled" => {
             let f = FilledFields::parse(event, node)?;
             let locked = lock_filled_rows(tx, &f.ob, &f.ids).await?;
-            if locked.is_empty() {
+            let outcome = if locked.is_empty() {
                 ExpiredOrphanOutcome::FilledNoLegPresent
             } else {
                 apply_filled_decrement(tx, &f, &locked).await?;
                 ExpiredOrphanOutcome::FilledDepthRepaired { legs: locked.len() }
-            }
+            };
+            // The Filled carries sellerTC + buyerNote; record the deal link even on
+            // the orphan path (orderbook + buyer are leg-independent; seller resolves
+            // from the SELL leg when present) — the normal deferred path never reruns.
+            link_deal_from_filled(tx, &f).await?;
+            outcome
         }
         "OrderCancelled" => ExpiredOrphanOutcome::CancelLost,
         _ => ExpiredOrphanOutcome::Nothing,

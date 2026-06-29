@@ -10,6 +10,7 @@ use dodex_infrastructure::database;
 use dodex_infrastructure::decoder::DecodedEvent;
 use dodex_infrastructure::graphql::EventNode;
 use dodex_infrastructure::inference_projectors::project_inference_event;
+use dodex_infrastructure::inference_projectors::repair_expired_inference_orphan;
 use dodex_infrastructure::projectors::ProjectionOutcome;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -823,4 +824,55 @@ async fn filled_links_deal_to_orderbook_seller_buyer() {
     assert_eq!(orderbook.as_deref(), Some(ob));
     assert_eq!(seller.as_deref(), Some("0:seller"));
     assert_eq!(buyer.as_deref(), Some("0:buyer"));
+}
+
+#[tokio::test]
+async fn orphan_repair_filled_links_deal() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_orphan_link_ob";
+    let tc = "0:tc_orphan_link";
+    sqlx::query("delete from inference_deals where token_contract_address=$1").bind(tc).execute(&pool).await.unwrap();
+    sqlx::query("delete from inference_orders where orderbook_address=$1").bind(ob).execute(&pool).await.unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address=$1").bind(ob).execute(&pool).await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    // Only the SELL leg present (the counterparty BUY OrderPlaced was dropped).
+    let sell = ev("OrderPlaced", serde_json::json!({
+        "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0"}));
+    project_inference_event(&mut tx, &sell, &node(ob, "co-1")).await.unwrap();
+    // Expired Filled orphan: maker(1) present, taker(2) dropped.
+    let filled = ev("Filled", serde_json::json!({
+        "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}));
+    repair_expired_inference_orphan(&mut tx, &filled, &node(ob, "co-2")).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let (orderbook, seller, buyer): (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "select orderbook_address, seller_note, buyer_note from inference_deals where token_contract_address=$1")
+        .bind(tc).fetch_one(&pool).await.unwrap();
+    assert_eq!(orderbook.as_deref(), Some(ob));
+    assert_eq!(seller.as_deref(), Some("0:seller"), "seller resolved from present SELL leg");
+    assert_eq!(buyer.as_deref(), Some("0:buyer"));
+}
+
+#[tokio::test]
+async fn orphan_repair_filled_no_leg_still_links() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_orphan_noleg_ob";
+    let tc = "0:tc_orphan_noleg";
+    sqlx::query("delete from inference_deals where token_contract_address=$1").bind(tc).execute(&pool).await.unwrap();
+    sqlx::query("delete from inference_orders where orderbook_address=$1").bind(ob).execute(&pool).await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    // Neither leg present (both OrderPlaced dropped).
+    let filled = ev("Filled", serde_json::json!({
+        "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}));
+    repair_expired_inference_orphan(&mut tx, &filled, &node(ob, "co-1")).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let (orderbook, seller, buyer): (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "select orderbook_address, seller_note, buyer_note from inference_deals where token_contract_address=$1")
+        .bind(tc).fetch_one(&pool).await.unwrap();
+    assert_eq!(orderbook.as_deref(), Some(ob), "orderbook recorded from the event even with no legs");
+    assert_eq!(buyer.as_deref(), Some("0:buyer"), "buyer recorded from the event even with no legs");
+    assert!(seller.is_none(), "seller unresolved when the SELL leg was dropped");
 }
