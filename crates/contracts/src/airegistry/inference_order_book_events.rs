@@ -30,6 +30,7 @@ pub enum InferenceOrderBookEvent {
     SubscriptionPlaced = 1005,
     CycleForfeited = 1006,
     ForfeitClaimed = 1007,
+    InferenceOrderBookDeployed = 1008,
 }
 
 impl TryFrom<String> for InferenceOrderBookEvent {
@@ -54,6 +55,7 @@ impl TryFrom<String> for InferenceOrderBookEvent {
             1005 => Ok(InferenceOrderBookEvent::SubscriptionPlaced),
             1006 => Ok(InferenceOrderBookEvent::CycleForfeited),
             1007 => Ok(InferenceOrderBookEvent::ForfeitClaimed),
+            1008 => Ok(InferenceOrderBookEvent::InferenceOrderBookDeployed),
             _ => Err(KitError::new(
                 KitModule::Event,
                 KitErrorCode::UnknownEvent,
@@ -85,6 +87,11 @@ pub enum DecodedInferenceOrderBookEvent {
     SubscriptionPlaced { event: Event, kind: InferenceOrderBookEvent, data: SubscriptionPlacedData },
     CycleForfeited { event: Event, kind: InferenceOrderBookEvent, data: CycleForfeitedData },
     ForfeitClaimed { event: Event, kind: InferenceOrderBookEvent, data: ForfeitClaimedData },
+    InferenceOrderBookDeployed {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: OrderBookDeployedData,
+    },
 }
 
 impl FromEvent for DecodedInferenceOrderBookEvent {
@@ -139,6 +146,14 @@ impl FromEvent for DecodedInferenceOrderBookEvent {
                     data,
                 })
             }
+            InferenceOrderBookEvent::InferenceOrderBookDeployed => {
+                let data = decode_or_err::<OrderBookDeployedData>(event, contract)?;
+                Ok(DecodedInferenceOrderBookEvent::InferenceOrderBookDeployed {
+                    event: event.clone(),
+                    kind,
+                    data,
+                })
+            }
         }
     }
 }
@@ -155,6 +170,18 @@ where
             format!("Unexpected empty data for inference order book event `{}`", event.dst),
         )
     })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// Payload of `InferenceOrderBookEvent::InferenceOrderBookDeployed`.
+pub struct OrderBookDeployedData {
+    /// Deployer note address; not stored as model identity.
+    pub note: String,
+    /// `uint256` model hash as returned by the ABI.
+    pub model_hash: String,
+    /// Canonical-ish model name (may be empty).
+    pub model_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

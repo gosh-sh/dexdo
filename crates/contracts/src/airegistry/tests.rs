@@ -363,6 +363,7 @@ fn event_ids_match_modifiers() {
     assert_eq!(Iob::SubscriptionPlaced as u128, 1005);
     assert_eq!(Iob::CycleForfeited as u128, 1006);
     assert_eq!(Iob::ForfeitClaimed as u128, 1007);
+    assert_eq!(Iob::InferenceOrderBookDeployed as u128, 1008);
 }
 
 #[test]
