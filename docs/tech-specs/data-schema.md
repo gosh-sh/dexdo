@@ -346,7 +346,7 @@ One row per `InferenceOrderBook` contract observed on chain — equivalently, on
 | `last_swept_at` | `timestamptz` (nullable) | Stamped `now()` on every sweep batch tick that passes the catch-up gates — not only on cycle completion. It drives the Queue B sweep cadence (`now() - last_swept_at >= inference_sweep_interval_ms`), so it must advance each tick. NULL until the first sweep. Used with `inference_markets_sweep_idx` to drive Queue B sweep scheduling. |
 | `sweep_cursor` | `numeric(78,0)` (nullable) | The `order_id` cursor for the current bounded round-robin sweep of `OPEN` orders. NULL at cycle start (or after a reset). The sweep resumes from this cursor on the next tick; NULL means start from the lowest `order_id`. |
 | `sweep_cycle_max` | `numeric(78,0)` (nullable) | Snapshot of the highest `order_id` at sweep-cycle start. Newly-minted orders above this bound are deferred to the next cycle — they cannot be phantoms yet when the book just accepted them. NULL when no cycle is in progress. |
-| `sweep_override_seq` | `bigint` NOT NULL default `0` | Monotonic counter bumped whenever a `Filled` event overrides a provisionally sweep-cancelled order while the book is still in the discovery phase. The discovery visibility stamp (transition to `last_reconciled_at IS NOT NULL`) is CAS-guarded on this counter being unchanged across the completing sweep tick, preventing a premature stamp when an override reset `sweep_cursor` to NULL at the start of a cycle where a plain cursor-CAS cannot distinguish reset-from-NULL from a normal start-of-cycle-NULL. |
+| `sweep_override_seq` | `bigint` NOT NULL default `0` | Monotonic counter bumped whenever a `InferenceFilled` event overrides a provisionally sweep-cancelled order while the book is still in the discovery phase. The discovery visibility stamp (transition to `last_reconciled_at IS NOT NULL`) is CAS-guarded on this counter being unchanged across the completing sweep tick, preventing a premature stamp when an override reset `sweep_cursor` to NULL at the start of a cycle where a plain cursor-CAS cannot distinguish reset-from-NULL from a normal start-of-cycle-NULL. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Indices:
@@ -362,22 +362,22 @@ Indices:
 
 ### `inference_orders`
 
-Per-order read model backing `/api/v1/inference/depth` (order-book depth). One row per chain-side order on an `InferenceOrderBook`, mutated in place as `OrderPlaced`, `Filled`, `OrderCancelled`, `Refunded`, and `SubscriptionPlaced` events arrive. Mirrors [`live_orders`](#live_orders): rows are never deleted, so `FILLED` / `CANCELLED` entries remain and the depth handler (`max(last_chain_order)` across **all** rows for the book) still sees them. This version exposes no account-scoped inference order endpoint, so no ownership / private-read columns are required.
+Per-order read model backing `/api/v1/inference/depth` (order-book depth). One row per chain-side order on an `InferenceOrderBook`, mutated in place as `InferenceOrderPlaced`, `InferenceFilled`, `InferenceOrderCancelled`, `InferenceRefunded`, and `InferenceSubscriptionPlaced` events arrive. Mirrors [`live_orders`](#live_orders): rows are never deleted, so `FILLED` / `CANCELLED` entries remain and the depth handler (`max(last_chain_order)` across **all** rows for the book) still sees them. This version exposes no account-scoped inference order endpoint, so no ownership / private-read columns are required.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `orderbook_address` | `text` (PK part 1) | InferenceOrderBook contract address. |
-| `order_id` | `numeric(78,0)` (PK part 2) | Chain-side order id (`OrderPlaced.orderId`). The pair `(orderbook_address, order_id)` is the primary key. |
+| `order_id` | `numeric(78,0)` (PK part 2) | Chain-side order id (`InferenceOrderPlaced.orderId`). The pair `(orderbook_address, order_id)` is the primary key. |
 | `is_buy` | `boolean` | Side. `true` = bid (buy order / subscription), `false` = ask (sell offer). |
-| `price` | `numeric(78,0)` | Price per tick `P` in SHELL atoms, as emitted (`OrderPlaced.price`). BUY = max price per tick; SELL = offer price. Pure taker orders (IOC / FOK / MARKET) never rest, so they produce no OPEN row. Decoded ÷ `10^9` at render, formatted at `price_precision`. |
-| `amount_initial` | `numeric(78,0)` | Original tick count (`OrderPlaced.ticks`). |
-| `amount_remaining` | `numeric(78,0)` | Ticks not yet filled. Set by `OrderPlaced`, decremented by `Filled`. `OrderCancelled` preserves the current value; depth ignores the row because `status != 'OPEN'`. |
-| `is_subscription` | `boolean` default `false` | `true` when the resting buy came from `SubscriptionPlaced` (spec §8 — a standing bid throttled by a weekly budget). Rests in the book like any other bid; flagged for diagnostics. |
+| `price` | `numeric(78,0)` | Price per tick `P` in SHELL atoms, as emitted (`InferenceOrderPlaced.price`). BUY = max price per tick; SELL = offer price. Pure taker orders (IOC / FOK / MARKET) never rest, so they produce no OPEN row. Decoded ÷ `10^9` at render, formatted at `price_precision`. |
+| `amount_initial` | `numeric(78,0)` | Original tick count (`InferenceOrderPlaced.ticks`). |
+| `amount_remaining` | `numeric(78,0)` | Ticks not yet filled. Set by `InferenceOrderPlaced`, decremented by `InferenceFilled`. `InferenceOrderCancelled` preserves the current value; depth ignores the row because `status != 'OPEN'`. |
+| `is_subscription` | `boolean` default `false` | `true` when the resting buy came from `InferenceSubscriptionPlaced` (spec §8 — a standing bid throttled by a weekly budget). Rests in the book like any other bid; flagged for diagnostics. |
 | `status` | `text` CHECK `IN ('OPEN','FILLED','CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. A SELL offer is a one-deal slot consumed on match; a BUY maker reduces across fills. |
 | `swept_at` | `timestamptz` (nullable) | Stamped by the reconciler sweep when `getOrder()` confirms the order is no longer in the book and the row is provisionally cancelled. NULL while the order has not yet been swept. |
-| `note_address` | `text` (nullable) | Owner note address (`OrderPlaced.note`). Not on the public hot path; kept for diagnostics and cancel attribution. |
+| `note_address` | `text` (nullable) | Owner note address (`InferenceOrderPlaced.note`). Not on the public hot path; kept for diagnostics and cancel attribution. |
 | `last_chain_order` | `text` NOT NULL | Chain-order key of the most recent book event that touched this order. Lex-monotonic via `greatest(existing, new)`. Feeds `lastUpdateId` in depth responses as a STRING. |
-| `chain_created_at` / `chain_updated_at` | `timestamptz` | On-chain block times of the originating `OrderPlaced` and the most recent touch. Display / diagnostic only. |
+| `chain_created_at` / `chain_updated_at` | `timestamptz` | On-chain block times of the originating `InferenceOrderPlaced` and the most recent touch. Display / diagnostic only. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Indices:
@@ -393,14 +393,14 @@ The inference settlement side tracks the lifecycle of each deal escrow (`TokenCo
 
 ### `inference_deals`
 
-One row per `TokenContract` address. Seeded as a skeleton from the first observed `TokenContract.*` event (keyed by `src_address`); remaining columns filled by the SETTLEMENT projector as `InferenceOrderBook.Filled`, `TokenContract.StreamOpened`, and the stream-close events (`StreamStopped`/`DisputeResolved`/`StreamReclaimed`/`ContractDestroyed`), and related events arrive.
+One row per `TokenContract` address. Seeded as a skeleton from the first observed `TokenContract.*` event (keyed by `src_address`); remaining columns filled by the SETTLEMENT projector as `InferenceOrderBook.InferenceFilled`, `TokenContract.StreamOpened`, and the stream-close events (`StreamStopped`/`DisputeResolved`/`StreamReclaimed`/`ContractDestroyed`), and related events arrive.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `token_contract_address` | `text` PK | Address of the `TokenContract` escrow deployed when a SELL order is matched. The per-deal identifier. |
-| `orderbook_address` | `text` (nullable) | The `InferenceOrderBook` address that matched this deal. Filled from `InferenceOrderBook.Filled`. |
-| `seller_note` | `text` (nullable) | PrivateNote address of the seller. Filled from `InferenceOrderBook.Filled`. |
-| `buyer_note` | `text` (nullable) | PrivateNote address of the buyer. Filled from `InferenceOrderBook.Filled`. |
+| `orderbook_address` | `text` (nullable) | The `InferenceOrderBook` address that matched this deal. Filled from `InferenceOrderBook.InferenceFilled`. |
+| `seller_note` | `text` (nullable) | PrivateNote address of the seller. Filled from `InferenceOrderBook.InferenceFilled`. |
+| `buyer_note` | `text` (nullable) | PrivateNote address of the buyer. Filled from `InferenceOrderBook.InferenceFilled`. |
 | `deposit` | `numeric(78,0)` (nullable) | Initial deposit amount (quote token units). |
 | `price_per_tick` | `numeric(78,0)` (nullable) | Agreed price per finalized tick (quote token units). |
 | `finalized_ticks` | `integer` NOT NULL default `0` | Count of `TokenContract.TickFinalized` events for this deal (= number of `inference_ticks` rows). NOT the contract's on-chain `_ticksFinalized`, which additionally counts the probe-accept tick (`ProbeAccepted`) and the closing tick (folded into `StreamStopped`/`StreamReclaimed`/`DisputeResolved`), neither emitted as `TickFinalized`. |
@@ -410,7 +410,7 @@ One row per `TokenContract` address. Seeded as a skeleton from the first observe
 | `close_kind` | `text` (nullable) | Terminal close type: one of `STOPPED`, `DISPUTE_RESOLVED`, `RECLAIMED`, `DESTROYED`, `PROBE_BURNED`. Enforced by a CHECK constraint. |
 | `clean_settlement` | `boolean` (nullable) | `true` if the deal closed without a dispute; `false` or `null` otherwise. |
 | `disputed_at_chain` | `timestamptz` (nullable) | Chain timestamp of the dispute event, if any. |
-| `last_chain_order` | `text` (nullable) | The `chain_order` of the most recent `InferenceOrderBook.Filled` cross-link that wrote this row. Advanced via `greatest(existing, new)` by the `Filled` handler; not read or advanced by any `TokenContract` handler. |
+| `last_chain_order` | `text` (nullable) | The `chain_order` of the most recent `InferenceOrderBook.InferenceFilled` cross-link that wrote this row. Advanced via `greatest(existing, new)` by the `InferenceFilled` handler; not read or advanced by any `TokenContract` handler. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
 
 Indices:

@@ -105,7 +105,7 @@ async fn order_placed_seeds_market_and_rests_order() {
 
     let mut tx = pool.begin().await.unwrap();
     let e = ev(
-        "OrderPlaced",
+        "InferenceOrderPlaced",
         serde_json::json!({
         "orderId":"5","isBuy":true,"price":"100","ticks":"10","note":"0:note5",
         "tokenContract":"0:tc","deadline":"0" }),
@@ -145,7 +145,7 @@ async fn order_placed_replay_does_not_reset_partial_fill() {
         .unwrap();
     let mut tx = pool.begin().await.unwrap();
     let e = ev(
-        "OrderPlaced",
+        "InferenceOrderPlaced",
         serde_json::json!({"orderId":"9","isBuy":false,"price":"7","ticks":"10","note":"0:n","tokenContract":"0:tc","deadline":"0"}),
     );
     project(&mut tx, &e, &node(ob, "co-1")).await;
@@ -181,7 +181,7 @@ async fn subscription_placed_rests_a_buy() {
         .unwrap();
     let mut tx = pool.begin().await.unwrap();
     let e = ev(
-        "SubscriptionPlaced",
+        "InferenceSubscriptionPlaced",
         serde_json::json!({
         "orderId":"3","buyerNote":"0:bn","maxPrice":"50","ticks":"8","cycleBudget":"0","autoRenew":false }),
     );
@@ -209,7 +209,7 @@ async fn order_cancelled_is_terminal_and_defers_when_absent() {
         .unwrap();
     // Cancel with no prior placement => Deferred (zero writes).
     let mut tx = pool.begin().await.unwrap();
-    let c = ev("OrderCancelled", serde_json::json!({"orderId":"2","refundedShell":"0"}));
+    let c = ev("InferenceOrderCancelled", serde_json::json!({"orderId":"2","refunded":"0"}));
     assert_eq!(project(&mut tx, &c, &node(ob, "co-1")).await, ProjectionOutcome::Deferred);
     tx.commit().await.unwrap();
     let n: i64 = sqlx::query_scalar(
@@ -222,7 +222,7 @@ async fn order_cancelled_is_terminal_and_defers_when_absent() {
     assert_eq!(n, 0);
     // Place then cancel => CANCELLED, swept_at NULL.
     let mut tx = pool.begin().await.unwrap();
-    project(&mut tx,&ev("OrderPlaced",serde_json::json!({"orderId":"2","isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":"0:tc","deadline":"0"})),&node(ob,"co-2")).await;
+    project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":"2","isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":"0:tc","deadline":"0"})),&node(ob,"co-2")).await;
     assert_eq!(project(&mut tx, &c, &node(ob, "co-3")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();
     let (status, swept_null): (String, bool) = sqlx::query_as(
@@ -245,7 +245,7 @@ async fn observability_event_seeds_market_only() {
         .await
         .unwrap();
     let mut tx = pool.begin().await.unwrap();
-    let r = ev("Refunded", serde_json::json!({"note":"0:n","amount":"1"}));
+    let r = ev("InferenceRefunded", serde_json::json!({"note":"0:n","amount":"1"}));
     assert_eq!(project(&mut tx, &r, &node(ob, "co-1")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();
     let m: i64 =
@@ -284,7 +284,7 @@ async fn routes_by_event_type_when_event_name_is_empty() {
     let loop_shaped = DecodedEvent {
         contract_kind: "",
         event_name: String::new(), // <-- as the live loop builds it
-        event_type: "InferenceOrderBook.OrderPlaced".to_string(),
+        event_type: "InferenceOrderBook.InferenceOrderPlaced".to_string(),
         value: serde_json::json!({"orderId":"7","isBuy":true,"price":"1","ticks":"3","note":"0:n","tokenContract":"0:tc","deadline":"0"}),
     };
     assert_eq!(project(&mut tx, &loop_shaped, &node(ob, "co-1")).await, ProjectionOutcome::Applied);
@@ -379,7 +379,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         .await
         .unwrap();
     let filled = serde_json::json!({"makerId":"900","takerId":"901","ticks":"1","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"});
-    let cancel = serde_json::json!({"orderId":"902","refundedShell":"0"});
+    let cancel = serde_json::json!({"orderId":"902","refunded":"0"});
     // (a) aged-ingest Filled orphan => dropped.        (b) aged-ingest OrderCancelled orphan => dropped (BOTH types).
     insert_raw(
         &pool,
@@ -388,7 +388,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         3600,
         0,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled.clone(),
     )
     .await;
@@ -399,7 +399,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         3600,
         0,
         ob,
-        "InferenceOrderBook.OrderCancelled",
+        "InferenceOrderBook.InferenceOrderCancelled",
         cancel.clone(),
     )
     .await;
@@ -411,7 +411,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         0,
         86400,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled.clone(),
     )
     .await;
@@ -423,7 +423,7 @@ async fn expired_orphans_dropped_both_types_using_ingest_age_not_chain_time() {
         0,
         0,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled.clone(),
     )
     .await;
@@ -481,7 +481,7 @@ async fn expired_orphan_not_dropped_until_capture_at_head() {
         3600,
         0,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled,
     )
     .await;
@@ -531,7 +531,7 @@ async fn expired_filled_orphan_decrements_present_leg() {
     // Seed a resting BUY maker (id 700) with 10 ticks of depth via the real placement projector.
     let mut tx = pool.begin().await.unwrap();
     let placed = ev(
-        "OrderPlaced",
+        "InferenceOrderPlaced",
         serde_json::json!({"orderId":"700","isBuy":true,"price":"5","ticks":"10","note":"0:n"}),
     );
     assert_eq!(
@@ -550,7 +550,7 @@ async fn expired_filled_orphan_decrements_present_leg() {
         3600,
         0,
         ob,
-        "InferenceOrderBook.Filled",
+        "InferenceOrderBook.InferenceFilled",
         filled,
     )
     .await;
@@ -598,7 +598,7 @@ async fn place(
 ) {
     let _ = pool; // place via the projector for realism
     let e = ev(
-        "OrderPlaced",
+        "InferenceOrderPlaced",
         serde_json::json!({"orderId":id,"isBuy":is_buy,"price":"1","ticks":ticks,"note":"0:n","tokenContract":"0:tc","deadline":"0"}),
     );
     project(tx, &e, &node(ob, co)).await;
@@ -629,7 +629,7 @@ async fn filled_closes_sell_offer_and_zeroes_buy_taker() {
     place(&pool, &mut tx, ob, "1", false, "10", "co-1").await; // SELL maker
     place(&pool, &mut tx, ob, "2", true, "10", "co-2").await; // BUY taker
     let f = ev(
-        "Filled",
+        "InferenceFilled",
         serde_json::json!({"makerId":"1","takerId":"2","ticks":"10","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}),
     );
     assert_eq!(project(&mut tx, &f, &node(ob, "co-3")).await, ProjectionOutcome::Applied);
@@ -647,12 +647,12 @@ async fn buy_maker_fills_across_deals_to_filled_at_zero() {
     place(&pool, &mut tx, ob, "10", true, "10", "co-1").await; // BUY maker
     place(&pool, &mut tx, ob, "11", false, "6", "co-2").await; // SELL taker A
     place(&pool, &mut tx, ob, "12", false, "4", "co-3").await; // SELL taker B
-    project(&mut tx,&ev("Filled",serde_json::json!({"makerId":"10","takerId":"11","ticks":"6","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-4")).await;
+    project(&mut tx,&ev("InferenceFilled",serde_json::json!({"makerId":"10","takerId":"11","ticks":"6","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-4")).await;
     tx.commit().await.unwrap();
     // Read via the pool only AFTER commit — a separate pooled connection cannot see uncommitted rows.
     assert_eq!(status_rem(&pool, ob, 10).await, ("OPEN".into(), "4".into())); // committed partial
     let mut tx = pool.begin().await.unwrap();
-    project(&mut tx,&ev("Filled",serde_json::json!({"makerId":"10","takerId":"12","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-5")).await;
+    project(&mut tx,&ev("InferenceFilled",serde_json::json!({"makerId":"10","takerId":"12","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-5")).await;
     tx.commit().await.unwrap();
     assert_eq!(status_rem(&pool, ob, 10).await, ("FILLED".into(), "0".into()));
 }
@@ -665,7 +665,7 @@ async fn filled_defers_zero_writes_when_one_side_absent_then_applies_once() {
     let mut tx = pool.begin().await.unwrap();
     place(&pool, &mut tx, ob, "20", false, "5", "co-1").await; // only the maker exists
     let f = ev(
-        "Filled",
+        "InferenceFilled",
         serde_json::json!({"makerId":"20","takerId":"21","ticks":"5","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}),
     );
     assert_eq!(project(&mut tx, &f, &node(ob, "co-2")).await, ProjectionOutcome::Deferred);
@@ -699,7 +699,7 @@ async fn filled_overrides_provisional_sweep_cancel_and_resets_discovery_cursor()
     sqlx::query("update inference_markets set sweep_cursor=99, last_reconciled_at=null where orderbook_address=$1").bind(ob).execute(&pool).await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     let f = ev(
-        "Filled",
+        "InferenceFilled",
         serde_json::json!({"makerId":"30","takerId":"31","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}),
     );
     assert_eq!(project(&mut tx, &f, &node(ob, "co-3")).await, ProjectionOutcome::Applied);
@@ -750,7 +750,7 @@ async fn filled_after_real_cancel_is_terminal_no_override() {
     sqlx::query("update inference_orders set status='CANCELLED', swept_at=null where orderbook_address=$1 and order_id=40").bind(ob).execute(&pool).await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     let f = ev(
-        "Filled",
+        "InferenceFilled",
         serde_json::json!({"makerId":"40","takerId":"41","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}),
     );
     project(&mut tx, &f, &node(ob, "co-3")).await;
@@ -797,21 +797,21 @@ async fn filled_links_deal_to_orderbook_seller_buyer() {
     let mut tx = pool.begin().await.unwrap();
     // SELL leg (is_buy=false) by the seller note; order_id 1.
     let sell = ev(
-        "OrderPlaced",
+        "InferenceOrderPlaced",
         serde_json::json!({
         "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0"}),
     );
     project(&mut tx, &sell, &node(ob, "co-1")).await;
     // BUY leg by the buyer note; order_id 2.
     let buy = ev(
-        "OrderPlaced",
+        "InferenceOrderPlaced",
         serde_json::json!({
         "orderId":"2","isBuy":true,"price":"100","ticks":"10","note":"0:buyer","tokenContract":"0:none","deadline":"0"}),
     );
     project(&mut tx, &buy, &node(ob, "co-2")).await;
     // Filled crossing them; carries sellerTC + buyerNote.
     let filled = ev(
-        "Filled",
+        "InferenceFilled",
         serde_json::json!({
         "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}),
     );
@@ -850,14 +850,14 @@ async fn orphan_repair_filled_links_deal() {
     let mut tx = pool.begin().await.unwrap();
     // Only the SELL leg present (the counterparty BUY OrderPlaced was dropped).
     let sell = ev(
-        "OrderPlaced",
+        "InferenceOrderPlaced",
         serde_json::json!({
         "orderId":"1","isBuy":false,"price":"100","ticks":"10","note":"0:seller","tokenContract":tc,"deadline":"0"}),
     );
     project_inference_event(&mut tx, &sell, &node(ob, "co-1")).await.unwrap();
     // Expired Filled orphan: maker(1) present, taker(2) dropped.
     let filled = ev(
-        "Filled",
+        "InferenceFilled",
         serde_json::json!({
         "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}),
     );
@@ -891,7 +891,7 @@ async fn orphan_repair_filled_no_leg_still_links() {
     let mut tx = pool.begin().await.unwrap();
     // Neither leg present (both OrderPlaced dropped).
     let filled = ev(
-        "Filled",
+        "InferenceFilled",
         serde_json::json!({
         "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}),
     );

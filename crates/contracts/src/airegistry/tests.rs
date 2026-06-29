@@ -88,9 +88,7 @@ fn sample_output_json(abi: &str, func: &str) -> Value {
 
 #[test]
 fn super_root_params_match_abi() {
-    use super::super_root::ParamsOfGetManifestAddress;
     use super::super_root::ParamsOfGetRootModelAddress;
-    use super::super_root::ParamsOfRegisterManifest;
     use super::super_root::ParamsOfSetPubkey;
 
     assert_eq!(
@@ -100,20 +98,6 @@ fn super_root_params_match_abi() {
     assert_eq!(
         serialized_keys(&ParamsOfGetRootModelAddress { owner_pubkey: "1".into() }),
         abi_input_names(SUPER_ROOT_ABI, "getRootModelAddress")
-    );
-    assert_eq!(
-        serialized_keys(&ParamsOfRegisterManifest {
-            owner_pubkey: "1".into(),
-            root_model_address: SAMPLE_ADDRESS.into(),
-        }),
-        abi_input_names(SUPER_ROOT_ABI, "registerManifest")
-    );
-    assert_eq!(
-        serialized_keys(&ParamsOfGetManifestAddress {
-            owner_pubkey: "1".into(),
-            root_model_address: SAMPLE_ADDRESS.into(),
-        }),
-        abi_input_names(SUPER_ROOT_ABI, "getManifestAddress")
     );
 }
 
@@ -254,6 +238,8 @@ fn inference_order_book_params_match_abi() {
             max_ticks: 1,
             token_contract: SAMPLE_ADDRESS.into(),
             flags: 0,
+            seller_pubkey: "1".into(),
+            nonce: 1,
         }),
         abi_input_names(INFERENCE_ORDER_BOOK_ABI, "placeSellOffer")
     );

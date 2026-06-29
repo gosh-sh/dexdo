@@ -26,8 +26,8 @@ const ABI: &str = include_str!("../../../../contracts/airegistry/SuperRoot.abi.j
 
 #[derive(Debug, Clone)]
 /// Wrapper for the AI Registry `SuperRoot` contract — the per-network root
-/// factory that registers `RootModel` and `ManifestMetadata` children at
-/// deterministic addresses derived from an owner pubkey.
+/// factory that registers `RootModel` children at deterministic addresses
+/// derived from an owner pubkey.
 pub struct SuperRoot {
     base: ContractBase,
 }
@@ -83,33 +83,14 @@ pub struct ParamsOfRegisterRoot {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Parameters for `SuperRoot.registerManifest`.
-pub struct ParamsOfRegisterManifest {
-    /// `uint256`, decimal or hex string.
-    pub owner_pubkey: String,
-    pub root_model_address: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 /// Parameters for `SuperRoot.getRootModelAddress`.
 pub struct ParamsOfGetRootModelAddress {
     /// `uint256`, decimal or hex string.
     pub owner_pubkey: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-/// Parameters for `SuperRoot.getManifestAddress`.
-pub struct ParamsOfGetManifestAddress {
-    /// `uint256`, decimal or hex string.
-    pub owner_pubkey: String,
-    pub root_model_address: String,
-}
-
 #[derive(Debug, Clone, Deserialize)]
-/// Result of the address-derivation getters
-/// (`getRootModelAddress`, `getManifestAddress`).
+/// Result of the address-derivation getter (`getRootModelAddress`).
 pub struct ResultOfGetAddress {
     #[serde(rename = "value0")]
     pub address: String,
@@ -175,22 +156,6 @@ impl SuperRoot {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// # Deploy + register a ManifestMetadata for a RootModel
-    ///
-    /// Original contract method: `registerManifest`
-    pub async fn register_manifest(
-        &self,
-        params: ParamsOfRegisterManifest,
-        signer: Signer,
-    ) -> KitResult<ResultOfSendMessage> {
-        let call_set = CallSet {
-            function_name: "registerManifest".to_string(),
-            header: None,
-            input: Some(json!(params)),
-        };
-        self.send_message(Some(call_set), None, signer).await
-    }
-
     /// # Get deterministic RootModel address for an owner pubkey
     ///
     /// Original contract method: `getRootModelAddress`
@@ -200,20 +165,6 @@ impl SuperRoot {
     ) -> KitResult<ResultOfGetAddress> {
         self.call_get_method_with::<ResultOfGetAddress, ParamsOfGetRootModelAddress>(
             "getRootModelAddress",
-            params,
-        )
-        .await
-    }
-
-    /// # Get deterministic ManifestMetadata address
-    ///
-    /// Original contract method: `getManifestAddress`
-    pub async fn get_manifest_address(
-        &self,
-        params: ParamsOfGetManifestAddress,
-    ) -> KitResult<ResultOfGetAddress> {
-        self.call_get_method_with::<ResultOfGetAddress, ParamsOfGetManifestAddress>(
-            "getManifestAddress",
             params,
         )
         .await

@@ -407,14 +407,14 @@ async fn token_contract_event_seeds_skeleton_then_filled_enriches() {
     );
     tx.commit().await.unwrap();
 
-    // Step 2: Seed SELL and BUY legs via InferenceOrderBook.OrderPlaced.
+    // Step 2: Seed SELL and BUY legs via InferenceOrderBook.InferenceOrderPlaced.
     let mut tx = pool.begin().await.unwrap();
     // SELL leg (is_buy=false, note=tc is seller's note address, orderId=1).
     assert_eq!(
         project(
             &mut tx,
             &iob_ev(
-                "OrderPlaced",
+                "InferenceOrderPlaced",
                 serde_json::json!({
                     "orderId": "1",
                     "isBuy": false,
@@ -435,7 +435,7 @@ async fn token_contract_event_seeds_skeleton_then_filled_enriches() {
         project(
             &mut tx,
             &iob_ev(
-                "OrderPlaced",
+                "InferenceOrderPlaced",
                 serde_json::json!({
                     "orderId": "2",
                     "isBuy": true,
@@ -453,13 +453,13 @@ async fn token_contract_event_seeds_skeleton_then_filled_enriches() {
     );
     tx.commit().await.unwrap();
 
-    // Step 3: InferenceOrderBook.Filled cross-links sellerTC=tc with ob.
+    // Step 3: InferenceOrderBook.InferenceFilled cross-links sellerTC=tc with ob.
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
         project(
             &mut tx,
             &iob_ev(
-                "Filled",
+                "InferenceFilled",
                 serde_json::json!({
                     "makerId": "1",
                     "takerId": "2",

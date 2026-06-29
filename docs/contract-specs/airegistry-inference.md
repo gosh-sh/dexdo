@@ -47,7 +47,7 @@ site. These events are decoded into `raw_events` (`event_type = "TokenContract.<
 `src_address` = the TokenContract address) and projected into the SETTLEMENT
 read-model: `inference_deals` (one row per TokenContract / deal) and
 `inference_ticks` (one row per finalized tick). The deal's `orderbook_address`,
-`seller_note`, and `buyer_note` are linked from `InferenceOrderBook.Filled`
+`seller_note`, and `buyer_note` are linked from `InferenceOrderBook.InferenceFilled`
 (`sellerTC` + `buyerNote` + the SELL leg's note); per-tick rows and the
 `finalized_ticks` aggregate comes from `TickFinalized` (per-tick `finalized_owed` is stored on each `inference_ticks` row — it is the contract's cumulative `_finalizedOwed`, not a per-tick delta);
 `close_kind` + `clean_settlement` + `settled_at_chain` from the stream-close

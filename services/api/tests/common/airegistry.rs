@@ -120,6 +120,7 @@ pub async fn deploy_token_contract(
         header: None,
         input: Some(json!({
             "modelName": deal.model_name,
+            "modelHash": model_hash_for(&deal.model_name),
             "tickSize": deal.tick_size.to_string(),
             "pricePerTick": deal.price_per_tick.to_string(),
             "maxTicks": deal.max_ticks.to_string(),

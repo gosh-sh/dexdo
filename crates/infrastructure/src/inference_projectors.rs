@@ -36,13 +36,14 @@ pub async fn project_inference_event(
     let suffix =
         event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
     match suffix {
-        "OrderPlaced" => apply_inference_order_placed(tx, event, node).await,
-        "SubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
-        "OrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
-        "Filled" => apply_inference_filled(tx, event, node).await,
-        "Executed" | "Refunded" | "CycleForfeited" | "ForfeitClaimed" => {
-            Ok(ProjectionOutcome::Applied)
-        }
+        "InferenceOrderPlaced" => apply_inference_order_placed(tx, event, node).await,
+        "InferenceSubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
+        "InferenceOrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
+        "InferenceFilled" => apply_inference_filled(tx, event, node).await,
+        "InferenceExecuted"
+        | "InferenceRefunded"
+        | "InferenceCycleForfeited"
+        | "InferenceForfeitClaimed" => Ok(ProjectionOutcome::Applied),
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }
@@ -144,7 +145,7 @@ async fn apply_inference_order_placed(
     let price = uint_field_to_decimal(&event.value, "price")?;
     let ticks = uint_field_to_decimal(&event.value, "ticks")?;
     let note = field_str(&event.value, "note").ok();
-    let chain_order = node_chain_order(node, "OrderPlaced")?;
+    let chain_order = node_chain_order(node, "InferenceOrderPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     upsert_resting_order(
         tx,
@@ -172,7 +173,7 @@ async fn apply_inference_subscription_placed(
     let price = uint_field_to_decimal(&event.value, "maxPrice")?;
     let ticks = uint_field_to_decimal(&event.value, "ticks")?;
     let note = field_str(&event.value, "buyerNote").ok();
-    let chain_order = node_chain_order(node, "SubscriptionPlaced")?;
+    let chain_order = node_chain_order(node, "InferenceSubscriptionPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     upsert_resting_order(
         tx,
@@ -218,7 +219,7 @@ impl FilledFields {
         let maker_id = uint_field_to_decimal(&event.value, "makerId")?;
         let taker_id = uint_field_to_decimal(&event.value, "takerId")?;
         let ticks = uint_field_to_decimal(&event.value, "ticks")?;
-        let chain_order = node_chain_order(node, "Filled")?;
+        let chain_order = node_chain_order(node, "InferenceFilled")?;
         let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
         let seller_tc = field_str(&event.value, "sellerTC").ok().map(str::to_string);
         let buyer_note = field_str(&event.value, "buyerNote").ok().map(str::to_string);
@@ -353,7 +354,7 @@ async fn link_deal_from_filled(
         warn!(
             orderbook_address = %f.ob,
             chain_order = %f.chain_order,
-            "Filled event missing mandatory sellerTC field; inference_deals orderbook/seller link skipped — possible ABI drift"
+            "InferenceFilled event missing mandatory sellerTC field; inference_deals orderbook/seller link skipped — possible ABI drift"
         );
         return Ok(());
     };
@@ -448,7 +449,7 @@ pub async fn repair_expired_inference_orphan(
     let suffix =
         event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
     let outcome = match suffix {
-        "Filled" => {
+        "InferenceFilled" => {
             let f = FilledFields::parse(event, node)?;
             let locked = lock_filled_rows(tx, &f.ob, &f.ids).await?;
             let outcome = if locked.is_empty() {
@@ -463,7 +464,7 @@ pub async fn repair_expired_inference_orphan(
             link_deal_from_filled(tx, &f).await?;
             outcome
         }
-        "OrderCancelled" => ExpiredOrphanOutcome::CancelLost,
+        "InferenceOrderCancelled" => ExpiredOrphanOutcome::CancelLost,
         _ => ExpiredOrphanOutcome::Nothing,
     };
 
@@ -495,7 +496,7 @@ async fn apply_inference_order_cancelled(
 ) -> anyhow::Result<ProjectionOutcome> {
     let ob = node.src.as_deref().context("OrderCancelled: src missing")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
-    let chain_order = node_chain_order(node, "OrderCancelled")?;
+    let chain_order = node_chain_order(node, "InferenceOrderCancelled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     // CTE locks the row; the UPDATE always matches it (so RETURNING distinguishes
     // present-from-absent), the CASE keeps a FILLED row terminal. swept_at -> NULL
