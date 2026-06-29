@@ -210,6 +210,9 @@ struct FilledFields {
     chain_seconds: Option<f64>,
     /// `[maker_id, taker_id]` — the row ids the decrement touches.
     ids: Vec<String>,
+    /// Deal-link fields (present on the normal `Filled`; unused by orphan repair).
+    seller_tc: Option<String>,
+    buyer_note: Option<String>,
 }
 
 impl FilledFields {
@@ -220,8 +223,10 @@ impl FilledFields {
         let ticks = uint_field_to_decimal(&event.value, "ticks")?;
         let chain_order = node_chain_order(node, "Filled")?;
         let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+        let seller_tc = field_str(&event.value, "sellerTC").ok().map(str::to_string);
+        let buyer_note = field_str(&event.value, "buyerNote").ok().map(str::to_string);
         let ids = vec![maker_id.clone(), taker_id.clone()];
-        Ok(Self { ob, maker_id, taker_id, ticks, chain_order, chain_seconds, ids })
+        Ok(Self { ob, maker_id, taker_id, ticks, chain_order, chain_seconds, ids, seller_tc, buyer_note })
     }
 }
 
@@ -323,6 +328,52 @@ async fn apply_filled_decrement(
     Ok(())
 }
 
+/// Records the deal link a `Filled` uniquely carries: the TokenContract
+/// (`sellerTC`) ↔ its market (`orderbook_address`), seller note (the SELL leg,
+/// `is_buy=false`), and buyer note (`buyerNote`). Upserts so the row survives
+/// whether the deal was first seen here or via an earlier TokenContract.* event.
+/// No-op when the event omits `sellerTC` (e.g. an orphan-repair replay).
+async fn link_deal_from_filled(
+    tx: &mut Transaction<'_, Postgres>,
+    f: &FilledFields,
+) -> anyhow::Result<()> {
+    let Some(seller_tc) = f.seller_tc.as_deref() else { return Ok(()) };
+
+    // Seller = the note on the SELL leg (is_buy=false) of this match.
+    let seller_note: Option<String> = sqlx::query_scalar(
+        r#"select note_address from inference_orders
+            where orderbook_address = $1 and order_id = any($2::numeric[]) and is_buy = false
+            limit 1"#,
+    )
+    .bind(&f.ob)
+    .bind(&f.ids)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("resolve seller_note for deal link")?
+    .flatten();
+
+    sqlx::query(
+        r#"insert into inference_deals
+               (token_contract_address, orderbook_address, seller_note, buyer_note, last_chain_order)
+           values ($1, $2, $3, $4, $5)
+           on conflict (token_contract_address) do update
+               set orderbook_address = coalesce(inference_deals.orderbook_address, excluded.orderbook_address),
+                   seller_note = coalesce(inference_deals.seller_note, excluded.seller_note),
+                   buyer_note = coalesce(inference_deals.buyer_note, excluded.buyer_note),
+                   last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
+                   updated_at = now()"#,
+    )
+    .bind(seller_tc)
+    .bind(&f.ob)
+    .bind(seller_note)
+    .bind(&f.buyer_note)
+    .bind(&f.chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("link inference_deals from Filled")?;
+    Ok(())
+}
+
 async fn apply_inference_filled(
     tx: &mut Transaction<'_, Postgres>,
     event: &DecodedEvent,
@@ -338,6 +389,7 @@ async fn apply_inference_filled(
         return Ok(ProjectionOutcome::Deferred); // parent(s) not seen yet — zero writes
     }
     apply_filled_decrement(tx, &f, &locked).await?;
+    link_deal_from_filled(tx, &f).await?;
     Ok(ProjectionOutcome::Applied)
 }
 
