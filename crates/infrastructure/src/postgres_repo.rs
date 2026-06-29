@@ -71,6 +71,10 @@ impl PostgresReadModelRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.pool
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1795,7 +1799,7 @@ fn filter_orderbook(s: String) -> Option<String> {
 /// returning a fixed-point DECIMAL string with `scale` digits after the point.
 /// Used to render live_orders.price / amount_remaining (stored as raw contract
 /// uint256/uint128 integers) as the human DECIMAL the API spec mandates.
-fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
+pub(crate) fn scale_uint_to_decimal(raw: &str, scale: u32) -> String {
     if scale == 0 {
         return raw.to_string();
     }
@@ -2002,12 +2006,12 @@ const MAX_DECIMAL_PRECISION: u32 = 38;
 /// `ref_tokens.decimals`) is unusable. Distinguishes the two corruption
 /// modes so callers can log them with the same field names while keeping
 /// their own surrounding context (skip-row vs MarketInconsistent).
-enum InvalidScale {
+pub(crate) enum InvalidScale {
     Negative,
     AboveMax,
 }
 
-fn validate_decimal_scale(raw: i32) -> Result<u32, InvalidScale> {
+pub(crate) fn validate_decimal_scale(raw: i32) -> Result<u32, InvalidScale> {
     let scale = u32::try_from(raw).map_err(|_| InvalidScale::Negative)?;
     if scale > MAX_DECIMAL_PRECISION {
         return Err(InvalidScale::AboveMax);
@@ -2827,17 +2831,17 @@ fn numeric_to_hex(decimal: &str) -> Result<String, anyhow::Error> {
 }
 
 #[derive(Debug, Clone)]
-struct DecodedCursor {
-    sort_key_i64: i64,
-    id: i64,
+pub(crate) struct DecodedCursor {
+    pub(crate) sort_key_i64: i64,
+    pub(crate) id: i64,
 }
 
-fn encode_cursor(sort_key: i64, id: i64) -> String {
+pub(crate) fn encode_cursor(sort_key: i64, id: i64) -> String {
     let payload = format!("{sort_key}:{id}");
     URL_SAFE_NO_PAD.encode(payload)
 }
 
-fn decode_cursor(raw: &str) -> Result<DecodedCursor, anyhow::Error> {
+pub(crate) fn decode_cursor(raw: &str) -> Result<DecodedCursor, anyhow::Error> {
     // Any failure here is the client's fault (the cursor came from a previous
     // response and they shouldn't be hand-crafting it). Wrap the typed
     // `DomainError::InvalidParameter` as the chain root so the API handler's
