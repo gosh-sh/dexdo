@@ -37,6 +37,7 @@ use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
 use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
+use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
@@ -76,7 +77,10 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
     // 1. Note deploys the per-model book.
     dex.deploy_inference_order_book(
         &note.address,
-        ParamsOfInferenceOrderBook { model_hash: model_hash.clone() },
+        ParamsOfDeployInferenceOrderBook {
+            model_hash: model_hash.clone(),
+            model_name: String::new(),
+        },
         signer(),
     )
     .await
