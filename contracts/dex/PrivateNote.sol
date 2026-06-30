@@ -27,21 +27,21 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.14";
+    string constant version = "4.0.15";
 
     /// @notice Canonical-deal derivation pins (#58 note-funded model). `fundDeployShell` /
     ///         `postProbeCommission` send SHELL ONLY to the seller's canonical RootModel / per-deal
     ///         TokenContract — DERIVED here from this note's own key (+nonce), never a caller-supplied
     ///         address (same guard the IOB enforces in placeSellOffer, review #39). Re-pin whenever
     ///         TokenContract/RootModel is rebuilt or the SuperRoot is redeployed.
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x85d61857286906de1138eaa349fde34a8c0bcf7359ac31846919b31a242d53ee;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x1963d8193473ffebaacb8c1fd69472d718bf61befa12b606ea18b18c97d641ae;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
-    uint256 constant ROOT_MODEL_CODE_HASH      = 0xf0b00f35c5d4aa715d4226e97d88c6383c2583ffdf2a9e1de91fc3dc066192b1;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0x132533863a1c5f5e9e491bd4c569bf5c210933332144f9fc88393839108d6e7d;
     uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
     // Canonical AI SuperRoot account id (workchain 0) — anchor for the RootModel-address derivation.
     // LOCAL/MAINNET build: FIXED at the vanity 0:0c0c… (zerostate force-places the SuperRoot here).
     // (SHELLNET uses a code-derived SuperRoot instead — see dexdo-specs/shellnet-update.md.)
-    uint256 constant SUPER_ROOT_ADDR           = 0x36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71;
+    uint256 constant SUPER_ROOT_ADDR           = 0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c;
 
     /// @notice Owner escape hatch: stale stream/dispute locks can be force
     ///         cleared after this many seconds since the last lock change, so a
@@ -439,6 +439,33 @@ contract PrivateNote is Modifiers, ReplayProtection {
         _lastStreamLockChange = uint64(block.timestamp);
     }
 
+    // ── Inference-market confirmation mirrors (owner-facing) ─────────────────
+    // The canonical InferenceOrderBook pushes a confirmation into the owner's note so the
+    // owner can read JUST this note's ext-out stream and get the deal address — no full index.
+    // Auth: the caller must be the canonical book for `modelHash`, derived from the IOB code this
+    // note already stores (`_inferenceOrderBookCode`, baked by RootPN) — no pin, no spoofed TC.
+
+    /// @notice Owner mirror of a resting order placement. `tokenContract` = seller's TC for a SELL
+    ///         offer, 0 for a BUY (no TC until a match binds one).
+    event InferenceOrderPlacedConfirmed(address orderBook, address tokenContract, uint128 orderId, bool isBuy, uint256 price, uint128 ticks);
+    /// @notice Owner mirror of a match. `tokenContract` is the deal contract: the buyer reads it to
+    ///         track the stream; the seller gets it symmetrically (their own TC).
+    event InferenceFilledConfirmed(address orderBook, address tokenContract, uint128 orderId, uint128 ticks, uint256 clearingPrice, bool isBuy);
+
+    function onInferencePlaced(uint256 modelHash, address tokenContract, uint128 orderId, bool isBuy, uint256 price, uint128 ticks) public accept {
+        require(msg.sender == DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash), ERR_INVALID_SENDER);
+        ensureBalance();
+        emit InferenceOrderPlacedConfirmed{dest: address.makeAddrExtern(PRIVATENOTE_INFERENCE_PLACED, bitCntAddress)}(
+            msg.sender, tokenContract, orderId, isBuy, price, ticks);
+    }
+
+    function onInferenceFilled(uint256 modelHash, address tokenContract, uint128 orderId, uint128 ticks, uint256 clearingPrice, bool isBuy) public accept {
+        require(msg.sender == DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash), ERR_INVALID_SENDER);
+        ensureBalance();
+        emit InferenceFilledConfirmed{dest: address.makeAddrExtern(PRIVATENOTE_INFERENCE_FILLED, bitCntAddress)}(
+            msg.sender, tokenContract, orderId, ticks, clearingPrice, isBuy);
+    }
+
     /// @notice Owner escape hatch — clear ALL stale locks after STREAM_LOCK_MAX
     ///         (deal escrow lives in the `token_contract`, untouched by this).
     function forceClearStreamLocks() public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
@@ -658,6 +685,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         return address.makeAddrStd(
             0, abi.stateInitHash(TOKEN_CONTRACT_CODE_HASH, tvm.hash(dataCell), TOKEN_CONTRACT_CODE_DEPTH, dataCell.depth()));
     }
+
 
     /// @notice (#58 / 1a, note-funded model) Owner pre-funds the seller's UNINIT cross-dapp deploy
     ///         targets — the canonical RootModel (per-seller) and/or per-deal TokenContract — with

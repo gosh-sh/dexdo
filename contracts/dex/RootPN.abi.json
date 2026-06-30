@@ -70,6 +70,14 @@
 			]
 		},
 		{
+			"name": "setPrivateNoteCode",
+			"inputs": [
+				{"name":"privateNoteCode","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "getPrivateNoteCode",
 			"inputs": [
 			],
