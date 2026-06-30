@@ -153,7 +153,10 @@ async fn superseded_failed_row_excluded_from_failing_bucket() {
     let active = "inf_metrics_test.failing_active";
     let superseded = "inf_metrics_test.failing_superseded";
     sqlx::query("delete from inference_markets where orderbook_address = any($1)")
-        .bind(vec![active.to_string(), superseded.to_string()]).execute(&pool).await.unwrap();
+        .bind(vec![active.to_string(), superseded.to_string()])
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let (_d0, _v0, f0) = repo.inference_market_state_counts().await.unwrap();
     // Active failing row -> +1 to failing.

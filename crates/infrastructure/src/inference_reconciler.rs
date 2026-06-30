@@ -305,7 +305,8 @@ impl InferenceReconciler {
     /// no `value0` is `Ok(None)` — destructive only on an actual model-slot
     /// collision, which `claim_model_slot` refuses (see Task 4).
     fn fetch_version(&self, boc: &str) -> anyhow::Result<Option<String>> {
-        let v = self.call_getter(boc, "getVersion", &serde_json::json!({})).context("getVersion")?;
+        let v =
+            self.call_getter(boc, "getVersion", &serde_json::json!({})).context("getVersion")?;
         Ok(version_from_getter(&v))
     }
 
@@ -827,7 +828,7 @@ mod tests {
         assert_eq!(parse_semver(Some("4.0.14")), Some((4, 0, 14)));
         assert!(parse_semver(Some("4.0.14")) > parse_semver(Some("4.0.11")));
         assert!(parse_semver(Some("4.0.9")) < parse_semver(Some("4.0.14"))); // numeric, not lexical
-        // legacy/unknown sorts below every real version
+                                                                             // legacy/unknown sorts below every real version
         assert!(parse_semver(None) < parse_semver(Some("4.0.10")));
         assert_eq!(parse_semver(Some("garbage")), None);
     }
