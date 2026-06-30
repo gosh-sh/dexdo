@@ -53,7 +53,14 @@ import "./interfaces.sol";
 ///         4c.`reclaimOnTimeout()` — seller no-show after `STREAM_TIMEOUT`.
 ///         5. `withdrawShell`/`destroy` — seller pulls finalized SHELL (§3.5).
 contract TokenContract is AiRegistryModifiers {
-    string constant version = "4.0.10";
+    string constant version = "4.0.14";
+
+    // Canonical AI SuperRoot account id (workchain 0) — same anchor IOB/PN pin. Used ONLY as the
+    // fixed sink for `cleanupUnopened`'s residual-native sweep (so a permissionless caller cannot
+    // route the leftover gas to an arbitrary address). On shellnet the SuperRoot is now ADDRESS-STABLE
+    // across versions (`SuperRoot.updateCode` swaps code in place, no rotation), so this is a fixed
+    // literal — no genaddr recompute, no pin cycle. LOCAL/MAINNET build: the vanity 0:0c0c… SuperRoot.
+    uint256 constant SUPER_ROOT_ADDR = 0x36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71;
 
     // Native value attached to THIS contract's cross-dapp messages (register / stream-lock /
     // payout). Tunable; recipients self-fund via `accept`/`ensureBalance`, so this
@@ -644,7 +651,11 @@ contract TokenContract is AiRegistryModifiers {
     ///         buyer's full deposit and return any posted probe commission to
     ///         the seller (nothing delivered → no fee, no penalty, §2.1), then
     ///         self-destruct the dead deal.
-    function cleanupUnopened(address payoutAddress) public {
+    /// @dev    Permissionless (no-show recovery), so the payout is NOT caller-chosen: the buyer's
+    ///         deposit + seller commission (ECC SHELL) are refunded to their fixed notes FIRST, then
+    ///         the residual native gas is swept to the canonical SuperRoot (a fixed protocol sink),
+    ///         never to an arbitrary caller-supplied address.
+    function cleanupUnopened() public {
         ensureBalance();
         require(_funded, ERR_NOT_FUNDED);
         require(!_opened, ERR_ALREADY_OPEN);
@@ -659,7 +670,7 @@ contract TokenContract is AiRegistryModifiers {
         _payShell(_sellerNote, commission);   // return the seller's probe commission
 
         emit ContractDestroyed{dest: address.makeAddrExtern(ContractDestroyedEmit, bitCntAddress)}(address(this));
-        selfdestruct(payoutAddress);
+        selfdestruct(address.makeAddrStd(0, SUPER_ROOT_ADDR));   // residual native → fixed SuperRoot, not caller
     }
 
     // ========================================================
@@ -704,10 +715,10 @@ contract TokenContract is AiRegistryModifiers {
     function getState() external view returns (
         bool funded, bool opened, bool probeAccepted, bool disputed,
         uint128 deposit, uint128 prepaid, uint128 frozen, uint128 finalizedOwed,
-        uint64 prepaidTime, uint64 lastAdvance, uint64 disputeTime
+        uint64 prepaidTime, uint64 lastAdvance, uint64 disputeTime, uint64 fundedTime
     ) {
         return (_funded, _opened, _probeAccepted, _disputed, _deposit, _prepaid, _frozen,
-                _finalizedOwed, _prepaidTime, _lastAdvance, _disputeTime);
+                _finalizedOwed, _prepaidTime, _lastAdvance, _disputeTime, _fundedTime);
     }
 
     /// @notice Probe state (spec §3.1.2): whether the seller posted the

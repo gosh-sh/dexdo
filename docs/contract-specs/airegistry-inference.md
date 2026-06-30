@@ -24,7 +24,10 @@ order/stream methods live on the note (`deployInferenceOrderBook`,
 Typed wrappers (message encoders/decoders, getters, event decoders) live in
 [`crates/contracts/src/airegistry/`](../../crates/contracts/src/airegistry/),
 following the same style as the `dex` wrappers. The note-side inference methods
-are on [`dex::private_note`](../../crates/contracts/src/dex/private_note.rs).
+are on [`dex::private_note`](../../crates/contracts/src/dex/private_note.rs). A
+method-by-method reference across all three layers (per-contract wrappers,
+note-side inference, and the `Dex` facade) is in
+[`airegistry-sdk.md`](airegistry-sdk.md).
 
 The `dodex-chain` facade exposes the inference flow behind the `test-helpers`
 feature (`deploy_inference_order_book`, `post_sell_offer`, `place_inference_buy`,

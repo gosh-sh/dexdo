@@ -93,7 +93,6 @@
 		{
 			"name": "cleanupUnopened",
 			"inputs": [
-				{"name":"payoutAddress","type":"address"}
 			],
 			"outputs": [
 			]
@@ -130,7 +129,8 @@
 				{"name":"finalizedOwed","type":"uint128"},
 				{"name":"prepaidTime","type":"uint64"},
 				{"name":"lastAdvance","type":"uint64"},
-				{"name":"disputeTime","type":"uint64"}
+				{"name":"disputeTime","type":"uint64"},
+				{"name":"fundedTime","type":"uint64"}
 			]
 		},
 		{

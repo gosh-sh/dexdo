@@ -45,12 +45,12 @@ interface IWeeklyMedianSink {
 ///         quote/base + collateral, event-resolution shutdown, and PN callbacks
 ///         (inference order entry is fire-and-forget; the note tracks via getters).
 contract InferenceOrderBook is AiRegistryModifiers {
-    string constant version = "4.0.10";
+    string constant version = "4.0.14";
 
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x18fd4b046bb8679fb92abd5262555232071c71003ad05af9a0c61f1c21822217;
+    uint256 constant NOTE_CODE_HASH  = 0x2d2a338b8a11568c7bd22d1b9756d6c43984f8ad46d34c2f13eee2344fcb02a7;
     uint16  constant NOTE_CODE_DEPTH = 18;
 
     // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
@@ -58,7 +58,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
     // contract that forwards SHELL on a fill, so the check must live HERE, not only in
     // the note: placeSellOffer is public and a direct call would bypass a note check).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xefa8df3f7e10a66678bbe194ff001252885114d28e907b9e512f47d5e67a3d65;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x85d61857286906de1138eaa349fde34a8c0bcf7359ac31846919b31a242d53ee;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
 
     // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
@@ -66,17 +66,17 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
     // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
     // Re-pin whenever airegistry/RootModel is recompiled.
-    uint256 constant ROOT_MODEL_CODE_HASH  = 0x573211b372bb2a58349cc8d7ea3b93498bbb1ef5e02ef626a25146b3541cfb85;
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0xf0b00f35c5d4aa715d4226e97d88c6383c2583ffdf2a9e1de91fc3dc066192b1;
     uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
 
     // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its
     // `_superRootAddress` static, so it is the anchor for the RootModel-address derivation. Must
     // match the live SuperRoot the sellers' RootModels were deployed under; re-pin if the SuperRoot
     // is redeployed at a different address.
-    // SHELLNET build: code-derived (NOT fixed) = stateInitHash(SuperRoot code, owner d6e958fe). The
-    // version / RootModel change rotates the SuperRoot code → re-pin + redeploy at the new address.
-    // (LOCAL/MAINNET would instead FIX it at the vanity 0:0c0c… genesis — see dexdo-specs/shellnet-update.md.)
-    uint256 constant SUPER_ROOT_ADDR = 0x312d7665b9e262a2e5b2e77953912abf69c89f652562cc11ca97778a74c329cf;
+    // LOCAL/MAINNET build: FIXED SuperRoot at the vanity 0:0c0c… address — the zerostate force-places
+    // the SuperRoot here (removed from PremineAddresses), and the address is stable across contract
+    // changes. (SHELLNET uses a code-derived SuperRoot instead — see dexdo-specs/shellnet-update.md.)
+    uint256 constant SUPER_ROOT_ADDR = 0x36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71;
 
     // Local errors (NOT in shared AiRegistryErrors — avoids rippling RootModel/TC/SuperRoot pins).
     uint16 constant ERR_NOT_DEPLOYER_NOTE = 333;
@@ -443,6 +443,16 @@ contract InferenceOrderBook is AiRegistryModifiers {
                     nextOrd = mk.nextAtPrice;
                 }
 
+                // GTD limit BUY resting past its deadline: refund the buyer's escrow and remove it
+                // before it can settle as live liquidity (P1). Subscriptions roll/expire via _subTouch
+                // above; a plain GTD bid had no match-time deadline check, so the deadline field was a
+                // no-op for resting orders. Skip taker BUY (mk = a SELL offer; deadline only on buys).
+                if (!takerIsBuy && !makerSub && mk.deadline != 0 && block.timestamp >= mk.deadline) {
+                    _refundAndRemove(cur);
+                    cur = nextOrd;
+                    continue;
+                }
+
                 uint128 trade = remaining < mk.amount ? remaining : mk.amount;
 
                 address buyerNote;
@@ -483,8 +493,40 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 _orders[cur].filledAccum += trade;
                 // SELL offer = one-deal slot → consumed on match (taker BUY), even
                 // on partial. BUY maker (taker SELL) is reduced (spans deals).
-                if (takerIsBuy || mk.amount == trade) { _removeFromBook(cur); }
-                else {
+                if (takerIsBuy) {
+                    _removeFromBook(cur);                       // maker SELL: no buyer escrow to return
+                } else if (mk.amount == trade) {
+                    // Fully-filled maker BUY: the residual escrow (over-fund + clearing-remainder
+                    // = mk.escrow - cost, set above) must NOT strand (#116).
+                    if (makerSub) {
+                        // §8.3/§8.4 (#116-F2): an early full-fill forfeits ONLY the CURRENT cycle's own
+                        // unspent (cycleBudget - cycleSpent) to that cycle's sellers (claimForfeit); the
+                        // FUTURE cycles' budget (weeks not yet served) refunds to the BUYER — never to the
+                        // current cycle's sellers, else a low-price seller filling cycle 0 would capture
+                        // weeks 2-4. Read escrow/note/sub before _removeFromBook deletes the order.
+                        uint128 resid = _orders[cur].escrow;
+                        address bnote = _orders[cur].note;
+                        Sub s = _subs[cur];
+                        if (resid > 0) {
+                            uint128 cycUnspent = s.cycleBudget > s.cycleSpent ? s.cycleBudget - s.cycleSpent : 0;
+                            if (cycUnspent > resid) { cycUnspent = resid; }   // resid caps the forfeit
+                            uint128 refundFuture = resid - cycUnspent;
+                            _orders[cur].escrow = 0;
+                            if (cycUnspent > 0) {
+                                _forfeitPool[cur][s.curCycle] += cycUnspent;
+                                emit InferenceCycleForfeited{dest: address.makeAddrExtern(CycleForfeitedEmit, bitCntAddress)}(cur, s.curCycle, cycUnspent, _cycleFundedTicks[cur][s.curCycle]);
+                            }
+                            if (refundFuture > 0) {
+                                _payShell(bnote, refundFuture);
+                                emit InferenceRefunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(bnote, refundFuture);
+                            }
+                        }
+                        _removeFromBook(cur);
+                        delete _subs[cur];
+                    } else {
+                        _refundAndRemove(cur);                  // limit BUY: residual escrow back to the buyer (#116)
+                    }
+                } else {
                     _orders[cur].amount = mk.amount - trade;
                     _levels[!takerIsBuy][lp].totalAmount -= trade;
                 }
