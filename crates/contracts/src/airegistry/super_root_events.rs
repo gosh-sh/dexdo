@@ -17,7 +17,6 @@ use serde::Deserialize;
 /// External events emitted by `SuperRoot`.
 pub enum SuperRootEvent {
     RootRegistered = 700,
-    ManifestRegistered = 701,
 }
 
 impl TryFrom<String> for SuperRootEvent {
@@ -35,7 +34,6 @@ impl TryFrom<String> for SuperRootEvent {
 
         match number {
             700 => Ok(SuperRootEvent::RootRegistered),
-            701 => Ok(SuperRootEvent::ManifestRegistered),
             _ => Err(KitError::new(
                 KitModule::Event,
                 KitErrorCode::UnknownEvent,
@@ -60,7 +58,6 @@ impl SuperRootEvent {
 /// Typed decoded `SuperRoot` external event.
 pub enum DecodedSuperRootEvent {
     RootRegistered { event: Event, kind: SuperRootEvent, data: RootRegisteredData },
-    ManifestRegistered { event: Event, kind: SuperRootEvent, data: ManifestRegisteredData },
 }
 
 impl FromEvent for DecodedSuperRootEvent {
@@ -70,10 +67,6 @@ impl FromEvent for DecodedSuperRootEvent {
             SuperRootEvent::RootRegistered => {
                 let data = decode_or_err::<RootRegisteredData>(event, contract)?;
                 Ok(DecodedSuperRootEvent::RootRegistered { event: event.clone(), kind, data })
-            }
-            SuperRootEvent::ManifestRegistered => {
-                let data = decode_or_err::<ManifestRegisteredData>(event, contract)?;
-                Ok(DecodedSuperRootEvent::ManifestRegistered { event: event.clone(), kind, data })
             }
         }
     }
@@ -98,11 +91,4 @@ where
 /// Payload of `SuperRootEvent::RootRegistered`.
 pub struct RootRegisteredData {
     pub root_address: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-/// Payload of `SuperRootEvent::ManifestRegistered`.
-pub struct ManifestRegisteredData {
-    pub manifest_address: String,
 }

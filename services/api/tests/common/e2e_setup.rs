@@ -19,6 +19,8 @@ use dodex_infrastructure::crypto::{self};
 use dodex_infrastructure::database;
 use hmac::Mac;
 use num_bigint::BigUint;
+use sha2::Digest;
+use sha2::Sha256;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
@@ -208,6 +210,17 @@ pub async fn provision_account(pool: &PgPool, kek: &Kek, pn: &TestPn) -> (String
     .expect("insert api_key");
 
     (api_key, secret_hex)
+}
+
+/// Decimal `uint256` string of `sha256(model_name)` — the on-chain `_modelHash`
+/// the AI-registry contracts enforce as the verified model-id preimage
+/// (`InferenceOrderBook` ctor and `TokenContract` ctor both
+/// `require(sha256(modelName) == modelHash)`). A single-cell model name (<=127 B)
+/// hashes as its raw bytes, matching TVM `sha256`. Use the same `model_name`
+/// for the deploy and this hash, or the constructor reverts and the contract
+/// deploys but stays un-constructed (every later call aborts in compute).
+pub fn model_hash_dec(model_name: &str) -> String {
+    BigUint::from_bytes_be(&Sha256::digest(model_name.as_bytes())).to_str_radix(10)
 }
 
 /// Decimal-encode the hex pubkey so it round-trips through the

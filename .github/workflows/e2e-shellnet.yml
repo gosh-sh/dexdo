@@ -84,5 +84,8 @@ jobs:
       # RootOracle (deployOracle) and OracleEventList (addEvent), which
       # serialise on-chain — parallel deploys race to exit_code 52/101.
       # `--run-ignored only` runs exactly the `#[ignore]`-marked e2e tests.
+      # e2e_inference_dispute is excluded: its window-gated settlement waits out
+      # a settle_window (~660s) plus probe acceptance, ~15min wall-clock — too
+      # long for CI. Run it locally on demand: drop the `-E` filter.
       - name: cargo nextest run (e2e, single-threaded)
-        run: cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast
+        run: cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast -E 'not binary(e2e_inference_dispute)'

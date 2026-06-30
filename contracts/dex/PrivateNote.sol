@@ -19,6 +19,7 @@ interface IInferenceDeal {
     function stop() external;
     function dispute() external;
     function reclaimOnTimeout() external;
+    function cleanupUnopened() external;
     function fundProbeCommission() external;
 }
 
@@ -26,22 +27,21 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.10";
+    string constant version = "4.0.14";
 
     /// @notice Canonical-deal derivation pins (#58 note-funded model). `fundDeployShell` /
     ///         `postProbeCommission` send SHELL ONLY to the seller's canonical RootModel / per-deal
     ///         TokenContract — DERIVED here from this note's own key (+nonce), never a caller-supplied
     ///         address (same guard the IOB enforces in placeSellOffer, review #39). Re-pin whenever
     ///         TokenContract/RootModel is rebuilt or the SuperRoot is redeployed.
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xefa8df3f7e10a66678bbe194ff001252885114d28e907b9e512f47d5e67a3d65;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x85d61857286906de1138eaa349fde34a8c0bcf7359ac31846919b31a242d53ee;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
-    uint256 constant ROOT_MODEL_CODE_HASH      = 0x573211b372bb2a58349cc8d7ea3b93498bbb1ef5e02ef626a25146b3541cfb85;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0xf0b00f35c5d4aa715d4226e97d88c6383c2583ffdf2a9e1de91fc3dc066192b1;
     uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
     // Canonical AI SuperRoot account id (workchain 0) — anchor for the RootModel-address derivation.
-    // SHELLNET build: code-derived (NOT fixed) = stateInitHash(SuperRoot code, owner d6e958fe). The
-    // version / RootModel change rotates the SuperRoot code → re-pin + redeploy at the new address.
-    // (LOCAL/MAINNET would instead FIX it at the vanity 0:0c0c… genesis — see dexdo-specs/shellnet-update.md.)
-    uint256 constant SUPER_ROOT_ADDR           = 0x312d7665b9e262a2e5b2e77953912abf69c89f652562cc11ca97778a74c329cf;
+    // LOCAL/MAINNET build: FIXED at the vanity 0:0c0c… (zerostate force-places the SuperRoot here).
+    // (SHELLNET uses a code-derived SuperRoot instead — see dexdo-specs/shellnet-update.md.)
+    uint256 constant SUPER_ROOT_ADDR           = 0x36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71;
 
     /// @notice Owner escape hatch: stale stream/dispute locks can be force
     ///         cleared after this many seconds since the last lock change, so a
@@ -611,6 +611,18 @@ contract PrivateNote is Modifiers, ReplayProtection {
     function streamReclaim(address tokenContract) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
         IInferenceDeal(tokenContract).reclaimOnTimeout{value: 1 vmshell, flag: 1, bounce: false}();
+    }
+
+    /// @notice Buyer note recovers a funded-but-never-opened deal (#149): after
+    ///         `MATCH_OPEN_TIMEOUT` from funding with no `open()`, the seller is a
+    ///         no-show — `cleanupUnopened` refunds the full deposit and returns the
+    ///         seller's probe commission (nothing delivered → no fee/penalty, §2.1).
+    ///         Distinct from `streamReclaim` (opened-then-abandoned). The TC gates the
+    ///         timer; the deposit/commission (ECC) refund to their fixed notes and the residual native
+    ///         gas is swept to the canonical SuperRoot — no caller-chosen payout.
+    function streamCleanup(address tokenContract) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
+        ensureBalance();
+        IInferenceDeal(tokenContract).cleanupUnopened{value: 1 vmshell, flag: 1, bounce: false}();
     }
 
     /// @notice Deterministic RootModel address for `ownerPubkey` from the pinned code hash/depth +

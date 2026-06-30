@@ -83,6 +83,7 @@ pub struct ParamsOfPlaceSellOffer {
     /// book recomputes the canonical TokenContract address from `sellerPubkey`
     /// + `nonce` and rejects offers whose `tokenContract` does not match.
     pub seller_pubkey: String,
+    /// Deal nonce — must match the nonce `token_contract` was derived from.
     pub nonce: u64,
 }
 

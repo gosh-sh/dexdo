@@ -39,6 +39,7 @@ use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
 use dodex_contracts::dex::private_note::ParamsOfStakeKey;
 use dodex_contracts::dex::private_note::ParamsOfWithdrawTokens;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
 use dodex_sdk::Dex;
 use dodex_sdk::DexConfig;
 use serde::Deserialize;
@@ -485,10 +486,10 @@ async fn stake_key_op(f: Flags, which: &str) -> ExitCode {
         token_type: d.token_type,
     };
     eprintln!("[dexdo {which}] market {market} via note {pn_address}");
-    let res = if which == "claim" {
-        dex.claim(&pn_address, key, Signer::Keys { keys }).await
-    } else {
-        dex.cancel_stake(&pn_address, key, Signer::Keys { keys }).await
+    let res = match which {
+        "claim" => dex.claim(&pn_address, key, Signer::Keys { keys }).await,
+        "delete-stake" => dex.delete_stake(&pn_address, key, Signer::Keys { keys }).await,
+        _ => dex.cancel_stake(&pn_address, key, Signer::Keys { keys }).await,
     };
     match res {
         Ok(r) => { println!("[dexdo {which}] DONE: {r:?}"); ExitCode::SUCCESS }
@@ -591,6 +592,29 @@ async fn cmd_withdraw(f: Flags) -> ExitCode {
     }
 }
 
+/// `dexdo resolve` — oracle votes an outcome on a PMP (submitResolve). With the
+/// single-oracle markets `mint_ob_pool` deploys, quorum is 1, so this one vote
+/// resolves the market. Sign with the market's oracle keys (oracle_*_hex in the
+/// ob_pool file). Only callable in the result window (now ≥ resultStart).
+async fn cmd_resolve(f: Flags) -> ExitCode {
+    let market = match f.require("market-address") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let public = match f.require("oracle-pubkey-hex") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let secret = match f.require("oracle-secret-hex") { Ok(v) => v.to_string(), Err(e) => return fail(&e) };
+    let outcome_id: u32 = match f.require("outcome").and_then(|v| v.parse().map_err(|e| format!("--outcome: {e}"))) {
+        Ok(v) => v, Err(e) => return fail(&e),
+    };
+    let dex = match dex(&f.endpoint()) { Ok(d) => d, Err(e) => return fail(&e) };
+    eprintln!("[dexdo resolve] market {market} outcome {outcome_id} (oracle vote)");
+    match dex.submit_resolve(
+        &market,
+        ParamsOfSubmitResolve { outcome_id },
+        Signer::Keys { keys: KeyPair { public, secret } },
+    ).await {
+        Ok(r) => { println!("[dexdo resolve] DONE: {r:?}"); ExitCode::SUCCESS }
+        Err(e) => fail(&format!("submit_resolve failed: {e:?}")),
+    }
+}
+
 // ----------------------------- dispatch -----------------------------
 
 fn fail(msg: &str) -> ExitCode {
@@ -638,6 +662,8 @@ async fn dispatch(sub: &str, rest: &[String]) -> ExitCode {
         "place-order" => cmd_place_order(flags).await,
         "cancel-all-orders" => cmd_cancel_all_orders(flags).await,
         "cancel-stake" => cmd_cancel_stake(flags).await,
+        "delete-stake" => stake_key_op(flags, "delete-stake").await,
+        "resolve" => cmd_resolve(flags).await,
         "merge-full-set" => cmd_merge_full_set(flags).await,
         "claim" => cmd_claim(flags).await,
         "withdraw" => cmd_withdraw(flags).await,

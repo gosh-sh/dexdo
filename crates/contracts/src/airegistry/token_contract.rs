@@ -99,13 +99,6 @@ pub struct ParamsOfOpen {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Parameters for `TokenContract.cleanupUnopened`.
-pub struct ParamsOfCleanupUnopened {
-    pub payout_address: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 /// Parameters for `TokenContract.withdrawShell`.
 pub struct ParamsOfWithdrawShell {
     pub amount: u128,
@@ -376,16 +369,9 @@ impl TokenContract {
     /// # Recover funds from a funded-but-unopened deal (seller no-show, §2.1)
     ///
     /// Original contract method: `cleanupUnopened`
-    pub async fn cleanup_unopened(
-        &self,
-        params: ParamsOfCleanupUnopened,
-        signer: Signer,
-    ) -> KitResult<ResultOfSendMessage> {
-        let call_set = CallSet {
-            function_name: "cleanupUnopened".to_string(),
-            header: None,
-            input: Some(json!(params)),
-        };
+    pub async fn cleanup_unopened(&self, signer: Signer) -> KitResult<ResultOfSendMessage> {
+        let call_set =
+            CallSet { function_name: "cleanupUnopened".to_string(), header: None, input: None };
         self.send_message(Some(call_set), None, signer).await
     }
 

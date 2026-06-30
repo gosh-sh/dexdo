@@ -338,7 +338,13 @@ mod tests {
             assert_eq!(entries[0].1.as_str(), name.as_str());
             checked += 1;
         }
-        assert_eq!(checked, 9, "expected all 9 InferenceOrderBook events to resolve uniquely");
+        assert_eq!(
+            checked, 9,
+            "expected exactly 9 inference events (InferenceOrderPlaced, InferenceFilled, \
+             InferenceExecuted, InferenceRefunded, InferenceOrderCancelled, \
+             InferenceSubscriptionPlaced, InferenceCycleForfeited, InferenceForfeitClaimed, \
+             InferenceOrderBookDeployed)"
+        );
     }
 
     #[test]
@@ -464,6 +470,7 @@ mod tests {
     }
 
     fn inference_filled_body_b64(d: &Decoder) -> String {
+        let zero = "0:0000000000000000000000000000000000000000000000000000000000000000";
         encode_event_body_b64(
             d,
             "InferenceOrderBook",
@@ -473,9 +480,9 @@ mod tests {
                 "takerId": "2",
                 "ticks": "3",
                 "clearingPrice": "0",
-                "sellerTC": "0:0000000000000000000000000000000000000000000000000000000000000000",
-                "buyerNote": "0:0000000000000000000000000000000000000000000000000000000000000000",
-                "sellerNote": "0:0000000000000000000000000000000000000000000000000000000000000000"
+                "sellerTC": zero,
+                "buyerNote": zero,
+                "sellerNote": zero
             }),
         )
     }

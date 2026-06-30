@@ -43,7 +43,8 @@ pub async fn project_inference_event(
         "InferenceExecuted"
         | "InferenceRefunded"
         | "InferenceCycleForfeited"
-        | "InferenceForfeitClaimed" => Ok(ProjectionOutcome::Applied),
+        | "InferenceForfeitClaimed"
+        | "InferenceOrderBookDeployed" => Ok(ProjectionOutcome::Applied),
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }

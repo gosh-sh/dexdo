@@ -175,6 +175,14 @@
 			]
 		},
 		{
+			"name": "streamCleanup",
+			"inputs": [
+				{"name":"tokenContract","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "fundDeployShell",
 			"inputs": [
 				{"name":"nonce","type":"uint64"},

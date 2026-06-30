@@ -21,6 +21,15 @@
 			]
 		},
 		{
+			"name": "updateCode",
+			"inputs": [
+				{"name":"newcode","type":"cell"},
+				{"name":"newRootModelCode","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "registerRoot",
 			"inputs": [
 				{"name":"ownerPubkey","type":"uint256"}
