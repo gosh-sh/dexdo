@@ -26,6 +26,14 @@ interface IWeeklyMedianSink {
     function onWeeklyMedian(uint256 eventId, uint256 oracleListHash, uint32 tokenType, uint256 price) external;
 }
 
+/// @notice Owner-facing confirmation mirrors pushed into a PrivateNote so the order owner can read
+///         just its own note's ext-out and learn the deal `tokenContract`. The note authenticates the
+///         caller as the canonical book for `_modelHash` (pinned IOB code), so the TC cannot be spoofed.
+interface IPrivateNote {
+    function onInferencePlaced(uint256 modelHash, address tokenContract, uint128 orderId, bool isBuy, uint256 price, uint128 ticks) external;
+    function onInferenceFilled(uint256 modelHash, address tokenContract, uint128 orderId, uint128 ticks, uint256 clearingPrice, bool isBuy) external;
+}
+
 /// @title InferenceOrderBook (spec §2 + §8) — full price→time CLOB with a queued,
 ///        resumable matching engine (ported from dex/OrderBook.sol).
 /// @notice Both sides rest (SELL offer = one-deal slot; BUY = §8.1 limit/subscription
@@ -45,12 +53,12 @@ interface IWeeklyMedianSink {
 ///         quote/base + collateral, event-resolution shutdown, and PN callbacks
 ///         (inference order entry is fire-and-forget; the note tracks via getters).
 contract InferenceOrderBook is AiRegistryModifiers {
-    string constant version = "4.0.14";
+    string constant version = "4.0.15";
 
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x2d2a338b8a11568c7bd22d1b9756d6c43984f8ad46d34c2f13eee2344fcb02a7;
+    uint256 constant NOTE_CODE_HASH  = 0x94e8d5fbadce274e4db260ccd6cbb2deff118b05638f50634b38da586aee3bfb;
     uint16  constant NOTE_CODE_DEPTH = 18;
 
     // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
@@ -58,7 +66,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
     // contract that forwards SHELL on a fill, so the check must live HERE, not only in
     // the note: placeSellOffer is public and a direct call would bypass a note check).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x85d61857286906de1138eaa349fde34a8c0bcf7359ac31846919b31a242d53ee;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x1963d8193473ffebaacb8c1fd69472d718bf61befa12b606ea18b18c97d641ae;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
 
     // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
@@ -66,7 +74,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
     // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
     // Re-pin whenever airegistry/RootModel is recompiled.
-    uint256 constant ROOT_MODEL_CODE_HASH  = 0xf0b00f35c5d4aa715d4226e97d88c6383c2583ffdf2a9e1de91fc3dc066192b1;
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0x132533863a1c5f5e9e491bd4c569bf5c210933332144f9fc88393839108d6e7d;
     uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
 
     // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its
@@ -76,7 +84,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // LOCAL/MAINNET build: FIXED SuperRoot at the vanity 0:0c0c… address — the zerostate force-places
     // the SuperRoot here (removed from PremineAddresses), and the address is stable across contract
     // changes. (SHELLNET uses a code-derived SuperRoot instead — see dexdo-specs/shellnet-update.md.)
-    uint256 constant SUPER_ROOT_ADDR = 0x36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71;
+    uint256 constant SUPER_ROOT_ADDR = 0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c;
 
     // Local errors (NOT in shared AiRegistryErrors — avoids rippling RootModel/TC/SuperRoot pins).
     uint16 constant ERR_NOT_DEPLOYER_NOTE = 333;
@@ -375,7 +383,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // Fill settlement (spec §2.3 → §3)
     // ========================================================
 
-    function _settleFill(uint128 makerId, uint128 takerId, address buyerNote, address sellerNote, uint256 buyerPubkey, address sellerTC, uint128 trade, uint256 clearing) private returns (uint128) {
+    function _settleFill(uint128 makerId, uint128 takerId, address buyerNote, address sellerNote, uint256 buyerPubkey, address sellerTC, uint128 trade, uint256 clearing, bool takerIsBuy) private returns (uint128) {
         uint128 cost = uint128(uint256(trade) * _unit(clearing));
         mapping(uint32 => varuint32) ecc;
         ecc[SHELL_ECC_ID] = varuint32(cost);
@@ -388,6 +396,16 @@ contract InferenceOrderBook is AiRegistryModifiers {
         _recordTrade(uint128(clearing), trade);
         emit InferenceFilled{dest: address.makeAddrExtern(MatchedEmit, bitCntAddress)}(makerId, takerId, trade, clearing, sellerTC, buyerNote, sellerNote);
         emit InferenceExecuted{dest: address.makeAddrExtern(ExecutedEmit, bitCntAddress)}(trade, clearing, cost);
+
+        // Owner-facing confirmation mirrors: push the deal `sellerTC` into each side's note so the
+        // owner reads only its note's ext-out. Each side gets ITS own order id (maker/taker depends
+        // on which side is the taker). bounce:false — a mirror failure must never strand the fill.
+        uint128 buyerOrderId  = takerIsBuy ? takerId : makerId;
+        uint128 sellerOrderId = takerIsBuy ? makerId : takerId;
+        IPrivateNote(buyerNote).onInferenceFilled{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(
+            _modelHash, sellerTC, buyerOrderId, trade, clearing, true);
+        IPrivateNote(sellerNote).onInferenceFilled{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(
+            _modelHash, sellerTC, sellerOrderId, trade, clearing, false);
         return cost;
     }
 
@@ -479,7 +497,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                     continue;
                 }
 
-                uint128 cost = _settleFill(takerIsBuy ? cur : takerId, takerIsBuy ? takerId : cur, buyerNote, sellerNote, buyerPubkey, sellerTC, trade, clearing);
+                uint128 cost = _settleFill(takerIsBuy ? cur : takerId, takerIsBuy ? takerId : cur, buyerNote, sellerNote, buyerPubkey, sellerTC, trade, clearing, takerIsBuy);
 
                 if (takerIsBuy) { leftoverEscrow -= cost; } else { _orders[cur].escrow = mk.escrow - cost; }
 
@@ -668,6 +686,9 @@ contract InferenceOrderBook is AiRegistryModifiers {
         if (firstRun) {
             emit InferenceOrderPlaced{dest: address.makeAddrExtern(OfferPlacedEmit, bitCntAddress)}(
                 orderId, e.isBuy, e.price, e.amount, e.owner, e.tokenContract, e.deadline);
+            // Owner mirror: confirm the placement into the owner's note (tokenContract = SELL's TC, 0 for BUY).
+            IPrivateNote(e.owner).onInferencePlaced{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(
+                _modelHash, e.tokenContract, orderId, e.isBuy, e.price, e.amount);
 
             // POST_ONLY: reject if it would cross.
             if ((e.flags & FLAG_POST_ONLY) != 0) {

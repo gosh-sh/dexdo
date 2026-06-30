@@ -46,6 +46,10 @@ abstract contract Modifiers is Errors {
     uint128 constant PRIVATENOTE_OWNER_CHANGED = 112;
     /// @notice External event id for `PrivateNote.StakeConfirmed`.
     uint128 constant PRIVATENOTE_STAKE_CONFIRMED = 113;
+    /// @notice External event id for `PrivateNote.InferenceOrderPlacedConfirmed` (owner-facing mirror of the OB placement).
+    uint128 constant PRIVATENOTE_INFERENCE_PLACED = 1100;
+    /// @notice External event id for `PrivateNote.InferenceFilledConfirmed` (owner-facing mirror carrying the deal TC).
+    uint128 constant PRIVATENOTE_INFERENCE_FILLED = 1101;
     /// @notice External event id for `PrivateNote.ClaimAccepted`.
     uint128 constant PRIVATENOTE_CLAIM_ACCEPTED = 114;
     /// @notice External event id for `PrivateNote.StakeCancelled`.
