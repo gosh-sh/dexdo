@@ -228,6 +228,7 @@ async fn discovery_stamp_is_optimistic_blocks_on_override() {
 
 use dodex_infrastructure::inference_reconciler::DiscoveryOutcome;
 use dodex_infrastructure::inference_reconciler::OrderBookGetter;
+use dodex_infrastructure::inference_reconciler::SlotClaim;
 use dodex_infrastructure::inference_reconciler::SweepStep;
 use dodex_infrastructure::tvm_runner::TvmGetterError;
 use serde_json::json;
@@ -1061,4 +1062,150 @@ async fn sweep_cancels_empty_subscription_order() {
         ("CANCELLED", true, true),
         "empty subscription phantom is swept (status/swept set; still flagged subscription)"
     );
+}
+
+// ---- model-slot supersede tests ----
+
+// Getter answering getParams (fixed model) + getVersion (given version).
+fn model_getter(model_hash_hex: &'static str, version: &'static str)
+    -> std::sync::Arc<FnGetter<impl Fn(&str, &Value) -> anyhow::Result<Value> + Send + Sync>>
+{
+    std::sync::Arc::new(FnGetter(move |name: &str, _a: &Value| Ok(match name {
+        "getParams" => json!({"modelHash": model_hash_hex, "platformFeeBps": "0x64"}),
+        "getVersion" => json!({"value0": version, "value1": "InferenceOrderBook"}),
+        _ => json!({}),
+    })))
+}
+
+#[tokio::test]
+async fn lower_version_duplicate_is_retired_not_claimed() {
+    let Some(pool) = setup().await else { return };
+    let (canonical, stale) = ("0:t_canon_lo", "0:t_stale_lo");
+    sqlx::query("delete from inference_markets where orderbook_address = any($1)")
+        .bind(vec![canonical.to_string(), stale.to_string()]).execute(&pool).await.unwrap();
+    // Incumbent holds model 0x10000 (65536) at v4.0.14, visible.
+    sqlx::query(
+        "insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at)
+         values ($1, 65536, '4.0.14', now())",
+    ).bind(canonical).execute(&pool).await.unwrap();
+    // Seed the loser as PREVIOUSLY VISIBLE (last_reconciled_at set, model_hash NULL):
+    // retirement must hide it again, matching the incumbent-supersede branch.
+    seed_market(&pool, stale, true).await;
+
+    let claim = InferenceReconciler::for_test_with_getter(pool.clone(), model_getter("0x10000", "4.0.12"))
+        .fill_params(stale, "boc").await.unwrap();
+    assert!(matches!(claim, SlotClaim::Superseded));
+
+    let (stale_superseded, stale_mh, stale_version, stale_visible): (bool, Option<String>, Option<String>, bool) =
+        sqlx::query_as(
+            "select superseded_at is not null, model_hash::text, version, last_reconciled_at is not null
+               from inference_markets where orderbook_address = $1",
+        ).bind(stale).fetch_one(&pool).await.unwrap();
+    assert!(stale_superseded, "lower-version duplicate must be retired");
+    assert_eq!(stale_mh, None, "lower-version duplicate must not claim the slot");
+    assert_eq!(stale_version.as_deref(), Some("4.0.12"), "retired row records the fetched version for audit");
+    assert!(!stale_visible, "retiring a previously-visible loser clears last_reconciled_at");
+
+    let (canon_mh, canon_visible): (Option<String>, bool) = sqlx::query_as(
+        "select model_hash::text, last_reconciled_at is not null
+           from inference_markets where orderbook_address = $1",
+    ).bind(canonical).fetch_one(&pool).await.unwrap();
+    assert_eq!(canon_mh.as_deref(), Some("65536"), "incumbent keeps the slot");
+    assert!(canon_visible, "incumbent stays visible");
+}
+
+#[tokio::test]
+async fn higher_version_supersedes_incumbent_and_swaps_slot() {
+    let Some(pool) = setup().await else { return };
+    let (old, new) = ("0:t_old_hi", "0:t_new_hi");
+    sqlx::query("delete from inference_markets where orderbook_address = any($1)")
+        .bind(vec![old.to_string(), new.to_string()]).execute(&pool).await.unwrap();
+    // Incumbent holds model 0x20000 (131072) at an OLD version, visible.
+    sqlx::query(
+        "insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at)
+         values ($1, 131072, '4.0.11', now())",
+    ).bind(old).execute(&pool).await.unwrap();
+    seed_market(&pool, new, false).await;
+
+    let claim = InferenceReconciler::for_test_with_getter(pool.clone(), model_getter("0x20000", "4.0.14"))
+        .fill_params(new, "boc").await.unwrap();
+    assert!(matches!(claim, SlotClaim::Claimed));
+
+    let (old_mh, old_superseded, old_visible): (Option<String>, bool, bool) = sqlx::query_as(
+        "select model_hash::text, superseded_at is not null, last_reconciled_at is not null
+           from inference_markets where orderbook_address = $1",
+    ).bind(old).fetch_one(&pool).await.unwrap();
+    assert_eq!(old_mh, None, "old incumbent releases the slot");
+    assert!(old_superseded, "old incumbent retired");
+    assert!(!old_visible, "old incumbent drops out of the visible set");
+
+    let (new_mh, new_version): (Option<String>, Option<String>) = sqlx::query_as(
+        "select model_hash::text, version from inference_markets where orderbook_address = $1",
+    ).bind(new).fetch_one(&pool).await.unwrap();
+    assert_eq!(new_mh.as_deref(), Some("131072"), "new book claims the slot");
+    assert_eq!(new_version.as_deref(), Some("4.0.14"));
+}
+
+#[tokio::test]
+async fn select_discovery_candidates_excludes_superseded() {
+    let Some(pool) = setup().await else { return };
+    let (eligible, retired) = ("0:t_cand_eligible", "0:t_cand_retired");
+    sqlx::query("delete from inference_markets where orderbook_address = any($1)")
+        .bind(vec![eligible.to_string(), retired.to_string()]).execute(&pool).await.unwrap();
+    // Failed PAST the 5-minute backoff, NOT superseded -> must be selectable
+    // (so the only thing that can exclude `retired` is the superseded_at guard).
+    sqlx::query("insert into inference_markets (orderbook_address, last_reconcile_failed_at) values ($1, now() - interval '6 minutes')")
+        .bind(eligible).execute(&pool).await.unwrap();
+    sqlx::query("insert into inference_markets (orderbook_address, last_reconcile_failed_at, superseded_at) values ($1, now() - interval '6 minutes', now())")
+        .bind(retired).execute(&pool).await.unwrap();
+
+    let addrs: Vec<String> = InferenceReconciler::for_test(pool.clone())
+        .select_discovery_candidates(i64::MAX).await.unwrap()
+        .into_iter().map(|b| b.orderbook_address).collect();
+    assert!(addrs.iter().any(|a| a == eligible), "non-superseded failing book must be a candidate");
+    assert!(!addrs.iter().any(|a| a == retired), "superseded book must be excluded from discovery");
+}
+
+#[tokio::test]
+async fn superseded_row_is_not_stamped_visible() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_superseded_no_stamp";
+    let r = InferenceReconciler::for_test(pool.clone());
+    seed_market(&pool, ob, false).await;
+    // Clean-completion CAS state that WOULD stamp (cursor + seq match), plus superseded_at.
+    sqlx::query("update inference_markets set sweep_cursor=5, sweep_cycle_max=10, sweep_override_seq=0, superseded_at=now() where orderbook_address=$1")
+        .bind(ob).execute(&pool).await.unwrap();
+
+    let stamped = r.advance_sweep_and_maybe_stamp(ob, Some("5"), "10", None, true, true, 0).await.unwrap();
+    assert!(!stamped, "superseded row must not be stamped visible even on a clean completion");
+
+    let reconciled: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "select last_reconciled_at from inference_markets where orderbook_address=$1",
+    ).bind(ob).fetch_one(&pool).await.unwrap();
+    assert!(reconciled.is_none(), "superseded row's last_reconciled_at stays NULL");
+}
+
+#[tokio::test]
+async fn unknown_incoming_version_does_not_retire_on_conflict() {
+    let Some(pool) = setup().await else { return };
+    let (incumbent, incoming) = ("0:t_unk_incumbent", "0:t_unk_incoming");
+    sqlx::query("delete from inference_markets where orderbook_address = any($1)")
+        .bind(vec![incumbent.to_string(), incoming.to_string()]).execute(&pool).await.unwrap();
+    sqlx::query("insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at) values ($1, 65537, '4.0.14', now())")
+        .bind(incumbent).execute(&pool).await.unwrap();
+    seed_market(&pool, incoming, false).await;
+
+    // Same model (collision); getVersion carries no value0 -> unknown incoming version.
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| Ok(match name {
+        "getParams" => json!({"modelHash": "0x10001", "platformFeeBps": "0x64"}), // 65537
+        "getVersion" => json!({}),
+        _ => json!({}),
+    })));
+    let res = InferenceReconciler::for_test_with_getter(pool.clone(), g).fill_params(incoming, "boc").await;
+    assert!(res.is_err(), "unknown incoming version on a collision must fail discovery, not retire");
+
+    let incoming_superseded: bool = sqlx::query_scalar(
+        "select superseded_at is not null from inference_markets where orderbook_address=$1",
+    ).bind(incoming).fetch_one(&pool).await.unwrap();
+    assert!(!incoming_superseded, "incoming with unknown version must NOT be retired");
 }
