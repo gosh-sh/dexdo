@@ -298,12 +298,25 @@ impl InferenceReconciler {
         self.getter.call(boc, name, args)
     }
 
+    /// Read the contract's self-reported version via the `getVersion` getter,
+    /// executed on the already-fetched account BOC (no extra network round-trip).
+    /// Getter FAILURES propagate (like `getParams`): a transient getVersion error
+    /// fails this discovery tick and is retried, so it is never silently misread as
+    /// "version unknown → lowest" and used to retire a book. A success that carries
+    /// no `value0` is `Ok(None)` — destructive only on an actual model-slot
+    /// collision, which `claim_model_slot` refuses (see Task 4).
+    fn fetch_version(&self, boc: &str) -> anyhow::Result<Option<String>> {
+        let v = self.call_getter(boc, "getVersion", &serde_json::json!({})).context("getVersion")?;
+        Ok(version_from_getter(&v))
+    }
+
     pub async fn fill_params(&self, ob: &str, boc: &str) -> anyhow::Result<()> {
         let params = self.call_getter(boc, "getParams", &json!({})).context("getParams")?;
         let model_hash = uint_field_to_decimal(&params, "modelHash")?;
         let fee: i32 =
             uint_field_to_decimal(&params, "platformFeeBps")?.parse().context("platformFeeBps")?;
-        self.write_params(ob, &model_hash, fee).await
+        let version = self.fetch_version(boc)?;
+        self.write_params(ob, &model_hash, fee, version.as_deref()).await
     }
 
     pub async fn refresh_price(&self, ob: &str, boc: &str) -> anyhow::Result<()> {
@@ -335,10 +348,16 @@ impl InferenceReconciler {
         Ok(())
     }
 
-    async fn write_params(&self, ob: &str, model_hash: &str, fee: i32) -> anyhow::Result<()> {
+    async fn write_params(
+        &self,
+        ob: &str,
+        model_hash: &str,
+        fee: i32,
+        version: Option<&str>,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             r#"update inference_markets
-                  set model_hash=$2::numeric, platform_fee_bps=$3,
+                  set model_hash=$2::numeric, platform_fee_bps=$3, version=$10,
                       quote_token_type=$4, price_precision=$5, quantity_precision=$6,
                       tick_size=$7, step_size=$8, min_notional=$9, updated_at=now()
                 where orderbook_address=$1"#,
@@ -352,6 +371,7 @@ impl InferenceReconciler {
         .bind(TICK_SIZE)
         .bind(STEP_SIZE)
         .bind(MIN_NOTIONAL)
+        .bind(version)
         .execute(&self.pool)
         .await
         .context("write inference params")?;

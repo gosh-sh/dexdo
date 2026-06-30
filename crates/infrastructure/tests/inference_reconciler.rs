@@ -1005,6 +1005,28 @@ async fn refresh_reprices_due_price_without_sweeping_fresh_book() {
 }
 
 #[tokio::test]
+async fn discovery_persists_version() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_version_persist";
+    sqlx::query("delete from inference_markets where orderbook_address = $1")
+        .bind(ob).execute(&pool).await.unwrap();
+    seed_market(&pool, ob, false).await; // bare skeleton: model_hash NULL, not reconciled
+
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| Ok(match name {
+        "getParams" => json!({"modelHash": "0x30000", "platformFeeBps": "0x64"}), // 196608, 100
+        "getVersion" => json!({"value0": "4.0.14", "value1": "InferenceOrderBook"}),
+        _ => json!({}),
+    })));
+    InferenceReconciler::for_test_with_getter(pool.clone(), g)
+        .fill_params(ob, "boc").await.unwrap();
+
+    let version: Option<String> = sqlx::query_scalar(
+        "select version from inference_markets where orderbook_address = $1",
+    ).bind(ob).fetch_one(&pool).await.unwrap();
+    assert_eq!(version.as_deref(), Some("4.0.14"));
+}
+
+#[tokio::test]
 async fn sweep_cancels_empty_subscription_order() {
     // Spec §6: a long-lived OPEN subscription that only ever emitted Refunded is
     // never closed by events; the phantom sweep must cancel it once empty on-chain.
