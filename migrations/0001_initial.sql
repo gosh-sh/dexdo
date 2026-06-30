@@ -321,6 +321,10 @@ create table inference_markets (
     last_reconciled_at timestamptz,
     last_reconcile_failed_at timestamptz,
     reconcile_attempts integer not null default 0,
+    -- Set when this book is retired as a stale duplicate of a higher-version
+    -- book for the same model. Excluded from discovery, the read API, and the
+    -- discovering/visible/failing metric buckets.
+    superseded_at timestamptz,
     last_swept_at timestamptz,
     sweep_cursor numeric(78, 0),
     sweep_cycle_max numeric(78, 0),
