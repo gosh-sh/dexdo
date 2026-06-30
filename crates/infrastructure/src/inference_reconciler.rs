@@ -694,3 +694,44 @@ impl InferenceReconciler {
         self.refresh_against_boc(&book, boc).await
     }
 }
+
+/// Parse a dotted `major.minor.patch` version. `None` (or any unparseable
+/// value) sorts below every real version under `Option` ordering, so an
+/// unversioned book always loses a slot contest to a versioned one.
+#[allow(dead_code)]
+fn parse_semver(v: Option<&str>) -> Option<(u64, u64, u64)> {
+    let v = v?;
+    let mut it = v.trim().split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Version string from a `getVersion` getter result (`value0`).
+#[allow(dead_code)]
+fn version_from_getter(v: &serde_json::Value) -> Option<String> {
+    v.get("value0").and_then(|x| x.as_str()).map(|s| s.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_semver_orders_versions() {
+        assert_eq!(parse_semver(Some("4.0.14")), Some((4, 0, 14)));
+        assert!(parse_semver(Some("4.0.14")) > parse_semver(Some("4.0.11")));
+        assert!(parse_semver(Some("4.0.9")) < parse_semver(Some("4.0.14"))); // numeric, not lexical
+        // legacy/unknown sorts below every real version
+        assert!(parse_semver(None) < parse_semver(Some("4.0.10")));
+        assert_eq!(parse_semver(Some("garbage")), None);
+    }
+
+    #[test]
+    fn version_from_getter_reads_value0() {
+        let v = serde_json::json!({"value0": "4.0.14", "value1": "InferenceOrderBook"});
+        assert_eq!(version_from_getter(&v).as_deref(), Some("4.0.14"));
+        assert_eq!(version_from_getter(&serde_json::json!({})), None);
+    }
+}
