@@ -50,7 +50,15 @@ async fn seed_market(pool: &PgPool, ob: &str) {
     .expect("seed market");
 }
 
-async fn seed_order(pool: &PgPool, ob: &str, id: i64, is_buy: bool, price: &str, amount: &str, co: &str) {
+async fn seed_order(
+    pool: &PgPool,
+    ob: &str,
+    id: i64,
+    is_buy: bool,
+    price: &str,
+    amount: &str,
+    co: &str,
+) {
     sqlx::query(
         r#"insert into inference_orders
                (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining,
@@ -87,7 +95,7 @@ async fn happy_path_returns_scaled_depth() {
     let body: DepthBody = resp.take_json().await.expect("depth body");
     assert_eq!(body.orderbook_address, ob);
     assert_eq!(body.last_update_id, "co-03"); // max chain order across all touches
-    // Bids best-first (descending), scaled by price_precision 9.
+                                              // Bids best-first (descending), scaled by price_precision 9.
     assert_eq!(
         body.bids,
         vec![
@@ -126,10 +134,9 @@ async fn unknown_book_is_1121() {
 async fn blank_address_is_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     // Present-but-blank address: `non_empty_query` trims to empty -> MissingParameter.
-    let mut resp =
-        TestClient::get("http://test/api/v1/inference/depth?inferenceOrderBookAddress=")
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get("http://test/api/v1/inference/depth?inferenceOrderBookAddress=")
+        .send(&service)
+        .await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1102);

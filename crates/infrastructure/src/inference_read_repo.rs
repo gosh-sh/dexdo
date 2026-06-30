@@ -131,13 +131,14 @@ impl PostgresReadModelRepository {
         if has_more {
             rows.truncate(limit as usize);
         }
-        let next_cursor =
-            if has_more { rows.last().map(|r| encode_cursor(r.created_at_micros, r.id)) } else { None };
+        let next_cursor = if has_more {
+            rows.last().map(|r| encode_cursor(r.created_at_micros, r.id))
+        } else {
+            None
+        };
 
-        let markets = rows
-            .into_iter()
-            .map(assemble_inference_market)
-            .collect::<Result<Vec<_>, _>>()?;
+        let markets =
+            rows.into_iter().map(assemble_inference_market).collect::<Result<Vec<_>, _>>()?;
         Ok(InferenceMarketsPage { markets, next_cursor, has_more })
     }
 }
@@ -281,7 +282,8 @@ async fn get_inference_depth_impl(
         return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
     };
     let price_scale = inference_scale(price_precision, orderbook_address, "price_precision")?;
-    let quantity_scale = inference_scale(quantity_precision, orderbook_address, "quantity_precision")?;
+    let quantity_scale =
+        inference_scale(quantity_precision, orderbook_address, "quantity_precision")?;
 
     let limit = limit.max(1) as i64;
     let rows: Vec<InferenceDepthLevelRow> = sqlx::query_as(

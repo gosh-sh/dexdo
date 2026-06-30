@@ -197,7 +197,9 @@ async fn unreconciled_market_is_hidden_by_the_visibility_gate() {
 
     // Single lookup of the unreconciled row is a miss, not a 503/inconsistent.
     let err = repo
-        .list_inference_markets(&InferenceMarketsRequest::One { orderbook_address: skeleton.into() })
+        .list_inference_markets(&InferenceMarketsRequest::One {
+            orderbook_address: skeleton.into(),
+        })
         .await
         .unwrap_err();
     assert!(matches!(

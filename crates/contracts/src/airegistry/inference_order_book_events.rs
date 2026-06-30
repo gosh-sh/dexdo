@@ -79,14 +79,46 @@ impl InferenceOrderBookEvent {
 
 /// Typed decoded `InferenceOrderBook` external event.
 pub enum DecodedInferenceOrderBookEvent {
-    OrderPlaced { event: Event, kind: InferenceOrderBookEvent, data: OrderPlacedData },
-    OrderCancelled { event: Event, kind: InferenceOrderBookEvent, data: OrderCancelledData },
-    Refunded { event: Event, kind: InferenceOrderBookEvent, data: RefundedData },
-    Filled { event: Event, kind: InferenceOrderBookEvent, data: FilledData },
-    Executed { event: Event, kind: InferenceOrderBookEvent, data: ExecutedData },
-    SubscriptionPlaced { event: Event, kind: InferenceOrderBookEvent, data: SubscriptionPlacedData },
-    CycleForfeited { event: Event, kind: InferenceOrderBookEvent, data: CycleForfeitedData },
-    ForfeitClaimed { event: Event, kind: InferenceOrderBookEvent, data: ForfeitClaimedData },
+    OrderPlaced {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: OrderPlacedData,
+    },
+    OrderCancelled {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: OrderCancelledData,
+    },
+    Refunded {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: RefundedData,
+    },
+    Filled {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: FilledData,
+    },
+    Executed {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: ExecutedData,
+    },
+    SubscriptionPlaced {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: SubscriptionPlacedData,
+    },
+    CycleForfeited {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: CycleForfeitedData,
+    },
+    ForfeitClaimed {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: ForfeitClaimedData,
+    },
     InferenceOrderBookDeployed {
         event: Event,
         kind: InferenceOrderBookEvent,

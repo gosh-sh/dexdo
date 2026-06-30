@@ -114,9 +114,8 @@ async fn address_with_filter_is_1102() {
 #[tokio::test]
 async fn invalid_status_is_1130() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    let mut resp = TestClient::get("http://test/api/v1/inference/markets?status=BOGUS")
-        .send(&service)
-        .await;
+    let mut resp =
+        TestClient::get("http://test/api/v1/inference/markets?status=BOGUS").send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1130);
@@ -176,10 +175,9 @@ async fn producer_filter_narrows_results() {
     seed_listed(&pool, a, prod, Some(1_700_000_100)).await;
     seed_listed(&pool, b, "other_producer", Some(1_700_000_200)).await;
 
-    let mut resp =
-        TestClient::get(format!("http://test/api/v1/inference/markets?producer={prod}"))
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get(format!("http://test/api/v1/inference/markets?producer={prod}"))
+        .send(&service)
+        .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body: Value = resp.take_json().await.expect("json");
     let addrs: Vec<&str> = body["markets"]
@@ -289,9 +287,8 @@ async fn corrupt_precision_returns_503_1500() {
 #[tokio::test]
 async fn bogus_sort_is_1130() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    let mut resp = TestClient::get("http://test/api/v1/inference/markets?sort=bogus")
-        .send(&service)
-        .await;
+    let mut resp =
+        TestClient::get("http://test/api/v1/inference/markets?sort=bogus").send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1130);
@@ -300,9 +297,8 @@ async fn bogus_sort_is_1130() {
 #[tokio::test]
 async fn non_numeric_limit_on_listing_is_1130() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    let mut resp = TestClient::get("http://test/api/v1/inference/markets?limit=abc")
-        .send(&service)
-        .await;
+    let mut resp =
+        TestClient::get("http://test/api/v1/inference/markets?limit=abc").send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1130);
@@ -314,10 +310,11 @@ async fn oversized_limit_clamps_and_returns_200() {
     // Use a producer that will match nothing so the listing is empty — proves
     // that `limit=99999` is clamped (not rejected as -1130) rather than
     // returning all DB rows (which may include corrupt task-3 fixtures).
-    let resp =
-        TestClient::get("http://test/api/v1/inference/markets?limit=99999&producer=__no_such_producer__")
-            .send(&service)
-            .await;
+    let resp = TestClient::get(
+        "http://test/api/v1/inference/markets?limit=99999&producer=__no_such_producer__",
+    )
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
 }
 
@@ -325,10 +322,11 @@ async fn oversized_limit_clamps_and_returns_200() {
 async fn address_with_non_numeric_limit_is_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     // Single-market presence beats the typed parse → -1102 (not -1130).
-    let mut resp =
-        TestClient::get("http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&limit=abc")
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get(
+        "http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&limit=abc",
+    )
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1102);
@@ -338,10 +336,11 @@ async fn address_with_non_numeric_limit_is_1102() {
 async fn address_with_blank_limit_is_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     // A present-but-blank `&limit=` still conflicts with single-market lookup.
-    let mut resp =
-        TestClient::get("http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&limit=")
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get(
+        "http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&limit=",
+    )
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1102);
@@ -351,10 +350,11 @@ async fn address_with_blank_limit_is_1102() {
 async fn address_with_blank_producer_is_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     // A present-but-blank `&producer=` still conflicts with single-market lookup.
-    let mut resp =
-        TestClient::get("http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&producer=")
-            .send(&service)
-            .await;
+    let mut resp = TestClient::get(
+        "http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&producer=",
+    )
+    .send(&service)
+    .await;
     assert_eq!(resp.status_code, Some(StatusCode::BAD_REQUEST));
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1102);
