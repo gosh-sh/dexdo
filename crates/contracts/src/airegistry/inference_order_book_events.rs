@@ -208,7 +208,8 @@ pub struct OrderCancelledData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub order_id: u128,
     #[serde(deserialize_with = "deserialize_u128")]
-    pub refunded_shell: u128,
+    pub refunded: u128,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -232,8 +233,12 @@ pub struct FilledData {
     pub ticks: u128,
     /// `uint256` represented as returned by ABI.
     pub clearing_price: String,
+    /// ABI field is `sellerTC` (both caps); `rename_all = camelCase` would emit
+    /// `sellerTc`, so the name is pinned explicitly.
+    #[serde(rename = "sellerTC")]
     pub seller_tc: String,
     pub buyer_note: String,
+    pub seller_note: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -289,4 +294,14 @@ pub struct ForfeitClaimedData {
     pub seller_note: String,
     #[serde(deserialize_with = "deserialize_u128")]
     pub amount: u128,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// Payload of `InferenceOrderBookEvent::OrderBookDeployed`.
+pub struct OrderBookDeployedData {
+    pub note: String,
+    /// `uint256` represented as returned by ABI.
+    pub model_hash: String,
+    pub model_name: String,
 }

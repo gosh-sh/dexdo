@@ -12,7 +12,7 @@ import "./libraries/DexLib.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.10";
+    string constant version = "4.0.15";
 
     /// @notice Stored code of PrivateNote contract
     TvmCell _privateNoteCode;
@@ -400,6 +400,16 @@ contract RootPN is Modifiers {
     function setInferenceOrderBookCode(TvmCell inferenceOrderBookCode) public onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
         _inferenceOrderBookCode = inferenceOrderBookCode;
+    }
+
+    /// @notice Owner-only setter for the PrivateNote code. Kept out of `onCodeUpgrade` so the upgrade
+    ///         message stays small — the PrivateNote code is the largest in the bundle and a full
+    ///         6-code upgrade cell overflows the shellnet BM JSON-body limit. `updateCode` carries an
+    ///         EMPTY PrivateNote slot; this sets the real code in a separate small message.
+    /// @param privateNoteCode New PrivateNote code baked into deployed notes.
+    function setPrivateNoteCode(TvmCell privateNoteCode) public onlyOwnerPubkey(_ownerPubkey) accept {
+        ensureBalance();
+        _privateNoteCode = privateNoteCode;
     }
 
     /// @notice Returns the salted PrivateNote contract code

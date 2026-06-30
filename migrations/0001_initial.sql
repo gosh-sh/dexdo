@@ -1,3 +1,6 @@
+-- Consolidated initial schema for the DEX.DO read-model and indexer.
+-- Source of truth for table/field intent is docs/tech-specs/data-schema.md.
+
 create extension if not exists pgcrypto;
 
 create type auth_permission as enum ('USER_DATA', 'TRADE');
@@ -35,16 +38,34 @@ create index raw_events_created_at_chain_idx on raw_events (created_at_chain des
 create index raw_events_event_type_decoded_idx
     on raw_events (event_type)
     where event_type is not null;
-create index raw_events_pending_projection_idx
-    on raw_events (created_at_chain, id)
+create index raw_events_chain_order_idx on raw_events (chain_order);
+
+-- The projection loop is the sole projector and reads every pending raw_events
+-- row ordered by chain_order via a keyset cursor (chain_order > $after). Keying
+-- the pending partial index by chain_order makes that a forward range scan over
+-- only pending rows (no separate sort, no scan through projected history).
+create index raw_events_pending_chain_order_idx
+    on raw_events (chain_order)
     where processed_at is null
       and event_type is not null
       and decoded is not null;
-create index raw_events_chain_order_idx on raw_events (chain_order);
+
+-- The inference reconciler's sweep catch-up gate probes "are there any pending
+-- events for this book?" by src_address = orderbook_address over the projection
+-- predicate. Indexing src_address over that same partial predicate makes the
+-- per-book equality probe an index probe rather than a full-table scan.
+create index raw_events_pending_src_idx
+    on raw_events (src_address)
+    where processed_at is null and event_type is not null and decoded is not null;
 
 create table indexer_cursors (
     stream_name text primary key,
     cursor text,
+    -- True only when the capture loop's most recent drain returned
+    -- has_next_page=false. The inference reconciler reads it as the `at_head`
+    -- sweep catch-up gate: a phantom cancel must not fire while the gateway
+    -- still has older pages ahead of the cursor.
+    at_head boolean not null default false,
     updated_at timestamptz not null default now()
 );
 
@@ -147,6 +168,10 @@ create unique index markets_orderbook_address_unique
     on markets (orderbook_address)
     where orderbook_address is not null;
 
+-- max_batch_size is backend policy (the api's mirror of the chain's compiled-in
+-- MAX_BATCH_SIZE), not chain state: it lives in api config (`chain.max_batch_size`),
+-- enforced by the batch use cases and advertised in /api/v1/markets from that
+-- single source, so it is intentionally not a column here.
 create table market_outcomes (
     id bigserial primary key,
     market_id_fk bigint not null references markets(id) on delete cascade,
@@ -159,7 +184,6 @@ create table market_outcomes (
     tick_size text not null,
     step_size text not null,
     min_notional text not null,
-    max_batch_size integer not null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     unique (pmp_address, outcome_id)
@@ -236,6 +260,163 @@ create unique index api_keys_api_key_active_idx
     on api_keys (api_key)
     where disabled_at is null;
 create index api_keys_account_id_idx on api_keys (account_id);
+
+-- Append-only public trade tape behind GET /api/v1/trades. One row per
+-- maker↔taker match, written by the OrderBook.OrderFilled projector on the
+-- taker-side event only (isTaker = true); the maker-side event mutates
+-- live_orders but writes no trades row, so a match is recorded exactly once.
+-- Rows are immutable once written, except a first-write-wins fill of a NULL
+-- chain_time on replay; never deleted. See docs/tech-specs/data-schema.md#trades.
+create table trades (
+    -- Taker-side OrderFilled event's chain-order key (gateway msg_chain_order,
+    -- copied from raw_events.chain_order). Globally unique per match and
+    -- lex-sortable: the sole sort key and identity for the tape (DESC).
+    trade_id text primary key,
+    orderbook_address text not null,
+    outcome_id integer not null,
+    -- Clearing price from OrderFilled.clearingPrice, raw basis points.
+    price numeric(78, 0) not null,
+    -- Matched quantity from OrderFilled.filledAmount, raw token atoms.
+    qty numeric(78, 0) not null,
+    -- Trade direction: taker selling ⇒ buyer is the maker ⇒ true.
+    is_buyer_maker boolean not null,
+    -- On-chain block time of the taker event (raw_events.created_at_chain).
+    -- NULL when the gateway omitted created_at; such rows are filtered out of
+    -- the read query, matching live_orders / /api/v1/orders.
+    chain_time timestamptz,
+    -- Indexer ingestion wall-clock (bookkeeping).
+    created_at timestamptz not null default now()
+);
+
+-- Backs the newest-first per-outcome read (ORDER BY trade_id DESC LIMIT $limit)
+-- as an index range scan.
+create index trades_tape_idx on trades (orderbook_address, outcome_id, trade_id desc);
+
+-- Inference order-book read model: one inference_markets row per InferenceOrderBook
+-- (one per model), and one inference_orders row per chain-side order.
+-- Every column except the two skeleton-seed columns is nullable/defaulted so the
+-- discovery pre-step can seed a market from any event before the reconciler fills it.
+
+create table inference_markets (
+    id bigserial primary key,
+    orderbook_address text not null unique,
+    model_hash numeric(78, 0),
+    platform_fee_bps integer,
+    quote_token_type integer references ref_tokens(token_type),
+    price_precision integer,
+    quantity_precision integer,
+    tick_size text,
+    step_size text,
+    min_notional text,
+    reference_price numeric(78, 0),
+    reference_price_at timestamptz,
+    model_ref text,
+    producer text,
+    model_name text,
+    version text,
+    manifest_address text,
+    root_model_address text,
+    owner_pubkey numeric(78, 0),
+    created_at_chain timestamptz,
+    last_reconciled_at timestamptz,
+    last_reconcile_failed_at timestamptz,
+    reconcile_attempts integer not null default 0,
+    -- Set when this book is retired as a stale duplicate of a higher-version
+    -- book for the same model. Excluded from discovery, the read API, and the
+    -- discovering/visible/failing metric buckets.
+    superseded_at timestamptz,
+    last_swept_at timestamptz,
+    sweep_cursor numeric(78, 0),
+    sweep_cycle_max numeric(78, 0),
+    -- Monotonic counter bumped whenever a Filled override reopens a provisionally
+    -- sweep-cancelled row while the book is still in discovery. The discovery
+    -- visibility stamp is guarded on this being unchanged across the completing
+    -- sweep tick, so an override that resets sweep_cursor to NULL on the FIRST tick
+    -- of a cycle (where a plain cursor-CAS cannot distinguish reset-from-NULL from
+    -- start-of-cycle-NULL) still blocks the stamp until a fresh cycle re-checks the
+    -- reopened id.
+    sweep_override_seq bigint not null default 0,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create unique index inference_markets_model_hash_idx
+    on inference_markets (model_hash) where model_hash is not null;
+create index inference_markets_pending_reconcile_idx
+    on inference_markets (last_reconcile_failed_at nulls first, id)
+    where last_reconciled_at is null;
+create index inference_markets_refresh_idx
+    on inference_markets (reference_price_at nulls first)
+    where last_reconciled_at is not null;
+create index inference_markets_sweep_idx
+    on inference_markets (last_swept_at nulls first)
+    where last_reconciled_at is not null;
+
+create table inference_orders (
+    orderbook_address text not null,
+    order_id numeric(78, 0) not null,
+    is_buy boolean not null,
+    price numeric(78, 0) not null,
+    amount_initial numeric(78, 0) not null,
+    amount_remaining numeric(78, 0) not null,
+    is_subscription boolean not null default false,
+    status text not null check (status in ('OPEN', 'FILLED', 'CANCELLED')),
+    swept_at timestamptz,
+    note_address text,
+    last_chain_order text not null,
+    chain_created_at timestamptz,
+    chain_updated_at timestamptz,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    primary key (orderbook_address, order_id)
+);
+
+create index inference_orders_open_book_idx
+    on inference_orders (orderbook_address, is_buy, price desc) where status = 'OPEN';
+create index inference_orders_sweep_idx
+    on inference_orders (orderbook_address, order_id) where status = 'OPEN';
+
+-- Inference SETTLEMENT read-model. One inference_deals row per TokenContract
+-- (the per-deal streaming escrow auto-deployed when a SELL offer is matched),
+-- and one inference_ticks row per finalized tick. Every column except the PK is
+-- nullable/defaulted so a deal skeleton can be seeded by any TokenContract.*
+-- event (keyed by src_address) before InferenceOrderBook.Filled fills the
+-- orderbook_address + seller_note link.
+
+create table inference_deals (
+    token_contract_address text primary key,
+    orderbook_address text,
+    seller_note text,
+    buyer_note text,
+    deposit numeric(78, 0),
+    price_per_tick numeric(78, 0),
+    finalized_ticks integer not null default 0,
+    funded_at_chain timestamptz,
+    opened_at_chain timestamptz,
+    settled_at_chain timestamptz,
+    close_kind text check (close_kind in ('STOPPED', 'DISPUTE_RESOLVED', 'RECLAIMED', 'DESTROYED', 'PROBE_BURNED')),
+    clean_settlement boolean,
+    disputed_at_chain timestamptz,
+    last_chain_order text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create index inference_deals_orderbook_idx on inference_deals (orderbook_address);
+create index inference_deals_seller_idx on inference_deals (seller_note);
+create index inference_deals_buyer_idx on inference_deals (buyer_note);
+
+create table inference_ticks (
+    token_contract_address text not null references inference_deals(token_contract_address) on delete cascade,
+    chain_order text not null,
+    finalized_owed numeric(78, 0) not null,
+    deposit numeric(78, 0) not null,
+    chain_at timestamptz,
+    created_at timestamptz not null default now(),
+    primary key (token_contract_address, chain_order)
+);
+
+create index inference_ticks_tc_idx on inference_ticks (token_contract_address);
 
 insert into ref_tokens (
     token_type,

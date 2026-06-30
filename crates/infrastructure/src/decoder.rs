@@ -260,10 +260,12 @@ mod tests {
             assert!(decoder.contracts.contains_key(kind), "missing contract {kind}");
         }
 
-        // 48 DEX unique ids + 9 InferenceOrderBook ids + 13 TokenContract ids = 70
+        // 50 DEX unique ids + 9 InferenceOrderBook ids + 13 TokenContract ids = 72
         // distinct ids. (The InferenceOrderBook events carry an `Inference` prefix, so
-        // none collides with the DEX OrderBook events.)
-        assert_eq!(decoder.known_events(), 70, "unexpected total event id count");
+        // none collides with the DEX OrderBook events. The two extra DEX ids over the
+        // earlier 48 are PrivateNote's owner-facing inference mirrors,
+        // InferenceOrderPlacedConfirmed / InferenceFilledConfirmed.)
+        assert_eq!(decoder.known_events(), 72, "unexpected total event id count");
 
         // sample lookups — find entries for PMP
         let pmp_event_ids: Vec<_> = decoder
@@ -284,8 +286,8 @@ mod tests {
     fn registers_inference_orderbook_and_counts_unique_ids() {
         let decoder = Decoder::new().unwrap();
         assert!(decoder.contracts.contains_key("InferenceOrderBook"), "inference abi missing");
-        // 48 DEX + 9 inference + 13 TokenContract = 70.
-        assert_eq!(decoder.unique_event_ids(), 70, "unexpected unique event-id count");
+        // 50 DEX + 9 inference + 13 TokenContract = 72.
+        assert_eq!(decoder.unique_event_ids(), 72, "unexpected unique event-id count");
     }
 
     #[test]
@@ -338,7 +340,13 @@ mod tests {
             assert_eq!(entries[0].1.as_str(), name.as_str());
             checked += 1;
         }
-        assert_eq!(checked, 9, "expected all 9 InferenceOrderBook events to resolve uniquely");
+        assert_eq!(
+            checked, 9,
+            "expected exactly 9 inference events (InferenceOrderPlaced, InferenceFilled, \
+             InferenceExecuted, InferenceRefunded, InferenceOrderCancelled, \
+             InferenceSubscriptionPlaced, InferenceCycleForfeited, InferenceForfeitClaimed, \
+             InferenceOrderBookDeployed)"
+        );
     }
 
     #[test]
@@ -464,6 +472,7 @@ mod tests {
     }
 
     fn inference_filled_body_b64(d: &Decoder) -> String {
+        let zero = "0:0000000000000000000000000000000000000000000000000000000000000000";
         encode_event_body_b64(
             d,
             "InferenceOrderBook",
@@ -473,9 +482,9 @@ mod tests {
                 "takerId": "2",
                 "ticks": "3",
                 "clearingPrice": "0",
-                "sellerTC": "0:0000000000000000000000000000000000000000000000000000000000000000",
-                "buyerNote": "0:0000000000000000000000000000000000000000000000000000000000000000",
-                "sellerNote": "0:0000000000000000000000000000000000000000000000000000000000000000"
+                "sellerTC": zero,
+                "buyerNote": zero,
+                "sellerNote": zero
             }),
         )
     }

@@ -84,6 +84,29 @@ fn sample_output_json(abi: &str, func: &str) -> Value {
     Value::Object(obj)
 }
 
+fn abi_event(abi: &str, event: &str) -> Value {
+    let v: Value = serde_json::from_str(abi).expect("parse ABI");
+    v["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .find(|e| e["name"].as_str() == Some(event))
+        .unwrap_or_else(|| panic!("event `{event}` not in ABI"))
+        .clone()
+}
+
+/// Build an event payload object for `event` straight from the ABI inputs, so a
+/// decoder struct is checked against the exact field names the node emits.
+fn sample_event_json(abi: &str, event: &str) -> Value {
+    let mut obj = Map::new();
+    for i in abi_event(abi, event)["inputs"].as_array().expect("inputs array") {
+        let name = i["name"].as_str().expect("input name");
+        let ty = i["type"].as_str().expect("input type");
+        obj.insert(name.to_string(), sample_for_type(ty));
+    }
+    Value::Object(obj)
+}
+
 // ── SuperRoot ────────────────────────────────────────────────────────────
 
 #[test]
@@ -322,7 +345,6 @@ fn event_ids_match_modifiers() {
     use super::token_contract_events::TokenContractEvent as Tc;
 
     assert_eq!(Sr::RootRegistered as u128, 700);
-    assert_eq!(Sr::ManifestRegistered as u128, 701);
 
     assert_eq!(Rm::TokenContractRegistered as u128, 702);
     assert_eq!(Rm::ContractDeployed as u128, 703);
@@ -369,4 +391,51 @@ fn event_address_roundtrips_through_try_from() {
         ":0000000000000000000000000000000000000000000000000000000000000063".to_string()
     )
     .is_err());
+}
+
+// ── Event payload decoders (field names vs ABI event inputs) ───────────────
+
+#[test]
+fn event_payloads_decode_abi_shape() {
+    use super::inference_order_book_events as iob;
+    use super::root_model_events as rm;
+    use super::super_root_events as sr;
+    use super::token_contract_events as tc;
+
+    macro_rules! decodes {
+        ($ty:ty, $abi:expr, $name:expr) => {
+            serde_json::from_value::<$ty>(sample_event_json($abi, $name))
+                .unwrap_or_else(|e| panic!("decode event `{}`: {e}", $name))
+        };
+    }
+
+    // InferenceOrderBook (1000-range). Events carry an `Inference` prefix since
+    // v4.0.10. `InferenceFilled.sellerTC` is the field whose camelCase would
+    // mis-derive to `sellerTc`, so assert it explicitly.
+    decodes!(iob::OrderPlacedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderPlaced");
+    decodes!(iob::OrderCancelledData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderCancelled");
+    let filled = decodes!(iob::FilledData, INFERENCE_ORDER_BOOK_ABI, "InferenceFilled");
+    assert_eq!(filled.seller_tc, SAMPLE_ADDRESS);
+    decodes!(iob::ExecutedData, INFERENCE_ORDER_BOOK_ABI, "InferenceExecuted");
+    decodes!(iob::RefundedData, INFERENCE_ORDER_BOOK_ABI, "InferenceRefunded");
+    decodes!(iob::SubscriptionPlacedData, INFERENCE_ORDER_BOOK_ABI, "InferenceSubscriptionPlaced");
+    decodes!(iob::CycleForfeitedData, INFERENCE_ORDER_BOOK_ABI, "InferenceCycleForfeited");
+    decodes!(iob::ForfeitClaimedData, INFERENCE_ORDER_BOOK_ABI, "InferenceForfeitClaimed");
+    decodes!(iob::OrderBookDeployedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderBookDeployed");
+
+    // TokenContract (700-range streaming).
+    decodes!(tc::StreamFundedData, TOKEN_CONTRACT_ABI, "StreamFunded");
+    decodes!(tc::StreamOpenedData, TOKEN_CONTRACT_ABI, "StreamOpened");
+    decodes!(tc::ProbeAcceptedData, TOKEN_CONTRACT_ABI, "ProbeAccepted");
+    decodes!(tc::ProbeBurnedData, TOKEN_CONTRACT_ABI, "ProbeBurned");
+    decodes!(tc::TickFinalizedData, TOKEN_CONTRACT_ABI, "TickFinalized");
+    decodes!(tc::StreamStoppedData, TOKEN_CONTRACT_ABI, "StreamStopped");
+    decodes!(tc::DisputeResolvedData, TOKEN_CONTRACT_ABI, "DisputeResolved");
+    decodes!(tc::StreamReclaimedData, TOKEN_CONTRACT_ABI, "StreamReclaimed");
+    decodes!(tc::ShellWithdrawnData, TOKEN_CONTRACT_ABI, "ShellWithdrawn");
+    decodes!(tc::ContractDeployedData, TOKEN_CONTRACT_ABI, "ContractDeployed");
+
+    // Registry.
+    decodes!(sr::RootRegisteredData, SUPER_ROOT_ABI, "RootRegistered");
+    decodes!(rm::TokenContractRegisteredData, ROOT_MODEL_ABI, "TokenContractRegistered");
 }

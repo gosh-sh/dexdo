@@ -44,6 +44,8 @@ indexer:
   # typos — so a bad entry fails startup rather than dropping events silently.
   ignored_event_types:
     - "OrderBook.Queued"
+    - "PMP.StakeAccepted"
+    - "PMP.MergeProcessed"
   # Inference reconciler/sweep/orphan-cutoff knobs.
   inference_reconciliation_interval_ms: 15000
   inference_reference_price_refresh_ms: 3600000

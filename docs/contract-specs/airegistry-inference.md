@@ -8,9 +8,8 @@ with, but separate from, the DEX.DO prediction-market core under `contracts/dex/
 
 | Contract | Role |
 | --- | --- |
-| `SuperRoot` | Per-network root factory. Registers a `RootModel` and a `ManifestMetadata` at deterministic addresses derived from an owner pubkey. |
+| `SuperRoot` | Per-network root factory. Registers a `RootModel` at a deterministic address derived from an owner pubkey. (The per-model `ManifestMetadata` contract and SuperRoot's `registerManifest` / `getManifestAddress` were removed upstream in v4.0.10.) |
 | `RootModel` | Per-owner model registry. Derives + registers `TokenContract` children at deterministic `(sellerPubkey, nonce)` addresses. |
-| `ManifestMetadata` | Per-model manifest. |
 | `TokenContract` | Per-deal streaming escrow. Holds the buyer's SHELL deposit and settles ticks one at a time (probe-tick model, spec §3.1.2): `open → advance → stop / dispute / reclaim`. |
 | `InferenceOrderBook` | Per-model CLOB. Matches SELL offers (each backed by a `TokenContract`) against BUY orders and subscriptions paid in SHELL escrow. Deployed per `(model)` from a `PrivateNote`. |
 
@@ -25,7 +24,10 @@ order/stream methods live on the note (`deployInferenceOrderBook`,
 Typed wrappers (message encoders/decoders, getters, event decoders) live in
 [`crates/contracts/src/airegistry/`](../../crates/contracts/src/airegistry/),
 following the same style as the `dex` wrappers. The note-side inference methods
-are on [`dex::private_note`](../../crates/contracts/src/dex/private_note.rs).
+are on [`dex::private_note`](../../crates/contracts/src/dex/private_note.rs). A
+method-by-method reference across all three layers (per-contract wrappers,
+note-side inference, and the `Dex` facade) is in
+[`airegistry-sdk.md`](airegistry-sdk.md).
 
 The `dodex-chain` facade exposes the inference flow behind the `test-helpers`
 feature (`deploy_inference_order_book`, `post_sell_offer`, `place_inference_buy`,
@@ -88,6 +90,7 @@ through `dodex_chain::Dex` (no DB, no HTTP — there are no inference handlers):
 | --- | --- |
 | `e2e_inference` | Note deploys the book, places a resting BUY with SHELL escrow, cancels it. |
 | `e2e_inference_match` | External `TokenContract` deploy + a SELL offer crossed by a BUY ⇒ the match funds the `TokenContract` (handover). |
+| `e2e_inference_clob` | Three flows: a partial fill (2-tick offer crossed by a 4-tick limit buy, 2 ticks rest) + `getBestBidAsk`/`getWeeklyMedianPrice`; a subscription (`placeInferenceSubscription` + `getSubscription`); and a match's `Filled` event confirmed by its routing id. |
 | `e2e_inference_stream` | Full deal lifecycle: match → probe commission → `open` → wait the 180s settle window → `advance` (probe accepted) → `streamStop`. Slow (~4 min). |
 
 They share the seed-note pool (`tests/fixtures/seed_notes.json` /
@@ -97,16 +100,39 @@ SHELL for escrow, and the giver must be reachable (shellnet only). Run:
 ```sh
 cargo test -p dodex-api --test e2e_inference -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_match -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_clob -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_stream -- --ignored --nocapture
 ```
 
+The `e2e_inference_clob` Filled check asserts the event by its routing id, not
+its decoded payload. Typed body decode of these ext-out events returns tvm
+error 304 against the current shellnet because of a **code version skew**: the
+`InferenceOrderBook` code baked into the shellnet-deployed `PrivateNote` (the
+one the seed notes derive their book from) has a different `code_hash` than this
+repo's `InferenceOrderBook.tvc`, so the deployed contract emits event bodies
+shaped by its own event signatures, not the bundled ABI. Function signatures
+(getters) still match, which is why reads work and only event-body decode
+fails — it is not the multi-cell off-by-32 case. This is a deployment skew, not
+a wrapper bug; typed payload decode will work once the shellnet book matches the
+bundled ABI (redeploy of the on-chain registry/RootPN). The routing id is
+version-independent, and the payload struct field names are verified offline.
+
 ABI-grounded offline checks (no node) live in `crates/contracts`
 (`airegistry::tests`): every `Params`/`Result` struct is verified against the
-bundled ABI, and every event id against `modifiers.sol`.
+bundled ABI, every event id against `modifiers.sol`, and every event payload
+struct's field names against the ABI event inputs.
 
 ## Not yet covered
 
-Registry registration (`SuperRoot → RootModel → TokenContract`), order-book
-subscriptions / forfeit (spec §8), the continuation queue (`processHead`),
-event-payload assertions, and the longer probe variants (probe burn, seller
-no-show reclaim, dispute timeout — each waits a 600s on-chain window).
+- **Registry registration** (`SuperRoot → RootModel → TokenContract`) — the
+  external `SuperRoot` deploy needs the child code cells extracted into its
+  constructor.
+- **Continuation queue** (`processHead`) — needs `> MAX_MATCHES_PER_CALL`
+  matches in one buy; depends on the deployed contract's constant.
+- **Subscription forfeit** (`pokeSubscription` / `claimForfeit`) — needs a
+  weekly cycle to roll over.
+- **Longer probe variants** — probe burn, seller no-show reclaim, dispute
+  timeout, each waiting a 600s on-chain window.
+- **Typed ext-out event payload decode** — blocked on the deployment skew noted
+  above (shellnet book `code_hash` ≠ this repo's), not a wrapper issue; events
+  are asserted by routing id meanwhile.

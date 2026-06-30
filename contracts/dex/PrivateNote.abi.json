@@ -61,6 +61,32 @@
 			]
 		},
 		{
+			"name": "onInferencePlaced",
+			"inputs": [
+				{"name":"modelHash","type":"uint256"},
+				{"name":"tokenContract","type":"address"},
+				{"name":"orderId","type":"uint128"},
+				{"name":"isBuy","type":"bool"},
+				{"name":"price","type":"uint256"},
+				{"name":"ticks","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "onInferenceFilled",
+			"inputs": [
+				{"name":"modelHash","type":"uint256"},
+				{"name":"tokenContract","type":"address"},
+				{"name":"orderId","type":"uint128"},
+				{"name":"ticks","type":"uint128"},
+				{"name":"clearingPrice","type":"uint256"},
+				{"name":"isBuy","type":"bool"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "forceClearStreamLocks",
 			"inputs": [
 			],
@@ -168,6 +194,14 @@
 		},
 		{
 			"name": "streamReclaim",
+			"inputs": [
+				{"name":"tokenContract","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "streamCleanup",
 			"inputs": [
 				{"name":"tokenContract","type":"address"}
 			],
@@ -827,6 +861,32 @@
 				{"name":"from","type":"address"},
 				{"name":"tokenType","type":"uint32"},
 				{"name":"amount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "InferenceOrderPlacedConfirmed",
+			"inputs": [
+				{"name":"orderBook","type":"address"},
+				{"name":"tokenContract","type":"address"},
+				{"name":"orderId","type":"uint128"},
+				{"name":"isBuy","type":"bool"},
+				{"name":"price","type":"uint256"},
+				{"name":"ticks","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "InferenceFilledConfirmed",
+			"inputs": [
+				{"name":"orderBook","type":"address"},
+				{"name":"tokenContract","type":"address"},
+				{"name":"orderId","type":"uint128"},
+				{"name":"ticks","type":"uint128"},
+				{"name":"clearingPrice","type":"uint256"},
+				{"name":"isBuy","type":"bool"}
 			],
 			"outputs": [
 			]

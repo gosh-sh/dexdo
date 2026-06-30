@@ -263,7 +263,8 @@ indexer only:
   disable scoping. An empty string is rejected at startup — it would otherwise
   deserialize to `Some("")` and drop every edge with a real `src_dapp_id`.
 - `indexer.ignored_event_types` may list only known droppable no-op types
-  (`OrderBook.Queued` / `FullyFilled` / `Rejected` / `CallbackBounced`). Each
+  (`OrderBook.Queued` / `FullyFilled` / `Rejected` / `CallbackBounced` and
+  `PMP.StakeAccepted` / `PMP.MergeProcessed`). Each
   entry is matched by its external `dst` before decode (no decode cost). The
   startup guard refuses anything else — metric-critical types
   (`OrderBook.OrderPlaced`, `OrderBook.PartialFill`, counted from `raw_events`

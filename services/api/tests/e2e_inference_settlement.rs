@@ -1,24 +1,21 @@
-// End-to-end streaming-settlement smoke for the AI Registry inference market
-// against a real shellnet, driven through `dodex_chain::Dex` (no DB, no HTTP).
+// End-to-end settlement smoke for the AI Registry inference market against a real
+// shellnet, driven through `dodex_chain::Dex`. Ported from the contract-side
+// `test_settlement.py` (#96 — optimistic SETTLE_WINDOW, path 1).
 //
-// Full deal lifecycle (self-trade — one note is maker, taker AND seller):
-//   1. note deploys the per-model InferenceOrderBook;
-//   2. a TokenContract is deployed externally (self-rooted, giver-funded);
-//   3. the note posts a SELL offer and crosses it with a BUY ⇒ the book funds
-//      the TokenContract (handover);
-//   4. the giver posts the seller probe commission (an internal SHELL message —
-//      `open()` requires it, and an external call cannot carry currency);
-//   5. seller `open()` freezes the probe tick;
-//   6. after SETTLE_WINDOW (180s) of buyer silence, seller `advance()` accepts
-//      the probe — `finalizedOwed` grows, `probeAccepted` flips true;
-//   7. buyer `streamStop()` closes the stream and settles.
+// The spec-aligned `stop()` finalizes the current prepaid streaming tick to the
+// seller ONLY if its acceptance window has elapsed. Here the buyer stops
+// IMMEDIATELY after the seller advances (probe accepted → Streaming, the streaming
+// tick is prepaid): the streaming tick's window is still open, so the seller must
+// NOT be paid that tick — `finalizedOwed` grows by less than one tick.
 //
-// This proves the whole streaming state machine (open → advance → stop, the
-// probe-tick money model in §3.1.2) against a live contract through our
-// wrappers. It is SLOW: it sleeps out the real 180s on-chain settle window, so
-// a run takes ~3-4 minutes.
+// Self-trade: one note is maker, taker, buyer AND seller. Lifecycle:
+//   book → TokenContract → sell+buy handover funds the TC → probe commission →
+//   open (freeze probe) → wait the probe window → advance (probe accepted,
+//   streaming tick prepaid) → IMMEDIATE stop → assert the streaming tick is unpaid.
 //
-//   cargo test -p dodex-api --test e2e_inference_stream -- --ignored --nocapture
+// Slow: sleeps out the real ~180s probe window (~3-4 min).
+//
+//   cargo test -p dodex-api --test e2e_inference_settlement -- --ignored --nocapture
 //
 // === SECURITY NOTE === see e2e_inference.rs.
 
@@ -48,16 +45,16 @@ const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
 const PRICE_PER_TICK: u128 = 1_000_000;
 const DEAL_TICKS: u128 = 4;
-// SETTLE_WINDOW is 180s on-chain; wait it out plus a margin before `advance`.
-const SETTLE_WAIT: Duration = Duration::from_secs(195);
+// Probe window is ~180s on-chain; wait it out plus a margin before `advance`.
+const PROBE_WAIT: Duration = Duration::from_secs(195);
 
 fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
 
 #[tokio::test]
-#[ignore = "requires shellnet + seed_notes.json; sleeps out the 180s settle window (~4 min)"]
-async fn inference_stream_open_advance_stop_against_shellnet() {
+#[ignore = "requires shellnet + seed_notes.json; sleeps out the ~180s probe window (~4 min)"]
+async fn inference_settlement_immediate_stop_does_not_pay_streaming_tick() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_env_filter("info,ackinacki_kit=debug")
@@ -73,11 +70,9 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
 
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex::from_endpoints");
     let suffix = unique_suffix();
-    // The book ctor enforces `sha256(modelName) == _modelHash`; uniqueness now
-    // rides the name (the hash is its preimage), not an arbitrary number.
-    let model_name = format!("e2e-stream--{suffix}");
+    let model_name = format!("e2e-settle--{suffix}");
     let model_hash = model_hash_dec(&model_name);
-    eprintln!("[e2e_stream] note={} model_name={model_name} model_hash={model_hash}", note.address);
+    eprintln!("[e2e_settle] note={} model_name={model_name} model_hash={model_hash}", note.address);
 
     let mut failures: Vec<String> = Vec::new();
 
@@ -101,8 +96,6 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
         .expect("getInferenceOrderBookAddress");
     wait_book_live(&dex, &ob).await;
 
-    // postSellOffer verifies token_contract derives from the seller key + this
-    // nonce, so the offer must pass the SAME nonce the TokenContract was deployed with.
     let nonce = (suffix % 1_000_000_000) as u64 + 1;
     let tc = deploy_token_contract(
         dex.context(),
@@ -119,7 +112,7 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
     )
     .await
     .expect("deploy TokenContract");
-    eprintln!("[e2e_stream] order_book={ob} token_contract={tc}");
+    eprintln!("[e2e_settle] order_book={ob} token_contract={tc}");
 
     // 3. Offer ↔ buy ⇒ handover funds the TokenContract.
     dex.post_sell_offer(
@@ -163,18 +156,7 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
     fund_probe_commission_via_giver(dex.context(), &tc, 200_000)
         .await
         .expect("fund probe commission via giver");
-    let mut probe_funded = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if let Ok(probe) = dex.token_contract_get_probe(&tc).await
-            && probe.probe_funded
-        {
-            eprintln!("[e2e_stream] probe funded: locked={}", probe.probe_locked);
-            probe_funded = true;
-            break;
-        }
-    }
-    if !probe_funded {
+    if !wait_probe_funded(&dex, &tc).await {
         failures.push("probe commission never registered (probeFunded stayed false)".to_string());
         finish(&dex, &note.address, &model_hash, &keys, failures).await;
         return;
@@ -184,70 +166,56 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
     dex.token_contract_open(&tc, ParamsOfOpen { endpoint_cipher: "00".to_string() }, signer())
         .await
         .expect("TokenContract.open accepted");
-    let mut opened = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if let Ok(state) = dex.token_contract_get_state(&tc).await
-            && state.opened
-        {
-            eprintln!("[e2e_stream] opened: frozen={} deposit={}", state.frozen, state.deposit);
-            opened = true;
-            break;
-        }
-    }
-    if !opened {
+    if !wait_state(&dex, &tc, |s| s.opened, "stream to open").await {
         failures.push("stream never opened".to_string());
         finish(&dex, &note.address, &model_hash, &keys, failures).await;
         return;
     }
 
-    // 6. Wait out the on-chain settle window, then accept the probe.
-    eprintln!("[e2e_stream] sleeping {}s for SETTLE_WINDOW…", SETTLE_WAIT.as_secs());
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // 6. Wait out the probe window, then accept the probe (sets the streaming tick prepaid).
+    eprintln!("[e2e_settle] sleeping {}s for the probe window…", PROBE_WAIT.as_secs());
+    tokio::time::sleep(PROBE_WAIT).await;
     dex.token_contract_advance(&tc, signer()).await.expect("TokenContract.advance accepted");
-    let mut accepted = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if let Ok(state) = dex.token_contract_get_state(&tc).await
-            && state.probe_accepted
-        {
-            eprintln!(
-                "[e2e_stream] probe accepted: finalizedOwed={} prepaid={} frozen={}",
-                state.finalized_owed, state.prepaid, state.frozen
-            );
-            if state.finalized_owed == 0 {
-                failures.push("probe accepted but finalizedOwed is 0".to_string());
-            }
-            accepted = true;
-            break;
-        }
-    }
-    if !accepted {
+    if !wait_state(&dex, &tc, |s| s.probe_accepted, "probe to be accepted").await {
         failures.push("advance did not accept the probe within budget".to_string());
         finish(&dex, &note.address, &model_hash, &keys, failures).await;
         return;
     }
+    let after_advance = dex.token_contract_get_state(&tc).await.expect("getState after advance");
+    let owed_before = after_advance.finalized_owed;
+    eprintln!(
+        "[e2e_settle] probe accepted: finalizedOwed(W0)={owed_before} prepaid={} frozen={}",
+        after_advance.prepaid, after_advance.frozen
+    );
+    if after_advance.prepaid != PRICE_PER_TICK {
+        failures.push(format!(
+            "streaming tick not prepaid after advance: prepaid={} want={PRICE_PER_TICK}",
+            after_advance.prepaid
+        ));
+    }
 
-    // 7. Buyer stops the stream (clean close, standard split).
+    // 7. IMMEDIATE stop — the streaming tick's window is still open ⇒ the seller
+    //    must NOT be paid it. finalizedOwed grows by less than one tick.
     dex.stream_stop(&note.address, ParamsOfStreamDeal { token_contract: tc.clone() }, signer())
         .await
         .expect("streamStop accepted");
-    let mut stopped = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if let Ok(state) = dex.token_contract_get_state(&tc).await
-            && !state.opened
-        {
-            eprintln!(
-                "[e2e_stream] stopped: opened={} finalizedOwed={} ticksFinalized via fees",
-                state.opened, state.finalized_owed
-            );
-            stopped = true;
-            break;
-        }
-    }
-    if !stopped {
+    if !wait_state(&dex, &tc, |s| !s.opened, "stream to close").await {
         failures.push("stream never closed after streamStop".to_string());
+        finish(&dex, &note.address, &model_hash, &keys, failures).await;
+        return;
+    }
+    let after_stop = dex.token_contract_get_state(&tc).await.expect("getState after stop");
+    let owed_after = after_stop.finalized_owed;
+    let delta = owed_after.saturating_sub(owed_before);
+    eprintln!(
+        "[e2e_settle] after immediate stop: finalizedOwed(W1)={owed_after} delta={delta} (tick={PRICE_PER_TICK})"
+    );
+    if delta >= PRICE_PER_TICK / 2 {
+        failures.push(format!(
+            "#96: seller was paid the un-accepted streaming tick on immediate stop \
+             (delta={delta} >= tick/2={}); W0={owed_before} W1={owed_after}",
+            PRICE_PER_TICK / 2
+        ));
     }
 
     finish(&dex, &note.address, &model_hash, &keys, failures).await;
@@ -279,12 +247,30 @@ where
 }
 
 async fn wait_funded(dex: &Dex, tc: &str) -> bool {
+    wait_state(dex, tc, |s| s.funded, "TokenContract to be funded").await
+}
+
+async fn wait_probe_funded(dex: &Dex, tc: &str) -> bool {
+    for _ in 0..POLL_TICKS {
+        tokio::time::sleep(POLL_TICK).await;
+        if let Ok(probe) = dex.token_contract_get_probe(tc).await
+            && probe.probe_funded
+        {
+            return true;
+        }
+    }
+    false
+}
+
+async fn wait_state<F>(dex: &Dex, tc: &str, pred: F, _what: &str) -> bool
+where
+    F: Fn(&dodex_contracts::airegistry::token_contract::ResultOfGetState) -> bool,
+{
     for _ in 0..POLL_TICKS {
         tokio::time::sleep(POLL_TICK).await;
         if let Ok(state) = dex.token_contract_get_state(tc).await
-            && state.funded
+            && pred(&state)
         {
-            eprintln!("[e2e_stream] TokenContract funded: deposit={}", state.deposit);
             return true;
         }
     }
@@ -300,5 +286,5 @@ async fn finish(dex: &Dex, note: &str, model_hash: &str, keys: &KeyPair, failure
             Signer::Keys { keys: keys.clone() },
         )
         .await;
-    assert!(failures.is_empty(), "e2e_stream failures: {failures:#?}");
+    assert!(failures.is_empty(), "e2e_settle failures: {failures:#?}");
 }

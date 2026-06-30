@@ -71,6 +71,10 @@ pub async fn project_event(
         | "OrderBook.Queued"
         | "OrderBook.Rejected"
         | "OrderBook.CallbackBounced" => Ok(ProjectionOutcome::Applied),
+        // Observability-only PMP events; no read-model table changes. Both are
+        // in `config::IGNORABLE_EVENT_TYPES` (so `ignored_event_types` may shed
+        // them) and neither is metric-critical — keep the two in sync.
+        "PMP.StakeAccepted" | "PMP.MergeProcessed" => Ok(ProjectionOutcome::Applied),
         et if et.starts_with("TokenContract.") => {
             crate::token_contract_projectors::project_token_contract_event(tx, event, node)
                 .await

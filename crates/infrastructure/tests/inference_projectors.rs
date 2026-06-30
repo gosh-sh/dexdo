@@ -17,11 +17,13 @@ use sqlx::PgPool;
 use sqlx::Postgres;
 use sqlx::Transaction;
 
+// Call sites pass the full on-wire event name (e.g. "InferenceOrderPlaced");
+// since v4.0.10 the inference book emits every event with an `Inference` prefix.
 fn ev(event_name: &str, value: serde_json::Value) -> DecodedEvent {
     DecodedEvent {
         contract_kind: "InferenceOrderBook",
-        event_name: event_name.to_string(),
         event_type: format!("InferenceOrderBook.{event_name}"),
+        event_name: event_name.to_string(),
         value,
     }
 }

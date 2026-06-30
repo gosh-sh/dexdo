@@ -844,10 +844,13 @@ impl IndexerRepository {
         let row: (i64, i64, i64) = sqlx::query_as(
             r#"select
                    count(*) filter (where last_reconciled_at is null
-                                      and last_reconcile_failed_at is null) as discovering,
-                   count(*) filter (where last_reconciled_at is not null) as visible,
+                                      and last_reconcile_failed_at is null
+                                      and superseded_at is null) as discovering,
+                   count(*) filter (where last_reconciled_at is not null
+                                      and superseded_at is null) as visible,
                    count(*) filter (where last_reconciled_at is null
-                                      and last_reconcile_failed_at is not null) as failing
+                                      and last_reconcile_failed_at is not null
+                                      and superseded_at is null) as failing
                  from inference_markets"#,
         )
         .fetch_one(&self.pool)

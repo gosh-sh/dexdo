@@ -47,6 +47,7 @@ pub struct InferenceReconcileStats {
     pub refreshed: u64,
     pub skipped: u64,
     pub failed: u64,
+    pub superseded: u64,
 }
 
 /// Test seam over the off-chain getter call. Production wraps `run_getter`; tests
@@ -86,8 +87,8 @@ pub struct InferenceReconciler {
 }
 
 #[derive(sqlx::FromRow)]
-struct BookRow {
-    orderbook_address: String,
+pub struct BookRow {
+    pub orderbook_address: String,
     model_hash: Option<String>,
     reference_price_at: Option<chrono::DateTime<chrono::Utc>>,
     last_swept_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -98,6 +99,12 @@ pub enum DiscoveryOutcome {
     Stamped,
     WaitingGates,
     NoBoc,
+    Superseded,
+}
+
+pub enum SlotClaim {
+    Claimed,
+    Superseded,
 }
 
 pub enum SweepStep {
@@ -191,6 +198,7 @@ impl InferenceReconciler {
                     refreshed = s.refreshed,
                     skipped = s.skipped,
                     failed = s.failed,
+                    superseded = s.superseded,
                     "inference reconciler tick"
                 ),
                 Ok(_) => debug!("inference reconciler tick (idle)"),
@@ -203,25 +211,14 @@ impl InferenceReconciler {
     pub async fn run_once(&self) -> anyhow::Result<InferenceReconcileStats> {
         let mut stats = InferenceReconcileStats::default();
         // Queue A — discovery.
-        let pending: Vec<BookRow> = sqlx::query_as(&format!(
-            r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
-                 from inference_markets
-                where last_reconciled_at is null
-                  and (last_reconcile_failed_at is null
-                       or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
-                order by last_reconcile_failed_at nulls first, id asc
-                limit $1"#
-        ))
-        .bind(BATCH_SIZE)
-        .fetch_all(&self.pool)
-        .await
-        .context("select discovery candidates")?;
+        let pending = self.select_discovery_candidates(BATCH_SIZE).await?;
 
         for book in &pending {
             stats.scanned += 1;
             match self.reconcile_discovery(book).await {
                 Ok(DiscoveryOutcome::Stamped) => stats.reconciled += 1,
                 Ok(DiscoveryOutcome::WaitingGates) => stats.waiting_gates += 1,
+                Ok(DiscoveryOutcome::Superseded) => stats.superseded += 1,
                 Ok(DiscoveryOutcome::NoBoc) => {
                     stats.skipped += 1;
                     self.stamp_failure_logged(&book.orderbook_address).await;
@@ -282,8 +279,8 @@ impl InferenceReconciler {
         needs_params: bool,
         needs_price: bool,
     ) -> anyhow::Result<DiscoveryOutcome> {
-        if needs_params {
-            self.fill_params(ob, boc).await?;
+        if needs_params && let SlotClaim::Superseded = self.fill_params(ob, boc).await? {
+            return Ok(DiscoveryOutcome::Superseded);
         }
         if needs_price {
             self.refresh_price(ob, boc).await?;
@@ -298,12 +295,26 @@ impl InferenceReconciler {
         self.getter.call(boc, name, args)
     }
 
-    pub async fn fill_params(&self, ob: &str, boc: &str) -> anyhow::Result<()> {
+    /// Read the contract's self-reported version via the `getVersion` getter,
+    /// executed on the already-fetched account BOC (no extra network round-trip).
+    /// Getter FAILURES propagate (like `getParams`): a transient getVersion error
+    /// fails this discovery tick and is retried, so it is never silently misread as
+    /// "version unknown → lowest" and used to retire a book. A success that carries
+    /// no `value0` is `Ok(None)` — destructive only on an actual model-slot
+    /// collision, which `claim_model_slot` refuses (see Task 4).
+    fn fetch_version(&self, boc: &str) -> anyhow::Result<Option<String>> {
+        let v =
+            self.call_getter(boc, "getVersion", &serde_json::json!({})).context("getVersion")?;
+        Ok(version_from_getter(&v))
+    }
+
+    pub async fn fill_params(&self, ob: &str, boc: &str) -> anyhow::Result<SlotClaim> {
         let params = self.call_getter(boc, "getParams", &json!({})).context("getParams")?;
         let model_hash = uint_field_to_decimal(&params, "modelHash")?;
         let fee: i32 =
             uint_field_to_decimal(&params, "platformFeeBps")?.parse().context("platformFeeBps")?;
-        self.write_params(ob, &model_hash, fee).await
+        let version = self.fetch_version(boc)?;
+        self.claim_model_slot(ob, &model_hash, version.as_deref(), fee).await
     }
 
     pub async fn refresh_price(&self, ob: &str, boc: &str) -> anyhow::Result<()> {
@@ -335,10 +346,83 @@ impl InferenceReconciler {
         Ok(())
     }
 
-    async fn write_params(&self, ob: &str, model_hash: &str, fee: i32) -> anyhow::Result<()> {
+    /// Resolve the `model_hash` slot for `ob` against the partial unique index.
+    /// One book per model is an on-chain invariant (single `_modelHash` static);
+    /// duplicates only exist across code versions (redeploys). The higher
+    /// `getVersion` is canonical: it claims the slot, releasing and retiring any
+    /// lower-version holder. A book that loses is retired via `superseded_at`
+    /// instead of failing forever on the unique violation.
+    async fn claim_model_slot(
+        &self,
+        ob: &str,
+        model_hash: &str,
+        version: Option<&str>,
+        fee: i32,
+    ) -> anyhow::Result<SlotClaim> {
+        let mut tx = self.pool.begin().await.context("begin model-slot tx")?;
+
+        let incumbent: Option<(String, Option<String>)> = sqlx::query_as(
+            "select orderbook_address, version from inference_markets
+              where model_hash = $1::numeric and superseded_at is null
+              for update",
+        )
+        .bind(model_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("select model-slot incumbent")?;
+
+        if let Some((incumbent_ob, incumbent_version)) = &incumbent
+            && incumbent_ob != ob
+        {
+            let incoming = parse_semver(version);
+            // Refuse a destructive slot decision on an unknown/unparseable incoming
+            // version — it could be the real higher-version replacement. Fail
+            // discovery (the book retries on the next tick) rather than retiring it.
+            // (Dropping `tx` here rolls back the FOR UPDATE select.)
+            if incoming.is_none() {
+                return Err(anyhow!(
+                    "model-slot conflict for {ob}: incoming version unknown ({version:?})"
+                ));
+            }
+            if incoming > parse_semver(incumbent_version.as_deref()) {
+                // Incoming wins: free + retire + hide the incumbent.
+                sqlx::query(
+                    "update inference_markets
+                            set model_hash = null, last_reconciled_at = null,
+                                superseded_at = now(), updated_at = now()
+                          where orderbook_address = $1",
+                )
+                .bind(incumbent_ob)
+                .execute(&mut *tx)
+                .await
+                .context("release superseded incumbent slot")?;
+            } else {
+                // Incoming is a known, lower-or-equal version: retire it. Clear
+                // model_hash + last_reconciled_at — same as the incumbent-supersede
+                // branch — so a superseded row never holds a slot or stays visible.
+                // Both are already NULL in the current discovery flow (the retire
+                // branch is only reached when the snapshot model_hash was NULL), but
+                // clearing them unconditionally keeps "superseded ⇒ hidden, slot-free"
+                // robust to future changes. Record the fetched version for audit.
+                sqlx::query(
+                    "update inference_markets
+                            set version = $2, model_hash = null, last_reconciled_at = null,
+                                superseded_at = now(), updated_at = now()
+                          where orderbook_address = $1",
+                )
+                .bind(ob)
+                .bind(version)
+                .execute(&mut *tx)
+                .await
+                .context("retire stale duplicate book")?;
+                tx.commit().await.context("commit retire")?;
+                return Ok(SlotClaim::Superseded);
+            }
+        }
+
         sqlx::query(
             r#"update inference_markets
-                  set model_hash=$2::numeric, platform_fee_bps=$3,
+                  set model_hash=$2::numeric, platform_fee_bps=$3, version=$10,
                       quote_token_type=$4, price_precision=$5, quantity_precision=$6,
                       tick_size=$7, step_size=$8, min_notional=$9, updated_at=now()
                 where orderbook_address=$1"#,
@@ -352,10 +436,29 @@ impl InferenceReconciler {
         .bind(TICK_SIZE)
         .bind(STEP_SIZE)
         .bind(MIN_NOTIONAL)
-        .execute(&self.pool)
+        .bind(version)
+        .execute(&mut *tx)
         .await
         .context("write inference params")?;
-        Ok(())
+        tx.commit().await.context("commit claim")?;
+        Ok(SlotClaim::Claimed)
+    }
+
+    pub async fn select_discovery_candidates(&self, limit: i64) -> anyhow::Result<Vec<BookRow>> {
+        sqlx::query_as(&format!(
+            r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
+                 from inference_markets
+                where last_reconciled_at is null
+                  and superseded_at is null
+                  and (last_reconcile_failed_at is null
+                       or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
+                order by last_reconcile_failed_at nulls first, id asc
+                limit $1"#
+        ))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("select discovery candidates")
     }
 
     async fn at_head(&self) -> anyhow::Result<bool> {
@@ -534,6 +637,7 @@ impl InferenceReconciler {
                       last_reconcile_failed_at = case when $5 then null else last_reconcile_failed_at end,
                       updated_at = now()
                 where orderbook_address = $1
+                  and superseded_at is null
                   and ($6 = false
                        or (sweep_cursor is not distinct from $4::numeric
                            and sweep_override_seq = $7))"#,
@@ -581,6 +685,7 @@ impl InferenceReconciler {
             r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
                  from inference_markets m
                 where last_reconciled_at is not null
+                  and superseded_at is null
                   and (last_reconcile_failed_at is null
                        or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
                   and (
@@ -692,5 +797,44 @@ impl InferenceReconciler {
         .await
         .context("select book for refresh-with-boc")?;
         self.refresh_against_boc(&book, boc).await
+    }
+}
+
+/// Parse a dotted `major.minor.patch` version. `None` (or any unparseable
+/// value) sorts below every real version under `Option` ordering, so an
+/// unversioned book always loses a slot contest to a versioned one.
+fn parse_semver(v: Option<&str>) -> Option<(u64, u64, u64)> {
+    let v = v?;
+    let mut it = v.trim().split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Version string from a `getVersion` getter result (`value0`).
+fn version_from_getter(v: &serde_json::Value) -> Option<String> {
+    v.get("value0").and_then(|x| x.as_str()).map(|s| s.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_semver_orders_versions() {
+        assert_eq!(parse_semver(Some("4.0.14")), Some((4, 0, 14)));
+        assert!(parse_semver(Some("4.0.14")) > parse_semver(Some("4.0.11")));
+        assert!(parse_semver(Some("4.0.9")) < parse_semver(Some("4.0.14"))); // numeric, not lexical
+                                                                             // legacy/unknown sorts below every real version
+        assert!(parse_semver(None) < parse_semver(Some("4.0.10")));
+        assert_eq!(parse_semver(Some("garbage")), None);
+    }
+
+    #[test]
+    fn version_from_getter_reads_value0() {
+        let v = serde_json::json!({"value0": "4.0.14", "value1": "InferenceOrderBook"});
+        assert_eq!(version_from_getter(&v).as_deref(), Some("4.0.14"));
+        assert_eq!(version_from_getter(&serde_json::json!({})), None);
     }
 }

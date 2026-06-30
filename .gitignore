@@ -24,7 +24,7 @@ plan.md
 sdk/ob_pool.json
 sdk/pn_pool*.json
 # e2e seed notes (real keys) — fetched from S3 in CI, never commit.
-tests/fixtures/seed_notes.json
+tests/fixtures/seed_notes*.json
 # Local-dev API seed notes (real keys) — dropped at runtime, never commit.
 config/seed_notes*.json
 
@@ -37,3 +37,6 @@ TODO.md
 # Python bytecode caches (generated when running the dexdo skill client)
 __pycache__/
 *.pyc
+# halo2 KZG SRS + proving-key cache (~500MB), generated at repo root by
+# mint_pn_pool / mint_ob_pool when proving deposit vouchers. Regenerable, never commit.
+params/

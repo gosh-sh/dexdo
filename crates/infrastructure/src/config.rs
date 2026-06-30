@@ -235,9 +235,8 @@ pub struct IndexerSection {
     ///
     /// Only genuine no-op types belong here — those `projectors::project_event`
     /// maps to `ProjectionOutcome::Applied` without touching a read-model table
-    /// AND that are not metric-critical
-    /// (`OrderBook.FullyFilled`/`Queued`/`Rejected`/`CallbackBounced` — the
-    /// exact set is [`IGNORABLE_EVENT_TYPES`]). `OrderBook.PartialFill` is also
+    /// AND that are not metric-critical (the exact set is
+    /// [`IGNORABLE_EVENT_TYPES`]). `OrderBook.PartialFill` is also
     /// a projector no-op, but its `raw_events` rows back an OTLP counter (it is
     /// metric-critical), so it is excluded.
     /// `IndexerConfig::validate` rejects any entry outside
@@ -436,20 +435,24 @@ pub const METRIC_CRITICAL_EVENT_TYPES: [&str; 2] =
 
 /// The only event types `indexer.ignored_event_types` may contain: projector
 /// no-ops (`projectors::project_event` -> `ProjectionOutcome::Applied` without
-/// touching a read-model table) that are NOT metric-critical. This is the
-/// `OrderBook` observability-only arm of `projectors::project_event` minus
-/// `OrderBook.PartialFill` (a no-op there, but it backs an OTLP counter — see
-/// [`METRIC_CRITICAL_EVENT_TYPES`]). `validate` rejects any configured type
+/// touching a read-model table) that are NOT metric-critical. These are the
+/// observability-only no-op arms of `projectors::project_event`: the `OrderBook`
+/// arm minus `OrderBook.PartialFill` (a no-op there, but it backs an OTLP
+/// counter — see [`METRIC_CRITICAL_EVENT_TYPES`]), plus the `PMP` no-ops
+/// (`StakeAccepted`, `MergeProcessed`), neither of which touches the read model.
+/// `validate` rejects any configured type
 /// outside this set, so a typo or a state-changing type fails loudly at startup
 /// instead of being a silent no-op (the ingest filter matches by dst before
 /// decode, so an unmatched name maps to no dst and would silently never drop
 /// anything). Keep in sync with the
-/// no-op arm in `projectors::project_event`.
-pub const IGNORABLE_EVENT_TYPES: [&str; 4] = [
+/// no-op arms in `projectors::project_event`.
+pub const IGNORABLE_EVENT_TYPES: [&str; 6] = [
     "OrderBook.FullyFilled",
     "OrderBook.Queued",
     "OrderBook.Rejected",
     "OrderBook.CallbackBounced",
+    "PMP.StakeAccepted",
+    "PMP.MergeProcessed",
 ];
 
 /// The `makeAddrExtern` EVENT_ID each ignorable event type routes its external
@@ -458,11 +461,13 @@ pub const IGNORABLE_EVENT_TYPES: [&str; 4] = [
 /// event-type name to the EVENT_ID needed to compute that `dst`. Names must
 /// equal [`IGNORABLE_EVENT_TYPES`] and IDs must match `modifiers.sol` — unit
 /// tests pin both.
-pub const IGNORABLE_EVENT_IDS: [(&str, u32); 4] = [
+pub const IGNORABLE_EVENT_IDS: [(&str, u32); 6] = [
     ("OrderBook.FullyFilled", 158),
     ("OrderBook.Queued", 159),
     ("OrderBook.Rejected", 160),
     ("OrderBook.CallbackBounced", 161),
+    ("PMP.StakeAccepted", 118),
+    ("PMP.MergeProcessed", 142),
 ];
 
 /// The external `dst` the gateway reports for an event routed to
@@ -1569,6 +1574,8 @@ indexer:
             ("OrderBook.Queued", "OB_QUEUED"),
             ("OrderBook.Rejected", "OB_REJECTED"),
             ("OrderBook.CallbackBounced", "OB_CALLBACK_BOUNCED"),
+            ("PMP.StakeAccepted", "PMP_STAKE_ACCEPTED"),
+            ("PMP.MergeProcessed", "PMP_MERGE_PROCESSED"),
         ];
         for (event_type, const_name) in want {
             let id = IGNORABLE_EVENT_IDS

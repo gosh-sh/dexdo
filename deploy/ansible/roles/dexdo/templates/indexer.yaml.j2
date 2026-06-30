@@ -26,6 +26,8 @@ indexer:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
   ignored_event_types:
     - "OrderBook.Queued"
+    - "PMP.StakeAccepted"
+    - "PMP.MergeProcessed"
   # Inference reconciler/sweep/orphan-cutoff knobs. Time-based cadences (not
   # round-trip-bound), so the same values as config/indexer.local.yaml.
   inference_reconciliation_interval_ms: 15000
