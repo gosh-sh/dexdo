@@ -279,10 +279,8 @@ impl InferenceReconciler {
         needs_params: bool,
         needs_price: bool,
     ) -> anyhow::Result<DiscoveryOutcome> {
-        if needs_params {
-            if let SlotClaim::Superseded = self.fill_params(ob, boc).await? {
-                return Ok(DiscoveryOutcome::Superseded);
-            }
+        if needs_params && let SlotClaim::Superseded = self.fill_params(ob, boc).await? {
+            return Ok(DiscoveryOutcome::Superseded);
         }
         if needs_price {
             self.refresh_price(ob, boc).await?;
@@ -373,52 +371,52 @@ impl InferenceReconciler {
         .await
         .context("select model-slot incumbent")?;
 
-        if let Some((incumbent_ob, incumbent_version)) = &incumbent {
-            if incumbent_ob != ob {
-                let incoming = parse_semver(version);
-                // Refuse a destructive slot decision on an unknown/unparseable incoming
-                // version — it could be the real higher-version replacement. Fail
-                // discovery (the book retries on the next tick) rather than retiring it.
-                // (Dropping `tx` here rolls back the FOR UPDATE select.)
-                if incoming.is_none() {
-                    return Err(anyhow!(
-                        "model-slot conflict for {ob}: incoming version unknown ({version:?})"
-                    ));
-                }
-                if incoming > parse_semver(incumbent_version.as_deref()) {
-                    // Incoming wins: free + retire + hide the incumbent.
-                    sqlx::query(
-                        "update inference_markets
+        if let Some((incumbent_ob, incumbent_version)) = &incumbent
+            && incumbent_ob != ob
+        {
+            let incoming = parse_semver(version);
+            // Refuse a destructive slot decision on an unknown/unparseable incoming
+            // version — it could be the real higher-version replacement. Fail
+            // discovery (the book retries on the next tick) rather than retiring it.
+            // (Dropping `tx` here rolls back the FOR UPDATE select.)
+            if incoming.is_none() {
+                return Err(anyhow!(
+                    "model-slot conflict for {ob}: incoming version unknown ({version:?})"
+                ));
+            }
+            if incoming > parse_semver(incumbent_version.as_deref()) {
+                // Incoming wins: free + retire + hide the incumbent.
+                sqlx::query(
+                    "update inference_markets
                             set model_hash = null, last_reconciled_at = null,
                                 superseded_at = now(), updated_at = now()
                           where orderbook_address = $1",
-                    )
-                    .bind(incumbent_ob)
-                    .execute(&mut *tx)
-                    .await
-                    .context("release superseded incumbent slot")?;
-                } else {
-                    // Incoming is a known, lower-or-equal version: retire it. Clear
-                    // model_hash + last_reconciled_at — same as the incumbent-supersede
-                    // branch — so a superseded row never holds a slot or stays visible.
-                    // Both are already NULL in the current discovery flow (the retire
-                    // branch is only reached when the snapshot model_hash was NULL), but
-                    // clearing them unconditionally keeps "superseded ⇒ hidden, slot-free"
-                    // robust to future changes. Record the fetched version for audit.
-                    sqlx::query(
-                        "update inference_markets
+                )
+                .bind(incumbent_ob)
+                .execute(&mut *tx)
+                .await
+                .context("release superseded incumbent slot")?;
+            } else {
+                // Incoming is a known, lower-or-equal version: retire it. Clear
+                // model_hash + last_reconciled_at — same as the incumbent-supersede
+                // branch — so a superseded row never holds a slot or stays visible.
+                // Both are already NULL in the current discovery flow (the retire
+                // branch is only reached when the snapshot model_hash was NULL), but
+                // clearing them unconditionally keeps "superseded ⇒ hidden, slot-free"
+                // robust to future changes. Record the fetched version for audit.
+                sqlx::query(
+                    "update inference_markets
                             set version = $2, model_hash = null, last_reconciled_at = null,
                                 superseded_at = now(), updated_at = now()
                           where orderbook_address = $1",
-                    )
-                    .bind(ob)
-                    .bind(version)
-                    .execute(&mut *tx)
-                    .await
-                    .context("retire stale duplicate book")?;
-                    tx.commit().await.context("commit retire")?;
-                    return Ok(SlotClaim::Superseded);
-                }
+                )
+                .bind(ob)
+                .bind(version)
+                .execute(&mut *tx)
+                .await
+                .context("retire stale duplicate book")?;
+                tx.commit().await.context("commit retire")?;
+                return Ok(SlotClaim::Superseded);
             }
         }
 
