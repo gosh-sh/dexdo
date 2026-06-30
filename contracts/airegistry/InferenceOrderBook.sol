@@ -58,7 +58,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x94e8d5fbadce274e4db260ccd6cbb2deff118b05638f50634b38da586aee3bfb;
+    uint256 constant NOTE_CODE_HASH  = 0x26425eed21e43aaf0847b133a94e4d068af2ff3b102333bbbaba6c1dcb98ccc6;
     uint16  constant NOTE_CODE_DEPTH = 18;
 
     // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
@@ -66,7 +66,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
     // contract that forwards SHELL on a fill, so the check must live HERE, not only in
     // the note: placeSellOffer is public and a direct call would bypass a note check).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x1963d8193473ffebaacb8c1fd69472d718bf61befa12b606ea18b18c97d641ae;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x296620d58a2d312a7906060170dcabcb605e0ed541d9c850e9525bf30642d7a7;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
 
     // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
@@ -74,7 +74,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
     // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
     // Re-pin whenever airegistry/RootModel is recompiled.
-    uint256 constant ROOT_MODEL_CODE_HASH  = 0x132533863a1c5f5e9e491bd4c569bf5c210933332144f9fc88393839108d6e7d;
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0x3da7eb4d3c0345d7a11b2473a8df32c8eec40f24bc9ecd305f34d02b0018c810;
     uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
 
     // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its
@@ -84,7 +84,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // LOCAL/MAINNET build: FIXED SuperRoot at the vanity 0:0c0c… address — the zerostate force-places
     // the SuperRoot here (removed from PremineAddresses), and the address is stable across contract
     // changes. (SHELLNET uses a code-derived SuperRoot instead — see dexdo-specs/shellnet-update.md.)
-    uint256 constant SUPER_ROOT_ADDR = 0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c;
+    uint256 constant SUPER_ROOT_ADDR = 0x36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71;
 
     // Local errors (NOT in shared AiRegistryErrors — avoids rippling RootModel/TC/SuperRoot pins).
     uint16 constant ERR_NOT_DEPLOYER_NOTE = 333;
