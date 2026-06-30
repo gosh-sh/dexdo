@@ -30,6 +30,7 @@ flowchart LR
     projectors --> markets[markets]
     projectors --> orders[live_orders]
     projectors --> inf_orders[inference_orders]
+    projectors --> inf_deals[inference_deals / inference_ticks]
 
     chain_state[GraphQL account BOC lookup] --> market_reconciler[Market reconciler]
     chain_state --> oel_reconciler[OracleEventList reconciler]
@@ -81,7 +82,7 @@ Intended use: shed confirmed observability-only floods (e.g. `OrderBook.Queued`,
 
 1. If `indexer.dapp_id` is set and the edge's `src_dapp_id` does not match (and is not absent), drop the edge. The page cursor still advances (step 4). `foreign_skipped` is incremented.
 2. If the edge's `dst` matches a configured `indexer.ignored_event_types` entry, drop the edge. The page cursor still advances (step 4). `type_ignored` is incremented.
-3. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). The decoder is **route-aware**: `event_type` is resolved by the message's `dst` address (the external `makeAddrExtern(EVENT_ID, 256)` in the message header) rather than a flat event-name scan. This resolves a collision between `OrderBook.OrderCancelled` and `InferenceOrderBook.OrderCancelled`, which share the same event name but carry a distinct `EVENT_ID` and therefore distinct `dst` addresses. The decoder does **not** assume event ids are globally unique: its id index tolerates collisions (one id may map to several `(contract, event)` entries), and the colliding pair is disambiguated by a small `dst` route table. Each route records the event's expected id, so a decoded body whose own id does not match its route is left undecoded with a warning rather than mis-attributed; events with a unique id resolve directly by id. On success, store the decoded JSON payload alongside `event_type`.
+3. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). The decoder is **route-aware**: when an event id is ambiguous it resolves `event_type` by the message's `dst` address (the external `makeAddrExtern(EVENT_ID, 256)` in the message header) rather than a flat event-name scan. No loaded ABI currently collides — the `InferenceOrderBook` events carry an `Inference` prefix, so `InferenceOrderBook.InferenceOrderCancelled` no longer shares an event id with `OrderBook.OrderCancelled`, and every event resolves directly by its unique id. The decoder still does **not** assume event ids are globally unique: its id index tolerates collisions (one id may map to several `(contract, event)` entries), and any colliding pair would be disambiguated by a small `dst` route table. The two `OrderCancelled` dsts are pinned in that table defensively; each route records the event's expected id, so a decoded body whose own id does not match its route is left undecoded with a warning rather than mis-attributed. On success, store the decoded JSON payload alongside `event_type`.
 4. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches.
 5. After the page commits, persist the resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). The cursor tracks capture progress, not projection; a restart resumes capture from it while the projection loop independently drains whatever rows remain `processed_at NULL`.
 
@@ -185,26 +186,49 @@ here.
 
 | Event | Effect |
 | --- | --- |
-| `InferenceOrderBook.OrderPlaced` | Upserts into `inference_orders` with `status = 'OPEN'`, `amount_initial = amount_remaining = ticks`, `price`, `is_buy`, `note_address = note`, `last_chain_order = msg_chain_order`. `chain_created_at` first-write-wins via `coalesce`; `chain_updated_at` via `greatest`. Conflict is `WHERE`-guarded against terminal rows (an isolated replay on a closed row is a no-op, logged at `warn!`). If `orderbook_address` is unknown, the projector also seeds a skeleton [`inference_markets`](data-schema.md#inference_markets) row (`orderbook_address`, `created_at_chain`, `last_reconciled_at = NULL`) so the inference reconciler picks it up. **Caveat:** `OrderPlaced` carries no `flags`, and it is emitted for *every* placement — including pure-taker (`IOC`/`FOK`/`MARKET`) and rejected `POST_ONLY` orders that never rest. See [Non-resting orders](#non-resting-orders). |
-| `InferenceOrderBook.InferenceOrderBookDeployed` | Writes model identity into the corresponding `inference_markets` row: `model_hash` (via `coalesce(model_hash, $2::numeric)` so the reconciler's `getParams()` write takes precedence if both fire), `model_ref` (`modelName` as-is), `producer` / `model_name` / `version` (split from `model_ref` on the `"--"` separator — exactly three non-empty parts fill all three; any other shape sets `model_ref` only and leaves the rest NULL). The skeleton pre-step seeds the row if it does not exist yet, so this event can arrive before or after the first `OrderPlaced`. The `parse_model_ref` function is the canonical parser for all three split components. |
-| `InferenceOrderBook.Filled` | Decrements `amount_remaining` by `ticks` on **both** the `makerId` and `takerId` rows; advances `last_chain_order` / `chain_updated_at` via `greatest`. Close rule, mirroring the contract's one-deal-slot semantics: a **SELL offer** (`is_buy = false`) is consumed by the book on any match — flip it to `FILLED` on the first `Filled` that names it, even a partial one. A **BUY maker** spans deals — it stays `OPEN` until `amount_remaining` reaches zero, then flips to `FILLED`. A named row that has not arrived yet defers the event. |
-| `InferenceOrderBook.OrderCancelled` | Flips `status` to `CANCELLED`, preserves `amount_remaining` as the unfilled remainder, advances `last_chain_order` / `chain_updated_at` via `greatest`. Terminal-state guard prevents a late cancel from demoting a `FILLED` row. |
-| `InferenceOrderBook.SubscriptionPlaced` | Upserts the resting BUY created by a §8 subscription: `status = 'OPEN'`, `is_buy = true`, `is_subscription = true`, `price = maxPrice`, `amount_initial = amount_remaining = ticks`. It rests as a standing bid and is matched by incoming sells like any other buy maker. |
-| `InferenceOrderBook.Executed` / `Refunded` / `CycleForfeited` / `ForfeitClaimed` | Observability-only — no `inference_orders` mutation. In particular `Refunded` carries `(note, amount)` with **no order id**, so it cannot close a specific row; non-resting and rejected orders are healed by the reconciler (below), never projected from `Refunded`. |
+| `InferenceOrderBook.InferenceOrderPlaced` | Upserts into `inference_orders` with `status = 'OPEN'`, `amount_initial = amount_remaining = ticks`, `price`, `is_buy`, `note_address = note`, `last_chain_order = msg_chain_order`. `chain_created_at` first-write-wins via `coalesce`; `chain_updated_at` via `greatest`. Conflict is `WHERE`-guarded against terminal rows (an isolated replay on a closed row is a no-op, logged at `warn!`). If `orderbook_address` is unknown, the projector also seeds a skeleton [`inference_markets`](data-schema.md#inference_markets) row (`orderbook_address`, `created_at_chain`, `last_reconciled_at = NULL`) so the inference reconciler picks it up — this first-order-event seed is the discovery trigger (the book does emit an `InferenceOrderBookDeployed` event, but the indexer does not project it). **Caveat:** `InferenceOrderPlaced` carries no `flags`, and it is emitted for *every* placement — including pure-taker (`IOC`/`FOK`/`MARKET`) and rejected `POST_ONLY` orders that never rest. See [Non-resting orders](#non-resting-orders). |
+| `InferenceOrderBook.InferenceFilled` | Decrements `amount_remaining` by `ticks` on **both** the `makerId` and `takerId` rows; advances `last_chain_order` / `chain_updated_at` via `greatest`. Close rule, mirroring the contract's one-deal-slot semantics: a **SELL offer** (`is_buy = false`) is consumed by the book on any match — flip it to `FILLED` on the first `InferenceFilled` that names it, even a partial one. A **BUY maker** spans deals — it stays `OPEN` until `amount_remaining` reaches zero, then flips to `FILLED`. A named row that has not arrived yet defers the event. **Also upserts [`inference_deals`](data-schema.md#inference_deals)** using the `sellerTC` field as the PK: sets `orderbook_address` (the source contract), `seller_note` (resolved from the SELL leg's `note_address` in `inference_orders`), and `buyer_note` (`buyerNote` field). Uses `coalesce` so a row seeded by an earlier `TokenContract.*` event keeps any columns already filled. This is the only event carrying both `sellerTC` and `buyerNote`, so it is the authoritative source for the orderbook↔deal cross-link. |
+| `InferenceOrderBook.InferenceOrderCancelled` | Flips `status` to `CANCELLED`, preserves `amount_remaining` as the unfilled remainder, advances `last_chain_order` / `chain_updated_at` via `greatest`. Terminal-state guard prevents a late cancel from demoting a `FILLED` row. |
+| `InferenceOrderBook.InferenceSubscriptionPlaced` | Upserts the resting BUY created by a §8 subscription: `status = 'OPEN'`, `is_buy = true`, `is_subscription = true`, `price = maxPrice`, `amount_initial = amount_remaining = ticks`. It rests as a standing bid and is matched by incoming sells like any other buy maker. |
+| `InferenceOrderBook.InferenceExecuted` / `InferenceRefunded` / `InferenceCycleForfeited` / `InferenceForfeitClaimed` | Observability-only — no `inference_orders` mutation. In particular `InferenceRefunded` carries `(note, amount)` with **no order id**, so it cannot close a specific row; non-resting and rejected orders are healed by the reconciler (below), never projected from `InferenceRefunded`. |
 
-Ordering is anchored on `raw_events.chain_order` as elsewhere. `OrderPlaced` for a taker is emitted at queue-entry before its `Filled` events, so the parent row always exists by the time a fill applies; a `Filled` seen first is `Deferred` and retried.
+Ordering is anchored on `raw_events.chain_order` as elsewhere. `InferenceOrderPlaced` for a taker is emitted at queue-entry before its `InferenceFilled` events, so the parent row always exists by the time a fill applies; a `InferenceFilled` seen first is `Deferred` and retried.
 
 ### Non-resting orders
 
-The contract emits `OrderPlaced` *before* it knows whether the order will rest: pure-taker orders (`IOC` / `FOK` / `MARKET`) and a crossing `POST_ONLY` are placed, emit `OrderPlaced`, then either fill or are refunded — without resting. Three closure paths exist:
+The contract emits `InferenceOrderPlaced` *before* it knows whether the order will rest: pure-taker orders (`IOC` / `FOK` / `MARKET`) and a crossing `POST_ONLY` are placed, emit `InferenceOrderPlaced`, then either fill or are refunded — without resting. Three closure paths exist:
 
-- **Fully filled** — `Filled` reduces `amount_remaining` to zero → `FILLED`. Correct from events alone.
-- **Explicitly cancelled** — `OrderCancelled` → `CANCELLED`. Correct from events alone.
-- **Placed-but-never-rested** (FOK/POST_ONLY rejected, IOC/MARKET leftover, expired subscription) — the only on-chain signal is a `Refunded` event that carries **no order id**, so the projector cannot close the specific row. Left untreated, the `OrderPlaced` row sits `OPEN` and pollutes depth (a phantom level).
+- **Fully filled** — `InferenceFilled` reduces `amount_remaining` to zero → `FILLED`. Correct from events alone.
+- **Explicitly cancelled** — `InferenceOrderCancelled` → `CANCELLED`. Correct from events alone.
+- **Placed-but-never-rested** (FOK/POST_ONLY rejected, IOC/MARKET leftover, expired subscription) — the only on-chain signal is a `InferenceRefunded` event that carries **no order id**, so the projector cannot close the specific row. Left untreated, the `InferenceOrderPlaced` row sits `OPEN` and pollutes depth (a phantom level).
 
 The inference reconciler closes this gap: it sweeps the book's `OPEN` rows with a **bounded round-robin cursor** — each tick reads a fixed batch via `InferenceOrderBook.getOrder(orderId)` and, when an order is no longer in the book (`getOrder` reports zero amount), flips the row to `CANCELLED`. This is the same getter-fills-what-events-miss pattern used by the market reconciler. The cursor advances per tick and resets to the start once a batch returns fewer rows than the batch size (the `(cursor, max]` range is exhausted), so every `OPEN` row — including long-lived subscriptions — is revisited over successive cycles without scanning the whole book in one pass. See [Inference reconciler](#inference-reconciler) for the cursor/cycle mechanics and the catch-up gates.
 
 > **Recommended contract-side follow-up.** Add `flags` to `OrderPlaced` (so a taker-only order is never recorded as resting), an `orderId` to `Refunded`, or an explicit `OrderClosed(orderId)` event. Any one removes the getter sweep and makes depth event-exact — the analogue of the [`REJECTED` follow-up](read-api.md#rejected-status) on the prediction-market side. Tracked as an open item because it touches `InferenceOrderBook` (and re-pins the note↔book code hash).
+
+## Projection — TokenContract SETTLEMENT events
+
+`TokenContract.*` events drive [`inference_deals`](data-schema.md#inference_deals) and [`inference_ticks`](data-schema.md#inference_ticks) — the per-deal read model for the inference SETTLEMENT phase. A `TokenContract` is deployed per matched SELL offer; its address is the PK for `inference_deals`.
+
+The projector seeds a skeleton `inference_deals` row on the **first** `TokenContract.*` event it sees for a given address (keyed by `src_address = event.src`), so out-of-order or early delivery still records the deal. The `orderbook_address`, `seller_note`, and `buyer_note` cross-link columns are filled by the `InferenceOrderBook.InferenceFilled` handler (see the table above) — it is the only event carrying `sellerTC` + `buyerNote` together; the SETTLEMENT projector does not touch those columns. Both sides use `coalesce`-guarded upserts so whichever event arrives first preserves the other side's contribution.
+
+| Event | Effect |
+| --- | --- |
+| `ContractDeployed` | Seeds the `inference_deals` skeleton only; no additional columns. |
+| `StreamFunded` | Sets `buyer_note` (first-write-wins), `deposit` (first-write-wins), `funded_at_chain` (first-write-wins). |
+| `StreamOpened` | Sets `buyer_note` (first-write-wins), `price_per_tick` (first-write-wins), `opened_at_chain` (first-write-wins). |
+| `TickFinalized` | Inserts one `inference_ticks` row keyed by `(token_contract_address, chain_order)` — idempotent on replay via `ON CONFLICT DO NOTHING`. Increments `finalized_ticks` on `inference_deals` **only** when the insert was a real insert (rows affected = 1), so `finalized_ticks` = count of `TickFinalized` events and replay does not double-count. The event's `finalizedOwed` is the contract's cumulative `_finalizedOwed`; it is stored on the tick row, not summed. |
+| `StreamStopped` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'STOPPED'`, `clean_settlement = true` (first-write-wins). |
+| `DisputeResolved` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'DISPUTE_RESOLVED'`, `clean_settlement = false` (first-write-wins). |
+| `StreamReclaimed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'RECLAIMED'`, `clean_settlement = false` (first-write-wins). |
+| `StreamDisputed` | Sets `disputed_at_chain` (first-write-wins), `clean_settlement = false`. |
+| `ContractDestroyed` | Sets `settled_at_chain` (first-write-wins), `close_kind = 'DESTROYED'`. |
+| `ProbeBurned` | Terminal close (buyer stop before probe-accept, or dispute-burn): sets `close_kind = 'PROBE_BURNED'` + `settled_at_chain` (first-write-wins). Does NOT set `clean_settlement` (stays NULL → not a clean settlement, no settlement-complete reward). |
+| `ProbeCommissionFunded` / `ProbeAccepted` / `ShellWithdrawn` | No-op beyond skeleton seed — these carry no deal-level state the SETTLEMENT read-model needs. |
+
+The projector never returns `Deferred`; the skeleton seed ensures the row always exists before the event-specific handler runs. All close columns use `coalesce(existing, new)` first-write-wins so late or replayed close events cannot overwrite an already-settled row.
+
+**Read-model contract intended for the forthcoming rewards service.** Given a deal's `TokenContract` address, a single query — `SELECT orderbook_address, seller_note, buyer_note, finalized_ticks, clean_settlement, settled_at_chain FROM inference_deals WHERE token_contract_address = $1` — resolves the originating order book, both parties, and the tick/settlement outcome without replaying raw events. `inference_ticks` provides per-tick granularity (one row per finalized tick) for tick-level scoring such as "Tick выдан / Tick потрачен".
 
 ## Reconciliation
 
@@ -267,7 +291,7 @@ The inference reconciler is the third reconciler — a sixth long-running indexe
 | `inference_reconciliation_interval_ms` | `15000` | How often Queue A runs. |
 | `inference_reference_price_refresh_ms` | `3600000` | Minimum age before a book's `reference_price` is re-fetched. |
 | `inference_sweep_interval_ms` | `30000` | Minimum age before a book's sweep cycle re-runs. |
-| `inference_orphan_cutoff_ms` | `1800000` | Projection-loop dead-letter window: an inference `Filled` or `OrderCancelled` whose parent `OrderPlaced` row is absent and whose ingest age exceeds this is dropped (marked `Applied`, with a counter increment) rather than deferred forever. Keyed on `raw_events.created_at` (wall-clock ingest time), not `created_at_chain`. |
+| `inference_orphan_cutoff_ms` | `1800000` | Projection-loop dead-letter window: an inference `InferenceFilled` or `InferenceOrderCancelled` whose parent `InferenceOrderPlaced` row is absent and whose ingest age exceeds this is dropped (marked `Applied`, with a counter increment) rather than deferred forever. Keyed on `raw_events.created_at` (wall-clock ingest time), not `created_at_chain`. |
 
 **Discovery pass (Queue A)**
 
@@ -280,12 +304,12 @@ For each `inference_markets` row with `last_reconciled_at IS NULL`, the reconcil
 5. The sweep runs only when **all three** catch-up gates pass:
    - **(i) idle gate**: `getQueueSize() == 0` — the book has no in-flight queue continuation. A book with a pending queue item must not be swept yet.
    - **(ii) `at_head` gate**: `indexer_cursors.at_head = true` — the capture loop is caught up to the chain tip. If false, the indexer is still replaying old pages; a sweep firing now would cancel orders that have already been filled by events not yet projected.
-   - **(iii) pending-events gate**: no `raw_events` row for this book remains `processed_at IS NULL` (checked via `raw_events_pending_src_idx`). An unprocessed event could be a `Filled` that closes the phantom order the sweep would otherwise cancel.
-6. **All-or-nothing visibility stamp**: stamps `last_reconciled_at` only after a complete sweep cycle (not mid-cycle). The stamp is guarded by a CAS on `sweep_override_seq` — if a `Filled` event overrode a provisionally cancelled order mid-cycle (bumping `sweep_override_seq`), the stamp is deferred until a fresh cycle completes cleanly. This prevents a book from becoming API-visible with phantom `CANCELLED` rows that events will later re-open.
+   - **(iii) pending-events gate**: no `raw_events` row for this book remains `processed_at IS NULL` (checked via `raw_events_pending_src_idx`). An unprocessed event could be a `InferenceFilled` that closes the phantom order the sweep would otherwise cancel.
+6. **All-or-nothing visibility stamp**: stamps `last_reconciled_at` only after a complete sweep cycle (not mid-cycle). The stamp is guarded by a CAS on `sweep_override_seq` — if a `InferenceFilled` event overrode a provisionally cancelled order mid-cycle (bumping `sweep_override_seq`), the stamp is deferred until a fresh cycle completes cleanly. This prevents a book from becoming API-visible with phantom `CANCELLED` rows that events will later re-open.
 
 **Provisional sweep-cancel**
 
-When `getOrder(orderId)` confirms an order is no longer in the book (zero amount), the reconciler writes `status = 'CANCELLED'` and stamps `swept_at`. This is provisional: a `Filled` or `OrderCancelled` event that arrives later will advance the row normally. Terminal-row guards ensure a late event on an already-`FILLED` row is a no-op.
+When `getOrder(orderId)` confirms an order is no longer in the book (zero amount), the reconciler writes `status = 'CANCELLED'` and stamps `swept_at`. This is provisional: a `InferenceFilled` or `InferenceOrderCancelled` event that arrives later will advance the row normally. Terminal-row guards ensure a late event on an already-`FILLED` row is a no-op.
 
 **Refresh pass (Queue B)**
 
@@ -296,7 +320,9 @@ For each already-reconciled book (`last_reconciled_at IS NOT NULL`) that is due 
 
 **Orphan dead-letter (projection loop)**
 
-The projection loop applies the `inference_orphan_cutoff_ms` window as a dead-letter for inference events that have waited beyond the cutoff without their parent arriving. Specifically: an `InferenceOrderBook.Filled` or `InferenceOrderBook.OrderCancelled` event whose `raw_events.created_at` (wall-clock ingest time) is older than `inference_orphan_cutoff_ms` and whose parent `OrderPlaced` row is absent is dropped (marked `Applied` with a counter increment) rather than deferred forever. The cutoff is keyed on ingest time — a row with an old `created_at_chain` but recent `created_at` (e.g. a late-arriving event) is not dropped.
+The projection loop applies the `inference_orphan_cutoff_ms` window as a dead-letter for inference events that have waited beyond the cutoff without their parent arriving. Specifically: an `InferenceOrderBook.InferenceFilled` or `InferenceOrderBook.InferenceOrderCancelled` event whose `raw_events.created_at` (wall-clock ingest time) is older than `inference_orphan_cutoff_ms` and whose parent `InferenceOrderPlaced` row is absent is dropped (marked `Applied` with a counter increment) rather than deferred forever. The cutoff is keyed on ingest time — a row with an old `created_at_chain` but recent `created_at` (e.g. a late-arriving event) is not dropped. An expired `InferenceFilled` orphan still records the `inference_deals` link (`orderbook_address` + `buyer_note` from the event; `seller_note` resolved from the SELL leg when it is present) so the deal remains visible to settlement rewards even when one or both `InferenceOrderPlaced` parents were dropped at capture.
+
+> 🚧 **Deferred — model-id source.** The order book carries only `model_hash`; the human `producer--model--version` is not on the book. Filling `model_ref` / `producer` / `model_name` / `version` requires a registry walk (`SuperRoot` → `RootModel` / `ManifestMetadata`) that is not yet implemented. These columns stay NULL; the API exposes the book by `model_hash` only until the manifest linkage is added.
 
 ## Failure handling
 
@@ -349,7 +375,7 @@ Unlike `orders_created_event_cnt` and `order_partially_filled_event_cnt` (read f
 
 | Metric | Type | What it measures | Source |
 | --- | --- | --- | --- |
-| `indexer_inference_orphans_dropped` | counter | Inference `Filled`/`OrderCancelled` events dead-lettered because their parent `OrderPlaced` never arrived within `inference_orphan_cutoff_ms` | in-process counter, polled each refresh |
+| `indexer_inference_orphans_dropped` | counter | Inference `InferenceFilled`/`InferenceOrderCancelled` events dead-lettered because their parent `InferenceOrderPlaced` never arrived within `inference_orphan_cutoff_ms` | in-process counter, polled each refresh |
 | `indexer_decode_errors` | counter | Event bodies that failed to decode (`decode_output`/`detokenize` error or an unparseable cell) and were stored undecoded | in-process counter, polled each refresh |
 
 Both are in-process counts polled by the refresh loop, like `indexer_projection_fallbacks`. `indexer_decode_errors` is the durable signal for a *hard* decode failure of a delivered body — distinct from an unknown/ambiguous event id, which is a normal, uncounted outcome (`Ok(None)` from the decoder). A non-zero rate means ABI drift or a malformed cell for an otherwise known event; the row is stored undecoded (`event_type`/`decoded` NULL), skipped by projection, and invisible to the inference sweep's `decoded IS NOT NULL` pending-events gate — so the counter, not a log, is the operator's signal.
@@ -385,7 +411,7 @@ In-process count like `indexer_projection_fallbacks`: the inference reconciler b
 | Cancellation reason matches its source | Projector picks `PMP_REJECTED_BY_ORACLE` or `EVENT_CANCELLED` based on event type, never NULL. |
 | `inference_markets.last_reconciled_at IS NOT NULL ⇒ model_hash IS NOT NULL` | Inference reconciler writes `model_hash` from `getParams()` on the discovery pass before stamping `last_reconciled_at`. |
 | `inference_orders.last_chain_order` lex-monotonic per row | `greatest(existing, new)` on every book-event UPDATE. |
-| A SELL offer never rests after a match | `Filled` flips an `is_buy = false` row to `FILLED` on first match (one-deal slot), independent of `amount_remaining`. |
+| A SELL offer never rests after a match | `InferenceFilled` flips an `is_buy = false` row to `FILLED` on first match (one-deal slot), independent of `amount_remaining`. |
 
 The API enforces complementary read-side invariants on the assembled DTO — see [read-api.md](read-api.md#fail-closed-validation). Together they guarantee that an inconsistent indexer state (e.g. `PMP.Resolved` indexed before `PoolsFrozen`) cannot leak into a client response.
 
@@ -395,4 +421,4 @@ A market is visible to the public API only when `markets.last_reconciled_at IS N
 
 This pairs with the API's PENDING short-circuit: a row with NULL timing columns (reconciled but pre-`TimingsSet`) surfaces as `status = "PENDING"` with `timings = null`, per [read-api.md](read-api.md#status-derivation).
 
-The same gate applies to inference markets: an [`inference_markets`](data-schema.md#inference_markets) row is hidden until the inference reconciler stamps `last_reconciled_at`, so a book seeded by a first `OrderPlaced` but not yet reconciled (no `model_hash` / precision) never reaches `/api/v1/inference/markets`.
+The same gate applies to inference markets: an [`inference_markets`](data-schema.md#inference_markets) row is hidden until the inference reconciler stamps `last_reconciled_at`, so a book seeded by a first `InferenceOrderPlaced` but not yet reconciled (no `model_hash` / precision) never reaches `/api/v1/inference/markets`.

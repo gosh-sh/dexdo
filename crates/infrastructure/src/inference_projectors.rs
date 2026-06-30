@@ -36,18 +36,15 @@ pub async fn project_inference_event(
     let suffix =
         event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
     match suffix {
-        "OrderPlaced" => apply_inference_order_placed(tx, event, node).await,
-        "SubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
-        "OrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
-        "Filled" => apply_inference_filled(tx, event, node).await,
-        "InferenceOrderBookDeployed" => apply_inference_orderbook_deployed(tx, event, node).await,
-        "Executed" | "Refunded" | "CycleForfeited" | "ForfeitClaimed" => {
-            Ok(ProjectionOutcome::Applied)
-        }
-        other => {
-            warn!(event_type = %event.event_type, other, "unknown InferenceOrderBook event; seeded only");
-            Ok(ProjectionOutcome::Applied)
-        }
+        "InferenceOrderPlaced" => apply_inference_order_placed(tx, event, node).await,
+        "InferenceSubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
+        "InferenceOrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
+        "InferenceFilled" => apply_inference_filled(tx, event, node).await,
+        "InferenceExecuted"
+        | "InferenceRefunded"
+        | "InferenceCycleForfeited"
+        | "InferenceForfeitClaimed" => Ok(ProjectionOutcome::Applied),
+        _ => Ok(ProjectionOutcome::Unknown),
     }
 }
 
@@ -148,7 +145,7 @@ async fn apply_inference_order_placed(
     let price = uint_field_to_decimal(&event.value, "price")?;
     let ticks = uint_field_to_decimal(&event.value, "ticks")?;
     let note = field_str(&event.value, "note").ok();
-    let chain_order = node_chain_order(node, "OrderPlaced")?;
+    let chain_order = node_chain_order(node, "InferenceOrderPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     upsert_resting_order(
         tx,
@@ -176,7 +173,7 @@ async fn apply_inference_subscription_placed(
     let price = uint_field_to_decimal(&event.value, "maxPrice")?;
     let ticks = uint_field_to_decimal(&event.value, "ticks")?;
     let note = field_str(&event.value, "buyerNote").ok();
-    let chain_order = node_chain_order(node, "SubscriptionPlaced")?;
+    let chain_order = node_chain_order(node, "InferenceSubscriptionPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     upsert_resting_order(
         tx,
@@ -211,6 +208,9 @@ struct FilledFields {
     chain_seconds: Option<f64>,
     /// `[maker_id, taker_id]` — the row ids the decrement touches.
     ids: Vec<String>,
+    /// Deal-link fields (present on the normal `Filled`; unused by orphan repair).
+    seller_tc: Option<String>,
+    buyer_note: Option<String>,
 }
 
 impl FilledFields {
@@ -219,10 +219,22 @@ impl FilledFields {
         let maker_id = uint_field_to_decimal(&event.value, "makerId")?;
         let taker_id = uint_field_to_decimal(&event.value, "takerId")?;
         let ticks = uint_field_to_decimal(&event.value, "ticks")?;
-        let chain_order = node_chain_order(node, "Filled")?;
+        let chain_order = node_chain_order(node, "InferenceFilled")?;
         let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+        let seller_tc = field_str(&event.value, "sellerTC").ok().map(str::to_string);
+        let buyer_note = field_str(&event.value, "buyerNote").ok().map(str::to_string);
         let ids = vec![maker_id.clone(), taker_id.clone()];
-        Ok(Self { ob, maker_id, taker_id, ticks, chain_order, chain_seconds, ids })
+        Ok(Self {
+            ob,
+            maker_id,
+            taker_id,
+            ticks,
+            chain_order,
+            chain_seconds,
+            ids,
+            seller_tc,
+            buyer_note,
+        })
     }
 }
 
@@ -324,6 +336,64 @@ async fn apply_filled_decrement(
     Ok(())
 }
 
+/// Records the deal link a `Filled` uniquely carries: the TokenContract
+/// (`sellerTC`) ↔ its market (`orderbook_address`), seller note (the SELL leg,
+/// `is_buy=false`), and buyer note (`buyerNote`). Upserts so the row survives
+/// whether the deal was first seen here or via an earlier TokenContract.* event.
+/// On a well-formed `Filled`, `sellerTC` is always present; its absence signals
+/// ABI drift, so that one case alone is logged and skipped with `Ok(())` (not
+/// `Err`): `apply_filled_decrement` has already mutated rows in this transaction,
+/// and failing the event over a decoder/ABI mismatch would defer it forever. A
+/// genuine DB error in the queries below still propagates — the reprojection
+/// savepoint isolates and retries the event.
+async fn link_deal_from_filled(
+    tx: &mut Transaction<'_, Postgres>,
+    f: &FilledFields,
+) -> anyhow::Result<()> {
+    let Some(seller_tc) = f.seller_tc.as_deref() else {
+        warn!(
+            orderbook_address = %f.ob,
+            chain_order = %f.chain_order,
+            "InferenceFilled event missing mandatory sellerTC field; inference_deals orderbook/seller link skipped — possible ABI drift"
+        );
+        return Ok(());
+    };
+
+    // Seller = the note on the SELL leg (is_buy=false) of this match.
+    let seller_note: Option<String> = sqlx::query_scalar(
+        r#"select note_address from inference_orders
+            where orderbook_address = $1 and order_id = any($2::numeric[]) and is_buy = false
+            limit 1"#,
+    )
+    .bind(&f.ob)
+    .bind(&f.ids)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("resolve seller_note for deal link")?
+    .flatten();
+
+    sqlx::query(
+        r#"insert into inference_deals
+               (token_contract_address, orderbook_address, seller_note, buyer_note, last_chain_order)
+           values ($1, $2, $3, $4, $5)
+           on conflict (token_contract_address) do update
+               set orderbook_address = coalesce(inference_deals.orderbook_address, excluded.orderbook_address),
+                   seller_note = coalesce(inference_deals.seller_note, excluded.seller_note),
+                   buyer_note = coalesce(inference_deals.buyer_note, excluded.buyer_note),
+                   last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
+                   updated_at = now()"#,
+    )
+    .bind(seller_tc)
+    .bind(&f.ob)
+    .bind(seller_note)
+    .bind(&f.buyer_note)
+    .bind(&f.chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("link inference_deals from Filled")?;
+    Ok(())
+}
+
 async fn apply_inference_filled(
     tx: &mut Transaction<'_, Postgres>,
     event: &DecodedEvent,
@@ -339,6 +409,7 @@ async fn apply_inference_filled(
         return Ok(ProjectionOutcome::Deferred); // parent(s) not seen yet — zero writes
     }
     apply_filled_decrement(tx, &f, &locked).await?;
+    link_deal_from_filled(tx, &f).await?;
     Ok(ProjectionOutcome::Applied)
 }
 
@@ -378,17 +449,22 @@ pub async fn repair_expired_inference_orphan(
     let suffix =
         event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
     let outcome = match suffix {
-        "Filled" => {
+        "InferenceFilled" => {
             let f = FilledFields::parse(event, node)?;
             let locked = lock_filled_rows(tx, &f.ob, &f.ids).await?;
-            if locked.is_empty() {
+            let outcome = if locked.is_empty() {
                 ExpiredOrphanOutcome::FilledNoLegPresent
             } else {
                 apply_filled_decrement(tx, &f, &locked).await?;
                 ExpiredOrphanOutcome::FilledDepthRepaired { legs: locked.len() }
-            }
+            };
+            // The Filled carries sellerTC + buyerNote; record the deal link even on
+            // the orphan path (orderbook + buyer are leg-independent; seller resolves
+            // from the SELL leg when present) — the normal deferred path never reruns.
+            link_deal_from_filled(tx, &f).await?;
+            outcome
         }
-        "OrderCancelled" => ExpiredOrphanOutcome::CancelLost,
+        "InferenceOrderCancelled" => ExpiredOrphanOutcome::CancelLost,
         _ => ExpiredOrphanOutcome::Nothing,
     };
 
@@ -413,62 +489,6 @@ pub async fn repair_expired_inference_orphan(
     Ok(outcome)
 }
 
-async fn apply_inference_orderbook_deployed(
-    tx: &mut Transaction<'_, Postgres>,
-    event: &DecodedEvent,
-    node: &EventNode,
-) -> anyhow::Result<ProjectionOutcome> {
-    let ob = node.src.as_deref().context("InferenceOrderBookDeployed: src missing")?;
-    let model_hash = uint_field_to_decimal(&event.value, "modelHash")?;
-    let model_name = field_str(&event.value, "modelName").unwrap_or("");
-    let (model_ref, producer, name, version) = parse_model_ref(model_name);
-
-    // The skeleton pre-step guarantees the row exists. `coalesce(model_hash, ...)`
-    // so this and the reconciler's getParams write agree on the same on-chain
-    // value without clobbering.
-    sqlx::query(
-        r#"update inference_markets
-              set model_hash = coalesce(model_hash, $2::numeric),
-                  model_ref = $3, producer = $4, model_name = $5, version = $6,
-                  updated_at = now()
-            where orderbook_address = $1"#,
-    )
-    .bind(ob)
-    .bind(&model_hash)
-    .bind(model_ref)
-    .bind(producer)
-    .bind(name)
-    .bind(version)
-    .execute(&mut **tx)
-    .await
-    .context("update inference_markets identity")?;
-    Ok(ProjectionOutcome::Applied)
-}
-
-/// Map the on-chain `modelName` to (ref, producer, name, version). Empty →
-/// all `None` (API falls back to `model_hash`). Splits on `"--"`: exactly three
-/// non-empty parts fill producer/name/version; otherwise only `ref` is set.
-pub(crate) fn parse_model_ref(
-    model_name: &str,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    let trimmed = model_name.trim();
-    if trimmed.is_empty() {
-        return (None, None, None, None);
-    }
-    let model_ref = Some(trimmed.to_string());
-    let parts: Vec<&str> = trimmed.split("--").collect();
-    if parts.len() == 3 && parts.iter().all(|p| !p.is_empty()) {
-        (
-            model_ref,
-            Some(parts[0].to_string()),
-            Some(parts[1].to_string()),
-            Some(parts[2].to_string()),
-        )
-    } else {
-        (model_ref, None, None, None)
-    }
-}
-
 async fn apply_inference_order_cancelled(
     tx: &mut Transaction<'_, Postgres>,
     event: &DecodedEvent,
@@ -476,7 +496,7 @@ async fn apply_inference_order_cancelled(
 ) -> anyhow::Result<ProjectionOutcome> {
     let ob = node.src.as_deref().context("OrderCancelled: src missing")?;
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
-    let chain_order = node_chain_order(node, "OrderCancelled")?;
+    let chain_order = node_chain_order(node, "InferenceOrderCancelled")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     // CTE locks the row; the UPDATE always matches it (so RETURNING distinguishes
     // present-from-absent), the CASE keeps a FILLED row terminal. swept_at -> NULL
@@ -503,35 +523,5 @@ async fn apply_inference_order_cancelled(
     match prior {
         None => Ok(ProjectionOutcome::Deferred), // parent OrderPlaced not seen yet
         Some(_) => Ok(ProjectionOutcome::Applied),
-    }
-}
-
-#[cfg(test)]
-mod parse_tests {
-    use super::parse_model_ref;
-
-    #[test]
-    fn three_parts_fill_all() {
-        let (r, p, n, v) = parse_model_ref("qwen--qwen2.5-32b--instruct");
-        assert_eq!(r.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
-        assert_eq!(p.as_deref(), Some("qwen"));
-        assert_eq!(n.as_deref(), Some("qwen2.5-32b"));
-        assert_eq!(v.as_deref(), Some("instruct"));
-    }
-
-    #[test]
-    fn non_three_parts_keep_only_ref() {
-        let (r, p, n, v) = parse_model_ref("just-a-name");
-        assert_eq!(r.as_deref(), Some("just-a-name"));
-        assert!(p.is_none() && n.is_none() && v.is_none());
-
-        let (r2, ..) = parse_model_ref("a--b"); // 2 parts
-        assert_eq!(r2.as_deref(), Some("a--b"));
-    }
-
-    #[test]
-    fn empty_yields_all_none() {
-        let (r, p, n, v) = parse_model_ref("   ");
-        assert!(r.is_none() && p.is_none() && n.is_none() && v.is_none());
     }
 }

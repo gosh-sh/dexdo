@@ -33,23 +33,17 @@ use std::time::UNIX_EPOCH;
 
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
+use common::airegistry::model_hash_for;
 use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
 use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
+use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45; // 90s budget — book deploy is an internal message.
-
-/// A per-run model hash so each run deploys a fresh book (the address is
-/// `tvm.hash(bakedCode, modelHash)`), keeping order-count assertions clean.
-fn unique_model_hash() -> String {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    // Decimal uint256 string; the high prefix keeps it clear of small ids.
-    format!("{}", 0x0E2E_0000_0000_0000_u128.wrapping_add(nanos))
-}
 
 #[tokio::test]
 #[ignore = "requires a reachable shellnet endpoint + seed_notes.json"]
@@ -68,15 +62,26 @@ async fn inference_order_book_buy_then_cancel_against_shellnet() {
     let signer = || Signer::Keys { keys: keys.clone() };
 
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex::from_endpoints");
-    let model_hash = unique_model_hash();
-    eprintln!("[e2e_inference] note={} model_hash={model_hash}", note.address);
+    // A per-run model name so each run deploys a fresh book (the address derives
+    // from modelHash), keeping order-count assertions clean. The book ctor
+    // requires modelHash == sha256(modelName), so derive the hash from the name.
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let model_name = format!("e2e-inference-{nanos}");
+    let model_hash = model_hash_for(&model_name);
+    eprintln!(
+        "[e2e_inference] note={} model_name={model_name} model_hash={model_hash}",
+        note.address
+    );
 
     let mut failures: Vec<String> = Vec::new();
 
     // 1. Note deploys the per-model InferenceOrderBook (internal message).
     dex.deploy_inference_order_book(
         &note.address,
-        ParamsOfInferenceOrderBook { model_hash: model_hash.clone() },
+        ParamsOfDeployInferenceOrderBook {
+            model_hash: model_hash.clone(),
+            model_name: model_name.clone(),
+        },
         signer(),
     )
     .await

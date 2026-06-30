@@ -29,9 +29,12 @@ are on [`dex::private_note`](../../crates/contracts/src/dex/private_note.rs).
 
 The `dodex-chain` facade exposes the inference flow behind the `test-helpers`
 feature (`deploy_inference_order_book`, `post_sell_offer`, `place_inference_buy`,
-`token_contract_*`, …). There are **no inference REST endpoints and no indexer
-projectors yet** — the support is at the wrapper + SDK layer only, so these
-methods stay out of the production binary.
+`token_contract_*`, …). There are **no inference REST endpoints** — the
+write-side SDK support stays behind the `test-helpers` feature flag and out of
+the production binary. Indexer projectors for `InferenceOrderBook.*` and
+`TokenContract.*` events are active; see
+[docs/tech-specs/indexer.md](../tech-specs/indexer.md) for the
+read-model they build (`inference_orders`, `inference_deals`, `inference_ticks`).
 
 ## Event ids
 
@@ -40,7 +43,22 @@ registry + streaming events occupy the 700s (e.g. `StreamFunded=720`,
 `ProbeAccepted=728`); order-book events occupy `1000`–`1007`. The ABI event
 names differ from the `*Emit` constant names, so the typed decoders in the
 `*_events.rs` wrappers bind each id from the actual `emit … makeAddrExtern(<const>)`
-site. These events are not yet ingested by the indexer.
+site. These events are decoded into `raw_events` (`event_type = "TokenContract.<Event>"`,
+`src_address` = the TokenContract address) and projected into the SETTLEMENT
+read-model: `inference_deals` (one row per TokenContract / deal) and
+`inference_ticks` (one row per finalized tick). The deal's `orderbook_address`,
+`seller_note`, and `buyer_note` are linked from `InferenceOrderBook.InferenceFilled`
+(`sellerTC` + `buyerNote` + the SELL leg's note); per-tick rows and the
+`finalized_ticks` aggregate comes from `TickFinalized` (per-tick `finalized_owed` is stored on each `inference_ticks` row — it is the contract's cumulative `_finalizedOwed`, not a per-tick delta);
+`close_kind` + `clean_settlement` + `settled_at_chain` from the stream-close
+events: `StreamStopped` sets `clean_settlement = true`; `DisputeResolved` and
+`StreamReclaimed` set it to `false`; `ContractDestroyed` (`'DESTROYED'`) and
+`ProbeBurned` (`'PROBE_BURNED'` — a buyer stop before probe-accept, or the
+dispute-burn path; both terminal) set only `close_kind` and `settled_at_chain`,
+leaving `clean_settlement` unchanged (remains `NULL` if no prior close event set
+it). Consumers should
+treat `clean_settlement IS NOT TRUE` as "not a clean settlement" to cover both
+the `false` and `NULL` cases.
 
 ## On-chain deploy specifics (Acki Nacki)
 

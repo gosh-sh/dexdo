@@ -28,6 +28,8 @@ const ABI_NULLIFIER: &str = include_str!("../../../contracts/dex/Nullifier.abi.j
 
 const ABI_INFERENCE_ORDER_BOOK: &str =
     include_str!("../../../contracts/airegistry/InferenceOrderBook.abi.json");
+const ABI_TOKEN_CONTRACT: &str =
+    include_str!("../../../contracts/airegistry/TokenContract.abi.json");
 
 const DEX_ABIS: &[(&str, &str)] = &[
     ("RootOracle", ABI_ROOT_ORACLE),
@@ -40,7 +42,8 @@ const DEX_ABIS: &[(&str, &str)] = &[
     ("Nullifier", ABI_NULLIFIER),
 ];
 
-const INFERENCE_ABIS: &[(&str, &str)] = &[("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK)];
+const INFERENCE_ABIS: &[(&str, &str)] =
+    &[("InferenceOrderBook", ABI_INFERENCE_ORDER_BOOK), ("TokenContract", ABI_TOKEN_CONTRACT)];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DecodedEvent {
@@ -121,13 +124,22 @@ impl Decoder {
             contracts.insert(kind, contract);
         }
 
-        // Route table: only the colliding OrderCancelled pair needs disambiguation.
-        // Non-colliding events resolve by unique id. Add more dsts here if a future
-        // ABI introduces another collision (R3). `expected_id` is looked up from the
-        // loaded contract, never hardcoded.
+        // Route table: dst-based disambiguation for colliding event ids. No loaded
+        // ABI currently introduces a collision — the InferenceOrderBook events carry
+        // an `Inference` prefix, so InferenceOrderCancelled no longer shares an id with
+        // OrderBook.OrderCancelled, and every event resolves by unique id. These two
+        // OrderCancelled dsts are pinned defensively to keep the path exercised; add
+        // more here if a future ABI reintroduces a collision. `expected_id` is looked
+        // up from the loaded contract, never hardcoded.
         let mut routes = HashMap::new();
         Self::add_route(&mut routes, &contracts, 144, "OrderBook", "OrderCancelled")?;
-        Self::add_route(&mut routes, &contracts, 1001, "InferenceOrderBook", "OrderCancelled")?;
+        Self::add_route(
+            &mut routes,
+            &contracts,
+            1001,
+            "InferenceOrderBook",
+            "InferenceOrderCancelled",
+        )?;
 
         Ok(Self { contracts, event_index, routes })
     }
@@ -248,12 +260,10 @@ mod tests {
             assert!(decoder.contracts.contains_key(kind), "missing contract {kind}");
         }
 
-        // 13 PMP + 2 Oracle + 4 OracleEventList + 8 OrderBook + 1 RootOracle
-        // + 6 RootPN + 14 PrivateNote + 0 Nullifier = 48 DEX events
-        // + 8 InferenceOrderBook events, but OrderCancelled collides with
-        // OrderBook.OrderCancelled -> still 48 + 7 = 55 unique ids, but one id
-        // has 2 entries. known_events() counts distinct ids = 55.
-        assert_eq!(decoder.known_events(), 55, "unexpected total event id count");
+        // 48 DEX unique ids + 9 InferenceOrderBook ids + 13 TokenContract ids = 70
+        // distinct ids. (The InferenceOrderBook events carry an `Inference` prefix, so
+        // none collides with the DEX OrderBook events.)
+        assert_eq!(decoder.known_events(), 70, "unexpected total event id count");
 
         // sample lookups — find entries for PMP
         let pmp_event_ids: Vec<_> = decoder
@@ -274,53 +284,49 @@ mod tests {
     fn registers_inference_orderbook_and_counts_unique_ids() {
         let decoder = Decoder::new().unwrap();
         assert!(decoder.contracts.contains_key("InferenceOrderBook"), "inference abi missing");
-        // 48 DEX unique ids + 8 inference events, of which OrderCancelled collides
-        // with OrderBook.OrderCancelled (same (uint128,uint128) signature) => +7 new ids.
-        // Total distinct ids = 55 (48 + 7). The colliding id has 2 entries.
-        assert_eq!(decoder.unique_event_ids(), 55, "unexpected unique event-id count");
+        // 48 DEX + 9 inference + 13 TokenContract = 70.
+        assert_eq!(decoder.unique_event_ids(), 70, "unexpected unique event-id count");
     }
 
     #[test]
-    fn order_cancelled_routes_by_dst() {
+    fn inference_order_cancelled_resolves_after_rename() {
+        // InferenceOrderCancelled used to share an id with OrderBook.OrderCancelled;
+        // the `Inference` prefix gives it a unique id, so it resolves by id regardless
+        // of dst, and its pinned dst route still decodes it to the same event.
         let decoder = Decoder::new().unwrap();
         let body = inference_cancel_body_b64(&decoder);
-        let ob_dst = crate::config::event_type_dst(144); // OB_ORDER_CANCELLED
-        let inf_dst = crate::config::event_type_dst(1001); // InferenceOrderBook OrderCancelled
+        let inf_dst = crate::config::event_type_dst(1001);
 
-        let inf = decoder.decode_event_body(&body, Some(&inf_dst)).unwrap().decoded().unwrap();
-        assert_eq!(inf.event_type, "InferenceOrderBook.OrderCancelled");
+        let via_route =
+            decoder.decode_event_body(&body, Some(&inf_dst)).unwrap().decoded().unwrap();
+        assert_eq!(via_route.event_type, "InferenceOrderBook.InferenceOrderCancelled");
 
-        let ob = decoder.decode_event_body(&body, Some(&ob_dst)).unwrap().decoded().unwrap();
-        assert_eq!(ob.event_type, "OrderBook.OrderCancelled");
+        let by_id = decoder.decode_event_body(&body, None).unwrap().decoded().unwrap();
+        assert_eq!(by_id.event_type, "InferenceOrderBook.InferenceOrderCancelled");
 
-        // Unknown dst on a colliding id => ambiguous => left undecoded, never first-ABI.
-        let ambiguous = decoder.decode_event_body(&body, Some(":dead")).unwrap();
-        assert!(
-            matches!(ambiguous, DecodeOutcome::AmbiguousCollision { .. }),
-            "colliding id with unknown dst must be reported ambiguous, not silently first-ABI"
-        );
+        // Unknown dst no longer means ambiguous: the id is unique now, so it resolves.
+        let unknown_dst =
+            decoder.decode_event_body(&body, Some(":dead")).unwrap().decoded().unwrap();
+        assert_eq!(unknown_dst.event_type, "InferenceOrderBook.InferenceOrderCancelled");
     }
 
     #[test]
     fn non_colliding_inference_event_resolves_by_id() {
         let decoder = Decoder::new().unwrap();
-        // Filled has a unique id, so it resolves even with no dst route.
+        // InferenceFilled has a unique id, so it resolves even with no dst route.
         let body = inference_filled_body_b64(&decoder);
         let ev = decoder.decode_event_body(&body, None).unwrap().decoded().unwrap();
-        assert_eq!(ev.event_type, "InferenceOrderBook.Filled");
+        assert_eq!(ev.event_type, "InferenceOrderBook.InferenceFilled");
     }
 
     #[test]
-    fn all_non_colliding_inference_events_resolve_uniquely_by_id() {
-        // Every InferenceOrderBook event EXCEPT the colliding OrderCancelled
-        // must map to a UNIQUE id resolving to InferenceOrderBook.
+    fn all_inference_events_resolve_uniquely_by_id() {
+        // After the `Inference` rename no InferenceOrderBook event collides, so every
+        // one maps to a UNIQUE id resolving to InferenceOrderBook.
         let d = Decoder::new().unwrap();
         let inf = d.contracts.get("InferenceOrderBook").expect("inference abi loaded");
         let mut checked = 0;
         for (name, ev) in inf.events() {
-            if name.as_str() == "OrderCancelled" {
-                continue; // colliding — resolved by dst (separate test)
-            }
             let entries = d.event_index.get(&ev.get_id()).expect("event id indexed");
             assert_eq!(
                 entries.len(),
@@ -332,11 +338,7 @@ mod tests {
             assert_eq!(entries[0].1.as_str(), name.as_str());
             checked += 1;
         }
-        assert_eq!(
-            checked,
-            7,
-            "expected exactly 7 non-colliding inference events (OrderPlaced, Filled, Executed, Refunded, SubscriptionPlaced, CycleForfeited, ForfeitClaimed)"
-        );
+        assert_eq!(checked, 9, "expected all 9 InferenceOrderBook events to resolve uniquely");
     }
 
     #[test]
@@ -399,6 +401,23 @@ mod tests {
         assert_eq!(decoded.value["opNonce"], "371");
     }
 
+    #[test]
+    fn registers_token_contract_events_uniquely() {
+        let decoder = Decoder::new().unwrap();
+        assert!(decoder.contracts.contains_key("TokenContract"), "token contract abi missing");
+        let tc = decoder.contracts.get("TokenContract").expect("token contract abi loaded");
+        for (name, event) in tc.events() {
+            let entries =
+                decoder.event_index.get(&event.get_id()).map(Vec::as_slice).unwrap_or(&[]);
+            assert_eq!(
+                entries.len(),
+                1,
+                "TokenContract.{name} signature id collides with another ABI: {entries:?} — add a dst route via event_type_dst(the event's `TokenContractEvent` discriminant in token_contract_events.rs)"
+            );
+            assert_eq!(entries[0].0, "TokenContract", "{name} resolves to the wrong contract");
+        }
+    }
+
     // --- Test helpers: encode event bodies from the loaded contracts ---
 
     fn encode_event_body_b64(
@@ -435,8 +454,12 @@ mod tests {
         encode_event_body_b64(
             d,
             "InferenceOrderBook",
-            "OrderCancelled",
-            serde_json::json!({ "orderId": "7", "refundedShell": "0" }),
+            "InferenceOrderCancelled",
+            serde_json::json!({
+                "orderId": "7",
+                "refunded": "0",
+                "note": "0:0000000000000000000000000000000000000000000000000000000000000000"
+            }),
         )
     }
 
@@ -444,14 +467,15 @@ mod tests {
         encode_event_body_b64(
             d,
             "InferenceOrderBook",
-            "Filled",
+            "InferenceFilled",
             serde_json::json!({
                 "makerId": "1",
                 "takerId": "2",
                 "ticks": "3",
                 "clearingPrice": "0",
                 "sellerTC": "0:0000000000000000000000000000000000000000000000000000000000000000",
-                "buyerNote": "0:0000000000000000000000000000000000000000000000000000000000000000"
+                "buyerNote": "0:0000000000000000000000000000000000000000000000000000000000000000",
+                "sellerNote": "0:0000000000000000000000000000000000000000000000000000000000000000"
             }),
         )
     }

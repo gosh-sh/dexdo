@@ -7,8 +7,7 @@
 			"name": "constructor",
 			"inputs": [
 				{"name":"pubkey","type":"uint256"},
-				{"name":"rootModelCode","type":"cell"},
-				{"name":"manifestCode","type":"cell"}
+				{"name":"rootModelCode","type":"cell"}
 			],
 			"outputs": [
 			]
@@ -30,28 +29,9 @@
 			]
 		},
 		{
-			"name": "registerManifest",
-			"inputs": [
-				{"name":"ownerPubkey","type":"uint256"},
-				{"name":"rootModelAddress","type":"address"}
-			],
-			"outputs": [
-			]
-		},
-		{
 			"name": "getRootModelAddress",
 			"inputs": [
 				{"name":"ownerPubkey","type":"uint256"}
-			],
-			"outputs": [
-				{"name":"value0","type":"address"}
-			]
-		},
-		{
-			"name": "getManifestAddress",
-			"inputs": [
-				{"name":"ownerPubkey","type":"uint256"},
-				{"name":"rootModelAddress","type":"address"}
 			],
 			"outputs": [
 				{"name":"value0","type":"address"}
@@ -83,14 +63,6 @@
 			],
 			"outputs": [
 			]
-		},
-		{
-			"name": "ManifestRegistered",
-			"inputs": [
-				{"name":"manifestAddress","type":"address"}
-			],
-			"outputs": [
-			]
 		}
 	],
 	"fields": [
@@ -98,7 +70,6 @@
 		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
 		{"init":false,"name":"_ownerPubkey","type":"uint256"},
-		{"init":false,"name":"_rootModelCode","type":"cell"},
-		{"init":false,"name":"_manifestCode","type":"cell"}
+		{"init":false,"name":"_rootModelCode","type":"cell"}
 	]
 }

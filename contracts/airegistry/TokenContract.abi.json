@@ -7,6 +7,7 @@
 			"name": "constructor",
 			"inputs": [
 				{"name":"modelName","type":"string"},
+				{"name":"modelHash","type":"uint256"},
 				{"name":"tickSize","type":"uint128"},
 				{"name":"pricePerTick","type":"uint128"},
 				{"name":"maxTicks","type":"uint128"},
@@ -209,6 +210,14 @@
 			]
 		},
 		{
+			"name": "getModelHash",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"uint256"}
+			]
+		},
+		{
 			"name": "getShellBalance",
 			"inputs": [
 			],
@@ -365,6 +374,7 @@
 		{"init":true,"name":"_rootModelAddress","type":"address"},
 		{"init":true,"name":"_nonce","type":"uint64"},
 		{"init":false,"name":"_modelName","type":"string"},
+		{"init":false,"name":"_modelHash","type":"uint256"},
 		{"init":false,"name":"_tickSize","type":"uint128"},
 		{"init":false,"name":"_pricePerTick","type":"uint128"},
 		{"init":false,"name":"_maxTicks","type":"uint128"},
@@ -388,6 +398,8 @@
 		{"init":false,"name":"_fundedTime","type":"uint64"},
 		{"init":false,"name":"_prepaidTime","type":"uint64"},
 		{"init":false,"name":"_lastAdvance","type":"uint64"},
-		{"init":false,"name":"_disputeTime","type":"uint64"}
+		{"init":false,"name":"_disputeTime","type":"uint64"},
+		{"init":false,"name":"_settleWindow","type":"uint64"},
+		{"init":false,"name":"_streamTimeout","type":"uint64"}
 	]
 }

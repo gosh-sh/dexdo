@@ -79,6 +79,11 @@ pub struct ParamsOfPlaceSellOffer {
     pub max_ticks: u128,
     pub token_contract: String,
     pub flags: u8,
+    /// `uint256`, decimal or hex string — the seller note's owner pubkey. The
+    /// book recomputes the canonical TokenContract address from `sellerPubkey`
+    /// + `nonce` and rejects offers whose `tokenContract` does not match.
+    pub seller_pubkey: String,
+    pub nonce: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

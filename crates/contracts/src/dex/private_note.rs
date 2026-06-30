@@ -441,8 +441,7 @@ pub struct ParamsOfStreamLock {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Parameters for `PrivateNote.deployInferenceOrderBook` and
-/// `PrivateNote.getInferenceOrderBookAddress`.
+/// Parameters for `PrivateNote.getInferenceOrderBookAddress`.
 ///
 /// Keyed only by `model_hash`: the canonical `InferenceOrderBook` code is
 /// baked into the note at deploy (`_inferenceOrderBookCode`), so the book
@@ -450,6 +449,16 @@ pub struct ParamsOfStreamLock {
 pub struct ParamsOfInferenceOrderBook {
     /// `uint256` model hash, decimal/hex string.
     pub model_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// Parameters for `PrivateNote.deployInferenceOrderBook`.
+pub struct ParamsOfDeployInferenceOrderBook {
+    /// `uint256` model hash, decimal/hex string — identifies the book.
+    pub model_hash: String,
+    /// Human-readable model name (ABI `modelName`, `string`).
+    pub model_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1262,7 +1271,7 @@ impl PrivateNote {
     /// deterministic per-model address.
     pub async fn deploy_inference_order_book(
         &self,
-        params: ParamsOfInferenceOrderBook,
+        params: ParamsOfDeployInferenceOrderBook,
         signer: Signer,
     ) -> KitResult<ResultOfSendMessage> {
         let call_set = CallSet {
@@ -1530,7 +1539,10 @@ mod inference_abi_tests {
     #[test]
     fn inference_params_match_abi() {
         assert_eq!(
-            keys(&ParamsOfInferenceOrderBook { model_hash: "1".into() }),
+            keys(&ParamsOfDeployInferenceOrderBook {
+                model_hash: "1".into(),
+                model_name: "m".into(),
+            }),
             abi_input_names("deployInferenceOrderBook")
         );
         assert_eq!(

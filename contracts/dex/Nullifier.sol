@@ -8,7 +8,7 @@ import "./RootPN.sol";
 /// @title Nullifier Contract
 contract Nullifier is Modifiers {
     /// @notice Contract semantic version.
-    string constant version = "4.0.5";
+    string constant version = "4.0.10";
 
     /// @notice Nullifier hash used as deterministic deployment key.
     uint256 static _nullifierHash;

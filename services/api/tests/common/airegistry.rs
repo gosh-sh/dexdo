@@ -50,6 +50,8 @@ use dodex_contracts::airegistry::inference_order_book::InferenceOrderBook;
 use dodex_contracts::airegistry::inference_order_book_events::DecodedInferenceOrderBookEvent;
 use dodex_contracts::airegistry::token_contract::TokenContract;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 
 const TOKEN_CONTRACT_TVC: &[u8] =
     include_bytes!("../../../../contracts/airegistry/TokenContract.tvc");
@@ -68,6 +70,14 @@ pub struct TokenDeal {
     pub tick_size: u128,
     pub price_per_tick: u128,
     pub max_ticks: u128,
+}
+
+/// The book ctor enforces `sha256(modelName) == modelHash` and
+/// `byteLength(modelName) <= 127` (InferenceOrderBook.sol). Derive the hash from
+/// the name so the deploy is accepted. `0x` + 64 hex is the big-endian uint256
+/// equal to on-chain `sha256(name)`; names must stay single-cell (<=127 bytes).
+pub fn model_hash_for(model_name: &str) -> String {
+    format!("0x{}", hex::encode(Sha256::digest(model_name.as_bytes())))
 }
 
 /// Deploy a standalone `TokenContract` and return its address.
@@ -110,6 +120,7 @@ pub async fn deploy_token_contract(
         header: None,
         input: Some(json!({
             "modelName": deal.model_name,
+            "modelHash": model_hash_for(&deal.model_name),
             "tickSize": deal.tick_size.to_string(),
             "pricePerTick": deal.price_per_tick.to_string(),
             "maxTicks": deal.max_ticks.to_string(),

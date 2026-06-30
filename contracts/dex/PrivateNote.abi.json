@@ -80,7 +80,8 @@
 		{
 			"name": "deployInferenceOrderBook",
 			"inputs": [
-				{"name":"modelHash","type":"uint256"}
+				{"name":"modelHash","type":"uint256"},
+				{"name":"modelName","type":"string"}
 			],
 			"outputs": [
 			]
@@ -169,6 +170,25 @@
 			"name": "streamReclaim",
 			"inputs": [
 				{"name":"tokenContract","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "fundDeployShell",
+			"inputs": [
+				{"name":"nonce","type":"uint64"},
+				{"name":"rootModelShell","type":"uint128"},
+				{"name":"tcShell","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "postProbeCommission",
+			"inputs": [
+				{"name":"nonce","type":"uint64"},
+				{"name":"amount","type":"uint128"}
 			],
 			"outputs": [
 			]
