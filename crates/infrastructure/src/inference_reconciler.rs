@@ -804,7 +804,6 @@ impl InferenceReconciler {
 /// Parse a dotted `major.minor.patch` version. `None` (or any unparseable
 /// value) sorts below every real version under `Option` ordering, so an
 /// unversioned book always loses a slot contest to a versioned one.
-#[allow(dead_code)]
 fn parse_semver(v: Option<&str>) -> Option<(u64, u64, u64)> {
     let v = v?;
     let mut it = v.trim().split('.');
@@ -815,7 +814,6 @@ fn parse_semver(v: Option<&str>) -> Option<(u64, u64, u64)> {
 }
 
 /// Version string from a `getVersion` getter result (`value0`).
-#[allow(dead_code)]
 fn version_from_getter(v: &serde_json::Value) -> Option<String> {
     v.get("value0").and_then(|x| x.as_str()).map(|s| s.to_owned())
 }
