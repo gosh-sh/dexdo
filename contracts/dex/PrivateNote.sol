@@ -34,14 +34,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///         TokenContract — DERIVED here from this note's own key (+nonce), never a caller-supplied
     ///         address (same guard the IOB enforces in placeSellOffer, review #39). Re-pin whenever
     ///         TokenContract/RootModel is rebuilt or the SuperRoot is redeployed.
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x296620d58a2d312a7906060170dcabcb605e0ed541d9c850e9525bf30642d7a7;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x1963d8193473ffebaacb8c1fd69472d718bf61befa12b606ea18b18c97d641ae;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
-    uint256 constant ROOT_MODEL_CODE_HASH      = 0x3da7eb4d3c0345d7a11b2473a8df32c8eec40f24bc9ecd305f34d02b0018c810;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0x132533863a1c5f5e9e491bd4c569bf5c210933332144f9fc88393839108d6e7d;
     uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
     // Canonical AI SuperRoot account id (workchain 0) — anchor for the RootModel-address derivation.
     // LOCAL/MAINNET build: FIXED at the vanity 0:0c0c… (zerostate force-places the SuperRoot here).
     // (SHELLNET uses a code-derived SuperRoot instead — see dexdo-specs/shellnet-update.md.)
-    uint256 constant SUPER_ROOT_ADDR           = 0x36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71;
+    uint256 constant SUPER_ROOT_ADDR           = 0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c;
 
     /// @notice Owner escape hatch: stale stream/dispute locks can be force
     ///         cleared after this many seconds since the last lock change, so a

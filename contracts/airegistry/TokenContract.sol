@@ -60,7 +60,7 @@ contract TokenContract is AiRegistryModifiers {
     // route the leftover gas to an arbitrary address). On shellnet the SuperRoot is now ADDRESS-STABLE
     // across versions (`SuperRoot.updateCode` swaps code in place, no rotation), so this is a fixed
     // literal — no genaddr recompute, no pin cycle. LOCAL/MAINNET build: the vanity 0:0c0c… SuperRoot.
-    uint256 constant SUPER_ROOT_ADDR = 0x36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71;
+    uint256 constant SUPER_ROOT_ADDR = 0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c;
 
     // Native value attached to THIS contract's cross-dapp messages (register / stream-lock /
     // payout). Tunable; recipients self-fund via `accept`/`ensureBalance`, so this
