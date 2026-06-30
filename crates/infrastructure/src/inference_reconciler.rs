@@ -686,6 +686,7 @@ impl InferenceReconciler {
             r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
                  from inference_markets m
                 where last_reconciled_at is not null
+                  and superseded_at is null
                   and (last_reconcile_failed_at is null
                        or last_reconcile_failed_at < now() - interval '{FAILURE_BACKOFF_INTERVAL_SQL}')
                   and (

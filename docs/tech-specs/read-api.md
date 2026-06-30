@@ -430,6 +430,8 @@ Lists the tradable models — one entry per `InferenceOrderBook`. The public con
 
 `WHERE last_reconciled_at IS NOT NULL`. A book discovered by a first `OrderPlaced` but not yet reconciled (no `model_hash` / precision) is hidden — clients see only fully described markets. Symmetric write-side rule in [indexer.md](indexer.md#visibility-gate).
 
+Superseded books are also hidden by this filter without any additional predicate. When the inference reconciler retires a book (lower-version duplicate superseded by a higher-version replacement, or the incoming book superseded by the existing incumbent), it clears `last_reconciled_at` as part of the retire write — so the retired row falls back to `last_reconciled_at IS NULL` and the existing visibility gate already excludes it. No separate `superseded_at IS NULL` predicate is needed on the read-API query.
+
 ### Status derivation
 
 Inference books have no multi-phase lifecycle. `status` is `TRADING` for every visible (reconciled) row; the enum is kept as a forward-compatible single value so a later `INACTIVE` / `HALTED` signal can be added without a shape change. It is not a stored column.

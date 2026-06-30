@@ -319,7 +319,9 @@ The reconciler resolves collisions transactionally (`claim_model_slot`) using th
   - **Incoming version is higher**: the incumbent is retired — its `model_hash` and `last_reconciled_at` are cleared and `superseded_at` is set. The incoming book then claims the slot and continues discovery normally.
   - **Incoming version is lower or equal**: the incoming book is retired — its `model_hash` and `last_reconciled_at` are cleared and `superseded_at` is set (recording the fetched `version` for audit). Discovery returns `Superseded` and the book no longer enters the visible or metric sets.
 
-Both retire branches clear `model_hash` and `last_reconciled_at` symmetrically, so a superseded row can never hold a slot or appear API-visible. The `superseded_at IS NULL` guard on the Queue A SELECT and on the stamp UPDATE keeps this invariant stable across ticks — a retired row drops out of discovery immediately and can never be stamped back in. Superseded books are excluded from `indexer_inference_markets{state=discovering|visible|failing}` buckets (all three gates on `last_reconciled_at`, which stays NULL for a superseded row).
+Both retire branches clear `model_hash` and `last_reconciled_at` symmetrically, so a superseded row can never hold a slot or appear API-visible. The `superseded_at IS NULL` guard on the Queue A SELECT and on the stamp UPDATE keeps this invariant stable across ticks — a retired row drops out of discovery immediately and can never be stamped back in.
+
+Superseded books are excluded from all three `indexer_inference_markets{state=discovering|visible|failing}` buckets. Each `count(*) filter` in `inference_market_state_counts` carries an explicit `AND superseded_at IS NULL` guard so a superseded row contributes to none of the buckets — even one that also has `last_reconcile_failed_at` set from a prior discovery attempt before it was retired.
 
 **Provisional sweep-cancel**
 
@@ -327,7 +329,7 @@ When `getOrder(orderId)` confirms an order is no longer in the book (zero amount
 
 **Refresh pass (Queue B)**
 
-For each already-reconciled book (`last_reconciled_at IS NOT NULL`) that is due for refresh:
+For each already-reconciled, non-superseded book (`last_reconciled_at IS NOT NULL AND superseded_at IS NULL`) that is due for refresh:
 
 1. If the price cadence is due (reference_price_at stale), re-fetches `getWeeklyMedianPrice()` → updates `reference_price` / `reference_price_at`. The `ERR_NO_LIQUIDITY` revert maps to NULL as on the discovery pass.
 2. Runs the phantom-cancel sweep under the same `at_head` + pending-events gates, over OPEN rows only (the sweep is a no-op if there are no open orders).
@@ -403,7 +405,7 @@ Both are in-process counts polled by the refresh loop, like `indexer_projection_
 | `indexer_inference_sweep_lag_seconds` | gauge | Age of the most stale `last_swept_at` across visible markets; order-book-depth staleness | `extract(epoch from now() - min(last_swept_at))` over visible rows |
 | `indexer_inference_orders{status=open\|filled\|cancelled}` | gauge | Resting inference orders by status; `open` is live order-book depth | `count(*) filter (…)` over `inference_orders` |
 
-These ride the same OTLP path and `REFRESH_INTERVAL` (15s) as the other gauges. `discovering` is a seeded skeleton not yet stamped visible; `visible` has `last_reconciled_at` set and is served by the API; `failing` is still invisible but the reconciler has recorded a failure (`last_reconcile_failed_at` set) — the bucket where an ABI-drift book or a never-deployed / wrong-dApp address surfaces instead of accruing `reconcile_attempts` silently. The two lag gauges read `now() - min(ts)` over visible markets (oldest timestamp = largest age) and report 0 when nothing is visible yet; a visible book always has both timestamps stamped because discovery refreshes the price and completes a sweep cycle before stamping visibility.
+These ride the same OTLP path and `REFRESH_INTERVAL` (15s) as the other gauges. `discovering` is a seeded skeleton not yet stamped visible; `visible` has `last_reconciled_at` set and is served by the API; `failing` is still invisible but the reconciler has recorded a failure (`last_reconcile_failed_at` set) — the bucket where an ABI-drift book or a never-deployed / wrong-dApp address surfaces instead of accruing `reconcile_attempts` silently. All three buckets exclude superseded rows (`superseded_at IS NOT NULL`): a retired book — even one that has a `last_reconcile_failed_at` stamp from a prior attempt — contributes to none of the counts. The two lag gauges read `now() - min(ts)` over visible markets (oldest timestamp = largest age) and report 0 when nothing is visible yet; a visible book always has both timestamps stamped because discovery refreshes the price and completes a sweep cycle before stamping visibility.
 
 ### Inference reconcile counter
 

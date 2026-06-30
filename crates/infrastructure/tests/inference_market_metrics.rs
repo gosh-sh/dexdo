@@ -145,3 +145,24 @@ async fn order_status_counts_reflect_inserted_rows() {
         .await
         .expect("cleanup");
 }
+
+#[tokio::test]
+async fn superseded_failed_row_excluded_from_failing_bucket() {
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let active = "inf_metrics_test.failing_active";
+    let superseded = "inf_metrics_test.failing_superseded";
+    sqlx::query("delete from inference_markets where orderbook_address = any($1)")
+        .bind(vec![active.to_string(), superseded.to_string()]).execute(&pool).await.unwrap();
+
+    let (_d0, _v0, f0) = repo.inference_market_state_counts().await.unwrap();
+    // Active failing row -> +1 to failing.
+    sqlx::query("insert into inference_markets (orderbook_address, last_reconcile_failed_at) values ($1, now())")
+        .bind(active).execute(&pool).await.unwrap();
+    // Superseded failed row -> must NOT count toward failing.
+    sqlx::query("insert into inference_markets (orderbook_address, last_reconcile_failed_at, superseded_at) values ($1, now(), now())")
+        .bind(superseded).execute(&pool).await.unwrap();
+
+    let (_d1, _v1, f1) = repo.inference_market_state_counts().await.unwrap();
+    assert_eq!(f1 - f0, 1, "only the non-superseded failing row increments the failing bucket");
+}
