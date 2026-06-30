@@ -422,8 +422,6 @@ Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
 
 ## `/api/v1/inference/markets`
 
-> 🚧 **TODO — not implemented.** The three inference endpoints below (`/inference/markets`, `/inference/market`, `/inference/depth`) and the `resolvesFrom` linkage are specified but **not yet built**. Forward-looking; safe to merge into `dev` as spec-only.
-
 Lists the tradable models — one entry per `InferenceOrderBook`. The public contract (fields, examples) is in [api-spec.md](../api-spec.md#inference-markets). Structurally this mirrors [`/api/v1/prediction/markets`](#apiv1predictionmarkets): a `serverTime` + cursor + array envelope built from indexed read-model rows, never from a contract call at request time. Source is [`inference_markets`](data-schema.md#inference_markets).
 
 ### Visibility filter
