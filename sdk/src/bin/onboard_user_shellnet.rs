@@ -126,6 +126,7 @@ enum NominalArg {
     N100,
     N1000,
     N10000,
+    N100000,
 }
 
 impl NominalArg {
@@ -134,7 +135,8 @@ impl NominalArg {
             "n100" | "100" => Ok(Self::N100),
             "n1000" | "1000" => Ok(Self::N1000),
             "n10000" | "10000" => Ok(Self::N10000),
-            other => Err(format!("unknown nominal `{other}` (use N100|N1000|N10000)")),
+            "n100000" | "100000" => Ok(Self::N100000),
+            other => Err(format!("unknown nominal `{other}` (use N100|N1000|N10000|N100000)")),
         }
     }
 
@@ -143,6 +145,7 @@ impl NominalArg {
             Self::N100 => 100,
             Self::N1000 => 1_000,
             Self::N10000 => 10_000,
+            Self::N100000 => 100_000,
         }
     }
 
@@ -155,6 +158,7 @@ impl NominalArg {
             Self::N100 => "N100",
             Self::N1000 => "N1000",
             Self::N10000 => "N10000",
+            Self::N100000 => "N100000",
         }
     }
 }
@@ -234,7 +238,7 @@ impl Args {
 
 fn usage() -> String {
     "usage: onboard_user_shellnet --multisig-address 0:<addr> --multisig-keys-file <path> \
-         [--nominal N100|N1000|N10000] [--token-type nackl|shell|usdc] \
+         [--nominal N100|N1000|N10000|N100000] [--token-type nackl|shell|usdc] \
          [--endpoint host] [--output path]\n\n  \
          --multisig-address    deployed multisig wallet address (required)\n  \
          --multisig-keys-file  JSON keypair from `tvm-cli genphrase --dump` (required)\n  \
