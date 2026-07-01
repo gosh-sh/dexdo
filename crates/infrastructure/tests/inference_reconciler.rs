@@ -280,6 +280,81 @@ async fn fill_params_writes_model_hash_and_constants() {
     assert_eq!((mh.as_deref(), fee, qt, pp), (Some("42"), Some(100), Some(2), Some(9)));
 }
 
+// `fill_params` also captures model identity from the `getModelName` getter. The
+// model `version` (3rd part) lands in `model_version`, NOT the `version` column —
+// that one holds the contract version (getVersion) for slot-supersede resolution.
+async fn identity_cols(
+    pool: &sqlx::PgPool,
+    ob: &str,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    sqlx::query_as(
+        "select model_ref, producer, model_name, model_version from inference_markets where orderbook_address=$1",
+    )
+    .bind(ob)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+// Each identity test gets a DISTINCT `model_hash` so they never contend for the
+// single non-superseded slot in the shared test DB (`inference_markets_model_hash_idx`).
+fn identity_getter(
+    model_hash_hex: &'static str,
+    model_name_value0: serde_json::Value,
+) -> std::sync::Arc<impl OrderBookGetter> {
+    std::sync::Arc::new(FnGetter(move |name: &str, _a: &Value| match name {
+        "getParams" => Ok(json!({ "modelHash": model_hash_hex, "platformFeeBps": "0x64" })),
+        "getModelName" => Ok(json!({ "value0": model_name_value0.clone() })),
+        _ => Ok(json!({})),
+    }))
+}
+
+#[tokio::test]
+async fn fill_params_captures_three_part_model_identity() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_identity_3part";
+    seed_market(&pool, ob, false).await;
+    let g = identity_getter("0xf0001", json!("qwen--qwen2.5-32b--instruct"));
+    InferenceReconciler::for_test_with_getter(pool.clone(), g)
+        .fill_params(ob, "boc")
+        .await
+        .unwrap();
+    let (mref, producer, mname, mver) = identity_cols(&pool, ob).await;
+    assert_eq!(mref.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
+    assert_eq!(producer.as_deref(), Some("qwen"));
+    assert_eq!(mname.as_deref(), Some("qwen2.5-32b"));
+    assert_eq!(mver.as_deref(), Some("instruct"));
+}
+
+#[tokio::test]
+async fn fill_params_non_three_part_name_keeps_only_ref() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_identity_freeform";
+    seed_market(&pool, ob, false).await;
+    let g = identity_getter("0xf0002", json!("freeform name"));
+    InferenceReconciler::for_test_with_getter(pool.clone(), g)
+        .fill_params(ob, "boc")
+        .await
+        .unwrap();
+    let (mref, producer, mname, mver) = identity_cols(&pool, ob).await;
+    assert_eq!(mref.as_deref(), Some("freeform name"));
+    assert!(producer.is_none() && mname.is_none() && mver.is_none());
+}
+
+#[tokio::test]
+async fn fill_params_empty_name_leaves_identity_null() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_identity_empty";
+    seed_market(&pool, ob, false).await;
+    let g = identity_getter("0xf0003", json!(""));
+    InferenceReconciler::for_test_with_getter(pool.clone(), g)
+        .fill_params(ob, "boc")
+        .await
+        .unwrap();
+    let (mref, producer, mname, mver) = identity_cols(&pool, ob).await;
+    assert!(mref.is_none() && producer.is_none() && mname.is_none() && mver.is_none());
+}
+
 #[tokio::test]
 async fn refresh_price_err_no_liquidity_is_null_success_writes() {
     let Some(pool) = setup().await else { return };

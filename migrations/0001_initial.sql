@@ -313,7 +313,15 @@ create table inference_markets (
     model_ref text,
     producer text,
     model_name text,
+    -- Contract version reported by the book's `getVersion` getter (e.g. 4.0.14).
+    -- Used by the reconciler's model-slot supersede resolution (parsed as semver).
+    -- NOT the model version — that is `model_version`.
     version text,
+    -- Parsed model version: the third part of a `producer--model--version`
+    -- `model_name`. Rendered as the API's `model.version`. Filled by the
+    -- inference reconciler from `getModelName()`; NULL when the name is empty or
+    -- not three-part.
+    model_version text,
     manifest_address text,
     root_model_address text,
     owner_pubkey numeric(78, 0),

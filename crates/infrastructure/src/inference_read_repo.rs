@@ -62,7 +62,7 @@ struct InferenceDepthLevelRow {
 // by ORDER BY / keyset / cursor — see the design doc §6.1 NULL handling.
 const INFERENCE_MARKET_COLUMNS: &str = r#"
     id, orderbook_address, model_hash::text as model_hash, model_ref, producer,
-    model_name, version, platform_fee_bps, price_precision, quantity_precision,
+    model_name, model_version as version, platform_fee_bps, price_precision, quantity_precision,
     tick_size, step_size, min_notional, reference_price::text as reference_price,
     coalesce(extract(epoch from created_at_chain)::bigint, 0) as created_at,
     coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) as created_at_micros

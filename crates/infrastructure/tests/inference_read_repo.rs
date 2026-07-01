@@ -66,7 +66,7 @@ async fn seed_market(
 ) {
     sqlx::query(
         r#"insert into inference_markets
-               (orderbook_address, model_hash, model_ref, producer, model_name, version,
+               (orderbook_address, model_hash, model_ref, producer, model_name, model_version,
                 platform_fee_bps, quote_token_type, price_precision, quantity_precision,
                 tick_size, step_size, min_notional, reference_price,
                 created_at_chain, last_reconciled_at)
@@ -104,6 +104,14 @@ async fn one_market_renders_fees_identity_and_refprice() {
         Some(1_700_000_000),
     )
     .await;
+    // The `version` column holds the CONTRACT version (getVersion, supersede); set
+    // it to a value distinct from the model version so the assertion below proves
+    // `model.version` renders from `model_version`, not from `version`.
+    sqlx::query("update inference_markets set version='4.0.14' where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let repo = PostgresReadModelRepository::new(pool.clone());
     let page = repo
@@ -115,6 +123,9 @@ async fn one_market_renders_fees_identity_and_refprice() {
     let m = &page.markets[0];
     assert_eq!(m.model.model_ref, "qwen--qwen2.5-32b--instruct");
     assert_eq!(m.model.producer.as_deref(), Some("qwen"));
+    assert_eq!(m.model.name.as_deref(), Some("qwen2.5-32b"));
+    // Model version, NOT the contract version "4.0.14" set above.
+    assert_eq!(m.model.version.as_deref(), Some("instruct"));
     assert_eq!(m.quote_asset, "SHELL");
     assert_eq!(m.taker_commission, "0.025"); // 250 bps
     assert_eq!(m.maker_commission, "-0.02"); // -REBATE_MAX_BPS

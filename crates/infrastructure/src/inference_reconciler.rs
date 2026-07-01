@@ -313,8 +313,15 @@ impl InferenceReconciler {
         let model_hash = uint_field_to_decimal(&params, "modelHash")?;
         let fee: i32 =
             uint_field_to_decimal(&params, "platformFeeBps")?.parse().context("platformFeeBps")?;
+        // Model identity: the book carries only `model_hash`; `getModelName` is the
+        // authoritative preimage. A getter FAILURE propagates (like getParams) so a
+        // transient error retries rather than wiping a known name. A successful call
+        // with no `value0` is an empty name → all-`None` identity (NOT an error).
+        let model_name =
+            self.call_getter(boc, "getModelName", &json!({})).context("getModelName")?;
+        let identity = parse_model_ref(model_name_str(&model_name));
         let version = self.fetch_version(boc)?;
-        self.claim_model_slot(ob, &model_hash, version.as_deref(), fee).await
+        self.claim_model_slot(ob, &model_hash, version.as_deref(), fee, &identity).await
     }
 
     pub async fn refresh_price(&self, ob: &str, boc: &str) -> anyhow::Result<()> {
@@ -358,6 +365,7 @@ impl InferenceReconciler {
         model_hash: &str,
         version: Option<&str>,
         fee: i32,
+        identity: &ModelIdentity,
     ) -> anyhow::Result<SlotClaim> {
         let mut tx = self.pool.begin().await.context("begin model-slot tx")?;
 
@@ -420,11 +428,17 @@ impl InferenceReconciler {
             }
         }
 
+        // `version` ($10) is the CONTRACT version (getVersion). The model identity
+        // from `getModelName` lands in the dedicated columns ($11..$14) — a flat SET
+        // (the getter is authoritative and stable; a re-reconcile rewrites the same
+        // value), so an empty/non-three-part name correctly NULLs producer/version.
         sqlx::query(
             r#"update inference_markets
                   set model_hash=$2::numeric, platform_fee_bps=$3, version=$10,
                       quote_token_type=$4, price_precision=$5, quantity_precision=$6,
-                      tick_size=$7, step_size=$8, min_notional=$9, updated_at=now()
+                      tick_size=$7, step_size=$8, min_notional=$9,
+                      model_ref=$11, producer=$12, model_name=$13, model_version=$14,
+                      updated_at=now()
                 where orderbook_address=$1"#,
         )
         .bind(ob)
@@ -437,6 +451,10 @@ impl InferenceReconciler {
         .bind(STEP_SIZE)
         .bind(MIN_NOTIONAL)
         .bind(version)
+        .bind(&identity.model_ref)
+        .bind(&identity.producer)
+        .bind(&identity.name)
+        .bind(&identity.version)
         .execute(&mut *tx)
         .await
         .context("write inference params")?;
@@ -817,6 +835,46 @@ fn version_from_getter(v: &serde_json::Value) -> Option<String> {
     v.get("value0").and_then(|x| x.as_str()).map(|s| s.to_owned())
 }
 
+/// String payload of the `getModelName` getter (`value0`); empty when absent or
+/// non-string, which [`parse_model_ref`] maps to an all-`None` identity.
+fn model_name_str(v: &serde_json::Value) -> &str {
+    v.get("value0").and_then(|x| x.as_str()).unwrap_or("")
+}
+
+/// Parsed components of the on-chain `modelName` (the `getModelName` getter).
+/// `model_ref` is the trimmed name verbatim; `producer`/`name`/`version` are set
+/// only on a clean `producer--model--version` (exactly three non-empty parts).
+/// An empty name yields all `None` — the read API then falls back to `model_hash`.
+/// Note: `version` here is the MODEL version (e.g. `instruct`), distinct from the
+/// contract version (`getVersion`) the slot-supersede logic parses as semver.
+#[derive(Debug, Default, Clone)]
+pub struct ModelIdentity {
+    pub model_ref: Option<String>,
+    pub producer: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+}
+
+/// Map the on-chain `modelName` to a [`ModelIdentity`]. See its doc for the rules.
+pub(crate) fn parse_model_ref(model_name: &str) -> ModelIdentity {
+    let trimmed = model_name.trim();
+    if trimmed.is_empty() {
+        return ModelIdentity::default();
+    }
+    let model_ref = Some(trimmed.to_string());
+    let parts: Vec<&str> = trimmed.split("--").collect();
+    if parts.len() == 3 && parts.iter().all(|p| !p.is_empty()) {
+        ModelIdentity {
+            model_ref,
+            producer: Some(parts[0].to_string()),
+            name: Some(parts[1].to_string()),
+            version: Some(parts[2].to_string()),
+        }
+    } else {
+        ModelIdentity { model_ref, ..Default::default() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,5 +894,41 @@ mod tests {
         let v = serde_json::json!({"value0": "4.0.14", "value1": "InferenceOrderBook"});
         assert_eq!(version_from_getter(&v).as_deref(), Some("4.0.14"));
         assert_eq!(version_from_getter(&serde_json::json!({})), None);
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::parse_model_ref;
+
+    #[test]
+    fn three_parts_fill_all() {
+        let id = parse_model_ref("qwen--qwen2.5-32b--instruct");
+        assert_eq!(id.model_ref.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
+        assert_eq!(id.producer.as_deref(), Some("qwen"));
+        assert_eq!(id.name.as_deref(), Some("qwen2.5-32b"));
+        assert_eq!(id.version.as_deref(), Some("instruct"));
+    }
+
+    #[test]
+    fn non_three_parts_keep_only_ref() {
+        let id = parse_model_ref("just-a-name");
+        assert_eq!(id.model_ref.as_deref(), Some("just-a-name"));
+        assert!(id.producer.is_none() && id.name.is_none() && id.version.is_none());
+
+        let id2 = parse_model_ref("a--b"); // 2 parts
+        assert_eq!(id2.model_ref.as_deref(), Some("a--b"));
+        assert!(id2.producer.is_none());
+    }
+
+    #[test]
+    fn empty_yields_all_none() {
+        let id = parse_model_ref("   ");
+        assert!(
+            id.model_ref.is_none()
+                && id.producer.is_none()
+                && id.name.is_none()
+                && id.version.is_none()
+        );
     }
 }
