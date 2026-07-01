@@ -53,7 +53,7 @@ import "./interfaces.sol";
 ///         4c.`reclaimOnTimeout()` — seller no-show after `STREAM_TIMEOUT`.
 ///         5. `withdrawShell`/`destroy` — seller pulls finalized SHELL (§3.5).
 contract TokenContract is AiRegistryModifiers {
-    string constant version = "4.0.15";
+    string constant version = "4.0.16";
 
     // Canonical AI SuperRoot account id (workchain 0) — same anchor IOB/PN pin. Used ONLY as the
     // fixed sink for `cleanupUnopened`'s residual-native sweep (so a permissionless caller cannot

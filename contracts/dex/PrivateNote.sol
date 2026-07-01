@@ -27,16 +27,16 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.15";
+    string constant version = "4.0.16";
 
     /// @notice Canonical-deal derivation pins (#58 note-funded model). `fundDeployShell` /
     ///         `postProbeCommission` send SHELL ONLY to the seller's canonical RootModel / per-deal
     ///         TokenContract — DERIVED here from this note's own key (+nonce), never a caller-supplied
     ///         address (same guard the IOB enforces in placeSellOffer, review #39). Re-pin whenever
     ///         TokenContract/RootModel is rebuilt or the SuperRoot is redeployed.
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x1963d8193473ffebaacb8c1fd69472d718bf61befa12b606ea18b18c97d641ae;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xddc8f81a2a5c3b86c6b7ae221e7df39aa36f23bb3ee8fd3c4746a34553ec78f4;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 11;
-    uint256 constant ROOT_MODEL_CODE_HASH      = 0x132533863a1c5f5e9e491bd4c569bf5c210933332144f9fc88393839108d6e7d;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0x1974f43fb11d1ef35516ee8a0c858baf7bc429e929d863603d65f3e627018732;
     uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
     // Canonical AI SuperRoot account id (workchain 0) — anchor for the RootModel-address derivation.
     // LOCAL/MAINNET build: FIXED at the vanity 0:0c0c… (zerostate force-places the SuperRoot here).
@@ -496,6 +496,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
     {
         ensureBalance();
+        require(!_hasWithdrawn, ERR_INVALID_STATE);
         TvmCell stateInit = DexLib.buildInferenceOrderBookStateInit(_inferenceOrderBookCode, modelHash);
         // The book's ctor verifies the deployer is a genuine note (NOTE_CODE_HASH + depositHash)
         // AND that `sha256(modelName) == modelHash` — so the on-chain model name is the genuine
@@ -536,6 +537,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // seller posts fee-free (§2.1, no no-show penalty). Owner = this note
         // (the OB uses msg.sender for ownership/handover).
         ensureBalance();
+        require(!_hasWithdrawn, ERR_INVALID_STATE);
         // The CANONICAL-TokenContract check is enforced authoritatively in
         // `InferenceOrderBook.placeSellOffer` (review #39): the IOB derives the seller's REAL
         // RootModel from `sellerPubkey` (under the canonical SuperRoot) and then the bound TC
@@ -565,6 +567,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // maxPricePerTick, TIF = deadline (0 = GTC), flags = IOC/FOK/MARKET/POST_ONLY.
         // Owner/buyer = this note (OB uses msg.sender).
         ensureBalance();
+        require(!_hasWithdrawn, ERR_INVALID_STATE);
         mapping(uint32 => varuint32) ecc;
         ecc[CURRENCIES_ID_SHELL] = varuint32(escrow);
         // §3.1.1: forward this note's pubkey so the OB can record it in the deal
@@ -590,6 +593,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         bool    autoRenew
     ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
+        require(!_hasWithdrawn, ERR_INVALID_STATE);
         mapping(uint32 => varuint32) ecc;
         ecc[CURRENCIES_ID_SHELL] = varuint32(escrow);
         // §3.1.1: forward this note's pubkey (gateway auth, recorded in the deal).
@@ -1768,9 +1772,18 @@ contract PrivateNote is Modifiers, ReplayProtection {
         require(_pendingPlaceBuyLock == 0, ERR_NON_ZERO_BALANCE);
         require(_pendingBatchBuyLock == 0, ERR_NON_ZERO_BALANCE);
         require(_openOrderCount == 0, ERR_OPEN_ORDERS_EXIST);
+        // Drain the note's PHYSICAL ECC pool too. Inference SHELL (ECC[2]) is held
+        // on the note ACCOUNT, NOT in the RootPN-custodied `_balance` — so releasing
+        // `_balance` alone leaves live ECC[2] on a "withdrawn" note, which could still
+        // fund an inference buy. Attach that physical SHELL to this message; RootPN
+        // forwards it straight through to `destWalletAddr` (and returns it on the
+        // revert path). After this the note holds zero ECC[2] and is dead.
+        mapping(uint32 => varuint32) physCc;
+        uint128 physShell = uint128(address(this).currencies[CURRENCIES_ID_SHELL]);
+        if (physShell > 0) { physCc[CURRENCIES_ID_SHELL] = varuint32(physShell); }
         // Withdraw the ENTIRE balance — pass the full per-token-type map so
         // RootPN moves every currency the note holds in one transfer.
-        RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_balance, destWalletAddr, _depositIdentifierHash, dapp_id);
+        RootPN(ROOT_PN_ADDRESS).withdrawTokens{value: 0.1 vmshell, bounce: false, flag: 1, currencies: physCc, dest_dapp_id: ROOT_PN_DAPP_ID}(_balance, destWalletAddr, _depositIdentifierHash, dapp_id);
         delete _balance;
         _hasWithdrawn = true;
 	}

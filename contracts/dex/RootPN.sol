@@ -12,7 +12,7 @@ import "./libraries/DexLib.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.15";
+    string constant version = "4.0.16";
 
     /// @notice Stored code of PrivateNote contract
     TvmCell _privateNoteCode;
@@ -506,7 +506,10 @@ contract RootPN is Modifiers {
         // plain require would leave the PN's `_balance` permanently low.
         for ((uint32 tt, uint128 amt) : amounts) {
             if (amt > 0 && (address(this).currencies[tt] < amt || _deployedValues[tt] < amt)) {
-                PrivateNote(msg.sender).revertWithdraw{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
+                // Bounce the note's attached PHYSICAL currency (its inference SHELL pool,
+                // drained on withdraw) back to it along with the revert — it must not
+                // strand in RootPN when the custody withdraw is refused.
+                PrivateNote(msg.sender).revertWithdraw{value: 0.1 vmshell, flag: 1, currencies: msg.currencies, dest_dapp_id: ROOT_PN_DAPP_ID}(
                     amounts
                 );
                 return;
@@ -520,6 +523,12 @@ contract RootPN is Modifiers {
                 cc[tt] = varuint32(amt);
                 _deployedValues[tt] -= amt;
             }
+        }
+        // Pass through any PHYSICAL currency the note attached to this message (its
+        // inference SHELL pool, drained on withdraw) straight to the destination —
+        // it is NOT custodied bookkeeping, so no `_deployedValues` debit.
+        for ((uint32 tt, varuint32 amt) : msg.currencies) {
+            cc[tt] += amt;
         }
 
         // Transfer every currency at once — flag is intentionally hard-coded to 1.
