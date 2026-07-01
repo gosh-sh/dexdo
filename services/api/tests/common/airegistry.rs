@@ -68,7 +68,7 @@ const CREATION_SHELL: u64 = 200_000_000_000;
 /// `InferenceOrderBook` (`contracts/airegistry/InferenceOrderBook.sol`). A
 /// SuperRoot-code / RootModel rotation re-pins this; keep it in sync with the
 /// contract constant.
-const SUPER_ROOT_ADDR: &str = "0:36f863b22cf08df9d1d1e5669a603d282d4046077e00d234289b17343bd9eb71";
+const SUPER_ROOT_ADDR: &str = "0:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
 
 /// Immutable deal config passed to the `TokenContract` constructor.
 pub struct TokenDeal {
