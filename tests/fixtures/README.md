@@ -12,8 +12,10 @@ integration tests.
   secret keys for shellnet-only throwaway trading PNs, so it is never
   committed. `TestPnPool::load()` reads it from here (override the path
   with the `E2E_SEED_NOTES` env var). Provide it before an e2e run:
-  - **CI** fetches it from the `E2E_NOTES_URL` secret — see
-    [`.github/workflows/e2e-shellnet.yml`](../../.github/workflows/e2e-shellnet.yml).
+  - **CI** self-provisions it: the
+    [`e2e (shellnet)`](../../.github/workflows/e2e-shellnet.yml) workflow mints a
+    fresh throwaway note per run with `mint_pn_pool` and drains it to a random
+    address in a teardown step (no hosted note, no secret).
   - **Locally**, drop your own copy here. `mint_pn_pool` writes a
     `<output>.seed_notes.json` sidecar in exactly this format (run it with an
     `https://` endpoint, else its shellnet calls time out) — use that slice; see
@@ -104,9 +106,10 @@ test run and ages out on its own.
 
 Each deploy spends ~300 NACKL of collateral on the deployer-PN (2 × 100 NACKL
 initial stakes + 2 × 0.2 NACKL regular stakes + 100 NACKL split collateral).
-The notes in `seed_notes.json` must hold balances above that threshold; top
-them up via `mint_pn_pool` (`sdk/src/bin/mint_pn_pool.rs`) and refresh the S3
-copy when balances drop.
+The note in `seed_notes.json` must hold a balance above that threshold across
+the whole run. CI mints a fresh note per run (`mint_pn_pool`,
+`sdk/src/bin/mint_pn_pool.rs`); locally, top yours up the same way when it runs
+low.
 
 See the `SECURITY NOTE` block at the top of
 [`services/api/tests/e2e_order.rs`](../../services/api/tests/e2e_order.rs)

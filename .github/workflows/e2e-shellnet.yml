@@ -65,19 +65,24 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
-      # The notes file carries real PN secret keys, so it is never committed.
-      # CI fetches it from the URL in the E2E_NOTES_URL secret and drops it at
-      # the path TestPnPool::load() reads (tests/fixtures/seed_notes.json).
-      - name: Fetch e2e seed notes
-        env:
-          E2E_NOTES_URL: ${{ secrets.E2E_NOTES_URL }}
+      # Self-provision a fresh throwaway deployer note per run, minted from the
+      # public shellnet giver (`mint_pn_pool` → `<out>.seed_notes.json`, the exact
+      # format TestPnPool::load() reads). Replaces the old S3 fetch: the suite
+      # shares one note (TestPnPool::first()), and once a run drains + withdraws
+      # it (the hasWithdrawn latch) that note is dead for deployPMP
+      # (ERR_INVALID_STATE), so any long-lived hosted note goes stale. A fresh
+      # note per run sidesteps cross-run poisoning and needs no secret. NACKL
+      # because markets deploy in NACKL; the note also gets SHELL gas, which
+      # covers the inference escrow. It is drained in the teardown step below.
+      - name: Mint fresh e2e seed note
+        working-directory: sdk
         run: |
-          if [ -z "$E2E_NOTES_URL" ]; then
-            echo "E2E_NOTES_URL secret is not set — add the seed-notes URL." >&2
-            exit 1
-          fi
-          curl -fsSL "$E2E_NOTES_URL" -o tests/fixtures/seed_notes.json
-          test -s tests/fixtures/seed_notes.json
+          cargo run --release --bin mint_pn_pool -- \
+            --count 1 --nominal N10000 --token-type nackl \
+            --endpoint https://shellnet.ackinacki.org \
+            --output "$RUNNER_TEMP/pn_pool.json"
+          cp "$RUNNER_TEMP/pn_pool.seed_notes.json" "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
+          test -s "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
 
       # Single-threaded on purpose: the PN-per-slot pool removes the per-PN
       # `_busy` contention, but every deploy still hits the shellnet-global
@@ -89,3 +94,23 @@ jobs:
       # long for CI. Run it locally on demand: drop the `-E` filter.
       - name: cargo nextest run (e2e, single-threaded)
         run: cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast -E 'not binary(e2e_inference_dispute)'
+
+      # Teardown: drain the throwaway note to a random (uninit) address so the
+      # plaintext key surfaced in the mint step / fixture controls no funds after
+      # the run — and the note ends in the hasWithdrawn state, unusable. Runs even
+      # if the suite failed; best-effort (the next run mints a fresh note anyway),
+      # so a drain failure never fails the job.
+      - name: Drain e2e seed note (teardown)
+        if: always()
+        working-directory: sdk
+        run: |
+          seed="$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
+          [ -s "$seed" ] || { echo "no seed note to drain — skip"; exit 0; }
+          jq '{pn_address: .[0].pn_address, owner_public_key_hex: .[0].pn_pubkey_hex, owner_secret_key_hex: .[0].pn_seckey_hex}' \
+            "$seed" > "$RUNNER_TEMP/pn_state.json"
+          dest="0:$(openssl rand -hex 32)"
+          echo "draining seed note to random dest $dest"
+          cargo run --release --bin dexdo -- withdraw \
+            --pn-state-file "$RUNNER_TEMP/pn_state.json" \
+            --dest "$dest" \
+            --endpoint shellnet.ackinacki.org || echo "teardown withdraw failed (non-fatal)"

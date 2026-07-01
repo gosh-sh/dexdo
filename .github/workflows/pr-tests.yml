@@ -146,7 +146,8 @@ jobs:
 
   # Gated e2e: only after fmt/clippy, tests and openapi-drift are green.
   # Delegates to the reusable e2e-shellnet workflow (real shellnet,
-  # single-threaded). Needs the E2E_NOTES_URL secret.
+  # single-threaded). It self-provisions a fresh seed note per run
+  # (mint_pn_pool) and drains it in teardown — no secret needed.
   e2e:
     name: e2e (shellnet)
     needs: [fmt-clippy, tests, openapi-drift]

@@ -138,14 +138,24 @@ a pool per consumer) so they never contend on the same PN on-chain:
 | --- | --- | --- |
 | local API dev (`cargo run` + `seed_accounts: true`) | `config/seed_notes_list.json` | drop locally |
 | local e2e (`cargo nextest … --run-ignored only`) | `tests/fixtures/seed_notes.json` | drop locally |
-| CI e2e | S3, fetched via the `E2E_NOTES_URL` secret | upload the slice; CI `curl`s it into `tests/fixtures/seed_notes.json` |
+| CI e2e | `tests/fixtures/seed_notes.json` | **self-provisioned per run** — no upload |
 
 The e2e slice needs **at least one funded note** (the suite shares a single
 deployer-PN — see [tests/fixtures/README.md](../tests/fixtures/README.md)),
 funded to cover every test's ~300 NACKL market deploy across the whole run.
 The `.seed_notes.json` sidecar is already in the right format — take the slice
-and place/upload it; all three files are secret (real keys) and git-ignored /
-never committed.
+and place it; both local files are secret (real keys) and git-ignored / never
+committed.
+
+CI e2e no longer pulls a hosted note. The
+[`e2e (shellnet)`](../.github/workflows/e2e-shellnet.yml) workflow **mints a
+fresh throwaway note per run** with `mint_pn_pool` (`--count 1 --nominal N10000
+--token-type nackl`) from the public giver, then **drains it to a random address
+in a teardown step** so the plaintext key printed in the run controls no funds
+afterwards. This sidesteps cross-run poisoning: the shared deployer note is
+withdrawn (or drained) during a run, and a withdrawn note is permanently dead
+for `deployPMP` (`ERR_INVALID_STATE`), so a long-lived hosted note would go
+stale. There is no `E2E_NOTES_URL` secret anymore.
 
 ## Tests
 
