@@ -1,11 +1,12 @@
 # Rendered by Ansible (deploy/ansible/roles/dexdo). Do NOT edit on the host —
 # it is overwritten on the next deploy. Change the template instead.
 #
-# Build-based: images are built on the host from the checkout at
-# {{ dexdo_src_dir }} (ref {{ dexdo_version }}) via `docker compose up --build`.
-# Nothing is pulled from a registry.
+# Image-based: images are pulled from the registry (built by .woodpecker/build.yml),
+# pinned to {{ dexdo_registry }}/dexdo-{api,indexer}:{{ dexdo_image_tag }}.
+# Nothing is built on the host.
 {% if dexdo_db_local %}
-# dexdo_db_local=true: a bundled Postgres runs here, data on volume dodex_pgdata.
+# dexdo_db_local=true: a bundled throwaway Postgres runs here — tuned like
+# docker-compose.test.yml (ephemeral tmpfs storage, crash-safety off) for e2e.
 {% else %}
 # dexdo_db_local=false: no Postgres here — services connect to the external DB
 # at dexdo_db_host:dexdo_db_port.
@@ -18,21 +19,36 @@ services:
       POSTGRES_USER: "{{ dexdo_db_user }}"
       POSTGRES_PASSWORD: "{{ dexdo_db_password }}"
       POSTGRES_DB: "{{ dexdo_db_name }}"
-    volumes:
-      - dodex_pgdata:/var/lib/postgresql/data
+      # Throwaway test DB — skip fsync on initdb (see docker-compose.test.yml).
+      POSTGRES_INITDB_ARGS: "--no-sync"
+    command:
+      - postgres
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+{% if dexdo_db_publish_port %}
+    # Publish for an out-of-compose test runner. dexdo_db_bind_ip (empty -> all
+    # interfaces) pins the bind interface.
+    ports:
+      - "{% if dexdo_db_bind_ip %}{{ dexdo_db_bind_ip }}:{% endif %}{{ dexdo_db_publish_port }}:5432"
+{% endif %}
+    # Ephemeral storage — DB resets on container restart (throwaway test DB).
+    tmpfs:
+      - /var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U {{ dexdo_db_user }} -d {{ dexdo_db_name }}"]
-      interval: 5s
+      interval: 2s
       timeout: 3s
-      retries: 20
-      start_period: 10s
+      retries: 30
+      start_period: 5s
 
 {% endif %}
   api:
-    build:
-      context: {{ dexdo_src_dir }}
-      dockerfile: docker/api.Dockerfile
+    image: {{ dexdo_registry }}/dexdo-api:{{ dexdo_image_tag }}
 {% if dexdo_db_local %}
     depends_on:
       postgres:
@@ -56,9 +72,7 @@ services:
       start_period: 10s
 
   indexer:
-    build:
-      context: {{ dexdo_src_dir }}
-      dockerfile: docker/indexer.Dockerfile
+    image: {{ dexdo_registry }}/dexdo-indexer:{{ dexdo_image_tag }}
 {% if dexdo_db_local %}
     depends_on:
       postgres:
@@ -74,8 +88,3 @@ services:
       - ./config:/app/config:ro
       - ./logs/indexer:/app/logs
     restart: unless-stopped
-{% if dexdo_db_local %}
-
-volumes:
-  dodex_pgdata:
-{% endif %}

@@ -10,15 +10,6 @@
     - "{{ dexdo_deploy_dir }}/logs/api"
     - "{{ dexdo_deploy_dir }}/logs/indexer"
 
-# Images are built on the host, so the source (the docker build context) has to
-# be present. `force: true` discards local changes so a redeploy is clean.
-- name: Check out source at the target ref
-  ansible.builtin.git:
-    repo: "{{ dexdo_repo_url }}"
-    dest: "{{ dexdo_src_dir }}"
-    version: "{{ dexdo_version }}"
-    force: true
-
 - name: Render api config
   ansible.builtin.template:
     src: api.yaml.j2
@@ -48,12 +39,12 @@
     dest: "{{ dexdo_deploy_dir }}/compose.yml"
     mode: "0644"
 
-# Builds the images from the checkout and (re)creates containers. `--build`
-# rebuilds whenever the source changed; config-only changes are applied by the
+# Pulls the SHA-pinned images from the registry and (re)creates containers.
+# `--pull always` picks up a new tag; config-only changes are applied by the
 # "Restart dexdo stack" handler (bind-mounted YAML does not trigger a recreate).
-- name: Build images and start the stack
+- name: Pull images and start the stack
   ansible.builtin.command:
-    cmd: docker compose up -d --build --remove-orphans
+    cmd: docker compose up -d --pull always --remove-orphans
     chdir: "{{ dexdo_deploy_dir }}"
   register: dexdo_compose_up
-  changed_when: "'Started' in dexdo_compose_up.stderr or 'Recreated' in dexdo_compose_up.stderr or 'Created' in dexdo_compose_up.stderr or 'Built' in dexdo_compose_up.stderr"
+  changed_when: "'Started' in dexdo_compose_up.stderr or 'Recreated' in dexdo_compose_up.stderr or 'Created' in dexdo_compose_up.stderr or 'Pulled' in dexdo_compose_up.stderr"

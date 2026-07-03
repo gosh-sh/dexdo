@@ -1,0 +1,169 @@
+---
+# E2E: stand up an ephemeral acki-nacki network on the infra hosts, 
+# deploy dexdo against it, run the dexdo e2e
+# suite, then tear the network down.
+#
+# The e2e inventory (dexdo-infra.yaml) is cloned at runtime from the private
+# gosh-infrastructure repo; the acki-nacki ansible playbooks + zerostate
+# generator are cloned from the acki-nacki repo.
+#
+
+when:
+  - event: pull_request
+    branch: dev
+  - event: manual
+
+# Build the dexdo images first; the deploy step pulls them by SHA.
+depends_on:
+  - build
+
+variables:
+  - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
+  # Image carrying zerostate-helper / node-helper + the contract compiler, built
+  # from the latest commit on the poseidon_dex branch.
+  - &all_bin_image "docker.gosh.sh/ackinacki-all-bin:br_poseidon_dex"
+  - &acki_branch "deploy/poseidon_dex_ansible"
+  - &inventory_branch "feature/add-e2e-dexdo-inv"
+  # e2e inventory path INSIDE the cloned gosh-infrastructure repo (.inventory/).
+  # Adjust to match where dexdo-infra.yaml lives in that repo.
+  - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yaml"
+  # tvm-cli / tvm-debugger / sold versions downloaded for zerostate generation
+  # (same source as test_on_net.yaml's prepare_for_test).
+  - &tvm_cli_version "v3.0.2.an"
+  - &sold_version "gosh_0.79.3"
+
+steps:
+  acki_clone:
+    image: *ansible_image
+    environment:
+      GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
+      ACKI_REPO: { from_secret: acki_repo_url }
+      ACKI_BRANCH: *acki_branch
+    commands:
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+      - rm -rf .acki-nacki
+      - git clone --depth 1 --branch "$ACKI_BRANCH" "$ACKI_REPO" .acki-nacki
+      - rm -f ~/.netrc
+
+  inventory_clone:
+    image: *ansible_image
+    environment:
+      GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
+      INVENTORY_REPO: { from_secret: inventory_repo_url }
+      INVENTORY_BRANCH: *inventory_branch
+    commands:
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+      - rm -rf .inventory
+      - git clone --depth 1 --branch "$INVENTORY_BRANCH" "$INVENTORY_REPO" .inventory
+      - rm -f ~/.netrc
+
+  remember_ssh_key:
+    image: *ansible_image
+    environment:
+      SSH_NET_KEY: { from_secret: ssh_dodex_ci }
+    commands:
+      - mkdir -p ~/.ssh
+      - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+      - cp -ar ~/.ssh ./.ssh
+
+  copy_static_shell:
+    depends_on:
+      - acki_clone
+    image: busybox:musl
+    directory: .acki-nacki
+    commands:
+      - cp /bin/sh /bin/mkdir /bin/cp ./
+
+  copy_helpers:
+    depends_on:
+      - copy_static_shell
+    image: *all_bin_image
+    directory: .acki-nacki
+    entrypoint:
+      [ "./sh", "-c", "./mkdir -p .bin && ./cp /usr/local/bin/zerostate-helper /usr/local/bin/node-helper .bin/" ]
+
+  generate_zerostate:
+    depends_on:
+      - copy_helpers
+      - inventory_clone
+    image: *ansible_image
+    directory: .acki-nacki
+    environment:
+      VERSION: *tvm_cli_version
+      SOLD_VER: *sold_version
+      INV: *e2e_inventory
+    commands:
+      - rm -f sh mkdir cp
+      # Download tvm-cli, tvm-debugger and sold, extract into .downloaded/.
+      - mkdir -p .downloaded
+      - curl -s -L "https://github.com/tvmlabs/tvm-sdk/releases/download/$VERSION/tvm-cli-$${VERSION#v}-linux-musl-amd64.tar.gz" | tar xvz -C .downloaded
+      - curl -s -L "https://github.com/tvmlabs/tvm-sdk/releases/download/$VERSION/tvm-debugger-$${VERSION#v}-linux-musl-amd64.tar.gz" | tar xvz -C .downloaded
+      - curl -s -L "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xvz -C .downloaded
+      - cp .downloaded/tvm-cli .downloaded/tvm-debugger .downloaded/sold .bin/
+      - chmod 755 .bin/*
+      # Stage every tool + the prebuilt helpers where the build expects them.
+      - mkdir -p target/release contracts/compiler
+      - cp -a .bin/* target/release/
+      - cp -a .bin/* contracts/compiler/
+      - cp -a .bin/* /usr/local/bin/
+      - cd ansible && ansible-playbook -i "$CI_WORKSPACE/$INV" tests/mt-p1.yaml --tags prepare
+
+  # 4. Deploy the acki-nacki network on the infra hosts with the +8 inventory.
+  deploy_network:
+    depends_on:
+      - generate_zerostate
+      - remember_ssh_key
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    environment:
+      INV: *e2e_inventory
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml deploy-bm.yml deploy-caddy.yml deploy-bk-tls-proxy.yml deploy-bk.yml --skip-tags confirm
+
+  # 5. Deploy dexdo (api + indexer) pointed at the fresh network, using the same
+  #    e2e inventory (dexdo-infra.yaml).
+  deploy_dexdo:
+    depends_on:
+      - deploy_network
+    image: *ansible_image
+    directory: deploy/ansible
+    environment:
+      INV: *e2e_inventory
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      - >
+        ansible-playbook deploy-dexdo.yml
+        -i "$CI_WORKSPACE/$INV"
+        -e dexdo_image_tag=$CI_COMMIT_SHA
+
+  e2e_tests:
+    depends_on:
+      - deploy_dexdo
+    image: rustlang/rust:nightly-bookworm
+    environment:
+      E2E_NETWORK_ENDPOINT: { from_secret: e2e_network_endpoint }
+      TEST_DATABASE_URL: { from_secret: e2e_test_database_url }
+      # Match pr-tests: strip debuginfo — nightly + tvm-sdk has hit rust-lld bus errors.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    commands:
+      # Prebuilt cargo-nextest binary (fast; avoids a ~3 min `cargo install`).
+      - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
+      - cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast
+
+  # 7. Tear the network down (run even if earlier steps failed).
+  cleanup:
+    depends_on:
+      - e2e_tests
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    environment:
+      INV: *e2e_inventory
+    when:
+      - status: [ success, failure ]
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml --skip-tags confirm

@@ -1,20 +1,21 @@
 # Deploying DEX.DO with Ansible
 
 An Ansible role + playbook to deploy the `api` + `indexer` services to your own
-host. It checks the source out on the target host and builds the images there
-with `docker compose up --build` — nothing is pulled from a registry. For the
-manual / from-scratch Compose path and the meaning of every config field, see
+host. It renders the config + compose file and pulls the pre-built images from
+the registry — the host builds nothing. For the manual / from-scratch Compose
+path and the meaning of every config field, see
 [`docs/deployment.md`](../../docs/deployment.md).
 
 ## How it works
 
 ```
-deploy-dexdo.yml → role dexdo   on the host: git checkout <ref> → render config +
-                                compose → docker compose up --build
+deploy-dexdo.yml → role dexdo   on the host: render config + compose →
+                                docker compose up --pull always
 ```
 
-Ansible checks the requested ref out on the host and `docker compose --build`
-compiles the images from it, so the Rust + halo2 build runs **on the host**.
+Images are built and pushed separately (`dexdo-api` / `dexdo-indexer`), and the
+deploy pulls them by tag — so the host only needs Docker + registry access, not
+a source checkout or a compiler.
 
 ## Layout
 
@@ -29,11 +30,11 @@ inventories/
     hosts.yml                     host(s) + dexdo_env + per-env overrides
     group_vars/all/vault.yml      encrypted secrets for THIS env only
 roles/dexdo/
-  defaults/main.yml               non-secret vars (env, repo/version, endpoints, knobs) — override per env in inventory
-  tasks/main.yml                  dirs, git checkout, render templates, docker compose up --build
+  defaults/main.yml               non-secret vars (env, registry/image tag, endpoints, knobs) — override per env in inventory
+  tasks/main.yml                  dirs, render templates, docker compose up --pull always
   handlers/main.yml               restart stack on config change
   templates/                      env-agnostic — env name comes from {{ dexdo_env }}
-    compose.yml.j2                build-based compose (build context = the host checkout) -> <deploy_dir>/compose.yml
+    compose.yml.j2                image-based compose (pulls from registry) -> <deploy_dir>/compose.yml
     api.yaml.j2                   rendered to <deploy_dir>/config/api.<env>.yaml
     indexer.yaml.j2               rendered to <deploy_dir>/config/indexer.<env>.yaml
 ```
@@ -137,21 +138,21 @@ The indexer can export OTLP metrics. A rendered `.env` next to the compose file
    (`openssl rand -hex 32`), then
    `ansible-vault encrypt inventories/<env>/group_vars/all/vault.yml`. This vault
    is loaded only for `<env>`.
-3. **Non-secret vars** — review `roles/dexdo/defaults/main.yml`: `dexdo_repo_url`
-   (the checkout source) plus the Acki Nacki endpoints. Override any of these per
-   environment in that env's `hosts.yml`.
-4. **Host prerequisites** — Docker Engine + Compose plugin, `git`, and an SSH
-   user that can `sudo` and run `docker` (the playbook uses `become: true`). The
-   host also needs read access to `dexdo_repo_url` (a deploy key, or a token in
-   the URL for a private repo) since it clones and builds the source itself.
+3. **Non-secret vars** — review `roles/dexdo/defaults/main.yml`: `dexdo_registry`
+   (where the images are pulled from) plus the Acki Nacki endpoints. Override any
+   of these per environment in that env's `hosts.yml`.
+4. **Host prerequisites** — Docker Engine + Compose plugin and an SSH user that
+   can `sudo` and run `docker` (the playbook uses `become: true`). The host must
+   be authenticated to `dexdo_registry` (`docker login`, out of band) so it can
+   pull the images. No `git` or compiler needed — nothing is built on the host.
 
 ## Run
 
 From this directory:
 
 ```sh
-# deploy a specific git ref (default is `dev` if omitted)
-ansible-playbook deploy-dexdo.yml -i inventories/<env>/hosts.yml --ask-vault-pass -e dexdo_version=<branch|tag|sha>
+# deploy a specific image tag (default is `latest-dev` if omitted)
+ansible-playbook deploy-dexdo.yml -i inventories/<env>/hosts.yml --ask-vault-pass -e dexdo_image_tag=<tag|sha>
 
 # dry run
 ansible-playbook deploy-dexdo.yml -i inventories/<env>/hosts.yml --ask-vault-pass --check --diff
