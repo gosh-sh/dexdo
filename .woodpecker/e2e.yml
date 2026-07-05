@@ -26,11 +26,17 @@ variables:
   - &inventory_branch "feature/add-e2e-dexdo-inv"
   # e2e inventory path INSIDE the cloned gosh-infrastructure repo (.inventory/).
   # Adjust to match where dexdo-infra.yaml lives in that repo.
-  - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yaml"
+  - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
   # tvm-cli / tvm-debugger / sold versions downloaded for zerostate generation
   # (same source as test_on_net.yaml's prepare_for_test).
   - &tvm_cli_version "v3.0.2.an"
   - &sold_version "gosh_0.79.3"
+  # TLS cert/key filenames for the BM + BK proxies (downloaded by download_tls_cert
+  # into ansible/files/, consumed by deploy-caddy / deploy-bk-tls-proxy).
+  - &bm_cert_file "testbm.ackinacki.org.crt"
+  - &bm_key_file "testbm.ackinacki.org.key"
+  - &cert_file "testbk.ackinacki.org.crt"
+  - &key_file "testbk.ackinacki.org.key"
 
 steps:
   acki_clone:
@@ -108,11 +114,36 @@ steps:
       - cp -a .bin/* /usr/local/bin/
       - cd ansible && ansible-playbook -i "$CI_WORKSPACE/$INV" tests/mt-p1.yaml --tags prepare
 
+  download_tls_cert:
+    depends_on:
+      - generate_zerostate
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    environment:
+      # BM certs
+      BM_CERT_PATH: { from_secret: TESTBM_WC_SSL_CERT_PATH }
+      BM_KEY_PATH: { from_secret: TESTBM_WC_SSL_KEY_PATH }
+      BM_AUTH_TOKEN: { from_secret: TESTBM_WC_SSL_AUTH_TOKEN }
+      BM_CERT_FILE: *bm_cert_file
+      BM_KEY_FILE: *bm_key_file
+      # BK certs
+      CERT_PATH: { from_secret: TESTBK_WC_SSL_CERT_PATH }
+      KEY_PATH: { from_secret: TESTBK_WC_SSL_KEY_PATH }
+      AUTH_TOKEN: { from_secret: TESTBK_WC_SSL_AUTH_TOKEN }
+      CERT_FILE: *cert_file
+      KEY_FILE: *key_file
+    commands:
+      - 'curl -sS -H "Authorization: Bearer $BM_AUTH_TOKEN" "$BM_CERT_PATH" -o files/$BM_CERT_FILE'
+      - 'curl -sS -H "Authorization: Bearer $BM_AUTH_TOKEN" "$BM_KEY_PATH" -o files/$BM_KEY_FILE'
+      - 'curl -sS -H "Authorization: Bearer $AUTH_TOKEN" "$CERT_PATH" -o files/$CERT_FILE'
+      - 'curl -sS -H "Authorization: Bearer $AUTH_TOKEN" "$KEY_PATH" -o files/$KEY_FILE'
+
   # 4. Deploy the acki-nacki network on the infra hosts with the +8 inventory.
   deploy_network:
     depends_on:
       - generate_zerostate
       - remember_ssh_key
+      - download_tls_cert
     image: *ansible_image
     directory: .acki-nacki/ansible
     environment:
