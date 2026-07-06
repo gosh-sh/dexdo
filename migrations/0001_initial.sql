@@ -111,6 +111,15 @@ create table oracle_events (
     confirmed_pmp_address text,
     confirmed_at timestamptz,
     meta_reconciled_at timestamptz,
+    -- Numeric range event (OracleEventList.addRangeEvent): the InferenceOrderBook
+    -- whose weekly-median price resolves the outcome, and the strictly-increasing
+    -- numeric upper bounds (n bounds -> n+1 outcomes) as a JSON array of decimal
+    -- strings. Both NULL for plain (addEvent) events. Populated by the
+    -- RangeEventAdded projector, which carries both. The reverse lookup on
+    -- range_ob_address backs the `resolvesFrom` filter / block on
+    -- /api/v1/prediction/markets.
+    range_ob_address text,
+    range_bounds_jsonb jsonb,
     unique (eventlist_id, internal_id_in_eventlist)
 );
 
@@ -122,6 +131,9 @@ create index oracle_events_confirmed_pmp_idx
 create index oracle_events_pending_meta_idx
     on oracle_events (eventlist_id)
     where meta_reconciled_at is null;
+create index oracle_events_range_ob_idx
+    on oracle_events (range_ob_address)
+    where range_ob_address is not null;
 
 create table markets (
     id bigserial primary key,

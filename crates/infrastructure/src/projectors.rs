@@ -42,6 +42,9 @@ pub async fn project_event(
         "OracleEventList.EventConfirmed" => {
             apply_event_confirmed(tx, event, node).await.with_context(context)
         }
+        "OracleEventList.RangeEventAdded" => {
+            apply_range_event_added(tx, event, node).await.with_context(context)
+        }
         "PrivateNote.PMPDeployed" => {
             apply_pmp_deployed(tx, event, node).await.with_context(context)
         }
@@ -284,6 +287,85 @@ async fn apply_event_confirmed(
             pmp_address,
             msg_id = %node.msg_id,
             "EventConfirmed observed before EventAdded; deferring"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    }
+
+    Ok(ProjectionOutcome::Applied)
+}
+
+/// Record the inference-settlement linkage for a numeric range event registered
+/// via `OracleEventList.addRangeEvent`: the `InferenceOrderBook` whose
+/// weekly-median price resolves the outcome (`range_ob_address`) and its
+/// strictly-increasing numeric upper bounds (`range_bounds_jsonb`, decimal
+/// strings). Emitted alongside `EventAdded` with the same `eventId`, so the
+/// `oracle_events` row is normally already present; if not, defer until it is.
+/// This is the source for the `resolvesFrom` block / filter on
+/// `/api/v1/prediction/markets` (read-time join via `confirmed_pmp_address`).
+async fn apply_range_event_added(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let eventlist_address =
+        node.src.as_deref().context("RangeEventAdded: src missing on event message")?;
+    let event_id_hex = field_str(&event.value, "eventId")?;
+    let event_id_decimal = uint256_hex_to_decimal(event_id_hex)?;
+    let range_ob_address = field_str(&event.value, "ob")?;
+
+    // `bounds` is a `uint256[]` — detokenised to an array of hex strings.
+    // Store the API-facing shape: a JSON array of decimal strings.
+    let bounds_raw = event
+        .value
+        .get("bounds")
+        .and_then(Value::as_array)
+        .context("RangeEventAdded: `bounds` missing or not an array")?;
+    let mut bounds_decimal = Vec::with_capacity(bounds_raw.len());
+    for bound in bounds_raw {
+        let hex = bound.as_str().context("RangeEventAdded: `bounds` entry is not a string")?;
+        bounds_decimal.push(Value::String(uint256_hex_to_decimal(hex)?));
+    }
+    let bounds_json = Value::Array(bounds_decimal);
+
+    let parent: Option<(i64,)> =
+        sqlx::query_as("select id from oracle_event_lists where address = $1")
+            .bind(eventlist_address)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("lookup oracle_event_lists id by address")?;
+
+    let Some((eventlist_id,)) = parent else {
+        warn!(
+            eventlist_address,
+            msg_id = %node.msg_id,
+            "RangeEventAdded observed before parent OracleEventListDeployed; deferring"
+        );
+        return Ok(ProjectionOutcome::Deferred);
+    };
+
+    let updated = sqlx::query(
+        r#"update oracle_events
+              set range_ob_address = $1,
+                  range_bounds_jsonb = $2::jsonb,
+                  updated_at = now()
+            where eventlist_id = $3
+              and internal_id_in_eventlist = $4::numeric"#,
+    )
+    .bind(range_ob_address)
+    .bind(&bounds_json)
+    .bind(eventlist_id)
+    .bind(&event_id_decimal)
+    .execute(&mut **tx)
+    .await
+    .context("update oracle_events on RangeEventAdded")?
+    .rows_affected();
+
+    if updated == 0 {
+        warn!(
+            eventlist_address,
+            event_id = %event_id_decimal,
+            msg_id = %node.msg_id,
+            "RangeEventAdded observed before EventAdded; deferring"
         );
         return Ok(ProjectionOutcome::Deferred);
     }

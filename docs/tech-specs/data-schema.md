@@ -124,8 +124,8 @@ Index: `oracle_event_lists_oracle_id_idx` speeds up loading all EventList rows f
 
 The actual events inside each EventList. Two writers:
 
-- **Projector** writes `event_name`, `oracle_fee`, `deadline`, and the `confirmed_*` columns from the `EventAdded` and `EventConfirmed` events.
-- **OracleEventList reconciler** fills the metadata that lives only in getter state: `describe` and `trust_addr` from `_events`, plus — for numeric **range events** — `range_ob_address` and `range_bounds_jsonb` from `OracleEventList.getRangeData(eventId)`. The `EventAdded` event is identical for plain and range events and carries neither field, so the inference linkage is reconciler-sourced.
+- **Projector** writes `event_name`, `oracle_fee`, `deadline`, and the `confirmed_*` columns from the `EventAdded` and `EventConfirmed` events, and — for numeric **range events** — `range_ob_address` + `range_bounds_jsonb` from the `RangeEventAdded` event (which carries both).
+- **OracleEventList reconciler** fills the metadata that lives only in getter state: `describe` and `trust_addr` from `_events`.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -139,8 +139,8 @@ The actual events inside each EventList. Two writers:
 | `count` | `numeric(78,0)` | Reserved metadata field from `_events`. |
 | `trust_addr` | `text` | Reconciler-only field. Optional on chain — may stay NULL even after reconciliation. |
 | `outcome_names_jsonb` | `jsonb` default `'{}'::jsonb` | Outcome label map (`outcomeId → name`). |
-| `range_ob_address` | `text` (nullable) | For a numeric **range event**: the `InferenceOrderBook` whose weekly-median price resolves the outcome (`OracleEventList._rangeData[eventId].ob`, spec §6.2). NULL for plain events. Reconciler-only. The reverse lookup (markets resolving from a given inference book) backs the `resolvesFrom` filter on `/api/v1/prediction/markets`. |
-| `range_bounds_jsonb` | `jsonb` (nullable) | For a range event: the strictly-increasing numeric upper bounds (`n` bounds → `n+1` outcomes), as a JSON array of decimal strings. NULL for plain events. Reconciler-only. The human labels for those ranges are already in `outcome_names_jsonb`, so the API does not re-expose the raw bounds. |
+| `range_ob_address` | `text` (nullable) | For a numeric **range event**: the `InferenceOrderBook` whose weekly-median price resolves the outcome (`OracleEventList._rangeData[eventId].ob`, spec §6.2). NULL for plain events. Set by the `RangeEventAdded` projector. Indexed by `oracle_events_range_ob_idx`; the reverse lookup (markets resolving from a given inference book) backs the `resolvesFrom` filter on `/api/v1/prediction/markets`. |
+| `range_bounds_jsonb` | `jsonb` (nullable) | For a range event: the strictly-increasing numeric upper bounds (`n` bounds → `n+1` outcomes), as a JSON array of decimal strings. NULL for plain events. Set by the `RangeEventAdded` projector. The human labels for those ranges are already in `outcome_names_jsonb`, so the API does not re-expose the raw bounds. |
 | `is_deleted` | `boolean` default `false` | Soft-delete flag for events that disappear from the EventList. |
 | `last_seen_at` | `timestamptz` | Updated on every projector pass that touches the row. |
 | `confirmed_pmp_address` | `text` | Set by the `EventConfirmed` event. Links an event to the PMP that markets it. |
