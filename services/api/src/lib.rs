@@ -923,7 +923,9 @@ fn resolves_from_to_dto(r: dodex_domain::ResolvesFrom) -> ResolvesFromDto {
         inference_order_book_address: r.inference_order_book_address,
         model: r.model,
         metric: match r.metric {
-            dodex_domain::ResolvesFromMetric::WeeklyMedianPrice => "WEEKLY_MEDIAN_PRICE".to_string(),
+            dodex_domain::ResolvesFromMetric::WeeklyMedianPrice => {
+                "WEEKLY_MEDIAN_PRICE".to_string()
+            }
         },
     }
 }

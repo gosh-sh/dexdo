@@ -2270,7 +2270,12 @@ fn aggregate_oracle_events(
         // range event); capture it and the model joined from that same row. A
         // conflicting second range_ob_address across rows fails closed.
         if let Some(ob) = row.range_ob_address {
-            unify_optional(&mut block.range_ob_address, Some(ob), "range_ob_address", &row.pmp_address)?;
+            unify_optional(
+                &mut block.range_ob_address,
+                Some(ob),
+                "range_ob_address",
+                &row.pmp_address,
+            )?;
             block.range_model = row.range_model_ref.or(row.range_model_hash);
         }
         block.oracles.push(OracleEntry {

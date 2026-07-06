@@ -52,11 +52,27 @@ async fn seed(
     let pmp = format!("0:{tag}_pmp");
     let oracle = format!("0:{tag}_oracle");
     // Cascade-clean any residue.
-    sqlx::query("delete from markets where pmp_address = $1").bind(&pmp).execute(pool).await.unwrap();
-    sqlx::query("delete from oracle_events where confirmed_pmp_address = $1").bind(&pmp).execute(pool).await.unwrap();
-    sqlx::query("delete from oracles where address = $1").bind(&oracle).execute(pool).await.unwrap();
+    sqlx::query("delete from markets where pmp_address = $1")
+        .bind(&pmp)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from oracle_events where confirmed_pmp_address = $1")
+        .bind(&pmp)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from oracles where address = $1")
+        .bind(&oracle)
+        .execute(pool)
+        .await
+        .unwrap();
     if let Some(ob) = range_ob {
-        sqlx::query("delete from inference_markets where orderbook_address = $1").bind(ob).execute(pool).await.unwrap();
+        sqlx::query("delete from inference_markets where orderbook_address = $1")
+            .bind(ob)
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     let market_id: i64 = sqlx::query_scalar(
@@ -120,14 +136,12 @@ async fn seed(
     .expect("insert oracle_event");
 
     if let (Some(ob), model) = (range_ob, model_ref) {
-        sqlx::query(
-            "insert into inference_markets (orderbook_address, model_ref) values ($1, $2)",
-        )
-        .bind(ob)
-        .bind(model)
-        .execute(pool)
-        .await
-        .expect("insert inference_market");
+        sqlx::query("insert into inference_markets (orderbook_address, model_ref) values ($1, $2)")
+            .bind(ob)
+            .bind(model)
+            .execute(pool)
+            .await
+            .expect("insert inference_market");
     }
 }
 
@@ -169,7 +183,8 @@ async fn range_market_without_reconciled_inference_book_degrades_model_to_none()
     seed(&pool, "rf_degrade", Some(ob), None, 44).await;
 
     let market = one(&pool, "rf_degrade").await;
-    let rf = market.resolves_from.as_ref().expect("market is not hidden when inference book missing");
+    let rf =
+        market.resolves_from.as_ref().expect("market is not hidden when inference book missing");
     assert_eq!(rf.inference_order_book_address, ob);
     assert!(rf.model.is_none(), "model degrades to null when the inference book is unreconciled");
 }
