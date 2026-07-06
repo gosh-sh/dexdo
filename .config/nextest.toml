@@ -12,5 +12,16 @@
 filter = 'binary(reprojection)'
 test-group = 'serial-reprojection'
 
+# `inference_market_metrics` asserts whole-table aggregate DELTAS
+# (`inference_market_state_counts` before/after inserting rows). Those deltas
+# are corrupted when a sibling test in the same binary mutates
+# `inference_markets` between the two reads — under nextest's default
+# per-process parallelism the three tests race and `state_counts_and_staleness…`
+# fails. Pin the binary to one test at a time, matching `reprojection` above.
+[[profile.default.overrides]]
+filter = 'binary(inference_market_metrics)'
+test-group = 'serial-inference-metrics'
+
 [test-groups]
 serial-reprojection = { max-threads = 1 }
+serial-inference-metrics = { max-threads = 1 }
