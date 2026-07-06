@@ -33,8 +33,16 @@ dexdo_rust_log: info
 # when 8080 is already taken on the host (multiple services share it).
 dexdo_api_port: 8080
 # Seeding writes DB rows for pre-deployed PrivateNotes; off by default.
-# See docs/seed-private-notes.md before turning on.
+# See docs/seed-private-notes.md before turning on. When true, the api seeds one
+# account + api_key per note in the seed-notes file on first start (e2e uses this
+# to create the trading users whose PNs the zerostate deployed).
 dexdo_seed_accounts: false
+# Source seed-notes JSON to install as config/seed_notes_list.json when seeding is
+# on. seed_notes format: a JSON array of {pn_address, pn_pubkey_hex, pn_seckey_hex,
+# pn_dih_hex} (ignored tokenType/value allowed). Path on the Ansible controller /
+# CI workspace (absolute, or relative to the role's files/). Carries plaintext note
+# seckeys -> never commit it; provide it out of band (e2e: the zerostate notes).
+dexdo_seed_notes_src: ""
 
 # --- Database ---------------------------------------------------------------
 # Bundled-Postgres toggle:

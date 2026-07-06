@@ -3,7 +3,7 @@
 # deploy dexdo against it, run the dexdo e2e
 # suite, then tear the network down.
 #
-# The e2e inventory (dexdo-infra.yaml) is cloned at runtime from the private
+# The e2e inventory (dexdo-infra.yml) is cloned at runtime from the private
 # gosh-infrastructure repo; the acki-nacki ansible playbooks + zerostate
 # generator are cloned from the acki-nacki repo.
 #
@@ -25,12 +25,18 @@ variables:
   - &acki_branch "deploy/poseidon_dex_ansible"
   - &inventory_branch "feature/add-e2e-dexdo-inv"
   # e2e inventory path INSIDE the cloned gosh-infrastructure repo (.inventory/).
-  # Adjust to match where dexdo-infra.yaml lives in that repo.
+  # Adjust to match where dexdo-infra.yml lives in that repo.
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
   # tvm-cli / tvm-debugger / sold versions downloaded for zerostate generation
   # (same source as test_on_net.yaml's prepare_for_test).
   - &tvm_cli_version "v3.0.2.an"
   - &sold_version "gosh_0.79.3"
+  # Seed-notes file the zerostate generation writes (the 10 DEX test notes,
+  # deterministic keys via NOT_GENERATE_KEYS) — already in the seed_notes format the
+  # dexdo seeder reads. deploy_dexdo installs it as the api's config/seed_notes_list.json
+  # so the seeder creates 10 users (one account + private note each). Path is RELATIVE
+  # to the .acki-nacki checkout.
+  - &seed_notes_rel "config/dex_test_notes.keys.json"
   # TLS cert/key filenames for the BM + BK proxies (downloaded by download_tls_cert
   # into ansible/files/, consumed by deploy-caddy / deploy-bk-tls-proxy).
   - &bm_cert_file "testbm.ackinacki.org.crt"
@@ -153,7 +159,7 @@ steps:
       - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml deploy-bm.yml deploy-caddy.yml deploy-bk-tls-proxy.yml deploy-bk.yml --skip-tags confirm
 
   # 5. Deploy dexdo (api + indexer) pointed at the fresh network, using the same
-  #    e2e inventory (dexdo-infra.yaml).
+  #    e2e inventory (dexdo-infra.yml).
   deploy_dexdo:
     depends_on:
       - deploy_network
@@ -161,12 +167,17 @@ steps:
     directory: deploy/ansible
     environment:
       INV: *e2e_inventory
+      # Seed 10 trading users (one account + private note each) from the notes the
+      # zerostate deployed. SEED_NOTES_REL is resolved against the .acki-nacki checkout.
+      SEED_NOTES_REL: *seed_notes_rel
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
       - >
         ansible-playbook deploy-dexdo.yml
         -i "$CI_WORKSPACE/$INV"
         -e dexdo_image_tag=$CI_COMMIT_SHA
+        -e dexdo_seed_accounts=true
+        -e dexdo_seed_notes_src="$CI_WORKSPACE/.acki-nacki/$SEED_NOTES_REL"
 
   e2e_tests:
     depends_on:
@@ -175,12 +186,18 @@ steps:
     environment:
       E2E_NETWORK_ENDPOINT: { from_secret: e2e_network_endpoint }
       TEST_DATABASE_URL: { from_secret: e2e_test_database_url }
+      # Resolved into an absolute E2E_SEED_NOTES in commands (env-map values are not
+      # shell-expanded; TestPnPool::load reads the var directly, so it must be absolute).
+      SEED_NOTES_REL: *seed_notes_rel
       # Match pr-tests: strip debuginfo — nightly + tvm-sdk has hit rust-lld bus errors.
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
     commands:
+      # Same 10 notes the zerostate deployed + the api seeded — TestPnPool::load()
+      # reads them to sign on-chain as the deployer PN. Loop closes on one file.
+      - export E2E_SEED_NOTES="$CI_WORKSPACE/.acki-nacki/$SEED_NOTES_REL"
       # Prebuilt cargo-nextest binary (fast; avoids a ~3 min `cargo install`).
       - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
       - cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast

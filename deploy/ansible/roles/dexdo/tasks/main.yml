@@ -1,4 +1,14 @@
 ---
+- name: Fail early when seeding is on but no notes source is given
+  ansible.builtin.assert:
+    that:
+      - dexdo_seed_notes_src | length > 0
+    fail_msg: >-
+      dexdo_seed_accounts is true but dexdo_seed_notes_src is empty — point it at
+      the seed-notes JSON to install as config/seed_notes_list.json (one account +
+      private note per entry). See docs/seed-private-notes.md.
+  when: dexdo_seed_accounts | bool
+
 - name: Ensure deploy directories exist
   ansible.builtin.file:
     path: "{{ item }}"
@@ -24,6 +34,15 @@
     dest: "{{ dexdo_deploy_dir }}/config/indexer.{{ dexdo_env }}.yaml"
     mode: "0640"
   no_log: true   # rendered file holds the db password — keep it out of -v/--diff output
+  notify: Restart dexdo stack
+
+- name: Install seed-notes file (one account + private note per entry)
+  ansible.builtin.copy:
+    src: "{{ dexdo_seed_notes_src }}"
+    dest: "{{ dexdo_deploy_dir }}/config/seed_notes_list.json"
+    mode: "0640"
+  when: dexdo_seed_accounts | bool and dexdo_seed_notes_src | length > 0
+  no_log: true   # seed notes carry plaintext pn seckeys — keep out of -v/--diff output
   notify: Restart dexdo stack
 
 - name: Render .env (OTLP metrics for the indexer)
