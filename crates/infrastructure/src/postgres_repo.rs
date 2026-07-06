@@ -121,6 +121,12 @@ struct OracleEventJoinRow {
     oracle_name: Option<String>,
     oracle_address: Option<String>,
     oracle_fee: Option<String>,
+    /// Set only on a numeric range event's row — the settling InferenceOrderBook.
+    range_ob_address: Option<String>,
+    /// Model identity joined from `inference_markets` on `range_ob_address`.
+    /// Both NULL when the event is non-range or the inference book is unreconciled.
+    range_model_ref: Option<String>,
+    range_model_hash: Option<String>,
 }
 
 /// Aggregated oracle confirmation block for a single market. Built from
@@ -130,6 +136,11 @@ struct OracleEventBlock {
     event_name: Option<String>,
     event_description: Option<String>,
     oracles: Vec<OracleEntry>,
+    /// Present when the confirming event is a numeric range event.
+    range_ob_address: Option<String>,
+    /// Model ref (falling back to hash) for `range_ob_address`; `None` when the
+    /// inference book is not yet reconciled — the market is still served.
+    range_model: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2214,10 +2225,16 @@ impl PostgresReadModelRepository {
                       oe.describe                           as event_description,
                       o.name                                as oracle_name,
                       o.address                             as oracle_address,
-                      oe.oracle_fee::text                   as oracle_fee
+                      oe.oracle_fee::text                   as oracle_fee,
+                      oe.range_ob_address                   as range_ob_address,
+                      im.model_ref                          as range_model_ref,
+                      im.model_hash::text                   as range_model_hash
                  from oracle_events oe
                  left join oracle_event_lists oel on oel.id = oe.eventlist_id
                  left join oracles o on o.id = oel.oracle_id
+                 -- Ungated on last_reconciled_at: the model degrades to
+                 -- hash/null but the prediction market is never hidden.
+                 left join inference_markets im on im.orderbook_address = oe.range_ob_address
                 where oe.confirmed_pmp_address = any($1)
                 order by oe.confirmed_pmp_address, oe.confirmed_at nulls last, oe.id"#,
         )
@@ -2249,6 +2266,13 @@ fn aggregate_oracle_events(
             "description",
             &row.pmp_address,
         )?;
+        // The range linkage lives on exactly one of a market's event rows (the
+        // range event); capture it and the model joined from that same row. A
+        // conflicting second range_ob_address across rows fails closed.
+        if let Some(ob) = row.range_ob_address {
+            unify_optional(&mut block.range_ob_address, Some(ob), "range_ob_address", &row.pmp_address)?;
+            block.range_model = row.range_model_ref.or(row.range_model_hash);
+        }
         block.oracles.push(OracleEntry {
             name: row.oracle_name,
             address: row.oracle_address,
@@ -2451,6 +2475,18 @@ fn build_listing_query(listing: &MarketsListing) -> Result<(String, Vec<Param>),
             params.len()
         ));
     }
+    if let Some(range_ob) = &listing.filter.resolves_from {
+        // Keep only markets whose confirming event settles from this inference
+        // book. EXISTS keeps one-row-per-market; backed by
+        // `oracle_events_range_ob_idx`.
+        params.push(Param::Text(range_ob.clone()));
+        where_parts.push(format!(
+            "exists (select 1 from oracle_events oe \
+                      where oe.confirmed_pmp_address = m.pmp_address \
+                        and oe.range_ob_address = ${})",
+            params.len()
+        ));
+    }
     if let Some(closing_before) = listing.filter.closing_before {
         params.push(Param::BigInt(closing_before));
         where_parts.push(format!("m.result_end < ${}", params.len()));
@@ -2562,6 +2598,11 @@ fn assemble_market(
     // with a NULL timing column becomes `timings: null` after `build_timings`
     // returns `None`. Both shapes violate the API contract.
     validate_invariants(status, &timings, &terminal).map_err(|err| anyhow!(err))?;
+    let resolves_from = oracle_block.range_ob_address.map(|ob| dodex_domain::ResolvesFrom {
+        inference_order_book_address: ob,
+        model: oracle_block.range_model,
+        metric: dodex_domain::ResolvesFromMetric::WeeklyMedianPrice,
+    });
     let event = MarketEvent {
         event_id: numeric_to_hex(&row.event_id)?,
         event_name: oracle_block.event_name,
@@ -2584,6 +2625,7 @@ fn assemble_market(
         event,
         terminal,
         outcomes,
+        resolves_from,
     })
 }
 
@@ -3671,6 +3713,7 @@ mod tests {
                 quote_asset: Some("USDC".into()),
                 oracle_name: Some("Oracle".into()),
                 closing_before: Some(1_700_000_000),
+                resolves_from: None,
             },
             Some(encode_cursor(1_700_000_000, 7)),
         );

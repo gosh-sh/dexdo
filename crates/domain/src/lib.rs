@@ -167,6 +167,29 @@ pub struct Terminal {
     pub cancel_reason: Option<CancelReason>,
 }
 
+/// The model reference-price metric a numeric range market resolves against.
+/// Only `WEEKLY_MEDIAN_PRICE` exists on chain today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ResolvesFromMetric {
+    WeeklyMedianPrice,
+}
+
+/// Inference-settlement linkage for a numeric range (token-price) prediction
+/// market: the model order book whose weekly-median price decides the outcome.
+/// Present only on range markets (`oracle_events.range_ob_address` set via the
+/// `RangeEventAdded` projector); `None` on all other markets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvesFrom {
+    /// The settling `InferenceOrderBook` address (= `oracle_events.range_ob_address`).
+    pub inference_order_book_address: String,
+    /// The model ref (`producer--model--version`), falling back to the model
+    /// hash, then `None` when the inference book is not yet reconciled — the
+    /// market is not hidden on that account.
+    pub model: Option<String>,
+    pub metric: ResolvesFromMetric,
+}
+
 /// Maker fee rate, global on-chain (no per-market lookup).
 /// Negative = maker rebate funded from the taker fee.
 pub const MAKER_COMMISSION: &str = "-0.0003375";
@@ -204,6 +227,8 @@ pub struct Market {
     pub event: MarketEvent,
     pub terminal: Option<Terminal>,
     pub outcomes: Vec<Outcome>,
+    /// Inference-settlement linkage for numeric range markets; `None` otherwise.
+    pub resolves_from: Option<ResolvesFrom>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

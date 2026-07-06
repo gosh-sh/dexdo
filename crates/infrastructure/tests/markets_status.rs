@@ -128,6 +128,7 @@ async fn cancelled_without_reason_fails_closed_listing() {
             quote_asset: Some("USDC".into()),
             oracle_name: None,
             closing_before: None,
+            resolves_from: None,
         },
         sort: dodex_application::MarketsSort::CreatedAtDesc,
         cursor: None,

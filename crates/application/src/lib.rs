@@ -116,6 +116,10 @@ pub struct MarketsFilter {
     pub quote_asset: Option<String>,
     pub oracle_name: Option<String>,
     pub closing_before: Option<i64>,
+    /// Listing-only: keep only markets settled from this `InferenceOrderBook`
+    /// (matched against `oracle_events.range_ob_address` via the confirming
+    /// event). Backs `?resolvesFrom=`.
+    pub resolves_from: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3491,6 +3495,7 @@ mod tests {
             },
             terminal: None,
             outcomes: vec![test_outcome(symbol)],
+            resolves_from: None,
         }
     }
 

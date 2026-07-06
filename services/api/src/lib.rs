@@ -241,6 +241,22 @@ struct MarketDto {
     terminal: Option<TerminalDto>,
     /// Outcome-token descriptors.
     outcomes: Vec<OutcomeDto>,
+    /// Present only for markets settled from an inference model's reference
+    /// price (numeric range events); `null` otherwise.
+    resolves_from: Option<ResolvesFromDto>,
+}
+
+/// Inference-settlement linkage for a numeric range (token-price) market.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ResolvesFromDto {
+    /// The `InferenceOrderBook` whose weekly-median price settles the outcome.
+    inference_order_book_address: String,
+    /// Model ref (`producer--model--version`); `null` until the inference book
+    /// is reconciled (the market is not hidden on that account).
+    model: Option<String>,
+    /// Reference-price metric; currently always `WEEKLY_MEDIAN_PRICE`.
+    metric: String,
 }
 
 /// Market lifecycle timestamps, all unix seconds. The market's
@@ -791,6 +807,7 @@ const MAX_LIMIT: u16 = 200;
         ("status" = Option<Vec<dto::MarketStatus>>, Query, style = Form, explode = false, description = "Comma-separated MarketStatus filter."),
         ("quoteAsset" = Option<String>, Query, description = "Filter by quote asset symbol."),
         ("oracleName" = Option<String>, Query, description = "Filter by oracle name."),
+        ("resolvesFrom" = Option<String>, Query, description = "Return only markets settled from this inference model's order book (its inferenceOrderBookAddress)."),
         ("closingBefore" = Option<i64>, Query, description = "Return only markets with timings.resultEnd before this unix-seconds bound."),
         ("sort" = Option<dto::MarketsSort>, Query, description = "Sort order: resultStart (default, ascending) or createdAt (descending)."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor returned from a previous page."),
@@ -833,6 +850,7 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
     let status = non_empty_query(req, "status");
     let quote_asset = non_empty_query(req, "quoteAsset");
     let oracle_name = non_empty_query(req, "oracleName");
+    let resolves_from = non_empty_query(req, "resolvesFrom");
     let closing_before = optional_typed_query::<i64>(req, "closingBefore")?;
     let sort_param = non_empty_query(req, "sort");
     let cursor = non_empty_query(req, "cursor");
@@ -845,6 +863,7 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
         if status.is_some()
             || quote_asset.is_some()
             || oracle_name.is_some()
+            || resolves_from.is_some()
             || closing_before.is_some()
             || sort_param.is_some()
             || cursor.is_some()
@@ -872,7 +891,7 @@ fn build_markets_request(req: &mut Request, now: i64) -> Result<MarketsRequest, 
     let limit = limit_param.map(|v| v.clamp(1, MAX_LIMIT as i64) as u16).unwrap_or(DEFAULT_LIMIT);
 
     Ok(MarketsRequest::Listing(MarketsListing {
-        filter: MarketsFilter { statuses, quote_asset, oracle_name, closing_before },
+        filter: MarketsFilter { statuses, quote_asset, oracle_name, closing_before, resolves_from },
         sort,
         cursor,
         limit,
@@ -895,6 +914,17 @@ fn market_to_dto(market: Market, max_batch_size: u16) -> MarketDto {
         event: event_to_dto(market.event),
         terminal: market.terminal.map(terminal_to_dto),
         outcomes: market.outcomes.into_iter().map(|o| outcome_to_dto(o, max_batch_size)).collect(),
+        resolves_from: market.resolves_from.map(resolves_from_to_dto),
+    }
+}
+
+fn resolves_from_to_dto(r: dodex_domain::ResolvesFrom) -> ResolvesFromDto {
+    ResolvesFromDto {
+        inference_order_book_address: r.inference_order_book_address,
+        model: r.model,
+        metric: match r.metric {
+            dodex_domain::ResolvesFromMetric::WeeklyMedianPrice => "WEEKLY_MEDIAN_PRICE".to_string(),
+        },
     }
 }
 
@@ -2638,6 +2668,7 @@ mod dto_tests {
             },
             terminal: None,
             outcomes: vec![],
+            resolves_from: None,
         };
         let dto = market_to_dto(market, 10);
         let v = serde_json::to_value(&dto).unwrap();
@@ -2653,6 +2684,49 @@ mod dto_tests {
         assert!(pos("tokenType") < pos("makerCommission"));
         assert!(pos("makerCommission") < pos("takerCommission"));
         assert!(pos("takerCommission") < pos("createdAt"));
+        // Non-range market: resolvesFrom serialises as JSON null.
+        assert!(v["resolvesFrom"].is_null());
+    }
+
+    #[test]
+    fn market_to_dto_serializes_resolves_from_block() {
+        use dodex_domain::Market;
+        use dodex_domain::MarketAddress;
+        use dodex_domain::MarketEvent;
+        use dodex_domain::MarketName;
+        use dodex_domain::MarketStatus;
+        use dodex_domain::ResolvesFrom;
+        use dodex_domain::ResolvesFromMetric;
+        let market = Market {
+            market_address: MarketAddress("0:m".into()),
+            order_book_address: "0:ob".into(),
+            oracle_list_hash: "0xdead".into(),
+            market_name: MarketName("PM".into()),
+            status: MarketStatus::Trading,
+            quote_asset: "USDC".into(),
+            token_type: 1,
+            maker_commission: dodex_domain::MAKER_COMMISSION.to_string(),
+            taker_commission: dodex_domain::TAKER_COMMISSION.to_string(),
+            created_at: 0,
+            timings: None,
+            event: MarketEvent {
+                event_id: "0x0".into(),
+                event_name: None,
+                description: None,
+                oracles: vec![],
+            },
+            terminal: None,
+            outcomes: vec![],
+            resolves_from: Some(ResolvesFrom {
+                inference_order_book_address: "0:infbook".into(),
+                model: Some("qwen--qwen3--32b".into()),
+                metric: ResolvesFromMetric::WeeklyMedianPrice,
+            }),
+        };
+        let v = serde_json::to_value(market_to_dto(market, 10)).unwrap();
+        assert_eq!(v["resolvesFrom"]["inferenceOrderBookAddress"], "0:infbook");
+        assert_eq!(v["resolvesFrom"]["model"], "qwen--qwen3--32b");
+        assert_eq!(v["resolvesFrom"]["metric"], "WEEKLY_MEDIAN_PRICE");
     }
 
     #[test]
@@ -2693,6 +2767,7 @@ mod dto_tests {
                 step_size: "1".into(),
                 min_notional: "1".into(),
             }],
+            resolves_from: None,
         };
         // The cap is a backend-wide config value stamped onto every
         // outcome — 7 (≠ the default 10) proves the passed value reaches

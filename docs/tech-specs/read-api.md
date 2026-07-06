@@ -73,9 +73,7 @@ For each row in the page, the API:
 
 ### Inference-settled markets (`resolvesFrom`)
 
-> 🚧 **TODO — not implemented** (inference linkage). Until the inference market ships, no market is inference-settled: `resolvesFrom` is always `null` and `?resolvesFrom=` matches nothing.
-
-A prediction market whose outcome is decided by a model's reference price (a numeric **range event**, spec §6.2) carries a `resolvesFrom` block; all other markets carry `resolvesFrom: null`. A market is inference-settled when its confirming event — joined `markets.pmp_address = oracle_events.confirmed_pmp_address` — has [`oracle_events.range_ob_address`](data-schema.md#oracle_events) set (the bound `InferenceOrderBook`, filled by the OracleEventList reconciler from `getRangeData`, see [indexer.md](indexer.md#oracleeventlist-reconciler)).
+A prediction market whose outcome is decided by a model's reference price (a numeric **range event**, spec §6.2) carries a `resolvesFrom` block; all other markets carry `resolvesFrom: null`. A market is inference-settled when its confirming event — joined `markets.pmp_address = oracle_events.confirmed_pmp_address` — has [`oracle_events.range_ob_address`](data-schema.md#oracle_events) set (the bound `InferenceOrderBook`, filled by the `RangeEventAdded` projector, see [indexer.md](indexer.md#projectors)).
 
 - **`?resolvesFrom=<inferenceOrderBookAddress>`** filters the listing to markets settled from one inference book — backed by `oracle_events_range_ob_idx`. It composes with the other list filters (it is not a single-market selector, unlike `predictionMarketAddress`).
 - The `resolvesFrom` block is `{inferenceOrderBookAddress (= range_ob_address), model, metric: "WEEKLY_MEDIAN_PRICE"}`. `model` is joined from [`inference_markets`](data-schema.md#inference_markets) on that address and degrades to `null`/hash-only if the inference book is not yet reconciled — the prediction market is not hidden on that account.

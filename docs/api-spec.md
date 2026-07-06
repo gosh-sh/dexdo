@@ -513,8 +513,6 @@ Example for a non-terminal market (any of the six live statuses, including the t
 
 ##### resolvesFrom
 
-> 🚧 **TODO — not implemented** (inference linkage). Until the inference market ships, `resolvesFrom` is always `null` and the `?resolvesFrom=` filter matches nothing.
-
 Present only on a prediction market whose outcome is decided by a model's reference price (a numeric range event); `null` on all other markets. The numeric outcome ranges are the market's normal `outcomes`.
 
 ```json

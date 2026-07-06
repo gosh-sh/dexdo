@@ -426,6 +426,7 @@ fn trading_market() -> Market {
             oracles: vec![],
         },
         terminal: None,
+        resolves_from: None,
         outcomes: vec![Outcome {
             outcome_id: 1,
             outcome_name: "YES".into(),
