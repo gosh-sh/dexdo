@@ -621,6 +621,14 @@ paths:
           type:
           - string
           - 'null'
+      - name: resolvesFrom
+        in: query
+        description: Return only markets settled from this inference model's order book (its inferenceOrderBookAddress).
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
       - name: closingBefore
         in: query
         description: Return only markets with timings.resultEnd before this unix-seconds bound.
@@ -1464,6 +1472,10 @@ components:
         quoteAsset:
           type: string
           description: Quote-asset symbol for display.
+        resolvesFrom:
+          allOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ResolvesFromDto'
         status:
           $ref: '#/components/schemas/MarketStatus'
         takerCommission:
@@ -1877,6 +1889,26 @@ components:
         pnAddress:
           type: string
           description: Echo of the registered PrivateNote address.
+    ResolvesFromDto:
+      type: object
+      description: Inference-settlement linkage for a numeric range (token-price) market.
+      required:
+      - inferenceOrderBookAddress
+      - metric
+      properties:
+        inferenceOrderBookAddress:
+          type: string
+          description: The `InferenceOrderBook` whose weekly-median price settles the outcome.
+        metric:
+          type: string
+          description: Reference-price metric; currently always `WEEKLY_MEDIAN_PRICE`.
+        model:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Model ref (`producer--model--version`); `null` until the inference book
+            is reconciled (the market is not hidden on that account).
     TerminalDto:
       type: object
       description: |-
