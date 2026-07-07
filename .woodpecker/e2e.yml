@@ -156,7 +156,7 @@ steps:
       INV: *e2e_inventory
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
-      - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml deploy-bm.yml deploy-caddy.yml deploy-bk-tls-proxy.yml deploy-bk.yml --skip-tags confirm
+      - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml deploy-bm.yml deploy-caddy.yml deploy-bk-tls-proxy.yml deploy-bk.yml --skip-tags confirm,prune
 
   # 5. Deploy dexdo (api + indexer) pointed at the fresh network, using the same
   #    e2e inventory (dexdo-infra.yml).
@@ -217,4 +217,4 @@ steps:
       - status: [ success, failure ]
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
-      - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml --skip-tags confirm
+      - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml --skip-tags confirm,prune
