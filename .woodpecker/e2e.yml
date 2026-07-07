@@ -200,7 +200,10 @@ steps:
       - export E2E_SEED_NOTES="$CI_WORKSPACE/.acki-nacki/$SEED_NOTES_REL"
       # Prebuilt cargo-nextest binary (fast; avoids a ~3 min `cargo install`).
       - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
-      - cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast
+      # --profile ci-e2e adds a ~10 min per-test terminate so a stalled network
+      # can't hang the run forever. e2e_inference_dispute is window-gated (~15 min,
+      # exceeds the terminate) — excluded like the shellnet workflow does.
+      - cargo nextest run --profile ci-e2e -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast -E 'not binary(e2e_inference_dispute)'
 
   # 7. Tear the network down (run even if earlier steps failed).
   cleanup:
