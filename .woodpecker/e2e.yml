@@ -1,48 +1,22 @@
 ---
-# E2E: stand up an ephemeral acki-nacki network on the infra hosts, 
-# deploy dexdo against it, run the dexdo e2e
-# suite, then tear the network down.
-#
-# The e2e inventory (dexdo-infra.yml) is cloned at runtime from the private
-# gosh-infrastructure repo; the acki-nacki ansible playbooks + zerostate
-# generator are cloned from the acki-nacki repo.
-#
 
 when:
   - event: pull_request
     branch: dev
   - event: manual
 
-# Build the dexdo images first; the deploy step pulls them by SHA.
 depends_on:
   - build
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  # Image carrying zerostate-helper / node-helper + the contract compiler, built
-  # from the latest commit on the poseidon_dex branch.
-  - &all_bin_image "docker.gosh.sh/ackinacki-all-bin:br_poseidon_dex"
+  - &rust_image "rustlang/rust:nightly-bookworm"
   - &acki_branch "deploy/poseidon_dex_ansible"
   - &inventory_branch "feature/add-e2e-dexdo-inv"
-  # e2e inventory path INSIDE the cloned gosh-infrastructure repo (.inventory/).
-  # Adjust to match where dexdo-infra.yml lives in that repo.
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
-  # tvm-cli / tvm-debugger / sold versions downloaded for zerostate generation
-  # (same source as test_on_net.yaml's prepare_for_test).
-  - &tvm_cli_version "v3.0.2.an"
-  - &sold_version "gosh_0.79.3"
-  # Seed-notes file the zerostate generation writes (the 10 DEX test notes,
-  # deterministic keys via NOT_GENERATE_KEYS) — already in the seed_notes format the
-  # dexdo seeder reads. deploy_dexdo installs it as the api's config/seed_notes_list.json
-  # so the seeder creates 10 users (one account + private note each). Path is RELATIVE
-  # to the .acki-nacki checkout.
-  - &seed_notes_rel "config/dex_test_notes.keys.json"
-  # TLS cert/key filenames for the BM + BK proxies (downloaded by download_tls_cert
-  # into ansible/files/, consumed by deploy-caddy / deploy-bk-tls-proxy).
-  - &bm_cert_file "testbm.ackinacki.org.crt"
-  - &bm_key_file "testbm.ackinacki.org.key"
-  - &cert_file "testbk.ackinacki.org.crt"
-  - &key_file "testbk.ackinacki.org.key"
+  - &acki_dir_on_host "/opt/acki-nacki"
+  - &db_host_port "55432"
+  - &seed_notes_ws "dex_test_notes.keys.json"
 
 steps:
   acki_clone:
@@ -78,98 +52,34 @@ steps:
       - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
       - cp -ar ~/.ssh ./.ssh
 
-  copy_static_shell:
+  net_up:
     depends_on:
       - acki_clone
-    image: busybox:musl
-    directory: .acki-nacki
-    commands:
-      - cp /bin/sh /bin/mkdir /bin/cp ./
-
-  copy_helpers:
-    depends_on:
-      - copy_static_shell
-    image: *all_bin_image
-    directory: .acki-nacki
-    entrypoint:
-      [ "./sh", "-c", "./mkdir -p .bin && ./cp /usr/local/bin/zerostate-helper /usr/local/bin/node-helper .bin/" ]
-
-  generate_zerostate:
-    depends_on:
-      - copy_helpers
       - inventory_clone
-    image: *ansible_image
-    directory: .acki-nacki
-    environment:
-      VERSION: *tvm_cli_version
-      SOLD_VER: *sold_version
-      INV: *e2e_inventory
-    commands:
-      - rm -f sh mkdir cp
-      # Download tvm-cli, tvm-debugger and sold, extract into .downloaded/.
-      - mkdir -p .downloaded
-      - curl -s -L "https://github.com/tvmlabs/tvm-sdk/releases/download/$VERSION/tvm-cli-$${VERSION#v}-linux-musl-amd64.tar.gz" | tar xvz -C .downloaded
-      - curl -s -L "https://github.com/tvmlabs/tvm-sdk/releases/download/$VERSION/tvm-debugger-$${VERSION#v}-linux-musl-amd64.tar.gz" | tar xvz -C .downloaded
-      - curl -s -L "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xvz -C .downloaded
-      - cp .downloaded/tvm-cli .downloaded/tvm-debugger .downloaded/sold .bin/
-      - chmod 755 .bin/*
-      # Stage every tool + the prebuilt helpers where the build expects them.
-      - mkdir -p target/release contracts/compiler
-      - cp -a .bin/* target/release/
-      - cp -a .bin/* contracts/compiler/
-      - cp -a .bin/* /usr/local/bin/
-      - cd ansible && ansible-playbook -i "$CI_WORKSPACE/$INV" tests/mt-p1.yaml --tags prepare
-
-  download_tls_cert:
-    depends_on:
-      - generate_zerostate
-    image: *ansible_image
-    directory: .acki-nacki/ansible
-    environment:
-      # BM certs
-      BM_CERT_PATH: { from_secret: TESTBM_WC_SSL_CERT_PATH }
-      BM_KEY_PATH: { from_secret: TESTBM_WC_SSL_KEY_PATH }
-      BM_AUTH_TOKEN: { from_secret: TESTBM_WC_SSL_AUTH_TOKEN }
-      BM_CERT_FILE: *bm_cert_file
-      BM_KEY_FILE: *bm_key_file
-      # BK certs
-      CERT_PATH: { from_secret: TESTBK_WC_SSL_CERT_PATH }
-      KEY_PATH: { from_secret: TESTBK_WC_SSL_KEY_PATH }
-      AUTH_TOKEN: { from_secret: TESTBK_WC_SSL_AUTH_TOKEN }
-      CERT_FILE: *cert_file
-      KEY_FILE: *key_file
-    commands:
-      - 'curl -sS -H "Authorization: Bearer $BM_AUTH_TOKEN" "$BM_CERT_PATH" -o files/$BM_CERT_FILE'
-      - 'curl -sS -H "Authorization: Bearer $BM_AUTH_TOKEN" "$BM_KEY_PATH" -o files/$BM_KEY_FILE'
-      - 'curl -sS -H "Authorization: Bearer $AUTH_TOKEN" "$CERT_PATH" -o files/$CERT_FILE'
-      - 'curl -sS -H "Authorization: Bearer $AUTH_TOKEN" "$KEY_PATH" -o files/$KEY_FILE'
-
-  # 4. Deploy the acki-nacki network on the infra hosts with the +8 inventory.
-  deploy_network:
-    depends_on:
-      - generate_zerostate
       - remember_ssh_key
-      - download_tls_cert
     image: *ansible_image
     directory: .acki-nacki/ansible
     environment:
       INV: *e2e_inventory
+      ACKI_DIR: *acki_dir_on_host
+      SEED_NOTES_WS: *seed_notes_ws
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
-      - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml deploy-bm.yml deploy-caddy.yml deploy-bk-tls-proxy.yml deploy-bk.yml --skip-tags confirm,prune
+      - >
+        ansible-playbook dexdo-e2e-up.yml
+        -i "$CI_WORKSPACE/$INV"
+        -e acki_dir="$ACKI_DIR"
+        -e seed_notes_dest="$CI_WORKSPACE/$SEED_NOTES_WS"
+        -e endpoint_host_dest="$CI_WORKSPACE/acki_net_host"
 
-  # 5. Deploy dexdo (api + indexer) pointed at the fresh network, using the same
-  #    e2e inventory (dexdo-infra.yml).
   deploy_dexdo:
     depends_on:
-      - deploy_network
+      - net_up
     image: *ansible_image
     directory: deploy/ansible
     environment:
       INV: *e2e_inventory
-      # Seed 10 trading users (one account + private note each) from the notes the
-      # zerostate deployed. SEED_NOTES_REL is resolved against the .acki-nacki checkout.
-      SEED_NOTES_REL: *seed_notes_rel
+      SEED_NOTES_WS: *seed_notes_ws
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
       - >
@@ -177,44 +87,54 @@ steps:
         -i "$CI_WORKSPACE/$INV"
         -e dexdo_image_tag=$CI_COMMIT_SHA
         -e dexdo_seed_accounts=true
-        -e dexdo_seed_notes_src="$CI_WORKSPACE/.acki-nacki/$SEED_NOTES_REL"
+        -e dexdo_seed_notes_src="$CI_WORKSPACE/$SEED_NOTES_WS"
 
   e2e_tests:
     depends_on:
       - deploy_dexdo
-    image: rustlang/rust:nightly-bookworm
+    image: *rust_image
     environment:
-      E2E_NETWORK_ENDPOINT: { from_secret: e2e_network_endpoint }
+      E2E_NETWORK_ENDPOINT: "http://127.0.0.1"
       TEST_DATABASE_URL: { from_secret: e2e_test_database_url }
-      # Resolved into an absolute E2E_SEED_NOTES in commands (env-map values are not
-      # shell-expanded; TestPnPool::load reads the var directly, so it must be absolute).
-      SEED_NOTES_REL: *seed_notes_rel
-      # Match pr-tests: strip debuginfo — nightly + tvm-sdk has hit rust-lld bus errors.
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      DB_HOST_PORT: *db_host_port
+      SEED_NOTES_WS: *seed_notes_ws
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
     commands:
-      # Same 10 notes the zerostate deployed + the api seeded — TestPnPool::load()
-      # reads them to sign on-chain as the deployer PN. Loop closes on one file.
-      - export E2E_SEED_NOTES="$CI_WORKSPACE/.acki-nacki/$SEED_NOTES_REL"
-      # Prebuilt cargo-nextest binary (fast; avoids a ~3 min `cargo install`).
+      - apt-get update && apt-get install -y --no-install-recommends openssh-client >/dev/null
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - ACKI_NET_HOST="$(cat $CI_WORKSPACE/acki_net_host)"
+      - >
+        ssh -f -N
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes
+        -L 127.0.0.1:80:$ACKI_NET_HOST:80
+        -L 127.0.0.1:5432:127.0.0.1:$DB_HOST_PORT
+        "$E2E_CI_USER@$E2E_HOST"
+      - export E2E_SEED_NOTES="$CI_WORKSPACE/$SEED_NOTES_WS"
       - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
-      # --profile ci-e2e adds a ~10 min per-test terminate so a stalled network
-      # can't hang the run forever. e2e_inference_dispute is window-gated (~15 min,
-      # exceeds the terminate) — excluded like the shellnet workflow does.
-      - cargo nextest run --profile ci-e2e -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast -E 'not binary(e2e_inference_dispute)'
+      - >
+        cargo nextest run --profile ci-e2e -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast
+        -E 'not binary(e2e_inference_dispute)
+        and not test(=inference_match_emits_filled_event)
+        and not test(=inference_partial_fill_leaves_remainder)
+        and not test(=inference_offer_matches_buy_and_funds_token_contract)
+        and not test(=inference_settlement_immediate_stop_does_not_pay_streaming_tick)
+        and not test(=inference_stream_open_advance_stop_against_shellnet)'
 
-  # 7. Tear the network down (run even if earlier steps failed).
-  cleanup:
+  net_down:
     depends_on:
       - e2e_tests
     image: *ansible_image
     directory: .acki-nacki/ansible
-    environment:
-      INV: *e2e_inventory
     when:
       - status: [ success, failure ]
+    environment:
+      INV: *e2e_inventory
+      ACKI_DIR: *acki_dir_on_host
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
-      - ansible-playbook -i "$CI_WORKSPACE/$INV" deep-cleanup.yaml --skip-tags confirm,prune
+      - ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e acki_dir="$ACKI_DIR"

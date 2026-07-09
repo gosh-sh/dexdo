@@ -20,6 +20,15 @@ dexdo_image_tag: latest-dev
 
 # --- Host layout ------------------------------------------------------------
 dexdo_deploy_dir: /opt/dexdo
+# Run api + indexer with the host's network stack (network_mode: host) instead
+# of the compose bridge. Off by default. Turn on ONLY when the chain must be
+# reached over the host's 127.0.0.1 — e2e, where a co-located single-compose
+# acki-nacki network fronts on 127.0.0.1:80 and there is no private interface to
+# bind on. Then set dexdo_chain_gateway_endpoint / dexdo_graphql_endpoint to
+# http://127.0.0.1 and dexdo_db_host to 127.0.0.1 (postgres reached via its
+# published 127.0.0.1:dexdo_db_publish_port). The api port publish is dropped
+# (host net ignores port maps — the api listens on dexdo_api_port directly).
+dexdo_host_network: false
 
 # --- Acki Nacki endpoints (see docs/deployment.md Step 1) -------------------
 dexdo_graphql_endpoint: https://shellnet.ackinacki.org/graphql

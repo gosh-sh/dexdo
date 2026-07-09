@@ -49,6 +49,13 @@ services:
 {% endif %}
   api:
     image: {{ dexdo_registry }}/dexdo-api:{{ dexdo_image_tag }}
+{% if dexdo_host_network %}
+    # Host network stack (e2e): the api shares the host's loopback so it reaches
+    # a co-located acki-nacki network on 127.0.0.1 (nginx0 :80) and the bundled
+    # postgres via its published 127.0.0.1:{{ dexdo_db_publish_port }} port —
+    # used when there is no private host interface to bind the chain endpoint on.
+    network_mode: host
+{% endif %}
 {% if dexdo_db_local %}
     depends_on:
       postgres:
@@ -58,8 +65,10 @@ services:
       APP_CONFIG: /app/config/api.{{ dexdo_env }}.yaml
       RUST_LOG: "{{ dexdo_rust_log }}"
       LOG_DIR: /app/logs
+{% if not dexdo_host_network %}
     ports:
       - "{{ dexdo_api_port }}:{{ dexdo_api_port }}"
+{% endif %}
     volumes:
       - ./config:/app/config:ro
       - ./logs/api:/app/logs
@@ -73,6 +82,11 @@ services:
 
   indexer:
     image: {{ dexdo_registry }}/dexdo-indexer:{{ dexdo_image_tag }}
+{% if dexdo_host_network %}
+    # See api above — host loopback so the indexer reaches the co-located
+    # acki-nacki chain on 127.0.0.1 and postgres on 127.0.0.1:{{ dexdo_db_publish_port }}.
+    network_mode: host
+{% endif %}
 {% if dexdo_db_local %}
     depends_on:
       postgres:
