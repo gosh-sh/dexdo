@@ -10,13 +10,16 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  - &rust_image "rustlang/rust:nightly-bookworm"
   - &acki_branch "deploy/poseidon_dex_ansible"
+  - &allbin_image "docker.gosh.sh/ackinacki-all-bin:br_deploy_poseidon_dex_ansible"
+  - &busybox_image "busybox:musl"
+  - &tvm_cli_version "v3.0.2.an"
+  - &sold_version "gosh_0.79.3"
+  - &dex_test_notes_cnt "10"
   - &inventory_branch "feature/add-e2e-dexdo-inv"
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
   - &acki_dir_on_host "/opt/acki-nacki"
-  - &db_host_port "55432"
-  - &seed_notes_ws "dex_test_notes.keys.json"
+  - &seed_notes_ws ".acki-nacki/config/dex_test_notes.keys.json"
 
 steps:
   acki_clone:
@@ -30,6 +33,52 @@ steps:
       - rm -rf .acki-nacki
       - git clone --depth 1 --branch "$ACKI_BRANCH" "$ACKI_REPO" .acki-nacki
       - rm -f ~/.netrc
+
+  copy_static_shell:
+    depends_on:
+      - acki_clone
+    image: *busybox_image
+    directory: .acki-nacki
+    commands:
+      - cp /bin/sh /bin/mkdir /bin/cp ./
+
+  copy_helpers:
+    depends_on:
+      - copy_static_shell
+    image: *allbin_image
+    directory: .acki-nacki
+    entrypoint:
+      - ./sh
+      - -c
+      - ./mkdir -p .bin && ./cp /usr/local/bin/node-helper /usr/local/bin/zerostate-helper .bin/
+
+  gen_zerostate:
+    depends_on:
+      - copy_helpers
+    image: *ansible_image
+    directory: .acki-nacki
+    environment:
+      TVM_VER: *tvm_cli_version
+      SOLD_VER: *sold_version
+      DEX_TEST_NOTES_CNT: *dex_test_notes_cnt
+    commands:
+      - rm -f sh mkdir cp
+      - apt-get update -qq && apt-get install -yqq --no-install-recommends make curl ca-certificates >/dev/null
+      # prebuilt helpers -> where generate_zerostate.py looks (./target/release)
+      - mkdir -p target/release contracts/compiler
+      - cp .bin/node-helper .bin/zerostate-helper target/release/ && chmod +x target/release/*
+      # contract toolchain (tvm-cli/tvm-debugger/sold) -> contracts/compiler, which
+      # tests/helper/common.py resolves by default (COMPILER_DIR). Download the
+      # exact versions acki-nacki CI pins so glibc/ABI match this runner.
+      - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-cli-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
+      - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-debugger-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
+      - curl -sSL "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xz -C contracts/compiler
+      - chmod +x contracts/compiler/*
+      - export PATH="$CI_WORKSPACE/.acki-nacki/contracts/compiler:$PATH"
+      # = `make generate_zerostate` minus the cargo helper build (helpers staged above)
+      - make compile_contracts
+      - DEX_TEST_NOTES_CNT="$DEX_TEST_NOTES_CNT" python3 contracts/scripts/generate_zerostate.py
+      - test -f config/zerostate && test -f config/block_manager1_signing.keys.json && test -f docker/.env
 
   inventory_clone:
     image: *ansible_image
@@ -69,12 +118,12 @@ steps:
   net_up:
     depends_on:
       - prepare_host
+      - gen_zerostate
     image: *ansible_image
     directory: .acki-nacki/ansible
     environment:
       INV: *e2e_inventory
       ACKI_DIR: *acki_dir_on_host
-      SEED_NOTES_WS: *seed_notes_ws
       GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
       ACKI_REPO: { from_secret: acki_repo_url }
       ACKI_BRANCH: *acki_branch
@@ -84,7 +133,8 @@ steps:
         ansible-playbook dexdo-e2e-up.yml
         -i "$CI_WORKSPACE/$INV"
         -e acki_dir="$ACKI_DIR"
-        -e seed_notes_dest="$CI_WORKSPACE/$SEED_NOTES_WS"
+        -e config_src="$CI_WORKSPACE/.acki-nacki/config"
+        -e env_src="$CI_WORKSPACE/.acki-nacki/docker/.env"
         -e endpoint_host_dest="$CI_WORKSPACE/acki_net_host"
 
   deploy_dexdo:
