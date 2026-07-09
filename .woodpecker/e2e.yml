@@ -52,7 +52,7 @@ steps:
       - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
       - cp -ar ~/.ssh ./.ssh
 
-  net_up:
+  prepare_host:
     depends_on:
       - acki_clone
       - inventory_clone
@@ -61,8 +61,23 @@ steps:
     directory: .acki-nacki/ansible
     environment:
       INV: *e2e_inventory
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      - ansible-playbook install-rust-python.yaml -i "$CI_WORKSPACE/$INV"
+      - ansible-playbook dexdo-e2e-prepare.yml -i "$CI_WORKSPACE/$INV"
+
+  net_up:
+    depends_on:
+      - prepare_host
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    environment:
+      INV: *e2e_inventory
       ACKI_DIR: *acki_dir_on_host
       SEED_NOTES_WS: *seed_notes_ws
+      GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
+      ACKI_REPO: { from_secret: acki_repo_url }
+      ACKI_BRANCH: *acki_branch
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
       - >
@@ -137,4 +152,4 @@ steps:
       ACKI_DIR: *acki_dir_on_host
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
-      - ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e acki_dir="$ACKI_DIR"
+      - ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e acki_dir="$ACKI_DIR" -e full_cleanup=true
