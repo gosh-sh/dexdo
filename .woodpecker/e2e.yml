@@ -107,47 +107,51 @@ steps:
   e2e_tests:
     depends_on:
       - deploy_dexdo
-    image: *rust_image
+    image: *ansible_image
     environment:
-      E2E_NETWORK_ENDPOINT: "http://127.0.0.1"
-      TEST_DATABASE_URL: { from_secret: e2e_test_database_url }
       E2E_HOST: { from_secret: e2e_host }
       E2E_CI_USER: { from_secret: e2e_ci_user }
-      DB_HOST_PORT: *db_host_port
-      SEED_NOTES_WS: *seed_notes_ws
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-      CARGO_TERM_COLOR: always
+      TEST_DATABASE_URL: { from_secret: e2e_test_database_url }   # postgres://dodex:<pw>@127.0.0.1:55432/dodex_test
+      ACKI_DIR: *acki_dir_on_host
     commands:
-      - apt-get update && apt-get install -y --no-install-recommends openssh-client >/dev/null
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
-      - ACKI_NET_HOST="$(cat $CI_WORKSPACE/acki_net_host)"
       - >
-        ssh -f -N
-        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes
-        -L 127.0.0.1:80:$ACKI_NET_HOST:80
-        -L 127.0.0.1:5432:127.0.0.1:$DB_HOST_PORT
-        -L 127.0.0.1:11000:127.0.0.1:11000
-        -L 127.0.0.1:11001:127.0.0.1:11001
-        -L 127.0.0.1:11002:127.0.0.1:11002
-        -L 127.0.0.1:11003:127.0.0.1:11003
-        -L 127.0.0.1:11004:127.0.0.1:11004
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
         "$E2E_CI_USER@$E2E_HOST"
-      - export E2E_SEED_NOTES="$CI_WORKSPACE/$SEED_NOTES_WS"
-      - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_NETWORK_ENDPOINT='http://127.0.0.1'
+        E2E_SEED_NOTES='$ACKI_DIR/config/dex_test_notes.keys.json'
+        TEST_DATABASE_URL='$TEST_DATABASE_URL'
+        bash -s" < .acki-nacki/tests/dexdo/e2e-on-host.sh
+
+  dump_logs:
+    depends_on:
+      - e2e_tests
+    image: *ansible_image
+    when:
+      - status: [ failure ]
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
       - >
-        cargo nextest run --profile ci-e2e -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast
-        -E 'not binary(e2e_inference_dispute)
-        and not test(=inference_match_emits_filled_event)
-        and not test(=inference_partial_fill_leaves_remainder)
-        and not test(=inference_offer_matches_buy_and_funds_token_contract)
-        and not test(=inference_settlement_immediate_stop_does_not_pay_streaming_tick)
-        and not test(=inference_stream_open_advance_stop_against_shellnet)'
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$E2E_CI_USER@$E2E_HOST"
+        "set +e;
+        echo '===== block_manager (logs/bm0/bm.log, tail 200) =====';
+        tail -n 200 $ACKI_DIR/logs/bm0/bm.log 2>/dev/null;
+        echo '===== node0 (logs/node0/node.log, tail 200) =====';
+        tail -n 200 $ACKI_DIR/logs/node0/node.log 2>/dev/null;
+        echo '===== docker compose logs (node0 block_manager, tail 100) =====';
+        cd $ACKI_DIR && docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=100 node0 block_manager 2>/dev/null;
+        true"
 
   net_down:
     depends_on:
       - e2e_tests
+      - dump_logs
     image: *ansible_image
     directory: .acki-nacki/ansible
     when:
