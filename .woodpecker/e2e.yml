@@ -128,6 +128,11 @@ steps:
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes
         -L 127.0.0.1:80:$ACKI_NET_HOST:80
         -L 127.0.0.1:5432:127.0.0.1:$DB_HOST_PORT
+        -L 127.0.0.1:11000:127.0.0.1:11000
+        -L 127.0.0.1:11001:127.0.0.1:11001
+        -L 127.0.0.1:11002:127.0.0.1:11002
+        -L 127.0.0.1:11003:127.0.0.1:11003
+        -L 127.0.0.1:11004:127.0.0.1:11004
         "$E2E_CI_USER@$E2E_HOST"
       - export E2E_SEED_NOTES="$CI_WORKSPACE/$SEED_NOTES_WS"
       - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
