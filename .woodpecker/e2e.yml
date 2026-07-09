@@ -11,7 +11,7 @@ depends_on:
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
   - &acki_branch "deploy/poseidon_dex_ansible"
-  - &allbin_image "docker.gosh.sh/ackinacki-all-bin:br_deploy_poseidon_dex_ansible"
+  - &allbin_image "docker.gosh.sh/ackinacki-all-bin:br_poseidon_dex"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.2.an"
   - &sold_version "gosh_0.79.3"
