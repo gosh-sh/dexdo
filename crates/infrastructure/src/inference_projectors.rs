@@ -18,6 +18,20 @@ use crate::projectors::node_chain_order;
 use crate::projectors::uint_field_to_decimal;
 use crate::projectors::ProjectionOutcome;
 
+/// The zero address an ABI decodes for an unset `address` field.
+pub(crate) const ZERO_ADDRESS: &str =
+    "0:0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Map the chain's "absent" encodings onto SQL NULL: a BUY placement carries the zero
+/// address for `tokenContract`, and a resting SELL carries deadline 0.
+pub(crate) fn non_zero_address(raw: Option<&str>) -> Option<&str> {
+    raw.filter(|a| *a != ZERO_ADDRESS)
+}
+
+pub(crate) fn non_zero_uint(raw: Option<String>) -> Option<String> {
+    raw.filter(|v| v != "0")
+}
+
 pub async fn project_inference_event(
     tx: &mut Transaction<'_, Postgres>,
     event: &DecodedEvent,
@@ -83,17 +97,19 @@ async fn upsert_resting_order(
     ticks: &str,
     is_subscription: bool,
     note: Option<&str>,
+    token_contract: Option<&str>,
+    deadline: Option<&str>,
     chain_order: &str,
     chain_seconds: Option<f64>,
 ) -> anyhow::Result<()> {
     let res = sqlx::query(
         r#"insert into inference_orders
                (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining,
-                is_subscription, note_address, status, last_chain_order,
+                is_subscription, note_address, token_contract, deadline, status, last_chain_order,
                 chain_created_at, chain_updated_at, updated_at)
            values ($1, $2::numeric, $3, $4::numeric, $5::numeric, $5::numeric,
-                   $6, $7, 'OPEN', $8,
-                   to_timestamp($9::double precision), to_timestamp($9::double precision), now())
+                   $6, $7, $8, $9::numeric, 'OPEN', $10,
+                   to_timestamp($11::double precision), to_timestamp($11::double precision), now())
            on conflict (orderbook_address, order_id) do update
                set is_buy = excluded.is_buy,
                    price = excluded.price,
@@ -101,6 +117,10 @@ async fn upsert_resting_order(
                    amount_remaining = excluded.amount_remaining,
                    is_subscription = excluded.is_subscription,
                    note_address = excluded.note_address,
+                   -- NULL-preserving: a replayed SubscriptionPlaced carries no deadline,
+                   -- and neither may erase a value the reconciler recovered from chain.
+                   token_contract = coalesce(excluded.token_contract, inference_orders.token_contract),
+                   deadline = coalesce(excluded.deadline, inference_orders.deadline),
                    status = 'OPEN',
                    last_chain_order = greatest(inference_orders.last_chain_order, excluded.last_chain_order),
                    chain_created_at = coalesce(inference_orders.chain_created_at, excluded.chain_created_at),
@@ -110,7 +130,8 @@ async fn upsert_resting_order(
                  and inference_orders.amount_remaining = inference_orders.amount_initial"#,
     )
     .bind(ob).bind(order_id).bind(is_buy).bind(price).bind(ticks)
-    .bind(is_subscription).bind(note).bind(chain_order).bind(chain_seconds)
+    .bind(is_subscription).bind(note).bind(token_contract).bind(deadline)
+    .bind(chain_order).bind(chain_seconds)
     .execute(&mut **tx).await.context("upsert inference_orders resting")?;
 
     // rows_affected = 0 only when the conflict arm's WHERE rejected the update:
@@ -145,7 +166,19 @@ async fn apply_inference_order_placed(
         .context("OrderPlaced: missing isBuy")?;
     let price = uint_field_to_decimal(&event.value, "price")?;
     let ticks = uint_field_to_decimal(&event.value, "ticks")?;
-    let note = field_str(&event.value, "note").ok();
+    // `note` is mandatory in the ABI and the endpoint filters exactly on it; a NULL
+    // would hide the order from every `note=X` listing forever, since the sweep
+    // repairs only `token_contract` and `deadline`.
+    let note = Some(field_str(&event.value, "note")?);
+    // `tokenContract` and `deadline` are mandatory in the ABI too — a BUY carries the
+    // zero address and a resting SELL carries deadline 0, but neither field is ever
+    // absent. Decode strictly and normalize only a successfully decoded zero to NULL:
+    // `.ok()` would map ABI/decoder drift onto a NULL insert and still create the row,
+    // and nothing would ever repair it once it fills or is cancelled before a sweep.
+    let token_contract: Option<&str> =
+        non_zero_address(Some(field_str(&event.value, "tokenContract")?));
+    let deadline: Option<String> =
+        non_zero_uint(Some(uint_field_to_decimal(&event.value, "deadline")?));
     let chain_order = node_chain_order(node, "InferenceOrderPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     upsert_resting_order(
@@ -157,6 +190,8 @@ async fn apply_inference_order_placed(
         &ticks,
         false,
         note,
+        token_contract,
+        deadline.as_deref(),
         &chain_order,
         chain_seconds,
     )
@@ -173,9 +208,14 @@ async fn apply_inference_subscription_placed(
     let order_id = uint_field_to_decimal(&event.value, "orderId")?;
     let price = uint_field_to_decimal(&event.value, "maxPrice")?;
     let ticks = uint_field_to_decimal(&event.value, "ticks")?;
-    let note = field_str(&event.value, "buyerNote").ok();
+    // `buyerNote` is mandatory in the ABI and the endpoint filters exactly on it; a NULL
+    // would hide the subscription from every `note=X` listing forever.
+    let note = Some(field_str(&event.value, "buyerNote")?);
     let chain_order = node_chain_order(node, "InferenceSubscriptionPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    // InferenceSubscriptionPlaced carries no tokenContract (a subscription is a bid) and
+    // no deadline, though the chain stores one. The reconciler's getter probe is the only
+    // source for a subscription row's deadline.
     upsert_resting_order(
         tx,
         ob,
@@ -185,6 +225,8 @@ async fn apply_inference_subscription_placed(
         &ticks,
         true,
         note,
+        None,
+        None,
         &chain_order,
         chain_seconds,
     )
