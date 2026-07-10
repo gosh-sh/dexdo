@@ -148,9 +148,6 @@ fn query(ob: &str) -> InferenceOrdersQuery {
 
 trait QueryBuilderExt {
     fn token_contract(self, tc: &str) -> Self;
-    // No test in this file currently filters by note; kept for parity with the query's
-    // other filter dimensions and for tests added later.
-    #[allow(dead_code)]
     fn note(self, note: &str) -> Self;
     fn side(self, side: InferenceSide) -> Self;
     fn status(self, statuses: &[InferenceOrderStatus]) -> Self;
@@ -524,4 +521,201 @@ async fn unknown_book_is_invalid_market() {
     let repo = PostgresReadModelRepository::new(pool.clone());
     let err = repo.list_inference_orders(&query("0:nope")).await.unwrap_err();
     assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::InvalidMarketOrSymbol)));
+}
+
+#[tokio::test]
+async fn note_filter_scopes_to_its_own_orders_and_is_unaffected_by_the_tc_gate() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:note";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    seed_order(&pool, ob, 1, false, "OPEN", Some("0:tc-a")).await;
+    seed_order(&pool, ob, 2, false, "OPEN", Some("0:tc-b")).await;
+    sqlx::query("update inference_orders set note_address = '0:a' where orderbook_address=$1 and order_id=1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update inference_orders set note_address = '0:b' where orderbook_address=$1 and order_id=2")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A third live SELL with an unknown TokenContract closes the gate's `tc_unknown` arm for
+    // every `tokenContract` query against this book.
+    seed_order(&pool, ob, 3, false, "OPEN", None).await;
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    // Sanity: the tc gate really is closed on this book.
+    let err = repo
+        .list_inference_orders(&query(ob).token_contract("0:tc-a").status(&[Live]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
+
+    // A `note` query asks nothing about a TokenContract, so it is served regardless — and it
+    // returns exactly its note's order, not the whole book.
+    let page = repo.list_inference_orders(&query(ob).note("0:a")).await.unwrap();
+    assert_eq!(page.orders.iter().map(|o| o.order_id.as_str()).collect::<Vec<_>>(), ["1"]);
+
+    let page = repo.list_inference_orders(&query(ob).note("0:b")).await.unwrap();
+    assert_eq!(page.orders.iter().map(|o| o.order_id.as_str()).collect::<Vec<_>>(), ["2"]);
+}
+
+#[tokio::test]
+async fn pagination_crosses_union_branches_in_order_id_order_not_text_order() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:page-seam";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    // Four orders interleaved across four different (is_buy, status) UNION branches, with
+    // ids straddling the "9"/"10" digit boundary: a regression to comparing `order_id` as
+    // text rather than `numeric` would sort "10" and "11" before "8" and "9".
+    seed_order(&pool, ob, 8, false, "OPEN", Some("0:tc-8")).await; // SELL / OPEN
+    seed_order(&pool, ob, 9, true, "OPEN", None).await; // BUY / OPEN
+    seed_order(&pool, ob, 10, false, "FILLED", Some("0:tc-10")).await; // SELL / FILLED
+    seed_order(&pool, ob, 11, true, "CANCELLED", None).await; // BUY / CANCELLED
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let first = repo.list_inference_orders(&query(ob).limit(2)).await.unwrap();
+    assert_eq!(first.orders.iter().map(|o| o.order_id.as_str()).collect::<Vec<_>>(), ["11", "10"]);
+    assert_eq!(first.next_cursor.as_deref(), Some("10"));
+
+    let second = repo.list_inference_orders(&query(ob).limit(2).cursor("10")).await.unwrap();
+    assert_eq!(second.orders.iter().map(|o| o.order_id.as_str()).collect::<Vec<_>>(), ["9", "8"]);
+    assert!(second.next_cursor.is_none());
+}
+
+/// Back-date `indexer_cursors.updated_at` by `secs`, mirroring
+/// `gate_refuses_when_the_capture_cursor_is_stale_even_if_it_says_at_head`'s inline insert
+/// but parameterized on the interval so both sides of the `CAPTURE_FRESHNESS_SECS` (30s)
+/// boundary can be exercised from one helper.
+async fn seed_cursor_stale_by(pool: &PgPool, secs: i64) {
+    sqlx::query(
+        "insert into indexer_cursors (stream_name, cursor, at_head, updated_at) \
+         values ($1, 'c', true, now() - make_interval(secs => $2)) \
+         on conflict (stream_name) do update set at_head = true, updated_at = excluded.updated_at",
+    )
+    .bind(CAPTURE_STREAM)
+    .bind(secs as f64)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn gate_freshness_boundary_at_thirty_seconds() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    let ob = "0:gate-freshness";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    seed_order(&pool, ob, 1, false, "OPEN", Some("0:tc")).await;
+    let repo = PostgresReadModelRepository::new(pool.clone());
+
+    // 29s stale: inside CAPTURE_FRESHNESS_SECS (30s) — the capture-lag arm stays clear.
+    seed_cursor_stale_by(&pool, 29).await;
+    repo.list_inference_orders(&query(ob).token_contract("0:tc").status(&[Live])).await.unwrap();
+
+    // 31s stale: outside the window — the gate refuses.
+    seed_cursor_stale_by(&pool, 31).await;
+    let err = repo
+        .list_inference_orders(&query(ob).token_contract("0:tc").status(&[Live]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
+
+    seed_at_head(&pool).await; // leave the shared cursor row fresh for whatever test runs next
+}
+
+#[tokio::test]
+async fn gate_refuses_when_at_head_is_false_even_with_a_fresh_updated_at() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    let ob = "0:gate-not-head";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    seed_order(&pool, ob, 1, false, "OPEN", Some("0:tc")).await;
+
+    // A fresh poll that itself reports "more pages remain" — at_head=false — must not be
+    // mistaken for a healthy view: the third gate arm needs both a recent poll AND that
+    // poll having reached the head.
+    sqlx::query(
+        "insert into indexer_cursors (stream_name, cursor, at_head, updated_at) \
+         values ($1, 'c', false, now()) \
+         on conflict (stream_name) do update set at_head = false, updated_at = excluded.updated_at",
+    )
+    .bind(CAPTURE_STREAM)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo
+        .list_inference_orders(&query(ob).token_contract("0:tc").status(&[Live]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
+
+    seed_at_head(&pool).await; // leave the shared cursor row fresh for whatever test runs next
+}
+
+#[tokio::test]
+async fn gate_refuses_when_the_capture_cursor_row_is_missing() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    let ob = "0:gate-no-cursor";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    seed_order(&pool, ob, 1, false, "OPEN", Some("0:tc")).await;
+
+    // No row at all for CAPTURE_STREAM: the `coalesce(..., false)` in the gate's third arm
+    // reads an absent cursor the same as one that is behind the head.
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(CAPTURE_STREAM)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo
+        .list_inference_orders(&query(ob).token_contract("0:tc").status(&[Live]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
+
+    seed_at_head(&pool).await; // leave the shared cursor row fresh for whatever test runs next
+}
+
+#[tokio::test]
+async fn a_negative_amount_remaining_trips_the_scale_guard() {
+    let Some(pool) = test_pool().await else { return };
+    let _guard = CAPTURE_CURSOR_LOCK.lock().await;
+    seed_at_head(&pool).await;
+    let ob = "0:corrupt-scale";
+    purge(&pool, ob).await;
+    seed_reconciled_market(&pool, ob).await;
+    // `numeric(78,0)` carries no CHECK constraint, so a negative magnitude — unreachable
+    // through the write path — still inserts cleanly here. `scale_guarded` must reject it
+    // rather than hand `scale_uint_to_decimal` a value it cannot slice into a valid decimal.
+    sqlx::query(
+        r#"insert into inference_orders
+               (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining,
+                is_subscription, status, last_chain_order, token_contract,
+                chain_created_at, chain_updated_at)
+           values ($1, 1, false, 10, 5, -1, false, 'OPEN', 'co-1', '0:tc', now(), now())"#,
+    )
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .expect("numeric(78,0) has no CHECK, so a negative amount_remaining inserts cleanly");
+
+    let repo = PostgresReadModelRepository::new(pool.clone());
+    let err = repo.list_inference_orders(&query(ob)).await.unwrap_err();
+    assert!(matches!(err.downcast_ref::<DomainError>(), Some(DomainError::MarketInconsistent)));
 }
