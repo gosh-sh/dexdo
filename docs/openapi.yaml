@@ -270,6 +270,97 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
+  /api/v1/inference/orders:
+    get:
+      tags:
+      - inference-market-data
+      summary: List inference orders
+      description: |-
+        Unlike this file's other handlers, which use `non_empty_query` and treat a
+
+        present-but-blank value as absent, this endpoint uses `non_blank_query` and rejects one
+
+        with `-1102`. Deliberate: `tokenContract=` silently becoming "no TokenContract filter"
+
+        would return the whole book and read as a confident answer to a question nobody asked.
+      operationId: get_inference_orders
+      parameters:
+      - name: inferenceOrderBookAddress
+        in: query
+        description: The model's order-book address.
+        required: true
+        schema:
+          type: string
+      - name: tokenContract
+        in: query
+        description: Exact deal TokenContract. Mutually exclusive with `note`. Refused with -1500 (HTTP 503, retry) while the book has a live SELL whose TokenContract the indexer does not know.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: note
+        in: query
+        description: Exact owning PrivateNote address. Mutually exclusive with `tokenContract`.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: side
+        in: query
+        description: BUY or SELL.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: status
+        in: query
+        description: 'Comma-separated: LIVE, FILLED, CANCELLED. Default: all. LIVE means currently resting.'
+        required: false
+        schema:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/InferenceOrderStatus'
+        style: form
+        explode: false
+      - name: limit
+        in: query
+        description: Page size. Default 100, max 500; out-of-range values are rejected.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          maximum: 500.0
+          minimum: 1.0
+      - name: cursor
+        in: query
+        description: Keyset cursor from a previous call's nextCursor.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferenceOrdersResponse'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
   /api/v1/oracles:
     get:
       tags:
@@ -1406,6 +1497,99 @@ components:
           type:
           - string
           - 'null'
+    InferenceOrderDto:
+      type: object
+      required:
+      - orderId
+      - inferenceOrderBookAddress
+      - side
+      - price
+      - ticks
+      - ticksInitial
+      - status
+      properties:
+        createdAt:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Unix seconds, like every timestamp this API returns. `null` when the chain
+            timestamp was not recovered — the row is served regardless.
+        deadline:
+          type:
+          - string
+          - 'null'
+          description: |-
+            `null` means no deadline is known to the indexer — either the chain has none, or it
+            has one the read model has not recovered yet (subscriptions never publish theirs).
+        inferenceOrderBookAddress:
+          type: string
+        note:
+          type:
+          - string
+          - 'null'
+        orderId:
+          type: string
+        price:
+          type: string
+        side:
+          type: string
+        status:
+          type: string
+        ticks:
+          type: string
+        ticksInitial:
+          type: string
+        tokenContract:
+          type:
+          - string
+          - 'null'
+          description: |-
+            `null` on BUY orders and on rows whose TokenContract is not known to the indexer.
+            A query filtering on `tokenContract` is refused while any live SELL of the book is
+            in that state, so `null` here never hides a match.
+        updatedAt:
+          type:
+          - integer
+          - 'null'
+          format: int64
+    InferenceOrderStatus:
+      type: string
+      description: |-
+        Order statuses accepted by the `GET /api/v1/inference/orders` `status` filter.
+        `LIVE` means currently resting; see docs/api-spec.md §Inference Orders.
+      enum:
+      - LIVE
+      - FILLED
+      - CANCELLED
+    InferenceOrdersResponse:
+      type: object
+      required:
+      - serverTime
+      - lastUpdateId
+      - hasMore
+      - orders
+      properties:
+        hasMore:
+          type: boolean
+        lastUpdateId:
+          type: string
+          description: |-
+            `max(last_chain_order)` over the book. Covers chain-projected events only: the
+            reconciler mutates rows without advancing it, so two snapshots sharing a
+            `lastUpdateId` are not guaranteed identical.
+        nextCursor:
+          type:
+          - string
+          - 'null'
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/InferenceOrderDto'
+        serverTime:
+          type: integer
+          format: int64
     MarketBalancesResponse:
       type: object
       required:

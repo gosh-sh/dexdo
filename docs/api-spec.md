@@ -28,6 +28,7 @@
   - [Inference Market Data](#inference-market-data)
     - [Inference Markets](#inference-markets)
     - [Inference Depth](#inference-depth)
+    - [Inference Orders](#inference-orders)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
     - [Market Outcome Balances](#market-outcome-balances)
@@ -222,6 +223,7 @@ envelope field failed or why a credential was rejected.
 | Fetch recent prediction trades | `GET` | `/api/v1/prediction/trades` | `NONE` |
 | List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
 | Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
+| List inference orders | `GET` | `/api/v1/inference/orders` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
@@ -948,6 +950,103 @@ Errors:
 | Book data temporarily inconsistent | `-1500` | 503 |
 
 > **Prediction markets settled from a model price** are regular prediction markets, listed by [`/api/v1/prediction/markets`](#prediction-markets) — filter with `?resolvesFrom=<inferenceOrderBookAddress>` and read the per-market `resolvesFrom` block. See [Markets](#prediction-markets).
+
+### Inference Orders
+
+```http
+GET /api/v1/inference/orders
+```
+
+Orders resting in, or historic to, one model's book — the order-level counterpart to [`/api/v1/inference/depth`](#inference-depth), which shows only aggregated price levels.
+
+Unlike [Inference Markets](#inference-markets) and [Inference Depth](#inference-depth), which collapse a present-but-blank query parameter to "absent", this endpoint rejects one with `-1102`. A blank `tokenContract=` silently becoming "no filter" would return the whole book and read as a confident answer to a question nobody asked; the caller must omit the parameter, not send it empty.
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | YES | The model's order-book address from [`/api/v1/inference/markets`](#inference-markets). |
+| `tokenContract` | STRING | NO | Exact deal `TokenContract` address. Mutually exclusive with `note`. Refused with `-1500` (HTTP 503, retry) while the book holds a live SELL whose `TokenContract` the indexer does not know. |
+| `note` | STRING | NO | Exact owning PrivateNote address. Mutually exclusive with `tokenContract`. |
+| `side` | STRING | NO | `BUY` or `SELL`. |
+| `status` | STRING | NO | Comma-separated: `LIVE`, `FILLED`, `CANCELLED`. Tokens are trimmed and de-duplicated. Default: all statuses. `LIVE` means currently resting. |
+| `limit` | INT | NO | Page size. Default: `100`. Range: `[1, 500]`; out-of-range values are rejected, not clamped. |
+| `cursor` | STRING | NO | Keyset cursor: the decimal `orderId` of the last row on the previous page, taken verbatim from a previous call's `nextCursor`. |
+
+Response:
+
+```json
+{
+  "serverTime": 1710000000,
+  "lastUpdateId": "76a23086a006700000000000000000000000000000000000000000000000000000000000000000007",
+  "nextCursor": "918273645",
+  "hasMore": false,
+  "orders": [
+    {
+      "orderId": "918273645",
+      "inferenceOrderBookAddress": "0:ob-addr...",
+      "tokenContract": "0:tc-addr...",
+      "note": "0:note-addr...",
+      "side": "SELL",
+      "price": "1000",
+      "ticks": "40",
+      "ticksInitial": "120",
+      "deadline": "1710003600",
+      "status": "LIVE",
+      "createdAt": 1709999000,
+      "updatedAt": 1710000500
+    }
+  ]
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `serverTime` | LONG | Unix seconds, captured once for the request. |
+| `lastUpdateId` | STRING | Freshness token: `max(last_chain_order)` over the book, covering chain-projected events only. The reconciler mutates rows without advancing it, so two responses sharing the same `lastUpdateId` are not guaranteed identical — do not treat it as a change fingerprint. |
+| `nextCursor` | STRING \| null | Decimal `orderId` of the last row on this page. Pass back verbatim as `cursor` to fetch the next page. `null` when `hasMore` is `false`. |
+| `hasMore` | BOOLEAN | Whether more pages follow. |
+| `orders` | ARRAY | Orders matching the filter, newest-placed first. Empty when there are no matches. |
+| `orderId` | STRING | Chain-side order id, as a decimal string. |
+| `inferenceOrderBookAddress` | STRING | Echoes the request's `inferenceOrderBookAddress`. |
+| `tokenContract` | STRING \| null | `null` on BUY orders and on rows whose TokenContract is not known to the indexer. A query filtering on `tokenContract` is refused (see `-1500` below) while any live SELL of the book is in that state, so `null` here never hides a match. |
+| `note` | STRING \| null | Owning PrivateNote address. |
+| `side` | ENUM | `BUY` or `SELL`. |
+| `price` | DECIMAL | Price per tick, in `SHELL`. |
+| `ticks` | DECIMAL | The **resting remainder** — ticks still available at this order. Compare directly against a level in [`/api/v1/inference/depth`](#inference-depth), which uses the same name (`ticks`) for the same quantity. |
+| `ticksInitial` | DECIMAL | The size the order was placed with. On chain, `InferenceOrderPlaced.ticks` is this initial size — the same field name carries a different number in the chain event than it does in this response's `ticks`. |
+| `deadline` | STRING \| null | Unix seconds as a **decimal string**, reproducing the chain `uint64` verbatim (it can exceed both `i64` and JSON's exact-integer range). `null` means no deadline is known to the indexer — see the note below; it does not mean "no deadline". |
+| `status` | ENUM | `LIVE`, `FILLED`, or `CANCELLED`. See the notes below. |
+| `createdAt` | LONG \| null | Unix seconds. `null` when the chain timestamp was not recovered — the row is served regardless. |
+| `updatedAt` | LONG \| null | Unix seconds, same convention as `createdAt`. |
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` missing or blank | `-1102` | 400 |
+| `tokenContract`, `note`, `side`, `status`, or `cursor` present but blank | `-1102` | 400 |
+| `tokenContract` and `note` both supplied | `-1130` | 400 |
+| `side` present and not `BUY` / `SELL` | `-1130` | 400 |
+| `status` contains an unknown token | `-1130` | 400 |
+| `limit` present but not an integer | `-1130` | 400 |
+| `limit` outside `[1, 500]` | `-1102` | 400 |
+| `cursor` present but not all decimal digits, or oversized | `-1130` | 400 |
+| `inferenceOrderBookAddress` not found | `-1121` | 404 |
+| A `tokenContract` query scopes live SELLs while the book holds one whose TokenContract the indexer does not know | `-1500` | 503 |
+
+Notes:
+
+- `LIVE` means currently resting: placed, not cancelled, not fully filled. `InferenceOrderCancelled` moves an order to `CANCELLED`; a fill moves it to `FILLED` once no ticks remain, and a SELL leaves `LIVE` on its first fill because one SELL offer is one deal.
+- `status=LIVE` can transiently include an order that was placed but never rested — a `POST_ONLY` placement rejected for crossing, a failed `FOK`, or a partially matched BUY `MARKET`/`IOC` whose remainder was refunded on chain without an order-bearing event. The reconciler's probe clears these on its next sweep. The error runs in the safe direction: such a row reports its TokenContract as *in use*, never as free.
+- `lastUpdateId` orders chain progress only. The reconciler mutates rows without advancing it, so two responses sharing a `lastUpdateId` are not guaranteed identical.
+- A `tokenContract` query that scopes live SELLs returns `-1500` (HTTP 503) while the book holds a live SELL whose TokenContract the indexer does not know. Deliberate: an empty page would otherwise be indistinguishable from "not in use", and 503 tells the client to retry where 404 would tell it to stop.
+- `deadline: null` means the indexer knows of no deadline, and it conflates two chain states the client cannot separate. `placeBuyOrder` accepts `deadline == 0` ("no deadline"), and a resting SELL always has `deadline = 0`; but a subscription always holds one on chain and never publishes it, so its row is born `null` and gains a value only when the sweep probes it. Do not let `null` read as "no deadline". Likewise `createdAt` / `updatedAt` may be `null`.
+- `ticks` is the **resting remainder**; `ticksInitial` is the placed size. `InferenceOrderPlaced.ticks` on chain is the initial size, so the same field name carries different numbers in the event and in this response. The `ticks` name follows [`/api/v1/inference/depth`](#inference-depth), which already publishes `[pricePerTick, ticks]` for the ticks resting at a level — a client comparing an order against a depth level finds one name for one quantity.
+- `deadline` is a **decimal string** while `createdAt`, `updatedAt`, and `serverTime` are JSON numbers, though all four are unix seconds. `deadline` is a chain `uint64` reproduced verbatim, and can exceed both `i64` and JSON's exact-integer range; the other three are database timestamps. This follows the repo-wide rule that chain-native unsigned integers (`price`, `ticks`, `lastUpdateId`) serialize as strings.
+- `note` and `tokenContract` cannot be combined: `-1130`, HTTP 400. Both are present, so nothing is missing — the combination is what cannot be served, because no index pins both and the pair would scan one filter's whole history. This is a different relation from [`/api/v1/prediction/orders`](#orders), where `predictionMarketAddress` and `symbol` must be given together or not at all, and a half-specified pair is `-1102`.
 
 ## Account Endpoints
 

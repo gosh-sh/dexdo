@@ -5,6 +5,8 @@
 use dodex_application::GetInferenceDepthQuery;
 use dodex_application::GetInferenceDepthUseCase;
 use dodex_application::GetInferenceMarketsUseCase;
+use dodex_application::GetInferenceOrdersInput;
+use dodex_application::GetInferenceOrdersUseCase;
 use dodex_application::InferenceMarketsFilter;
 use dodex_application::InferenceMarketsListing;
 use dodex_application::InferenceMarketsRequest;
@@ -19,7 +21,9 @@ use salvo_oapi::ToSchema;
 use serde::Serialize;
 use tracing::error;
 
+use crate::dto;
 use crate::map_domain_or_unexpected;
+use crate::non_blank_query;
 use crate::non_empty_query;
 use crate::now_seconds;
 use crate::optional_typed_query;
@@ -288,5 +292,131 @@ pub(crate) async fn get_inference_depth(
         last_update_id: snapshot.last_update_id,
         bids: snapshot.bids.into_iter().map(|l| [l.price, l.quantity]).collect(),
         asks: snapshot.asks.into_iter().map(|l| [l.price, l.quantity]).collect(),
+    }))
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceOrdersResponse {
+    server_time: i64,
+    /// `max(last_chain_order)` over the book. Covers chain-projected events only: the
+    /// reconciler mutates rows without advancing it, so two snapshots sharing a
+    /// `lastUpdateId` are not guaranteed identical.
+    last_update_id: String,
+    next_cursor: Option<String>,
+    has_more: bool,
+    orders: Vec<InferenceOrderDto>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceOrderDto {
+    order_id: String,
+    inference_order_book_address: String,
+    /// `null` on BUY orders and on rows whose TokenContract is not known to the indexer.
+    /// A query filtering on `tokenContract` is refused while any live SELL of the book is
+    /// in that state, so `null` here never hides a match.
+    token_contract: Option<String>,
+    note: Option<String>,
+    side: &'static str,
+    price: String,
+    ticks: String,
+    ticks_initial: String,
+    /// `null` means no deadline is known to the indexer — either the chain has none, or it
+    /// has one the read model has not recovered yet (subscriptions never publish theirs).
+    deadline: Option<String>,
+    status: &'static str,
+    /// Unix seconds, like every timestamp this API returns. `null` when the chain
+    /// timestamp was not recovered — the row is served regardless.
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+}
+
+/// Orders resting in, or historic to, one model's book.
+///
+/// Unlike this file's other handlers, which use `non_empty_query` and treat a
+/// present-but-blank value as absent, this endpoint uses `non_blank_query` and rejects one
+/// with `-1102`. Deliberate: `tokenContract=` silently becoming "no TokenContract filter"
+/// would return the whole book and read as a confident answer to a question nobody asked.
+#[endpoint(
+    tags("inference-market-data"),
+    summary = "List inference orders",
+    parameters(
+        ("inferenceOrderBookAddress" = String, Query, description = "The model's order-book address."),
+        ("tokenContract" = Option<String>, Query, description = "Exact deal TokenContract. Mutually exclusive with `note`. Refused with -1500 (HTTP 503, retry) while the book has a live SELL whose TokenContract the indexer does not know."),
+        ("note" = Option<String>, Query, description = "Exact owning PrivateNote address. Mutually exclusive with `tokenContract`."),
+        ("side" = Option<String>, Query, description = "BUY or SELL."),
+        ("status" = Option<Vec<dto::InferenceOrderStatus>>, Query, style = Form, explode = false, description = "Comma-separated: LIVE, FILLED, CANCELLED. Default: all. LIVE means currently resting."),
+        ("limit" = Option<i64>, Query, minimum = 1, maximum = 500, description = "Page size. Default 100, max 500; out-of-range values are rejected."),
+        ("cursor" = Option<String>, Query, description = "Keyset cursor from a previous call's nextCursor."),
+    ),
+    security(()),
+)]
+// `style = Form, explode = false` describes a comma-separated ARRAY, so the declared type
+// must be `Option<Vec<_>>` — both existing uses in `lib.rs` (markets `status` at `:807`,
+// prediction orders `status` at `:1191`) are. Add `pub(crate) enum InferenceOrderStatus`
+// deriving `ToSchema` to `services/api/src/dto.rs`, beside `QueryableOrderStatus`; it exists
+// only to shape the OpenAPI document. The handler still reads the raw CSV string and lets
+// `InferenceOrderStatus::from_csv` in the application crate parse it — the same split
+// `/prediction/orders` uses.
+pub(crate) async fn get_inference_orders(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<InferenceOrdersResponse>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+    let inference_repo = state.inference_repo.clone().ok_or_else(|| {
+        error!("inference_repo not wired in AppState");
+        ApiError::from(DomainError::Unexpected)
+    })?;
+
+    let address = non_blank_query(req, "inferenceOrderBookAddress")?
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let input = GetInferenceOrdersInput {
+        orderbook_address: address.clone(),
+        token_contract: non_blank_query(req, "tokenContract")?,
+        note: non_blank_query(req, "note")?,
+        side: non_blank_query(req, "side")?,
+        status_csv: non_blank_query(req, "status")?,
+        // A non-numeric limit is InvalidParameter here; an out-of-range numeric one is
+        // MissingParameter inside the use case, matching prediction/orders.
+        limit: optional_typed_query::<i64>(req, "limit")?,
+        cursor: req.query::<String>("cursor"),
+    };
+
+    let use_case = GetInferenceOrdersUseCase::new(inference_repo);
+    let page = use_case
+        .execute(input)
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "get_inference_orders"))?;
+
+    Ok(Json(InferenceOrdersResponse {
+        server_time: now_seconds(),
+        last_update_id: page.last_update_id,
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
+        orders: page
+            .orders
+            .into_iter()
+            .map(|o| InferenceOrderDto {
+                order_id: o.order_id,
+                inference_order_book_address: address.clone(),
+                token_contract: o.token_contract,
+                note: o.note,
+                side: if o.is_buy { "BUY" } else { "SELL" },
+                price: o.price,
+                ticks: o.ticks,
+                ticks_initial: o.ticks_initial,
+                deadline: o.deadline,
+                status: o.status.as_public(),
+                created_at: o.created_at,
+                updated_at: o.updated_at,
+            })
+            .collect(),
     }))
 }

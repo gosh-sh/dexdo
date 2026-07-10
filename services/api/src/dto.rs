@@ -202,6 +202,18 @@ pub(crate) enum QueryableOrderStatus {
     Rejected,
 }
 
+/// Order statuses accepted by the `GET /api/v1/inference/orders` `status` filter.
+/// `LIVE` means currently resting; see docs/api-spec.md §Inference Orders.
+// Documentation-only, same rationale as `MarketsSort`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum InferenceOrderStatus {
+    Live,
+    Filled,
+    Cancelled,
+}
+
 #[cfg(test)]
 mod wire_value_tests {
     use super::*;

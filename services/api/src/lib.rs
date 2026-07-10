@@ -2346,6 +2346,7 @@ pub fn build_router(state: AppState) -> Router {
         .push(Router::with_path("api/v1/prediction/depth").get(get_depth))
         .push(Router::with_path("api/v1/inference/markets").get(inference::get_inference_markets))
         .push(Router::with_path("api/v1/inference/depth").get(inference::get_inference_depth))
+        .push(Router::with_path("api/v1/inference/orders").get(inference::get_inference_orders))
         .push(Router::with_path("api/v1/oracles").get(get_oracles))
         .push(Router::with_path("api/v1/prediction/trades").get(get_trades))
         // Registration is public — a client has no API key yet, so it
@@ -2405,7 +2406,8 @@ pub fn openapi_doc() -> OpenApi {
         .push(Router::with_path("api/v1/account/balances").get(get_account_balances))
         .push(Router::with_path("api/v1/prediction/buyFullSet").post(buy_full_set))
         .push(Router::with_path("api/v1/inference/markets").get(inference::get_inference_markets))
-        .push(Router::with_path("api/v1/inference/depth").get(inference::get_inference_depth));
+        .push(Router::with_path("api/v1/inference/depth").get(inference::get_inference_depth))
+        .push(Router::with_path("api/v1/inference/orders").get(inference::get_inference_orders));
 
     OpenApi::new("Dodex REST API", env!("CARGO_PKG_VERSION"))
         .info(
