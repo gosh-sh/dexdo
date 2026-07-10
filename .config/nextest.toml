@@ -23,21 +23,14 @@ filter = 'binary(inference_market_metrics)'
 test-group = 'serial-inference-metrics'
 
 
-# `inference_orders_repo` and (once it exists) `inference_orders_http` both read the
-# singleton `indexer_cursors` row for CAPTURE_STREAM, and one of them flips `at_head` to
-# false to exercise the read gate's capture-lag arm. Under nextest's per-process
-# parallelism a sibling binary would observe that flip and receive -1500 for a lookup it
-# expects to succeed. One group, one thread: the in-process mutexes then cover the rest.
-#
-# `inference_orders_http` is not listed yet: nextest's `binary()` filter is validated at
-# config-parse time against the binaries that currently exist in the workspace, and a
-# filter naming a not-yet-existing binary fails the whole config with "operator didn't
-# match any binary names" (nextest-filtering 0.21.1, cargo-nextest 0.9.137) — this holds
-# for every matcher form (exact, contains, glob, regex), so there is no syntax that
-# pre-declares a future binary. When the HTTP test file is added, extend the filter to
-# `binary(inference_orders_repo) | binary(inference_orders_http)`.
+# `inference_orders_repo` and `inference_orders_http` both read the singleton
+# `indexer_cursors` row for CAPTURE_STREAM, and one of them flips `at_head` to false to
+# exercise the read gate's capture-lag arm. Under nextest's per-process parallelism a
+# sibling binary would observe that flip and receive -1500 for a lookup it expects to
+# succeed. Both binaries are pinned to the same one-thread group so they run sequentially
+# and never race the cursor row; the in-process mutexes then cover the rest.
 [[profile.default.overrides]]
-filter = 'binary(inference_orders_repo)'
+filter = 'binary(inference_orders_repo) | binary(inference_orders_http)'
 test-group = 'serial-capture-cursor'
 
 [test-groups]
