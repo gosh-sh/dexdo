@@ -494,6 +494,130 @@ Each side is then re-sorted in Rust with exact-numeric `BigUint` comparison (lex
 | Missing `inferenceOrderBookAddress` | `MissingParameter` | 400 |
 | Invalid `limit` (non-numeric) | `InvalidParameter` | 400 |
 
+## `/api/v1/inference/orders`
+
+Lists orders on one `InferenceOrderBook` — the inference analogue of [`/api/v1/prediction/orders`](#apiv1predictionorders), but public and unauthenticated rather than owner-scoped: an `InferenceOrderBook` has no per-order ownership column (see [`inference_orders`](data-schema.md#inference_orders)), so the endpoint filters by `tokenContract` or `note` instead of by caller identity. Source is [`inference_orders`](data-schema.md#inference_orders), never a contract call at request time.
+
+This note covers the application-layer contract built in `crates/application/src/lib.rs` — the validated types (`InferenceOrdersCursor`, `InferenceOrderStatus`, `InferenceSide`, `InferenceOrdersQuery`, `InferenceOrderRow`, `InferenceOrdersPage`), the `InferenceReadRepository::list_inference_orders` trait method, and `GetInferenceOrdersUseCase`. The repository query and the HTTP handler consume this contract.
+
+### Query resolution
+
+`GetInferenceOrdersUseCase::execute` validates the raw `GetInferenceOrdersInput` into an `InferenceOrdersQuery` before anything reaches the repository:
+
+1. `orderbookAddress` blank / whitespace-only → `MissingParameter` → `-1102` / 400.
+2. `tokenContract` and `note` are mutually exclusive — see [§ tokenContract / note exclusion](#tokencontract--note-exclusion).
+3. `side`, if present, must be `BUY` or `SELL` (case-sensitive); blank → `MissingParameter` → `-1102` / 400; anything else → `InvalidParameter` → `-1130` / 400.
+4. `status` CSV — see [§ Status vocabulary](#status-vocabulary).
+5. `limit` — see [§ Page-size protocol](#page-size-protocol-1).
+6. `cursor` — see [§ Cursor format](#cursor-format).
+
+### `tokenContract` / `note` exclusion
+
+`tokenContract` and `note` are both optional narrowing filters over the same book, and passing both at once is refused: `InvalidParameter` → `-1130` / 400, not `MissingParameter` — both values are present and well-formed, so nothing is missing; it is specifically the *combination* the endpoint cannot serve. Passing neither is fine (no token-contract / no note filter, side/status/cursor still apply).
+
+The reason is structural, not a validation preference: [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) is keyed `(orderbook_address, token_contract, status, order_id DESC)` and [`inference_orders_book_note_idx`](data-schema.md#inference_orders) is keyed `(orderbook_address, note_address, is_buy, status, order_id DESC)`. Neither index carries the other's column, so a query naming both filters would have to pick one to seek on and apply the other as a heap residual — unbounded, because rows are never deleted and a TokenContract or note can accumulate history across many book cycles. Rather than serve a query whose cost is silently proportional to one filter's full history, the use case rejects the combination up front.
+
+A resting SELL whose `token_contract` is still NULL (the indexer has not yet learned it — see [`inference_orders.token_contract`](data-schema.md#inference_orders)) makes any TokenContract-filtered query over live SELLs suspect: the row might belong to the requested TokenContract and simply not say so yet. The repository probes [`inference_orders_live_sell_tc_null_idx`](data-schema.md#inference_orders) for such rows and fails closed with `MarketInconsistent` → 503 rather than silently omitting a row that could match — one of three arms of the fail-closed gate; see [§ Fail-closed gate](#fail-closed-gate).
+
+### Status vocabulary
+
+Three public values, exhaustive over every row (`InferenceOrderStatus::ALL`):
+
+| Public `status` | `inference_orders.status` |
+| --- | --- |
+| `LIVE` | `OPEN` |
+| `FILLED` | `FILLED` |
+| `CANCELLED` | `CANCELLED` |
+
+`LIVE` is exactly `OPEN`: every chain placement path on an `InferenceOrderBook` requires non-zero size, and the fill projector moves a row to `FILLED` as soon as its remainder reaches zero, so an `OPEN` row is always still resting. This three-way split is exhaustive — every row falls under exactly one value — which is what lets the default (no `status` filter) query claim to cover the whole book.
+
+`status` is a CSV, parsed by `InferenceOrderStatus::from_csv`: blank / whitespace-only → `MissingParameter` → `-1102` / 400 (a present-but-empty value is a client bug — an unbound template variable — not "no filter"); an unrecognized token → `InvalidParameter` → `-1130` / 400. Tokens are de-duplicated on parse; omitting `status` entirely defaults to all three values.
+
+### Page-size protocol
+
+Same contract as [`/api/v1/prediction/orders`](#apiv1predictionorders)'s page-size protocol: `limit` defaults to `ORDERS_DEFAULT_LIMIT` (100) when omitted; valid range is `[1, ORDERS_MAX_LIMIT]` (`[1, 500]`). Out of range (`0`, `> 500`, or a value that parses as a valid integer but does not fit `u16` — negative or above `u16::MAX`) → `MissingParameter` → `-1102` / 400, all folded into the same range check rather than split into a separate malformed-input case. A non-numeric `limit` is rejected earlier, at the HTTP boundary, as `InvalidParameter`.
+
+### Cursor format
+
+The cursor is `InferenceOrdersCursor`, a validated `u128` — the `order_id` of the last row on the previous page. This differs from `/api/v1/prediction/orders`'s cursor, which is an opaque `placed_chain_order` string compared with SQL `<` on `text`: the inference cursor is fed into an `order_id::numeric` predicate against [`inference_orders_book_side_status_idx`](data-schema.md#inference_orders) / [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) / [`inference_orders_book_note_idx`](data-schema.md#inference_orders) (`order_id` is `uint128` on chain, stored `numeric(78,0)`), so it is validated as an unsigned integer here rather than surfacing as a SQL cast error.
+
+`InferenceOrdersCursor::new` validates, in order:
+
+1. Trim ASCII whitespace. Empty after trim → `DomainError::MissingParameter` → `-1102` / 400.
+2. Length check against `MAX_CURSOR_LEN` (128 chars) *before* any per-byte scan of the input — the endpoint is public and unauthenticated, so an arbitrarily long all-digits string must not buy an arbitrarily long scan. Oversized → `DomainError::InvalidParameter` → `-1130` / 400.
+3. Every remaining byte must be an ASCII digit — no leading `-`, no interior whitespace, no `+`. Any non-digit byte → `InvalidParameter` → `-1130` / 400.
+4. Parse as `u128`. An all-digit string with too many digits (39+) overflows `u128` and is rejected the same way — `InvalidParameter` → `-1130` / 400, not a panic or a silently truncated value.
+
+| Condition | `DomainError` | API code | HTTP |
+| --- | --- | --- | --- |
+| `cursor` blank / whitespace-only | `MissingParameter` | `-1102` | 400 |
+| `cursor` longer than `MAX_CURSOR_LEN` (128) | `InvalidParameter` | `-1130` | 400 |
+| `cursor` contains a non-digit byte (including a leading `-`) | `InvalidParameter` | `-1130` | 400 |
+| `cursor` is all digits but overflows `u128` | `InvalidParameter` | `-1130` | 400 |
+
+### Repository query
+
+`PostgresReadModelRepository::list_inference_orders` (`crates/infrastructure/src/inference_read_repo.rs`) reads the page, `lastUpdateId`, precision and the fail-closed gate in **one** SQL statement, so all four share a single MVCC snapshot. Splitting them into separate statements would let an order commit between them: the page would miss it while `lastUpdateId` already covered it, which the caller cannot detect.
+
+The statement is `with mkt as (…), gate as (…), wm as (…), page as (…) select … from mkt cross join gate cross join wm left join page p on true order by p.order_id desc nulls last limit $fetch`, built with `sqlx::QueryBuilder` because the branch count in `page` varies with the filters and hand-numbered `$n` placeholders are how a query at this size acquires an off-by-one:
+
+- `mkt` resolves visibility and precision: no row ⇒ the book is unknown or not yet reconciled ⇒ `InvalidMarketOrSymbol` → `-1121` / 404.
+- `gate` computes the three fail-closed booleans — see [§ Fail-closed gate](#fail-closed-gate).
+- `wm` computes `lastUpdateId` = `max(last_chain_order)` over the book.
+- `page` is a `UNION ALL` of one branch per `(is_buy, status)` pair the query admits. Each branch pins `orderbook_address`, `is_buy` and `status` to one stored value (`LIVE` is exactly `OPEN`, so no residual there either) and applies `token_contract` / `note_address` / the cursor as index conditions, then `ORDER BY order_id DESC LIMIT $fetch` — so every branch already returns its own candidates in cursor order and the outer merge sorts at most `branches × fetch` rows, never the book's full history.
+
+A `token_contract` filter admits SELL branches only — `token_contract` is non-null exclusively on SELL rows, so a `tokenContract` + `side=BUY` combination is provably empty:
+
+| `tokenContract` | `side` | Sides emitted |
+| --- | --- | --- |
+| absent | absent | BUY + SELL |
+| absent | `BUY` / `SELL` | the requested side |
+| present | `BUY` | none — `page` becomes `select … from inference_orders where false` |
+| present | absent / `SELL` | SELL only |
+
+The `where false` shape still resolves through `mkt` (an unknown book is still `-1121`) and still reports `lastUpdateId`, but `page` never scans `inference_orders`. This is not a cosmetic shortcut: [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) has no `is_buy` column, so without pinning SELL up front an impossible BUY+TC query would have to walk that TokenContract's entire status-scoped history on an unauthenticated endpoint before the residual discarded every row and the `LIMIT` never filled.
+
+Each branch's index depends on which filter is present:
+
+| Branch shape | Index ridden |
+| --- | --- |
+| `token_contract` present | [`inference_orders_book_tc_idx`](data-schema.md#inference_orders) `(orderbook_address, token_contract, status, order_id DESC)` |
+| `note` present | [`inference_orders_book_note_idx`](data-schema.md#inference_orders) `(orderbook_address, note_address, is_buy, status, order_id DESC)` |
+| neither present | [`inference_orders_book_side_status_idx`](data-schema.md#inference_orders) `(orderbook_address, is_buy, status, order_id DESC)` |
+
+A cursor, when present, adds `order_id < $cursor::numeric` to every branch as a range condition trailing that branch's equality prefix, so the same index serves it.
+
+### Fail-closed gate
+
+`gate` computes three independent booleans, each a different reason this book's read-model state cannot support a claim of absence:
+
+1. **`tc_unknown`** — a resting SELL with `token_contract is null`: `exists(select 1 from inference_orders where orderbook_address = $ob and is_buy = false and status = 'OPEN' and token_contract is null)`, backed by [`inference_orders_live_sell_tc_null_idx`](data-schema.md#inference_orders). A resting SELL always carries a `token_contract` by the write-path invariant documented at [`data-schema.md#inference_orders`](data-schema.md#inference_orders); a NULL here means either the indexer has not filled it in yet or that invariant has been violated.
+2. **`unprojected`** — captured-but-not-yet-projected events for this book: `exists(select 1 from raw_events where src_address = $ob and processed_at is null)`, backed by `raw_events_unprocessed_src_idx`. Deliberately wider than the inference reconciler's own `pending_events_exist` gate (which additionally requires `event_type is not null and decoded is not null`, so a permanently undecodable row cannot wedge its sweep forever): a reader asking "is my view of this book complete?" must count every unprojected row for the book — pending, undecodable, bodyless, or an event id no loaded ABI recognizes — because every event an `InferenceOrderBook` emits is already in that ABI, so none of those shapes has a benign explanation for this `src_address`.
+3. **`capture_stale`** — the capture cursor is stale or behind the chain head: `not coalesce((select at_head and updated_at > now() - make_interval(secs => CAPTURE_FRESHNESS_SECS) from indexer_cursors where stream_name = CAPTURE_STREAM), false)`, so an absent cursor row is treated the same as a stale one. `at_head` alone only records that the *last* poll saw no next page; it says nothing about the chain since. `CAPTURE_FRESHNESS_SECS` (30s, `crates/infrastructure/src/config.rs`) bounds how old that poll may be before the read API stops trusting it — see [indexer.md § Capture-freshness / polling-interval coupling](indexer.md#capture-freshness--polling-interval-coupling) for the config-side half of this contract.
+
+All three arms answer the wire the same way — `MarketInconsistent`, never `InvalidMarketOrSymbol` — because in every case the book **exists and is reconciled**; only the read model's coverage of it is incomplete. `-1121` / 404 is cacheable and tells the client to stop asking; `MarketInconsistent` → 503 tells it to retry, which is the correct remedy for all three arms — including arm 1, where the underlying cause is an operator-visible defect but the caller's only available action is still to retry.
+
+The gate refuses a request only when it names a `tokenContract` **and** admits at least one LIVE SELL (`side` absent or `SELL`, and the resolved `status` set includes `LIVE`) — the one shape an incomplete view could turn into a false "not in use". A query that names no `tokenContract`, or that filters `side=BUY` only, or that excludes `LIVE` from `status`, makes no claim the incomplete state could falsify, so it is served regardless of `gate`'s booleans; an affected row's `tokenContract` may simply read `null` in the response.
+
+Arm 1 (`tc_unknown`) logs at `error!` on **every** request that observes it, evaluated ahead of — and independent of — the refusal check: this alarm is not conditioned on the request happening to be one the gate refuses, because the condition itself (a live SELL the write path should never let go TokenContract-less) is a defect regardless of who asks or what they ask for. Arms 2 and 3 log at `debug!` / `warn!` respectively, and only when they actually cause a refusal, since their volume otherwise tracks ordinary indexer catch-up rather than anything worth an operator's attention.
+
+### Error mapping
+
+| Condition | `DomainError` | API code | HTTP |
+| --- | --- | --- | --- |
+| `orderbookAddress` blank / missing | `MissingParameter` | `-1102` | 400 |
+| `tokenContract` and `note` both present | `InvalidParameter` | `-1130` | 400 |
+| `side` present but blank | `MissingParameter` | `-1102` | 400 |
+| `side` present and not `BUY` / `SELL` | `InvalidParameter` | `-1130` | 400 |
+| `status` CSV blank / whitespace-only | `MissingParameter` | `-1102` | 400 |
+| `status` CSV contains an unknown token | `InvalidParameter` | `-1130` | 400 |
+| `limit` out of `[1, 500]` (including values outside `u16` range) | `MissingParameter` | `-1102` | 400 |
+| `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
+| `cursor` — see [§ Cursor format](#cursor-format) | | | |
+| `orderbookAddress` unknown / not yet reconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
+| Fail-closed gate refusal — unresolved live-SELL `tokenContract`, unprojected events for the book, or a stale/behind-head capture cursor, under a query naming `tokenContract` and admitting LIVE SELLs; see [§ Fail-closed gate](#fail-closed-gate) | `MarketInconsistent` | — | 503 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
 ## `/api/v1/prediction/orders`
 
 `DELETE /api/v1/prediction/openOrders` (cancel-all-open) is a separate TRADE operation and is out of scope here — its tech spec lives in [write-api.md](write-api.md).

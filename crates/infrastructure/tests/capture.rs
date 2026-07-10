@@ -64,6 +64,10 @@ fn edge(msg_id: &str, chain_order: Option<&str>, src: &str, body: Option<&str>) 
 // event_type "OrderBook.OrderPlaced", orderId "2".
 const ORDER_PLACED_BODY: &str = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAACAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJGgAAAAAAAAAAAAAAAn+OzoAAAAAAAAAAAFcScEalnJSVsVKAm0LrR0TbuPbU18Mkb7ENEBG22bNzhvrIubdt2wtAAQAQAAAAAAAAAXM=";
 
+// A stream of this test's own: `persist_page` upserts `at_head` into `indexer_cursors`,
+// and the production row is read by the inference orders endpoint's fail-closed gate.
+const CAPTURE_TEST_STREAM: &str = "capture_persist_page_test_stream";
+
 #[tokio::test]
 async fn captures_decodable_event_without_projecting() {
     let Some(pool) = setup().await else { return };
@@ -89,7 +93,7 @@ async fn captures_decodable_event_without_projecting() {
         Some(ORDER_PLACED_BODY),
     )];
     let result = repo
-        .persist_page("blockchain_events", &edges, Some("cursor-1"), &decoder, false)
+        .persist_page(CAPTURE_TEST_STREAM, &edges, Some("cursor-1"), &decoder, false)
         .await
         .expect("persist_page");
 
@@ -157,7 +161,7 @@ async fn bulk_insert_counts_new_and_conflicting_and_dedups_within_page() {
 
     // Pre-insert `existing` so it conflicts on the next page.
     let pre = vec![edge(&existing, Some("5f80capture_counts_000000001"), &src, None)];
-    repo.persist_page("blockchain_events", &pre, None, &decoder, false).await.expect("pre-insert");
+    repo.persist_page(CAPTURE_TEST_STREAM, &pre, None, &decoder, false).await.expect("pre-insert");
 
     // Page: the conflicting `existing`, a `fresh` row, and `dup` twice.
     let edges = vec![
@@ -167,7 +171,7 @@ async fn bulk_insert_counts_new_and_conflicting_and_dedups_within_page() {
         edge(&dup, Some("5f80capture_counts_000000003"), &src, None),
     ];
     let result = repo
-        .persist_page("blockchain_events", &edges, None, &decoder, false)
+        .persist_page(CAPTURE_TEST_STREAM, &edges, None, &decoder, false)
         .await
         .expect("persist_page");
 
@@ -197,7 +201,7 @@ async fn edge_missing_chain_order_is_dropped() {
 
     let edges = vec![edge(&msg_id, None, &src, None)];
     let result = repo
-        .persist_page("blockchain_events", &edges, None, &decoder, false)
+        .persist_page(CAPTURE_TEST_STREAM, &edges, None, &decoder, false)
         .await
         .expect("persist_page");
 
@@ -328,7 +332,7 @@ async fn persist_page_handles_mixed_decodable_and_undecodable_edges() {
         edge(&msg_undecodable, Some("5f80capture_mixed_00000000000002"), &orderbook, None),
     ];
     let result = repo
-        .persist_page("blockchain_events", &edges, None, &decoder, false)
+        .persist_page(CAPTURE_TEST_STREAM, &edges, None, &decoder, false)
         .await
         .expect("persist_page");
 

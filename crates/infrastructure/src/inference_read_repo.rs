@@ -9,7 +9,12 @@ use anyhow::Context;
 use async_trait::async_trait;
 use dodex_application::InferenceMarketsListing;
 use dodex_application::InferenceMarketsRequest;
+use dodex_application::InferenceOrderRow;
+use dodex_application::InferenceOrderStatus;
+use dodex_application::InferenceOrdersPage;
+use dodex_application::InferenceOrdersQuery;
 use dodex_application::InferenceReadRepository;
+use dodex_application::InferenceSide;
 use dodex_domain::bps_to_decimal_string;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceDepthSnapshot;
@@ -20,8 +25,12 @@ use dodex_domain::InferenceModel;
 use dodex_domain::PriceLevel;
 use dodex_domain::INFERENCE_MAKER_REBATE_CAP_BPS;
 use num_bigint::BigUint;
+use tracing::debug;
+use tracing::error;
 use tracing::warn;
 
+use crate::config::CAPTURE_FRESHNESS_SECS;
+use crate::indexer_repo::CAPTURE_STREAM;
 use crate::postgres_repo::decode_cursor;
 use crate::postgres_repo::encode_cursor;
 use crate::postgres_repo::scale_uint_to_decimal;
@@ -165,6 +174,13 @@ impl InferenceReadRepository for PostgresReadModelRepository {
         limit: u16,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
         get_inference_depth_impl(self, orderbook_address, limit).await
+    }
+
+    async fn list_inference_orders(
+        &self,
+        query: &InferenceOrdersQuery,
+    ) -> Result<InferenceOrdersPage, anyhow::Error> {
+        list_inference_orders_impl(self, query).await
     }
 }
 
@@ -343,4 +359,328 @@ async fn get_inference_depth_impl(
         bids,
         asks,
     })
+}
+
+/// One row of the snapshot statement.
+///
+/// EVERY `page.*` column is `Option`: a valid query that matches no order still returns
+/// exactly one row — the `mkt × gate × wm` constants left-joined against an empty page —
+/// and Postgres fills the page columns with NULL. sqlx decodes the row before any
+/// application-level filter runs, so a non-`Option` field here would turn the endpoint's
+/// central acceptance case ("this TokenContract has no live SELL") into an internal error.
+#[derive(sqlx::FromRow)]
+struct InferenceOrderQueryRow {
+    order_id: Option<String>,
+    token_contract: Option<String>,
+    note_address: Option<String>,
+    is_buy: Option<bool>,
+    price: Option<String>,
+    amount_remaining: Option<String>,
+    amount_initial: Option<String>,
+    deadline: Option<String>,
+    status: Option<String>,
+    /// Unix seconds, extracted in SQL: the application layer has no chrono dependency and
+    /// this API returns unix seconds throughout.
+    created_at_unix: Option<i64>,
+    updated_at_unix: Option<i64>,
+    // Repeated on every row: the statement is one snapshot, so these are constant.
+    last_update_id: Option<String>,
+    /// True when this book's state cannot support a claim of absence: a resting SELL with
+    /// an unknown TokenContract, pending unprojected events for the book, or capture
+    /// behind the chain head.
+    // The gate's three arms are kept apart all the way out of SQL. They collapse to one
+    // `-1500` on the wire, but they are three different events for an operator: a violated
+    // invariant, a routine projection backlog, and a wedged capture loop.
+    tc_unknown: bool,
+    unprojected: bool,
+    capture_stale: bool,
+    price_precision: Option<i32>,
+    quantity_precision: Option<i32>,
+}
+
+/// Which sides the page may contain.
+///
+/// A `tokenContract` filter admits SELL branches only: `token_contract` is non-null
+/// exclusively on SELL rows, so a BUY branch is provably empty — but not *cheap*.
+/// `inference_orders_book_tc_idx` is keyed `(orderbook_address, token_contract, status,
+/// order_id)` with no `is_buy`, so Postgres would walk that TC's entire status group
+/// before the residual discarded every row and the `LIMIT` never filled. On a public
+/// endpoint that is an unbounded scan for an empty answer.
+fn resolve_sides(query: &InferenceOrdersQuery) -> Vec<bool> {
+    match (query.token_contract.is_some(), query.side) {
+        (true, Some(InferenceSide::Buy)) => Vec::new(),
+        (true, _) => vec![false],
+        (false, Some(side)) => vec![side.is_buy()],
+        (false, None) => vec![true, false],
+    }
+}
+
+/// Columns every page branch projects, in the order `InferenceOrderQueryRow` reads.
+const PAGE_COLUMNS: &str = "order_id, token_contract, note_address, is_buy, price, \
+                            amount_remaining, amount_initial, deadline, status, \
+                            chain_created_at, chain_updated_at";
+
+/// One statement: visibility gate, fail-closed gate, watermark and page share an MVCC
+/// snapshot. The page is a UNION ALL of branches that each pin `is_buy` and `status`, so
+/// every branch rides an index in `order_id` order and the outer merge sorts at most
+/// `branches × fetch` rows. Built with `QueryBuilder` because the branch count varies with
+/// the filters, and hand-numbered `$n` placeholders are how such a query acquires an
+/// off-by-one.
+fn build_snapshot_query<'a>(
+    q: &'a InferenceOrdersQuery,
+    fetch: i64,
+) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let ob = &q.orderbook_address;
+    let mut b = sqlx::QueryBuilder::new(
+        "with mkt as (select price_precision, quantity_precision from inference_markets \
+         where orderbook_address = ",
+    );
+    b.push_bind(ob);
+    // The fail-closed gate. Three ways this book's state cannot vouch for an absence:
+    //
+    //  1. a resting SELL whose TokenContract the indexer does not know;
+    //  2. captured events for this book that are decoded but not yet projected — the very
+    //     placement being asked about may sit there, so no row exists to be found;
+    //  3. capture is behind the chain head, so the placement may not even be captured.
+    //
+    // (2) and (3) echo the reconciler's own gates: if it will not trust this view enough to
+    // sweep, a reader must not assert absence from it. But (2) is deliberately WIDER than
+    // the reconciler's `pending_events_exist`, which adds `event_type is not null and
+    // decoded is not null` because an undecodable row would wedge its sweep forever. A
+    // reader asking "is my view complete?" must count exactly those rows. That is why this
+    // arm rides `raw_events_unprocessed_src_idx` and not the existing
+    // `raw_events_pending_src_idx`: the bare `processed_at is null` predicate does not
+    // imply that index's narrower one, so Postgres could not use it. (3) is a primary-key
+    // lookup on `indexer_cursors`.
+    b.push(
+        " and last_reconciled_at is not null), gate as (select exists(\
+             select 1 from inference_orders where orderbook_address = ",
+    );
+    b.push_bind(ob);
+    b.push(
+        " and is_buy = false and status = 'OPEN' and token_contract is null) as tc_unknown, \
+             exists(select 1 from raw_events where src_address = ",
+    );
+    b.push_bind(ob);
+    // Any unprojected message under this book's address. Every event an InferenceOrderBook
+    // emits is in the ABI this indexer loads, so such a row — pending, undecodable,
+    // bodyless, or an id we do not know — can only mean our view of this book is
+    // incomplete. Scoping by src is what makes the predicate safe: a benign unknown id
+    // from another contract cannot reach it.
+    //
+    // The third arm needs `updated_at`, not `at_head` alone. `at_head` records that the
+    // LAST poll saw no next page; it says nothing about the chain since. A placement that
+    // landed after that poll leaves the flag true while neither raw_events nor
+    // inference_orders knows about it. Requiring a recent poll bounds the blind spot to one
+    // capture interval, which is the best a read model can promise without reading the
+    // chain itself — and the caller can still compare `lastUpdateId` across calls.
+    b.push(
+        " and processed_at is null) as unprojected, \
+          not coalesce((select at_head and updated_at > now() - make_interval(secs => ",
+    );
+    b.push_bind(CAPTURE_FRESHNESS_SECS);
+    b.push(") from indexer_cursors where stream_name = ");
+    // `crate::indexer_repo::CAPTURE_STREAM` — the one cursor row the capture loop maintains.
+    b.push_bind(CAPTURE_STREAM);
+    b.push(
+        "), false) as capture_stale), \
+         wm as (select max(last_chain_order) as last_update_id from inference_orders \
+         where orderbook_address = ",
+    );
+    b.push_bind(ob);
+    b.push("), page as (");
+
+    let sides = resolve_sides(q);
+    if sides.is_empty() {
+        // Typed, never-scanned: the outer SELECT still needs the column types, and the
+        // book still resolves through `mkt`.
+        b.push("select ").push(PAGE_COLUMNS).push(" from inference_orders where false");
+    } else {
+        let mut first = true;
+        for &is_buy in &sides {
+            for status in &q.statuses {
+                if !first {
+                    b.push(" union all ");
+                }
+                first = false;
+                b.push("(select ").push(PAGE_COLUMNS);
+                b.push(" from inference_orders where orderbook_address = ");
+                b.push_bind(ob);
+                b.push(" and is_buy = ");
+                b.push_bind(is_buy);
+                b.push(" and status = ");
+                b.push_bind(status.db_status());
+                // No residual on any branch: `db_status()` pins one stored value, and LIVE
+                // is exactly OPEN. An index scan alone decides membership.
+                if let Some(tc) = &q.token_contract {
+                    b.push(" and token_contract = ");
+                    b.push_bind(tc);
+                }
+                if let Some(note) = &q.note {
+                    b.push(" and note_address = ");
+                    b.push_bind(note);
+                }
+                if let Some(cursor) = &q.cursor {
+                    // `order_id` is numeric(78,0); u128 has no Postgres encoding, so pass
+                    // the digits and cast.
+                    b.push(" and order_id < ");
+                    b.push_bind(cursor.as_u128().to_string());
+                    b.push("::numeric");
+                }
+                b.push(" order by order_id desc limit ");
+                b.push_bind(fetch);
+                b.push(")");
+            }
+        }
+    }
+
+    b.push(
+        ") select p.order_id::text as order_id, p.token_contract, p.note_address, p.is_buy, \
+                  p.price::text as price, p.amount_remaining::text as amount_remaining, \
+                  p.amount_initial::text as amount_initial, p.deadline::text as deadline, \
+                  p.status, \
+                  extract(epoch from p.chain_created_at)::bigint as created_at_unix, \
+                  extract(epoch from p.chain_updated_at)::bigint as updated_at_unix, \
+                  wm.last_update_id, gate.tc_unknown, gate.unprojected, gate.capture_stale, \
+                  mkt.price_precision, mkt.quantity_precision \
+             from mkt cross join gate cross join wm \
+             left join page p on true \
+            order by p.order_id desc nulls last limit ",
+    );
+    b.push_bind(fetch);
+    b
+}
+
+async fn list_inference_orders_impl(
+    repo: &PostgresReadModelRepository,
+    query: &InferenceOrdersQuery,
+) -> Result<InferenceOrdersPage, anyhow::Error> {
+    let limit = query.limit.get() as i64;
+
+    // ONE statement: the page, the freshness watermark, the precision and the fail-closed
+    // gate share a single MVCC snapshot. Split statements would let an order commit between
+    // them — absent from the page, yet already covered by the lastUpdateId the caller is
+    // handed.
+    let rows: Vec<InferenceOrderQueryRow> = build_snapshot_query(query, limit + 1)
+        .build_query_as::<InferenceOrderQueryRow>()
+        .fetch_all(repo.pool())
+        .await
+        .context("list inference orders")?;
+
+    // `mkt` is the visibility gate: no row ⇒ unknown or not-yet-reconciled book.
+    let Some(first) = rows.first() else {
+        return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
+    };
+
+    // Fail closed rather than answer from state we cannot vouch for. An empty page is a
+    // claim of absence, and a claim of absence needs a complete view: no live SELL with an
+    // unknown TokenContract, no captured-but-unprojected events for this book (the very
+    // placement being asked about could be one), and capture at the chain head. Only
+    // queries that could turn an incomplete view into a false "not in use" are refused;
+    // everything else is served.
+    // The first arm is an invariant the write path cannot violate (see the module docs): a
+    // live SELL always carries a TokenContract. If it is true, something is inserting rows
+    // that should not exist — a defect, not a delay — and that must be reported whether or
+    // not THIS request happens to be one the gate refuses. Tying the alarm to
+    // `tokenContract=…&status=LIVE` would let a broken book stay silent for as long as
+    // nobody asks it that particular question.
+    //
+    // A broken book therefore logs once per request, from an unauthenticated endpoint. That
+    // is accepted: the condition is unreachable by construction, so the volume is a symptom
+    // of the defect rather than a cost of the check, and a rate-limited alarm for an
+    // impossible event is an alarm nobody will see fire.
+    if first.tc_unknown {
+        error!(
+            orderbook_address = %query.orderbook_address,
+            "a live SELL has no TokenContract: the read gate's invariant is violated",
+        );
+    }
+
+    let asks_about_tc = query.token_contract.is_some();
+    let scopes_live_sells = query.side != Some(InferenceSide::Buy)
+        && query.statuses.contains(&InferenceOrderStatus::Live);
+    if (first.tc_unknown || first.unprojected || first.capture_stale)
+        && asks_about_tc
+        && scopes_live_sells
+    {
+        // One error on the wire, three different things to say in the log. `tc_unknown` has
+        // already spoken above; the other two are the indexer catching up, and their volume
+        // scales with request rate during a normal backlog, so they stay quiet.
+        if first.capture_stale {
+            warn!(
+                orderbook_address = %query.orderbook_address,
+                "capture cursor is stale or behind the chain head; refusing TokenContract lookups",
+            );
+        } else if first.unprojected {
+            debug!(
+                orderbook_address = %query.orderbook_address,
+                "unprojected events for this book; refusing TokenContract lookups",
+            );
+        }
+        // MarketInconsistent (-1500 / 503), not InvalidMarketOrSymbol (-1121 / 404): the
+        // book exists and is reconciled, and every arm of this gate is transient indexer
+        // state. 404 is cacheable and tells the client to stop asking; 503 tells it to
+        // retry, which is the remedy for all three arms.
+        return Err(anyhow!(DomainError::MarketInconsistent));
+    }
+
+    let price_scale =
+        inference_scale(first.price_precision, &query.orderbook_address, "price_precision")?;
+    let quantity_scale =
+        inference_scale(first.quantity_precision, &query.orderbook_address, "quantity_precision")?;
+    let last_update_id = first.last_update_id.clone().unwrap_or_default();
+
+    // An empty page is one row whose page columns are all NULL; `order_id` is the
+    // discriminator. Every other page column is non-null whenever it is, because the
+    // underlying columns are `not null` in the schema — a NULL there is read-model
+    // corruption.
+    let mut orders: Vec<InferenceOrderRow> = Vec::new();
+    for r in rows.iter().filter(|r| r.order_id.is_some()) {
+        let corrupt = |field: &str| {
+            warn!(orderbook = %query.orderbook_address, field, "inference_orders row has a NULL not-null column");
+            anyhow!(DomainError::MarketInconsistent)
+        };
+        orders.push(InferenceOrderRow {
+            order_id: r.order_id.clone().expect("filtered on is_some"),
+            token_contract: r.token_contract.clone(),
+            note: r.note_address.clone(),
+            is_buy: r.is_buy.ok_or_else(|| corrupt("is_buy"))?,
+            price: scale_uint_to_decimal(
+                r.price.as_deref().ok_or_else(|| corrupt("price"))?,
+                price_scale,
+            ),
+            ticks: scale_uint_to_decimal(
+                r.amount_remaining.as_deref().ok_or_else(|| corrupt("amount_remaining"))?,
+                quantity_scale,
+            ),
+            ticks_initial: scale_uint_to_decimal(
+                r.amount_initial.as_deref().ok_or_else(|| corrupt("amount_initial"))?,
+                quantity_scale,
+            ),
+            deadline: r.deadline.clone(),
+            status: public_status(r.status.as_deref().ok_or_else(|| corrupt("status"))?)?,
+            created_at: r.created_at_unix,
+            updated_at: r.updated_at_unix,
+        });
+    }
+
+    let has_more = orders.len() as i64 > limit;
+    orders.truncate(limit as usize);
+    let next_cursor = has_more.then(|| orders.last().map(|o| o.order_id.clone())).flatten();
+
+    Ok(InferenceOrdersPage { orders, next_cursor, has_more, last_update_id })
+}
+
+/// Map a stored status onto the public vocabulary. An unknown value is read-model
+/// corruption — fail closed, as `get_inference_depth_impl` does for a non-numeric price.
+fn public_status(raw: &str) -> Result<InferenceOrderStatus, anyhow::Error> {
+    match raw {
+        "OPEN" => Ok(InferenceOrderStatus::Live),
+        "FILLED" => Ok(InferenceOrderStatus::Filled),
+        "CANCELLED" => Ok(InferenceOrderStatus::Cancelled),
+        other => {
+            warn!(status = other, "inference_orders.status is not a known value");
+            Err(anyhow!(DomainError::MarketInconsistent))
+        }
+    }
 }

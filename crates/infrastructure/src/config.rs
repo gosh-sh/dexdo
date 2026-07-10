@@ -207,6 +207,16 @@ fn default_graphql_page_size() -> u32 {
     100
 }
 
+/// How recently capture must have polled for its `at_head` flag to mean anything.
+///
+/// `at_head` records that the last drain saw no next page; it is not a statement about the
+/// chain now. Capture polls every `polling_interval_ms` (3 s in the shipped configs), so a
+/// cursor older than this bound means a stalled or dead capture loop and the read API must
+/// stop claiming absence. Generous enough to absorb a slow poll, tight enough to catch a
+/// wedged indexer within seconds. `validate` refuses an interval that leaves fewer than two
+/// polls inside the window.
+pub const CAPTURE_FRESHNESS_SECS: f64 = 30.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexerSection {
     pub polling_interval_ms: u64,
@@ -512,6 +522,16 @@ impl IndexerConfig {
         );
         let i = &self.indexer;
         anyhow::ensure!(i.polling_interval_ms > 0, "indexer.polling_interval_ms must be > 0");
+        // The read API's fail-closed gate trusts `indexer_cursors.at_head` only while the
+        // cursor was written within CAPTURE_FRESHNESS_SECS. Demand at least two polls inside
+        // that window: one late poll must not be able to make every book unqueryable.
+        anyhow::ensure!(
+            2.0 * (i.polling_interval_ms as f64) / 1000.0 <= CAPTURE_FRESHNESS_SECS,
+            "indexer.polling_interval_ms ({} ms) leaves fewer than two capture polls inside the \
+             {} s freshness window the read API's fail-closed gate requires",
+            i.polling_interval_ms,
+            CAPTURE_FRESHNESS_SECS,
+        );
         anyhow::ensure!(
             i.depth_refresh_interval_ms > 0,
             "indexer.depth_refresh_interval_ms must be > 0"
@@ -869,6 +889,25 @@ indexer:
         let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("polling_interval_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_polling_interval_that_outlives_the_capture_freshness_window() {
+        let raw = format!(
+            "{COMMON}
+graphql:
+  endpoint: https://graphql.example.invalid
+  page_size: 100
+  request_timeout_ms: 10000
+indexer:
+  polling_interval_ms: 60000
+  depth_refresh_interval_ms: 5000
+  reconciliation_interval_ms: 60000
+"
+        );
+        let cfg: IndexerConfig = serde_yaml::from_str(&raw).expect("parse");
+        let err = cfg.validate().expect_err("must not start");
+        assert!(err.to_string().contains("freshness window"), "{err}");
     }
 
     /// Any 64-char hex; the bytes are irrelevant for config-shape tests.
