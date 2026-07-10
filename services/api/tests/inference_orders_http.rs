@@ -82,7 +82,14 @@ async fn seed_at_head(pool: &PgPool) {
     .expect("seed at_head");
 }
 
-async fn seed_order(pool: &PgPool, ob: &str, id: i64, is_buy: bool, status: &str, tc: Option<&str>) {
+async fn seed_order(
+    pool: &PgPool,
+    ob: &str,
+    id: i64,
+    is_buy: bool,
+    status: &str,
+    tc: Option<&str>,
+) {
     sqlx::query(
         r#"insert into inference_orders
                (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining,
@@ -91,8 +98,14 @@ async fn seed_order(pool: &PgPool, ob: &str, id: i64, is_buy: bool, status: &str
            values ($1, $2::numeric, $3, 1000000000, 5, 5, false, $4, 'co-' || $2::text, $5,
                    to_timestamp(1700000000), to_timestamp(1700000000))"#,
     )
-    .bind(ob).bind(id).bind(is_buy).bind(status).bind(tc)
-    .execute(pool).await.expect("seed order");
+    .bind(ob)
+    .bind(id)
+    .bind(is_buy)
+    .bind(status)
+    .bind(tc)
+    .execute(pool)
+    .await
+    .expect("seed order");
 }
 
 #[tokio::test]
@@ -250,7 +263,11 @@ async fn rows_with_null_chain_timestamps_are_returned_with_null_times() {
                 is_subscription, status, last_chain_order, token_contract,
                 chain_created_at, chain_updated_at)
            values ($1, 1, false, 1000000000, 5, 5, false, 'OPEN', 'co-1', '0:tc', null, null)"#,
-    ).bind(ob).execute(&pool).await.unwrap();
+    )
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let mut resp = TestClient::get(format!(
         "http://test/api/v1/inference/orders?inferenceOrderBookAddress={ob}"
@@ -279,11 +296,10 @@ async fn missing_book_address_is_1102() {
 async fn unknown_book_is_1121() {
     let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
     seed_at_head(&pool).await; // a closed gate must not mask a parameter assertion
-    let mut resp = TestClient::get(
-        "http://test/api/v1/inference/orders?inferenceOrderBookAddress=0:nope",
-    )
-    .send(&service)
-    .await;
+    let mut resp =
+        TestClient::get("http://test/api/v1/inference/orders?inferenceOrderBookAddress=0:nope")
+            .send(&service)
+            .await;
     assert_eq!(resp.status_code, Some(StatusCode::NOT_FOUND));
     let body: Value = resp.take_json().await.expect("json");
     assert_eq!(body["code"], -1121);
