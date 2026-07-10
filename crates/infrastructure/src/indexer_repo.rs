@@ -902,6 +902,36 @@ impl IndexerRepository {
         Ok(row)
     }
 
+    /// Visible inference order-book markets currently wedged by an unprojected
+    /// `raw_events` row under their address, backing `indexer_inference_wedged_books`.
+    /// Mirrors the read gate's arm-2 (`inference_read_repo::build_snapshot_query`):
+    /// a book is "wedged" when it is visible AND has at least one `raw_events` row with
+    /// `src_address = orderbook_address and processed_at is null` — the same
+    /// predicate that trips `MarketInconsistent` (503) on every read of that book.
+    /// The gate spells visibility as `last_reconciled_at is not null` alone; the
+    /// `superseded_at is null` clause below is belt-and-suspenders (superseding always
+    /// nulls `last_reconciled_at` in the same update, so it is redundant) and matches
+    /// the sibling `visible` metric bucket — do not expect to find it in the gate's SQL.
+    /// An ABI-lagging contract upgrade can wedge a book here indefinitely with no
+    /// other symptom, so this is the signal an operator alerts on rather than
+    /// reading 503s as a silent, unexplained outage. The correlated `EXISTS` rides
+    /// `raw_events_unprocessed_src_idx` the same way the gate's probe does.
+    pub async fn inference_wedged_books_count(&self) -> anyhow::Result<i64> {
+        let count: i64 = sqlx::query_scalar(
+            r#"select count(*) from inference_markets m
+                where m.last_reconciled_at is not null
+                  and m.superseded_at is null
+                  and exists(
+                      select 1 from raw_events e
+                       where e.src_address = m.orderbook_address
+                         and e.processed_at is null)"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("inference wedged books count")?;
+        Ok(count)
+    }
+
     /// (in_use, idle) sqlx pool connections — cheap in-memory reads, no DB query.
     /// `size()` is total (in_use + idle); `num_idle()` is idle.
     pub fn pool_connection_stats(&self) -> (u64, u64) {

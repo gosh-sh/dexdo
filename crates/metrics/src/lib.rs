@@ -66,6 +66,7 @@ pub struct IndexerMetrics {
     inference_orders_filled: Arc<AtomicU64>,
     inference_orders_cancelled: Arc<AtomicU64>,
     inference_reconcile_failures: Arc<AtomicU64>,
+    inference_wedged_books: Arc<AtomicU64>,
     // Retain the observable-counter and gauge handles for the lifetime of the
     // provider, mirroring the reference metrics setup. The observe callbacks
     // themselves are registered with the meter at `build()` time.
@@ -85,6 +86,7 @@ pub struct IndexerMetrics {
     _inference_sweep_lag_gauge: ObservableGauge<u64>,
     _inference_orders_gauge: ObservableGauge<u64>,
     _inference_reconcile_failures_counter: ObservableCounter<u64>,
+    _inference_wedged_books_gauge: ObservableGauge<u64>,
 }
 
 impl IndexerMetrics {
@@ -109,6 +111,7 @@ impl IndexerMetrics {
         let inference_orders_filled = Arc::new(AtomicU64::new(0));
         let inference_orders_cancelled = Arc::new(AtomicU64::new(0));
         let inference_reconcile_failures = Arc::new(AtomicU64::new(0));
+        let inference_wedged_books = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -301,6 +304,17 @@ impl IndexerMetrics {
             })
             .build();
 
+        let wedged_books_cache = Arc::clone(&inference_wedged_books);
+        let inference_wedged_books_gauge = meter
+            .u64_observable_gauge("indexer_inference_wedged_books")
+            .with_description(
+                "Visible inference order-book markets currently wedged by an unprojected raw_events row under their address — the read gate's arm-2 condition (MarketInconsistent/503) that an ABI-lagging contract upgrade can trigger indefinitely",
+            )
+            .with_callback(move |observer| {
+                observer.observe(wedged_books_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
@@ -322,6 +336,7 @@ impl IndexerMetrics {
             inference_orders_filled,
             inference_orders_cancelled,
             inference_reconcile_failures,
+            inference_wedged_books,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
             _projection_backlog_gauge: projection_backlog_gauge,
@@ -337,6 +352,7 @@ impl IndexerMetrics {
             _inference_sweep_lag_gauge: inference_sweep_lag_gauge,
             _inference_orders_gauge: inference_orders_gauge,
             _inference_reconcile_failures_counter: inference_reconcile_failures_counter,
+            _inference_wedged_books_gauge: inference_wedged_books_gauge,
         }
     }
 
@@ -425,6 +441,12 @@ impl IndexerMetrics {
     /// Set the cumulative value reported by `indexer_inference_reconcile_failures`.
     pub fn set_inference_reconcile_failures(&self, value: u64) {
         self.inference_reconcile_failures.store(value, Ordering::Relaxed);
+    }
+
+    /// Set the value reported by `indexer_inference_wedged_books` — the count of
+    /// visible inference books currently wedged by an unprojected `raw_events` row.
+    pub fn set_inference_wedged_books(&self, value: u64) {
+        self.inference_wedged_books.store(value, Ordering::Relaxed);
     }
 }
 
@@ -563,6 +585,7 @@ mod tests {
         metrics.set_inference_sweep_lag_seconds(555);
         metrics.set_inference_order_counts(60, 70, 80);
         metrics.set_inference_reconcile_failures(99);
+        metrics.set_inference_wedged_books(13);
 
         assert_eq!(metrics.orders_created.load(Ordering::Relaxed), 7);
         assert_eq!(metrics.orders_partially_filled.load(Ordering::Relaxed), 3);
@@ -584,5 +607,6 @@ mod tests {
         assert_eq!(metrics.inference_orders_filled.load(Ordering::Relaxed), 70);
         assert_eq!(metrics.inference_orders_cancelled.load(Ordering::Relaxed), 80);
         assert_eq!(metrics.inference_reconcile_failures.load(Ordering::Relaxed), 99);
+        assert_eq!(metrics.inference_wedged_books.load(Ordering::Relaxed), 13);
     }
 }

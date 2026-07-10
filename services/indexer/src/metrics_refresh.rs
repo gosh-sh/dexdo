@@ -97,6 +97,10 @@ pub async fn run_refresh_loop(
             Err(err) => error!(?err, "inference order status metric refresh failed"),
         }
         metrics.set_inference_reconcile_failures(repo.inference_reconcile_failures_count());
+        match repo.inference_wedged_books_count().await {
+            Ok(n) => metrics.set_inference_wedged_books(n.max(0) as u64),
+            Err(err) => error!(?err, "inference wedged books metric refresh failed"),
+        }
         tokio::time::sleep(interval).await;
     }
 }

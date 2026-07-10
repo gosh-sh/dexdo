@@ -169,3 +169,113 @@ async fn superseded_failed_row_excluded_from_failing_bucket() {
     let (_d1, _v1, f1) = repo.inference_market_state_counts().await.unwrap();
     assert_eq!(f1 - f0, 1, "only the non-superseded failing row increments the failing bucket");
 }
+
+/// `event_type`/`decoded` are left NULL — the wedged-books predicate only cares
+/// about `src_address` and `processed_at is null`, matching the read gate's
+/// arm-2, which is deliberately wider than the projection-pending predicate.
+async fn insert_unprojected_raw_event(pool: &PgPool, msg_id: &str, src_address: &str) {
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $1, now(), $2, null, null, '{}'::jsonb, null)
+           on conflict (msg_id) do nothing"#,
+    )
+    .bind(msg_id)
+    .bind(src_address)
+    .execute(pool)
+    .await
+    .expect("insert unprojected raw_events row");
+}
+
+// Whole-table aggregate, so assert a delta (other rows in the shared test DB are
+// expected). Exercises all three predicates of the wedged-book definition: visible
+// (last_reconciled_at set, superseded_at null) AND at least one raw_events row with
+// processed_at null under the book's address.
+#[tokio::test]
+async fn wedged_books_count_reflects_unprojected_events_under_visible_books() {
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let wedged = "inf_metrics_test.wedged";
+    let clean = "inf_metrics_test.wedged_clean";
+    let unreconciled = "inf_metrics_test.wedged_unreconciled";
+    let superseded = "inf_metrics_test.wedged_superseded";
+    let addrs = vec![
+        wedged.to_string(),
+        clean.to_string(),
+        unreconciled.to_string(),
+        superseded.to_string(),
+    ];
+
+    sqlx::query("delete from raw_events where src_address = any($1)")
+        .bind(&addrs)
+        .execute(&pool)
+        .await
+        .expect("purge raw_events");
+    sqlx::query("delete from inference_markets where orderbook_address = any($1)")
+        .bind(&addrs)
+        .execute(&pool)
+        .await
+        .expect("purge inference_markets");
+
+    let before = repo.inference_wedged_books_count().await.expect("wedged count before");
+
+    // wedged: visible book with an unprojected raw_events row under its address -> counted.
+    sqlx::query(
+        "insert into inference_markets (orderbook_address, last_reconciled_at) values ($1, now())",
+    )
+    .bind(wedged)
+    .execute(&pool)
+    .await
+    .expect("insert wedged market");
+    insert_unprojected_raw_event(&pool, "inf_metrics_test.wedged.evt1", wedged).await;
+
+    // clean: visible book with no unprojected event -> not counted.
+    sqlx::query(
+        "insert into inference_markets (orderbook_address, last_reconciled_at) values ($1, now())",
+    )
+    .bind(clean)
+    .execute(&pool)
+    .await
+    .expect("insert clean market");
+
+    // unreconciled: never visible (last_reconciled_at null), but has an unprojected
+    // event under its address -> not counted (excluded by the visibility predicate).
+    sqlx::query("insert into inference_markets (orderbook_address) values ($1)")
+        .bind(unreconciled)
+        .execute(&pool)
+        .await
+        .expect("insert unreconciled market");
+    insert_unprojected_raw_event(&pool, "inf_metrics_test.wedged.evt2", unreconciled).await;
+
+    // superseded: was visible, now superseded, still has an unprojected event -> not
+    // counted (excluded by superseded_at, same as the failing-bucket exclusion).
+    sqlx::query(
+        "insert into inference_markets (orderbook_address, last_reconciled_at, superseded_at) \
+         values ($1, now(), now())",
+    )
+    .bind(superseded)
+    .execute(&pool)
+    .await
+    .expect("insert superseded market");
+    insert_unprojected_raw_event(&pool, "inf_metrics_test.wedged.evt3", superseded).await;
+
+    let after = repo.inference_wedged_books_count().await.expect("wedged count after");
+    assert_eq!(
+        after - before,
+        1,
+        "only the visible book with an unprojected event should count as wedged"
+    );
+
+    sqlx::query("delete from raw_events where src_address = any($1)")
+        .bind(&addrs)
+        .execute(&pool)
+        .await
+        .expect("cleanup raw_events");
+    sqlx::query("delete from inference_markets where orderbook_address = any($1)")
+        .bind(&addrs)
+        .execute(&pool)
+        .await
+        .expect("cleanup inference_markets");
+}
