@@ -190,12 +190,19 @@ steps:
       - >
         ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$E2E_CI_USER@$E2E_HOST"
         "set +e;
+        cd $ACKI_DIR;
+        echo '===== docker compose ps -a (state + exit codes) =====';
+        docker compose -f docker/dexdo-e2e.compose.yaml ps -a 2>/dev/null;
+        for n in node0 node1 node2 node3 node4; do
+          echo \"===== \$n (logs/\$n/node.log, tail 120) =====\";
+          tail -n 120 $ACKI_DIR/logs/\$n/node.log 2>/dev/null;
+          echo \"----- docker logs \$n (tail 60) -----\";
+          docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=60 \$n 2>/dev/null;
+        done;
         echo '===== block_manager (logs/bm0/bm.log, tail 200) =====';
         tail -n 200 $ACKI_DIR/logs/bm0/bm.log 2>/dev/null;
-        echo '===== node0 (logs/node0/node.log, tail 200) =====';
-        tail -n 200 $ACKI_DIR/logs/node0/node.log 2>/dev/null;
-        echo '===== docker compose logs (node0 block_manager, tail 100) =====';
-        cd $ACKI_DIR && docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=100 node0 block_manager 2>/dev/null;
+        echo '----- docker logs block_manager (tail 100) -----';
+        docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=100 block_manager 2>/dev/null;
         true"
 
   net_down:
