@@ -364,7 +364,7 @@ Indices:
 
 ### `inference_orders`
 
-Per-order read model backing `/api/v1/inference/depth` (order-book depth). One row per chain-side order on an `InferenceOrderBook`, mutated in place as `InferenceOrderPlaced`, `InferenceFilled`, `InferenceOrderCancelled`, `InferenceRefunded`, and `InferenceSubscriptionPlaced` events arrive (the `Inference` prefix is part of the on-wire event name since v4.0.10). Mirrors [`live_orders`](#live_orders): rows are never deleted, so `FILLED` / `CANCELLED` entries remain and the depth handler (`max(last_chain_order)` across **all** rows for the book) still sees them. This version exposes no account-scoped inference order endpoint, so no ownership / private-read columns are required.
+Per-order read model backing `/api/v1/inference/depth` (order-book depth) and `/api/v1/inference/orders` (per-order listing, public and unauthenticated). One row per chain-side order on an `InferenceOrderBook`, mutated in place as `InferenceOrderPlaced`, `InferenceFilled`, `InferenceOrderCancelled`, `InferenceRefunded`, and `InferenceSubscriptionPlaced` events arrive (the `Inference` prefix is part of the on-wire event name since v4.0.10). Mirrors [`live_orders`](#live_orders): rows are never deleted, so `FILLED` / `CANCELLED` entries remain and the depth handler (`max(last_chain_order)` across **all** rows for the book) still sees them. This version exposes no account-scoped (owner-authenticated) inference order endpoint, so no ownership / private-read columns are required.
 
 | Column | Type | Notes |
 | --- | --- | --- |

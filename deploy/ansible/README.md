@@ -73,6 +73,52 @@ Either way the connection string is built from `dexdo_db_user` / `dexdo_db_name`
 / `dexdo_db_host` / `dexdo_db_port` + `vault_dexdo_db_password`, and migrations
 run automatically on startup (`sqlx::migrate!`).
 
+### Migration checksums and schema recreation
+
+`sqlx::migrate!` records a checksum per applied migration file in
+`_sqlx_migrations`. Editing an already-applied migration file (as opposed to
+adding a new one) changes its checksum, so any database that already recorded
+the old checksum refuses to start — `sqlx::migrate!` errors out rather than
+reapplying it. When a release folds a schema change into an existing
+migration file instead of shipping a new one, **the target database must be
+dropped and recreated before deploying that release.** This destroys all
+indexed data; the indexer rebuilds the read-model from chain with no operator
+backfill step, but market-data endpoints will read empty until ingestion
+catches back up (see [Verify](#verify)).
+
+### Rollout order: stop the stack, then wipe, then deploy
+
+Stop the running stack **before** wiping the database, and only deploy the
+new release once the database is empty. Wiping while the old stack is still
+up lets the old indexer reapply *its* (unedited) migration file into the now-empty
+schema; the new indexer's edited version of that file then fails its checksum
+check against what the old indexer just recorded, and refuses to start.
+
+There is a second, data-correctness reason to keep this order. In the window
+between the wipe and the old stack actually stopping, the old projector can
+still write rows for a column a schema fold expects a reconciler sweep to
+backfill progressively — for example `inference_orders.token_contract`. A
+row that reaches a terminal status (`FILLED` / `CANCELLED`) before the sweep
+visits it keeps that column `NULL` permanently: the sweep only probes `OPEN`
+rows, and the `/api/v1/inference/orders` read-side gate only vouches for
+`OPEN` (`LIVE`) rows too, so a historical NULL like this is invisible to any
+later online repair. Following stop → wipe → deploy makes that window
+unreachable.
+
+### The indexer applies migrations; start it before or with the API
+
+`sqlx::migrate!` runs unconditionally from the indexer's `main.rs` at every
+startup. The API runs it too, but **only** when `auth.seed_accounts=true`
+(`services/api/src/lib.rs:2445-2459`); with the flag off — the normal
+deployed configuration — the API stays a read-only client of whatever schema
+already exists. The rendered compose file starts `api` and `indexer`
+concurrently with no `depends_on` between them, so on a freshly recreated
+database the API container can come up first and query tables the migration
+hasn't created yet. This fails closed: affected requests return an internal
+error, never a wrong answer, and the condition self-heals with no operator
+action once the indexer finishes applying migrations. Deploying or starting
+the indexer before or together with the API avoids the transient outright.
+
 ## Metrics
 
 The indexer can export OTLP metrics. A rendered `.env` next to the compose file
@@ -122,3 +168,41 @@ curl -s 'http://<host>:<dexdo_api_port>/api/v1/prediction/markets?limit=5' | jq
 
 Market-data endpoints are empty until the indexer has ingested chain events —
 normal on a cold database.
+
+### When `/api/v1/inference/orders` refuses to answer
+
+This endpoint fails closed rather than risk a false "not in use" for a
+`tokenContract` query: it returns `-1500` / HTTP 503 (retry) instead of an
+empty page whenever it cannot vouch for its coverage of the book. Two
+operational conditions cause this, both distinct from ordinary indexer
+backlog:
+
+- **An unprojected message under the book's address.** The gate treats any
+  `raw_events` row for that book's `src_address` with `processed_at IS NULL`
+  as incomplete coverage. Most of the time this is ordinary projection
+  backlog and clears on its own as the projection loop catches up — no
+  operator action needed. It does **not** clear when the row is stored
+  undecoded (`event_type` / `decoded` both NULL): `persist_page` never
+  re-decodes a stored row and projection permanently skips it. Because
+  every event an `InferenceOrderBook` contract can emit is already in the
+  indexer's loaded ABI, a permanently-undecoded row under a book's
+  `src_address` can only mean the deployed contract emitted something the
+  loaded ABI doesn't recognize — i.e. the ABI is stale. Monitor with:
+
+  ```sql
+  select src_address, count(*) from raw_events where processed_at is null group by 1;
+  ```
+
+  A count that persists across repeated checks (rather than draining) points
+  at the undecoded case; corroborate with the exported `indexer_decode_errors`
+  / `indexer_decode_ambiguous_collisions` OTLP counters. Recovery: sync the
+  ABI to the deployed contract version, then stop → wipe → redeploy per
+  [Rollout order](#rollout-order-stop-the-stack-then-wipe-then-deploy) above
+  — the same procedure the schema fold already requires.
+- **A stale capture cursor.** The gate also requires the capture loop's last
+  poll to be recent — within `CAPTURE_FRESHNESS_SECS` (30s) of the request —
+  because `at_head` alone only records that the *last* poll saw no next
+  page, not that the loop is still polling. A wedged or crashed capture loop
+  therefore turns every book's TokenContract-filtered live-SELL queries into
+  a 503 once the last poll ages past 30s, independent of whether the loop is
+  actually behind on data.
