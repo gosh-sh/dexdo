@@ -544,26 +544,39 @@ impl InferenceReconciler {
             return Ok(SweepStep::GatesFailed);
         };
 
-        // New cycle (cursor NULL) ⇒ snapshot boundary = getStats().nextOrderId.
+        // The account state this step probes. Read from THIS BOC on every step, not
+        // replayed from the cycle's stored boundary: mid-cycle `cycle_max` describes the
+        // BOC that opened the cycle, and a gateway serving a rolled-back state would
+        // otherwise let us probe an id it has never assigned — reading amount == 0 for an
+        // order that is alive.
+        let boc_next_order_id =
+            uint_field_to_decimal(&self.call_getter(boc, "getStats", &json!({}))?, "nextOrderId")?;
+
+        // New cycle (cursor NULL) ⇒ snapshot boundary = this BOC's nextOrderId.
         let cycle_max: String = match existing_cycle_max {
             Some(m) if prev_cursor.is_some() => m,
-            _ => uint_field_to_decimal(
-                &self.call_getter(boc, "getStats", &json!({}))?,
-                "nextOrderId",
-            )?,
+            _ => boc_next_order_id.clone(),
         };
 
-        // Next N OPEN orders in (prev_cursor, cycle_max].
+        // Bound exclusively, and never past what this BOC can answer for. `nextOrderId`
+        // is the next UNASSIGNED id (`orderId = _nextOrderId++` on chain), and the BOC was
+        // fetched before this step ran, so a placement projected since then can occupy
+        // exactly that id while the BOC knows nothing about it. Probing it would read
+        // amount == 0 and cancel a live order. The boundary id is swept next cycle,
+        // against a fresh BOC.
+        //
         let lower = prev_cursor.clone().unwrap_or_else(|| "-1".to_string());
         let ids: Vec<(String,)> = sqlx::query_as(
             r#"select order_id::text from inference_orders
                 where orderbook_address=$1 and status='OPEN'
-                  and order_id > $2::numeric and order_id <= $3::numeric
-                order by order_id asc limit $4"#,
+                  and order_id > $2::numeric
+                  and order_id < least($3::numeric, $4::numeric)
+                order by order_id asc limit $5"#,
         )
         .bind(ob)
         .bind(&lower)
         .bind(&cycle_max)
+        .bind(&boc_next_order_id)
         .bind(self.sweep_batch_n)
         .fetch_all(&self.pool)
         .await
@@ -582,9 +595,38 @@ impl InferenceReconciler {
             self.provisional_cancel(ob, &to_cancel).await?;
         }
 
-        let cycle_complete = (ids.len() as i64) < self.sweep_batch_n;
-        let new_cursor: Option<String> =
-            if cycle_complete { None } else { ids.last().map(|(id,)| id.clone()) };
+        // Both are `uint128` on chain (InferenceOrderBook.sol:159, :960). The DB columns are
+        // `numeric(78, 0)`, so a corrupted `sweep_cycle_max` can exceed `u128` and this parse
+        // fails the step. That is fail-loud, and the `.context` names the value rather than
+        // guarding against the overflow.
+        let clamped = boc_next_order_id.parse::<u128>().context("boc nextOrderId")?
+            < cycle_max.parse::<u128>().context("cycle_max")?;
+        if clamped {
+            // Order ids only grow, so `boc_next_order_id < cycle_max` means the gateway served
+            // an account state older than the one that opened this cycle. Silent otherwise: the
+            // cycle cannot complete, so a book in discovery keeps answering -1121 on depth,
+            // markets and this endpoint until a fresh BOC arrives. This is the only signal.
+            warn!(
+                orderbook_address = ob,
+                boc_next_order_id = %boc_next_order_id,
+                cycle_max = %cycle_max,
+                "sweep bound clamped by a rolled-back account state; cycle cannot complete",
+            );
+        }
+        // A short batch means the BOUND was reached — which is the cycle's boundary only
+        // when the BOC did not clamp it. Under a clamp the ids in
+        // [boc_next_order_id, cycle_max) were never probed, and calling that a completed
+        // cycle would reset the cursor and, under discovery, stamp visibility for a book
+        // this sweep only half-inspected.
+        let cycle_complete = ((ids.len() as i64) < self.sweep_batch_n) && !clamped;
+        // `or(prev_cursor)` keeps the cycle's progress when a clamped batch comes back
+        // empty: `ids.last()` is None there, and a None cursor is how a COMPLETED cycle is
+        // spelled — it would silently rewind the cycle to its start.
+        let new_cursor: Option<String> = if cycle_complete {
+            None
+        } else {
+            ids.last().map(|(id,)| id.clone()).or_else(|| prev_cursor.clone())
+        };
 
         if discovery {
             let stamped = self

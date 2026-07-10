@@ -599,7 +599,7 @@ async fn sweep_wraps_against_fixed_boundary_not_live_next_order_id() {
         .unwrap();
 
     // Cycle 1: snapshot boundary = nextOrderId = 3 ⇒ id=10 (>3) is excluded THIS cycle.
-    let g1 = RecGetter::new(0, 3, &[]); // default batch 50 ⇒ one batch covers (−1,3]
+    let g1 = RecGetter::new(0, 3, &[]); // default batch 50 ⇒ one batch covers (−1,3)
     let _ = r_run(&pool, g1.clone(), ob).await;
     assert_eq!(
         g1.order_ids(),
@@ -613,6 +613,153 @@ async fn sweep_wraps_against_fixed_boundary_not_live_next_order_id() {
         g2.order_ids().contains(&"10".to_string()),
         "id=10 re-probed in the next cycle (low ids also re-scanned)"
     );
+}
+
+#[tokio::test]
+async fn sweep_does_not_probe_the_next_unassigned_order_id() {
+    let ob = "0:t_sweep_bound";
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    seed_market(&pool, ob, true).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    open_order(&pool, ob, 5).await; // id == getStats().nextOrderId
+                                    // queue idle; nextOrderId = 5; id "5" would report amount == 0 and be cancelled.
+    let g = RecGetter::new(0, 5, &["5"]);
+
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g.clone());
+    r.run_sweep_step(ob, "boc", false).await.unwrap();
+
+    assert!(g.order_ids().is_empty(), "the next unassigned id must never be probed");
+    let status: String = sqlx::query_scalar(
+        "select status from inference_orders where orderbook_address=$1 and order_id=5",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "OPEN", "the boundary id must not be probed against a possibly stale BOC");
+}
+
+#[tokio::test]
+async fn sweep_does_not_probe_ids_a_rolled_back_account_state_cannot_answer_for() {
+    let ob = "0:t_sweep_rollback";
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    seed_market(&pool, ob, true).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    open_order(&pool, ob, 7).await;
+    // Mid-cycle: the stored boundary came from an older, further-ahead account state.
+    sqlx::query("update inference_markets set sweep_cursor=1, sweep_cycle_max=20 where orderbook_address=$1")
+        .bind(ob).execute(&pool).await.unwrap();
+
+    // This BOC has rolled back: it has not assigned id 7 yet.
+    let g = RecGetter::new(0, 5, &["7"]);
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g.clone());
+    r.run_sweep_step(ob, "boc", false).await.unwrap();
+
+    assert!(g.order_ids().is_empty(), "a rolled-back state cannot answer for id 7");
+    let status: String = sqlx::query_scalar(
+        "select status from inference_orders where orderbook_address=$1 and order_id=7",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        status, "OPEN",
+        "a stored cycle boundary must not authorize probing a rolled-back state"
+    );
+}
+
+/// The clamp above must not be read as "the cycle finished". A short batch means the
+/// *bound* was reached, and when the BOC clamps the bound below `cycle_max` the ids in
+/// `[boc_next_order_id, cycle_max)` were never looked at. Reporting `CycleComplete` there
+/// resets the cursor and — under discovery — stamps `last_reconciled_at` for a book the
+/// sweep only half-inspected.
+#[tokio::test]
+async fn a_batch_clamped_by_a_rolled_back_boc_does_not_complete_the_cycle() {
+    let ob = "0:t_sweep_clamped_cycle";
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    seed_market(&pool, ob, /* reconciled= */ false).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    open_order(&pool, ob, 2).await; // below the clamp: probed, alive
+    open_order(&pool, ob, 7).await; // above the clamp: never probed
+    sqlx::query("update inference_markets set sweep_cursor=1, sweep_cycle_max=20 where orderbook_address=$1")
+        .bind(ob).execute(&pool).await.unwrap();
+
+    let g = RecGetter::new(0, 5, &[]); // nextOrderId=5 ⇒ effective bound 5 < cycle_max 20
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g.clone());
+    let step = r.run_sweep_step(ob, "boc", /* discovery= */ true).await.unwrap();
+
+    assert!(matches!(step, SweepStep::Continued), "a clamped batch has not finished the cycle");
+    assert_eq!(g.order_ids(), vec!["2".to_string()], "only ids below the clamp are probed");
+
+    let (cursor, cycle_max, reconciled): (Option<String>, Option<String>, Option<i64>) =
+        sqlx::query_as(
+            "select sweep_cursor::text, sweep_cycle_max::text,
+                               extract(epoch from last_reconciled_at)::bigint
+                          from inference_markets where orderbook_address=$1",
+        )
+        .bind(ob)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cursor.as_deref(), Some("2"), "the cursor keeps the progress it made");
+    assert_eq!(cycle_max.as_deref(), Some("20"), "the cycle keeps its own boundary");
+    assert!(reconciled.is_none(), "an unfinished cycle must not stamp visibility");
+}
+
+/// An empty clamped batch (every id below the clamp is already swept) must not rewind the
+/// cycle to its start either — `ids.last()` is `None` there, and a bare `None` cursor is
+/// how a *completed* cycle is spelled.
+#[tokio::test]
+async fn an_empty_clamped_batch_leaves_the_cursor_where_it_was() {
+    let ob = "0:t_sweep_clamped_empty";
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    seed_market(&pool, ob, true).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    open_order(&pool, ob, 7).await; // above the clamp
+    sqlx::query("update inference_markets set sweep_cursor=4, sweep_cycle_max=20 where orderbook_address=$1")
+        .bind(ob).execute(&pool).await.unwrap();
+
+    let g = RecGetter::new(0, 5, &[]);
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g.clone());
+    assert!(matches!(r.run_sweep_step(ob, "boc", false).await.unwrap(), SweepStep::Continued));
+
+    let cursor: Option<String> = sqlx::query_scalar(
+        "select sweep_cursor::text from inference_markets where orderbook_address=$1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cursor.as_deref(), Some("4"), "an empty clamped batch must not reset the cursor");
 }
 
 #[tokio::test]
