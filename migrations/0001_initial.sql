@@ -58,6 +58,16 @@ create index raw_events_pending_src_idx
     on raw_events (src_address)
     where processed_at is null and event_type is not null and decoded is not null;
 
+-- The read gate's "we cannot see everything for this book" probe, always scoped to one
+-- `src_address`. Capture stores only ext-out messages, and every event an
+-- InferenceOrderBook emits is in the ABI this indexer loads (all nine), so an unprojected
+-- row under that src — decodable and pending, undecodable, bodyless, or an id we do not
+-- know — can only mean our view of that book is incomplete. There is no benign case for
+-- this src, which is why the predicate needs no decode-outcome discriminator.
+create index raw_events_unprocessed_src_idx
+    on raw_events (src_address)
+    where processed_at is null;
+
 create table indexer_cursors (
     stream_name text primary key,
     cursor text,
@@ -383,6 +393,15 @@ create table inference_orders (
     status text not null check (status in ('OPEN', 'FILLED', 'CANCELLED')),
     swept_at timestamptz,
     note_address text,
+    -- Deal TokenContract carried by InferenceOrderPlaced. NULL on BUY rows: the event
+    -- carries the zero address there. A live SELL with a NULL value means the indexer
+    -- does not know it yet, and the read API refuses TokenContract lookups until the
+    -- reconciler fills it in.
+    token_contract text,
+    -- Unix seconds, NULL when the chain value is 0 (a resting SELL) or is not known:
+    -- InferenceSubscriptionPlaced omits the deadline the chain stores, so a
+    -- subscription row learns it only from the reconciler's getOrder probe.
+    deadline numeric(20, 0),
     last_chain_order text not null,
     chain_created_at timestamptz,
     chain_updated_at timestamptz,
@@ -395,6 +414,36 @@ create index inference_orders_open_book_idx
     on inference_orders (orderbook_address, is_buy, price desc) where status = 'OPEN';
 create index inference_orders_sweep_idx
     on inference_orders (orderbook_address, order_id) where status = 'OPEN';
+
+-- Backs the tokenContract lookup. `status` precedes the keyset because one TC's row
+-- count is unbounded: a seller may re-place the same TC after a cancel, and rows are
+-- never deleted, so a status residual would walk that TC's whole history.
+create index inference_orders_book_tc_idx
+    on inference_orders (orderbook_address, token_contract, status, order_id desc)
+    where token_contract is not null;
+
+-- Backs the note filter alone or combined with side/status; every leading column is
+-- pinned per query branch, so the keyset order survives.
+create index inference_orders_book_note_idx
+    on inference_orders (orderbook_address, note_address, is_buy, status, order_id desc)
+    where note_address is not null;
+
+-- Backs the read path's fail-closed probe for a resting SELL whose TokenContract is
+-- unknown. Empty whenever every live SELL has one, so the EXISTS is O(1).
+create index inference_orders_live_sell_tc_null_idx
+    on inference_orders (orderbook_address)
+    where status = 'OPEN' and is_buy = false and token_contract is null;
+
+-- Serves side-only, status-only, side+status and unfiltered listings: the query plan
+-- pins is_buy and status in every branch, so one composite covers all four shapes.
+create index inference_orders_book_side_status_idx
+    on inference_orders (orderbook_address, is_buy, status, order_id desc);
+
+-- max(last_chain_order) per book is the lastUpdateId watermark for the depth and the
+-- orders endpoints; rows are never deleted, so without this index it scans a book's
+-- whole history on every request.
+create index inference_orders_book_chain_order_idx
+    on inference_orders (orderbook_address, last_chain_order desc);
 
 -- Inference SETTLEMENT read-model. One inference_deals row per TokenContract
 -- (the per-deal streaming escrow auto-deployed when a SELL offer is matched),

@@ -73,6 +73,7 @@ Indices:
 | `raw_events_chain_order_idx` | Backs the projection loop's `ORDER BY chain_order ASC`. |
 | `raw_events_pending_chain_order_idx` (partial: `processed_at IS NULL AND event_type IS NOT NULL AND decoded IS NOT NULL`) | Backs the projection loop's keyset scan (`crates/infrastructure/src/indexer_repo.rs::reproject_pending_from`). Keyed on `chain_order` to match the loop's `ORDER BY`. |
 | `raw_events_pending_src_idx` (partial: `processed_at IS NULL AND event_type IS NOT NULL AND decoded IS NOT NULL`) | Indexed on `src_address`. Allows the inference reconciler's sweep catch-up gate to probe "are there any pending events for this book?" as an index probe on `src_address = orderbook_address`, rather than a full-table scan. |
+| `raw_events_unprocessed_src_idx` (partial: `processed_at IS NULL`) | Indexed on `src_address`. Backs the read gate's "we cannot see everything for this book" probe: every event an `InferenceOrderBook` emits is in the loaded ABI, so any unprojected row under that `src_address` — pending-decodable, undecoded, bodyless, or an unrecognized id — means the view of that book is incomplete. Broader than `raw_events_pending_src_idx`'s decode-outcome-scoped predicate, so Postgres cannot reuse that index for this probe. |
 
 ### `indexer_cursors`
 
@@ -377,6 +378,8 @@ Per-order read model backing `/api/v1/inference/depth` (order-book depth). One r
 | `status` | `text` CHECK `IN ('OPEN','FILLED','CANCELLED')` | Order lifecycle. Depth aggregation filters on `status = 'OPEN' AND amount_remaining > 0`. A SELL offer is a one-deal slot consumed on match; a BUY maker reduces across fills. |
 | `swept_at` | `timestamptz` (nullable) | Stamped by the reconciler sweep when `getOrder()` confirms the order is no longer in the book and the row is provisionally cancelled. NULL while the order has not yet been swept. |
 | `note_address` | `text` (nullable) | Owner note address (`InferenceOrderPlaced.note`). Not on the public hot path; kept for diagnostics and cancel attribution. |
+| `token_contract` | `text` (nullable) | Deal TokenContract carried by `InferenceOrderPlaced`. NULL on BUY rows (the event carries the zero address there). A live SELL with a NULL value means the indexer does not know it yet, and the read API refuses TokenContract lookups until the reconciler fills it in. |
+| `deadline` | `numeric(20,0)` (nullable) | Unix seconds. NULL when the chain value is 0 (a resting SELL) or is not known: `InferenceSubscriptionPlaced` omits the deadline the chain stores, so a subscription row learns it only from the reconciler's `getOrder` probe. |
 | `last_chain_order` | `text` NOT NULL | Chain-order key of the most recent book event that touched this order. Lex-monotonic via `greatest(existing, new)`. Feeds `lastUpdateId` in depth responses as a STRING. |
 | `chain_created_at` / `chain_updated_at` | `timestamptz` | On-chain block times of the originating `InferenceOrderPlaced` and the most recent touch. Display / diagnostic only. |
 | `created_at` / `updated_at` | `timestamptz` | Bookkeeping. |
@@ -387,6 +390,11 @@ Indices:
 | --- | --- |
 | `inference_orders_open_book_idx` (partial: `status = 'OPEN'`) | `(orderbook_address, is_buy, price DESC)`. Sized for the depth query: top-N price levels per side for one book. |
 | `inference_orders_sweep_idx` (partial: `status = 'OPEN'`) | `(orderbook_address, order_id)`. Backs the reconciler's bounded round-robin sweep SELECT over OPEN rows, keyed by book + cursor position. |
+| `inference_orders_book_tc_idx` (partial: `token_contract IS NOT NULL`) | `(orderbook_address, token_contract, status, order_id DESC)`. Backs the tokenContract lookup. `status` precedes the keyset because one TC's row count is unbounded — a seller may re-place the same TC after a cancel, and rows are never deleted, so a status residual would walk that TC's whole history. |
+| `inference_orders_book_note_idx` (partial: `note_address IS NOT NULL`) | `(orderbook_address, note_address, is_buy, status, order_id DESC)`. Backs the note filter alone or combined with side/status; every leading column is pinned per query branch, so the keyset order survives. |
+| `inference_orders_live_sell_tc_null_idx` (partial: `status = 'OPEN' AND is_buy = false AND token_contract IS NULL`) | `(orderbook_address)`. Backs the read path's fail-closed probe for a resting SELL whose TokenContract is unknown. Empty whenever every live SELL has one, so the `EXISTS` is O(1). |
+| `inference_orders_book_side_status_idx` | `(orderbook_address, is_buy, status, order_id DESC)`. Serves side-only, status-only, side+status and unfiltered listings: the query plan pins `is_buy` and `status` in every branch, so one composite covers all four shapes. |
+| `inference_orders_book_chain_order_idx` | `(orderbook_address, last_chain_order DESC)`. `max(last_chain_order)` per book is the `lastUpdateId` watermark for the depth and the orders endpoints; rows are never deleted, so without this index it scans a book's whole history on every request. |
 
 ## Read-model — inference deals
 
