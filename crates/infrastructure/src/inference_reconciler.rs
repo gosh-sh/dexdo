@@ -616,12 +616,34 @@ impl InferenceReconciler {
                 continue;
             }
             let tc: Option<String> = if *tc_missing {
-                non_zero_address(field_str(&o, "tokenContract").ok()).map(str::to_owned)
+                match field_str(&o, "tokenContract") {
+                    Ok(v) => non_zero_address(Some(v)).map(str::to_owned),
+                    Err(e) => {
+                        warn!(
+                            orderbook_address = ob,
+                            order_id = %id,
+                            error = %e,
+                            "getOrder tokenContract failed to decode during sweep repair; ABI drift?",
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
             let deadline: Option<String> = if *deadline_missing {
-                non_zero_uint(uint_field_to_decimal(&o, "deadline").ok())
+                match uint_field_to_decimal(&o, "deadline") {
+                    Ok(v) => non_zero_uint(Some(v)),
+                    Err(e) => {
+                        warn!(
+                            orderbook_address = ob,
+                            order_id = %id,
+                            error = %e,
+                            "getOrder deadline failed to decode during sweep repair; ABI drift?",
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -637,7 +659,8 @@ impl InferenceReconciler {
             debug!(orderbook_address = ob, repaired, "sweep repaired inference order fields");
         }
 
-        // Both are `uint128` on chain (InferenceOrderBook.sol:159, :960). The DB columns are
+        // Both are `uint128` on chain (the `_nextOrderId` counter, read via
+        // `getStats().nextOrderId`). The DB columns are
         // `numeric(78, 0)`, so a corrupted `sweep_cycle_max` can exceed `u128` and this parse
         // fails the step. That is fail-loud, and the `.context` names the value rather than
         // guarding against the overflow.

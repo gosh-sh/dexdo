@@ -448,10 +448,9 @@ fn build_snapshot_query<'a>(
     // the reconciler's `pending_events_exist`, which adds `event_type is not null and
     // decoded is not null` because an undecodable row would wedge its sweep forever. A
     // reader asking "is my view complete?" must count exactly those rows. That is why this
-    // arm rides `raw_events_unprocessed_src_idx` and not the existing
-    // `raw_events_pending_src_idx`: the bare `processed_at is null` predicate does not
-    // imply that index's narrower one, so Postgres could not use it. (3) is a primary-key
-    // lookup on `indexer_cursors`.
+    // arm rides `raw_events_unprocessed_src_idx` and not `raw_events_pending_src_idx`,
+    // whose narrower predicate the bare `processed_at is null` clause does not imply, so
+    // Postgres could not use it. (3) is a primary-key lookup on `indexer_cursors`.
     b.push(
         " and last_reconciled_at is not null), gate as (select exists(\
              select 1 from inference_orders where orderbook_address = ",

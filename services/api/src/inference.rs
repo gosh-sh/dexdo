@@ -352,13 +352,6 @@ struct InferenceOrderDto {
     ),
     security(()),
 )]
-// `style = Form, explode = false` describes a comma-separated ARRAY, so the declared type
-// must be `Option<Vec<_>>` — both existing uses in `lib.rs` (markets `status` at `:807`,
-// prediction orders `status` at `:1191`) are. Add `pub(crate) enum InferenceOrderStatus`
-// deriving `ToSchema` to `services/api/src/dto.rs`, beside `QueryableOrderStatus`; it exists
-// only to shape the OpenAPI document. The handler still reads the raw CSV string and lets
-// `InferenceOrderStatus::from_csv` in the application crate parse it — the same split
-// `/prediction/orders` uses.
 pub(crate) async fn get_inference_orders(
     req: &mut Request,
     depot: &mut Depot,

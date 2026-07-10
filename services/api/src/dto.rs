@@ -204,6 +204,8 @@ pub(crate) enum QueryableOrderStatus {
 
 /// Order statuses accepted by the `GET /api/v1/inference/orders` `status` filter.
 /// `LIVE` means currently resting; see docs/api-spec.md §Inference Orders.
+/// Shapes the OpenAPI `status` parameter's allowed values; the handler passes the raw CSV
+/// query string to the application crate's parser rather than using this enum for logic.
 // Documentation-only, same rationale as `MarketsSort`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
