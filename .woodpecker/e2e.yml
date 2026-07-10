@@ -16,7 +16,7 @@ variables:
   - &tvm_cli_version "v3.0.2.an"
   - &sold_version "gosh_0.79.3"
   - &dex_test_notes_cnt "10"
-  - &inventory_branch "feature/add-e2e-dexdo-inv"
+  - &inventory_branch "main"
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
   - &acki_dir_on_host "/opt/acki-nacki"
   - &seed_notes_ws ".acki-nacki/config/dex_test_notes.keys.json"
