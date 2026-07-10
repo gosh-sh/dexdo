@@ -497,7 +497,7 @@ fn build_snapshot_query<'a>(
     } else {
         let mut first = true;
         for &is_buy in &sides {
-            for status in &q.statuses {
+            for status in q.statuses.iter() {
                 if !first {
                     b.push(" union all ");
                 }
@@ -639,23 +639,37 @@ async fn list_inference_orders_impl(
             warn!(orderbook = %query.orderbook_address, field, "inference_orders row has a NULL not-null column");
             anyhow!(DomainError::MarketInconsistent)
         };
+        // Validate each raw magnitude as a non-negative integer before scaling, exactly as
+        // the depth path does: `scale_uint_to_decimal` slices the digits by length and would
+        // render a corrupt off-grid value into a malformed decimal. An off-grid value is
+        // unreachable under the write path; fail closed rather than serve it.
+        let scale_guarded = |raw: &str, scale: u32, field: &str| -> Result<String, anyhow::Error> {
+            if BigUint::parse_bytes(raw.as_bytes(), 10).is_none() {
+                warn!(orderbook = %query.orderbook_address, raw = %raw, field, "inference_orders value is not a non-negative integer");
+                return Err(anyhow!(DomainError::MarketInconsistent));
+            }
+            Ok(scale_uint_to_decimal(raw, scale))
+        };
         orders.push(InferenceOrderRow {
             order_id: r.order_id.clone().expect("filtered on is_some"),
             token_contract: r.token_contract.clone(),
             note: r.note_address.clone(),
             is_buy: r.is_buy.ok_or_else(|| corrupt("is_buy"))?,
-            price: scale_uint_to_decimal(
+            price: scale_guarded(
                 r.price.as_deref().ok_or_else(|| corrupt("price"))?,
                 price_scale,
-            ),
-            ticks: scale_uint_to_decimal(
+                "price",
+            )?,
+            ticks: scale_guarded(
                 r.amount_remaining.as_deref().ok_or_else(|| corrupt("amount_remaining"))?,
                 quantity_scale,
-            ),
-            ticks_initial: scale_uint_to_decimal(
+                "amount_remaining",
+            )?,
+            ticks_initial: scale_guarded(
                 r.amount_initial.as_deref().ok_or_else(|| corrupt("amount_initial"))?,
                 quantity_scale,
-            ),
+                "amount_initial",
+            )?,
             deadline: r.deadline.clone(),
             status: public_status(r.status.as_deref().ok_or_else(|| corrupt("status"))?)?,
             created_at: r.created_at_unix,
@@ -663,23 +677,22 @@ async fn list_inference_orders_impl(
         });
     }
 
+    // `has_more` drives truncation and whether a resume cursor exists; the page stores only
+    // the cursor, so `has_more ⟺ next_cursor.is_some()` cannot drift.
     let has_more = orders.len() as i64 > limit;
     orders.truncate(limit as usize);
     let next_cursor = has_more.then(|| orders.last().map(|o| o.order_id.clone())).flatten();
 
-    Ok(InferenceOrdersPage { orders, next_cursor, has_more, last_update_id })
+    Ok(InferenceOrdersPage { orders, next_cursor, last_update_id })
 }
 
-/// Map a stored status onto the public vocabulary. An unknown value is read-model
-/// corruption — fail closed, as `get_inference_depth_impl` does for a non-numeric price.
+/// Map a stored status onto the public vocabulary. The string table lives once in
+/// [`InferenceOrderStatus::from_db_status`]; this boundary keeps the fail-closed policy — an
+/// unknown value is read-model corruption, logged and surfaced as `MarketInconsistent`, as
+/// `get_inference_depth_impl` does for a non-numeric price.
 fn public_status(raw: &str) -> Result<InferenceOrderStatus, anyhow::Error> {
-    match raw {
-        "OPEN" => Ok(InferenceOrderStatus::Live),
-        "FILLED" => Ok(InferenceOrderStatus::Filled),
-        "CANCELLED" => Ok(InferenceOrderStatus::Cancelled),
-        other => {
-            warn!(status = other, "inference_orders.status is not a known value");
-            Err(anyhow!(DomainError::MarketInconsistent))
-        }
-    }
+    InferenceOrderStatus::from_db_status(raw).map_err(|_| {
+        warn!(status = raw, "inference_orders.status is not a known value");
+        anyhow!(DomainError::MarketInconsistent)
+    })
 }

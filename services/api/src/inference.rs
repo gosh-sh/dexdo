@@ -388,11 +388,14 @@ pub(crate) async fn get_inference_orders(
         .await
         .map_err(|err| map_domain_or_unexpected(err, "get_inference_orders"))?;
 
+    // The cursor is the single source of "there is a next page": present exactly when the
+    // scan was truncated. Derive the wire `hasMore` from it before the field is moved.
+    let has_more = page.next_cursor.is_some();
     Ok(Json(InferenceOrdersResponse {
         server_time: now_seconds(),
         last_update_id: page.last_update_id,
         next_cursor: page.next_cursor,
-        has_more: page.has_more,
+        has_more,
         orders: page
             .orders
             .into_iter()

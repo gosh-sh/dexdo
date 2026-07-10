@@ -12,6 +12,7 @@ use std::time::Duration;
 use dodex_application::InferenceOrderStatus::Filled;
 use dodex_application::InferenceOrderStatus::Live;
 use dodex_application::InferenceOrderStatus::{self};
+use dodex_application::InferenceOrderStatusSet;
 use dodex_application::InferenceOrdersCursor;
 use dodex_application::InferenceOrdersQuery;
 use dodex_application::InferenceReadRepository;
@@ -139,7 +140,7 @@ fn query(ob: &str) -> InferenceOrdersQuery {
         token_contract: None,
         note: None,
         side: None,
-        statuses: InferenceOrderStatus::ALL.to_vec(),
+        statuses: InferenceOrderStatusSet::all(),
         limit: OrdersLimit::DEFAULT,
         cursor: None,
     }
@@ -174,7 +175,8 @@ impl QueryBuilderExt for InferenceOrdersQuery {
     }
 
     fn status(mut self, statuses: &[InferenceOrderStatus]) -> Self {
-        self.statuses = statuses.to_vec();
+        self.statuses =
+            InferenceOrderStatusSet::new(statuses.to_vec()).expect("test statuses are non-empty");
         self
     }
 
@@ -462,7 +464,6 @@ async fn an_empty_page_still_carries_the_watermark() {
         .await
         .unwrap();
     assert!(page.orders.is_empty());
-    assert!(!page.has_more);
     assert!(page.next_cursor.is_none());
     assert!(!page.last_update_id.is_empty(), "an empty page is still dated");
 }
@@ -482,7 +483,7 @@ async fn pagination_walks_order_id_descending() {
     let repo = PostgresReadModelRepository::new(pool.clone());
     let first = repo.list_inference_orders(&query(ob).limit(2)).await.unwrap();
     assert_eq!(first.orders.iter().map(|o| o.order_id.as_str()).collect::<Vec<_>>(), ["5", "4"]);
-    assert!(first.has_more);
+    // A present `next_cursor` is now the sole "more pages" signal.
     assert_eq!(first.next_cursor.as_deref(), Some("4"));
 
     let second = repo.list_inference_orders(&query(ob).limit(2).cursor("4")).await.unwrap();
