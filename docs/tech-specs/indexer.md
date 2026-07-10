@@ -329,6 +329,10 @@ Superseded books are excluded from all three `indexer_inference_markets{state=di
 
 When `getOrder(orderId)` confirms an order is no longer in the book (zero amount), the reconciler writes `status = 'CANCELLED'` and stamps `swept_at`. This is provisional: a `InferenceFilled` or `InferenceOrderCancelled` event that arrives later will advance the row normally. Terminal-row guards ensure a late event on an already-`FILLED` row is a no-op.
 
+**`token_contract` / `deadline` repair**
+
+The same `getOrder(orderId)` call the sweep already makes for the phantom-cancel check also carries `tokenContract` and `deadline` — the reconciler repairs a row missing either at no extra chain cost. Two gaps this closes: a live SELL whose `token_contract` the indexer does not yet know (see [`inference_orders.token_contract`](data-schema.md#inference_orders) — the read path's fail-closed probe exists precisely because this state is possible), and every subscription-placed BUY (`InferenceSubscriptionPlaced` carries neither field), which always starts with `deadline IS NULL`. The batch `SELECT` behind the sweep carries `token_contract IS NULL AS tc_missing` and `deadline IS NULL AS deadline_missing` alongside each `order_id`, and the two columns repair **independently**: `token_contract` is written only when `tc_missing` is true and the getter's `tokenContract` decodes to a non-zero address (`non_zero_address`), and `deadline` only when `deadline_missing` is true and the getter's `deadline` decodes to a non-zero value (`non_zero_uint`) — the same normalization the placement projector applies. A row with both columns already set costs a `getOrder` call but never reaches the UPDATE; a BUY's permanently-zero `token_contract` and a resting SELL's permanently-zero `deadline` are intentional NULLs and are never targeted, so a healthy row's `updated_at` never churns on a sweep cycle it does nothing for.
+
 **Refresh pass (Queue B)**
 
 For each already-reconciled, non-superseded book (`last_reconciled_at IS NOT NULL AND superseded_at IS NULL`) that is due for refresh:

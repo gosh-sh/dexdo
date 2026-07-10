@@ -22,6 +22,9 @@ use tracing::warn;
 
 use crate::decoder::Decoder;
 use crate::graphql::GraphqlClient;
+use crate::inference_projectors::non_zero_address;
+use crate::inference_projectors::non_zero_uint;
+use crate::projectors::field_str;
 use crate::projectors::uint_field_to_decimal;
 use crate::tvm_runner::run_getter;
 use crate::tvm_runner::tvm_exit_code;
@@ -566,8 +569,15 @@ impl InferenceReconciler {
         // against a fresh BOC.
         //
         let lower = prev_cursor.clone().unwrap_or_else(|| "-1".to_string());
-        let ids: Vec<(String,)> = sqlx::query_as(
-            r#"select order_id::text from inference_orders
+        // The two `is null` flags ride along so the repair below can skip a row that needs
+        // nothing. Asking the database per order instead would cost one round trip per open
+        // SELL — at ~95 ms per round trip to the deployed database, a book with a few
+        // hundred orders would spend minutes in a single step.
+        let ids: Vec<(String, bool, bool)> = sqlx::query_as(
+            r#"select order_id::text,
+                      token_contract is null as tc_missing,
+                      deadline is null as deadline_missing
+                 from inference_orders
                 where orderbook_address=$1 and status='OPEN'
                   and order_id > $2::numeric
                   and order_id < least($3::numeric, $4::numeric)
@@ -582,17 +592,49 @@ impl InferenceReconciler {
         .await
         .context("select sweep batch")?;
 
-        // Probe each via getOrder; an empty order (amount==0) is a phantom.
+        // Probe each via getOrder. amount == 0 is a phantom (placed but never rested, or
+        // a taker remainder refunded on chain without an event). A live order is also an
+        // opportunity: the getter carries tokenContract and deadline, so a row missing
+        // either is repaired here at no extra chain cost. The two repairs are independent
+        // — a BUY's TC is zero by design, and a subscription's deadline exists only on
+        // chain.
         let mut to_cancel: Vec<String> = Vec::new();
-        for (id,) in &ids {
+        // Repairs are accumulated, not applied per order. One UPDATE per row would cost a
+        // round trip each — and every subscription is born with a NULL deadline, so a fresh
+        // book needs the whole batch repaired. At ~95 ms per round trip, a 50-row batch
+        // would spend ~5 s here and stall every book behind it.
+        let mut repairs: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        for (id, tc_missing, deadline_missing) in &ids {
             let o = self.call_getter(boc, "getOrder", &json!({ "id": id }))?;
             let amount = uint_field_to_decimal(&o, "amount")?;
             if amount == "0" {
                 to_cancel.push(id.clone());
+                continue;
+            }
+            // A healthy row needs nothing: it never reaches the database.
+            if !tc_missing && !deadline_missing {
+                continue;
+            }
+            let tc: Option<String> = if *tc_missing {
+                non_zero_address(field_str(&o, "tokenContract").ok()).map(str::to_owned)
+            } else {
+                None
+            };
+            let deadline: Option<String> = if *deadline_missing {
+                non_zero_uint(uint_field_to_decimal(&o, "deadline").ok())
+            } else {
+                None
+            };
+            if tc.is_some() || deadline.is_some() {
+                repairs.push((id.clone(), tc, deadline));
             }
         }
         if !to_cancel.is_empty() {
             self.provisional_cancel(ob, &to_cancel).await?;
+        }
+        let repaired = self.repair_order_fields(ob, &repairs).await?;
+        if repaired > 0 {
+            debug!(orderbook_address = ob, repaired, "sweep repaired inference order fields");
         }
 
         // Both are `uint128` on chain (InferenceOrderBook.sol:159, :960). The DB columns are
@@ -625,7 +667,7 @@ impl InferenceReconciler {
         let new_cursor: Option<String> = if cycle_complete {
             None
         } else {
-            ids.last().map(|(id,)| id.clone()).or_else(|| prev_cursor.clone())
+            ids.last().map(|(id, _, _)| id.clone()).or_else(|| prev_cursor.clone())
         };
 
         if discovery {
@@ -667,6 +709,53 @@ impl InferenceReconciler {
         .await
         .context("provisional cancel")?;
         Ok(())
+    }
+
+    /// Fill in `token_contract` / `deadline` for live orders from a chain getter, in one
+    /// statement.
+    ///
+    /// Each column is applied only when the row is missing it AND the getter supplied one,
+    /// so a row whose remaining NULL is intentional is never rewritten — a bare
+    /// `IS NULL` predicate stays true forever on healthy rows (a BUY's TC, a resting SELL's
+    /// deadline) and would churn `updated_at` every cycle. Returns the number of rows
+    /// changed, for logging only.
+    pub async fn repair_order_fields(
+        &self,
+        ob: &str,
+        repairs: &[(String, Option<String>, Option<String>)],
+    ) -> anyhow::Result<u64> {
+        if repairs.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<String> = repairs.iter().map(|(id, _, _)| id.clone()).collect();
+        let tcs: Vec<Option<String>> = repairs.iter().map(|(_, tc, _)| tc.clone()).collect();
+        let deadlines: Vec<Option<String>> = repairs.iter().map(|(_, _, d)| d.clone()).collect();
+
+        // Every array binds as `text[]` — that is what sqlx sends for `Vec<String>` and
+        // `Vec<Option<String>>` — and the two numeric columns are cast per element at the
+        // point of use. Declaring the parameter `$2::numeric[]` instead would lean on
+        // Postgres's array-level `text[] -> numeric[]` coercion, which is a different code
+        // path for no gain here.
+        let res = sqlx::query(
+            r#"update inference_orders o
+                  set token_contract = coalesce(o.token_contract, r.tc),
+                      deadline = coalesce(o.deadline, r.deadline::numeric),
+                      updated_at = now()
+                 from unnest($2::text[], $3::text[], $4::text[]) as r(order_id, tc, deadline)
+                where o.orderbook_address = $1
+                  and o.order_id = r.order_id::numeric
+                  and o.status = 'OPEN'
+                  and (   (o.token_contract is null and r.tc is not null)
+                       or (o.deadline is null and r.deadline is not null))"#,
+        )
+        .bind(ob)
+        .bind(&ids)
+        .bind(&tcs)
+        .bind(&deadlines)
+        .execute(&self.pool)
+        .await
+        .context("repair inference order fields")?;
+        Ok(res.rows_affected())
     }
 
     /// Advance the sweep cursor and (discovery + clean completion) stamp visibility.

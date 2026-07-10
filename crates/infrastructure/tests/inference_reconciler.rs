@@ -106,6 +106,39 @@ async fn open_subscription_order(pool: &sqlx::PgPool, ob: &str, id: i64) {
     .unwrap();
 }
 
+/// An OPEN SELL with neither TokenContract nor deadline — what the projector leaves behind
+/// when a fill arrives before the placement it belongs to, and the only row shape that
+/// closes the read gate.
+async fn open_sell_order(pool: &sqlx::PgPool, ob: &str, id: i64) {
+    sqlx::query(
+        "insert into inference_orders (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining, status, last_chain_order)
+                 values ($1,$2,false,1,5,5,'OPEN','co')",
+    )
+    .bind(ob)
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A BUY MARKET/IOC taker that matched partially: still OPEN with ticks left, because the
+/// chain refunded the remainder without emitting an order-id-bearing event.
+async fn partially_filled_buy(pool: &sqlx::PgPool, ob: &str, id: i64) {
+    sqlx::query(
+        "insert into inference_orders (orderbook_address, order_id, is_buy, price, amount_initial, amount_remaining, status, last_chain_order)
+                 values ($1,$2,true,1,5,2,'OPEN','co')",
+    )
+    .bind(ob)
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// The zero address an ABI decodes for an unset `address` field — what a BUY placement
+/// and a BUY order's getter carry in place of a TokenContract.
+const ZERO_ADDRESS: &str = "0:0000000000000000000000000000000000000000000000000000000000000000";
+
 // ---- discovery / sweep DB-side tests ----
 
 #[tokio::test]
@@ -1505,4 +1538,156 @@ async fn unknown_incoming_version_does_not_retire_on_conflict() {
     .await
     .unwrap();
     assert!(!incoming_superseded, "incoming with unknown version must NOT be retired");
+}
+
+// ---- sweep repairs token_contract / deadline from the getOrder probe ----
+
+#[tokio::test]
+async fn sweep_repairs_token_contract_and_deadline_independently() {
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_sweep_repair";
+    seed_market(&pool, ob, true).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    open_sell_order(&pool, ob, 1).await; // SELL: real TC on chain, deadline 0
+    open_order(&pool, ob, 2).await; // BUY:  zero TC on chain, real deadline
+
+    let g = std::sync::Arc::new(FnGetter(|name: &str, a: &Value| match name {
+        "getQueueSize" => Ok(json!({ "value0": "0" })),
+        "getStats" => Ok(json!({ "nextOrderId": "9" })),
+        "getOrder" => Ok(match a.get("id").and_then(|v| v.as_str()) {
+            Some("1") => json!({ "amount": "5", "tokenContract": "0:deal", "deadline": "0" }),
+            _ => json!({ "amount": "5", "tokenContract": ZERO_ADDRESS, "deadline": "1760003600" }),
+        }),
+        _ => Ok(json!({})),
+    }));
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g.clone());
+    r.run_sweep_step(ob, "boc", false).await.unwrap();
+
+    let (tc, dl): (Option<String>, Option<String>) = sqlx::query_as(
+        "select token_contract, deadline::text from inference_orders where orderbook_address=$1 and order_id=1",
+    ).bind(ob).fetch_one(&pool).await.unwrap();
+    assert_eq!(tc.as_deref(), Some("0:deal"));
+    assert!(dl.is_none(), "a zero deadline stays NULL");
+
+    let (tc2, dl2): (Option<String>, Option<String>) = sqlx::query_as(
+        "select token_contract, deadline::text from inference_orders where orderbook_address=$1 and order_id=2",
+    ).bind(ob).fetch_one(&pool).await.unwrap();
+    assert!(tc2.is_none(), "a BUY's zero TC stays NULL");
+    assert_eq!(
+        dl2.as_deref(),
+        Some("1760003600"),
+        "deadline repair must not depend on a TC being present"
+    );
+
+    // A second sweep must not rewrite a row whose remaining NULL is intentional.
+    let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "select updated_at from inference_orders where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    r.run_sweep_step(ob, "boc", false).await.unwrap();
+    let after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "select updated_at from inference_orders where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(before, after, "a repaired row must not be rewritten on every cycle");
+}
+
+#[tokio::test]
+async fn sweep_skips_the_repair_entirely_for_rows_that_need_nothing() {
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_sweepnoop";
+    seed_market(&pool, ob, true).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // A complete row: both columns already populated by the projector. It must be a SELL —
+    // on chain a BUY always carries the zero TokenContract address, so a BUY row with a
+    // non-zero TokenContract is chain-impossible and must not be used as a fixture here;
+    // that would encode the same falsehood the read path depends on being false.
+    open_sell_order(&pool, ob, 1).await;
+    sqlx::query(
+        "update inference_orders set token_contract='0:deal', deadline=1760003600 \
+         where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
+        "getQueueSize" => Ok(json!({ "value0": "0" })),
+        "getStats" => Ok(json!({ "nextOrderId": "9", "orderCount": "1" })),
+        "getOrder" => {
+            Ok(json!({ "amount": "5", "tokenContract": "0:deal", "deadline": "1760003600" }))
+        }
+        _ => Ok(json!({})),
+    }));
+    let rec = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+
+    let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "select updated_at from inference_orders where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    rec.run_sweep_step(ob, "boc", false).await.unwrap();
+    let after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "select updated_at from inference_orders where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(before, after, "a complete row must not be written at all");
+}
+
+#[tokio::test]
+async fn sweep_still_cancels_phantoms_and_partially_filled_buy_takers() {
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_sweep_phantom";
+    seed_market(&pool, ob, true).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    open_sell_order(&pool, ob, 1).await; // a placement that never rested
+    partially_filled_buy(&pool, ob, 2).await; // remainder refunded on chain, no event
+
+    // nextOrderId = 9; both ids report amount == 0.
+    let g = RecGetter::new(0, 9, &["1", "2"]);
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+    r.run_sweep_step(ob, "boc", false).await.unwrap();
+
+    let statuses: Vec<String> = sqlx::query_scalar(
+        "select status from inference_orders where orderbook_address=$1 order by order_id",
+    )
+    .bind(ob)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(statuses, vec!["CANCELLED", "CANCELLED"]);
 }
