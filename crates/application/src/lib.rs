@@ -215,10 +215,11 @@ impl InferenceOrderStatus {
         }
     }
 
-    /// Inverse of [`Self::db_status`]: map a stored `inference_orders.status`
-    /// value back onto the enum. The string table lives only in [`Self::db_status`];
-    /// this reads it in reverse. An unknown value is read-model corruption, surfaced
-    /// as [`DomainError::MarketInconsistent`] so the read path fails closed.
+    /// Inverse of [`Self::db_status`]: maps a stored `inference_orders.status`
+    /// value back onto the enum through its own match arms, a separate table kept
+    /// consistent with [`Self::db_status`] by a round-trip test covering every
+    /// variant. An unknown value is read-model corruption, surfaced as
+    /// [`DomainError::MarketInconsistent`] so the read path fails closed.
     pub fn from_db_status(raw: &str) -> Result<Self, DomainError> {
         match raw {
             "OPEN" => Ok(Self::Live),
@@ -7155,8 +7156,10 @@ mod inference_usecase_tests {
     use super::InferenceOrdersPage;
     use super::InferenceOrdersQuery;
     use super::InferenceReadRepository;
+    use super::OrdersLimit;
     use super::MAX_CURSOR_LEN;
     use super::ORDERS_DEFAULT_LIMIT;
+    use super::ORDERS_MAX_LIMIT;
 
     #[derive(Clone, Default)]
     struct StubInferenceRepo {
@@ -7280,6 +7283,20 @@ mod inference_usecase_tests {
     }
 
     #[test]
+    fn inference_status_csv_dedupes_and_trims_whitespace() {
+        // Two identical tokens collapse to a single entry, not two.
+        let all_live = InferenceOrderStatus::from_csv("LIVE,LIVE").unwrap();
+        assert_eq!(all_live.as_slice(), &[InferenceOrderStatus::Live][..]);
+
+        // Whitespace around both the separator and the tokens is trimmed before parsing.
+        let live_and_filled = InferenceOrderStatus::from_csv("LIVE , FILLED").unwrap();
+        assert_eq!(
+            live_and_filled.as_slice(),
+            &[InferenceOrderStatus::Live, InferenceOrderStatus::Filled][..]
+        );
+    }
+
+    #[test]
     fn inference_db_status_round_trips() {
         // `db_status` and `from_db_status` are exact inverses for every variant.
         for status in InferenceOrderStatus::ALL {
@@ -7334,6 +7351,12 @@ mod inference_usecase_tests {
                 Some(DomainError::MissingParameter)
             ));
         }
+    }
+
+    #[test]
+    fn inference_orders_limit_accepts_boundaries() {
+        assert_eq!(OrdersLimit::new(1).unwrap().get(), 1);
+        assert_eq!(OrdersLimit::new(ORDERS_MAX_LIMIT).unwrap().get(), ORDERS_MAX_LIMIT);
     }
 
     #[tokio::test]

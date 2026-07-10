@@ -1057,6 +1057,111 @@ async fn a_placement_missing_token_contract_fails_projection_instead_of_insertin
 }
 
 #[tokio::test]
+async fn a_placement_missing_note_fails_projection_instead_of_inserting_null() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:note-drift";
+    clean(&pool, ob).await;
+
+    // ABI or decoder drift: the mandatory field is gone. Inserting the row with a NULL
+    // note would hide it from every `note=X` listing forever, and nothing ever repairs
+    // `note_address` after the fact.
+    let err = project_placed_raw(
+        &pool,
+        ob,
+        11,
+        serde_json::json!({
+            "orderId": "11", "isBuy": false, "price": "10", "ticks": "5",
+            "tokenContract": ZERO_ADDRESS, "deadline": "0",
+        }),
+    )
+    .await
+    .expect_err("a missing note must fail the projection");
+    assert!(format!("{err:#}").contains("note"));
+
+    let rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_orders where orderbook_address=$1")
+            .bind(ob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "no row may be inserted from an undecodable placement");
+}
+
+#[tokio::test]
+async fn a_placement_missing_deadline_fails_projection_instead_of_inserting_null() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:deadline-drift";
+    clean(&pool, ob).await;
+
+    // ABI or decoder drift: the mandatory field is gone. Inserting the row with a NULL
+    // deadline would be unrecoverable once it reaches a terminal status.
+    let err = project_placed_raw(
+        &pool,
+        ob,
+        12,
+        serde_json::json!({
+            "orderId": "12", "isBuy": false, "price": "10", "ticks": "5", "note": "0:n",
+            "tokenContract": ZERO_ADDRESS,
+        }),
+    )
+    .await
+    .expect_err("a missing deadline must fail the projection");
+    assert!(format!("{err:#}").contains("deadline"));
+
+    let rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_orders where orderbook_address=$1")
+            .bind(ob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "no row may be inserted from an undecodable placement");
+}
+
+async fn project_subscription_raw(
+    pool: &PgPool,
+    ob: &str,
+    id: i64,
+    value: serde_json::Value,
+) -> anyhow::Result<ProjectionOutcome> {
+    let e = ev("InferenceSubscriptionPlaced", value);
+    let mut tx = pool.begin().await.unwrap();
+    let co = format!("co-sub-raw-{id}");
+    let outcome = project_inference_event(&mut tx, &e, &node(ob, &co)).await?;
+    tx.commit().await.unwrap();
+    Ok(outcome)
+}
+
+#[tokio::test]
+async fn a_subscription_missing_buyer_note_fails_projection_instead_of_inserting_null() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:buyer-note-drift";
+    clean(&pool, ob).await;
+
+    // ABI or decoder drift: the mandatory field is gone. A subscription carries neither
+    // tokenContract nor deadline, so buyerNote is the only mandatory sibling field.
+    let err = project_subscription_raw(
+        &pool,
+        ob,
+        13,
+        serde_json::json!({
+            "orderId": "13", "maxPrice": "10", "ticks": "5",
+            "cycleBudget": "0", "autoRenew": false,
+        }),
+    )
+    .await
+    .expect_err("a missing buyerNote must fail the projection");
+    assert!(format!("{err:#}").contains("buyerNote"));
+
+    let rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_orders where orderbook_address=$1")
+            .bind(ob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "no row may be inserted from an undecodable placement");
+}
+
+#[tokio::test]
 async fn replay_preserves_repaired_token_contract_and_deadline() {
     let Some(pool) = setup().await else { return };
     let ob = "0:tc-replay";
