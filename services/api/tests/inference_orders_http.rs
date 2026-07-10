@@ -36,6 +36,11 @@ struct OrderItem {
 }
 
 async fn purge(pool: &PgPool, ob: &str) {
+    sqlx::query("delete from raw_events where src_address = $1")
+        .bind(ob)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query("delete from inference_orders where orderbook_address = $1")
         .bind(ob)
         .execute(pool)

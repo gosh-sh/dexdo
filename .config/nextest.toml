@@ -14,26 +14,26 @@ test-group = 'serial-reprojection'
 
 # `inference_market_metrics` asserts whole-table aggregate DELTAS
 # (`inference_market_state_counts` before/after inserting rows). Those deltas
-# are corrupted when a sibling test in the same binary mutates
-# `inference_markets` between the two reads — under nextest's default
-# per-process parallelism the three tests race and `state_counts_and_staleness…`
-# fails. Pin the binary to one test at a time, matching `reprojection` above.
-[[profile.default.overrides]]
-filter = 'binary(inference_market_metrics)'
-test-group = 'serial-inference-metrics'
-
-
+# are corrupted by any concurrent writer to `inference_markets` — including
+# `inference_orders_repo` and `inference_orders_http` below, whose `purge` /
+# `seed_reconciled_market` helpers delete and insert rows in that same table.
+# It therefore joins the `serial-capture-cursor` group rather than getting a
+# group of its own, so none of the three binaries ever run concurrently with
+# each other. The durable fix — scoping the aggregates to a test marker so
+# the assertion no longer depends on exclusive access to the whole table —
+# is out of scope here.
+#
 # `inference_orders_repo` and `inference_orders_http` both read the singleton
 # `indexer_cursors` row for CAPTURE_STREAM, and one of them flips `at_head` to false to
 # exercise the read gate's capture-lag arm. Under nextest's per-process parallelism a
 # sibling binary would observe that flip and receive -1500 for a lookup it expects to
-# succeed. Both binaries are pinned to the same one-thread group so they run sequentially
-# and never race the cursor row; the in-process mutexes then cover the rest.
+# succeed. All three binaries are pinned to the same one-thread group so they run
+# sequentially and never race the cursor row or `inference_markets`; the in-process
+# mutexes then cover the rest.
 [[profile.default.overrides]]
-filter = 'binary(inference_orders_repo) | binary(inference_orders_http)'
+filter = 'binary(inference_market_metrics) | binary(inference_orders_repo) | binary(inference_orders_http)'
 test-group = 'serial-capture-cursor'
 
 [test-groups]
 serial-reprojection = { max-threads = 1 }
-serial-inference-metrics = { max-threads = 1 }
 serial-capture-cursor = { max-threads = 1 }
