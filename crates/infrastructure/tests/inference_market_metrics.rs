@@ -188,10 +188,18 @@ async fn insert_unprojected_raw_event(pool: &PgPool, msg_id: &str, src_address: 
     .expect("insert unprojected raw_events row");
 }
 
-// Whole-table aggregate, so assert a delta (other rows in the shared test DB are
-// expected). Exercises all three predicates of the wedged-book definition: visible
-// (last_reconciled_at set, superseded_at null) AND at least one raw_events row with
-// processed_at null under the book's address.
+// Pins the wedged-book predicate's exact qualifying set among four seeded
+// addresses (wedged / clean / unreconciled / superseded), scoped via
+// `inference_wedged_book_addresses` so a concurrent writer elsewhere in the
+// shared test DB cannot perturb the result the way a whole-table count would.
+// Asserting the exact set — not a count or a delta — pins WHICH book
+// qualifies: inverting any single clause of the predicate (visibility,
+// `superseded_at is null`, or the `exists(unprojected)` check) makes a
+// different one of the four addresses appear or disappear, so every inversion
+// changes this assertion's outcome. `inference_wedged_book_addresses` runs the
+// same `WEDGED_BOOKS_WHERE` that `inference_wedged_books_count` runs
+// whole-table (see indexer_repo.rs), so this also exercises the real
+// production predicate rather than a parallel test-only copy.
 #[tokio::test]
 async fn wedged_books_count_reflects_unprojected_events_under_visible_books() {
     let Some(pool) = setup().await else { return };
@@ -218,8 +226,6 @@ async fn wedged_books_count_reflects_unprojected_events_under_visible_books() {
         .execute(&pool)
         .await
         .expect("purge inference_markets");
-
-    let before = repo.inference_wedged_books_count().await.expect("wedged count before");
 
     // wedged: visible book with an unprojected raw_events row under its address -> counted.
     sqlx::query(
@@ -261,11 +267,27 @@ async fn wedged_books_count_reflects_unprojected_events_under_visible_books() {
     .expect("insert superseded market");
     insert_unprojected_raw_event(&pool, "inf_metrics_test.wedged.evt3", superseded).await;
 
-    let after = repo.inference_wedged_books_count().await.expect("wedged count after");
+    // Scoped to just these four addresses: exactly `wedged` qualifies. Inverting
+    // the visibility clause would let `unreconciled` in; inverting `superseded_at
+    // is null` would let `superseded` in; inverting the `exists(unprojected)`
+    // check would let `clean` in (and drop `wedged`) — any single-clause
+    // inversion changes this set.
+    let qualifying =
+        repo.inference_wedged_book_addresses(&addrs).await.expect("wedged book addresses");
     assert_eq!(
-        after - before,
-        1,
-        "only the visible book with an unprojected event should count as wedged"
+        qualifying,
+        vec![wedged.to_string()],
+        "exactly the wedged book should satisfy the predicate among the four seeded addresses"
+    );
+
+    // Smoke-test the production (whole-table) path on the same predicate: it
+    // must at least see our wedged book. Not an exact/delta count — other rows
+    // in the shared test DB are expected and a concurrent writer could add or
+    // remove wedged books elsewhere at any moment.
+    let whole_table = repo.inference_wedged_books_count().await.expect("wedged count");
+    assert!(
+        whole_table >= 1,
+        "whole-table wedged count {whole_table} should include our wedged book"
     );
 
     sqlx::query("delete from raw_events where src_address = any($1)")
