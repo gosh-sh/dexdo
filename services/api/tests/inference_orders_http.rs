@@ -53,14 +53,19 @@ async fn purge(pool: &PgPool, ob: &str) {
         .unwrap();
 }
 
+// `reference_price_at` and `last_swept_at` are stamped fresh, not left NULL: a NULL in
+// either makes the market price-/sweep-due for the reconciler's `select_refresh_books`
+// queue and — sorted `nulls first` under that query's `LIMIT` — it would displace a
+// concurrent `inference_reconciler` test's own candidates in the shared database. The
+// orders endpoint under test ignores both columns.
 async fn seed_market(pool: &PgPool, ob: &str) {
     sqlx::query(
         r#"insert into inference_markets
                (orderbook_address, model_hash, model_ref, platform_fee_bps, quote_token_type,
                 price_precision, quantity_precision, tick_size, step_size, min_notional,
-                created_at_chain, last_reconciled_at)
+                created_at_chain, last_reconciled_at, reference_price_at, last_swept_at)
            values ($1, null, 'r', 250, 2, 9, 0, '0.000000001', '1', '0.000000001',
-                   to_timestamp(1700000000), now())
+                   to_timestamp(1700000000), now(), now(), now())
            on conflict (orderbook_address) do nothing"#,
     )
     .bind(ob)
