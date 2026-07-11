@@ -53,19 +53,31 @@ pub async fn run_refresh_loop(
                 metrics.set_orders_partially_filled(partially);
                 debug!(created, partially, "metrics refresh");
             }
-            Err(err) => error!(?err, "metrics refresh failed"),
+            Err(err) => {
+                error!(?err, "metrics refresh failed");
+                metrics.inc_metrics_refresh_failures();
+            }
         }
         match repo.count_pending_projection().await {
             Ok(n) => metrics.set_projection_backlog(n.max(0) as u64),
-            Err(err) => error!(?err, "projection backlog metric refresh failed"),
+            Err(err) => {
+                error!(?err, "projection backlog metric refresh failed");
+                metrics.inc_metrics_refresh_failures();
+            }
         }
         match repo.projection_lag_seconds().await {
             Ok(s) => metrics.set_projection_lag_seconds(s.max(0) as u64),
-            Err(err) => error!(?err, "projection lag metric refresh failed"),
+            Err(err) => {
+                error!(?err, "projection lag metric refresh failed");
+                metrics.inc_metrics_refresh_failures();
+            }
         }
         match repo.cursor_age_seconds(cursor_stream).await {
             Ok(age) => metrics.set_capture_cursor_age_seconds(age.unwrap_or(0).max(0) as u64),
-            Err(err) => error!(?err, "cursor age metric refresh failed"),
+            Err(err) => {
+                error!(?err, "cursor age metric refresh failed");
+                metrics.inc_metrics_refresh_failures();
+            }
         }
         let (in_use, idle) = repo.pool_connection_stats();
         metrics.set_pool_connections(in_use, idle);
@@ -79,14 +91,20 @@ pub async fn run_refresh_loop(
                 visible.max(0) as u64,
                 failing.max(0) as u64,
             ),
-            Err(err) => error!(?err, "inference market state metric refresh failed"),
+            Err(err) => {
+                error!(?err, "inference market state metric refresh failed");
+                metrics.inc_metrics_refresh_failures();
+            }
         }
         match repo.inference_staleness_seconds().await {
             Ok((price_lag, sweep_lag)) => {
                 metrics.set_inference_reference_price_lag_seconds(price_lag.max(0) as u64);
                 metrics.set_inference_sweep_lag_seconds(sweep_lag.max(0) as u64);
             }
-            Err(err) => error!(?err, "inference staleness metric refresh failed"),
+            Err(err) => {
+                error!(?err, "inference staleness metric refresh failed");
+                metrics.inc_metrics_refresh_failures();
+            }
         }
         match repo.inference_order_status_counts().await {
             Ok((open, filled, cancelled)) => metrics.set_inference_order_counts(
@@ -94,12 +112,18 @@ pub async fn run_refresh_loop(
                 filled.max(0) as u64,
                 cancelled.max(0) as u64,
             ),
-            Err(err) => error!(?err, "inference order status metric refresh failed"),
+            Err(err) => {
+                error!(?err, "inference order status metric refresh failed");
+                metrics.inc_metrics_refresh_failures();
+            }
         }
         metrics.set_inference_reconcile_failures(repo.inference_reconcile_failures_count());
         match repo.inference_wedged_books_count().await {
             Ok(n) => metrics.set_inference_wedged_books(n.max(0) as u64),
-            Err(err) => error!(?err, "inference wedged books metric refresh failed"),
+            Err(err) => {
+                error!(?err, "inference wedged books metric refresh failed");
+                metrics.inc_metrics_refresh_failures();
+            }
         }
         tokio::time::sleep(interval).await;
     }
