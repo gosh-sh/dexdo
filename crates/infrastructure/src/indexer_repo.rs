@@ -907,8 +907,10 @@ impl IndexerRepository {
     /// Mirrors the read gate's arm-2 (`inference_read_repo::build_snapshot_query`):
     /// a book is "wedged" when it is visible AND has at least one `raw_events` row with
     /// `src_address = orderbook_address and processed_at is null` — the same
-    /// predicate that trips `MarketInconsistent` (503) on every read of that book.
-    /// The gate spells visibility as `last_reconciled_at is not null` alone; the
+    /// predicate that trips `MarketInconsistent` (503) for a `tokenContract` query that
+    /// scopes live SELLs (`side` not BUY and a status set including LIVE); a `note`
+    /// filter, a `side=BUY` query, or a status set without LIVE against the same book
+    /// still returns 200. The gate spells visibility as `last_reconciled_at is not null` alone; the
     /// `superseded_at is null` clause below is belt-and-suspenders (superseding always
     /// nulls `last_reconciled_at` in the same update, so it is redundant) and matches
     /// the sibling `visible` metric bucket — do not expect to find it in the gate's SQL.

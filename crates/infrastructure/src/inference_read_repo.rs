@@ -639,10 +639,12 @@ async fn list_inference_orders_impl(
             warn!(orderbook = %query.orderbook_address, field, "inference_orders row has a NULL not-null column");
             anyhow!(DomainError::MarketInconsistent)
         };
-        // Validate each raw magnitude as a non-negative integer before scaling, exactly as
-        // the depth path does: `scale_uint_to_decimal` slices the digits by length and would
-        // render a corrupt off-grid value into a malformed decimal. An off-grid value is
-        // unreachable under the write path; fail closed rather than serve it.
+        // Validate each raw magnitude as a non-negative integer before scaling — the same
+        // guard the depth path applies to price, applied here to all three scaled values
+        // (price, amount_remaining, amount_initial): `scale_uint_to_decimal` slices the
+        // digits by length and would render a corrupt off-grid value into a malformed
+        // decimal. An off-grid value is unreachable under the write path; fail closed
+        // rather than serve it.
         let scale_guarded = |raw: &str, scale: u32, field: &str| -> Result<String, anyhow::Error> {
             if BigUint::parse_bytes(raw.as_bytes(), 10).is_none() {
                 warn!(orderbook = %query.orderbook_address, raw = %raw, field, "inference_orders value is not a non-negative integer");

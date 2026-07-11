@@ -268,8 +268,9 @@ impl InferenceOrderStatus {
 /// Non-empty set of inference order statuses to filter on. The tuple field is private
 /// and every constructor rejects an empty set, so a query can never carry zero status
 /// branches — the state that would make [`InferenceOrdersQuery`]'s snapshot query emit an
-/// empty `page as ( )` and 500. De-duplication and the caller's order are preserved by the
-/// constructing parser.
+/// empty `page as ( )` and 500. [`InferenceOrderStatusSet::new`] de-duplicates, preserving
+/// the caller's order of first appearance, so every producer of a set — not just
+/// [`InferenceOrderStatus::from_csv`] — gets uniqueness for free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceOrderStatusSet(Vec<InferenceOrderStatus>);
 
@@ -279,13 +280,20 @@ impl InferenceOrderStatusSet {
         Self(InferenceOrderStatus::ALL.to_vec())
     }
 
-    /// Build a set from an explicit list. Returns [`DomainError::MissingParameter`] if the
-    /// list is empty, which is the only way the empty state could otherwise be reached.
+    /// Build a set from an explicit list. De-duplicates, preserving the order of first
+    /// appearance, then returns [`DomainError::MissingParameter`] if the deduplicated
+    /// result is empty — the only way the empty state could otherwise be reached.
     pub fn new(statuses: Vec<InferenceOrderStatus>) -> Result<Self, DomainError> {
-        if statuses.is_empty() {
+        let mut deduped = Vec::with_capacity(statuses.len());
+        for status in statuses {
+            if !deduped.contains(&status) {
+                deduped.push(status);
+            }
+        }
+        if deduped.is_empty() {
             Err(DomainError::MissingParameter)
         } else {
-            Ok(Self(statuses))
+            Ok(Self(deduped))
         }
     }
 
@@ -7294,6 +7302,17 @@ mod inference_usecase_tests {
             live_and_filled.as_slice(),
             &[InferenceOrderStatus::Live, InferenceOrderStatus::Filled][..]
         );
+    }
+
+    #[test]
+    fn inference_order_status_set_new_dedupes() {
+        // `new` itself enforces uniqueness, not just the `from_csv` parser that calls it.
+        let deduped = InferenceOrderStatusSet::new(vec![
+            InferenceOrderStatus::Live,
+            InferenceOrderStatus::Live,
+        ])
+        .unwrap();
+        assert_eq!(deduped.as_slice(), &[InferenceOrderStatus::Live][..]);
     }
 
     #[test]
