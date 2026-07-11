@@ -945,9 +945,10 @@ impl IndexerRepository {
     }
 
     /// The `orderbook_address`es among `scope` that satisfy the same
-    /// wedged-book predicate as `inference_wedged_books_count` above (see
-    /// `WEDGED_BOOKS_WHERE` — the two run the identical WHERE clause and must
-    /// stay in lockstep), ordered by address for a deterministic result. Exists
+    /// wedged-book predicate as `inference_wedged_books_count` above: both
+    /// build from `WEDGED_BOOKS_WHERE`, the identical wedged-book predicate, and
+    /// must stay in lockstep; this method additionally filters on
+    /// `orderbook_address = any($1)`. Ordered by address for a deterministic result. Exists
     /// so a test can pin exactly which of several seeded addresses the
     /// predicate selects, scoped to those addresses so a concurrent writer
     /// elsewhere in the shared test DB cannot perturb the result — the

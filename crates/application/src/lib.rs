@@ -269,8 +269,9 @@ impl InferenceOrderStatus {
 /// and every constructor rejects an empty set, so a query can never carry zero status
 /// branches — the state that would make [`InferenceOrdersQuery`]'s snapshot query emit an
 /// empty `page as ( )` and 500. [`InferenceOrderStatusSet::new`] de-duplicates, preserving
-/// the caller's order of first appearance, so every producer of a set — not just
-/// [`InferenceOrderStatus::from_csv`] — gets uniqueness for free.
+/// the caller's order of first appearance, so every producer that builds through it — not
+/// just [`InferenceOrderStatus::from_csv`] — gets uniqueness for free. [`all`](Self::all) is
+/// distinct by construction and does not route through `new`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceOrderStatusSet(Vec<InferenceOrderStatus>);
 
@@ -7313,6 +7314,17 @@ mod inference_usecase_tests {
         ])
         .unwrap();
         assert_eq!(deduped.as_slice(), &[InferenceOrderStatus::Live][..]);
+        // Distinct values keep their first-appearance order; a later repeat is dropped.
+        let interleaved = InferenceOrderStatusSet::new(vec![
+            InferenceOrderStatus::Filled,
+            InferenceOrderStatus::Live,
+            InferenceOrderStatus::Filled,
+        ])
+        .unwrap();
+        assert_eq!(
+            interleaved.as_slice(),
+            &[InferenceOrderStatus::Filled, InferenceOrderStatus::Live][..]
+        );
     }
 
     #[test]
