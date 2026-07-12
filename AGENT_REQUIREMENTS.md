@@ -22,6 +22,8 @@ Repository specifications live under [`docs/`](docs/), with implementation techn
 
 The public REST API contract is [`docs/api-spec.md`](docs/api-spec.md); do not edit it unless the task explicitly asks to change the public API.
 
+Its machine-readable counterpart [`docs/openapi.yaml`](docs/openapi.yaml) is **generated, never hand-edited**. Whenever a change adds or alters a public route, a query/body parameter, or a response DTO — anything registered in the Salvo OpenAPI document — regenerate it with `cargo run -p dodex-api --bin gen-openapi` and stage the result in the same commit.
+
 README files are entry points only: keep a short service definition, links to canonical specs, config locations/variables, and maintenance commands such as run/test/deploy. Do not put implementation details in README files. Functional requirements belong in `docs/api-spec.md`; implementation details belong in `docs/tech-specs/` (`read-api.md`, `write-api.md`, `indexer.md`, `auth.md`); schema details belong in `docs/tech-specs/data-schema.md`.
 
 ## Before every `git commit`
@@ -35,3 +37,11 @@ This includes terminology renames (e.g. `OEL` -> `OracleEventList`) and schema/f
 If a doc is now obsolete and has no salvageable content, delete it and remove references in the same commit.
 
 Before running the full test suite or DB-backed integration tests, start the disposable test Postgres as described in [`README.md#test-postgres`](README.md#test-postgres).
+
+## Metrics, dashboards, and alerts
+
+The Grafana artifacts under `deploy/grafana/` live outside `docs/`, so the "before every `git commit`" doc sweep does **not** cover them — they must be updated explicitly. When a change adds, renames, or removes an exported metric (in `crates/metrics/`, wired through `services/indexer/`):
+
+- Add or adjust its panel in the dashboard [`deploy/grafana/dodex-indexer-dashboard.json`](deploy/grafana/dodex-indexer-dashboard.json), mirroring the existing panel for the same metric family, in the same commit. The dashboard is JSON — validate it parses before committing.
+- If the metric is an error or health signal an operator would page on, add or adjust a rule in [`deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml`](deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml). A purely informational metric may have a panel and no alert.
+- Keep the metric documented in the catalog in `docs/tech-specs/indexer.md` (already required by the doc rules above).
