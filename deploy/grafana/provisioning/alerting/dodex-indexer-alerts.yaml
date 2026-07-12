@@ -249,6 +249,38 @@ groups:
               expression: "$A > 0"
               datasource: { type: __expr__, uid: __expr__ }
 
+      - uid: dodex-metrics-refresh-failures
+        title: Indexer metrics-refresh loop failing
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Indexer metrics-refresh loop failing"
+          description: "The metrics-refresh loop is failing to read the DB ({{ $values.A.Value }}/s on {{ $labels.instance }}), so every gauge it feeds — projection backlog/lag, capture cursor age, inference markets/orders/lags, and wedged-books — is frozen at its last value rather than reflecting reality. A gauge alert may therefore be silently stale; treat this as loss of metrics visibility and check DB reachability. Pair with the inference wedged-books alert."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: rate({__name__=~"indexer_metrics_refresh_failures(_total)?"}[5m])
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
   - orgId: 1
     name: dodex-indexer-inference
     folder: Dodex Indexer
@@ -471,6 +503,70 @@ groups:
               refId: A
               editorMode: code
               expr: (sum(indexer_inference_markets{state="visible"}) == bool 0) and (sum(indexer_inference_markets) > 0)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-inf-wedged-warn
+        title: Inference books wedged (fail-closed 503)
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Inference books wedged (fail-closed 503)"
+          description: "{{ $values.A.Value }} visible inference book(s) have an unprojected raw_events row, so the read gate returns MarketInconsistent (503) for their tokenContract live-SELL lookups (note=, side=BUY and non-LIVE reads still succeed). Sustained >15m usually means a deployed contract upgrade outran the indexer's ABI. NOTE: this gauge freezes when the metrics-refresh loop cannot read the DB — correlate with 'Indexer metrics-refresh loop failing' before trusting a 0."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: max(indexer_inference_wedged_books)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-inf-wedged-crit
+        title: Inference books wedged for over an hour
+        condition: C
+        for: 1h
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Inference books wedged for over an hour"
+          description: "{{ $values.A.Value }} inference book(s) have been fail-closed (503 on tokenContract live-SELL lookups) for over an hour — the unprojected events are not clearing on their own, which for an order book means a stale ABI. Sync the indexer ABI to the deployed contracts and redeploy (stop → wipe → deploy, per the runbook)."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: max(indexer_inference_wedged_books)
               instant: true
               range: false
               intervalMs: 1000
