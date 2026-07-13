@@ -9,7 +9,6 @@ when:
   - event: pull_request
     branch: [dev, main]
   - event: tag
-  - event: manual
 
 variables:
   - &build_plugin "docker.gosh.sh/plugin-docker-buildx-cond:stable"
@@ -22,7 +21,6 @@ variables:
   - not_tag: &not_tag
       - { event: push, branch: [dev, main] }
       - { event: pull_request, branch: [dev, main] }
-      - { event: manual }
   - is_tag: &is_tag
       - { event: tag }
   # Shared per-image build settings (tags_file + skip_if_tag_exists set per step).
@@ -48,7 +46,7 @@ variables:
       dockerfile: docker/indexer.Dockerfile
 
 steps:
-  # Tag list for branch / PR / manual builds -> .tags
+  # Tag list for branch / PR builds -> .tags
   docker_tags:
     depends_on: []
     when: *not_tag
