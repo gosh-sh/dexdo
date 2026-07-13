@@ -853,7 +853,23 @@ impl InferenceReconciler {
     /// is due when its reference price is stale, or its sweep cadence elapsed and
     /// it still has OPEN rows; failed books are held out for the backoff window.
     async fn select_refresh_books(&self) -> anyhow::Result<Vec<BookRow>> {
-        let rows: Vec<BookRow> = sqlx::query_as(&format!(
+        self.select_refresh_books_scoped(None).await
+    }
+
+    /// The Queue B refresh SELECT, optionally restricted to the `scope`
+    /// addresses. Production passes `None` (whole-table, `LIMIT BATCH_SIZE`). A
+    /// selection test passes `Some(&addrs)` so the `LIMIT` and the
+    /// `reference_price_at nulls first` ordering apply within its own seeded
+    /// books only — otherwise a concurrent writer's never-priced (NULL
+    /// `reference_price_at`) visible markets, which sort first, can fill the
+    /// window and evict the test's candidate. Both paths run the identical
+    /// due-predicate SQL, so a scoped test still exercises the production query.
+    async fn select_refresh_books_scoped(
+        &self,
+        scope: Option<&[String]>,
+    ) -> anyhow::Result<Vec<BookRow>> {
+        let scope_clause = if scope.is_some() { "and m.orderbook_address = any($4)" } else { "" };
+        let sql = format!(
             r#"select orderbook_address, model_hash::text as model_hash, reference_price_at, last_swept_at
                  from inference_markets m
                 where last_reconciled_at is not null
@@ -866,15 +882,18 @@ impl InferenceReconciler {
                           and exists (select 1 from inference_orders o
                                        where o.orderbook_address = m.orderbook_address and o.status='OPEN') )
                       )
+                  {scope_clause}
                 order by reference_price_at nulls first
                 limit $1"#
-        ))
-        .bind(BATCH_SIZE)
-        .bind(self.reference_price_refresh.as_secs_f64())
-        .bind(self.sweep_interval.as_secs_f64())
-        .fetch_all(&self.pool)
-        .await
-        .context("select refresh candidates")?;
+        );
+        let mut query = sqlx::query_as::<sqlx::Postgres, BookRow>(&sql)
+            .bind(BATCH_SIZE)
+            .bind(self.reference_price_refresh.as_secs_f64())
+            .bind(self.sweep_interval.as_secs_f64());
+        if let Some(scope) = scope {
+            query = query.bind(scope.to_vec());
+        }
+        let rows = query.fetch_all(&self.pool).await.context("select refresh candidates")?;
         Ok(rows)
     }
 
@@ -883,6 +902,22 @@ impl InferenceReconciler {
     /// runs, so the selection test exercises the production query, not a copy.
     pub async fn select_refresh_candidates(&self) -> anyhow::Result<Vec<String>> {
         Ok(self.select_refresh_books().await?.into_iter().map(|r| r.orderbook_address).collect())
+    }
+
+    /// `select_refresh_candidates` restricted to `scope`. A selection test uses
+    /// this so the shared test DB's other never-priced visible books cannot crowd
+    /// the `nulls first` `LIMIT` window and evict the test's own candidate; the
+    /// due-predicate SQL is identical to the unscoped production path.
+    pub async fn select_refresh_candidates_within(
+        &self,
+        scope: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .select_refresh_books_scoped(Some(scope))
+            .await?
+            .into_iter()
+            .map(|r| r.orderbook_address)
+            .collect())
     }
 
     fn price_due(&self, book: &BookRow) -> bool {

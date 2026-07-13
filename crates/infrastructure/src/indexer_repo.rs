@@ -128,6 +128,31 @@ struct PendingRow {
 }
 
 impl IndexerRepository {
+    /// Shared `count(*) filter (...)` projection for the three inference-market
+    /// lifecycle buckets, in `(discovering, visible, failing)` order. Both
+    /// `inference_market_state_counts` (whole-table) and
+    /// `inference_market_state_counts_for` (scoped to a caller-supplied address
+    /// set) below build from this one constant so the production count and the
+    /// scoped query a test exercises can never drift — edit the bucket
+    /// predicates here only.
+    const MARKET_STATE_COUNTS_SELECT: &'static str = r#"
+        count(*) filter (where last_reconciled_at is null
+                           and last_reconcile_failed_at is null
+                           and superseded_at is null) as discovering,
+        count(*) filter (where last_reconciled_at is not null
+                           and superseded_at is null) as visible,
+        count(*) filter (where last_reconciled_at is null
+                           and last_reconcile_failed_at is not null
+                           and superseded_at is null) as failing"#;
+    /// Shared `count(*) filter (...)` projection for the three inference-order
+    /// status buckets, in `(open, filled, cancelled)` order. Shared by
+    /// `inference_order_status_counts` (whole-table) and
+    /// `inference_order_status_counts_for` (scoped) for the same anti-drift
+    /// reason as `MARKET_STATE_COUNTS_SELECT`.
+    const ORDER_STATUS_COUNTS_SELECT: &'static str = r#"
+        count(*) filter (where status = 'OPEN') as open,
+        count(*) filter (where status = 'FILLED') as filled,
+        count(*) filter (where status = 'CANCELLED') as cancelled"#;
     /// Shared WHERE-clause fragment for the "wedged inference book" predicate:
     /// visible, not superseded, and with at least one still-unprocessed
     /// `raw_events` row under the book's `orderbook_address`. Both
@@ -856,21 +881,32 @@ impl IndexerRepository {
     /// wrong-dApp address that would otherwise accrue `reconcile_attempts` with
     /// nothing in metrics. The three buckets partition the table.
     pub async fn inference_market_state_counts(&self) -> anyhow::Result<(i64, i64, i64)> {
-        let row: (i64, i64, i64) = sqlx::query_as(
-            r#"select
-                   count(*) filter (where last_reconciled_at is null
-                                      and last_reconcile_failed_at is null
-                                      and superseded_at is null) as discovering,
-                   count(*) filter (where last_reconciled_at is not null
-                                      and superseded_at is null) as visible,
-                   count(*) filter (where last_reconciled_at is null
-                                      and last_reconcile_failed_at is not null
-                                      and superseded_at is null) as failing
-                 from inference_markets"#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("inference market state counts")?;
+        let sql = format!("select {} from inference_markets", Self::MARKET_STATE_COUNTS_SELECT);
+        let row: (i64, i64, i64) = sqlx::query_as(&sql)
+            .fetch_one(&self.pool)
+            .await
+            .context("inference market state counts")?;
+        Ok(row)
+    }
+
+    /// `inference_market_state_counts` restricted to the `orderbook_address`es in
+    /// `scope`, running the identical `MARKET_STATE_COUNTS_SELECT` bucket
+    /// predicates. Exists so a test can assert exact per-bucket counts over just
+    /// the rows it seeded — immune to a concurrent writer elsewhere in the shared
+    /// test DB, which a whole-table delta cannot exclude.
+    pub async fn inference_market_state_counts_for(
+        &self,
+        scope: &[String],
+    ) -> anyhow::Result<(i64, i64, i64)> {
+        let sql = format!(
+            "select {} from inference_markets where orderbook_address = any($1)",
+            Self::MARKET_STATE_COUNTS_SELECT
+        );
+        let row: (i64, i64, i64) = sqlx::query_as(&sql)
+            .bind(scope)
+            .fetch_one(&self.pool)
+            .await
+            .context("inference market state counts (scoped)")?;
         Ok(row)
     }
 
@@ -904,16 +940,31 @@ impl IndexerRepository {
     /// live depth; `FILLED` and `CANCELLED` are terminal. The three buckets
     /// partition the table.
     pub async fn inference_order_status_counts(&self) -> anyhow::Result<(i64, i64, i64)> {
-        let row: (i64, i64, i64) = sqlx::query_as(
-            r#"select
-                   count(*) filter (where status = 'OPEN') as open,
-                   count(*) filter (where status = 'FILLED') as filled,
-                   count(*) filter (where status = 'CANCELLED') as cancelled
-                 from inference_orders"#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("inference order status counts")?;
+        let sql = format!("select {} from inference_orders", Self::ORDER_STATUS_COUNTS_SELECT);
+        let row: (i64, i64, i64) = sqlx::query_as(&sql)
+            .fetch_one(&self.pool)
+            .await
+            .context("inference order status counts")?;
+        Ok(row)
+    }
+
+    /// `inference_order_status_counts` restricted to the `orderbook_address`es in
+    /// `scope`, running the identical `ORDER_STATUS_COUNTS_SELECT` bucket
+    /// predicates. Test-scoping counterpart, same rationale as
+    /// `inference_market_state_counts_for`.
+    pub async fn inference_order_status_counts_for(
+        &self,
+        scope: &[String],
+    ) -> anyhow::Result<(i64, i64, i64)> {
+        let sql = format!(
+            "select {} from inference_orders where orderbook_address = any($1)",
+            Self::ORDER_STATUS_COUNTS_SELECT
+        );
+        let row: (i64, i64, i64) = sqlx::query_as(&sql)
+            .bind(scope)
+            .fetch_one(&self.pool)
+            .await
+            .context("inference order status counts (scoped)")?;
         Ok(row)
     }
 

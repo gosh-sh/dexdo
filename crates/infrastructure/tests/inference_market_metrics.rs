@@ -33,11 +33,15 @@ async fn setup() -> Option<PgPool> {
     Some(pool)
 }
 
-// State queries are whole-table aggregates, so this test asserts deltas (counts)
-// and lower bounds (staleness) rather than absolute values — other rows in the
-// shared test DB are expected. model_hash is left NULL on every row: the UNIQUE
-// partial index `inference_markets_model_hash_idx` ignores NULLs, so distinct
-// rows never collide.
+// The state-count queries are whole-table aggregates. Under nextest's
+// process-per-test model many sibling tests insert into `inference_markets`
+// concurrently, so a whole-table count delta is not reproducible. This test
+// asserts exact per-bucket counts scoped to its own seeded addresses
+// (`inference_market_state_counts_for`) — immune to concurrent writers — and
+// smoke-checks the whole-table path with lower bounds. Staleness is likewise a
+// lower bound: any other visible row only makes `min(ts)` older, never younger.
+// model_hash is left NULL on every row: the UNIQUE partial index
+// `inference_markets_model_hash_idx` ignores NULLs, so distinct rows never collide.
 #[tokio::test]
 async fn state_counts_and_staleness_reflect_inserted_rows() {
     let Some(pool) = setup().await else { return };
@@ -53,8 +57,6 @@ async fn state_counts_and_staleness_reflect_inserted_rows() {
         .execute(&pool)
         .await
         .expect("purge");
-
-    let (d0, v0, f0) = repo.inference_market_state_counts().await.expect("state counts before");
 
     // discovering: seeded, never reconciled, never failed.
     sqlx::query("insert into inference_markets (orderbook_address) values ($1)")
@@ -81,10 +83,21 @@ async fn state_counts_and_staleness_reflect_inserted_rows() {
     .await
     .expect("insert failing");
 
-    let (d1, v1, f1) = repo.inference_market_state_counts().await.expect("state counts after");
-    assert_eq!(d1 - d0, 1, "discovering bucket should gain exactly 1");
-    assert_eq!(v1 - v0, 1, "visible bucket should gain exactly 1");
-    assert_eq!(f1 - f0, 1, "failing bucket should gain exactly 1");
+    // Scoped to the three addresses seeded (and purged) above: exactly one row
+    // lands in each bucket, pinning the CASE boundaries. Scoping makes this immune
+    // to the concurrent sibling inserts a whole-table delta cannot exclude.
+    let scoped = repo.inference_market_state_counts_for(&addrs).await.expect("scoped state counts");
+    assert_eq!(scoped, (1, 1, 1), "each seeded row lands in exactly its own bucket");
+
+    // Smoke-test the production whole-table path on the same predicates: it must at
+    // least see our three rows. Not an exact count — other rows in the shared test
+    // DB are expected and a concurrent writer can move any bucket at any moment.
+    let (dw, vw, fw) =
+        repo.inference_market_state_counts().await.expect("whole-table state counts");
+    assert!(
+        dw >= 1 && vw >= 1 && fw >= 1,
+        "whole-table counts must include our rows: {dw},{vw},{fw}"
+    );
 
     // Our visible row makes the oldest reference_price_at at least 1000s old and
     // the oldest last_swept_at at least 500s old; any other visible row can only
@@ -100,9 +113,11 @@ async fn state_counts_and_staleness_reflect_inserted_rows() {
         .expect("cleanup");
 }
 
-// Whole-table aggregate, so assert deltas (other rows in the shared test DB are
-// expected). Orders use a test-unique orderbook_address; status values exercise
-// each of the three buckets.
+// The status counts are whole-table aggregates, so — like the market-state test
+// above — this asserts exact per-bucket counts scoped to its own orderbook_address
+// (`inference_order_status_counts_for`), immune to concurrent sibling inserts, and
+// smoke-checks the whole-table path with lower bounds. Orders use a test-unique
+// orderbook_address; status values exercise each of the three buckets.
 #[tokio::test]
 async fn order_status_counts_reflect_inserted_rows() {
     let Some(pool) = setup().await else { return };
@@ -114,8 +129,6 @@ async fn order_status_counts_reflect_inserted_rows() {
         .execute(&pool)
         .await
         .expect("purge");
-
-    let (o0, f0, c0) = repo.inference_order_status_counts().await.expect("order counts before");
 
     // One order in each status. Only the NOT NULL columns are set; order_id is
     // the per-book PK component.
@@ -134,10 +147,19 @@ async fn order_status_counts_reflect_inserted_rows() {
         .expect("insert order");
     }
 
-    let (o1, f1, c1) = repo.inference_order_status_counts().await.expect("order counts after");
-    assert_eq!(o1 - o0, 1, "OPEN bucket should gain exactly 1");
-    assert_eq!(f1 - f0, 1, "FILLED bucket should gain exactly 1");
-    assert_eq!(c1 - c0, 1, "CANCELLED bucket should gain exactly 1");
+    // Scoped to this test's orderbook_address: exactly one order in each bucket,
+    // immune to the concurrent sibling inserts a whole-table delta cannot exclude.
+    let scope = vec![ob.to_string()];
+    let scoped = repo.inference_order_status_counts_for(&scope).await.expect("scoped order counts");
+    assert_eq!(scoped, (1, 1, 1), "each seeded order lands in exactly its own status bucket");
+
+    // Whole-table smoke check on the same predicates: it must at least see our rows.
+    let (ow, fw, cw) =
+        repo.inference_order_status_counts().await.expect("whole-table order counts");
+    assert!(
+        ow >= 1 && fw >= 1 && cw >= 1,
+        "whole-table counts must include our rows: {ow},{fw},{cw}"
+    );
 
     sqlx::query("delete from inference_orders where orderbook_address = $1")
         .bind(ob)
@@ -152,22 +174,30 @@ async fn superseded_failed_row_excluded_from_failing_bucket() {
     let repo = IndexerRepository::new(pool.clone());
     let active = "inf_metrics_test.failing_active";
     let superseded = "inf_metrics_test.failing_superseded";
+    let addrs = vec![active.to_string(), superseded.to_string()];
     sqlx::query("delete from inference_markets where orderbook_address = any($1)")
-        .bind(vec![active.to_string(), superseded.to_string()])
+        .bind(&addrs)
         .execute(&pool)
         .await
         .unwrap();
 
-    let (_d0, _v0, f0) = repo.inference_market_state_counts().await.unwrap();
-    // Active failing row -> +1 to failing.
+    // Active failing row -> counts toward failing.
     sqlx::query("insert into inference_markets (orderbook_address, last_reconcile_failed_at) values ($1, now())")
         .bind(active).execute(&pool).await.unwrap();
-    // Superseded failed row -> must NOT count toward failing.
+    // Superseded failed row -> excluded by `superseded_at is null`.
     sqlx::query("insert into inference_markets (orderbook_address, last_reconcile_failed_at, superseded_at) values ($1, now(), now())")
         .bind(superseded).execute(&pool).await.unwrap();
 
-    let (_d1, _v1, f1) = repo.inference_market_state_counts().await.unwrap();
-    assert_eq!(f1 - f0, 1, "only the non-superseded failing row increments the failing bucket");
+    // Scoped to just these two addresses, so a concurrent sibling's failing rows
+    // cannot perturb the count: exactly one failing row (the active one).
+    let (_d, _v, f) = repo.inference_market_state_counts_for(&addrs).await.unwrap();
+    assert_eq!(f, 1, "only the non-superseded failing row counts toward the failing bucket");
+
+    sqlx::query("delete from inference_markets where orderbook_address = any($1)")
+        .bind(&addrs)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 /// `event_type`/`decoded` are left NULL — the wedged-books predicate only cares

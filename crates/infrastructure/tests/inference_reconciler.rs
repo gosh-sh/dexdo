@@ -1040,7 +1040,11 @@ async fn refresh_selects_price_due_sweep_due_and_skips_fresh() {
         .await
         .unwrap();
 
-    let picked = r.select_refresh_candidates().await.unwrap();
+    // Scope the selection to just these four books so concurrent never-priced
+    // visible markets elsewhere in the shared test DB cannot crowd the
+    // `reference_price_at nulls first` LIMIT window and evict our candidates.
+    let scope = vec![a.to_string(), b.to_string(), c.to_string(), d.to_string()];
+    let picked = r.select_refresh_candidates_within(&scope).await.unwrap();
     assert!(picked.contains(&a.to_string()), "price-due must be selected");
     assert!(picked.contains(&b.to_string()), "sweep-due must be selected");
     assert!(picked.contains(&c.to_string()), "never-swept (last_swept_at NULL) must be selected");
@@ -1116,15 +1120,20 @@ async fn failure_stamps_backoff_and_excludes_from_reselection() {
         .await
         .unwrap();
 
+    // Scope the selection to just this book so concurrent never-priced visible
+    // markets elsewhere in the shared test DB cannot crowd it out of the
+    // `nulls first` LIMIT window (see
+    // refresh_selects_price_due_sweep_due_and_skips_fresh).
+    let scope = vec![ob.to_string()];
     // Confirm selected before any failure.
-    let before = r.select_refresh_candidates().await.unwrap();
+    let before = r.select_refresh_candidates_within(&scope).await.unwrap();
     assert!(before.contains(&ob.to_string()), "price-due book must be selected before failure");
 
     // Stamp a failure.
     r.stamp_failure(ob).await.unwrap();
 
     // Within backoff window ⇒ must be excluded.
-    let after = r.select_refresh_candidates().await.unwrap();
+    let after = r.select_refresh_candidates_within(&scope).await.unwrap();
     assert!(
         !after.contains(&ob.to_string()),
         "within 5-min backoff ⇒ must be excluded from selection"
@@ -1148,7 +1157,7 @@ async fn failure_stamps_backoff_and_excludes_from_reselection() {
         .unwrap();
 
     // Must be selectable again.
-    let after_expiry = r.select_refresh_candidates().await.unwrap();
+    let after_expiry = r.select_refresh_candidates_within(&scope).await.unwrap();
     assert!(
         after_expiry.contains(&ob.to_string()),
         "after backoff window expires ⇒ must be selectable again"
