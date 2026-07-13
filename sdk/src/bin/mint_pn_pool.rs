@@ -610,14 +610,6 @@ async fn main() -> ExitCode {
         None => eprintln!("[pool] rate limit: disabled"),
     }
     let paths = Halo2Paths::from_env();
-    if !paths.srs_exists() {
-        eprintln!(
-            "[pool] SRS {} not found — generating it (~64 MB, one-time, CPU-bound)...",
-            paths.srs_path().display()
-        );
-        paths.ensure_srs();
-        eprintln!("[pool] SRS ready at {}", paths.srs_path().display());
-    }
     if let Err(e) = paths.validate() {
         eprintln!("[pool] halo2 paths invalid: {e:?}");
         return ExitCode::FAILURE;

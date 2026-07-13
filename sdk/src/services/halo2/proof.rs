@@ -21,6 +21,14 @@ const MODULE: KitModule = KitModule::External("dex.root_pn");
 pub const SHELLNET_HISTORY_PROOF_WINDOW_SIZE: u64 = 128;
 pub const MAINNET_HISTORY_PROOF_WINDOW_SIZE: u64 = 128;
 
+/// Canonical Hermez-anchored KZG SRS (K=19, ~64 MB) served by GOSH. The
+/// prover's verifying key is derived from this exact SRS, and the on-chain
+/// `RootPN` / `USDCBridge` verifier is anchored to the same Hermez Perpetual
+/// Powers of Tau ceremony — a different SRS yields proofs that fail
+/// verification. The prover downloads it once and caches it next to the keygen
+/// artefacts (`<cache>/hermez_kzg_srs_k19.bin`).
+const HERMEZ_KZG_SRS_URL: &str = "https://binaries.gosh.sh/dexdo/hermez_kzg_bn254_19.srs";
+
 /// Inputs for the witness-export step. Matches `witness_lib::ExportParams`
 /// but uses `KitResult` for ergonomics.
 #[derive(Debug, Clone)]
@@ -73,9 +81,10 @@ pub async fn export_witness(params: &ExportWitnessParams) -> KitResult<String> {
     })
 }
 
-/// Generate a halo2 proof from a fixture JSON, using `cache` for PK/VK
-/// persistence (first call runs keygen, subsequent calls reuse it). Phase
-/// timings are written to stderr for diagnostics.
+/// Generate a halo2 proof from a fixture JSON, using `cache` for SRS + PK/VK
+/// persistence. The first call downloads the Hermez KZG SRS (~64 MB) and runs
+/// keygen; subsequent calls reuse both from `cache`. Phase timings are written
+/// to stderr for diagnostics.
 pub fn generate_proof(
     cache: &impl ProverCacheStorage,
     fixture_json: &str,
@@ -84,7 +93,11 @@ pub fn generate_proof(
     let cached = cache_dir.as_ref().map(|d| d.join("pk_cache.bin").exists()).unwrap_or(false);
 
     let t_init = std::time::Instant::now();
-    let mut prover = Prover::new(cache_dir.as_deref().map(Path::new)).map_err(|e| {
+    let mut prover = Prover::new_with_srs_from_url(
+        Some(HERMEZ_KZG_SRS_URL),
+        cache_dir.as_deref().map(Path::new),
+    )
+    .map_err(|e| {
         KitError::new(
             MODULE,
             KitErrorCode::QueryEvents,
@@ -92,7 +105,7 @@ pub fn generate_proof(
         )
     })?;
     eprintln!(
-        "[halo2-time] Prover::new ({}): {:.2}s",
+        "[halo2-time] Prover::new_with_srs_from_url ({}): {:.2}s",
         if cached { "cached" } else { "fresh" },
         t_init.elapsed().as_secs_f64()
     );

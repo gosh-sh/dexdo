@@ -72,10 +72,13 @@ url = "2"
 
 # Layered halo2 voucher pipeline (witness export -> prover -> public-input
 # decode). See src/services/halo2.
-halo2-proover = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", branch = "main" }
-dark_dex_halo2_private_witness_export_lib = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", branch = "main" }
-gosh-dark-dex-halo2-new-circuit = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", branch = "main", package = "dex-halo2-circuit" }
-halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "main", default-features = false, features = ["halo2-axiom", "test-utils"] }
+halo2-proover = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", tag = "v0.2.0" }
+dark_dex_halo2_private_witness_export_lib = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", tag = "v0.2.0" }
+gosh-dark-dex-halo2-new-circuit = { git = "https://github.com/gosh-sh/dexdo-halo2-kit", tag = "v0.2.0", package = "dex-halo2-circuit" }
+# Branch must match the kit's own halo2-base pin (halo2-proover Cargo.toml) so
+# Cargo unifies to a single crate — `sk_commit`'s `Fr` has to be the same field
+# type the prover's circuit was built against.
+halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom", "test-utils"] }
 
 console_error_panic_hook = { optional = true, version = "0.1.7" }
 gloo-timers = { optional = true, version = "0.3.0", features = ["futures"] }

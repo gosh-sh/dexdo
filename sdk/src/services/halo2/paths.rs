@@ -1,19 +1,20 @@
 //! Explicit configuration for halo2 on-disk artifacts.
 //!
-//! `prove_voucher_for_event` needs three directories on disk:
+//! `prove_voucher_for_event` needs two writable directories on disk:
 //!
-//! 1. **SRS** — `kzg_bn254_19.srs` (~64 MB), KZG parameter blob. Reproducible
-//!    from a fixed seed via `halo2_base::gen_srs` (see `ensure_srs`), so the
-//!    dev deploy tooling can generate it on first use. A halo2 proving host on
-//!    a real network would instead supply one from a genuine trusted-setup
-//!    ceremony. (The dodex `api` / `indexer` never use halo2, so none of this
-//!    applies to deploying the backend.)
-//! 2. **Prover cache** — `pk_cache.bin` (~464 MB) + `vk_cache.bin` +
-//!    `break_points_cache.bin`. Read-write, persistent. Lost cache means one
-//!    ~5-minute keygen on the next call.
-//! 3. **Fixture dir** — `dex_fixture_live_L{layer}_H{height}_T{nanos}.json`
+//! 1. **Prover cache** — the Hermez KZG SRS (`hermez_kzg_srs_k19.bin`, ~64 MB,
+//!    downloaded once from GOSH on first proof — see `proof::HERMEZ_KZG_SRS_URL`)
+//!    plus the keygen artefacts `pk_cache.bin` (~464 MB) / `vk_cache.bin` /
+//!    `break_points_cache.bin`. Read-write, persistent. A lost cache re-downloads
+//!    the SRS and re-runs one ~5-minute keygen on the next call. (The dodex
+//!    `api` / `indexer` never use halo2, so none of this applies to deploying
+//!    the backend.)
+//! 2. **Fixture dir** — `dex_fixture_live_L{layer}_H{height}_T{nanos}.json`
 //!    witness dumps written per-proof. Read-write, ephemeral; safe to wipe
 //!    between runs.
+//!
+//! `srs_dir` remains on the struct only for the legacy `ensure_srs` /
+//! `gen_srs` path (insecure, unused by the live prover); see `ensure_srs`.
 //!
 //! On a host machine env vars + `./params/...` defaults are fine, but
 //! mobile sandboxes (iOS / Android Tauri builds) need the host to pick
@@ -66,15 +67,12 @@ impl Halo2Paths {
         }
     }
 
-    /// Verify the SRS file exists and the writable directories can be
-    /// created. Call once at boot — turns deep halo2-internal panics
-    /// (file not found inside `read_or_create_srs`) into an upfront
-    /// `Result` the host can surface to the user.
+    /// Verify the writable directories can be created. Call once at boot —
+    /// turns deep halo2-internal panics (unwritable cache) into an upfront
+    /// `Result` the host can surface to the user. The SRS is no longer a
+    /// precondition here: the prover downloads the Hermez KZG SRS into
+    /// `prover_cache_dir` on first proof (see `proof::HERMEZ_KZG_SRS_URL`).
     pub fn validate(&self) -> Result<(), Halo2PathsError> {
-        let srs_path = self.srs_path();
-        if !srs_path.is_file() {
-            return Err(Halo2PathsError::SrsNotFound { path: srs_path });
-        }
         ensure_writable_dir(&self.prover_cache_dir).map_err(|source| {
             Halo2PathsError::ProverCacheDirNotWritable {
                 path: self.prover_cache_dir.clone(),
@@ -97,20 +95,12 @@ impl Halo2Paths {
         self.srs_path().is_file()
     }
 
-    /// Generate the SRS if it is absent. `halo2_base::gen_srs` derives the
-    /// KZG parameters from a fixed seed, so the output is byte-for-byte
-    /// reproducible and matches the verifier key the on-chain contract was
-    /// built against — there is nothing environment-specific to source.
-    /// Generating on first use spares a fresh checkout (the `.srs` is
-    /// gitignored, ~64 MB) from sourcing the file out of band. CPU-bound
-    /// and one-time; the result is cached on disk under `srs_dir`.
-    ///
-    /// This is for the dev/test deploy tooling (`mint_pn_pool` /
-    /// `mint_ob_pool`), which targets networks with a giver — not the dodex
-    /// `api` / `indexer`, which never use halo2 at all. A halo2 proving host
-    /// on a real network (e.g. a wallet minting vouchers) would instead supply
-    /// an SRS from a genuine trusted-setup ceremony and rely on `validate()`
-    /// to reject a missing one.
+    /// **LEGACY / INSECURE — not used by the live prover.** Generates a
+    /// self-seeded `gen_srs` SRS whose trapdoor is knowable; proofs built
+    /// against it do NOT verify on the Hermez-anchored on-chain verifier.
+    /// The prover now sources the real SRS over the network
+    /// (`proof::HERMEZ_KZG_SRS_URL`), so nothing in this repo calls this.
+    /// Kept only as an escape hatch for the deprecated `Prover::new` path.
     pub fn ensure_srs(&self) {
         if self.srs_exists() {
             return;

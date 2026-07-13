@@ -960,14 +960,6 @@ async fn main() -> ExitCode {
 
     let context = create_tvm_context(&args.endpoint);
     let paths = Halo2Paths::from_env();
-    if !paths.srs_exists() {
-        eprintln!(
-            "[ob-pool] SRS {} not found — generating it (~64 MB, one-time, CPU-bound)...",
-            paths.srs_path().display()
-        );
-        paths.ensure_srs();
-        eprintln!("[ob-pool] SRS ready at {}", paths.srs_path().display());
-    }
     if let Err(e) = paths.validate() {
         eprintln!("[ob-pool] halo2 paths invalid: {e:?}");
         return ExitCode::FAILURE;

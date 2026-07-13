@@ -75,14 +75,15 @@ pub struct Halo2Proof {
 /// the event by its `skUCommit` payload — bulletproof under concurrent
 /// voucher mints from independent callers).
 ///
-/// `paths` controls where the SRS / prover cache / witness fixtures live —
-/// hosts (mobile / packaged builds) must point these at writable
-/// app-managed locations; `Halo2Paths::from_env()` is the test/CLI default.
+/// `paths` controls where the prover cache (SRS download + keygen) and the
+/// witness fixtures live — hosts (mobile / packaged builds) must point these
+/// at writable app-managed locations; `Halo2Paths::from_env()` is the
+/// test/CLI default.
 ///
 /// Panics on halo2 / chain failures (layer wait timeout, witness export
 /// failure, prover failure across the whole attempt plan); returns
-/// `Halo2PathsError` if `paths` is misconfigured (missing SRS, unwritable
-/// cache/fixture dir).
+/// `Halo2PathsError` if `paths` is misconfigured (unwritable cache/fixture
+/// dir).
 pub async fn prove_voucher_for_event(
     context: Arc<ClientContext>,
     network_url: String,
@@ -96,7 +97,6 @@ pub async fn prove_voucher_for_event(
     paths: &super::paths::Halo2Paths,
 ) -> Result<Halo2Proof, super::paths::Halo2PathsError> {
     paths.validate()?;
-    paths.install_env();
 
     let t_total = std::time::Instant::now();
     let history_proof_window_size =
