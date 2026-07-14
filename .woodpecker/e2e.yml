@@ -10,7 +10,7 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  - &acki_branch "poseidon_dex_update"
+  - &acki_branch "history_cursor"
   - &allbin_image "docker.gosh.sh/ackinacki-all-bin:br_history_cursor"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
