@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use dodex_chain::DEX_DAPP_ID;
 use ackinacki_kit::tvm_client::account::get_account;
 use ackinacki_kit::tvm_client::account::ParamsOfGetAccount;
 use ackinacki_kit::tvm_client::net::ErrorCode;
@@ -14,6 +13,7 @@ use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
+use dodex_chain::DEX_DAPP_ID;
 use reqwest::Client;
 use serde::Deserialize;
 use serde::Serialize;
