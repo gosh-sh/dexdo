@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use ackinacki_kit::contracts::dapp::SystemDapp;
+use dodex_chain::DEX_DAPP_ID;
 use ackinacki_kit::tvm_client::account::get_account;
 use ackinacki_kit::tvm_client::account::ParamsOfGetAccount;
 use ackinacki_kit::tvm_client::net::ErrorCode;
@@ -103,15 +103,17 @@ impl GraphqlClient {
     /// Returns `None` if the account does not exist or has not been deployed yet.
     ///
     /// Goes through `tvm_client::account::get_account` (REST `/v2/account`),
-    /// not GraphQL — see the `tvm_ctx` field doc. DEX contracts live under
-    /// the System dApp (all-zero id); `account_id` is the address without
-    /// its `0:` workchain prefix.
+    /// not GraphQL — see the `tvm_ctx` field doc. Reads DEX contracts, so it
+    /// scopes the lookup to [`DEX_DAPP_ID`]: the PMP addresses the market
+    /// reconciler refreshes, and the inference order books, which `PrivateNote`
+    /// deploys as its own children and which therefore inherit its dApp.
+    /// `account_id` is the address without its `0:` workchain prefix.
     pub async fn fetch_account_boc(&self, address: &str) -> anyhow::Result<Option<String>> {
         let ctx = self.tvm_context()?;
         let account_id = address.strip_prefix("0:").unwrap_or(address);
         let params = ParamsOfGetAccount {
             account_id: account_id.to_string(),
-            dapp_id: SystemDapp::System.dapp_id().to_string(),
+            dapp_id: DEX_DAPP_ID.to_string(),
         };
         match get_account(ctx, params).await {
             Ok(result) => Ok(Some(result.boc)),
