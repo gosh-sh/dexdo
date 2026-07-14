@@ -43,11 +43,11 @@ zeroize = { version = "1.8", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 dotenvy = "0.15"
 chrono = { version = "0.4", features = ["clock"] }
-tvm_abi = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.2.an' }
-tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.2.an' }
-tvm_executor = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.2.an' }
-tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.2.an' }
-tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.2.an' }
+tvm_abi = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.4.an' }
+tvm_block = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.4.an' }
+tvm_executor = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.4.an' }
+tvm_types = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.4.an' }
+tvm_vm = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = 'v3.0.4.an' }
 # `ackinacki-kit` supplies the contract-wrapper trait surface (ContractBase,
 # encode/decode/send/getter traits) plus the error/account/event/deserialize
 # infra and `tvm_client`. The DEX contract wrappers themselves (PrivateNote,
