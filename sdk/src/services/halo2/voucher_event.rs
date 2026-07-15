@@ -121,7 +121,10 @@ pub async fn fetch_extout_voucher_events(
     last: u32,
     with_block_id: bool,
 ) -> KitResult<Vec<VoucherExtoutMessage>> {
-    let dapp_id_api = ackinacki_kit::contracts::dapp::supports_dapp_id(&context, MODULE).await?;
+    let dapp_id_api = context.supports_dapp_id().await.map_err(|e| {
+        KitError::new(MODULE, KitErrorCode::QueryEvents, "Detect GraphQL server version")
+            .with_tvm_error(e)
+    })?;
     let query = if dapp_id_api { GQL_EXTOUT_MESSAGES_V3 } else { GQL_EXTOUT_MESSAGES };
     let mut variables = account_query_vars(dapp_id_api, root_pn_address);
     variables.insert("last".to_string(), serde_json::json!(last));

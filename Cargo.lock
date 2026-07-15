@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "ackinacki-kit"
-version = "3.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v3.0.0#69a3026ddc8d71bb67a692b69c326e2a8835d889"
+version = "4.0.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v4.0.0#8bd184d36be3fdc8dee2b4b0551ee96e7cf277d5"
 dependencies = [
  "contracts",
  "shared",
@@ -1090,8 +1090,8 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "contracts"
-version = "3.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v3.0.0#69a3026ddc8d71bb67a692b69c326e2a8835d889"
+version = "4.0.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v4.0.0#8bd184d36be3fdc8dee2b4b0551ee96e7cf277d5"
 dependencies = [
  "base64",
  "chrono",
@@ -5223,8 +5223,8 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "3.0.0"
-source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v3.0.0#69a3026ddc8d71bb67a692b69c326e2a8835d889"
+version = "4.0.0"
+source = "git+https://github.com/gosh-sh/ackinacki-kit.git?tag=v4.0.0#8bd184d36be3fdc8dee2b4b0551ee96e7cf277d5"
 dependencies = [
  "tokio",
 ]

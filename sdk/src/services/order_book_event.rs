@@ -100,7 +100,10 @@ pub async fn fetch_extout_events_for_kind(
     last: u32,
 ) -> KitResult<Vec<OrderBookExtoutMessage>> {
     let target_dst = ext_dst_for_kind(kind);
-    let dapp_id_api = ackinacki_kit::contracts::dapp::supports_dapp_id(&context, MODULE).await?;
+    let dapp_id_api = context.supports_dapp_id().await.map_err(|e| {
+        KitError::new(MODULE, KitErrorCode::QueryEvents, "Detect GraphQL server version")
+            .with_tvm_error(e)
+    })?;
     let query = if dapp_id_api { GQL_EXTOUT_MESSAGES_V3 } else { GQL_EXTOUT_MESSAGES };
     let mut variables = account_query_vars(dapp_id_api, ob_address);
     variables.insert("last".to_string(), serde_json::json!(last));

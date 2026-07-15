@@ -281,7 +281,7 @@ pub async fn fetch_inference_event_ids(
     ctx: Arc<ClientContext>,
     order_book_addr: &str,
 ) -> anyhow::Result<Vec<u128>> {
-    let events = query_events(ctx, order_book_addr, SystemDapp::System.dapp_id(), Some(100))
+    let events = query_events(ctx, order_book_addr, SystemDapp::Dex.dapp_id(), Some(100))
         .await
         .map_err(|e| anyhow!("query inference events {order_book_addr}: {e:?}"))?;
     Ok(events
