@@ -1,0 +1,120 @@
+---
+# Build pipeline: build the api + indexer images and push them to the registry.
+# The deploy pipeline (.woodpecker/deploy.yml) pulls these by commit SHA.
+# On a git tag, images are ALSO tagged with the tag name (+ `latest`).
+
+when:
+  - event: push
+    branch: [dev, main]
+  - event: pull_request
+    branch: [dev, main]
+  - event: tag
+
+variables:
+  - &build_plugin "docker.gosh.sh/plugin-docker-buildx-cond:stable"
+  - docker_logins: &docker_logins
+      - registry: https://docker.gosh.sh
+        username: woodpecker
+        password:
+          from_secret: DOCKER_GOSH_SH_PASSWORD
+  # Step-level triggers: everything except tags, vs tags only.
+  - not_tag: &not_tag
+      - { event: push, branch: [dev, main] }
+      - { event: pull_request, branch: [dev, main] }
+  - is_tag: &is_tag
+      - { event: tag }
+  # Shared per-image build settings (tags_file + skip_if_tag_exists set per step).
+  - api_settings: &api_settings
+      logins: *docker_logins
+      repo: docker.gosh.sh/dexdo-api
+      skip_registry_url: "https://docker.gosh.sh"
+      cache_to:
+        - type=inline,mode=max
+      cache_from:
+        - docker.gosh.sh/dexdo-api:cache
+        - docker.gosh.sh/dexdo-api:latest-dev
+      dockerfile: docker/api.Dockerfile
+  - indexer_settings: &indexer_settings
+      logins: *docker_logins
+      repo: docker.gosh.sh/dexdo-indexer
+      skip_registry_url: "https://docker.gosh.sh"
+      cache_to:
+        - type=inline,mode=max
+      cache_from:
+        - docker.gosh.sh/dexdo-indexer:cache
+        - docker.gosh.sh/dexdo-indexer:latest-dev
+      dockerfile: docker/indexer.Dockerfile
+
+steps:
+  # Tag list for branch / PR builds -> .tags
+  docker_tags:
+    depends_on: []
+    when: *not_tag
+    image: bash
+    commands:
+      - |
+        set -x
+        {
+          echo "cache"
+          [[ "$CI_COMMIT_BRANCH" == "dev" ]] && [[ "$CI_PIPELINE_EVENT" == "push" ]] && echo "latest-dev"
+          [[ "$CI_COMMIT_BRANCH" == "main" ]] && [[ "$CI_PIPELINE_EVENT" == "push" ]] && echo "latest"
+          [[ -n "$CI_COMMIT_PULL_REQUEST" ]] && echo "pr_$CI_COMMIT_PULL_REQUEST" | tr / _
+          [[ -n "$CI_COMMIT_SOURCE_BRANCH" ]] && echo "br_$CI_COMMIT_SOURCE_BRANCH" | tr / _
+          [[ -n "$CI_COMMIT_SHA" ]] && echo "$CI_COMMIT_SHA"
+        } | tee .tags
+
+  # Tag list for git-tag builds -> .tags_tag (tag name + latest + SHA)
+  docker_tags_for_tag:
+    depends_on: []
+    when: *is_tag
+    image: bash
+    commands:
+      - |
+        set -x
+        {
+          echo "cache"
+          [[ -n "$CI_COMMIT_TAG" ]] && echo "$CI_COMMIT_TAG"
+          [[ -n "$CI_COMMIT_SHA" ]] && echo "$CI_COMMIT_SHA"
+        } | tee .tags_tag
+
+  publish_api:
+    depends_on:
+      - docker_tags
+    when: *not_tag
+    image: *build_plugin
+    privileged: true
+    settings:
+      <<: *api_settings
+      tags_file: .tags
+      skip_if_tag_exists: ${CI_COMMIT_SHA}
+
+  publish_api_tagged:
+    depends_on:
+      - docker_tags_for_tag
+    when: *is_tag
+    image: *build_plugin
+    privileged: true
+    settings:
+      <<: *api_settings
+      tags_file: .tags_tag
+
+  publish_indexer:
+    depends_on:
+      - docker_tags
+    when: *not_tag
+    image: *build_plugin
+    privileged: true
+    settings:
+      <<: *indexer_settings
+      tags_file: .tags
+      skip_if_tag_exists: ${CI_COMMIT_SHA}
+
+  publish_indexer_tagged:
+    depends_on:
+      - docker_tags_for_tag
+    when: *is_tag
+    image: *build_plugin
+    privileged: true
+    settings:
+      <<: *indexer_settings
+      tags_file: .tags_tag

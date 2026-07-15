@@ -10,18 +10,25 @@
 # SET THIS PER ENVIRONMENT IN THE INVENTORY — this default is only a fallback.
 dexdo_env: stage
 
-# --- Source (images are BUILT on the host from this checkout) ---------------
-# Images are not pulled from a registry — compose builds them on the host from
-# the Dockerfiles in this repo. Ansible checks the source out at dexdo_src_dir.
-dexdo_repo_url: https://github.com/gosh-sh/dexdo.git
-# Git ref to build (branch, tag, or commit SHA). CI passes the commit SHA via
-# `-e dexdo_version=...`; the default is only used for manual runs.
-dexdo_version: dev
+# --- Image source (images are PULLED, built by .woodpecker/build.yml) -------
+# Nothing is built on the host. The registry holds <registry>/dexdo-api and
+# <registry>/dexdo-indexer; the host must be authenticated to pull from it.
+dexdo_registry: docker.gosh.sh
+# Image tag to deploy. CI passes the commit SHA via `-e dexdo_image_tag=...`;
+# the default is only used for manual runs.
+dexdo_image_tag: latest-dev
 
 # --- Host layout ------------------------------------------------------------
 dexdo_deploy_dir: /opt/dexdo
-# Where the source checkout (docker build context) lives on the host.
-dexdo_src_dir: "{{ dexdo_deploy_dir }}/src"
+# Run api + indexer with the host's network stack (network_mode: host) instead
+# of the compose bridge. Off by default. Turn on ONLY when the chain must be
+# reached over the host's 127.0.0.1 — e2e, where a co-located single-compose
+# acki-nacki network fronts on 127.0.0.1:80 and there is no private interface to
+# bind on. Then set dexdo_chain_gateway_endpoint / dexdo_graphql_endpoint to
+# http://127.0.0.1 and dexdo_db_host to 127.0.0.1 (postgres reached via its
+# published 127.0.0.1:dexdo_db_publish_port). The api port publish is dropped
+# (host net ignores port maps — the api listens on dexdo_api_port directly).
+dexdo_host_network: false
 
 # --- Acki Nacki endpoints (see docs/deployment.md Step 1) -------------------
 dexdo_graphql_endpoint: https://shellnet.ackinacki.org/graphql
@@ -35,16 +42,30 @@ dexdo_rust_log: info
 # when 8080 is already taken on the host (multiple services share it).
 dexdo_api_port: 8080
 # Seeding writes DB rows for pre-deployed PrivateNotes; off by default.
-# See docs/seed-private-notes.md before turning on.
+# See docs/seed-private-notes.md before turning on. When true, the api seeds one
+# account + api_key per note in the seed-notes file on first start (e2e uses this
+# to create the trading users whose PNs the zerostate deployed).
 dexdo_seed_accounts: false
+# Source seed-notes JSON to install as config/seed_notes_list.json when seeding is
+# on. seed_notes format: a JSON array of {pn_address, pn_pubkey_hex, pn_seckey_hex,
+# pn_dih_hex} (ignored tokenType/value allowed). Path on the Ansible controller /
+# CI workspace (absolute, or relative to the role's files/). Carries plaintext note
+# seckeys -> never commit it; provide it out of band (e2e: the zerostate notes).
+dexdo_seed_notes_src: ""
 
 # --- Database ---------------------------------------------------------------
 # Bundled-Postgres toggle:
 #   false (default) -> connect to an EXISTING database; set dexdo_db_host/port/
 #                      name/user + vault_dexdo_db_password to point at it.
-#   true            -> run a `postgres` service inside the compose stack (data on
-#                      the dodex_pgdata volume); leave dexdo_db_host at `postgres`.
+#   true            -> run a bundled throwaway `postgres` service in the compose
+#                      stack (ephemeral tmpfs, tuned like docker-compose.test.yml);
+#                      leave dexdo_db_host at `postgres`. Intended for e2e/dev.
 dexdo_db_local: false
+# Host port to publish the bundled postgres on (for an out-of-compose test runner,
+# e.g. the e2e cargo-nextest step). Empty -> not published (internal only).
+dexdo_db_publish_port: ""
+# Optional IP to bind the published port to (empty -> all interfaces).
+dexdo_db_bind_ip: ""
 
 dexdo_db_user: dodex
 dexdo_db_name: dodex

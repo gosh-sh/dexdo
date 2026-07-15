@@ -44,3 +44,11 @@ test-group = 'serial-inference-reconciler'
 serial-reprojection = { max-threads = 1 }
 serial-capture-cursor = { max-threads = 1 }
 serial-inference-reconciler = { max-threads = 1 }
+
+# Profile for the Woodpecker e2e run (.woodpecker/e2e.yml) against a live
+# ephemeral network. The chain client has no per-call timeout, so if the network
+# stalls a test blocks forever and nextest only prints `SLOW …` indefinitely.
+# Terminate a test after ~10 min (60s × 10) so the pipeline fails cleanly instead
+# of hanging for hours. Inherits the default profile's overrides + test-groups.
+[profile.ci-e2e]
+slow-timeout = { period = "60s", terminate-after = 10 }

@@ -28,6 +28,17 @@ tests/fixtures/seed_notes*.json
 # Local-dev API seed notes (real keys) — dropped at runtime, never commit.
 config/seed_notes*.json
 
+# CI e2e runtime dirs, created at the repo root by .woodpecker/e2e.yml. They hold
+# material that must NEVER land in this PUBLIC repo: .acki-nacki/ is a transient
+# acki-nacki clone whose config/ carries plaintext seckeys (block-manager signing
+# keys, DEX test-note seckeys) + docker/.env; .ssh/ holds the CI SSH key;
+# .inventory/ holds the private host inventory; .bin/ holds extracted binaries.
+/.acki-nacki/
+/.inventory/
+/.ssh/
+/.bin/
+/acki_net_host
+
 # Ansible deploy: per-environment inventories carry host addresses + encrypted
 # vaults. Commit only the *.example dirs and templates. See deploy/ansible/README.md.
 deploy/ansible/inventories/*/
