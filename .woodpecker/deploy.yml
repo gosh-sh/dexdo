@@ -4,6 +4,10 @@ when:
   - event: push
     branch: dev
 
+# Wait for the image build; deploy pulls the image it produced (by commit SHA).
+depends_on:
+  - build
+
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
   - &inventory_branch "main"
@@ -41,4 +45,4 @@ steps:
     commands:
       - cp -ar .ssh ~/.ssh
       - echo "$ANSIBLE_VAULT_PASSWORD" > /tmp/vault-pass && chmod 600 /tmp/vault-pass
-      - ansible-playbook deploy-dexdo.yml -i $CI_WORKSPACE/.inventory/ansible/inventory/dexdo/stage/hosts.yml --vault-password-file /tmp/vault-pass -e dexdo_version=$CI_COMMIT_SHA
+      - ansible-playbook deploy-dexdo.yml -i $CI_WORKSPACE/.inventory/ansible/inventory/dexdo/stage/hosts.yml --vault-password-file /tmp/vault-pass -e dexdo_image_tag=$CI_COMMIT_SHA

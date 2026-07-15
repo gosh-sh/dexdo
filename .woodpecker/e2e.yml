@@ -1,0 +1,221 @@
+---
+
+when:
+  - event: pull_request
+    branch: dev
+  - event: manual
+
+depends_on:
+  - build
+
+variables:
+  - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
+  - &acki_branch "history_cursor"
+  - &allbin_image "docker.gosh.sh/ackinacki-all-bin:br_history_cursor"
+  - &busybox_image "busybox:musl"
+  - &tvm_cli_version "v3.0.4-rc.an"
+  - &sold_version "gosh_0.79.4-rc"
+  - &dex_test_notes_cnt "10"
+  - &inventory_branch "main"
+  - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
+  - &acki_dir_on_host "/opt/acki-nacki"
+  - &seed_notes_ws ".acki-nacki/config/dex_test_notes.keys.json"
+
+steps:
+  acki_clone:
+    image: *ansible_image
+    environment:
+      GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
+      ACKI_REPO: { from_secret: acki_repo_url }
+      ACKI_BRANCH: *acki_branch
+    commands:
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+      - rm -rf .acki-nacki
+      - git clone --depth 1 --branch "$ACKI_BRANCH" "$ACKI_REPO" .acki-nacki
+      - rm -f ~/.netrc
+
+  copy_static_shell:
+    depends_on:
+      - acki_clone
+    image: *busybox_image
+    directory: .acki-nacki
+    commands:
+      - cp /bin/sh /bin/mkdir /bin/cp ./
+
+  copy_helpers:
+    depends_on:
+      - copy_static_shell
+    image: *allbin_image
+    directory: .acki-nacki
+    entrypoint:
+      - ./sh
+      - -c
+      - ./mkdir -p .bin && ./cp /usr/local/bin/node-helper /usr/local/bin/zerostate-helper .bin/
+
+  gen_zerostate:
+    depends_on:
+      - copy_helpers
+    image: *ansible_image
+    directory: .acki-nacki
+    environment:
+      TVM_VER: *tvm_cli_version
+      SOLD_VER: *sold_version
+      DEX_TEST_NOTES_CNT: *dex_test_notes_cnt
+    commands:
+      - rm -f sh mkdir cp
+      - apt-get update -qq && apt-get install -yqq --no-install-recommends make curl ca-certificates >/dev/null
+      # prebuilt helpers -> where generate_zerostate.py looks (./target/release)
+      - mkdir -p target/release contracts/compiler
+      - cp .bin/node-helper .bin/zerostate-helper target/release/ && chmod +x target/release/*
+      # contract toolchain (tvm-cli/tvm-debugger/sold) -> contracts/compiler, which
+      # tests/helper/common.py resolves by default (COMPILER_DIR). Download the
+      # exact versions acki-nacki CI pins so glibc/ABI match this runner.
+      - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-cli-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
+      - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-debugger-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
+      - curl -sSL "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xz -C contracts/compiler
+      - chmod +x contracts/compiler/*
+      - export PATH="$CI_WORKSPACE/.acki-nacki/contracts/compiler:$PATH"
+      # = `make generate_zerostate` minus the cargo helper build (helpers staged above)
+      - make compile_contracts
+      - DEX_TEST_NOTES_CNT="$DEX_TEST_NOTES_CNT" python3 contracts/scripts/generate_zerostate.py
+      - test -f config/zerostate && test -f config/block_manager1_signing.keys.json && test -f docker/.env
+
+  inventory_clone:
+    image: *ansible_image
+    environment:
+      GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
+      INVENTORY_REPO: { from_secret: inventory_repo_url }
+      INVENTORY_BRANCH: *inventory_branch
+    commands:
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+      - rm -rf .inventory
+      - git clone --depth 1 --branch "$INVENTORY_BRANCH" "$INVENTORY_REPO" .inventory
+      - rm -f ~/.netrc
+
+  remember_ssh_key:
+    image: *ansible_image
+    environment:
+      SSH_NET_KEY: { from_secret: ssh_dodex_ci }
+    commands:
+      - mkdir -p ~/.ssh
+      - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+      - cp -ar ~/.ssh ./.ssh
+
+  prepare_host:
+    depends_on:
+      - acki_clone
+      - inventory_clone
+      - remember_ssh_key
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    environment:
+      INV: *e2e_inventory
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      - ansible-playbook install-rust-python.yaml -i "$CI_WORKSPACE/$INV"
+      - ansible-playbook dexdo-e2e-prepare.yml -i "$CI_WORKSPACE/$INV"
+
+  net_up:
+    depends_on:
+      - prepare_host
+      - gen_zerostate
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    environment:
+      INV: *e2e_inventory
+      ACKI_DIR: *acki_dir_on_host
+      GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
+      ACKI_REPO: { from_secret: acki_repo_url }
+      ACKI_BRANCH: *acki_branch
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      - >
+        ansible-playbook dexdo-e2e-up.yml
+        -i "$CI_WORKSPACE/$INV"
+        -e acki_dir="$ACKI_DIR"
+        -e config_src="$CI_WORKSPACE/.acki-nacki/config"
+        -e env_src="$CI_WORKSPACE/.acki-nacki/docker/.env"
+        -e endpoint_host_dest="$CI_WORKSPACE/acki_net_host"
+
+  deploy_dexdo:
+    depends_on:
+      - net_up
+    image: *ansible_image
+    directory: deploy/ansible
+    environment:
+      INV: *e2e_inventory
+      SEED_NOTES_WS: *seed_notes_ws
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      - >
+        ansible-playbook deploy-dexdo.yml
+        -i "$CI_WORKSPACE/$INV"
+        -e dexdo_image_tag=$CI_COMMIT_SHA
+        -e dexdo_seed_accounts=true
+        -e dexdo_seed_notes_src="$CI_WORKSPACE/$SEED_NOTES_WS"
+
+  e2e_tests:
+    depends_on:
+      - deploy_dexdo
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      TEST_DATABASE_URL: { from_secret: e2e_test_database_url }   # postgres://dodex:<pw>@127.0.0.1:55432/dodex_test
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_NETWORK_ENDPOINT='http://127.0.0.1'
+        E2E_SEED_NOTES='$ACKI_DIR/config/dex_test_notes.keys.json'
+        TEST_DATABASE_URL='$TEST_DATABASE_URL'
+        bash -s" < .acki-nacki/tests/dexdo/e2e-on-host.sh
+
+  dump_logs:
+    depends_on:
+      - e2e_tests
+    image: *ansible_image
+    when:
+      - status: [ failure ]
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$E2E_CI_USER@$E2E_HOST"
+        "set +e;
+        cd $ACKI_DIR;
+        echo '===== docker compose ps -a (state + exit codes) =====';
+        docker compose -f docker/dexdo-e2e.compose.yaml ps -a 2>/dev/null;
+        for n in node0 node1 node2 node3 node4; do
+          echo \"===== \$n (logs/\$n/node.log, tail 120) =====\";
+          tail -n 120 $ACKI_DIR/logs/\$n/node.log 2>/dev/null;
+          echo \"----- docker logs \$n (tail 60) -----\";
+          docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=60 \$n 2>/dev/null;
+        done;
+        echo '===== block_manager (logs/bm0/bm.log, tail 200) =====';
+        tail -n 200 $ACKI_DIR/logs/bm0/bm.log 2>/dev/null;
+        echo '----- docker logs block_manager (tail 100) -----';
+        docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=100 block_manager 2>/dev/null;
+        true"
+
+  net_down:
+    depends_on:
+      - e2e_tests
+      - dump_logs
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    when:
+      - status: [ success, failure ]
+    environment:
+      INV: *e2e_inventory
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      - ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e acki_dir="$ACKI_DIR" -e full_cleanup=true

@@ -1,4 +1,14 @@
 ---
+- name: Fail early when seeding is on but no notes source is given
+  ansible.builtin.assert:
+    that:
+      - dexdo_seed_notes_src | length > 0
+    fail_msg: >-
+      dexdo_seed_accounts is true but dexdo_seed_notes_src is empty — point it at
+      the seed-notes JSON to install as config/seed_notes_list.json (one account +
+      private note per entry). See docs/seed-private-notes.md.
+  when: dexdo_seed_accounts | bool
+
 - name: Ensure deploy directories exist
   ansible.builtin.file:
     path: "{{ item }}"
@@ -9,15 +19,6 @@
     - "{{ dexdo_deploy_dir }}/config"
     - "{{ dexdo_deploy_dir }}/logs/api"
     - "{{ dexdo_deploy_dir }}/logs/indexer"
-
-# Images are built on the host, so the source (the docker build context) has to
-# be present. `force: true` discards local changes so a redeploy is clean.
-- name: Check out source at the target ref
-  ansible.builtin.git:
-    repo: "{{ dexdo_repo_url }}"
-    dest: "{{ dexdo_src_dir }}"
-    version: "{{ dexdo_version }}"
-    force: true
 
 - name: Render api config
   ansible.builtin.template:
@@ -35,6 +36,15 @@
   no_log: true   # rendered file holds the db password — keep it out of -v/--diff output
   notify: Restart dexdo stack
 
+- name: Install seed-notes file (one account + private note per entry)
+  ansible.builtin.copy:
+    src: "{{ dexdo_seed_notes_src }}"
+    dest: "{{ dexdo_deploy_dir }}/config/seed_notes_list.json"
+    mode: "0640"
+  when: dexdo_seed_accounts | bool and dexdo_seed_notes_src | length > 0
+  no_log: true   # seed notes carry plaintext pn seckeys — keep out of -v/--diff output
+  notify: Restart dexdo stack
+
 - name: Render .env (OTLP metrics for the indexer)
   ansible.builtin.template:
     src: env.j2
@@ -48,12 +58,12 @@
     dest: "{{ dexdo_deploy_dir }}/compose.yml"
     mode: "0644"
 
-# Builds the images from the checkout and (re)creates containers. `--build`
-# rebuilds whenever the source changed; config-only changes are applied by the
+# Pulls the SHA-pinned images from the registry and (re)creates containers.
+# `--pull always` picks up a new tag; config-only changes are applied by the
 # "Restart dexdo stack" handler (bind-mounted YAML does not trigger a recreate).
-- name: Build images and start the stack
+- name: Pull images and start the stack
   ansible.builtin.command:
-    cmd: docker compose up -d --build --remove-orphans
+    cmd: docker compose up -d --pull always --remove-orphans
     chdir: "{{ dexdo_deploy_dir }}"
   register: dexdo_compose_up
-  changed_when: "'Started' in dexdo_compose_up.stderr or 'Recreated' in dexdo_compose_up.stderr or 'Created' in dexdo_compose_up.stderr or 'Built' in dexdo_compose_up.stderr"
+  changed_when: "'Started' in dexdo_compose_up.stderr or 'Recreated' in dexdo_compose_up.stderr or 'Created' in dexdo_compose_up.stderr or 'Pulled' in dexdo_compose_up.stderr"
