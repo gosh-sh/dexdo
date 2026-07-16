@@ -78,10 +78,15 @@ fn client_for(mock: &MockGateway) -> GraphqlClient {
 }
 
 const ADDR: &str = "0:1010101010101010101010101010101010101010101010101010101010101010";
-const ZERO_DAPP: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+/// Spelled out rather than taken from `DEX_DAPP_ID` so the wire value stays
+/// pinned: it has to track `ROOT_PN_DAPP_ID` / `ORACLE_DAPP_ID` in
+/// `contracts/dex/modifiers/modifiers.sol`, and a lookup sent to the wrong dApp
+/// comes back as "account doesn't have a state" rather than as an error.
+const DEX_DAPP: &str = "0000000000000000000000000000000000000000000000000000000000000004";
+const SYSTEM_DAPP: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[tokio::test]
-async fn v3_gateway_fetches_boc_with_account_id_and_zero_dapp() {
+async fn v3_gateway_fetches_boc_with_account_id_and_dex_dapp() {
     let mock = spawn_mock("1.0.0", "200 OK", r#"{"boc":"dGVzdA=="}"#);
     let client = client_for(&mock);
 
@@ -93,7 +98,7 @@ async fn v3_gateway_fetches_boc_with_account_id_and_zero_dapp() {
         .iter()
         .find(|r| r.contains("/v2/account"))
         .expect("account request reached the gateway");
-    // v3 wire form: bare 64-hex account_id (no `0:`), System dApp.
+    // v3 wire form: bare 64-hex account_id (no `0:`), DEX dApp.
     assert!(
         account_req.contains(&format!("account_id={}", ADDR.trim_start_matches("0:"))),
         "account_id must be the address without its workchain prefix: {account_req}",
@@ -103,8 +108,12 @@ async fn v3_gateway_fetches_boc_with_account_id_and_zero_dapp() {
         "workchain prefix must be stripped: {account_req}"
     );
     assert!(
-        account_req.contains(&format!("dapp_id={ZERO_DAPP}")),
-        "DEX contracts live under the System dApp: {account_req}",
+        account_req.contains(&format!("dapp_id={DEX_DAPP}")),
+        "DEX contracts live under the DEX dApp: {account_req}",
+    );
+    assert!(
+        !account_req.contains(&format!("dapp_id={SYSTEM_DAPP}")),
+        "the System dApp hosts the giver and the block keepers, not the DEX: {account_req}",
     );
 }
 

@@ -18,7 +18,7 @@ test-helpers = []
 # reach the parent workspace's `[workspace.package]` /
 # `[workspace.dependencies]`.
 [dependencies]
-ackinacki-kit = { git = "https://github.com/gosh-sh/ackinacki-kit.git", tag = "v4.0.0", default-features = false, features = ["contracts", "default"] }
+ackinacki-kit = { git = "https://github.com/gosh-sh/ackinacki-kit.git", tag = "v4.0.1", default-features = false, features = ["contracts", "default"] }
 dodex-contracts = { path = "../contracts" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

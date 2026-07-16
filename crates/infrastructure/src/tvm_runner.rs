@@ -118,7 +118,9 @@ pub fn run_getter(
     let response_body = out_messages
         .iter()
         .find_map(|m| match m.header() {
-            CommonMsgInfo::ExtOutMsgInfo(_) => m.body(),
+            // V2 carries the same external-outbound header plus `src_dapp_id`; both
+            // tags denote a reply, so a getter answer may arrive under either.
+            CommonMsgInfo::ExtOutMsgInfo(_) | CommonMsgInfo::ExtOutMsgInfoV2(_) => m.body(),
             _ => None,
         })
         .ok_or_else(|| anyhow!("getter {function_name} produced no ext-out reply"))?;
@@ -155,10 +157,14 @@ fn call_tvm_msg(account: &mut Account, msg: &Message) -> Result<Vec<Message>> {
     let msg_cell = msg.serialize().map_err(|err| anyhow!("serialize msg: {err}"))?;
     let balance = account.balance().map_or(0u128, |cc| cc.grams.as_u128());
 
+    // Variants are listed exhaustively on purpose: a future inbound message kind must
+    // surface as a compile error here rather than silently fall into the ext-out reject.
     let function_selector = match msg.header() {
         CommonMsgInfo::IntMsgInfo(_) => int!(0),
         CommonMsgInfo::ExtInMsgInfo(_) => int!(-1),
-        CommonMsgInfo::ExtOutMsgInfo(_) => return Err(anyhow!("invalid message type ext-out")),
+        CommonMsgInfo::ExtOutMsgInfo(_) | CommonMsgInfo::ExtOutMsgInfoV2(_) => {
+            return Err(anyhow!("invalid message type ext-out"));
+        }
     };
 
     let mut stack = Stack::new();
