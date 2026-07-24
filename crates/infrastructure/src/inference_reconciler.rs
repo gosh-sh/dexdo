@@ -38,9 +38,15 @@ const KIND: &str = "InferenceOrderBook";
 const QUOTE_TOKEN_TYPE_SHELL: i32 = 2;
 const PRICE_PRECISION: i32 = 9;
 const QUANTITY_PRECISION: i32 = 0;
-const TICK_SIZE: &str = "0.000000001";
+// Advertised trading rules. The chain enforces none of them: InferenceOrderBook
+// takes `price` as a free `uint256` of ECC[SHELL] base units per tick and `ticks`
+// as a `uint128`, with no tick-multiple or notional check, and the API exposes no
+// inference order-entry endpoint. They are client-facing metadata only, served
+// verbatim — unlike `reference_price`, they are not scaled by PRICE_PRECISION on
+// read, so they are written here in the same display units as price.
+const TICK_SIZE: &str = "1";
 const STEP_SIZE: &str = "1";
-const MIN_NOTIONAL: &str = "0.000000001";
+const MIN_NOTIONAL: &str = "1";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct InferenceReconcileStats {

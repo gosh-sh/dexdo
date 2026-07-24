@@ -862,7 +862,7 @@ Response:
       "takerCommission": "0.025",
       "pricePrecision": 9,
       "quantityPrecision": 0,
-      "tickSize": "0.000000001",
+      "tickSize": "1",
       "stepSize": "1",
       "minNotional": "1",
       "referencePrice": "1010",
