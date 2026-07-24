@@ -1768,6 +1768,109 @@ async fn oracle_event_list_deployed_persists_description() {
     assert_eq!(desc.as_deref(), Some("Election markets verified by ElectionOracle."));
 }
 
+/// An oracle may deploy the same event list twice — first bare, then again once
+/// a description is set. Each emission carries its own msg_id, so the upsert has
+/// to reconcile on `address`; keying it on msg_id turns the second emission into
+/// a plain insert that trips `oracle_event_lists_address_key` and pins the raw
+/// event pending forever.
+#[tokio::test]
+async fn oracle_event_list_redeployed_updates_row_instead_of_colliding() {
+    let Some(pool) = setup().await else { return };
+
+    let oracle_addr = "0:oel_redeploy_test_oracle";
+    let oel_addr = "0:oel_redeploy_test_evlist";
+
+    // Clean slate.
+    sqlx::query("delete from oracle_event_lists where address = $1")
+        .bind(oel_addr)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from oracles where address = $1")
+        .bind(oracle_addr)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        r#"insert into oracles (name, address, deploy_msg_id, pubkey)
+           values ('oel-redeploy-test', $1, 'oel-redeploy-deploy', '0xff')"#,
+    )
+    .bind(oracle_addr)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let deploy = |msg_id: &str, description: &str| {
+        let event = dodex_infrastructure::decoder::DecodedEvent {
+            contract_kind: "Oracle",
+            event_name: "OracleEventListDeployed".to_string(),
+            event_type: "Oracle.OracleEventListDeployed".to_string(),
+            value: serde_json::json!({
+                "eventListAddress": oel_addr,
+                "index": "0",
+                "description": description,
+            }),
+        };
+        let node = dodex_infrastructure::graphql::EventNode {
+            msg_id: msg_id.to_string(),
+            src: Some(oracle_addr.to_string()),
+            msg_chain_order: None,
+            src_dapp_id: None,
+            dst: None,
+            body: None,
+            created_at: None,
+        };
+        (event, node)
+    };
+
+    let project = |msg_id: &'static str, description: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let (event, node) = deploy(msg_id, description);
+            let mut tx = pool.begin().await.unwrap();
+            let outcome = dodex_infrastructure::projectors::project_event(&mut tx, &event, &node)
+                .await
+                .unwrap_or_else(|err| panic!("project {msg_id}: {err:?}"));
+            tx.commit().await.unwrap();
+            outcome
+        }
+    };
+
+    // Bare deploy, then a re-deploy of the same list carrying the description.
+    assert_eq!(
+        project("oel-redeploy-msg-bare", "").await,
+        dodex_infrastructure::projectors::ProjectionOutcome::Applied,
+    );
+    assert_eq!(
+        project("oel-redeploy-msg-named", "Football").await,
+        dodex_infrastructure::projectors::ProjectionOutcome::Applied,
+        "a second deploy of the same list address must upsert, not collide",
+    );
+
+    // A later bare re-emission must not erase the description already on record.
+    assert_eq!(
+        project("oel-redeploy-msg-bare-again", "").await,
+        dodex_infrastructure::projectors::ProjectionOutcome::Applied,
+    );
+
+    let (rows, description, msg_id): (i64, String, String) = sqlx::query_as(
+        r#"select count(*) over (), description, msg_id
+             from oracle_event_lists where address = $1"#,
+    )
+    .bind(oel_addr)
+    .fetch_one(&pool)
+    .await
+    .expect("exactly one event list row for the address");
+
+    assert_eq!(rows, 1, "re-deploys must reconcile onto the single row keyed by address");
+    assert_eq!(description, "Football", "the description-bearing deploy wins over a bare one");
+    assert_eq!(
+        msg_id, "oel-redeploy-msg-bare",
+        "msg_id stays the message that first created the row",
+    );
+}
+
 #[tokio::test]
 async fn orderfilled_does_not_rewrite_rejected_row() {
     let _guard = REPROJECTION_LOCK.lock().await;

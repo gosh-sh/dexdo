@@ -156,14 +156,25 @@ async fn apply_oracle_event_list_deployed(
     // inventing a value.
     let description = field_str(&event.value, "description")?;
 
+    // Conflict on `address`, not `msg_id`: an oracle may emit
+    // OracleEventListDeployed more than once for the same list (e.g. once bare,
+    // then again once a description is set), and every emission carries its own
+    // msg_id. Keying the upsert on msg_id makes the second emission fall through
+    // to a plain insert, which trips the UNIQUE on `address` and leaves the raw
+    // event pending forever. `msg_id` is deliberately left untouched on update —
+    // it records the message that first created the row.
+    //
+    // `description` is NOT NULL, so "no description" arrives as ''. Take the
+    // incoming value only when it carries text, so a later bare re-emission
+    // cannot erase a description already on record.
     sqlx::query(
         r#"insert into oracle_event_lists (msg_id, oracle_id, address, list_index, description)
            values ($1, $2, $3, $4, $5)
-           on conflict (msg_id) do update
+           on conflict (address) do update
                set oracle_id = excluded.oracle_id,
-                   address = excluded.address,
                    list_index = excluded.list_index,
-                   description = coalesce(oracle_event_lists.description, excluded.description)"#,
+                   description =
+                       coalesce(nullif(excluded.description, ''), oracle_event_lists.description)"#,
     )
     .bind(&node.msg_id)
     .bind(oracle_id)
