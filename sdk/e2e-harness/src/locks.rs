@@ -82,9 +82,11 @@ impl ChainLockGuard {
 
 impl Drop for ChainLockGuard {
     fn drop(&mut self) {
-        // Best-effort: the fd is about to close anyway, which already
-        // releases the lock; there is nothing actionable to do with an
-        // error here.
+        // Closing `self.file`'s fd right after this call would release the
+        // lock on its own; the explicit LOCK_UN exists so the release point
+        // is visible at the site a reader looks for it, not because it's
+        // load-bearing. Best-effort: there is nothing actionable to do with
+        // an error here.
         let _ = flock(&self.file, libc::LOCK_UN);
     }
 }
@@ -125,5 +127,9 @@ mod tests {
             "exclusive при живом shared"
         );
         drop(sh);
+        assert!(
+            ChainLockGuard::try_b0_exclusive(d.path()).unwrap().is_some(),
+            "exclusive не смог взяться после освобождения shared"
+        );
     }
 }
