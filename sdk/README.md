@@ -177,3 +177,19 @@ FullSetStakeConfirmed, FullSetStakeCancelled, TransferInitiated, TransferReceive
 
 **Tests** use giver to fund RootPN directly, bypassing `generate_voucher`.
 **Production** requires the full voucher flow via multifactor wallet.
+
+## Running SDK integration tests
+
+SDK integration tests are located in `sdk/tests/integration/` and require a live Acki-Nacki network with a giver (e.g., Shellnet).
+
+By default, tests connect to Shellnet (`https://shellnet.ackinacki.org`). To run against a different network, set the `E2E_NETWORK_ENDPOINT` environment variable with a full URL including the scheme:
+
+```sh
+# Run tests against a local from-scratch network
+E2E_NETWORK_ENDPOINT="http://127.0.0.1:8888" cargo nextest run --manifest-path sdk/Cargo.toml
+
+# Run specific test
+E2E_NETWORK_ENDPOINT="http://127.0.0.1:8888" cargo nextest run --manifest-path sdk/Cargo.toml -E 'test(endpoint_)'
+```
+
+**Important:** Always provide a full URL with scheme (`http://` or `https://`). A bare host will cause `tvm_client` to attempt plain HTTP on the `/v2/account` endpoint, which may time out.

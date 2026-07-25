@@ -25,8 +25,6 @@ use dodex_sdk::halo2::Halo2Paths;
 use dodex_sdk::proof;
 use serde_json::json;
 
-use crate::common::context::ENDPOINT;
-
 const EVENT_WAIT_TIMEOUT_S: u64 = 300;
 const BLOCK_ID_WAIT_TIMEOUT_S: u64 = 180;
 
@@ -43,7 +41,7 @@ pub async fn make_voucher_proof(
 ) -> proof::Halo2Proof {
     let t_total = std::time::Instant::now();
     let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
-    let network_url = format!("https://{ENDPOINT}");
+    let network_url = crate::common::context::network_endpoint();
     let ephemeral_pubkey_hex = proof::strip_0x(ephemeral_pubkey_hex).to_string();
 
     // 1. Random sk_u; skUCommit = poseidon([sk_u, 0]).

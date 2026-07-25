@@ -6,7 +6,23 @@ use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
 use dodex_sdk::Dex;
 
-pub const ENDPOINT: &str = "shellnet.ackinacki.org";
+/// Pure core: normalizes endpoint value; takes parameter so tests avoid env mutation.
+fn endpoint_from(v: Option<&str>) -> String {
+    match v {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => "https://shellnet.ackinacki.org".to_string(),
+    }
+}
+
+/// e2e network endpoint — полный URL со схемой (зеркало контракта
+/// `services/api/tests/common/e2e_setup.rs`). Потребители схему не дописывают.
+/// Bare host гонит tvm_client на REST `/v2/account` по plain-http → таймаут.
+/// Читает переменную окружения `E2E_NETWORK_ENDPOINT`; если не задана или пуста,
+/// возвращает Shellnet по умолчанию.
+pub fn network_endpoint() -> String {
+    endpoint_from(std::env::var("E2E_NETWORK_ENDPOINT").ok().as_deref())
+}
+
 pub const TOKEN_TYPE_NACKL: u32 = dodex_sdk::proof::TokenType::Nackl as u32;
 pub const VAULT_DEPOSIT: u64 = 100_000_000_000; // 100 NACKL (Nominal::N100)
 pub const ECC_SHELL_DEPOSIT: u64 = 100_000_000_000; // 100 ECC shell (Nominal::N100)
@@ -28,11 +44,31 @@ pub const GIVER_ADDRESS: &str =
 
 pub fn create_context() -> Arc<ClientContext> {
     let mut config = ClientConfig::default();
-    config.network.endpoints = Some(vec![ENDPOINT.to_string()]);
+    config.network.endpoints = Some(vec![network_endpoint()]);
     Arc::new(ClientContext::new(config).expect("create context"))
 }
 
 pub fn create_dex() -> Dex {
-    Dex::new(dodex_sdk::DexConfig { endpoints: vec![ENDPOINT.to_string()], ..Default::default() })
+    Dex::new(dodex_sdk::DexConfig { endpoints: vec![network_endpoint()], ..Default::default() })
         .expect("create Dex")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::endpoint_from;
+
+    #[test]
+    fn endpoint_defaults_to_shellnet_with_scheme() {
+        assert_eq!(endpoint_from(None), "https://shellnet.ackinacki.org");
+    }
+
+    #[test]
+    fn endpoint_env_passthrough_verbatim() {
+        assert_eq!(endpoint_from(Some("http://127.0.0.1")), "http://127.0.0.1");
+    }
+
+    #[test]
+    fn endpoint_empty_env_falls_back() {
+        assert_eq!(endpoint_from(Some("")), "https://shellnet.ackinacki.org");
+    }
 }
