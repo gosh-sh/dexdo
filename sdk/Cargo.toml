@@ -10,6 +10,7 @@ edition.workspace = true
 # HTTPS — no SSH key required.
 [workspace]
 members = [".", "e2e-harness"]
+default-members = [".", "e2e-harness"]
 
 [workspace.package]
 version = "0.1.0"
