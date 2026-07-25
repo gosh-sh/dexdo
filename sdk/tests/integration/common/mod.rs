@@ -9,6 +9,8 @@
 //! - `pn` — `deploy_pn`, `fund_pn_gas`, `deploy_funded_pn`,
 //!   `ensure_root_pn_funded`, `deploy_pn_with_keys`.
 //! - `pmp` — `deploy_oracle_with_event`, `setup_pmp`, `PmpSetup`.
+//! - `ledger` — re-exported from the `dodex-e2e-harness` crate; the file-backed
+//!   account registry shared across concurrent e2e test processes.
 //!
 //! Each test module imports the items it actually uses via
 //! `use crate::common::<sub>::<item>;`.
@@ -21,3 +23,8 @@ pub mod pmp;
 pub mod pn;
 pub mod pn_pool;
 pub mod voucher;
+
+// No test module consumes this yet; the account allocator and parallel
+// scenario tests built on it land in later work.
+#[allow(unused_imports)]
+pub use dodex_e2e_harness::ledger;

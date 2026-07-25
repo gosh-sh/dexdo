@@ -1837,6 +1837,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dodex-e2e-harness"
+version = "0.1.0"
+dependencies = [
+ "fd-lock",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "dodex-sdk"
 version = "0.1.0"
 dependencies = [
@@ -1846,6 +1858,7 @@ dependencies = [
  "dark_dex_halo2_private_witness_export_lib",
  "dex-halo2-circuit",
  "dodex-contracts",
+ "dodex-e2e-harness",
  "gloo-timers",
  "halo2-base 0.4.1",
  "halo2-proover",
@@ -1860,6 +1873,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tracing",
  "url",
