@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use dodex_e2e_harness::ledger::Ledger;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
+use sha2::Sha256;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -46,7 +47,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let manifest_hash: String = Sha256::digest(&contents).iter().map(|b| format!("{b:02x}")).collect();
+    let manifest_hash: String =
+        Sha256::digest(&contents).iter().map(|b| format!("{b:02x}")).collect();
 
     match Ledger::bootstrap(&dir, &run_id, Some(&manifest_hash)) {
         Ok(()) => ExitCode::SUCCESS,
