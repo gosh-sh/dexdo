@@ -4,6 +4,9 @@
 //! - `context` — endpoint constants + `ClientContext` / `Dex` builders.
 //! - `chain_reader` — `ChainReader`, the single read path for on-chain
 //!   account state (raw BOC, physical balance, decoded storage fields).
+//! - `invariant` — B0 money check: exact per-currency conservation over a
+//!   declared set of contracts, per-account physical (ECC) deltas, and the
+//!   quiescence barriers a snapshot must be taken behind.
 //! - `keys` — random keypair generation.
 //! - `misc` — small utilities (time, account-active wait, balance read, GraphQL
 //!   event-entry destructuring).
@@ -21,6 +24,7 @@
 
 pub mod chain_reader;
 pub mod context;
+pub mod invariant;
 pub mod keys;
 pub mod misc;
 pub mod ob_pool;

@@ -215,8 +215,10 @@ case you're in:
   on-chain flows are single-threaded and spend test tokens — keep them `#[ignore]`d
   so they stay out of the fast PR job.
 - **Any test in a separate workspace (`sdk/`, `tools/`)** → **no CI job runs these
-  today** — `--workspace` excludes them, and `sdk/`'s only tests are the live,
-  `#[ignore]`d Shellnet integration suite. If you add a test there that *should*
+  today** — `--workspace` excludes them, and the e2e job runs `-p dodex-api` from
+  the root. `sdk/` holds both live-network tests and hermetic unit tests (in the
+  `dodex-sdk` lib, the `dodex-e2e-harness` crate, and the integration binary's
+  `common/` helpers); neither kind is gated. If you add a test there that *should*
   gate PRs (hermetic, no network — e.g. an HTTP-boundary-mocked test), you must add
   a CI step that runs it from that workspace's directory. A test that doesn't run
   in CI is documentation, not a gate — say so in the PR if you leave it manual.
