@@ -52,6 +52,7 @@ use dodex_contracts::dex::order_book::OrderBook;
 use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::root_pn::ParamsOfGetProtocolFee;
 use dodex_contracts::dex::root_pn::RootPn;
+use dodex_infrastructure::tvm_runner::decode_account_fields_json;
 use dodex_sdk::dex_contract_params;
 use serde_json::Value;
 
@@ -189,7 +190,14 @@ pub enum Phase<'a> {
         pmp: &'a str,
     },
     AfterSplit,
-    AfterTrade,
+    /// The one phase where orders legitimately rest in the book — which is
+    /// exactly why it states the count instead of opting out of the check.
+    /// Skipping it here would drop the open-order comparison from the phase
+    /// that carries the most information about the book, and a default would
+    /// let a scenario inherit an expectation it never thought about.
+    AfterTrade {
+        expected_open_orders: u32,
+    },
     /// `resolve` decrements the pool and sends the creator fee asynchronously,
     /// and the order-book drain forwards protocol fees to RootPN on its own
     /// schedule. Both are checked as exact equalities against baselines read
@@ -462,10 +470,13 @@ pub fn assert_phys_delta(
 /// Block until the tracked set has settled for `phase`, or fail after
 /// [`QUIESCENCE_TIMEOUT`].
 ///
-/// A read failure aborts immediately rather than being retried: a getter that
-/// errors means the wrong address or the wrong ABI, which waiting cannot fix.
-/// A condition that is merely not met yet is polled and, on timeout, reported
-/// verbatim — including the numbers that never converged.
+/// An account that does not exist yet is a *pending* condition, not a failure:
+/// a tracked contract is routinely deployed part-way through a phase, and
+/// waiting is precisely what fixes it. Every other read failure aborts
+/// immediately — a getter that errors means the wrong address or the wrong
+/// ABI, which waiting cannot fix. A condition that is merely not met yet is
+/// polled and, on timeout, reported verbatim, including the numbers that never
+/// converged.
 pub async fn await_quiescence(
     r: &ChainReader,
     t: &TrackedContracts,
@@ -499,16 +510,17 @@ async fn base_pending(
     phase: &Phase<'_>,
 ) -> anyhow::Result<Option<String>> {
     for pn in &t.pns {
-        let fields = read_pn_fields(r, pn).await?;
+        let Some(fields) = pn_fields_opt(r, pn).await? else {
+            return Ok(Some(format!("PN {pn} is not deployed yet")));
+        };
         let busy = field(&fields, PN_BUSY)?;
         if !busy.is_null() {
             return Ok(Some(format!("PN {pn} is still busy with {busy}")));
         }
-        if phase_expects_no_open_orders(phase) {
-            let open = field_u32(&fields, PN_OPEN_ORDER_COUNT)?;
-            if open != 0 {
-                return Ok(Some(format!("PN {pn} still has {open} open order(s)")));
-            }
+        let open = field_u32(&fields, PN_OPEN_ORDER_COUNT)?;
+        let want = expected_open_orders(phase);
+        if open != want {
+            return Ok(Some(format!("PN {pn} has {open} open order(s), expected {want}")));
         }
     }
 
@@ -532,12 +544,14 @@ async fn base_pending(
     Ok(None)
 }
 
-/// Every phase leaves the notes with a flat order state except `AfterTrade`,
-/// which is measured while limit orders are deliberately resting in the book.
-/// The variant carries no count because there the barrier's only job is to
-/// prove the notes are no longer mid-message.
-fn phase_expects_no_open_orders(phase: &Phase<'_>) -> bool {
-    !matches!(phase, Phase::AfterTrade)
+/// How many orders each phase expects to find resting. Every phase but
+/// `AfterTrade` leaves the notes with a flat order state; `AfterTrade` states
+/// its own number, so the check is never skipped — only parameterised.
+fn expected_open_orders(phase: &Phase<'_>) -> u32 {
+    match phase {
+        Phase::AfterTrade { expected_open_orders } => *expected_open_orders,
+        _ => 0,
+    }
 }
 
 async fn phase_pending(
@@ -564,13 +578,12 @@ async fn phase_pending(
             Ok(None)
         }
 
-        Phase::AfterStake | Phase::AfterSplit | Phase::AfterTrade => Ok(None),
+        Phase::AfterStake | Phase::AfterSplit | Phase::AfterTrade { .. } => Ok(None),
 
         Phase::AfterFreeze { pmp } => {
-            let fields = r
-                .storage_fields(pmp, PMP_ABI)
-                .await
-                .with_context(|| format!("read PMP storage at {pmp}"))?;
+            let Some(fields) = storage_fields_opt(r, pmp, PMP_ABI).await? else {
+                return Ok(Some(format!("PMP {pmp} is not deployed yet")));
+            };
             if field_bool(&fields, PMP_NORM_REFUND_PENDING)? {
                 return Ok(Some(format!(
                     "PMP {pmp} is still waiting for the normalisation refund to be acknowledged"
@@ -603,7 +616,9 @@ async fn phase_pending(
             }
 
             let want = deployer_balance_before + creator_fee;
-            let got = pn_balance(r, deployer, token_type).await?;
+            let Some(got) = pn_balance_opt(r, deployer, token_type).await? else {
+                return Ok(Some(format!("deployer PN {deployer} is not deployed yet")));
+            };
             if got != want {
                 return Ok(Some(format!(
                     "deployer PN {deployer} holds {got} of tt={token_type}, expected {want} \
@@ -687,13 +702,40 @@ fn with_pmp_self_destructed(
     Ok(out)
 }
 
-async fn read_pn_fields(r: &ChainReader, pn: &str) -> anyhow::Result<Value> {
-    r.storage_fields(pn, PN_ABI).await.with_context(|| format!("read PrivateNote storage at {pn}"))
+/// Decoded storage fields, or `None` when the account does not exist on chain.
+///
+/// `ChainReader::storage_fields` collapses "absent" into an error, and the
+/// quiescence barriers have to tell that one condition apart from a genuine
+/// read failure — so existence is decided by the fetch itself returning no
+/// account, never by matching an error string.
+async fn storage_fields_opt(
+    r: &ChainReader,
+    addr: &str,
+    abi_json: &str,
+) -> anyhow::Result<Option<Value>> {
+    let Some(boc) =
+        r.account_boc(addr).await.with_context(|| format!("fetch account BOC of {addr}"))?
+    else {
+        return Ok(None);
+    };
+    decode_account_fields_json(abi_json, &boc)
+        .with_context(|| format!("decode storage fields of {addr}"))
+        .map(Some)
 }
 
-async fn pn_balance(r: &ChainReader, pn: &str, tt: u32) -> anyhow::Result<u128> {
-    let fields = read_pn_fields(r, pn).await?;
-    Ok(field_uint_map(&fields, PN_BALANCE)?.get(&tt).copied().unwrap_or(0))
+async fn pn_fields_opt(r: &ChainReader, pn: &str) -> anyhow::Result<Option<Value>> {
+    storage_fields_opt(r, pn, PN_ABI).await
+}
+
+/// Snapshot-side read: a note the tracked set names but the chain does not have
+/// is a broken tracked set, not a value to substitute a zero for.
+async fn read_pn_fields(r: &ChainReader, pn: &str) -> anyhow::Result<Value> {
+    pn_fields_opt(r, pn).await?.ok_or_else(|| anyhow!("PrivateNote {pn} is not deployed"))
+}
+
+async fn pn_balance_opt(r: &ChainReader, pn: &str, tt: u32) -> anyhow::Result<Option<u128>> {
+    let Some(fields) = pn_fields_opt(r, pn).await? else { return Ok(None) };
+    Ok(Some(field_uint_map(&fields, PN_BALANCE)?.get(&tt).copied().unwrap_or(0)))
 }
 
 async fn protocol_fee(r: &ChainReader, root_pn: &str, tt: u32) -> anyhow::Result<u128> {
@@ -813,6 +855,37 @@ mod tests {
         let d = conserved_diff(&b, &a, &ExternalDelta::none());
         assert_eq!(d.get(&1), Some(&-1i128));
         assert_eq!(d.get(&2), Some(&1i128));
+    }
+
+    #[test]
+    fn a_currency_present_on_only_one_side_is_still_compared() {
+        // The shape the `AfterClaims` barrier polls: the dying PMP's bucket
+        // exists in the baseline and its account is gone from the current
+        // snapshot, so tt=2 appears on the `before` side only.
+        let b = snap(&[(1, "pn_a", 100), (2, "pmp", 7)]);
+        let a = snap(&[(1, "pn_a", 100)]);
+        let d = conserved_diff(&b, &a, &ExternalDelta::none());
+        assert_eq!(d.get(&2), Some(&-7i128));
+        assert_eq!(d.get(&1), None);
+
+        // And a currency named only by the declaration: an external delta
+        // against a currency neither snapshot mentions must still be demanded,
+        // not silently dropped.
+        let mut ext = ExternalDelta::none();
+        ext.0.insert(("pn_a".into(), 3), 5);
+        let d = conserved_diff(&b, &b, &ext);
+        assert_eq!(d.get(&3), Some(&-5i128));
+    }
+
+    #[test]
+    fn only_after_trade_expects_resting_orders() {
+        // Skipping the check for `AfterTrade` would drop it from the phase it
+        // says the most about; the variant carries the number so the barrier
+        // compares there like everywhere else.
+        assert_eq!(expected_open_orders(&Phase::AfterTrade { expected_open_orders: 2 }), 2);
+        assert_eq!(expected_open_orders(&Phase::AfterStake), 0);
+        assert_eq!(expected_open_orders(&Phase::AfterSplit), 0);
+        assert_eq!(expected_open_orders(&Phase::AfterFreeze { pmp: "0:pmp" }), 0);
     }
 
     #[test]
