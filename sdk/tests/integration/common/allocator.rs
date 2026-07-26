@@ -7,7 +7,8 @@
 //!
 //! - [`SWEEP_MUST_BE_EMPTY_OR_ZERO`] — every stateful field (nonces, locks,
 //!   stakes, debt, coupons, order-book bookkeeping) that must read back as
-//!   `null` / `"0"` / `0` / an empty map, array, or string.
+//!   `null`, an all-zero numeric string (decimal `"0"` or a zero-padded
+//!   `uint256` hex string), `0`, or an empty map, array, or string.
 //! - [`SWEEP_MUST_BE_FALSE`] — the boolean-typed fields among them; `false`
 //!   isn't covered by the "zero" notion above, so they're judged separately.
 //!
@@ -90,11 +91,29 @@ pub enum SweepVerdict {
     Dirty { fields: Vec<String> },
 }
 
-/// `null`, `"0"`, `0`, or an empty object/array/string.
+/// `null`, `0`, an empty object/array/string, or a numeric string that is
+/// entirely zero digits.
+///
+/// The last case exists because `tvm_abi`'s detokenizer does not encode every
+/// integer width the same way: a `uint256` decodes to a zero-padded hex
+/// string (`"0x" + 64 hex digits`, per `detokenize_big_uint`), while every
+/// narrower unsigned width decodes to a plain decimal string. Matching only
+/// the literal `"0"` would accept a narrow-width zero but reject a genuine
+/// `uint256` zero (`"0x000…000"`), which would make every real note
+/// permanently Dirty on any `uint256` field in the sweep list — this has to
+/// stay general (strip an optional `0x`, then check the remainder is
+/// non-empty and all `'0'`) so the next `uint256` field added to the sweep
+/// list is handled automatically, not by special-casing a field name here.
 fn is_empty_or_zero(v: &Value) -> bool {
     match v {
         Value::Null => true,
-        Value::String(s) => s.is_empty() || s == "0",
+        Value::String(s) => {
+            let digits = s.strip_prefix("0x").unwrap_or(s);
+            s.is_empty() || (!digits.is_empty() && digits.chars().all(|c| c == '0'))
+        }
+        // Defensive fallback only: the decoder emits strings for every
+        // numeric ABI field (see above), so a JSON number here would mean an
+        // unexpected decode shape, not the primary path.
         Value::Number(n) => n.as_f64() == Some(0.0),
         Value::Array(a) => a.is_empty(),
         Value::Object(m) => m.is_empty(),
@@ -148,25 +167,101 @@ mod tests {
         }
     }
 
+    /// The ABI declares each field's ("fields" section) name and Solidity
+    /// type; this reads that map from the same ABI file the completeness
+    /// test parses.
+    fn private_note_abi_types() -> std::collections::HashMap<String, String> {
+        let abi: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../contracts/dex/PrivateNote.abi.json"))
+                .unwrap();
+        abi["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (f["name"].as_str().unwrap().to_string(), f["type"].as_str().unwrap().to_string())
+            })
+            .collect()
+    }
+
+    /// The JSON shape `tvm_abi`'s detokenizer actually produces for a
+    /// zero/empty value of the given ABI type — NOT a guess. `uint256`
+    /// encodes to a zero-padded hex string, every narrower unsigned width to
+    /// a plain decimal string, maps/arrays to an empty object/array,
+    /// `optional(..)` to `null` when absent, `bool` to `false`. Panics on an
+    /// ABI type this mapping doesn't cover yet, so a future field of a new
+    /// shape fails loudly here instead of silently building a test fixture
+    /// the real decoder could never produce.
+    fn clean_value_for_abi_type(abi_type: &str) -> serde_json::Value {
+        if abi_type.ends_with("[]") {
+            serde_json::json!([])
+        } else if abi_type.starts_with("map(") {
+            serde_json::json!({})
+        } else if abi_type.starts_with("optional(") {
+            serde_json::Value::Null
+        } else if abi_type == "bool" {
+            serde_json::json!(false)
+        } else if abi_type == "uint256" {
+            serde_json::json!(format!("0x{}", "0".repeat(64)))
+        } else if abi_type.starts_with("uint") {
+            serde_json::json!("0")
+        } else {
+            panic!("clean_value_for_abi_type: unhandled ABI type `{abi_type}` — extend the mapping")
+        }
+    }
+
     #[test]
     fn sweep_clean_note_passes() {
+        // Built from the ABI's actual field types (via `clean_value_for_abi_type`),
+        // not from a guessed shape — this is what caught the original bug: a
+        // hardcoded `null` for every field can never surface a `uint256`
+        // field's real hex-zero encoding.
+        let types = private_note_abi_types();
         let mut m = serde_json::Map::new();
-        for f in SWEEP_MUST_BE_EMPTY_OR_ZERO {
-            m.insert((*f).into(), serde_json::json!(null));
-        }
-        for f in SWEEP_MUST_BE_FALSE {
-            m.insert((*f).into(), serde_json::json!(false));
+        for f in SWEEP_MUST_BE_EMPTY_OR_ZERO.iter().chain(SWEEP_MUST_BE_FALSE) {
+            let ty = types.get(*f).unwrap_or_else(|| panic!("field {f} missing from ABI"));
+            m.insert((*f).into(), clean_value_for_abi_type(ty));
         }
         assert!(matches!(sweep_verdict(&serde_json::Value::Object(m)), SweepVerdict::Clean));
     }
 
     #[test]
+    fn sweep_uint256_hex_zero_is_clean() {
+        // `_pendingBatchStakeHash` is the sweep list's one `uint256` field.
+        // Regression guard for the bug `sweep_clean_note_passes` could not
+        // catch on its own: a lone all-zero hex string must be judged clean,
+        // the same as the decimal `"0"` the narrower widths use.
+        assert!(is_empty_or_zero(&serde_json::json!(format!("0x{}", "0".repeat(64)))));
+        assert!(!is_empty_or_zero(&serde_json::json!(format!("0x{}1", "0".repeat(63)))));
+    }
+
+    #[test]
+    fn sweep_bool_field_rejects_non_boolean_shapes() {
+        // `SWEEP_MUST_BE_FALSE` requires the JSON boolean `false` exactly —
+        // a string or a numeric zero must not be accepted as a stand-in.
+        let v = serde_json::json!({ "_hasWithdrawn": "false", "_hasTransferred": 0 });
+        match sweep_verdict(&v) {
+            SweepVerdict::Dirty { fields } => {
+                assert!(fields.contains(&"_hasWithdrawn".to_string()));
+                assert!(fields.contains(&"_hasTransferred".to_string()));
+            }
+            _ => panic!("string/number stand-ins for false must be Dirty"),
+        }
+    }
+
+    #[test]
     fn sweep_missing_required_field_fails() {
         // Fail-closed: a key named by a sweep list but absent from the
-        // decoded fields entirely is NOT equivalent to a clean null.
+        // decoded fields entirely is NOT equivalent to a clean null. Checked
+        // for one field from each list — the zero list and the boolean list
+        // use different clean-value checks, so a missing key has to be
+        // caught on both paths, not just one.
         let v = serde_json::json!({ "_stakes": null }); // no other keys at all
         match sweep_verdict(&v) {
-            SweepVerdict::Dirty { fields } => assert!(fields.contains(&"_busy".to_string())),
+            SweepVerdict::Dirty { fields } => {
+                assert!(fields.contains(&"_busy".to_string()));
+                assert!(fields.contains(&"_hasWithdrawn".to_string()));
+            }
             _ => panic!("отсутствующее обязательное поле обязано давать Dirty"),
         }
     }
@@ -213,15 +308,7 @@ mod tests {
             "_lastHash", // hash of the last external message (replay guard); survives operations
             "_opNonce",  // monotonic count of all operations ever run; nonzero on a reused note
         ];
-        let abi: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../contracts/dex/PrivateNote.abi.json"))
-                .unwrap();
-        let abi_fields: Vec<String> = abi["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| f["name"].as_str().unwrap().to_string())
-            .collect();
+        let abi_fields: Vec<String> = private_note_abi_types().into_keys().collect();
         for f in SWEEP_MUST_BE_EMPTY_OR_ZERO.iter().chain(SWEEP_MUST_BE_FALSE) {
             assert!(
                 abi_fields.contains(&f.to_string()),
