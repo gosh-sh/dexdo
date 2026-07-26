@@ -18,7 +18,10 @@
 //! - `voucher` — `make_voucher_proof` driving the live halo2 pipeline.
 //! - `pn` — `deploy_pn`, `fund_pn_gas`, `deploy_funded_pn`,
 //!   `ensure_root_pn_funded`, `deploy_pn_with_keys`.
-//! - `pmp` — `deploy_oracle_with_event`, `setup_pmp`, `PmpSetup`.
+//! - `pmp` — `deploy_oracle_with_event`, `setup_pmp`, `PmpSetup`; and the
+//!   two-phase split `prepare_oracle_event`/`deploy_pmp_with_deployer` with
+//!   `OracleEventCtx`, for scenarios that need a snapshot between
+//!   publishing the event and deploying the PMP.
 //! - `ledger` — re-exported from the `dodex-e2e-harness` crate; the file-backed
 //!   account registry shared across concurrent e2e test processes.
 //! - `locks` — re-exported from the `dodex-e2e-harness` crate; the
@@ -40,7 +43,4 @@ pub mod pn_pool;
 pub mod voucher;
 
 pub use dodex_e2e_harness::ledger;
-// No test module consumes this yet; the chain-wide shared/exclusive lock
-// protocol is exercised by scenario tests built in later work.
-#[allow(unused_imports)]
 pub use dodex_e2e_harness::locks;
