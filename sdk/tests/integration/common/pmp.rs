@@ -260,6 +260,19 @@ pub async fn prepare_oracle_event(
 /// `setTimings` call, a separate step the scenario performs after this
 /// function returns — waiting on it here would hang forever.
 ///
+/// Unlike `setup_pmp`'s equivalent wait, which falls through silently if
+/// quorum never lands, this panics on exhaustion, naming the PMP address and
+/// the last observed counters. A silent fallthrough here would hand a
+/// conservation scenario a PMP address as if quorum had been reached, and
+/// the scenario would go on to stake into it; the resulting failure would
+/// surface much later with no obvious link back to the real cause.
+/// `setup_pmp` is left as-is — it has live callers this task must not
+/// change — so the two tails now deliberately differ on this one point.
+///
+/// Returns only the PMP address, not `setup_pmp`'s full detail set: it
+/// deliberately does not re-fetch `get_pmp_details` for `oracle_list_hash`,
+/// since no caller of this two-phase split needs it yet.
+///
 /// `_guard` proves the caller already holds `ChainLockGuard`; see
 /// `prepare_oracle_event` for why this function never calls `flock` itself.
 // No caller in this hermetic test crate yet; see `OracleEventCtx`.
@@ -302,13 +315,23 @@ pub async fn deploy_pmp_with_deployer(
     let pmp_contract = Pmp::new(context.clone(), dex_contract_params(&pmp_address));
     wait_active(&pmp_contract, "PMP").await;
 
+    let mut reached_quorum = false;
+    let mut last_counters = (0_u128, 0_u128);
     for _ in 0..30 {
         let d = dex.get_pmp_details(&pmp_address).await.expect("pmp details");
+        last_counters = (d.approved_oracle_events, d.number_of_oracle_events);
         if d.approved_oracle_events >= d.number_of_oracle_events && d.number_of_oracle_events > 0 {
+            reached_quorum = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
+    let (approved_oracle_events, number_of_oracle_events) = last_counters;
+    assert!(
+        reached_quorum,
+        "PMP {pmp_address} did not reach oracle quorum within 90s: \
+         approved_oracle_events={approved_oracle_events}, number_of_oracle_events={number_of_oracle_events}"
+    );
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     pmp_address
