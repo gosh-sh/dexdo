@@ -2,6 +2,9 @@
 //! responsibility:
 //!
 //! - `context` — endpoint constants + `ClientContext` / `Dex` builders.
+//! - `allocator` — `sweep_verdict`, the reuse judgment over a note's decoded
+//!   storage, pinned against the full `PrivateNote` ABI field set (the
+//!   account-pool allocator that consumes it lands in later work).
 //! - `chain_reader` — `ChainReader`, the single read path for on-chain
 //!   account state (raw BOC, physical balance, decoded storage fields).
 //! - `invariant` — B0 money check: exact per-currency conservation over a
@@ -22,6 +25,7 @@
 //! Each test module imports the items it actually uses via
 //! `use crate::common::<sub>::<item>;`.
 
+pub mod allocator;
 pub mod chain_reader;
 pub mod context;
 pub mod invariant;
