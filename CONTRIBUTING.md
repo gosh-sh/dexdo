@@ -39,6 +39,10 @@ There are two, and both hold libraries other code imports:
   the `Dex` facade, DTOs, and the halo2 voucher/proof pipeline that **tools, WASM
   builds, and external integrators** import to drive the chain. Its zk/halo2 graph
   is heavy, so it is its **own workspace**, excluded from the root resolve.
+  Its `tests/integration` e2e harness takes a `dev-dependency` on
+  [`crates/infrastructure`](crates/infrastructure) (chain-account BOC/ECC/storage
+  decoding) — the one sanctioned edge back into the root workspace; production
+  code in `sdk/` still depends on nothing under `crates/*`.
 
 So the first cut is *backend or client/write-side?* — then, within the backend,
 the layering decides the crate. Decision order, stop at the first match:

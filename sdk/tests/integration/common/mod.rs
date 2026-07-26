@@ -2,6 +2,8 @@
 //! responsibility:
 //!
 //! - `context` — endpoint constants + `ClientContext` / `Dex` builders.
+//! - `chain_reader` — `ChainReader`, the single read path for on-chain
+//!   account state (raw BOC, physical balance, decoded storage fields).
 //! - `keys` — random keypair generation.
 //! - `misc` — small utilities (time, account-active wait, balance read, GraphQL
 //!   event-entry destructuring).
@@ -17,6 +19,7 @@
 //! Each test module imports the items it actually uses via
 //! `use crate::common::<sub>::<item>;`.
 
+pub mod chain_reader;
 pub mod context;
 pub mod keys;
 pub mod misc;
