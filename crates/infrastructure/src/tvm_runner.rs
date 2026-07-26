@@ -5,6 +5,7 @@
 // so we depend on the low-level crates instead of pulling the full tvm_client
 // graph (network layer, async runtime hooks, FIFT-style get_methods, etc.).
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -151,6 +152,61 @@ pub fn decode_account_fields(contract: &Contract, account_boc_base64: &str) -> R
         .map_err(|err| anyhow!("detokenize storage fields: {err}"))
 }
 
+/// Physical balance of an account: native grams plus the extra-currency
+/// dictionary (`CurrencyCollection.other`). Currency id 2 is SHELL, which
+/// pays for gas.
+#[derive(Debug)]
+pub struct AccountEcc {
+    pub grams: u128,
+    pub ecc: BTreeMap<u32, u128>,
+}
+
+/// Decode the physical balance (grams + ECC dictionary) that the blockchain
+/// holds for an account, straight from its BOC. This is the counterpart to
+/// [`decode_account_fields`], which reads the contract's logical storage
+/// cell and cannot see the account's physical balance at all.
+pub fn decode_account_ecc(account_boc_base64: &str) -> Result<AccountEcc> {
+    let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
+    let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;
+    let cc = account.balance().ok_or_else(|| anyhow!("account has no balance (AccountNone)"))?;
+
+    let mut ecc = BTreeMap::new();
+    let mut overflow: Option<u32> = None;
+    cc.other
+        .iterate_with_keys(|k: u32, v| {
+            // VarUInteger32::value() returns &BigInt (only Grams exposes as_u128()).
+            // u128::try_from(&BigInt) is num-bigint's own TryFrom impl, reachable
+            // without naming the type. An amount that doesn't fit u128 means the
+            // account data is corrupt, so we stop iterating and report it below
+            // rather than truncate the value.
+            match u128::try_from(v.value()) {
+                Ok(amount) => {
+                    ecc.insert(k, amount);
+                    Ok(true)
+                }
+                Err(_) => {
+                    overflow = Some(k);
+                    Ok(false)
+                }
+            }
+        })
+        .map_err(|err| anyhow!("iterate ecc dict: {err}"))?;
+    if let Some(k) = overflow {
+        return Err(anyhow!("ECC[{k}] overflows u128"));
+    }
+
+    Ok(AccountEcc { grams: cc.grams.as_u128(), ecc })
+}
+
+/// JSON wrapper over [`decode_account_fields`] for callers that only have the
+/// ABI as a JSON string rather than a `tvm_abi::Contract` — e.g. across a
+/// crate boundary that doesn't take a direct dependency on `tvm_abi`.
+pub fn decode_account_fields_json(abi_json: &str, account_boc_base64: &str) -> Result<Value> {
+    let contract = Contract::load(std::io::Cursor::new(abi_json))
+        .context("load abi json for account fields")?;
+    decode_account_fields(&contract, account_boc_base64)
+}
+
 fn call_tvm_msg(account: &mut Account, msg: &Message) -> Result<Vec<Message>> {
     let config = BlockchainConfig::default();
 
@@ -273,6 +329,53 @@ mod tests {
         let err = run_getter(&contract, "not_a_boc", "getDetails", &json!({})).unwrap_err();
         let msg = format!("{:#}", err);
         assert!(msg.contains("decode") || msg.contains("base64") || msg.contains("parse"));
+    }
+
+    #[test]
+    fn decode_account_ecc_reads_grams_and_ecc_dict() {
+        use tvm_block::CurrencyCollection;
+        use tvm_block::ExtraCurrencyCollection;
+        use tvm_block::MsgAddressInt;
+        use tvm_block::StateInit;
+        use tvm_types::base64_encode;
+
+        let mut other = ExtraCurrencyCollection::default();
+        other.set(&2u32, &1_000_000_000u128.into()).unwrap(); // ECC[2] = 1 SHELL
+        let cc = CurrencyCollection { grams: 5_000u64.into(), other };
+        let addr: MsgAddressInt =
+            "0:2222222222222222222222222222222222222222222222222222222222222222".parse().unwrap();
+        let account =
+            Account::active_by_init_code_hash(addr, cc, 0, StateInit::default(), false).unwrap();
+        let boc = base64_encode(account.write_to_bytes().unwrap());
+
+        let got = decode_account_ecc(&boc).unwrap();
+
+        assert_eq!(got.grams, 5_000);
+        assert_eq!(got.ecc.get(&2), Some(&1_000_000_000));
+    }
+
+    #[test]
+    fn decode_account_ecc_rejects_amount_overflowing_u128() {
+        use tvm_block::CurrencyCollection;
+        use tvm_block::ExtraCurrencyCollection;
+        use tvm_block::MsgAddressInt;
+        use tvm_block::StateInit;
+        use tvm_block::VarUInteger32;
+        use tvm_types::base64_encode;
+
+        let mut other = ExtraCurrencyCollection::default();
+        // 2^128 — one past u128::MAX, still well inside VarUInteger32's 256-bit range.
+        other.set(&2u32, &VarUInteger32::from_two_u128(1, 0).unwrap()).unwrap();
+        let cc = CurrencyCollection { grams: 5_000u64.into(), other };
+        let addr: MsgAddressInt =
+            "0:3333333333333333333333333333333333333333333333333333333333333333".parse().unwrap();
+        let account =
+            Account::active_by_init_code_hash(addr, cc, 0, StateInit::default(), false).unwrap();
+        let boc = base64_encode(account.write_to_bytes().unwrap());
+
+        let err = decode_account_ecc(&boc).unwrap_err();
+
+        assert!(err.to_string().contains("overflow"), "unexpected error: {err}");
     }
 
     #[test]
