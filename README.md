@@ -102,10 +102,10 @@ contracts/           # on-chain contracts (TVM), .sol + .abi.json side by side
                      #   ManifestMetadata, TokenContract, InferenceOrderBook
 sdk/                 # dodex-sdk: write-side DEX facade + halo2 voucher pipeline
                      # (separate workspace, excluded from the root build; its
-                     # tests/integration e2e harness takes a dev-only path
-                     # dependency on crates/infrastructure for chain-account
-                     # decoding — production sdk/ code depends on nothing
-                     # under crates/)
+                     # library depends on crates/contracts for the on-chain ABI
+                     # wrappers, and its tests/integration e2e harness also
+                     # takes a dev-only path dependency on crates/infrastructure
+                     # for chain-account decoding)
 tools/               # end-user CLIs (separate workspace; see tools/README.md)
 docs/                # specs and plans (see docs/README.md)
 migrations/          # SQL migrations applied by sqlx::migrate! at startup
