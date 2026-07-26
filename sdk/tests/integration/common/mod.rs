@@ -3,8 +3,10 @@
 //!
 //! - `context` — endpoint constants + `ClientContext` / `Dex` builders.
 //! - `allocator` — `sweep_verdict`, the reuse judgment over a note's decoded
-//!   storage, pinned against the full `PrivateNote` ABI field set (the
-//!   account-pool allocator that consumes it lands in later work).
+//!   storage, pinned against the full `PrivateNote` ABI field set; and
+//!   `Allocator`/`LeasedPn`, the pool of pre-baked `PrivateNote`s tests rent
+//!   from and release/taint back into, quarantining on anything but a
+//!   verified-clean return.
 //! - `chain_reader` — `ChainReader`, the single read path for on-chain
 //!   account state (raw BOC, physical balance, decoded storage fields).
 //! - `invariant` — B0 money check: exact per-currency conservation over a
@@ -37,9 +39,8 @@ pub mod pn;
 pub mod pn_pool;
 pub mod voucher;
 
-// No test module consumes this yet; the account allocator and parallel
-// scenario tests built on it land in later work.
-#[allow(unused_imports)]
 pub use dodex_e2e_harness::ledger;
+// No test module consumes this yet; the chain-wide shared/exclusive lock
+// protocol is exercised by scenario tests built in later work.
 #[allow(unused_imports)]
 pub use dodex_e2e_harness::locks;

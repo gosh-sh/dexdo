@@ -193,3 +193,14 @@ E2E_NETWORK_ENDPOINT="http://127.0.0.1:8888" cargo nextest run --manifest-path s
 ```
 
 **Important:** Always provide a full URL with scheme (`http://` or `https://`). A bare host will cause `tvm_client` to attempt plain HTTP on the `/v2/account` endpoint, which may time out.
+
+### Shared account pool (`common::allocator::Allocator`)
+
+Some integration tests rent pre-baked `PrivateNote`s from a shared pool file (`dex_test_notes.keys.json`, a JSON array of `{pn_address, pn_pubkey_hex, pn_seckey_hex, pn_dih_hex}` rows) instead of deploying their own. `Allocator::new` locates that file via, in order, `E2E_SEED_NOTES` then `PN_POOL_PATH`; it errors if neither is set. Only the last `E2E_SDK_TAIL_COUNT` entries (default 3) of the file are ever rented — the head of the same pool is reserved for the api-e2e suite.
+
+```sh
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json E2E_SDK_TAIL_COUNT=5 \
+  cargo nextest run --manifest-path sdk/Cargo.toml -E 'test(allocator)'
+```
+
+`PN_POOL_PATH` is also read elsewhere in this same test tree (`common::pn_pool`, `order_book`) for the unrelated `pn_pool.json` raw-pool format — set `E2E_SEED_NOTES` instead of `PN_POOL_PATH` whenever a test run needs both pools at once, so one env var can't be misread as the other's file.

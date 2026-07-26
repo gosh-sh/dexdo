@@ -18,6 +18,7 @@ what to generate and where to drop it.
 | `sdk/pn_pool_deployers.json` | A `pn_pool.json` used as the **market-deployer** pool. Reusing a funded PN as deployer lets `mint_ob_pool` skip minting a fresh halo2 voucher (~3 min/market). | `mint_pn_pool` | `mint_ob_pool --deployer-pn-pool <path>` |
 | `sdk/ob_pool.json` | Pool of **pre-warmed OrderBook markets** (addresses + oracle/deployer keys), so a script can grab a live market without paying the ~10–15 min deploy. | `sdk/src/bin/mint_ob_pool.rs` | ad-hoc scripts |
 | `tests/fixtures/seed_notes.json` | The **e2e fixture pool**, in the **seed_notes format** (not the pool shape below) — the `.seed_notes.json` sidecar `mint_pn_pool` writes. CI fetches it from S3; each e2e test claims one slot. See `tests/fixtures/README.md`. | `mint_pn_pool` (sidecar) | `services/api/tests` → `TestPnPool::load()` |
+| `dex_test_notes.keys.json` (path given by `E2E_SEED_NOTES` / `PN_POOL_PATH`) | The **`sdk/` e2e-harness pool** — also the seed_notes format, so any seed_notes file works. Only its **tail** (last `E2E_SDK_TAIL_COUNT` entries, default 3) is ever rented; the head is reserved for the api-e2e suite. The file's own directory also hosts the shared ledger (`ledger.json`/`ledger.lock`) that tracks each note's lease/quarantine state across concurrent test processes. | supplied out of band, same as `seed_notes.json` | `sdk/tests/integration` → `common::allocator::Allocator` |
 
 ## Format
 
