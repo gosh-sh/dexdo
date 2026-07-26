@@ -211,6 +211,24 @@ pub fn decode_account_ecc(account_boc_base64: &str) -> Result<AccountEcc> {
     Ok(AccountEcc { grams: cc.grams.as_u128(), ecc })
 }
 
+/// Whether the BOC holds no account at all (`AccountNone`).
+///
+/// A contract that lived and then self-destructed does not necessarily stop
+/// answering: the gateway may still return a BOC, and that BOC decodes to
+/// `AccountNone`. So "the fetch returned something" is not the same question as
+/// "the contract exists", and a caller that needs the second one — a test
+/// barrier waiting for a self-destruct, a snapshot deciding whether an account
+/// contributes a balance — cannot answer it from the fetch alone.
+///
+/// This exists so such callers can decide existence *structurally* rather than
+/// by matching the error text of [`decode_account_fields`], which rejects
+/// `AccountNone` but says so only in prose.
+pub fn account_boc_is_none(account_boc_base64: &str) -> Result<bool> {
+    let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
+    let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;
+    Ok(account.is_none())
+}
+
 /// JSON wrapper over [`decode_account_fields`] for callers that only have the
 /// ABI as a JSON string rather than a `tvm_abi::Contract` — e.g. across a
 /// crate boundary that doesn't take a direct dependency on `tvm_abi`.
@@ -411,6 +429,34 @@ mod tests {
 
         assert_eq!(got.grams, 0);
         assert!(got.ecc.is_empty());
+    }
+
+    #[test]
+    fn account_boc_is_none_separates_a_dead_account_from_a_live_one() {
+        use tvm_block::CurrencyCollection;
+        use tvm_block::MsgAddressInt;
+        use tvm_block::StateInit;
+        use tvm_types::base64_encode;
+
+        // Self-destructed (or never deployed): the gateway can still hand back
+        // a BOC, and it carries no account.
+        let dead = base64_encode(Account::default().write_to_bytes().unwrap());
+        assert!(account_boc_is_none(&dead).unwrap());
+
+        // A funded, active account is not "none" — this is the half that keeps
+        // a barrier from declaring a live contract gone.
+        let addr: MsgAddressInt =
+            "0:4444444444444444444444444444444444444444444444444444444444444444".parse().unwrap();
+        let live = Account::active_by_init_code_hash(
+            addr,
+            CurrencyCollection::with_grams(5_000),
+            0,
+            StateInit::default(),
+            false,
+        )
+        .unwrap();
+        let live = base64_encode(live.write_to_bytes().unwrap());
+        assert!(!account_boc_is_none(&live).unwrap());
     }
 
     #[test]

@@ -52,6 +52,7 @@ use dodex_contracts::dex::order_book::OrderBook;
 use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::root_pn::ParamsOfGetProtocolFee;
 use dodex_contracts::dex::root_pn::RootPn;
+use dodex_infrastructure::tvm_runner::account_boc_is_none;
 use dodex_infrastructure::tvm_runner::decode_account_fields_json;
 use dodex_sdk::dex_contract_params;
 use serde_json::Value;
@@ -247,6 +248,20 @@ pub fn live_order_books(t: &TrackedContracts) -> impl Iterator<Item = &TrackedOb
 /// Sum the logical balances of the tracked set. Quiescence is a precondition:
 /// call [`await_quiescence`] first, or the numbers describe a state that is
 /// still moving.
+///
+/// An account that is not on chain — not deployed yet, or already
+/// self-destructed — contributes **zero**, not an error. That is the correct
+/// value, not a leniency: an account holding no state holds no money, and a
+/// scenario legitimately takes its first snapshot before the PMP exists so the
+/// delta is measured from nothing. It also keeps the two modes agreeing:
+/// [`phys_snapshot`] already reads zero for the same account.
+///
+/// This does mean a typo'd address reads as a silent zero here. Catching that
+/// is not this function's job and it is covered twice over: the stand's
+/// preflight verifies the deployed code hashes of the known contracts, and a
+/// wrong address breaks [`assert_phys_delta`], whose per-account expectation
+/// must itself sum to zero. Do not re-introduce strictness here thinking the
+/// protection is missing.
 pub async fn snapshot(r: &ChainReader, t: &TrackedContracts) -> anyhow::Result<InvariantSnapshot> {
     // A residual sent outside the tracked set is money the Σ view can never
     // account for, so reject the declaration before reading anything.
@@ -266,32 +281,38 @@ pub async fn snapshot(r: &ChainReader, t: &TrackedContracts) -> anyhow::Result<I
         per_tt.entry(*tt).or_default();
     }
 
-    // A note's money is its free balance plus whatever is escrowed against its
-    // resting orders; dropping the escrow would read every placed order as a
-    // loss.
     for pn in &t.pns {
-        let fields = read_pn_fields(r, pn).await?;
-        let balance = field_uint_map(&fields, PN_BALANCE)?;
-        let locked = field_uint_map(&fields, PN_LOCKED_IN_ORDERS)?;
-        for tt in &t.token_types {
-            let held = balance.get(tt).copied().unwrap_or(0) + locked.get(tt).copied().unwrap_or(0);
-            credit(&mut per_tt, *tt, pn, as_i128(held)?);
+        let fields = pn_fields_opt(r, pn).await?;
+        for (tt, held) in pn_holdings(fields.as_ref(), &t.token_types)? {
+            credit(&mut per_tt, tt, pn, as_i128(held)?);
         }
     }
 
     // RootPN accrues the protocol fee per currency, so this is one call per
-    // tracked token type rather than one call in total.
-    let root = RootPn::new(r.ctx.clone(), dex_contract_params(&t.root_pn));
-    for tt in &t.token_types {
-        let fee = root
-            .get_protocol_fee(ParamsOfGetProtocolFee { token_type: *tt })
-            .await
-            .map_err(|e| anyhow!("RootPN {} getProtocolFee(tokenType={tt}): {e}", t.root_pn))?
-            .value;
-        credit(&mut per_tt, *tt, &t.root_pn, as_i128(fee)?);
+    // tracked token type rather than one call in total. Existence is checked
+    // once, before the getters: a getter against a missing account fails, and
+    // the failure would say nothing useful about which account it was.
+    if !account_absent(r, &t.root_pn).await? {
+        let root = RootPn::new(r.ctx.clone(), dex_contract_params(&t.root_pn));
+        for tt in &t.token_types {
+            let fee = root
+                .get_protocol_fee(ParamsOfGetProtocolFee { token_type: *tt })
+                .await
+                .map_err(|e| anyhow!("RootPN {} getProtocolFee(tokenType={tt}): {e}", t.root_pn))?
+                .value;
+            credit(&mut per_tt, *tt, &t.root_pn, as_i128(fee)?);
+        }
+    } else {
+        for tt in &t.token_types {
+            credit(&mut per_tt, *tt, &t.root_pn, 0);
+        }
     }
 
     for pmp in live_pmps(t) {
+        if account_absent(r, &pmp.addr).await? {
+            credit(&mut per_tt, pmp.token_type, &pmp.addr, 0);
+            continue;
+        }
         let contract = Pmp::new(r.ctx.clone(), dex_contract_params(&pmp.addr));
         let details = contract
             .get_details()
@@ -307,6 +328,10 @@ pub async fn snapshot(r: &ChainReader, t: &TrackedContracts) -> anyhow::Result<I
     }
 
     for ob in live_order_books(t) {
+        if account_absent(r, &ob.addr).await? {
+            credit(&mut per_tt, ob.token_type, &ob.addr, 0);
+            continue;
+        }
         let details = OrderBook::new(r.ctx.clone(), dex_contract_params(&ob.addr))
             .get_details()
             .await
@@ -639,7 +664,12 @@ async fn phase_pending(
         }
 
         Phase::AfterClaims { pmp, residual_to, baseline } => {
-            if r.account_boc(pmp).await?.is_some() {
+            // Deliberately `account_absent`, not a bare `account_boc(..) ==
+            // None`: a self-destructed PMP can still answer with a BOC that
+            // carries no account, and treating that as "still alive" would
+            // hang this barrier for its full timeout on a condition that is
+            // already satisfied — with no assertion message to show for it.
+            if !account_absent(r, pmp).await? {
                 return Ok(Some(format!("PMP {pmp} has not self-destructed yet")));
             }
             // The account being gone says nothing about where its money is, so
@@ -702,12 +732,26 @@ fn with_pmp_self_destructed(
     Ok(out)
 }
 
-/// Decoded storage fields, or `None` when the account does not exist on chain.
+/// The module's single notion of "the contract is not there": either the
+/// gateway has no account for the address, or it hands back a BOC that carries
+/// no account (`AccountNone`).
 ///
-/// `ChainReader::storage_fields` collapses "absent" into an error, and the
-/// quiescence barriers have to tell that one condition apart from a genuine
-/// read failure — so existence is decided by the fetch itself returning no
-/// account, never by matching an error string.
+/// Both halves matter. A never-deployed address answers with the first; a
+/// contract that lived and then self-destructed can keep answering with the
+/// second, so a barrier that only checked the fetch would wait out its whole
+/// timeout on a self-destruct that already happened. Existence is decided
+/// structurally in both cases — never by matching an error string.
+async fn account_absent(r: &ChainReader, addr: &str) -> anyhow::Result<bool> {
+    match r.account_boc(addr).await.with_context(|| format!("fetch account BOC of {addr}"))? {
+        None => Ok(true),
+        Some(boc) => {
+            account_boc_is_none(&boc).with_context(|| format!("decode account state of {addr}"))
+        }
+    }
+}
+
+/// Decoded storage fields, or `None` when the account is absent by
+/// [`account_absent`]'s definition.
 async fn storage_fields_opt(
     r: &ChainReader,
     addr: &str,
@@ -718,6 +762,9 @@ async fn storage_fields_opt(
     else {
         return Ok(None);
     };
+    if account_boc_is_none(&boc).with_context(|| format!("decode account state of {addr}"))? {
+        return Ok(None);
+    }
     decode_account_fields_json(abi_json, &boc)
         .with_context(|| format!("decode storage fields of {addr}"))
         .map(Some)
@@ -727,15 +774,29 @@ async fn pn_fields_opt(r: &ChainReader, pn: &str) -> anyhow::Result<Option<Value
     storage_fields_opt(r, pn, PN_ABI).await
 }
 
-/// Snapshot-side read: a note the tracked set names but the chain does not have
-/// is a broken tracked set, not a value to substitute a zero for.
-async fn read_pn_fields(r: &ChainReader, pn: &str) -> anyhow::Result<Value> {
-    pn_fields_opt(r, pn).await?.ok_or_else(|| anyhow!("PrivateNote {pn} is not deployed"))
-}
-
 async fn pn_balance_opt(r: &ChainReader, pn: &str, tt: u32) -> anyhow::Result<Option<u128>> {
     let Some(fields) = pn_fields_opt(r, pn).await? else { return Ok(None) };
     Ok(Some(field_uint_map(&fields, PN_BALANCE)?.get(&tt).copied().unwrap_or(0)))
+}
+
+/// A note's holdings per currency: its free balance plus what is escrowed
+/// against its resting orders. Dropping the escrow would read every placed
+/// order as a loss.
+///
+/// `None` fields mean the account is not on chain, and every requested currency
+/// then reads zero — see [`snapshot`] for why that is the correct value rather
+/// than an error.
+fn pn_holdings(fields: Option<&Value>, token_types: &[u32]) -> anyhow::Result<BTreeMap<u32, u128>> {
+    let (balance, locked) = match fields {
+        Some(f) => (field_uint_map(f, PN_BALANCE)?, field_uint_map(f, PN_LOCKED_IN_ORDERS)?),
+        None => (BTreeMap::new(), BTreeMap::new()),
+    };
+    Ok(token_types
+        .iter()
+        .map(|tt| {
+            (*tt, balance.get(tt).copied().unwrap_or(0) + locked.get(tt).copied().unwrap_or(0))
+        })
+        .collect())
 }
 
 async fn protocol_fee(r: &ChainReader, root_pn: &str, tt: u32) -> anyhow::Result<u128> {
@@ -875,6 +936,30 @@ mod tests {
         ext.0.insert(("pn_a".into(), 3), 5);
         let d = conserved_diff(&b, &b, &ext);
         assert_eq!(d.get(&3), Some(&-5i128));
+    }
+
+    #[test]
+    fn an_account_that_is_not_on_chain_contributes_zero() {
+        // A snapshot taken before the contracts exist must measure the delta
+        // from nothing, not abort. Zero is the correct balance of an account
+        // holding no state — the same reading `phys_snapshot` already gives it.
+        let h = pn_holdings(None, &[1, 2]).unwrap();
+        assert_eq!(h.get(&1), Some(&0));
+        assert_eq!(h.get(&2), Some(&0));
+    }
+
+    #[test]
+    fn a_note_holds_its_free_balance_plus_what_is_escrowed_in_orders() {
+        let fields = serde_json::json!({
+            "_balance": { "1": "100", "2": "7" },
+            "_lockedInOrders": { "1": "40" },
+        });
+        let h = pn_holdings(Some(&fields), &[1, 2, 3]).unwrap();
+        // Counting only `_balance` would read a resting order as a loss.
+        assert_eq!(h.get(&1), Some(&140));
+        assert_eq!(h.get(&2), Some(&7));
+        // A currency the note has never held still reads zero, not absent.
+        assert_eq!(h.get(&3), Some(&0));
     }
 
     #[test]
