@@ -52,6 +52,9 @@ use std::sync::Arc;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use anyhow::anyhow;
 use anyhow::Context;
+use dodex_infrastructure::tvm_runner::account_boc_is_none;
+use dodex_infrastructure::tvm_runner::decode_account_ecc;
+use dodex_infrastructure::tvm_runner::decode_account_fields_json;
 use dodex_infrastructure::tvm_runner::AccountEcc;
 use dodex_sdk::proof::strip_0x;
 use serde::Deserialize;
@@ -210,9 +213,9 @@ pub enum PnProfile {
 /// rest are for a caller that has already diagnosed the note some other way
 /// (e.g. a scenario that knows a note it holds has outstanding debt) and wants
 /// to record why via [`LeasedPn::taint`].
-// Only DirtyState/ShellDepleted are constructed by this file's own tests; the
-// rest are for a caller that has diagnosed a note some other way, added in
-// scenario tests.
+// Only Dead/DirtyState/ShellDepleted are constructed by this file's own code
+// and tests; the rest are for a caller that has diagnosed a note some other
+// way, added in scenario tests.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaintReason {
@@ -301,11 +304,24 @@ pub fn seed_dir() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("seed path {} has no parent directory", path.display()))
 }
 
-fn sdk_tail_count() -> usize {
-    std::env::var("E2E_SDK_TAIL_COUNT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_SDK_TAIL)
+/// Pure core of [`sdk_tail_count`]: testable without touching process env,
+/// the same split `context::endpoint_from`/`network_endpoint` already use.
+/// Unset (`None`) defaults to [`DEFAULT_SDK_TAIL`]; a value that is set but
+/// does not parse as a `usize` is an error, not a silent fall-through to the
+/// default — `E2E_SDK_TAIL_COUNT=oops` is a pool-sizing typo, and defaulting
+/// through it would hide exactly the kind of misconfiguration this knob
+/// exists to make explicit.
+fn tail_count_from(v: Option<&str>) -> anyhow::Result<usize> {
+    match v {
+        None => Ok(DEFAULT_SDK_TAIL),
+        Some(s) => s.parse().map_err(|e| {
+            anyhow!("E2E_SDK_TAIL_COUNT `{s}` is not a valid non-negative integer: {e}")
+        }),
+    }
+}
+
+fn sdk_tail_count() -> anyhow::Result<usize> {
+    tail_count_from(std::env::var("E2E_SDK_TAIL_COUNT").ok().as_deref())
 }
 
 /// Rents pre-baked `PrivateNote`s out of a shared pool for the lifetime of an
@@ -331,10 +347,22 @@ impl Allocator {
         Allocator::with_seed_path(run_id, &seed)
     }
 
-    /// Loads the seed file at an explicit path — testable without mutating
-    /// process environment (`std::env::set_var` is `unsafe` as of Rust 2024).
-    /// The ledger lives in `seed`'s own directory, exactly like
-    /// [`Allocator::new`]'s env-driven path.
+    /// Loads the seed file at an explicit path, with the tail size read from
+    /// `E2E_SDK_TAIL_COUNT` (see [`sdk_tail_count`]) — thin wrapper over
+    /// [`Allocator::with_seed_path_and_tail`].
+    pub fn with_seed_path(run_id: &str, seed: &Path) -> anyhow::Result<Allocator> {
+        Allocator::with_seed_path_and_tail(run_id, seed, sdk_tail_count()?)
+    }
+
+    /// Loads the seed file at an explicit path with an explicit tail size —
+    /// testable without mutating process environment (`std::env::set_var` is
+    /// `unsafe` as of Rust 2024) *and* without depending on whatever
+    /// `E2E_SDK_TAIL_COUNT` happens to be set to in the ambient environment
+    /// a test runs in. `with_seed_path` exists so a real e2e run doesn't have
+    /// to pass the tail explicitly, but every hermetic test in this file goes
+    /// through here with a literal tail so `E2E_SDK_TAIL_COUNT` can never
+    /// change what they assert. The ledger lives in `seed`'s own directory,
+    /// exactly like [`Allocator::new`]'s env-driven path.
     ///
     /// Registration is idempotent and additive only: [`Ledger::bootstrap`]
     /// starts a generation with an empty `notes` map, so without this no
@@ -345,7 +373,17 @@ impl Allocator {
     /// untouched. That "absent only" rule is what keeps a quarantine from a
     /// prior run inside this generation from reviving just because a later
     /// process re-registers.
-    pub fn with_seed_path(run_id: &str, seed: &Path) -> anyhow::Result<Allocator> {
+    ///
+    /// Errors if the pool has fewer notes than `tail`: a tail that reaches
+    /// past the intended boundary would silently register, rent, and
+    /// quarantine head slots reserved for the api-e2e suite — a pool sized
+    /// wrong for the configured tail is a configuration error, not something
+    /// to degrade through quietly.
+    pub fn with_seed_path_and_tail(
+        run_id: &str,
+        seed: &Path,
+        tail: usize,
+    ) -> anyhow::Result<Allocator> {
         let bytes = std::fs::read(seed)
             .with_context(|| format!("read seed notes file {}", seed.display()))?;
         let rows: Vec<SeedNoteFile> = serde_json::from_slice(&bytes)
@@ -361,13 +399,20 @@ impl Allocator {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
+        anyhow::ensure!(
+            notes.len() >= tail,
+            "seed file {} has {} note(s), fewer than the requested tail of {tail} — \
+             the tail would reach into the api-e2e head",
+            seed.display(),
+            notes.len()
+        );
+
         let dir = seed
             .parent()
             .ok_or_else(|| anyhow!("seed path {} has no parent directory", seed.display()))?;
         let ledger = Arc::new(Ledger::open(dir, run_id));
 
-        let sdk_tail = sdk_tail_count();
-        let tail_start = notes.len().saturating_sub(sdk_tail);
+        let tail_start = notes.len() - tail;
         let tail_addrs: Vec<String> =
             notes[tail_start..].iter().map(|n| n.address.clone()).collect();
         ledger.with_txn(|f| {
@@ -379,12 +424,11 @@ impl Allocator {
             }
         })?;
 
-        Ok(Allocator { notes, ledger, sdk_tail })
+        Ok(Allocator { notes, ledger, sdk_tail: tail })
     }
 
     fn tail(&self) -> &[SeedNote] {
-        let start = self.notes.len().saturating_sub(self.sdk_tail);
-        &self.notes[start..]
+        &self.notes[self.notes.len() - self.sdk_tail..]
     }
 
     /// Leases the first `Free` note found in the tail, in file order, marking
@@ -437,16 +481,41 @@ pub struct LeasedPn {
 }
 
 impl LeasedPn {
-    /// Fetches the note's current on-chain storage fields and ECC balance,
-    /// then hands both to the synchronous, network-free core ([`LeasedPn::finish`])
-    /// that judges and records the outcome. Splitting fetch from decision this
-    /// way is what makes the decision itself unit-testable without a network.
+    /// Fetches the note's current raw account state once. A structurally
+    /// absent account — [`boc_is_absent`], the harness's single notion of
+    /// "not there" (no account at all, or a BOC that decodes to
+    /// `AccountNone`) — is quarantined `Dead` right here rather than falling
+    /// through to `finish`, which has no fields to judge for an account that
+    /// no longer exists. A transient fetch error propagates via `?` before
+    /// either check runs, so a flaky RPC still falls through to `Drop`'s
+    /// generic reason instead of being mislabeled as a destroyed account.
+    /// Otherwise, decodes storage fields and ECC balance from the one fetched
+    /// BOC and hands both to the synchronous, network-free core
+    /// ([`LeasedPn::finish`]) that judges and records the outcome. Splitting
+    /// fetch from decision this way is what makes the decision itself
+    /// unit-testable without a network.
     // No caller in this hermetic test file — it needs a live chain; `finish`
     // below is what this file's own tests exercise directly instead.
     #[allow(dead_code)]
     pub async fn release_clean(mut self, r: &ChainReader) -> anyhow::Result<()> {
-        let fields = r.storage_fields(&self.note.address, PN_ABI).await?;
-        let ecc = r.account_ecc(&self.note.address).await?;
+        let boc = r.account_boc(&self.note.address).await?;
+        if boc_is_absent(boc.as_deref())? {
+            let addr = self.note.address.clone();
+            let reason = taint_reason_string(&TaintReason::Dead);
+            self.ledger.with_txn(|f| {
+                f.notes.insert(addr, NoteState::Quarantined { reason });
+            })?;
+            self.released = true;
+            return Err(anyhow!(
+                "release_clean: note {} no longer exists on chain",
+                self.note.address
+            ));
+        }
+        let boc = boc.expect("boc_is_absent(.., false) implies a Some boc");
+        let fields = decode_account_fields_json(PN_ABI, &boc)
+            .with_context(|| format!("decode storage fields of {}", self.note.address))?;
+        let ecc = decode_account_ecc(&boc)
+            .with_context(|| format!("decode physical balance of {}", self.note.address))?;
         self.finish(fields, ecc)
     }
 
@@ -537,6 +606,19 @@ impl Drop for LeasedPn {
         let _ = self.ledger.with_txn(|f| {
             f.notes.insert(addr, NoteState::Quarantined { reason: "drop".to_string() });
         });
+    }
+}
+
+/// Whether `boc` — the account's raw state, or `None` if the gateway has no
+/// account at all — is structurally absent: the harness's single notion of
+/// "not there" (see `invariant::account_absent`), reused rather than
+/// reinvented. `None` and a BOC that decodes to `AccountNone` both count;
+/// neither is matched by error text — [`account_boc_is_none`] decides it
+/// structurally, straight off the decoded account.
+fn boc_is_absent(boc: Option<&str>) -> anyhow::Result<bool> {
+    match boc {
+        None => Ok(true),
+        Some(b) => account_boc_is_none(b),
     }
 }
 
@@ -774,7 +856,7 @@ mod tests {
         let d = TempDir::new().unwrap();
         let seed = fake_seed(d.path(), 10);
         Ledger::bootstrap(d.path(), "r1", None).unwrap();
-        let a = Allocator::with_seed_path("r1", &seed).unwrap();
+        let a = Allocator::with_seed_path_and_tail("r1", &seed, 3).unwrap();
         let l1 = a.rent(PnProfile::Dep, "t").unwrap();
         let l2 = a.rent(PnProfile::Trd, "t").unwrap();
         let l3 = a.rent(PnProfile::Trd, "t").unwrap();
@@ -790,7 +872,7 @@ mod tests {
         let d = TempDir::new().unwrap();
         let seed = fake_seed(d.path(), 10);
         Ledger::bootstrap(d.path(), "r2", None).unwrap();
-        let a = Allocator::with_seed_path("r2", &seed).unwrap();
+        let a = Allocator::with_seed_path_and_tail("r2", &seed, 3).unwrap();
 
         let dropped_addr = {
             let l = a.rent(PnProfile::Trd, "t").unwrap();
@@ -829,7 +911,7 @@ mod tests {
         let d = TempDir::new().unwrap();
         let seed = fake_seed(d.path(), 10);
         Ledger::bootstrap(d.path(), "r3", None).unwrap();
-        let a = Allocator::with_seed_path("r3", &seed).unwrap();
+        let a = Allocator::with_seed_path_and_tail("r3", &seed, 3).unwrap();
         let l = a.rent(PnProfile::Shell, "t").unwrap();
         let addr = l.note.address.clone();
         l.taint(TaintReason::ShellDepleted);
@@ -873,7 +955,7 @@ mod tests {
         let d = TempDir::new().unwrap();
         let seed = fake_seed(d.path(), 10);
         Ledger::bootstrap(d.path(), "r4", None).unwrap();
-        let a = Allocator::with_seed_path("r4", &seed).unwrap();
+        let a = Allocator::with_seed_path_and_tail("r4", &seed, 3).unwrap();
         let mut l = a.rent(PnProfile::Dep, "t").unwrap();
         let addr = l.note.address.clone();
 
@@ -909,7 +991,7 @@ mod tests {
         let d = TempDir::new().unwrap();
         let seed = fake_seed(d.path(), 10);
         Ledger::bootstrap(d.path(), "r5", None).unwrap();
-        let a = Allocator::with_seed_path("r5", &seed).unwrap();
+        let a = Allocator::with_seed_path_and_tail("r5", &seed, 3).unwrap();
         let mut l = a.rent(PnProfile::Trd, "t").unwrap();
         let addr = l.note.address.clone();
 
@@ -937,7 +1019,7 @@ mod tests {
         let d = TempDir::new().unwrap();
         let seed = fake_seed(d.path(), 10);
         Ledger::bootstrap(d.path(), "r6", None).unwrap();
-        let a = Allocator::with_seed_path("r6", &seed).unwrap();
+        let a = Allocator::with_seed_path_and_tail("r6", &seed, 3).unwrap();
         let mut l = a.rent(PnProfile::Trd, "t").unwrap();
         let addr = l.note.address.clone();
 
@@ -959,5 +1041,88 @@ mod tests {
             _ => panic!("expected the note back as Free after a clean release"),
         })
         .unwrap();
+    }
+
+    #[test]
+    fn quarantine_survives_reregistration_by_a_new_allocator() {
+        let d = TempDir::new().unwrap();
+        let seed = fake_seed(d.path(), 10);
+        Ledger::bootstrap(d.path(), "r7", None).unwrap();
+
+        let a1 = Allocator::with_seed_path_and_tail("r7", &seed, 3).unwrap();
+        let l = a1.rent(PnProfile::Trd, "t").unwrap();
+        let addr = l.note.address.clone();
+        l.taint(TaintReason::Dead);
+
+        // A second construction over the SAME directory/generation must not
+        // revive the quarantine — registration only fills in genuinely
+        // absent addresses (see `with_seed_path_and_tail`'s doc comment).
+        let a2 = Allocator::with_seed_path_and_tail("r7", &seed, 3).unwrap();
+
+        let led = Ledger::open(d.path(), "r7");
+        led.with_txn(|f| {
+            assert!(
+                matches!(f.notes.get(&addr), Some(NoteState::Quarantined { .. })),
+                "re-registration must not revive a quarantined note"
+            );
+        })
+        .unwrap();
+
+        // Behavioral proof, through the real API: draining `a2`'s tail must
+        // never hand the quarantined address back out.
+        let mut rented = Vec::new();
+        while let Ok(l) = a2.rent(PnProfile::Trd, "t2") {
+            rented.push(l.note.address.clone());
+        }
+        assert!(!rented.contains(&addr), "quarantine revived after re-registration");
+        assert_eq!(
+            rented.len(),
+            2,
+            "tail has 3 slots; one is quarantined, so exactly 2 remain rentable"
+        );
+    }
+
+    #[test]
+    fn with_seed_path_and_tail_rejects_a_pool_smaller_than_the_tail() {
+        let d = TempDir::new().unwrap();
+        let seed = fake_seed(d.path(), 2);
+        Ledger::bootstrap(d.path(), "r8", None).unwrap();
+        let err = match Allocator::with_seed_path_and_tail("r8", &seed, 3) {
+            Ok(_) => panic!("a 2-note pool must not satisfy a tail of 3"),
+            Err(e) => e,
+        };
+        // Exact substrings, not bare digits — the seed path itself (a tempdir
+        // name) can otherwise coincidentally contain '2' or '3' and pass
+        // regardless of whether the message actually names either number.
+        let msg = format!("{err}");
+        assert!(msg.contains("has 2 note"), "error should name the pool size: {msg}");
+        assert!(msg.contains("tail of 3"), "error should name the requested tail: {msg}");
+    }
+
+    #[test]
+    fn tail_count_from_defaults_when_unset() {
+        assert_eq!(tail_count_from(None).unwrap(), DEFAULT_SDK_TAIL);
+    }
+
+    #[test]
+    fn tail_count_from_parses_a_valid_value() {
+        assert_eq!(tail_count_from(Some("7")).unwrap(), 7);
+    }
+
+    #[test]
+    fn tail_count_from_rejects_a_malformed_value() {
+        // `E2E_SDK_TAIL_COUNT=oops` must be a load error, not a silent
+        // fall-through to `DEFAULT_SDK_TAIL` — that would hide a pool-sizing
+        // typo instead of surfacing it.
+        let err = tail_count_from(Some("oops")).unwrap_err();
+        assert!(format!("{err}").contains("oops"));
+    }
+
+    #[test]
+    fn boc_is_absent_treats_a_missing_boc_as_absent() {
+        // The `None` half of the harness's single absence notion — the other
+        // half (a BOC that decodes to `AccountNone`) is `account_boc_is_none`,
+        // already covered by its own tests in `tvm_runner.rs`.
+        assert!(boc_is_absent(None).unwrap());
     }
 }
