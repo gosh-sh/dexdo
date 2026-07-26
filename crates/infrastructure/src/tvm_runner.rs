@@ -165,10 +165,23 @@ pub struct AccountEcc {
 /// holds for an account, straight from its BOC. This is the counterpart to
 /// [`decode_account_fields`], which reads the contract's logical storage
 /// cell and cannot see the account's physical balance at all.
+///
+/// An `AccountNone` BOC (not yet deployed, or self-destructed) decodes to a
+/// zero balance rather than an error. This is deliberately asymmetric with
+/// `decode_account_fields`, which does error on `AccountNone`: that function
+/// reads *storage*, and a nonexistent account has no storage cell to parse —
+/// there is genuinely nothing there. A *balance*, in contrast, is always
+/// well-defined: an account holding no state holds no money, so its balance
+/// is zero rather than absent. Callers computing a conservation delta across
+/// a scenario need this — a contract that lived and later self-destructed
+/// must still contribute a well-defined (zero) balance to the snapshot,
+/// not abort the check.
 pub fn decode_account_ecc(account_boc_base64: &str) -> Result<AccountEcc> {
     let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
     let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;
-    let cc = account.balance().ok_or_else(|| anyhow!("account has no balance (AccountNone)"))?;
+    let Some(cc) = account.balance() else {
+        return Ok(AccountEcc { grams: 0, ecc: BTreeMap::new() });
+    };
 
     let mut ecc = BTreeMap::new();
     let mut overflow: Option<u32> = None;
@@ -375,7 +388,29 @@ mod tests {
 
         let err = decode_account_ecc(&boc).unwrap_err();
 
-        assert!(err.to_string().contains("overflow"), "unexpected error: {err}");
+        // The error must name the offending currency id (2 here), not just
+        // say "overflow" — a future refactor that drops the id should fail
+        // this test.
+        let msg = err.to_string();
+        assert!(msg.contains("overflow"), "unexpected error: {msg}");
+        assert!(msg.contains("ECC[2]"), "error does not name the offending currency id: {msg}");
+    }
+
+    #[test]
+    fn decode_account_ecc_reads_zero_for_account_none() {
+        use tvm_types::base64_encode;
+
+        // Not-yet-deployed (or self-destructed) accounts serialize as
+        // AccountNone — no `stuff` at all. This must decode to a zero
+        // balance, not an error: the account holds no state, so it holds
+        // no money.
+        let account = Account::default();
+        let boc = base64_encode(account.write_to_bytes().unwrap());
+
+        let got = decode_account_ecc(&boc).unwrap();
+
+        assert_eq!(got.grams, 0);
+        assert!(got.ecc.is_empty());
     }
 
     #[test]
