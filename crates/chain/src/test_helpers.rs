@@ -21,6 +21,7 @@ use dodex_contracts::airegistry::inference_order_book::ResultOfGetStats as IobSt
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetSubscription as IobSubscription;
 use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
 use dodex_contracts::airegistry::token_contract::ParamsOfWithdrawShell;
+use dodex_contracts::airegistry::token_contract::ResultOfGetFees as TcFees;
 use dodex_contracts::airegistry::token_contract::ResultOfGetOffer as TcOffer;
 use dodex_contracts::airegistry::token_contract::ResultOfGetParties as TcParties;
 use dodex_contracts::airegistry::token_contract::ResultOfGetSellerBond as TcSellerBond;
@@ -510,6 +511,19 @@ impl Dex {
     ) -> ChainResult<TcSellerBond> {
         TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
             .get_seller_bond()
+            .await
+            .map_err(Into::into)
+    }
+
+    /// `ticksFinalized` here is the only bond-free measure of "did the seller get
+    /// paid for a tick": `finalizedOwed` also carries the returned seller bond and
+    /// the close rebate, both of which dwarf a single tick.
+    pub async fn token_contract_get_fees(
+        &self,
+        token_contract_address: &str,
+    ) -> ChainResult<TcFees> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .get_fees()
             .await
             .map_err(Into::into)
     }

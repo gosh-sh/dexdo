@@ -6,7 +6,12 @@
 // seller ONLY if its acceptance window has elapsed. Here the buyer stops
 // IMMEDIATELY after the seller advances (probe accepted → Streaming, the streaming
 // tick is prepaid): the streaming tick's window is still open, so the seller must
-// NOT be paid that tick — `finalizedOwed` grows by less than one tick.
+// NOT be paid that tick — `ticksFinalized` stays at the single probe tick.
+//
+// The measure is `ticksFinalized`, not a `finalizedOwed` delta: a plain stop is an
+// amicable close, so it also credits `finalizedOwed` with the full returned seller
+// bond (2P) plus the clean-close rebate. Together those exceed one tick, so a
+// balance delta cannot distinguish "paid for the tick" from "got its bond back".
 //
 // Self-trade: one note is maker, taker, buyer AND seller. Lifecycle:
 //   book → TokenContract → sell+buy handover funds the TC → seller bond →
@@ -177,11 +182,22 @@ async fn inference_settlement_immediate_stop_does_not_pay_streaming_tick() {
         return;
     }
     let after_advance = dex.token_contract_get_state(&tc).await.expect("getState after advance");
-    let owed_before = after_advance.finalized_owed;
+    // `ticksFinalized`, not the `finalizedOwed` delta, is what says whether the
+    // seller was paid for a tick: a plain stop also credits `finalizedOwed` with
+    // the full returned seller bond (2P) and the clean-close rebate, which together
+    // exceed a tick and would read as a payout that never happened.
+    let ticks_before =
+        dex.token_contract_get_fees(&tc).await.expect("getFees after advance").ticks_finalized;
     eprintln!(
-        "[e2e_settle] probe accepted: finalizedOwed(W0)={owed_before} prepaid={} frozen={}",
-        after_advance.prepaid, after_advance.frozen
+        "[e2e_settle] probe accepted: ticksFinalized(W0)={ticks_before} \
+         finalizedOwed={} prepaid={} frozen={}",
+        after_advance.finalized_owed, after_advance.prepaid, after_advance.frozen
     );
+    if ticks_before != 1 {
+        failures.push(format!(
+            "probe acceptance should finalize exactly the probe tick: ticksFinalized={ticks_before}, want 1"
+        ));
+    }
     if after_advance.prepaid != PRICE_PER_TICK {
         failures.push(format!(
             "streaming tick not prepaid after advance: prepaid={} want={PRICE_PER_TICK}",
@@ -190,7 +206,7 @@ async fn inference_settlement_immediate_stop_does_not_pay_streaming_tick() {
     }
 
     // 7. IMMEDIATE stop — the streaming tick's window is still open ⇒ the seller
-    //    must NOT be paid it. finalizedOwed grows by less than one tick.
+    //    must NOT be paid it, so no second tick is finalized.
     dex.stream_stop(&note.address, ParamsOfStreamDeal { token_contract: tc.clone() }, signer())
         .await
         .expect("streamStop accepted");
@@ -200,16 +216,17 @@ async fn inference_settlement_immediate_stop_does_not_pay_streaming_tick() {
         return;
     }
     let after_stop = dex.token_contract_get_state(&tc).await.expect("getState after stop");
-    let owed_after = after_stop.finalized_owed;
-    let delta = owed_after.saturating_sub(owed_before);
+    let ticks_after =
+        dex.token_contract_get_fees(&tc).await.expect("getFees after stop").ticks_finalized;
     eprintln!(
-        "[e2e_settle] after immediate stop: finalizedOwed(W1)={owed_after} delta={delta} (tick={PRICE_PER_TICK})"
+        "[e2e_settle] after immediate stop: ticksFinalized(W1)={ticks_after} finalizedOwed={} (tick={PRICE_PER_TICK})",
+        after_stop.finalized_owed
     );
-    if delta >= PRICE_PER_TICK / 2 {
+    if ticks_after != ticks_before {
         failures.push(format!(
             "#96: seller was paid the un-accepted streaming tick on immediate stop \
-             (delta={delta} >= tick/2={}); W0={owed_before} W1={owed_after}",
-            PRICE_PER_TICK / 2
+             (ticksFinalized {ticks_before} -> {ticks_after}); the still-open window \
+             must leave the tick with the buyer"
         ));
     }
 
