@@ -16,6 +16,14 @@ set -euo pipefail
 
 : "${DEXDO_SHA:?}" "${E2E_RUN_ID:?}" "${ACKI_DIR:?}" "${PIPELINE_ID:?}"
 
+# A whitespace-bearing id would corrupt the "id timestamp" lease line on
+# write (read splits on the whitespace on the way back in), locking this
+# pipeline out of renewing, asserting, or releasing its own lease until it
+# ages out on its own. Reject before it's ever written.
+case "$PIPELINE_ID" in
+  *[[:space:]]*) echo "FATAL: PIPELINE_ID must not contain whitespace: '$PIPELINE_ID'"; exit 64 ;;
+esac
+
 REPO="${DEXDO_REPO:-https://github.com/gosh-sh/dexdo.git}"
 DIR="${DEXDO_DIR:-$HOME/dexdo-e2e}"
 # shellcheck disable=SC1091  # host-specific path; rustup puts it there on this host's own prior setup
@@ -30,10 +38,26 @@ LEASE=/var/lock/dexdo-e2e.lease
 # condition this whole protocol exists to catch, and swallowing that error
 # here would mean the rest of the script runs against a host somebody else
 # now legitimately owns.
+#
+# Both the flock wait and the ownership check below fail via an explicit
+# `exit`, never by letting a bare command's own non-zero status fall through
+# to `errexit`. This matters beyond style: this function also runs as
+# `( lease_assert ) || { ... }` inside the heartbeat further down, and bash
+# suspends `errexit` for the entire body of a command used as the left side
+# of `||` -- a bare `flock -w 30 9` timing out in that position would NOT
+# abort the subshell, so execution would fall through into the read/compare/
+# write below without ever having held the guard. An explicit `exit` inside
+# the function always terminates it regardless of that suspension, which is
+# why every failure path here calls `exit` directly instead of relying on
+# the ambient `set -e`.
 lease_assert() {
   exec 9>"$GUARD"
-  flock -w 30 9
-  read -r L_ID _ < "$LEASE" 2>/dev/null || L_ID=""
+  flock -w 30 9 || { echo "FATAL: guard busy (flock on $GUARD not acquired within 30s)"; exit 70; }
+  if [ -f "$LEASE" ]; then
+    read -r L_ID _ < "$LEASE"
+  else
+    L_ID=""
+  fi
   [ "$L_ID" = "$PIPELINE_ID" ] || { echo "FATAL: lease is not ours ($L_ID != $PIPELINE_ID)"; exit 72; }
   echo "$PIPELINE_ID $(date +%s)" > "$LEASE"
   exec 9>&-
@@ -54,26 +78,41 @@ lease_assert                                   # again immediately before drivin
 # every 300s, is what keeps that from happening for as long as this script
 # is between the discrete steps that otherwise assert on their own.
 #
-# Losing the lease here is fatal to the whole script, not just this
-# background loop: `kill -TERM -$$` signals the process GROUP, not just this
-# script's own PID. Signaling just `$$` would only kill the orchestrating
-# shell and leave `cargo nextest run` (a separate foreground child of this
-# same group) running as an orphan, still driving the chain -- verified
-# empirically before writing this: signaling a single PID leaves its
-# foreground child alive, while signaling the group with a leading `-` tears
-# down both. `$$` in this subshell still names the top-level script's PID,
-# not the subshell's own -- bash does not rebind it on entering `( ... )`.
+# Losing the lease has to actually stop the chain-touching process, not just
+# the shell orchestrating it. `$SUITE_PID_FILE` carries the PID of the
+# backgrounded `cargo nextest run` job once it exists (see below); the
+# heartbeat signals THAT job's process GROUP, not a bare PID and not this
+# script's own PID -- reaching only the wrapper shell would leave nextest's
+# test binaries running as orphans, still driving the chain. Signaling the
+# group needs the job to actually own one: it is started under `set -m`
+# (job control) specifically so backgrounding it creates a fresh process
+# group, independent of whatever process group this script itself happens
+# to be in -- an earlier version of this signaled `-$$` (this script's own
+# assumed group), which only works when this script is invoked in a shape
+# that makes it a process-group leader itself, true for some SSH command
+# forms and false for others (e.g. a wrapping login shell, or any `cmd1 &&
+# bash -s`). Falling back to a bare PID kill if the group signal fails, and
+# unconditionally also signaling this script's own PID, are the last-resort
+# nets: even if nextest somehow is not reachable by either kill, the
+# orchestrating script must still not report success.
+SUITE_PID_FILE=$(mktemp)
 (
   while sleep 300; do
     ( lease_assert ) || {
       echo "FATAL: lost the host lease during the run -- aborting"
-      kill -TERM -$$
+      if [ -s "$SUITE_PID_FILE" ]; then
+        SPID=$(cat "$SUITE_PID_FILE" 2>/dev/null || true)
+        if [ -n "$SPID" ]; then
+          kill -TERM -"$SPID" 2>/dev/null || kill -TERM "$SPID" 2>/dev/null || true
+        fi
+      fi
+      kill -TERM "$$" 2>/dev/null || true
       break
     }
   done
 ) &
 HB=$!
-trap 'kill "$HB" 2>/dev/null || true' EXIT
+trap 'kill "$HB" 2>/dev/null || true; rm -f "$SUITE_PID_FILE"' EXIT
 
 command -v cargo-nextest >/dev/null 2>&1 \
   || curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$HOME/.cargo/bin"
@@ -110,13 +149,35 @@ cd "$DIR"
 # filter that matches nothing still exits 0, so the step would report
 # success having exercised no tests at all. Count the selection before
 # running and fail outright if it's empty, rather than let a typo'd filter
-# masquerade as a passing suite.
-N=$(cargo nextest list --manifest-path sdk/Cargo.toml --run-ignored only -E "$FILTER" 2>/dev/null | grep -c '::' || true)
-[ "$N" -ge 1 ] || { echo "FATAL: empty nextest selection for filter $FILTER"; exit 65; }
+# masquerade as a passing suite. stderr is captured rather than discarded: a
+# filter that matches nothing and a `cargo nextest list` that never got that
+# far because the crate failed to compile look identical from the line count
+# alone, and the failure message below has to be able to tell them apart.
+LIST_ERR=$(mktemp)
+N=$(cargo nextest list --manifest-path sdk/Cargo.toml --run-ignored only -E "$FILTER" 2>"$LIST_ERR" | grep -c '::' || true)
+if [ "$N" -lt 1 ]; then
+  echo "FATAL: empty nextest selection for filter $FILTER"
+  echo "--- cargo nextest list stderr ---"
+  cat "$LIST_ERR"
+  rm -f "$LIST_ERR"
+  exit 65
+fi
+rm -f "$LIST_ERR"
 
+# Backgrounded under `set -m` so this job gets its own process group (see the
+# heartbeat comment above) instead of inheriting whatever group this script
+# happens to run in. `wait` turns a signal-killed suite into a non-zero exit
+# here, which `errexit` then turns into a failed step -- losing the lease
+# mid-run has to fail the script, not just end the background loop that
+# noticed it.
+set -m
 E2E_NETWORK_ENDPOINT='http://127.0.0.1' \
 E2E_SEED_NOTES="$SEED" E2E_MANIFEST="$MANIFEST" E2E_RUN_ID="$E2E_RUN_ID" \
 cargo nextest run --manifest-path sdk/Cargo.toml \
   --config-file "$DIR/.config/nextest.toml" --profile sdk-e2e \
-  --run-ignored only --test-threads "$THREADS" --no-fail-fast -E "$FILTER"
+  --run-ignored only --test-threads "$THREADS" --no-fail-fast -E "$FILTER" &
+SUITE_PID=$!
+set +m
+echo "$SUITE_PID" > "$SUITE_PID_FILE"
+wait "$SUITE_PID"
 lease_assert   # final confirmation; inlined for the same reason as above

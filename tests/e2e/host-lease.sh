@@ -27,6 +27,14 @@ LEASE=/var/lock/dexdo-e2e.lease
 
 CMD=${1:?usage: host-lease.sh acquire|renew|assert|release <pipeline_id> [ttl_secs]}
 ID=${2:?pipeline_id is required}
+# A whitespace-bearing id corrupts the "id timestamp" line on write: reading
+# it back splits on the whitespace, so the id we compare against later is
+# only the first token, never matching the id that was actually passed in.
+# The lease would then be un-renewable and un-releasable by its own owner
+# until it aged out on its own. Reject before it's ever written.
+case "$ID" in
+  *[[:space:]]*) echo "FATAL: pipeline_id must not contain whitespace: '$ID'"; exit 64 ;;
+esac
 # TTL only guards against a DEAD pipeline (crashed or killed without
 # releasing). A LIVE one never hits it: every step that touches the host
 # calls `assert` before doing anything, and `assert` renews the timestamp as
@@ -56,6 +64,21 @@ _read() {
   else
     L_ID=""
     L_TS=0
+  fi
+  # An id with no valid numeric timestamp (e.g. a write torn mid-`echo`, or
+  # any other corruption that leaves a bare id on the line) must not be
+  # treated as merely "free": bash arithmetic reads an empty or non-numeric
+  # L_TS as 0, which would make do_acquire's age computation come out
+  # enormous and take it over as if it were simply long expired. That is
+  # this lease's one way to fail OPEN instead of closed. Refuse instead of
+  # guessing what a malformed record meant.
+  if [ -n "$L_ID" ]; then
+    case "$L_TS" in
+      ''|*[!0-9]*)
+        echo "FATAL: malformed lease file $LEASE (id '$L_ID' has no valid timestamp)"
+        exit 73
+        ;;
+    esac
   fi
 }
 
