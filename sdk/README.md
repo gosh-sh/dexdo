@@ -207,9 +207,11 @@ E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json E2E_SDK_TAIL_COUNT=5 \
 
 ### Stand provenance (`common::preflight`)
 
-`common::preflight::run_preflight` returns an error unless the network under test matches the contract manifest produced when those contracts were compiled: it compares the deployed code hashes, the semantic hash of every ABI compiled into these binaries, and the state of the pre-baked notes against that manifest. It reads two environment variables, neither of which has a default — an unset one is an error, not a skipped check:
+`common::preflight::run_preflight` returns an error unless the network under test matches the contract manifest produced when those contracts were compiled: it compares the deployed code hashes, the semantic hash of every ABI compiled into these binaries, and the state of the pre-baked notes against that manifest. It reads two environment variables, neither of which has a default — unset or empty is an error, not a skipped check:
 
 - `E2E_MANIFEST` — path to the contract manifest JSON. TVC paths recorded inside the manifest are resolved relative to that file's own directory, since manifest and images ship together.
 - `DEXDO_SHA` — the dodex commit the run is against; it must equal the manifest's own `dodex_sha`, or the manifest belongs to some other build.
 
 The notes it validates are read from the same seed file the allocator uses (`E2E_SEED_NOTES` / `PN_POOL_PATH`, above).
+
+It asserts how the stand was **generated**, so it has to run before anything touches the chain. A stand that has already served a wave fails it legitimately — deploying any fresh note credits `RootPN._deployedValues` beyond what the seed file accounts for, and api-e2e activity on the pool's head slice moves note balances — and that is not a provenance defect. The failure text says so too.

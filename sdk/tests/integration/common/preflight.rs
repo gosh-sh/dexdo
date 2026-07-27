@@ -38,6 +38,7 @@
 //! - the code salt is a wrapper cell, not the raw code cell ([`salt_wrapper`]).
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -538,6 +539,24 @@ pub async fn assert_salted_code(
 
 /// Refuse to run unless the stand matches the manifest. See the module doc
 /// for the order of checks; every failure names the invariant that broke.
+///
+/// **Precondition: a freshly generated zerostate.** This asserts how the stand
+/// was *generated*, so it has to run before anything mutates RootPN's book or
+/// the pre-baked notes — first thing in the pipeline, ahead of any scenario.
+/// A stand that has already served a wave fails it *legitimately*, by two
+/// separate mechanisms, and neither is a provenance defect:
+///
+/// - `RootPN.sol` credits `_deployedValues` for every note it deploys, so one
+///   fresh note minted by anybody puts the book permanently above the sum over
+///   the seed file, and [`check_root_pn_booking`]'s equality can never hold
+///   again;
+/// - the seed file covers the *whole* pool, including the head slice the
+///   api-e2e suite draws from, so activity there moves `_balance` and leaves
+///   note state behind — failing the same booking equality and
+///   [`check_note_swept`] for reasons that have nothing to do with bytecode.
+///
+/// Both read as "provenance failure" unless you know this, which is why they
+/// say so in the failure text as well.
 #[allow(dead_code)] // consumed by the live scenario tests
 pub async fn run_preflight(r: &ChainReader) -> anyhow::Result<()> {
     let manifest = load_manifest()?;
@@ -575,6 +594,24 @@ pub async fn run_preflight(r: &ChainReader) -> anyhow::Result<()> {
 fn check_provenance(manifest: &Manifest) -> anyhow::Result<()> {
     let env_sha = std::env::var(DODEX_SHA_ENV)
         .map_err(|_| anyhow!("provenance: {DODEX_SHA_ENV} is not set"))?;
+    provenance_verdict(&env_sha, manifest)
+}
+
+/// Pure core of [`check_provenance`], split off so it is testable without
+/// mutating process environment (`std::env::set_var` is `unsafe` as of Rust
+/// 2024) — the same split `context::endpoint_from` and
+/// `allocator::tail_count_from` already use.
+///
+/// Both sides must be non-empty, because two empty strings compare equal:
+/// `export DEXDO_SHA=` against a manifest whose `dodex_sha` was never pinned
+/// would otherwise "prove" provenance over nothing at all — the precise shape
+/// of vacuous pass this module exists to refuse.
+fn provenance_verdict(env_sha: &str, manifest: &Manifest) -> anyhow::Result<()> {
+    anyhow::ensure!(!env_sha.is_empty(), "provenance: {DODEX_SHA_ENV} is set but empty");
+    anyhow::ensure!(
+        !manifest.dodex_sha.is_empty(),
+        "provenance: manifest.dodex_sha is empty — the manifest pins no source revision"
+    );
     anyhow::ensure!(
         env_sha == manifest.dodex_sha,
         "provenance: {DODEX_SHA_ENV}={env_sha} != manifest.dodex_sha={} (that manifest was built \
@@ -593,15 +630,19 @@ fn check_provenance(manifest: &Manifest) -> anyhow::Result<()> {
 /// if a `.sol` changes, the staged TVC and the staged ABI both move together
 /// and the code check passes, while our own decoding still runs on the stale
 /// committed schema — a note would then sweep clean on fields nobody read.
+///
+/// Both sides go through [`normalize_u256_hex`] like every other 256-bit value
+/// here. A semantic hash is one, and the module holds exactly one normalizer
+/// for them — leaving this comparison raw would let a manifest that spells its
+/// digests in upper case reject a stand that is entirely correct.
 fn check_embedded_abis(manifest: &Manifest) -> anyhow::Result<()> {
     for (name, abi_json) in EMBEDDED_ABIS {
-        let got = abi_semantic_hash(abi_json)
+        let digest = abi_semantic_hash(abi_json)
             .with_context(|| format!("semantic hash of embedded {name} abi"))?;
-        let want = &manifest.contract(name)?.abi_sem_hash;
-        anyhow::ensure!(
-            &got == want,
-            "{name}: embedded abi semantic hash {got} != manifest {want}"
-        );
+        let got = normalize_u256_hex(&digest)?;
+        let want = normalize_u256_hex(&manifest.contract(name)?.abi_sem_hash)
+            .with_context(|| format!("manifest abi_sem_hash for {name}"))?;
+        anyhow::ensure!(got == want, "{name}: embedded abi semantic hash {got} != manifest {want}");
     }
     Ok(())
 }
@@ -752,9 +793,13 @@ fn check_note_embedded_codes(
 /// withdrawal of a baked note into the revert path, and a scenario that never
 /// withdraws would pass on a stand no other wave can use.
 ///
-/// Token types and extra-currency ids share one numbering (NACKL 1, SHELL 2,
-/// USDC 3 — see `proof::TokenType`), which is what makes the physical
-/// comparison meaningful per token type.
+/// **This is an assertion about a freshly generated zerostate, not a running
+/// one** — see [`run_preflight`]'s precondition. `RootPN.sol` credits
+/// `_deployedValues` on every note it deploys, so a single fresh note minted by
+/// anything at all puts the book permanently above the seed file's sum;
+/// separately, the seed file spans the whole pool, so api-e2e activity on the
+/// head slice moves `_balance` under it. Either makes this fail on a stand that
+/// is otherwise perfectly provenanced.
 async fn check_root_pn_booking(
     r: &ChainReader,
     note_sum: &BTreeMap<u32, u128>,
@@ -762,19 +807,45 @@ async fn check_root_pn_booking(
     let fields = r.storage_fields(RootPn::DEFAULT_ADDRESS, ROOT_PN_ABI).await?;
     let booked = uint_map(&fields, "_deployedValues")?;
     let physical = r.account_ecc(RootPn::DEFAULT_ADDRESS).await?;
+    booking_verdict(&booked, note_sum, &physical.ecc)
+}
 
+/// Pure core of [`check_root_pn_booking`]: the comparison itself, split from
+/// the fetch so it can be exercised with hand-built maps instead of a live
+/// chain — the same split `LeasedPn::release_clean`/`finish` uses.
+///
+/// Token types and extra-currency ids share one numbering (NACKL 1, SHELL 2,
+/// USDC 3 — see `proof::TokenType`), which is what makes the physical
+/// comparison meaningful per token type.
+fn booking_verdict(
+    booked: &BTreeMap<u32, u128>,
+    note_sum: &BTreeMap<u32, u128>,
+    physical: &BTreeMap<u32, u128>,
+) -> anyhow::Result<()> {
     // Union of both key sets: a token type booked but not held by any note is
     // just as much a mismatch as the reverse.
-    let token_types: std::collections::BTreeSet<u32> =
-        booked.keys().chain(note_sum.keys()).copied().collect();
+    let token_types: BTreeSet<u32> = booked.keys().chain(note_sum.keys()).copied().collect();
+
+    // With both maps empty the loop below never runs and conservation is
+    // "proved" over nothing. Nothing else here asserts the baked notes carry a
+    // balance at all, so an unfunded pool would otherwise sail through the one
+    // check whose whole subject is what those notes hold.
+    anyhow::ensure!(
+        !token_types.is_empty(),
+        "RootPN books nothing and the seed notes hold nothing — an unfunded pool proves no \
+         conservation"
+    );
+
     for tt in token_types {
         let want = note_sum.get(&tt).copied().unwrap_or(0);
         let got = booked.get(&tt).copied().unwrap_or(0);
         anyhow::ensure!(
             got == want,
-            "RootPN._deployedValues[{tt}] = {got}, but the seed notes hold {want}"
+            "RootPN._deployedValues[{tt}] = {got}, but the seed notes hold {want} (this asserts a \
+             freshly generated zerostate: a note deployed since generation credits the book, and \
+             api-e2e activity on the pool's head moves note balances — see run_preflight)"
         );
-        let held = physical.ecc.get(&tt).copied().unwrap_or(0);
+        let held = physical.get(&tt).copied().unwrap_or(0);
         anyhow::ensure!(
             held >= want,
             "RootPN physically holds {held} of currency {tt}, less than the {want} it booked"
@@ -785,8 +856,6 @@ async fn check_root_pn_booking(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use dodex_infrastructure::tvm_runner::boc_cell_shape;
     use serde_json::json;
 
@@ -979,6 +1048,100 @@ mod tests {
         assert_ne!(with_wrapper, with_raw_code);
         assert_ne!(with_wrapper, unsalted);
         assert_ne!(with_raw_code, unsalted);
+    }
+
+    /// A manifest carrying no contracts, for the checks that only read the
+    /// provenance header.
+    fn manifest_with_sha(dodex_sha: &str) -> Manifest {
+        Manifest {
+            dodex_sha: dodex_sha.to_string(),
+            acki_sha: "cafe".into(),
+            sold_ver: "0.80.0".into(),
+            sold_old_ver: "0.76.0".into(),
+            tvm_cli_ver: "0.42.0".into(),
+            images: BTreeMap::new(),
+            contracts: Vec::new(),
+            deployed_addresses: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn provenance_verdict_refuses_two_empty_shas() {
+        // `export DEXDO_SHA=` against a manifest that pinned no revision:
+        // both sides are empty, `"" == ""` holds, and provenance would be
+        // "proved" over nothing. Each side has to be non-empty in its own
+        // right.
+        assert!(provenance_verdict("", &manifest_with_sha("")).is_err());
+        assert!(provenance_verdict("", &manifest_with_sha("deadbeef")).is_err());
+        assert!(provenance_verdict("deadbeef", &manifest_with_sha("")).is_err());
+
+        assert!(provenance_verdict("deadbeef", &manifest_with_sha("deadbeef")).is_ok());
+        assert!(provenance_verdict("deadbeef", &manifest_with_sha("feedface")).is_err());
+    }
+
+    #[test]
+    fn embedded_abi_comparison_normalizes_both_sides() {
+        // A manifest that spells its digests in upper case is the same
+        // manifest. Every other 256-bit comparison here normalizes both
+        // sides; this one is a semantic hash and must too, or a correct stand
+        // is rejected over letter case.
+        let upper: Vec<ManifestContract> = EMBEDDED_ABIS
+            .iter()
+            .map(|(name, abi)| ManifestContract {
+                name: (*name).to_string(),
+                code_hash: "0".repeat(64),
+                code_depth: 0,
+                abi_sem_hash: abi_semantic_hash(abi).unwrap().to_uppercase(),
+                tvc_rel_path: None,
+            })
+            .collect();
+        let mut manifest = manifest_with_sha("deadbeef");
+        manifest.contracts = upper;
+        check_embedded_abis(&manifest).unwrap();
+
+        // …and it is still a real comparison: one digit off and it fails.
+        let mut wrong = manifest_with_sha("deadbeef");
+        wrong.contracts = EMBEDDED_ABIS
+            .iter()
+            .map(|(name, _)| ManifestContract {
+                name: (*name).to_string(),
+                code_hash: "0".repeat(64),
+                code_depth: 0,
+                abi_sem_hash: "0".repeat(64),
+                tvc_rel_path: None,
+            })
+            .collect();
+        assert!(check_embedded_abis(&wrong).is_err());
+    }
+
+    #[test]
+    fn booking_verdict_refuses_an_empty_union() {
+        // Nothing booked and nothing held: the per-token loop never runs, so
+        // conservation would be "proved" over no tokens at all. An unfunded
+        // pool is a broken stand, not a passing one.
+        let empty = BTreeMap::new();
+        assert!(booking_verdict(&empty, &empty, &empty).is_err());
+    }
+
+    #[test]
+    fn booking_verdict_compares_book_and_physical_per_token() {
+        let notes = BTreeMap::from([(1u32, 100u128), (2, 50)]);
+        let booked = BTreeMap::from([(1u32, 100u128), (2, 50)]);
+        let physical = BTreeMap::from([(1u32, 100u128), (2, 70)]);
+        assert!(booking_verdict(&booked, &notes, &physical).is_ok());
+
+        // Booked less than the notes hold — the withdraw-path defect §8.2
+        // describes.
+        let short_book = BTreeMap::from([(1u32, 100u128), (2, 49)]);
+        assert!(booking_verdict(&short_book, &notes, &physical).is_err());
+
+        // Booked for a token no note holds is equally a mismatch.
+        let extra_book = BTreeMap::from([(1u32, 100u128), (2, 50), (3, 7)]);
+        assert!(booking_verdict(&extra_book, &notes, &physical).is_err());
+
+        // Book agrees with the notes, but RootPN cannot actually cover it.
+        let thin = BTreeMap::from([(1u32, 100u128), (2, 49)]);
+        assert!(booking_verdict(&booked, &notes, &thin).is_err());
     }
 
     #[test]
