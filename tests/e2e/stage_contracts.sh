@@ -71,14 +71,21 @@ rm -rf "$D080" "$D081/dex" "$D081/airegistry"; mkdir -p "$D080" "$D081/dex" "$D0
 cp "$STAGE/RootPN.tvc" "$STAGE/RootPN.abi.json" "$D080/"
 for c in "${DEX13[@]}"; do [ "$c" = RootPN ] && continue; cp "$STAGE/$c.tvc" "$STAGE/$c.abi.json" "$D081/dex/"; done
 for c in "${AIR5[@]}";  do cp "$STAGE/$c.tvc" "$STAGE/$c.abi.json" "$D081/airegistry/"; done
-# "No more" check: exactly 13 tvc files across the versioned paths — a
-# leftover extra one means a foreign artifact survived the rm -rf above.
-n_tvc=$(find "$D080" "$D081" -name '*.tvc' | wc -l)
+# "No more" check: exactly 13 tvc files across the three directories this
+# script actually replaced above. Scoped to those three, not the whole
+# 0.81.0_compiled tree -- that tree has other subdirectories this script
+# never touches (e.g. exchange/), and counting over it would fail a
+# perfectly staged run over an artifact this script has no business judging.
+n_tvc=$(find "$D080" "$D081/dex" "$D081/airegistry" -name '*.tvc' | wc -l)
 [ "$n_tvc" -eq 13 ] || { echo "FATAL: staged paths hold $n_tvc tvc files, expected 13"; exit 1; }
 
 echo "==> [5/5] manifest from the staged artifacts"
+# Same tvm-cli binary the pin cascade above was pinned to (not whatever
+# "tvm-cli" resolves to on PATH) -- the manifest's code hashes must come from
+# the exact tool version the rest of this pipeline pins.
 python3 "$DODEX_DIR/tests/e2e/gen_manifest.py" --staged "$D080" "$D081/dex" "$D081/airegistry" \
   --zerostate-py "$BUILD_DIR/contracts/scripts/generate_zerostate.py" \
+  --cli "$BUILD_DIR/contracts/compiler/tvm-cli" \
   --out "$BUILD_DIR/config/dex_contracts_manifest.json"
 # Ship the exact TVC bytes alongside the manifest so host B can derive the
 # salted PMP/OrderBook hash from them (spec §8.1-2) instead of trusting a
