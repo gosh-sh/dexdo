@@ -204,3 +204,12 @@ E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json E2E_SDK_TAIL_COUNT=5 \
 ```
 
 `PN_POOL_PATH` is also read elsewhere in this same test tree (`common::pn_pool`, `order_book`) for the unrelated `pn_pool.json` raw-pool format — set `E2E_SEED_NOTES` instead of `PN_POOL_PATH` whenever a test run needs both pools at once, so one env var can't be misread as the other's file.
+
+### Stand provenance (`common::preflight`)
+
+`common::preflight::run_preflight` returns an error unless the network under test matches the contract manifest produced when those contracts were compiled: it compares the deployed code hashes, the semantic hash of every ABI compiled into these binaries, and the state of the pre-baked notes against that manifest. It reads two environment variables, neither of which has a default — an unset one is an error, not a skipped check:
+
+- `E2E_MANIFEST` — path to the contract manifest JSON. TVC paths recorded inside the manifest are resolved relative to that file's own directory, since manifest and images ship together.
+- `DEXDO_SHA` — the dodex commit the run is against; it must equal the manifest's own `dodex_sha`, or the manifest belongs to some other build.
+
+The notes it validates are read from the same seed file the allocator uses (`E2E_SEED_NOTES` / `PN_POOL_PATH`, above).

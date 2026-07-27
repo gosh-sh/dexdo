@@ -265,6 +265,28 @@ pub struct SeedNote {
     pub keys: KeyPair,
 }
 
+/// Parses the seed file at `seed` into every note it declares, in file order.
+///
+/// Split out of [`Allocator::with_seed_path_and_tail`] so a caller that needs
+/// the pool's *contents* without the pool's *lifecycle* — preflight, which
+/// validates every baked note and must not open or mutate the shared ledger —
+/// reads the file through this one parser rather than a second copy of it.
+pub fn load_seed_notes(seed: &Path) -> anyhow::Result<Vec<SeedNote>> {
+    let bytes =
+        std::fs::read(seed).with_context(|| format!("read seed notes file {}", seed.display()))?;
+    let rows: Vec<SeedNoteFile> = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse seed notes file {} as a JSON array", seed.display()))?;
+    rows.into_iter()
+        .map(|r| {
+            Ok(SeedNote {
+                address: r.pn_address,
+                dih_dec: dih_hex_to_dec(&r.pn_dih_hex)?,
+                keys: KeyPair { public: r.pn_pubkey_hex, secret: r.pn_seckey_hex },
+            })
+        })
+        .collect()
+}
+
 /// Hex (optionally `0x`-prefixed, any length — the seed file's short form
 /// `"0x0"`/`"0x1"` included) to decimal. Returns an error instead of panicking
 /// so a malformed seed file surfaces as a load error, not a crashed test
@@ -384,20 +406,7 @@ impl Allocator {
         seed: &Path,
         tail: usize,
     ) -> anyhow::Result<Allocator> {
-        let bytes = std::fs::read(seed)
-            .with_context(|| format!("read seed notes file {}", seed.display()))?;
-        let rows: Vec<SeedNoteFile> = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse seed notes file {} as a JSON array", seed.display()))?;
-        let notes: Vec<SeedNote> = rows
-            .into_iter()
-            .map(|r| {
-                Ok(SeedNote {
-                    address: r.pn_address,
-                    dih_dec: dih_hex_to_dec(&r.pn_dih_hex)?,
-                    keys: KeyPair { public: r.pn_pubkey_hex, secret: r.pn_seckey_hex },
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let notes = load_seed_notes(seed)?;
 
         anyhow::ensure!(
             notes.len() >= tail,

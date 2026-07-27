@@ -22,6 +22,10 @@
 //!   two-phase split `prepare_oracle_event`/`deploy_pmp_with_deployer` with
 //!   `OracleEventCtx`, for scenarios that need a snapshot between
 //!   publishing the event and deploying the PMP.
+//! - `preflight` — refuses to run against a stand that does not match the
+//!   build-time contract manifest: deployed code hashes, the semantic hashes of
+//!   the ABIs compiled into these binaries, and the zerostate invariants over
+//!   the pre-baked notes.
 //! - `ledger` — re-exported from the `dodex-e2e-harness` crate; the file-backed
 //!   account registry shared across concurrent e2e test processes.
 //! - `locks` — re-exported from the `dodex-e2e-harness` crate; the
@@ -40,6 +44,7 @@ pub mod ob_pool;
 pub mod pmp;
 pub mod pn;
 pub mod pn_pool;
+pub mod preflight;
 pub mod voucher;
 
 pub use dodex_e2e_harness::ledger;

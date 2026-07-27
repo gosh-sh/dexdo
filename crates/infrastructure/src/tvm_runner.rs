@@ -229,6 +229,52 @@ pub fn account_boc_is_none(account_boc_base64: &str) -> Result<bool> {
     Ok(account.is_none())
 }
 
+/// Repr-hash of the code cell an account is actually running, as lower-case
+/// 64-character hex with no `0x` prefix — the same shape `tvm-cli decode
+/// stateinit` prints, so the two are directly comparable.
+///
+/// This is the *deployed* side of a bytecode-provenance check: the reference
+/// side comes from a build-time manifest, and the two must be produced by
+/// separate paths for the comparison to prove anything. An account with no
+/// code (`AccountNone`, or an uninitialised account) is an error rather than
+/// a placeholder value: a stand where the contract is simply missing must
+/// fail the check loudly, not compare equal to something.
+pub fn deployed_code_hash(account_boc_base64: &str) -> Result<String> {
+    let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
+    let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;
+    let code = account.get_code().ok_or_else(|| anyhow!("account has no code cell"))?;
+    Ok(code.repr_hash().as_hex_string())
+}
+
+/// Structure of a single-root cell BOC: how many data bits its root holds and
+/// the repr-hash of each of its references, in order.
+#[derive(Debug)]
+pub struct CellShape {
+    pub data_bits: usize,
+    pub refs: Vec<String>,
+}
+
+/// Decode a single-root cell BOC and report its [`CellShape`].
+///
+/// Exists so callers without a direct `tvm_types` dependency can assert on a
+/// cell's *structure* rather than only on its hash. Hash equality tells you
+/// two cells are the same; it cannot tell you that a cell you just built has
+/// the layout you intended — and a wrapper cell built with the wrong layout
+/// hashes to something perfectly self-consistent and perfectly wrong.
+pub fn boc_cell_shape(boc_base64: &str) -> Result<CellShape> {
+    let bytes = BASE64_STANDARD.decode(boc_base64).context("decode cell boc base64")?;
+    let cell =
+        tvm_types::read_single_root_boc(&bytes).map_err(|err| anyhow!("parse boc: {err}"))?;
+    let refs = (0..cell.references_count())
+        .map(|i| {
+            cell.reference(i)
+                .map(|r| r.repr_hash().as_hex_string())
+                .map_err(|err| anyhow!("read reference {i}: {err}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(CellShape { data_bits: cell.bit_length(), refs })
+}
+
 /// JSON wrapper over [`decode_account_fields`] for callers that only have the
 /// ABI as a JSON string rather than a `tvm_abi::Contract` — e.g. across a
 /// crate boundary that doesn't take a direct dependency on `tvm_abi`.
@@ -457,6 +503,61 @@ mod tests {
         .unwrap();
         let live = base64_encode(live.write_to_bytes().unwrap());
         assert!(!account_boc_is_none(&live).unwrap());
+    }
+
+    #[test]
+    fn deployed_code_hash_reads_the_state_init_code_cell() {
+        use tvm_block::CurrencyCollection;
+        use tvm_block::MsgAddressInt;
+        use tvm_block::StateInit;
+        use tvm_types::base64_encode;
+        use tvm_types::BuilderData;
+
+        let code =
+            BuilderData::with_raw(vec![0xde, 0xad, 0xbe, 0xef], 32).unwrap().into_cell().unwrap();
+        let addr: MsgAddressInt =
+            "0:5555555555555555555555555555555555555555555555555555555555555555".parse().unwrap();
+        let account = Account::active_by_init_code_hash(
+            addr,
+            CurrencyCollection::with_grams(5_000),
+            0,
+            StateInit { code: Some(code.clone()), ..Default::default() },
+            false,
+        )
+        .unwrap();
+        let boc = base64_encode(account.write_to_bytes().unwrap());
+
+        assert_eq!(deployed_code_hash(&boc).unwrap(), code.repr_hash().as_hex_string());
+    }
+
+    #[test]
+    fn deployed_code_hash_rejects_an_account_with_no_code() {
+        use tvm_types::base64_encode;
+
+        // AccountNone: nothing deployed, so there is no code cell to hash.
+        // This must be an error rather than some placeholder hash — a
+        // provenance check that silently compared a placeholder would pass
+        // against a stand where the contract is simply missing.
+        let boc = base64_encode(Account::default().write_to_bytes().unwrap());
+        assert!(deployed_code_hash(&boc).is_err());
+    }
+
+    #[test]
+    fn boc_cell_shape_reports_data_bits_and_reference_hashes() {
+        use tvm_types::base64_encode;
+        use tvm_types::write_boc;
+        use tvm_types::BuilderData;
+
+        let child = BuilderData::with_raw(vec![0xaa], 8).unwrap().into_cell().unwrap();
+        let mut parent = BuilderData::new();
+        parent.checked_append_reference(child.clone()).unwrap();
+        let parent = parent.into_cell().unwrap();
+        let boc = base64_encode(write_boc(&parent).unwrap());
+
+        let shape = boc_cell_shape(&boc).unwrap();
+
+        assert_eq!(shape.data_bits, 0);
+        assert_eq!(shape.refs, vec![child.repr_hash().as_hex_string()]);
     }
 
     #[test]
