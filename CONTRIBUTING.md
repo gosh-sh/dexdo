@@ -193,6 +193,14 @@ the **openapi-drift** job fails otherwise:
 cargo run -p dodex-api --bin gen-openapi -- --out docs/openapi.yaml
 ```
 
+The **sdk-harness-tests** job gates a filtered, hermetic subset of the `sdk/`
+workspace — no network needed:
+
+```sh
+cargo nextest run --manifest-path sdk/Cargo.toml \
+  -E 'test(ledger) + test(allocator) + test(invariant) + test(sweep) + test(preflight) + test(endpoint_) + test(chain_reader) + test(locks)'
+```
+
 `sdk/` and `tools/` are separate workspaces — build and test them from their own
 directory (`cargo build` / `cargo test` inside `sdk/`, inside `tools/`).
 
@@ -214,14 +222,27 @@ case you're in:
   [`.github/workflows/e2e-shellnet.yml`](.github/workflows/e2e-shellnet.yml). New
   on-chain flows are single-threaded and spend test tokens — keep them `#[ignore]`d
   so they stay out of the fast PR job.
-- **Any test in a separate workspace (`sdk/`, `tools/`)** → **no CI job runs these
-  today** — `--workspace` excludes them, and the e2e job runs `-p dodex-api` from
-  the root. `sdk/` holds both live-network tests and hermetic unit tests (in the
-  `dodex-sdk` lib, the `dodex-e2e-harness` crate, and the integration binary's
-  `common/` helpers); neither kind is gated. If you add a test there that *should*
-  gate PRs (hermetic, no network — e.g. an HTTP-boundary-mocked test), you must add
-  a CI step that runs it from that workspace's directory. A test that doesn't run
-  in CI is documentation, not a gate — say so in the PR if you leave it manual.
+- **A test in `tools/`** → **no CI job runs these today** — `--workspace` excludes
+  it and nothing else references that workspace from any workflow. Add a CI step
+  that runs it from that workspace's directory, the same way `sdk-harness-tests`
+  does for `sdk/` below.
+- **A hermetic test in `sdk/`** (the `dodex-sdk` lib, the `dodex-e2e-harness`
+  crate, or the integration binary's `common/` helpers) → gated **only if its
+  name matches** the `sdk-harness-tests` job's nextest filter in
+  [`.github/workflows/pr-tests.yml`](.github/workflows/pr-tests.yml) — currently
+  `ledger`, `allocator`, `invariant`, `sweep`, `preflight`, `endpoint_`,
+  `chain_reader`, `locks`. That job runs `cargo nextest run --manifest-path
+  sdk/Cargo.toml` scoped to those names; a hermetic test outside them is not
+  gated even though nothing stops it from running locally. Add its name (or a
+  shared substring) to the filter, or it stays untested in CI.
+- **A live-network test in `sdk/`** (the integration binary's chain-touching
+  scenarios — `proof_money`, `parallel_setup`, and the pn/pmp/oracle/discovery/
+  flows modules) → **not run by `pr-tests.yml`.** These run against a
+  from-scratch network in [`.woodpecker/e2e.yml`](.woodpecker/e2e.yml)'s
+  `sdk_proof`/`sdk_parallel_acceptance` steps, each with its own fixed filter.
+  Extending that coverage means extending those filters, not `pr-tests.yml`. A
+  test that runs in neither place is documentation, not a gate — say so in the
+  PR if you leave it manual.
 
 ## Documentation
 

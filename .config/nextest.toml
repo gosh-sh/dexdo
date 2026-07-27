@@ -52,3 +52,17 @@ serial-inference-reconciler = { max-threads = 1 }
 # of hanging for hours. Inherits the default profile's overrides + test-groups.
 [profile.ci-e2e]
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# Profile for the sdk workspace's proof/acceptance suites (.woodpecker/e2e.yml
+# sdk_proof / sdk_parallel_acceptance), run against a from-scratch local network
+# via `--config-file .config/nextest.toml --profile sdk-e2e` (the sdk workspace's
+# own root has no nextest config of its own). Budgets are longer than api-e2e's
+# ci-e2e profile above: waiting for resultStart plus the barriers in between runs
+# well past api-e2e's typical single wait_entry, and rendezvous between the
+# harness's own processes can take up to 10 minutes.
+[profile.sdk-e2e]
+# Upper bound on the proof scenario's own budget: Oracle/event prep + PMP deploy
+# ~5 min; preflight ~2 min; 7 quiescences x 120s = 14 min; ack-polls (<=60s each)
+# across ~8 phases ~8 min; stake_end/resultStart waits (<=300s) ~5 min; OB-drain
+# and claims reserve ~5 min -> ~39 min total. The hard cap below stays above that.
+slow-timeout = { period = "120s", terminate-after = 25 }   # hard cap 50 min > ~39 min budget

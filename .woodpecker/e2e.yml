@@ -10,12 +10,17 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  - &acki_branch "dev"
-  - &allbin_image "docker.gosh.sh/ackinacki-all-bin:latest-dev"
+  - &acki_sha "<SHA>"   # BLOCKED: acki-nacki commit to pin, chosen together with the image digests below (node-team ask, spec §10)
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:<digest>"        # BLOCKED: same ask
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:<digest>"             # BLOCKED: same ask
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:<digest>"        # BLOCKED: same ask
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:<digest>"      # BLOCKED: same ask
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
   - &sold_version "gosh_0.79.4-rc"
+  - &sold_old_version "<TBD>"   # BLOCKED: node-team ask (spec §10) -- which release built contracts/0.80.0_compiled/dex/RootPN.tvc
+  - &sold_old_sha256 "<TBD>"    # BLOCKED: sha256 of the sold_old release asset above, same ask
   - &dex_test_notes_cnt "10"
   - &inventory_branch "main"
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
@@ -28,11 +33,12 @@ steps:
     environment:
       GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
       ACKI_REPO: { from_secret: acki_repo_url }
-      ACKI_BRANCH: *acki_branch
+      ACKI_SHA: *acki_sha
     commands:
       - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
       - rm -rf .acki-nacki
-      - git clone --depth 1 --branch "$ACKI_BRANCH" "$ACKI_REPO" .acki-nacki
+      - git clone "$ACKI_REPO" .acki-nacki
+      - git -C .acki-nacki fetch --depth 1 origin "$ACKI_SHA" && git -C .acki-nacki checkout -f FETCH_HEAD
       - rm -f ~/.netrc
 
   copy_static_shell:
@@ -46,7 +52,7 @@ steps:
   copy_helpers:
     depends_on:
       - copy_static_shell
-    image: *allbin_image
+    image: *allbin_img
     directory: .acki-nacki
     entrypoint:
       - ./sh
@@ -61,7 +67,14 @@ steps:
     environment:
       TVM_VER: *tvm_cli_version
       SOLD_VER: *sold_version
+      SOLD_OLD_VER: *sold_old_version
+      SOLD_OLD_SHA256: *sold_old_sha256
       DEX_TEST_NOTES_CNT: *dex_test_notes_cnt
+      ACKI_SHA: *acki_sha
+      DEXDO_NODE_IMG: *node_img
+      DEXDO_GQL_IMG: *gql_img
+      DEXDO_BM_IMG: *bm_img
+      DEXDO_ALLBIN_IMG: *allbin_img
     commands:
       - rm -f sh mkdir cp
       - apt-get update -qq && apt-get install -yqq --no-install-recommends make curl ca-certificates >/dev/null
@@ -75,11 +88,26 @@ steps:
       - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-debugger-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
       - curl -sSL "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xz -C contracts/compiler
       - chmod +x contracts/compiler/*
+      # sold_old (RootPN's pin-cascade compiler, spec §8.1-1 item 2) unpacks to a
+      # temp directory, never straight into contracts/compiler: that directory
+      # already holds the current `sold`, which the other 12 contracts still
+      # need to compile with.
+      - curl -sSL -o /tmp/sold_old.tar.gz "<TBD>/$SOLD_OLD_VER/..."
+      - echo "$SOLD_OLD_SHA256  /tmp/sold_old.tar.gz" | sha256sum -c -
+      - mkdir -p /tmp/sold_old_x && tar xz -f /tmp/sold_old.tar.gz -C /tmp/sold_old_x
+      - mv /tmp/sold_old_x/sold contracts/compiler/sold_old
+      - test -x contracts/compiler/sold_old && test -x contracts/compiler/sold
       - export PATH="$CI_WORKSPACE/.acki-nacki/contracts/compiler:$PATH"
-      # = `make generate_zerostate` minus the cargo helper build (helpers staged above)
+      # Stages contracts/{dex,airegistry} fresh from this dodex checkout into the
+      # generator's versioned paths and writes the provenance manifest from those
+      # staged artifacts (spec §8.1-1/8.1-2), before `make compile_contracts`
+      # builds the giver/test contracts as before and the generator bakes
+      # everything into the zerostate.
+      - export BUILD_DIR="$CI_WORKSPACE/.acki-nacki" DODEX_DIR="$CI_WORKSPACE"
+      - bash "$CI_WORKSPACE/tests/e2e/stage_contracts.sh"
       - make compile_contracts
       - DEX_TEST_NOTES_CNT="$DEX_TEST_NOTES_CNT" python3 contracts/scripts/generate_zerostate.py
-      - test -f config/zerostate && test -f config/block_manager1_signing.keys.json && test -f docker/.env
+      - test -f config/zerostate && test -f config/dex_contracts_manifest.json
 
   inventory_clone:
     image: *ansible_image
@@ -116,10 +144,44 @@ steps:
       - ansible-playbook install-rust-python.yaml -i "$CI_WORKSPACE/$INV"
       - ansible-playbook dexdo-e2e-prepare.yml -i "$CI_WORKSPACE/$INV"
 
-  net_up:
+  # Host-wide pipeline lease (tests/e2e/host-lease.sh): more than one pipeline
+  # can reach the shared e2e host, but `up.sh` tears down and recreates the
+  # whole stand as its first act, so only one pipeline may hold it at a time.
+  # This is distinct from ledger.lock/b0.lock, which arbitrate processes within
+  # a single run. Always piped from this checkout, never run off host B's own
+  # disk -- see the script's header for why.
+  lease_acquire:
     depends_on:
       - prepare_host
       - gen_zerostate
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- acquire $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
+
+  assert_net_up:
+    depends_on:
+      - lease_acquire
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
+
+  net_up:
+    depends_on:
+      - assert_net_up
     image: *ansible_image
     directory: .acki-nacki/ansible
     environment:
@@ -127,10 +189,19 @@ steps:
       ACKI_DIR: *acki_dir_on_host
       GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
       ACKI_REPO: { from_secret: acki_repo_url }
-      ACKI_BRANCH: *acki_branch
+      ACKI_BRANCH: *acki_sha
       NODE_IMAGE_TAG: *node_image_tag
+      NODE_IMG: *node_img
+      GQL_IMG: *gql_img
+      BM_IMG: *bm_img
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      # NODE_IMG/GQL_IMG/BM_IMG travel as -e args below: the playbook forwards
+      # dexdo_*_image into up.sh's process environment for the compose
+      # invocation, and process environment overrides docker/.env's
+      # interpolation, so pinning through .env instead would be silently
+      # ignored. dexdo_net_image_tag stays as the fallback tag for anything
+      # compose starts that these three pins don't cover.
       - >
         ansible-playbook dexdo-e2e-up.yml
         -i "$CI_WORKSPACE/$INV"
@@ -139,10 +210,75 @@ steps:
         -e env_src="$CI_WORKSPACE/.acki-nacki/docker/.env"
         -e endpoint_host_dest="$CI_WORKSPACE/acki_net_host"
         -e dexdo_net_image_tag="$NODE_IMAGE_TAG"
+        -e dexdo_node_image="$NODE_IMG"
+        -e dexdo_gql_image="$GQL_IMG"
+        -e dexdo_bm_image="$BM_IMG"
+
+  # SDK proof/acceptance run on host B itself, not the CI runner: the tvm
+  # client follows the block-producer redirect straight to nodeN:8600, which
+  # only resolves off host B's own docker bridge (design spec §8.3). Both
+  # steps sync dodex@$CI_COMMIT_SHA on the host and assert the lease
+  # internally (tests/e2e/sdk-proof-on-host.sh) rather than through a
+  # preceding mini-step.
+  sdk_proof:
+    depends_on:
+      - net_up
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=proof
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < tests/e2e/sdk-proof-on-host.sh
+
+  sdk_parallel_acceptance:
+    depends_on:
+      - sdk_proof
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=acceptance
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < tests/e2e/sdk-proof-on-host.sh
+
+  assert_deploy_dexdo:
+    depends_on:
+      - sdk_parallel_acceptance
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
 
   deploy_dexdo:
     depends_on:
-      - net_up
+      - assert_deploy_dexdo
     image: *ansible_image
     directory: deploy/ansible
     environment:
@@ -157,9 +293,23 @@ steps:
         -e dexdo_seed_accounts=true
         -e dexdo_seed_notes_src="$CI_WORKSPACE/$SEED_NOTES_WS"
 
-  e2e_tests:
+  assert_e2e_tests:
     depends_on:
       - deploy_dexdo
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
+
+  e2e_tests:
+    depends_on:
+      - assert_e2e_tests
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -181,6 +331,8 @@ steps:
   dump_logs:
     depends_on:
       - e2e_tests
+      - sdk_proof
+      - sdk_parallel_acceptance
     image: *ansible_image
     when:
       - status: [ failure ]
@@ -190,6 +342,10 @@ steps:
       ACKI_DIR: *acki_dir_on_host
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
       - >
         ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$E2E_CI_USER@$E2E_HOST"
         "set +e;
@@ -212,6 +368,8 @@ steps:
     depends_on:
       - e2e_tests
       - dump_logs
+      - sdk_proof
+      - sdk_parallel_acceptance
     image: *ansible_image
     directory: .acki-nacki/ansible
     when:
@@ -219,6 +377,20 @@ steps:
     environment:
       INV: *e2e_inventory
       ACKI_DIR: *acki_dir_on_host
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      # Owner check before touching anything: if this pipeline's lease expired
+      # and another one took it over, `assert` exits non-zero here and the
+      # teardown below never runs -- tearing down a network this pipeline no
+      # longer owns would take out whoever legitimately holds it now.
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
       - ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e acki_dir="$ACKI_DIR" -e full_cleanup=true
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- release $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
