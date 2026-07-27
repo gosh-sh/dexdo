@@ -9,14 +9,15 @@
 //   4. the giver posts the seller mirror bond (an internal SHELL message —
 //      `open()` requires it, and an external call cannot carry currency);
 //   5. seller `open()` freezes the probe tick;
-//   6. after SETTLE_WINDOW (180s) of buyer silence, seller `advance()` accepts
+//   6. after the advance window (600s at a 1-SHELL tick) of buyer silence,
+//      seller `advance()` accepts
 //      the probe — `finalizedOwed` grows, `probeAccepted` flips true;
 //   7. buyer `streamStop()` closes the stream and settles.
 //
 // This proves the whole streaming state machine (open → advance → stop, the
 // probe-tick money model in §3.1.2) against a live contract through our
-// wrappers. It is SLOW: it sleeps out the real 180s on-chain settle window, so
-// a run takes ~3-4 minutes.
+// wrappers. It is SLOW: it sleeps out the real 600s on-chain advance window, so
+// a run takes ~11-12 minutes.
 //
 //   cargo test -p dodex-api --test e2e_inference_stream -- --ignored --nocapture
 //
@@ -46,19 +47,23 @@ use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
-const PRICE_PER_TICK: u128 = 1_000_000;
+// A limit price must be a positive whole multiple of `PRICE_STEP` (1 SHELL =
+// 1e9), so 1 SHELL is the cheapest deal this test can open.
+const PRICE_PER_TICK: u128 = 1_000_000_000;
 const DEAL_TICKS: u128 = 4;
 // Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin.
 const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
-// SETTLE_WINDOW is 180s on-chain; wait it out plus a margin before `advance`.
-const SETTLE_WAIT: Duration = Duration::from_secs(195);
+// The advance window is per-deal and price-scaled: W = clamp(P*600/1e9, 180,
+// 3600), so at the minimum 1-SHELL price it is 600s, not the 180s floor. Wait it
+// out plus a margin before `advance`.
+const SETTLE_WAIT: Duration = Duration::from_secs(615);
 
 fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
 
 #[tokio::test]
-#[ignore = "requires shellnet + seed_notes.json; sleeps out the 180s settle window (~4 min)"]
+#[ignore = "requires shellnet + seed_notes.json; sleeps out the 600s advance window (~12 min)"]
 async fn inference_stream_open_advance_stop_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -135,7 +140,8 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: DEAL_TICKS,
-            escrow: 6_000_000,
+            // >= ticks * (price + 2.5% fee) = 4 * 1.025e9 = 4.1e9.
+            escrow: 6_000_000_000,
             flags: 1,
             deadline: 0,
         },
@@ -193,7 +199,7 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
     }
 
     // 6. Wait out the on-chain settle window, then accept the probe.
-    eprintln!("[e2e_stream] sleeping {}s for SETTLE_WINDOW…", SETTLE_WAIT.as_secs());
+    eprintln!("[e2e_stream] sleeping {}s for the advance window…", SETTLE_WAIT.as_secs());
     tokio::time::sleep(SETTLE_WAIT).await;
     dex.token_contract_advance(&tc, signer()).await.expect("TokenContract.advance accepted");
     let mut accepted = false;

@@ -17,7 +17,7 @@
 // id) and funded with ECC SHELL via flag 16 — native value does not cross a
 // dApp boundary on Acki Nacki (see `common::airegistry::deploy_token_contract`).
 // The streaming settlement (open/advance/stop) and probe model need timed
-// windows (180-600s) and are covered separately.
+// windows (600-1200s at these prices) and are covered separately.
 //
 //   cargo test -p dodex-api --test e2e_inference_match -- --ignored --nocapture
 //
@@ -45,7 +45,11 @@ use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45; // 90s budget per wait.
-const PRICE_PER_TICK: u128 = 1_000_000;
+
+// A limit price must be a positive whole multiple of `PRICE_STEP` (1 SHELL =
+// 1e9); the book rejects sub-SHELL dust with ERR_BAD_PARAM before assigning an
+// order id, so a too-small price reads as "the order never rested".
+const PRICE_PER_TICK: u128 = 1_000_000_000;
 const OFFER_TICKS: u128 = 2;
 
 fn unique_suffix() -> u128 {
@@ -159,7 +163,8 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: OFFER_TICKS,
-            escrow: 3_000_000,
+            // >= ticks * (price + 2.5% fee) = 2 * 1.025e9.
+            escrow: 3_000_000_000,
             flags: 1,
             deadline: 0,
         },

@@ -13,7 +13,7 @@
 //   open (freeze probe) → wait the probe window → advance (probe accepted,
 //   streaming tick prepaid) → IMMEDIATE stop → assert the streaming tick is unpaid.
 //
-// Slow: sleeps out the real ~180s probe window (~3-4 min).
+// Slow: sleeps out the real ~600s probe window (~11-12 min).
 //
 //   cargo test -p dodex-api --test e2e_inference_settlement -- --ignored --nocapture
 //
@@ -43,19 +43,22 @@ use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
-const PRICE_PER_TICK: u128 = 1_000_000;
+// A limit price must be a positive whole multiple of `PRICE_STEP` (1 SHELL =
+// 1e9), so 1 SHELL is the cheapest deal this test can open.
+const PRICE_PER_TICK: u128 = 1_000_000_000;
 const DEAL_TICKS: u128 = 4;
 // Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin.
 const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
-// Probe window is ~180s on-chain; wait it out plus a margin before `advance`.
-const PROBE_WAIT: Duration = Duration::from_secs(195);
+// The probe-acceptance window is per-deal and price-scaled: W = clamp(P*600/1e9,
+// 180, 3600), so at the minimum 1-SHELL price it is 600s, not the 180s floor.
+const PROBE_WAIT: Duration = Duration::from_secs(615);
 
 fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
 
 #[tokio::test]
-#[ignore = "requires shellnet + seed_notes.json; sleeps out the ~180s probe window (~4 min)"]
+#[ignore = "requires shellnet + seed_notes.json; sleeps out the ~600s probe window (~12 min)"]
 async fn inference_settlement_immediate_stop_does_not_pay_streaming_tick() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -128,7 +131,8 @@ async fn inference_settlement_immediate_stop_does_not_pay_streaming_tick() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: DEAL_TICKS,
-            escrow: 6_000_000,
+            // >= ticks * (price + 2.5% fee) = 4 * 1.025e9 = 4.1e9.
+            escrow: 6_000_000_000,
             flags: 1,
             deadline: 0,
         },

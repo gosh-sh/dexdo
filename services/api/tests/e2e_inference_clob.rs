@@ -39,7 +39,10 @@ use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
-const PRICE_PER_TICK: u128 = 1_000_000;
+// A limit price must be a positive whole multiple of `PRICE_STEP` (1 SHELL =
+// 1e9); the book rejects sub-SHELL dust with ERR_BAD_PARAM before assigning an
+// order id, so a too-small price reads as "the order never rested".
+const PRICE_PER_TICK: u128 = 1_000_000_000;
 
 fn note_and_signer() -> (common::test_pns::TestPn, KeyPair) {
     let note = {
@@ -152,7 +155,8 @@ async fn inference_partial_fill_leaves_remainder() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 4,
-            escrow: 6_000_000,
+            // >= ticks * (price + 2.5% fee) = 4 * 1.025e9 = 4.1e9.
+            escrow: 6_000_000_000,
             flags: 0,
             deadline: 0,
         },
@@ -227,14 +231,14 @@ async fn inference_subscription_place_and_read() {
     let (ob, model_hash) = deploy_book(&dex, &note.address, &model_name, signer()).await;
     eprintln!("[e2e_clob] subscription order_book={ob}");
 
-    // escrow must be >= ticks * (price + platform fee); 8 * (1M + 2.5%) = 8.2M.
+    // escrow must be >= ticks * (price + platform fee); 8 * (1e9 + 2.5%) = 8.2e9.
     dex.place_inference_subscription(
         &note.address,
         ParamsOfPlaceInferenceSubscription {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 8,
-            escrow: 10_000_000,
+            escrow: 10_000_000_000,
             auto_renew: true,
         },
         signer(),
@@ -327,7 +331,8 @@ async fn inference_match_emits_filled_event() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 2,
-            escrow: 3_000_000,
+            // >= ticks * (price + 2.5% fee) = 2 * 1.025e9.
+            escrow: 3_000_000_000,
             flags: 1,
             deadline: 0,
         },

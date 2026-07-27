@@ -132,14 +132,23 @@ async fn inference_order_book_buy_then_cancel_against_shellnet() {
     // Two ticks is the book's minimum: a deal serves a probe tick plus at least
     // one stream tick, so `placeBuyOrder` rejects `ticks < 2` outright.
     let ticks: u128 = 2;
+    // A limit price must be a positive whole multiple of PRICE_STEP (1 SHELL =
+    // 1e9); `placeBuyOrder` rejects sub-SHELL dust with ERR_BAD_PARAM before the
+    // order is ever assigned an id, so a too-small price shows up as "the buy
+    // never rested" rather than as a placement error. 1 SHELL is the minimum.
+    const PRICE_PER_TICK: u128 = 1_000_000_000;
+    // The book requires escrow >= ticks * (price + 2.5% platform fee); leave a
+    // margin above the exact 2 * 1.025e9 so a fee-constant change does not turn
+    // this into a silent non-placement again.
+    const BUY_ESCROW: u128 = 3_000_000_000;
     let place = dex
         .place_inference_buy(
             &note.address,
             ParamsOfPlaceInferenceBuy {
                 model_hash: model_hash.clone(),
-                max_price_per_tick: 1_000_000,
+                max_price_per_tick: PRICE_PER_TICK,
                 ticks,
-                escrow: 5_000_000,
+                escrow: BUY_ESCROW,
                 flags: 0,
                 deadline: 0,
             },

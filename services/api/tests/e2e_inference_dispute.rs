@@ -5,7 +5,7 @@
 // `resolveDisputeTimeout()` must apply the SAME window-gated close as `stop()`:
 // a disputed streaming tick is finalized to the seller ONLY if its acceptance
 // window has elapsed by the timeout. `price_per_tick` is chosen so the per-tick
-// acceptance window (`settle_window = clamp(P*600/1e9, 180, 3600) = 660s`) is
+// acceptance window (`settle_window = clamp(P*600/1e9, 180, 3600) = 1200s`) is
 // LONGER than the dispute window (600s) — the only regime where the bug bit.
 //
 // Two deals run in parallel (self-trade: one note is buyer AND seller on both):
@@ -14,8 +14,8 @@
 //   * Case B — timeout fires after the acceptance window has ELAPSED ⇒ the tick
 //     IS accepted ⇒ seller keeps it.
 //
-// VERY slow: sleeps out the real ~180s probe window AND the ~660s acceptance
-// window (~15 min).
+// VERY slow: both windows scale with the 2-SHELL tick price, so it sleeps out a
+// ~1200s probe window AND a ~1200s acceptance window (~45 min).
 //
 //   cargo test -p dodex-api --test e2e_inference_dispute -- --ignored --nocapture
 //
@@ -47,23 +47,30 @@ use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
 // `settle_window = clamp(P*600/1e9, 180, 3600)`. P = 1.1e9 ⇒ 660s > DISPUTE_WINDOW.
-const PRICE_PER_TICK: u128 = 1_100_000_000;
+// The regime this test needs is `settle_window > DISPUTE_WINDOW (600s)`, and
+// `settle_window = clamp(P*600/1e9, 180, 3600)`, so P must exceed 1 SHELL. P is
+// also constrained to whole multiples of `PRICE_STEP` (1e9), which makes 2 SHELL
+// the cheapest price that keeps the window open past the timeout: W = 1200s.
+const PRICE_PER_TICK: u128 = 2_000_000_000;
 const DEAL_TICKS: u128 = 4;
-const BUY_ESCROW: u128 = 6_000_000_000;
+// >= ticks * (price + 2.5% fee) = 4 * 2.05e9 = 8.2e9.
+const BUY_ESCROW: u128 = 10_000_000_000;
 // Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin;
 // it scales with `price_per_tick`, so it must be derived from P (a fixed value
 // under-funds it and `fundSellerBond` rejects the message).
 const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
-const PROBE_WAIT: Duration = Duration::from_secs(195);
+// Probe acceptance is gated by the same price-scaled window, so this waits out
+// W = 1200s, not the 180s floor.
+const PROBE_WAIT: Duration = Duration::from_secs(1215);
 const DISPUTE_WINDOW_S: u64 = 600;
-const SETTLE_WINDOW_S: u64 = 660;
+const SETTLE_WINDOW_S: u64 = 1200;
 
 fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
 
 #[tokio::test]
-#[ignore = "requires shellnet + seed_notes.json; sleeps out the probe + ~660s acceptance window (~15 min)"]
+#[ignore = "requires shellnet + seed_notes.json; sleeps out the ~1200s probe + ~1200s acceptance window (~45 min)"]
 async fn inference_dispute_timeout_window_gated_settlement() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
