@@ -8,7 +8,10 @@
 //! - [`SWEEP_MUST_BE_EMPTY_OR_ZERO`] — every stateful field (nonces, locks,
 //!   stakes, debt, coupons, order-book bookkeeping) that must read back as
 //!   `null`, an all-zero numeric string (decimal `"0"` or a zero-padded
-//!   `uint256` hex string), `0`, or an empty map, array, or string.
+//!   `uint256` hex string), `0`, or a map/array holding nothing but
+//!   empty-or-zero values — recursively, so a map the contract zeroed in
+//!   place rather than deleted (`_lockedInOrders[tt] = 0`, still present as
+//!   a key) counts the same as one that was never populated.
 //! - [`SWEEP_MUST_BE_FALSE`] — the boolean-typed fields among them; `false`
 //!   isn't covered by the "zero" notion above, so they're judged separately.
 //!
@@ -119,19 +122,35 @@ pub enum SweepVerdict {
     Dirty { fields: Vec<String> },
 }
 
-/// `null`, `0`, an empty object/array/string, or a numeric string that is
-/// entirely zero digits.
+/// `null`, an all-zero numeric string (decimal or hex), `0`, an empty
+/// string, or a map/array every one of whose *values* is itself
+/// empty-or-zero — checked recursively, with the empty map/array as the base
+/// case.
 ///
-/// The last case exists because `tvm_abi`'s detokenizer does not encode every
-/// integer width the same way: a `uint256` decodes to a zero-padded hex
-/// string (`"0x" + 64 hex digits`, per `detokenize_big_uint`), while every
-/// narrower unsigned width decodes to a plain decimal string. Matching only
-/// the literal `"0"` would accept a narrow-width zero but reject a genuine
-/// `uint256` zero (`"0x000…000"`), which would make every real note
-/// permanently Dirty on any `uint256` field in the sweep list — this has to
-/// stay general (strip an optional `0x`, then check the remainder is
-/// non-empty and all `'0'`) so the next `uint256` field added to the sweep
-/// list is handled automatically, not by special-casing a field name here.
+/// Two encoding quirks both fall out of the same general rule instead of a
+/// per-field special case:
+///
+/// - **Scalar zero isn't always `"0"`.** `tvm_abi`'s detokenizer does not
+///   encode every integer width the same way: a `uint256` decodes to a
+///   zero-padded hex string (`"0x" + 64 hex digits`, per
+///   `detokenize_big_uint`), while every narrower unsigned width decodes to a
+///   plain decimal string. Matching only the literal `"0"` would accept a
+///   narrow-width zero but reject a genuine `uint256` zero
+///   (`"0x000…000"`), which made every real note permanently Dirty on any
+///   `uint256` field in the sweep list (`_pendingBatchStakeHash`) — fixed by
+///   stripping an optional `0x` and checking the remainder is non-empty and
+///   all `'0'`, so the next `uint256` sweep field is handled automatically.
+/// - **A cleared map entry is a zero value, not a missing key.**
+///   `PrivateNote.sol` never `delete`s the maps in the sweep list; it zeroes
+///   entries in place (`_lockedInOrders[tokenType] = 0`,
+///   `_openOrdersByEvent[hash] -= 1` down to `0`, …). A note that finished a
+///   full trade cycle therefore decodes those fields as maps that still
+///   *contain* keys, whose values are zero — requiring the container itself
+///   to be empty made every such note permanently Dirty too. Recursing into
+///   every value (map or array) instead of demanding the container be empty
+///   is what makes "contains no non-zero value anywhere" — exactly what "no
+///   locks held, nothing outstanding" means — hold for a map with cleared
+///   entries, and for nested containers (a map of maps) with no extra case.
 fn is_empty_or_zero(v: &Value) -> bool {
     match v {
         Value::Null => true,
@@ -143,8 +162,8 @@ fn is_empty_or_zero(v: &Value) -> bool {
         // numeric ABI field (see above), so a JSON number here would mean an
         // unexpected decode shape, not the primary path.
         Value::Number(n) => n.as_f64() == Some(0.0),
-        Value::Array(a) => a.is_empty(),
-        Value::Object(m) => m.is_empty(),
+        Value::Array(a) => a.iter().all(is_empty_or_zero),
+        Value::Object(m) => m.values().all(is_empty_or_zero),
         Value::Bool(_) => false,
     }
 }
@@ -726,7 +745,50 @@ mod tests {
             let ty = types.get(*f).unwrap_or_else(|| panic!("field {f} missing from ABI"));
             m.insert((*f).into(), clean_value_for_abi_type(ty));
         }
+        // `clean_value_for_abi_type` defaults every map to `{}` — the shape
+        // a note that has NEVER traded decodes to. `_lockedInOrders` and
+        // `_openOrdersByEvent` are never `delete`d by `PrivateNote.sol`; it
+        // zeros entries in place (`_lockedInOrders[tt] = 0`,
+        // `_openOrdersByEvent[hash] -= 1` down to 0), so a note that
+        // finished a full trade cycle really decodes these still holding
+        // keys, at zero. Overriding them to that real post-trade shape here
+        // is what would have caught the container-recursion bug: a map
+        // required to be empty, rather than recursively all-zero, made a
+        // real note like this permanently Dirty.
+        m.insert("_lockedInOrders".to_string(), serde_json::json!({ "1": "0" }));
+        m.insert("_openOrdersByEvent".to_string(), serde_json::json!({ "77": "0" }));
         assert!(matches!(sweep_verdict(&serde_json::Value::Object(m)), SweepVerdict::Clean));
+    }
+
+    #[test]
+    fn sweep_map_with_a_nonzero_entry_is_dirty_and_named() {
+        // The opposite direction of the post-trade shape above: a map
+        // holding a real, non-zero value must still fail, and the
+        // offending field must still be named — otherwise the recursive
+        // fix could silently degrade into "every map is clean".
+        let v = mostly_clean_fields("_lockedInOrders", serde_json::json!({ "1": "5" }));
+        match sweep_verdict(&v) {
+            SweepVerdict::Dirty { fields } => {
+                assert!(fields.contains(&"_lockedInOrders".to_string()))
+            }
+            _ => panic!("a locked, nonzero order-book entry must be Dirty"),
+        }
+    }
+
+    #[test]
+    fn sweep_nested_map_of_zeros_is_clean_but_one_nonzero_leaf_is_not() {
+        // Recursion is the point of the fix, not one level of unwrapping:
+        // `_orderLocks` / `_orderFeeReserves` are `map(address, map(uint128,
+        // uint128))`. A one-level-deep implementation (check the outer
+        // map's values are scalars, forget maps can nest) would pass a test
+        // that only exercises one level, so this pins two levels directly
+        // against `is_empty_or_zero`, independent of the ABI/allocator
+        // plumbing the other tests go through.
+        let all_zero_nested = serde_json::json!({ "0:aaaa": { "1": "0", "2": "0" } });
+        assert!(is_empty_or_zero(&all_zero_nested));
+
+        let one_nonzero_leaf = serde_json::json!({ "0:aaaa": { "1": "0", "2": "9" } });
+        assert!(!is_empty_or_zero(&one_nonzero_leaf));
     }
 
     #[test]
