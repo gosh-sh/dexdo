@@ -32,6 +32,7 @@ use std::time::UNIX_EPOCH;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
+use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -133,27 +134,8 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
         .expect("postSellOffer accepted");
 
     // Wait until the offer rests in the book.
-    let mut offer_rested = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        let Ok(stats) = dex.inference_get_stats(&ob).await else { continue };
-        if stats.order_count >= 1 {
-            eprintln!("[e2e_match] sell offer resting (order_count={})", stats.order_count);
-            offer_rested = true;
-            break;
-        }
-    }
-    if !offer_rested {
-        // note → postFromNote → placeSellOffer is `bounce:false` end to end, so a
-        // lost offer surfaces nowhere. The TC's own latch says which hop dropped
-        // it: still set ⇒ the book never answered, cleared ⇒ the book refused it
-        // and called `onSellClosed`, unreadable ⇒ the note addressed a TC that is
-        // not the one deployed here.
-        let latch = match dex.token_contract_get_offer(&tc).await {
-            Ok(o) => format!("offerPosted={} closing={}", o.offer_posted, o.closing),
-            Err(err) => format!("getOffer unreadable: {err:?}"),
-        };
-        failures.push(format!("sell offer never rested in the book ({latch})"));
+    if let Err(diag) = wait_sell_offer_rested(&dex, &ob, &tc, POLL_TICKS, POLL_TICK).await {
+        failures.push(diag);
     }
 
     // 4. Crossing BUY (taker): same price ⇒ matches the resting sell.

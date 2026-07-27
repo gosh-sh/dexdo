@@ -24,6 +24,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
 use common::airegistry::fetch_inference_event_ids;
+use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -134,19 +135,12 @@ async fn inference_partial_fill_leaves_remainder() {
     dex.post_sell_offer(&note.address, ParamsOfPostSellOffer { flags: 0, nonce }, signer())
         .await
         .expect("postSellOffer");
-    let mut rested = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        let Ok(stats) = dex.inference_get_stats(&ob).await else { continue };
-        if stats.order_count >= 1 {
-            rested = true;
-            break;
-        }
-    }
     // Assert the precondition instead of falling through: with no resting ask the
     // buy below has nothing to cross, and the real cause resurfaces much later as a
     // misleading "match never funded" / ERR_NO_LIQUIDITY out of getWeeklyMedianPrice.
-    assert!(rested, "sell offer never rested in the book — no liquidity to match");
+    if let Err(diag) = wait_sell_offer_rested(&dex, &ob, &tc, POLL_TICKS, POLL_TICK).await {
+        panic!("{diag} — no liquidity to match");
+    }
 
     // 4-tick limit BUY crosses: 2 fill (fund the TC), 2 rest.
     dex.place_inference_buy(
@@ -312,19 +306,11 @@ async fn inference_match_emits_filled_event() {
     dex.post_sell_offer(&note.address, ParamsOfPostSellOffer { flags: 0, nonce }, signer())
         .await
         .expect("postSellOffer");
-    let mut rested = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        let Ok(stats) = dex.inference_get_stats(&ob).await else { continue };
-        if stats.order_count >= 1 {
-            rested = true;
-            break;
-        }
+    // Same precondition as above: a missing ask surfaces much later as a
+    // misleading "match never funded" / ERR_NO_LIQUIDITY.
+    if let Err(diag) = wait_sell_offer_rested(&dex, &ob, &tc, POLL_TICKS, POLL_TICK).await {
+        panic!("{diag} — no liquidity to match");
     }
-    // Assert the precondition instead of falling through: with no resting ask the
-    // buy below has nothing to cross, and the real cause resurfaces much later as a
-    // misleading "match never funded" / ERR_NO_LIQUIDITY out of getWeeklyMedianPrice.
-    assert!(rested, "sell offer never rested in the book — no liquidity to match");
     dex.place_inference_buy(
         &note.address,
         ParamsOfPlaceInferenceBuy {

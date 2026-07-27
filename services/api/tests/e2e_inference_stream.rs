@@ -9,9 +9,9 @@
 //   4. the giver posts the seller mirror bond (an internal SHELL message —
 //      `open()` requires it, and an external call cannot carry currency);
 //   5. seller `open()` freezes the probe tick;
-//   6. after the advance window (600s at a 1-SHELL tick) of buyer silence,
-//      seller `advance()` accepts
-//      the probe — `finalizedOwed` grows, `probeAccepted` flips true;
+//   6. after the advance window (600s at a 1-SHELL tick) of buyer silence, the
+//      seller `advance()`s and the probe is accepted — `finalizedOwed` grows and
+//      `probeAccepted` flips true;
 //   7. buyer `streamStop()` closes the stream and settles.
 //
 // This proves the whole streaming state machine (open → advance → stop, the
@@ -33,6 +33,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
 use common::airegistry::fund_seller_bond_via_giver;
+use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -132,7 +133,11 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
     dex.post_sell_offer(&note.address, ParamsOfPostSellOffer { flags: 0, nonce }, signer())
         .await
         .expect("postSellOffer accepted");
-    wait_until(&dex, &ob, |s| s.order_count >= 1, "sell offer to rest").await;
+    if let Err(diag) = wait_sell_offer_rested(&dex, &ob, &tc, POLL_TICKS, POLL_TICK).await {
+        failures.push(diag);
+        finish(&dex, &note.address, &model_hash, &keys, failures).await;
+        return;
+    }
 
     dex.place_inference_buy(
         &note.address,
@@ -258,21 +263,6 @@ async fn wait_book_live(dex: &Dex, ob: &str) {
         }
     }
     panic!("InferenceOrderBook did not become live within budget");
-}
-
-async fn wait_until<F>(dex: &Dex, ob: &str, pred: F, what: &str)
-where
-    F: Fn(&dodex_contracts::airegistry::inference_order_book::ResultOfGetStats) -> bool,
-{
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if let Ok(stats) = dex.inference_get_stats(ob).await
-            && pred(&stats)
-        {
-            return;
-        }
-    }
-    panic!("timed out waiting for {what}");
 }
 
 async fn wait_funded(dex: &Dex, tc: &str) -> bool {

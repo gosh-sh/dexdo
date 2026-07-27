@@ -70,6 +70,45 @@ const CREATION_SHELL: u64 = 200_000_000_000;
 /// contract constant.
 const SUPER_ROOT_ADDR: &str = "0:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
 
+/// Wait for a TC's sell offer to rest in the book; on timeout, say WHICH hop
+/// dropped it instead of just reporting a timeout.
+///
+/// `note.postSellOffer` → `TokenContract.postFromNote` →
+/// `InferenceOrderBook.placeSellOffer` → `TokenContract.onSellClosed` is
+/// `bounce:false` end to end, so a refused offer surfaces nowhere: the book
+/// simply never grows an order and every hop looks like it succeeded. The TC's
+/// own `_offerPosted` latch is the only observable that separates them.
+pub async fn wait_sell_offer_rested(
+    dex: &dodex_chain::Dex,
+    order_book: &str,
+    token_contract: &str,
+    ticks: u32,
+    tick: std::time::Duration,
+) -> Result<(), String> {
+    for _ in 0..ticks {
+        tokio::time::sleep(tick).await;
+        if let Ok(stats) = dex.inference_get_stats(order_book).await
+            && stats.order_count >= 1
+        {
+            return Ok(());
+        }
+    }
+    let latch = match dex.token_contract_get_offer(token_contract).await {
+        // The TC accepted `postFromNote` and forwarded to the book, but no order
+        // rests: the book never answered, or it refused and `onSellClosed` has
+        // not landed yet.
+        Ok(o) if o.offer_posted => format!("offerPosted=true closing={}", o.closing),
+        // Either `postFromNote` never took effect — its canonical-note guard
+        // (`_sellerNote` vs the PN code hash pinned in the TC) rejects a note
+        // built from different PrivateNote code — or the book refused the terms
+        // and `onSellClosed` already cleared the latch.
+        Ok(o) => format!("offerPosted=false closing={}", o.closing),
+        // The note addressed a TC that is not the one deployed here.
+        Err(err) => format!("getOffer unreadable: {err:?}"),
+    };
+    Err(format!("sell offer never rested in the book ({latch})"))
+}
+
 /// Immutable deal config passed to the `TokenContract` constructor.
 ///
 /// These are also the terms the TC posts to the book: `postSellOffer` on the
