@@ -212,6 +212,8 @@ E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json E2E_SDK_TAIL_COUNT=5 \
 - `E2E_MANIFEST` — path to the contract manifest JSON. TVC paths recorded inside the manifest are resolved relative to that file's own directory, since manifest and images ship together.
 - `DEXDO_SHA` — the dodex commit the run is against; it must equal the manifest's own `dodex_sha`, or the manifest belongs to some other build.
 
+The manifest itself is produced by two scripts in [`tests/e2e/`](../tests/e2e/), run against an acki-nacki checkout before `generate_zerostate.py`: `stage_contracts.sh` replaces the zerostate generator's versioned contract directories wholesale with a freshly compiled, allowlisted set of the 13 DEX/airegistry contracts from the current dodex checkout, and `gen_manifest.py` hashes exactly those staged artifacts into `dex_contracts_manifest.json`.
+
 The notes it validates are read from the same seed file the allocator uses (`E2E_SEED_NOTES` / `PN_POOL_PATH`, above).
 
 It asserts how the stand was **generated**, so it has to run before anything touches the chain. A stand that has already served a wave fails it legitimately — deploying any fresh note credits `RootPN._deployedValues` beyond what the seed file accounts for, and api-e2e activity on the pool's head slice moves note balances — and that is not a provenance defect. The failure text says so too.
