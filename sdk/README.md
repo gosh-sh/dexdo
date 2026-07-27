@@ -180,7 +180,7 @@ FullSetStakeConfirmed, FullSetStakeCancelled, TransferInitiated, TransferReceive
 
 ## Running SDK integration tests
 
-SDK integration tests are located in `sdk/tests/integration/` and require a live Acki-Nacki network with a giver (e.g., Shellnet).
+SDK integration tests are located in `sdk/tests/integration/`. Most exercise on-chain flows and require a live Acki-Nacki network with a giver (e.g., Shellnet); a few — `ledger_race` among them — are fully hermetic and need no network at all (see below).
 
 By default, tests connect to Shellnet (`https://shellnet.ackinacki.org`). To run against a different network, set the `E2E_NETWORK_ENDPOINT` environment variable with a full URL including the scheme:
 
@@ -244,3 +244,41 @@ E2E_MANIFEST=/path/to/manifest.json DEXDO_SHA=<dodex commit> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=proof_money::proof_money_lifecycle_local)'
 ```
+
+### Multiprocess ledger race (`ledger_race`)
+
+`ledger_race` proves the ledger's cross-process locking under genuine contention: it
+spawns four real OS processes (not threads) that re-execute the test binary itself as
+workers, each repeatedly renting, releasing, and — every fifth successful cycle —
+quarantining notes from a small pool it registers up front. Not `#[ignore]`d and needs
+no chain, no seed file, and no environment variables — it runs against a throwaway
+temp directory:
+
+```sh
+cargo nextest run --manifest-path sdk/Cargo.toml -E 'test(ledger_race)'
+```
+
+The same file also has a worker-from-a-stale-generation test, confirming a process left
+running from a generation the ledger has since moved past (the same situation a leftover
+process from a previous CI run would be in) gets `LedgerError::StaleRun` rather than
+corrupting the ledger.
+
+### Parallel market setup (`parallel_setup`)
+
+`parallel_setup_a` and `parallel_setup_b` each deploy a market independently against the
+same live stand at the same time, and assert their outcomes never coincide — different
+leased note, different nonce, different oracle address, different PMP address. Both are
+`#[ignore]`d and must be selected together; run alone, either side blocks on the ledger's
+`ready` rendezvous until it times out, since its peer never starts:
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only -E 'test(parallel_setup)'
+```
+
+It takes `ChainLockGuard::shared`, not `proof_money`'s exclusive hold — this is the case
+shared mode exists for, two chain-mutating scenarios running at once. Because each side
+deploys a real market and leaves it live, neither note can be returned clean; both end
+the run quarantined under an explicit reason instead.
