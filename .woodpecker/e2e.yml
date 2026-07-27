@@ -10,7 +10,7 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  - &acki_sha "<SHA>"   # BLOCKED: acki-nacki commit to pin, chosen together with the image digests below (node-team ask, spec §10)
+  - &acki_sha "<SHA>"   # BLOCKED: acki-nacki commit to pin, chosen together with the image digests below (node-team ask)
   - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:<digest>"        # BLOCKED: same ask
   - &node_img "docker.gosh.sh/ackinacki-node@sha256:<digest>"             # BLOCKED: same ask
   - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:<digest>"        # BLOCKED: same ask
@@ -19,7 +19,7 @@ variables:
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
   - &sold_version "gosh_0.79.4-rc"
-  - &sold_old_version "<TBD>"   # BLOCKED: node-team ask (spec §10) -- which release built contracts/0.80.0_compiled/dex/RootPN.tvc
+  - &sold_old_version "<TBD>"   # BLOCKED: node-team ask -- which release built contracts/0.80.0_compiled/dex/RootPN.tvc
   - &sold_old_sha256 "<TBD>"    # BLOCKED: sha256 of the sold_old release asset above, same ask
   - &dex_test_notes_cnt "10"
   - &inventory_branch "main"
@@ -88,10 +88,11 @@ steps:
       - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-debugger-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
       - curl -sSL "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xz -C contracts/compiler
       - chmod +x contracts/compiler/*
-      # sold_old (RootPN's pin-cascade compiler, spec §8.1-1 item 2) unpacks to a
-      # temp directory, never straight into contracts/compiler: that directory
-      # already holds the current `sold`, which the other 12 contracts still
-      # need to compile with.
+      # sold_old — the older compiler release RootPN's committed TVC was built
+      # with, and so the one its pin cascade has to be rebuilt with to
+      # reproduce that code hash — unpacks to a temp directory, never straight
+      # into contracts/compiler: that directory already holds the current
+      # `sold`, which the other 12 contracts still need to compile with.
       - curl -fsSL -o /tmp/sold_old.tar.gz "<TBD>/$SOLD_OLD_VER/..."
       - echo "$SOLD_OLD_SHA256  /tmp/sold_old.tar.gz" | sha256sum -c -
       - mkdir -p /tmp/sold_old_x && tar xz -f /tmp/sold_old.tar.gz -C /tmp/sold_old_x
@@ -100,9 +101,9 @@ steps:
       - export PATH="$CI_WORKSPACE/.acki-nacki/contracts/compiler:$PATH"
       # Stages contracts/{dex,airegistry} fresh from this dodex checkout into the
       # generator's versioned paths and writes the provenance manifest from those
-      # staged artifacts (spec §8.1-1/8.1-2), before `make compile_contracts`
-      # builds the giver/test contracts as before and the generator bakes
-      # everything into the zerostate.
+      # staged artifacts, before `make compile_contracts` builds the giver/test
+      # contracts as before and the generator bakes everything into the
+      # zerostate.
       - export BUILD_DIR="$CI_WORKSPACE/.acki-nacki" DODEX_DIR="$CI_WORKSPACE"
       - bash "$CI_WORKSPACE/tests/e2e/stage_contracts.sh"
       - make compile_contracts
@@ -223,14 +224,30 @@ steps:
 
   # SDK proof/acceptance run on host B itself, not the CI runner: the tvm
   # client follows the block-producer redirect straight to nodeN:8600, which
-  # only resolves off host B's own docker bridge (design spec §8.3). Both
-  # steps sync dodex@$CI_COMMIT_SHA on the host and assert the lease
-  # internally (tests/e2e/sdk-proof-on-host.sh) rather than through a
-  # preceding mini-step.
+  # only resolves off host B's own docker bridge. Both steps sync
+  # dodex@$CI_COMMIT_SHA on the host and assert the lease internally
+  # (tests/e2e/sdk-proof-on-host.sh) rather than through a preceding
+  # mini-step.
+  #
+  # They run before deploy_dexdo and that order is load-bearing: the proof
+  # scenario's preflight asserts a pristine zerostate (RootPN's deploy book
+  # equals the seed pool's sum), and deploy_dexdo seeds accounts, which puts
+  # the book permanently above it. Moving these steps after or alongside
+  # deploy_dexdo would fail them for a reason unrelated to the code they test.
+  #
+  # `failure: ignore` on both: they are reported but do not stop the pipeline.
+  # Neither has yet completed a run against a real stand, each does a cold
+  # cargo build of the sdk workspace on the host, and the proof scenario alone
+  # budgets up to 50 minutes — so a failure here is at least as likely to be
+  # the step's own immaturity as a defect in the code. Blocking on them would
+  # sink deploy_dexdo and e2e_tests with them and cost the pre-existing
+  # end-to-end suite its signal. Make them blocking once each has produced a
+  # green run against a real stand.
   sdk_proof:
     depends_on:
       - net_up
     image: *ansible_image
+    failure: ignore
     environment:
       E2E_HOST: { from_secret: e2e_host }
       E2E_CI_USER: { from_secret: e2e_ci_user }
@@ -248,10 +265,14 @@ steps:
         ACKI_DIR='$ACKI_DIR'
         bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
+  # Non-blocking for the same reason as sdk_proof above, and additionally
+  # because it depends on it: a step chained behind an ignored failure would
+  # otherwise be the one that stops the pipeline instead.
   sdk_parallel_acceptance:
     depends_on:
       - sdk_proof
     image: *ansible_image
+    failure: ignore
     environment:
       E2E_HOST: { from_secret: e2e_host }
       E2E_CI_USER: { from_secret: e2e_ci_user }

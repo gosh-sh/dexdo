@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host-wide pipeline lease for the shared e2e host (design spec §8.3).
+# Host-wide pipeline lease for the shared e2e host.
 #
 # More than one CI pipeline can reach this host, but only one may hold the
 # network at a time: `up.sh` tears down and recreates the whole stand as its

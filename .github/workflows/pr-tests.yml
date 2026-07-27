@@ -159,7 +159,7 @@ jobs:
       # sweep/preflight/endpoint/chain_reader/locks families) — sdk/ is its own
       # workspace and sits outside `cargo nextest run --workspace` above, and
       # the selection must be non-empty or this step would pass having tested
-      # nothing (design spec §8.3).
+      # nothing.
       - name: nextest (sdk harness units)
         run: |
           N=$(cargo nextest list --manifest-path sdk/Cargo.toml -E 'test(ledger) + test(allocator) + test(invariant) + test(sweep) + test(preflight) + test(endpoint_) + test(chain_reader) + test(locks)' | grep -c '::')

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the SDK proof (or post-proof acceptance) suite on the shared e2e host
-# (host B), against the network `up.sh` already brought up there (design spec
-# §8.3). Required env: DEXDO_SHA, E2E_RUN_ID, ACKI_DIR, PIPELINE_ID.
+# (host B), against the network `up.sh` already brought up there.
+# Required env: DEXDO_SHA, E2E_RUN_ID, ACKI_DIR, PIPELINE_ID.
 # Optional: SUITE=proof|acceptance (default proof), DEXDO_REPO, DEXDO_DIR.
 #
 # This script is always piped over SSH from the CI runner's own checkout

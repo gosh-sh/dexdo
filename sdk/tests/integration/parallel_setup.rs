@@ -36,7 +36,7 @@ use std::time::Duration;
 use crate::common::allocator;
 use crate::common::allocator::PnProfile;
 use crate::common::allocator::TaintReason;
-use crate::common::context;
+use crate::common::chain_reader::ChainReader;
 use crate::common::ledger::Ledger;
 use crate::common::locks::ChainLockGuard;
 use crate::common::pmp;
@@ -73,15 +73,17 @@ async fn one_side(me: &str, peer: &str) {
     // transactions rather than one process observing the other's state.
     let nonce = alloc.next_nonce().expect("allocate an oracle-name nonce");
 
-    let ctx = context::create_context();
-    let dex = context::create_dex();
+    // `ChainReader` is where the harness builds its tvm/`Dex` client pair;
+    // this side takes them from there rather than assembling a second pair of
+    // its own, so both scenarios speak to the stand through one construction.
+    let r = ChainReader::new();
 
     // The oracle and event names `prepare_oracle_event` derives are a
     // function of `nonce`, not of wall-clock time — the entire reason this
     // scenario can assert the two oracle addresses differ instead of
     // racing to see which side's clock-based name collides first.
-    let ev = pmp::prepare_oracle_event(&ctx, &dex, &guard, nonce).await;
-    let pmp_addr = pmp::deploy_pmp_with_deployer(&ctx, &dex, &lease, &ev, &guard).await;
+    let ev = pmp::prepare_oracle_event(&r.ctx, &r.dex, &guard, nonce).await;
+    let pmp_addr = pmp::deploy_pmp_with_deployer(&r.ctx, &r.dex, &lease, &ev, &guard).await;
 
     // Write-only, at exactly this key — never overwrites the `ready` mark,
     // and never collides with the peer's own `result/<peer>` key.

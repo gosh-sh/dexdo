@@ -272,8 +272,15 @@ impl Ledger {
     }
 }
 
+/// Opens `ledger.lock` — the flock sidecar, never the ledger data itself,
+/// which is only ever replaced wholesale by [`write_atomic`].
+///
+/// `truncate(false)` is stated rather than left to the default: the file is
+/// opened while other processes may already hold or be waiting on a lock over
+/// it, and truncating it out from under them is a change to shared state made
+/// for no reason — nothing here ever writes a byte through this handle.
 fn open_rw(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new().create(true).write(true).open(path)
+    fs::OpenOptions::new().create(true).write(true).truncate(false).open(path)
 }
 
 fn read_json(path: &Path) -> Result<LedgerFile, LedgerError> {

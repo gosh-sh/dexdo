@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stages the DEX/airegistry contracts of the current dodex checkout into the
-# zerostate generator's versioned paths (design spec §8.1-1), then writes the
-# provenance manifest from exactly those staged artifacts.
+# zerostate generator's versioned paths, then writes the provenance manifest
+# from exactly those staged artifacts.
 #
 # Why this exists: the generator reads compiled contracts from
 # contracts/{0.80.0,0.81.0}_compiled/, which acki-nacki commits and which can
@@ -17,9 +17,8 @@ set -euo pipefail
 
 # Fixed by name, not derived from a directory listing: a listing would also
 # pick up whatever the previous build happened to leave behind. This is the
-# generator's own contract set (design spec §8.1-1 item 4) — dex: the 8
-# PrivateNote-adjacent contracts placed straight from source; airegistry: the
-# 5 AI-inference contracts.
+# generator's own contract set — dex: the 8 PrivateNote-adjacent contracts
+# placed straight from source; airegistry: the 5 AI-inference contracts.
 DEX13=(PrivateNote RootPN PMP OrderBook Nullifier RootOracle Oracle OracleEventList)
 AIR5=(InferenceOrderBook TokenContract RootModel SuperRoot ModelRegistry)
 
@@ -36,7 +35,7 @@ rm -rf /tmp/cascade_out
   CLI="$BUILD_DIR/contracts/compiler/tvm-cli" \
   python3 contracts/scripts/cascade_pins.py )
 
-echo "==> [3/5] plain sold for the 6 pin-free DEX contracts (spec §8.1-1 item 3)"
+echo "==> [3/5] plain sold for the 6 pin-free DEX contracts"
 STAGE=$(mktemp -d)
 for c in PMP OrderBook Nullifier RootOracle Oracle OracleEventList; do
   # Same deterministic flags the cascade's own build() step uses: a different
@@ -65,7 +64,7 @@ for c in "${DEX13[@]}" "${AIR5[@]}"; do
   fi
 done
 
-echo "==> [4/5] clean replacement of the versioned paths + allowlist (spec §8.1-1 item 4)"
+echo "==> [4/5] clean replacement of the versioned paths + allowlist"
 D080="$BUILD_DIR/contracts/0.80.0_compiled/dex"; D081="$BUILD_DIR/contracts/0.81.0_compiled"
 rm -rf "$D080" "$D081/dex" "$D081/airegistry"; mkdir -p "$D080" "$D081/dex" "$D081/airegistry"
 cp "$STAGE/RootPN.tvc" "$STAGE/RootPN.abi.json" "$D080/"
@@ -88,6 +87,6 @@ python3 "$DODEX_DIR/tests/e2e/gen_manifest.py" --staged "$D080" "$D081/dex" "$D0
   --cli "$BUILD_DIR/contracts/compiler/tvm-cli" \
   --out "$BUILD_DIR/config/dex_contracts_manifest.json"
 # Ship the exact TVC bytes alongside the manifest so host B can derive the
-# salted PMP/OrderBook hash from them (spec §8.1-2) instead of trusting a
-# value nobody there can recompute.
+# salted PMP/OrderBook hash from them instead of trusting a value nobody
+# there can recompute.
 cp "$STAGE/PrivateNote.tvc" "$STAGE/PMP.tvc" "$STAGE/OrderBook.tvc" "$BUILD_DIR/config/"

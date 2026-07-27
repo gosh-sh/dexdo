@@ -85,7 +85,6 @@ use crate::common::allocator::LeasedPn;
 use crate::common::allocator::PnProfile;
 use crate::common::chain_reader;
 use crate::common::chain_reader::ChainReader;
-use crate::common::context;
 use crate::common::context::CURRENCY_ID_SHELL;
 use crate::common::context::NETWORK_FEE_AMOUNT;
 use crate::common::context::ORACLE_FEE;
@@ -196,13 +195,17 @@ async fn proof_money_lifecycle_local() {
     let buyer = alloc.rent(PnProfile::Trd, "proof").expect("rent the buyer note");
     let seller = alloc.rent(PnProfile::Trd, "proof").expect("rent the seller note");
 
-    let ctx = context::create_context();
-    let dex = context::create_dex();
+    // The reader's own clients, not a second pair: every write below and the
+    // read that verifies it then travel over one connection set, so a
+    // conservation failure can never be an artifact of two clients pointed at
+    // different endpoints or observing different committed states.
+    let ctx = &r.ctx;
+    let dex = &r.dex;
 
     // Phase one of the market setup: publish the oracle event. Its fee is paid
     // by the oracle, outside the measured window on purpose — see below.
     let nonce = alloc.next_nonce().expect("allocate an oracle-name nonce");
-    let ev = pmp::prepare_oracle_event(&ctx, &dex, &b0, nonce).await;
+    let ev = pmp::prepare_oracle_event(ctx, dex, &b0, nonce).await;
 
     // The boundary of the money check. Everything money can reach in this
     // scenario is named here; the PMP and the order book join the set as they
@@ -238,7 +241,7 @@ async fn proof_money_lifecycle_local() {
     // ---------------------------------------------------------------- deploy
     // Phase two: the deployer note deploys the market and funds it with two
     // initial stakes.
-    let pmp_addr = pmp::deploy_pmp_with_deployer(&ctx, &dex, &deployer, &ev, &b0).await;
+    let pmp_addr = pmp::deploy_pmp_with_deployer(ctx, dex, &deployer, &ev, &b0).await;
     tracked.pmps.push(TrackedPmp {
         addr: pmp_addr.clone(),
         token_type: TOKEN_TYPE_NACKL,
@@ -283,7 +286,7 @@ async fn proof_money_lifecycle_local() {
     )
     .await
     .expect("submit_set_timings");
-    wait_pmp_approved(&dex, &pmp_addr).await;
+    wait_pmp_approved(dex, &pmp_addr).await;
 
     let s1 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after deploy");
     invariant::assert_conserved(&sum0, &s1, &ExternalDelta::none());
@@ -311,8 +314,8 @@ async fn proof_money_lifecycle_local() {
     // Concurrent, because the window is ~30 s and two sequential
     // acknowledged stakes can eat most of it.
     tokio::join!(
-        stake(&dex, &buyer, &key, WINNING_OUTCOME),
-        stake(&dex, &seller, &key, LOSING_OUTCOME),
+        stake(dex, &buyer, &key, WINNING_OUTCOME),
+        stake(dex, &seller, &key, LOSING_OUTCOME),
     );
     assert!(
         now_unix() + STAKE_MARGIN_SECS < stake_end,
@@ -346,8 +349,8 @@ async fn proof_money_lifecycle_local() {
     // `freezeNow` is a public entry that anyone may call, and it is what
     // normalises the pools and deploys the order book.
     wait_until(stake_end).await;
-    pmp_freeze_now(&ctx, &dex, &pmp_addr).await;
-    let ob_addr = wait_order_book(&ctx, &dex, &pmp_addr).await;
+    pmp_freeze_now(ctx, dex, &pmp_addr).await;
+    let ob_addr = wait_order_book(ctx, dex, &pmp_addr).await;
     tracked.order_books.push(TrackedOb {
         addr: ob_addr.clone(),
         token_type: TOKEN_TYPE_NACKL,
@@ -384,18 +387,18 @@ async fn proof_money_lifecycle_local() {
         now_unix()
     );
 
-    let buyer_before_split = outcome_tokens(&dex, &buyer).await;
-    let seller_before_split = outcome_tokens(&dex, &seller).await;
+    let buyer_before_split = outcome_tokens(dex, &buyer).await;
+    let seller_before_split = outcome_tokens(dex, &seller).await;
 
-    split_full_set(&dex, &buyer, &key).await;
-    split_full_set(&dex, &seller, &key).await;
+    split_full_set(dex, &buyer, &key).await;
+    split_full_set(dex, &seller, &key).await;
     invariant::await_quiescence(&r, &tracked, Phase::AfterSplit).await.expect("split quiescence");
 
     // The effect: each trader now holds tokens of *both* outcomes. A rejected
     // split leaves the holdings untouched, and the conservation check below
     // would pass on a phase where nothing happened.
-    let buyer_after_split = outcome_tokens(&dex, &buyer).await;
-    let seller_after_split = outcome_tokens(&dex, &seller).await;
+    let buyer_after_split = outcome_tokens(dex, &buyer).await;
+    let seller_after_split = outcome_tokens(dex, &seller).await;
     assert_split_minted("buyer", &buyer.note.address, &buyer_before_split, &buyer_after_split);
     assert_split_minted("seller", &seller.note.address, &seller_before_split, &seller_after_split);
 
@@ -407,7 +410,7 @@ async fn proof_money_lifecycle_local() {
     // pays splits into a rebate for the maker and a protocol fee the book
     // accrues until it drains — both inside the tracked set.
     let coid_base = u128::from(alloc.next_nonce().expect("allocate client order ids"));
-    place_and_match(&dex, &buyer, &seller, &key, &ob_addr, coid_base).await;
+    place_and_match(dex, &buyer, &seller, &key, &ob_addr, coid_base).await;
 
     // Both orders filled completely, so nothing is left resting; the barrier
     // states that number rather than skipping the check on the phase that
@@ -422,8 +425,8 @@ async fn proof_money_lifecycle_local() {
     // satisfied by nothing having been placed at all. The token movement is
     // not — it is exactly the traded amount, from the seller to the buyer.
     // Both baselines were read after the split barrier, before the orders.
-    let buyer_traded = outcome_tokens(&dex, &buyer).await;
-    let seller_traded = outcome_tokens(&dex, &seller).await;
+    let buyer_traded = outcome_tokens(dex, &buyer).await;
+    let seller_traded = outcome_tokens(dex, &seller).await;
     assert_eq!(
         at(&buyer_traded, WINNING_OUTCOME),
         at(&buyer_after_split, WINNING_OUTCOME) + ORDER_AMOUNT,
@@ -453,7 +456,7 @@ async fn proof_money_lifecycle_local() {
     let rootpn_fee_before = root_pn_protocol_fee(&r).await;
     // Read before the drain forwards it to RootPN and zeroes the book's own
     // counter.
-    let expected_protocol_fee = ob_total_protocol_fees(&dex, &ob_addr).await;
+    let expected_protocol_fee = ob_total_protocol_fees(dex, &ob_addr).await;
 
     wait_until(result_start).await;
     dex.submit_resolve(
@@ -463,12 +466,12 @@ async fn proof_money_lifecycle_local() {
     )
     .await
     .expect("submit_resolve");
-    wait_resolved(&dex, &pmp_addr, WINNING_OUTCOME).await;
+    wait_resolved(dex, &pmp_addr, WINNING_OUTCOME).await;
     // Resolving triggers the order book's shutdown; the drain cancels and
     // refunds whatever rests, hands its protocol fees to RootPN, and destroys
     // the book in the same message that reports completion. `claim` is gated
     // on that report.
-    wait_order_book_done(&dex, &pmp_addr).await;
+    wait_order_book_done(dex, &pmp_addr).await;
     // Declared drained only now, and only because the report has arrived: a
     // snapshot or barrier would otherwise keep reading an account that no
     // longer exists, and counting fees RootPN has already been credited with.
@@ -476,7 +479,7 @@ async fn proof_money_lifecycle_local() {
 
     // The creator fee is computed by `resolve` from the live pools, so unlike
     // the baselines above it can only be read afterwards.
-    let creator_fee = read_creator_fee(&dex, &pmp_addr).await;
+    let creator_fee = read_creator_fee(dex, &pmp_addr).await;
     invariant::await_quiescence(
         &r,
         &tracked,
@@ -500,9 +503,9 @@ async fn proof_money_lifecycle_local() {
     // the winning mass, and the market only closes once that mass has been
     // claimed down to what forfeiters left behind — skip this claim and the
     // PMP never self-destructs and the barrier below times out.
-    claim(&dex, &buyer, &key).await;
-    claim(&dex, &seller, &key).await;
-    claim(&dex, &deployer, &key).await;
+    claim(dex, &buyer, &key).await;
+    claim(dex, &seller, &key).await;
+    claim(dex, &deployer, &key).await;
 
     // The PMP's account can be gone while its residual transfer is still in
     // flight, so "the market disappeared" proves nothing on its own. This

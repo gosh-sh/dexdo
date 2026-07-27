@@ -121,9 +121,6 @@ pub async fn deploy_oracle_with_event(
 
 /// Oracle + published event, everything phase 2 of the two-phase PMP setup
 /// (`deploy_pmp_with_deployer`) needs to deploy the PMP.
-// No caller in this hermetic test crate yet; the conservation scenario
-// that drives this two-phase split is built in later work.
-#[allow(dead_code)]
 pub struct OracleEventCtx {
     pub oracle_address: String,
     pub el_address: String,
@@ -153,8 +150,6 @@ pub struct OracleEventCtx {
 /// Still tops up RootOracle's native gas from the giver: that pays for
 /// transaction execution, not currency inside the tracked balance set, so
 /// it stays outside a conservation scenario's Σ-scope.
-// No caller in this hermetic test crate yet; see `OracleEventCtx`.
-#[allow(dead_code)]
 pub async fn prepare_oracle_event(
     context: &Arc<ClientContext>,
     dex: &Dex,
@@ -266,17 +261,16 @@ pub async fn prepare_oracle_event(
 /// conservation scenario a PMP address as if quorum had been reached, and
 /// the scenario would go on to stake into it; the resulting failure would
 /// surface much later with no obvious link back to the real cause.
-/// `setup_pmp` is left as-is — it has live callers this task must not
-/// change — so the two tails now deliberately differ on this one point.
+/// `setup_pmp` keeps its silent fallthrough — it is the shared entry point
+/// of the older `pmp`/`flows`/`history` modules — so the two tails
+/// deliberately differ on this one point.
 ///
-/// Returns only the PMP address, not `setup_pmp`'s full detail set: it
-/// deliberately does not re-fetch `get_pmp_details` for `oracle_list_hash`,
-/// since no caller of this two-phase split needs it yet.
+/// Returns only the PMP address, not `setup_pmp`'s full detail set: no
+/// caller of this two-phase split reads `oracle_list_hash`, so the extra
+/// `get_pmp_details` round trip it would cost buys nothing.
 ///
 /// `_guard` proves the caller already holds `ChainLockGuard`; see
 /// `prepare_oracle_event` for why this function never calls `flock` itself.
-// No caller in this hermetic test crate yet; see `OracleEventCtx`.
-#[allow(dead_code)]
 pub async fn deploy_pmp_with_deployer(
     context: &Arc<ClientContext>,
     dex: &Dex,

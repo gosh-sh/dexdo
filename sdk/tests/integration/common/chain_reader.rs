@@ -1,7 +1,11 @@
 //! `ChainReader` — the single read path for on-chain account state: raw BOC,
-//! physical balance, and decoded storage fields, all through one `Dex` + tvm
-//! client + GraphQL client trio instead of assembling connections ad hoc per
-//! test.
+//! physical balance, and decoded storage fields.
+//!
+//! It owns one `Dex` + tvm client + GraphQL client trio, built from a single
+//! endpoint, and the scenarios drive their writes through the same `dex`/`ctx`
+//! rather than constructing a second pair: a scenario that wrote over one
+//! connection set and verified over another would be comparing two views that
+//! need not agree, and a disagreement would read as a defect in the contracts.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -9,19 +13,20 @@ use std::time::Duration;
 
 use ackinacki_kit::tvm_client::ClientConfig;
 use ackinacki_kit::tvm_client::ClientContext;
-use anyhow::anyhow;
+use anyhow::Context;
 use dodex_infrastructure::graphql::GraphqlClient;
+use dodex_infrastructure::tvm_runner::account_boc_is_none;
 use dodex_infrastructure::tvm_runner::decode_account_ecc;
 use dodex_infrastructure::tvm_runner::decode_account_fields_json;
 use dodex_infrastructure::tvm_runner::AccountEcc;
 use dodex_sdk::Dex;
 use dodex_sdk::DexConfig;
+use serde_json::Value;
 
 use crate::common::context::network_endpoint;
 
 const GRAPHQL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[allow(dead_code)] // no test module consumes this yet; scenario tests land later
 pub struct ChainReader {
     pub dex: Dex,
     pub ctx: Arc<ClientContext>,
@@ -31,7 +36,6 @@ pub struct ChainReader {
     gql_endpoint: String,
 }
 
-#[allow(dead_code)] // no test module consumes this yet; scenario tests land later
 impl ChainReader {
     pub fn new() -> ChainReader {
         Self::with_endpoint(&network_endpoint())
@@ -72,19 +76,51 @@ impl ChainReader {
         }
     }
 
+    /// Whether `addr` holds no account. Two structurally different shapes
+    /// mean the same thing: the node answers 404 (never deployed), or it
+    /// answers with a BOC that decodes to `AccountNone` — which is what a
+    /// contract that lived and then self-destructed keeps returning. A caller
+    /// that only checked the fetch would read the second as "still alive" and
+    /// wait out its whole timeout on a self-destruct that already happened.
+    ///
+    /// Decided structurally in both cases, never by matching an error string.
+    pub async fn account_absent(&self, addr: &str) -> anyhow::Result<bool> {
+        match self
+            .account_boc(addr)
+            .await
+            .with_context(|| format!("fetch account BOC of {addr}"))?
+        {
+            None => Ok(true),
+            Some(boc) => {
+                account_boc_is_none(&boc).with_context(|| format!("decode account state of {addr}"))
+            }
+        }
+    }
+
     /// Decoded contract storage fields (the ABI `fields` section), read
-    /// straight off the account state — no getter call. Unlike the physical
-    /// balance, storage has no well-defined value for a nonexistent account.
+    /// straight off the account state — no getter call. `None` when the
+    /// account is absent by [`ChainReader::account_absent`]'s definition:
+    /// unlike the physical balance, storage has no well-defined value there,
+    /// and callers differ on what absence means to them — a barrier waiting
+    /// for a contract to disappear treats it as success, the preflight treats
+    /// it as a broken stand. Reporting it structurally lets each say so at
+    /// its own call site instead of deciding here for both.
     pub async fn storage_fields(
         &self,
         addr: &str,
         abi_json: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        let boc = self
-            .account_boc(addr)
-            .await?
-            .ok_or_else(|| anyhow!("account {addr} does not exist"))?;
+    ) -> anyhow::Result<Option<Value>> {
+        let Some(boc) =
+            self.account_boc(addr).await.with_context(|| format!("fetch account BOC of {addr}"))?
+        else {
+            return Ok(None);
+        };
+        if account_boc_is_none(&boc).with_context(|| format!("decode account state of {addr}"))? {
+            return Ok(None);
+        }
         decode_account_fields_json(abi_json, &boc)
+            .with_context(|| format!("decode storage fields of {addr}"))
+            .map(Some)
     }
 }
 

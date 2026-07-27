@@ -198,9 +198,6 @@ pub fn sweep_verdict(fields: &Value) -> SweepVerdict {
 /// `PrivateNote` ABI, read from the same on-branch contract source the sweep
 /// lists above are pinned against — used to decode a leased note's storage
 /// before [`LeasedPn::release_clean`] judges it.
-// Only `release_clean` reads this, and nothing in this hermetic test file
-// calls it — it needs a live chain.
-#[allow(dead_code)]
 const PN_ABI: &str = include_str!("../../../../contracts/dex/PrivateNote.abi.json");
 
 /// The default tail size (see [`Allocator::new`]) when `E2E_SDK_TAIL_COUNT` is
@@ -211,8 +208,8 @@ const DEFAULT_SDK_TAIL: usize = 3;
 /// profile-aware pool partitioning: the allocator here draws every profile
 /// from the same tail slice, uniformly — nothing yet gives one profile a
 /// dedicated sub-range.
-// Only Dep/Trd/Shell are constructed by this file's own tests; the rest are
-// for scenario tests to come.
+// Only Dep/Trd/Shell are constructed anywhere; Cons/Cpn/Usdc/Inf/Rot name the
+// rest of the role vocabulary a scenario may declare.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PnProfile {
@@ -232,9 +229,9 @@ pub enum PnProfile {
 /// rest are for a caller that has already diagnosed the note some other way
 /// (e.g. a scenario that knows a note it holds has outstanding debt) and wants
 /// to record why via [`LeasedPn::taint`].
-// Only Dead/DirtyState/ShellDepleted are constructed by this file's own code
-// and tests; the rest are for a caller that has diagnosed a note some other
-// way, added in scenario tests.
+// Only Dead/DirtyState/ShellDepleted are constructed here: the remaining
+// variants exist for a caller that has diagnosed a note some other way and
+// records it via `LeasedPn::taint`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaintReason {
@@ -271,10 +268,6 @@ struct SeedNoteFile {
 }
 
 /// One pre-baked account from the seed file, ready to be leased.
-// `dih_dec`/`keys` are read by scenario tests that actually perform signed
-// operations against the leased note; this file's own tests only rent,
-// release, and taint.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct SeedNote {
     pub address: String,
@@ -334,10 +327,6 @@ pub fn seed_path() -> anyhow::Result<PathBuf> {
 /// Directory the seed file lives in — also where the shared [`Ledger`] and
 /// its lock sidecar live, since [`Allocator::new`] opens the ledger at the
 /// seed file's own directory.
-// No caller in this crate yet — for helpers that, like the allocator itself,
-// need to find the ledger from the environment rather than from an explicit
-// path.
-#[allow(dead_code)]
 pub fn seed_dir() -> anyhow::Result<PathBuf> {
     let path = seed_path()?;
     path.parent()
@@ -379,10 +368,6 @@ pub struct Allocator {
 impl Allocator {
     /// Thin env wrapper: resolves the seed path via [`seed_path`] and defers
     /// to [`Allocator::with_seed_path`].
-    // No caller in this hermetic test file — tests use `with_seed_path`
-    // directly to avoid mutating env; a real e2e run is the caller of this
-    // constructor.
-    #[allow(dead_code)]
     pub fn new(run_id: &str) -> anyhow::Result<Allocator> {
         let seed = seed_path()?;
         Allocator::with_seed_path(run_id, &seed)
@@ -489,9 +474,6 @@ impl Allocator {
 
     /// Allocates the next unique nonce for this run's ledger generation —
     /// see [`Ledger::next_nonce`].
-    // No caller in this hermetic test file yet; scenario tests that need a
-    // unique nonce per operation use it.
-    #[allow(dead_code)]
     pub fn next_nonce(&self) -> anyhow::Result<u64> {
         Ok(self.ledger.next_nonce()?)
     }
@@ -522,9 +504,6 @@ impl LeasedPn {
     /// ([`LeasedPn::finish`]) that judges and records the outcome. Splitting
     /// fetch from decision this way is what makes the decision itself
     /// unit-testable without a network.
-    // No caller in this hermetic test file — it needs a live chain; `finish`
-    // below is what this file's own tests exercise directly instead.
-    #[allow(dead_code)]
     pub async fn release_clean(mut self, r: &ChainReader) -> anyhow::Result<()> {
         let boc = r.account_boc(&self.note.address).await?;
         if boc_is_absent(boc.as_deref())? {

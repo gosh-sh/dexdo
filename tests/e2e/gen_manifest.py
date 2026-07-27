@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Builds dex_contracts_manifest.json from a staged set of compiled contracts
-(design spec §8.1-2).
+"""Builds dex_contracts_manifest.json from a staged set of compiled contracts.
 
 Run against the output of tests/e2e/stage_contracts.sh: a directory per
 versioned path, each holding <name>.tvc/<name>.abi.json pairs for the fixed
@@ -113,7 +112,7 @@ def check_env_pins():
     for v in IMAGE_VARS.values():
         if not IMAGE_DIGEST_RE.match(os.environ[v]):
             sys.exit(f"FATAL: {v}={os.environ[v]!r} is not image@sha256:<64 lower-case hex> "
-                      "(design spec §8.1) -- a tag is rewritable and is not a pin")
+                      "-- a tag is rewritable and is not a pin")
 
 
 def vanity_addresses(zerostate_py):

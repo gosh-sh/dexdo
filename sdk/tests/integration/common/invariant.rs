@@ -36,10 +36,6 @@
 //! (the scenario holds `b0.lock` for the whole comparison window): a
 //! concurrent actor mutating RootPN would show up here as a leak.
 
-// The scenario tests that consume this module land in later work; until then
-// most of the surface has no caller inside the test binary.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -52,8 +48,6 @@ use dodex_contracts::dex::order_book::OrderBook;
 use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::root_pn::ParamsOfGetProtocolFee;
 use dodex_contracts::dex::root_pn::RootPn;
-use dodex_infrastructure::tvm_runner::account_boc_is_none;
-use dodex_infrastructure::tvm_runner::decode_account_fields_json;
 use dodex_sdk::dex_contract_params;
 use serde_json::Value;
 
@@ -292,7 +286,7 @@ pub async fn snapshot(r: &ChainReader, t: &TrackedContracts) -> anyhow::Result<I
     // tracked token type rather than one call in total. Existence is checked
     // once, before the getters: a getter against a missing account fails, and
     // the failure would say nothing useful about which account it was.
-    if !account_absent(r, &t.root_pn).await? {
+    if !r.account_absent(&t.root_pn).await? {
         let root = RootPn::new(r.ctx.clone(), dex_contract_params(&t.root_pn));
         for tt in &t.token_types {
             let fee = root
@@ -309,7 +303,7 @@ pub async fn snapshot(r: &ChainReader, t: &TrackedContracts) -> anyhow::Result<I
     }
 
     for pmp in live_pmps(t) {
-        if account_absent(r, &pmp.addr).await? {
+        if r.account_absent(&pmp.addr).await? {
             credit(&mut per_tt, pmp.token_type, &pmp.addr, 0);
             continue;
         }
@@ -328,7 +322,7 @@ pub async fn snapshot(r: &ChainReader, t: &TrackedContracts) -> anyhow::Result<I
     }
 
     for ob in live_order_books(t) {
-        if account_absent(r, &ob.addr).await? {
+        if r.account_absent(&ob.addr).await? {
             credit(&mut per_tt, ob.token_type, &ob.addr, 0);
             continue;
         }
@@ -606,7 +600,7 @@ async fn phase_pending(
         Phase::AfterStake | Phase::AfterSplit | Phase::AfterTrade { .. } => Ok(None),
 
         Phase::AfterFreeze { pmp } => {
-            let Some(fields) = storage_fields_opt(r, pmp, PMP_ABI).await? else {
+            let Some(fields) = r.storage_fields(pmp, PMP_ABI).await? else {
                 return Ok(Some(format!("PMP {pmp} is not deployed yet")));
             };
             if field_bool(&fields, PMP_NORM_REFUND_PENDING)? {
@@ -664,12 +658,13 @@ async fn phase_pending(
         }
 
         Phase::AfterClaims { pmp, residual_to, baseline } => {
-            // Deliberately `account_absent`, not a bare `account_boc(..) ==
-            // None`: a self-destructed PMP can still answer with a BOC that
-            // carries no account, and treating that as "still alive" would
-            // hang this barrier for its full timeout on a condition that is
-            // already satisfied — with no assertion message to show for it.
-            if !account_absent(r, pmp).await? {
+            // Deliberately `ChainReader::account_absent`, not a bare
+            // `account_boc(..) == None`: a self-destructed PMP can still
+            // answer with a BOC that carries no account, and treating that
+            // as "still alive" would hang this barrier for its full timeout
+            // on a condition that is already satisfied — with no assertion
+            // message to show for it.
+            if !r.account_absent(pmp).await? {
                 return Ok(Some(format!("PMP {pmp} has not self-destructed yet")));
             }
             // The account being gone says nothing about where its money is, so
@@ -732,46 +727,8 @@ fn with_pmp_self_destructed(
     Ok(out)
 }
 
-/// The module's single notion of "the contract is not there": either the
-/// gateway has no account for the address, or it hands back a BOC that carries
-/// no account (`AccountNone`).
-///
-/// Both halves matter. A never-deployed address answers with the first; a
-/// contract that lived and then self-destructed can keep answering with the
-/// second, so a barrier that only checked the fetch would wait out its whole
-/// timeout on a self-destruct that already happened. Existence is decided
-/// structurally in both cases — never by matching an error string.
-async fn account_absent(r: &ChainReader, addr: &str) -> anyhow::Result<bool> {
-    match r.account_boc(addr).await.with_context(|| format!("fetch account BOC of {addr}"))? {
-        None => Ok(true),
-        Some(boc) => {
-            account_boc_is_none(&boc).with_context(|| format!("decode account state of {addr}"))
-        }
-    }
-}
-
-/// Decoded storage fields, or `None` when the account is absent by
-/// [`account_absent`]'s definition.
-async fn storage_fields_opt(
-    r: &ChainReader,
-    addr: &str,
-    abi_json: &str,
-) -> anyhow::Result<Option<Value>> {
-    let Some(boc) =
-        r.account_boc(addr).await.with_context(|| format!("fetch account BOC of {addr}"))?
-    else {
-        return Ok(None);
-    };
-    if account_boc_is_none(&boc).with_context(|| format!("decode account state of {addr}"))? {
-        return Ok(None);
-    }
-    decode_account_fields_json(abi_json, &boc)
-        .with_context(|| format!("decode storage fields of {addr}"))
-        .map(Some)
-}
-
 async fn pn_fields_opt(r: &ChainReader, pn: &str) -> anyhow::Result<Option<Value>> {
-    storage_fields_opt(r, pn, PN_ABI).await
+    r.storage_fields(pn, PN_ABI).await
 }
 
 /// A note's free balance in `tt` — `PrivateNote._balance`, without the escrow

@@ -236,13 +236,27 @@ case you're in:
   gated even though nothing stops it from running locally. Add its name (or a
   shared substring) to the filter, or it stays untested in CI.
 - **A live-network test in `sdk/`** (the integration binary's chain-touching
-  scenarios — `proof_money`, `parallel_setup`, and the pn/pmp/oracle/discovery/
-  flows modules) → **not run by `pr-tests.yml`.** These run against a
-  from-scratch network in [`.woodpecker/e2e.yml`](.woodpecker/e2e.yml)'s
-  `sdk_proof`/`sdk_parallel_acceptance` steps, each with its own fixed filter.
-  Extending that coverage means extending those filters, not `pr-tests.yml`. A
-  test that runs in neither place is documentation, not a gate — say so in the
-  PR if you leave it manual.
+  scenarios) → **not run by `pr-tests.yml`,** and covered by
+  [`.woodpecker/e2e.yml`](.woodpecker/e2e.yml) only if one of two fixed filters
+  in [`tests/e2e/sdk-proof-on-host.sh`](tests/e2e/sdk-proof-on-host.sh) names
+  it. Both run `--run-ignored only` against a from-scratch network:
+  - `sdk_proof` — `test(=proof_money::proof_money_lifecycle_local)`, exactly
+    that one test;
+  - `sdk_parallel_acceptance` — `test(parallel_setup)`, i.e. `parallel_setup_a`
+    and `parallel_setup_b`.
+
+  Nothing else in the integration binary is selected by any job. In particular
+  the older chain-touching modules — `pn_basic`, `pmp`, `oracle`, `discovery`,
+  `flows`, `history`, `multitoken` — contribute 25 tests that are **not**
+  `#[ignore]`d and are named by no filter anywhere: they run in no CI job at
+  all, yet `cargo nextest run --manifest-path sdk/Cargo.toml` with no `-E`
+  drives them straight against a live public network (shellnet, the default in
+  `common::context::network_endpoint`) and spends test tokens. Scope your local
+  runs with `-E`, and do not take a green unfiltered run as CI coverage.
+
+  Extending real coverage means extending those two filters, not
+  `pr-tests.yml`. A test that runs in neither place is documentation, not a
+  gate — say so in the PR if you leave it manual.
 
 ## Documentation
 

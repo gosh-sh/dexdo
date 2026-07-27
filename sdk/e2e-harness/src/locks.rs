@@ -8,8 +8,8 @@
 //! transfer inside its measurement window, so it takes the lock EXCLUSIVE,
 //! which blocks until every shared holder has released.
 //!
-//! Helpers added in later tasks accept `&ChainLockGuard` and never call
-//! `flock` themselves: a nested acquisition on the same file either
+//! Chain-mutating helpers take `&ChainLockGuard` and never call `flock`
+//! themselves: a nested acquisition on the same file either
 //! self-deadlocks (a second, independent open of the same path blocks
 //! behind the first) or silently converts an exclusive hold into a shared
 //! one (re-locking the same open file description with a different mode),
@@ -91,8 +91,14 @@ impl Drop for ChainLockGuard {
     }
 }
 
+/// The sidecar exists only to carry the `flock`; nothing ever writes a byte
+/// through this handle. `write(true)` is there because the open must be able
+/// to create the file, and `truncate(false)` is stated rather than left to
+/// the default: other processes may already hold or be blocked on a lock over
+/// this same path, and truncating a file out from under them would be a
+/// change to shared state made for no reason.
 fn open_lock_file(dir: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new().create(true).write(true).open(dir.join("b0.lock"))
+    fs::OpenOptions::new().create(true).write(true).truncate(false).open(dir.join("b0.lock"))
 }
 
 fn flock(file: &fs::File, op: libc::c_int) -> io::Result<()> {

@@ -192,7 +192,6 @@ impl Manifest {
 /// Path to the manifest, from [`MANIFEST_ENV`]. There is no default: a run
 /// with no manifest cannot verify anything, and silently proceeding would
 /// defeat the entire point of this module.
-#[allow(dead_code)] // consumed by the live scenario tests
 pub fn manifest_path() -> anyhow::Result<PathBuf> {
     let raw = std::env::var(MANIFEST_ENV)
         .map_err(|_| anyhow!("manifest path not set: export {MANIFEST_ENV}"))?;
@@ -201,7 +200,6 @@ pub fn manifest_path() -> anyhow::Result<PathBuf> {
 }
 
 /// Directory the manifest lives in — where the shipped TVC images sit too.
-#[allow(dead_code)] // consumed by the live scenario tests
 pub fn manifest_dir() -> anyhow::Result<PathBuf> {
     let path = manifest_path()?;
     path.parent()
@@ -209,7 +207,6 @@ pub fn manifest_dir() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("manifest path {} has no parent directory", path.display()))
 }
 
-#[allow(dead_code)] // consumed by the live scenario tests
 pub fn load_manifest() -> anyhow::Result<Manifest> {
     let path = manifest_path()?;
     let bytes =
@@ -472,7 +469,6 @@ fn shipped_tvc_code(
 /// Raw code-hash check for a contract deployed from unsalted code — the
 /// baked roots, the seed notes, and the Oracle/OracleEventList a scenario
 /// creates at runtime.
-#[allow(dead_code)] // consumed by the live scenario tests
 pub async fn assert_raw_code(
     r: &ChainReader,
     deployed_addr: &str,
@@ -509,7 +505,6 @@ async fn assert_raw_code_with(
 /// here from those pinned bytes rather than carried in the manifest — the
 /// provenance chain is the same either way, because a substituted image is
 /// caught by the raw hash the manifest pins for it.
-#[allow(dead_code)] // consumed by the live scenario tests
 pub async fn assert_salted_code(
     r: &ChainReader,
     deployed_addr: &str,
@@ -557,7 +552,6 @@ pub async fn assert_salted_code(
 ///
 /// Both read as "provenance failure" unless you know this, which is why they
 /// say so in the failure text as well.
-#[allow(dead_code)] // consumed by the live scenario tests
 pub async fn run_preflight(r: &ChainReader) -> anyhow::Result<()> {
     let manifest = load_manifest()?;
 
@@ -574,7 +568,15 @@ pub async fn run_preflight(r: &ChainReader) -> anyhow::Result<()> {
         assert_raw_code_with(&manifest, r, &note.address, "PrivateNote").await?;
         check_note_address(&root_pn, note).await?;
 
-        let fields = r.storage_fields(&note.address, PRIVATE_NOTE_ABI).await?;
+        // An absent account is a structural answer from the reader, not an
+        // error, because a barrier elsewhere waits for exactly that. Here it
+        // is the opposite: the seed file names this note as baked into the
+        // zerostate, so nothing being there means the stand was not generated
+        // from this seed file at all.
+        let fields = r
+            .storage_fields(&note.address, PRIVATE_NOTE_ABI)
+            .await?
+            .ok_or_else(|| anyhow!("seed note {} holds no account on this stand", note.address))?;
         check_note_keys(r, note, &fields)?;
         check_note_swept(note, &fields)?;
         check_note_embedded_codes(&manifest, r, note, &fields)?;
@@ -804,7 +806,10 @@ async fn check_root_pn_booking(
     r: &ChainReader,
     note_sum: &BTreeMap<u32, u128>,
 ) -> anyhow::Result<()> {
-    let fields = r.storage_fields(RootPn::DEFAULT_ADDRESS, ROOT_PN_ABI).await?;
+    let fields =
+        r.storage_fields(RootPn::DEFAULT_ADDRESS, ROOT_PN_ABI).await?.ok_or_else(|| {
+            anyhow!("RootPN {} holds no account on this stand", RootPn::DEFAULT_ADDRESS)
+        })?;
     let booked = uint_map(&fields, "_deployedValues")?;
     let physical = r.account_ecc(RootPn::DEFAULT_ADDRESS).await?;
     booking_verdict(&booked, note_sum, &physical.ecc)
@@ -1130,8 +1135,10 @@ mod tests {
         let physical = BTreeMap::from([(1u32, 100u128), (2, 70)]);
         assert!(booking_verdict(&booked, &notes, &physical).is_ok());
 
-        // Booked less than the notes hold — the withdraw-path defect §8.2
-        // describes.
+        // Booked less than the notes hold — the withdraw-path defect this
+        // check exists for: `RootPN.withdrawTokens` requires
+        // `_deployedValues[tt] >= amount`, so the excess can never be
+        // withdrawn.
         let short_book = BTreeMap::from([(1u32, 100u128), (2, 49)]);
         assert!(booking_verdict(&short_book, &notes, &physical).is_err());
 
