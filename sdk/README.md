@@ -215,3 +215,23 @@ E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json E2E_SDK_TAIL_COUNT=5 \
 The notes it validates are read from the same seed file the allocator uses (`E2E_SEED_NOTES` / `PN_POOL_PATH`, above).
 
 It asserts how the stand was **generated**, so it has to run before anything touches the chain. A stand that has already served a wave fails it legitimately — deploying any fresh note credits `RootPN._deployedValues` beyond what the seed file accounts for, and api-e2e activity on the pool's head slice moves note balances — and that is not a provenance defect. The failure text says so too.
+
+### Conservation scenario (`proof_money`)
+
+`proof_money::proof_money_lifecycle_local` drives one prediction market through its whole life — deploy, stake, freeze, split, trade, resolve, claim, self-destruct — and asserts exact per-currency conservation after every phase. It is `#[ignore]`d and runs against a from-scratch local stand: it calls `run_preflight` first, so it inherits that check's freshly-generated-zerostate precondition.
+
+It reads everything the two sections above list, plus `E2E_RUN_ID` — the ledger generation the run belongs to. The test panics immediately if it is unset.
+
+Two things make it exclusive of everything else on the stand:
+
+- it holds `b0.lock` (in the seed file's own directory) in **exclusive** mode for its whole duration, so it blocks until every scenario holding that lock in shared mode has finished, and they block while it runs;
+- it rents three notes — deployer, buyer, seller — which is the whole rentable tail at the default `E2E_SDK_TAIL_COUNT` of 3.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+E2E_MANIFEST=/path/to/manifest.json DEXDO_SHA=<dodex commit> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=proof_money::proof_money_lifecycle_local)'
+```

@@ -13,6 +13,9 @@
 //! - `flows` — multi-step user flows (recovery, gas top-up,
 //!   change-owner+stake).
 //! - `multitoken` — one PN per token type (NACKL/SHELL/USDC).
+//! - `proof_money` — one market's whole lifecycle against a from-scratch local
+//!   stand, with an exact per-currency conservation assertion after every
+//!   phase.
 //!
 //! Each `mod` declaration here pulls in `tests/integration/<name>.rs` (or
 //! `tests/integration/<name>/mod.rs` for the multi-file `common` module).
@@ -26,3 +29,4 @@ mod oracle;
 mod order_book;
 mod pmp;
 mod pn_basic;
+mod proof_money;
