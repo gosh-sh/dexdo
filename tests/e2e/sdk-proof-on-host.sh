@@ -171,10 +171,14 @@ rm -f "$LIST_ERR"
 # mid-run has to fail the script, not just end the background loop that
 # noticed it.
 set -m
+# No --config-file: sdk/ is its own workspace, so nextest auto-discovers
+# sdk/.config/nextest.toml (which defines the sdk-e2e profile) on its own.
+# Pointing --config-file at the root workspace's .config/nextest.toml instead
+# is a hard error -- that file's [[profile.default.overrides]] name binaries
+# that only exist in the root workspace.
 E2E_NETWORK_ENDPOINT='http://127.0.0.1' \
 E2E_SEED_NOTES="$SEED" E2E_MANIFEST="$MANIFEST" E2E_RUN_ID="$E2E_RUN_ID" \
-cargo nextest run --manifest-path sdk/Cargo.toml \
-  --config-file "$DIR/.config/nextest.toml" --profile sdk-e2e \
+cargo nextest run --manifest-path sdk/Cargo.toml --profile sdk-e2e \
   --run-ignored only --test-threads "$THREADS" --no-fail-fast -E "$FILTER" &
 SUITE_PID=$!
 set +m

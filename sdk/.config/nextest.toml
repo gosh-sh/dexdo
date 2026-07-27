@@ -1,0 +1,22 @@
+# nextest profile config for the sdk workspace. sdk/ is its own Cargo
+# workspace (excluded from the root workspace, see the root Cargo.toml), so
+# nextest auto-discovers this file — not the root .config/nextest.toml — for
+# any `cargo nextest run --manifest-path sdk/Cargo.toml` invocation. No
+# `--config-file` flag is needed; passing the root config here instead would
+# be a hard error, since its `[[profile.default.overrides]]` name binaries
+# (`reprojection`, `inference_orders_repo`, ...) that only exist in that
+# other workspace.
+
+# Profile for the sdk workspace's proof/acceptance suites (.woodpecker/e2e.yml
+# sdk_proof / sdk_parallel_acceptance and tests/e2e/sdk-proof-on-host.sh), run
+# against a from-scratch local network via `--profile sdk-e2e`. Budgets are
+# longer than the root workspace's ci-e2e profile (.config/nextest.toml):
+# waiting for resultStart plus the barriers in between runs well past
+# api-e2e's typical single wait_entry, and rendezvous between the harness's
+# own processes can take up to 10 minutes.
+[profile.sdk-e2e]
+# Upper bound on the proof scenario's own budget: Oracle/event prep + PMP deploy
+# ~5 min; preflight ~2 min; 7 quiescences x 120s = 14 min; ack-polls (<=60s each)
+# across ~8 phases ~8 min; stake_end/resultStart waits (<=300s) ~5 min; OB-drain
+# and claims reserve ~5 min -> ~39 min total. The hard cap below stays above that.
+slow-timeout = { period = "120s", terminate-after = 25 }   # hard cap 50 min > ~39 min budget

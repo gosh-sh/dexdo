@@ -92,7 +92,7 @@ steps:
       # temp directory, never straight into contracts/compiler: that directory
       # already holds the current `sold`, which the other 12 contracts still
       # need to compile with.
-      - curl -sSL -o /tmp/sold_old.tar.gz "<TBD>/$SOLD_OLD_VER/..."
+      - curl -fsSL -o /tmp/sold_old.tar.gz "<TBD>/$SOLD_OLD_VER/..."
       - echo "$SOLD_OLD_SHA256  /tmp/sold_old.tar.gz" | sha256sum -c -
       - mkdir -p /tmp/sold_old_x && tar xz -f /tmp/sold_old.tar.gz -C /tmp/sold_old_x
       - mv /tmp/sold_old_x/sold contracts/compiler/sold_old
@@ -107,7 +107,7 @@ steps:
       - bash "$CI_WORKSPACE/tests/e2e/stage_contracts.sh"
       - make compile_contracts
       - DEX_TEST_NOTES_CNT="$DEX_TEST_NOTES_CNT" python3 contracts/scripts/generate_zerostate.py
-      - test -f config/zerostate && test -f config/dex_contracts_manifest.json
+      - test -f config/zerostate && test -f config/block_manager1_signing.keys.json && test -f docker/.env && test -f config/dex_contracts_manifest.json
 
   inventory_clone:
     image: *ansible_image
@@ -150,6 +150,13 @@ steps:
   # This is distinct from ledger.lock/b0.lock, which arbitrate processes within
   # a single run. Always piped from this checkout, never run off host B's own
   # disk -- see the script's header for why.
+  #
+  # Acquired after prepare_host runs unleased: dexdo-e2e-prepare.yml only
+  # installs build-essential and adds the CI user to the docker group, both
+  # idempotent, and it never touches the stand directory or anything a live
+  # run reads, so two pipelines running it concurrently cannot corrupt each
+  # other. Acquiring any earlier would hold the lease across a step that
+  # doesn't need its protection.
   lease_acquire:
     depends_on:
       - prepare_host
@@ -239,7 +246,7 @@ steps:
         PIPELINE_ID='$CI_PIPELINE_NUMBER'
         SUITE=proof
         ACKI_DIR='$ACKI_DIR'
-        bash -s" < tests/e2e/sdk-proof-on-host.sh
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
   sdk_parallel_acceptance:
     depends_on:
@@ -260,7 +267,7 @@ steps:
         PIPELINE_ID='$CI_PIPELINE_NUMBER'
         SUITE=acceptance
         ACKI_DIR='$ACKI_DIR'
-        bash -s" < tests/e2e/sdk-proof-on-host.sh
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
   assert_deploy_dexdo:
     depends_on:
