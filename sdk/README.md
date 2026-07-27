@@ -222,6 +222,13 @@ It asserts how the stand was **generated**, so it has to run before anything tou
 
 It reads everything the two sections above list, plus `E2E_RUN_ID` — the ledger generation the run belongs to. The test panics immediately if it is unset.
 
+**Every attempt needs its own generation.** A panic anywhere in the scenario drops its three leases, and `Drop` quarantines each note rather than returning it to the pool, so the tail this run drew from is used up. Re-running under the same `E2E_RUN_ID` then fails at `rent` with "no Free note left in the tail". Changing the variable alone is not enough either: `Allocator::new` only *opens* an existing generation, and an id the ledger does not carry fails with `StaleRun`. Start a new one with the bootstrapper before each attempt:
+
+```sh
+cargo run --manifest-path sdk/Cargo.toml --bin ledger-bootstrap -- \
+  --dir /path/to/seed/dir --run-id <fresh id> --manifest /path/to/manifest.json
+```
+
 Two things make it exclusive of everything else on the stand:
 
 - it holds `b0.lock` (in the seed file's own directory) in **exclusive** mode for its whole duration, so it blocks until every scenario holding that lock in shared mode has finished, and they block while it runs;

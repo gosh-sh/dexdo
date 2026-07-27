@@ -43,6 +43,17 @@
 //! - Baselines an exact barrier compares against are read **before** the
 //!   action that moves them. Read afterwards they describe the outcome, and
 //!   the comparison degenerates into a tautology.
+//! - Every phase additionally **asserts its own effect** — the pool grew by the
+//!   stakes, the notes hold the tokens they split, the traded amount changed
+//!   hands. This is not belt-and-braces on top of conservation, it is what
+//!   makes conservation mean anything: sending an operation is
+//!   fire-and-forget, and one rejected by a `require` before `tvm.accept()`
+//!   leaves no trace at the sender at all. A phase that silently did nothing
+//!   moves no money, so its barrier finds nothing pending and its
+//!   conservation assertion passes **vacuously** — and so does every phase
+//!   after it, since the later ones do not depend on the earlier one's money
+//!   having moved. Without an effect assertion this scenario can report
+//!   success having proved nothing.
 //!
 //! The phases are ordered by the contracts, not by taste: staking only works
 //! between `stakeStart` and `stakeEnd`, `splitFullSet` only after the market
@@ -65,7 +76,6 @@ use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
 use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
 use dodex_contracts::dex::private_note::ParamsOfStakeKey;
-use dodex_contracts::dex::root_pn::ParamsOfGetProtocolFee;
 use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::Dex;
@@ -92,7 +102,6 @@ use crate::common::invariant::TrackedOb;
 use crate::common::invariant::TrackedPmp;
 use crate::common::locks;
 use crate::common::misc::now_unix;
-use crate::common::misc::pn_nackl;
 use crate::common::misc::wait_active;
 use crate::common::pmp;
 use crate::common::pmp::OracleEventCtx;
@@ -109,6 +118,11 @@ const STAKE_PERIOD_PROOF: u64 = 300;
 /// stake past `stakeEnd`, where it fails for a reason that has nothing to do
 /// with conservation. Asserting the remaining budget right after the stakes
 /// turns that into a clear diagnosis instead of a puzzling revert later.
+///
+/// It reports *only* a slow stand. A stake that was rejected on its merits is
+/// caught by the pool-growth assertion after the barrier — which is why
+/// [`wait_not_busy`] must not burn a large budget before getting here, or a
+/// rejected stake would trip this assertion first and blame the stand.
 const STAKE_MARGIN_SECS: u64 = 8;
 
 /// SHELL as a *token type* (the key of a note's `_balance` map), which is a
@@ -145,6 +159,15 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// 30 × 2 s = 60 s, the suite's standard ceiling for one acknowledged
 /// operation.
 const POLL_ATTEMPTS: usize = 30;
+
+/// How long [`wait_not_busy`] looks for a note to *become* busy before giving
+/// up on ever seeing it. Deliberately short: not seeing the marker proves
+/// nothing either way — the operation may have completed between two polls, or
+/// been rejected outright and never existed — so there is nothing to be gained
+/// by waiting longer, and every second spent here comes out of a deadline the
+/// scenario has to meet. What distinguishes the two cases is each phase's
+/// effect assertion, not this loop.
+const BUSY_APPEAR_ATTEMPTS: usize = 5;
 
 #[tokio::test]
 #[ignore = "requires a from-scratch local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID, E2E_MANIFEST"]
@@ -275,6 +298,10 @@ async fn proof_money_lifecycle_local() {
     let details = dex.get_pmp_details(&pmp_addr).await.expect("pmp details after approval");
     let stake_end = details.stake_end;
     let result_start = details.result_start;
+    // Baseline for the stake phase's effect assertion — the pool as it stands
+    // with only the deployer's initial stakes in it, read before either trader
+    // stakes.
+    let total_pool_before = details.total_pool;
     let key = ParamsOfStakeKey {
         event_id: details.event_id.clone(),
         oracle_list_hash: details.oracle_list_hash.clone(),
@@ -294,6 +321,20 @@ async fn proof_money_lifecycle_local() {
         stake_end.saturating_sub(now_unix()),
     );
     invariant::await_quiescence(&r, &tracked, Phase::AfterStake).await.expect("stake quiescence");
+
+    // The effect, asserted before the money check, because the money check
+    // cannot see its absence: a `setStake` rejected before `tvm.accept()` —
+    // outside the window, below the minimum, market not approved — moves
+    // nothing, leaves no trace at the note, and would sail through both the
+    // barrier and `assert_conserved` while the rest of the scenario ran
+    // against a market nobody staked into.
+    let total_pool_after = dex.get_pmp_details(&pmp_addr).await.expect("pmp details").total_pool;
+    assert_eq!(
+        total_pool_after,
+        total_pool_before + 2 * STAKE_AMOUNT,
+        "the market's pool did not grow by the two stakes ({total_pool_before} -> \
+         {total_pool_after}) — at least one `setStake` never took effect"
+    );
 
     // A stake moves collateral from a note into the market. Both are inside
     // the tracked set, so this still has to come out exactly even.
@@ -330,9 +371,33 @@ async fn proof_money_lifecycle_local() {
     // ----------------------------------------------------------------- split
     // Collateral in, a full set of outcome tokens out. The traders need the
     // tokens before they can put either side of a trade on the book.
+    //
+    // `splitFullSet` requires `now < resultStart`, and once that has passed it
+    // reverts before `tvm.accept()` — invisibly, from the sender's side. The
+    // check is here rather than left to the effect assertion below so the
+    // failure names the deadline the scenario missed instead of a downstream
+    // symptom.
+    assert!(
+        now_unix() < result_start,
+        "the split window has already closed (now {} >= resultStart {result_start}) — the phases \
+         before this one spent the market's whole trading life",
+        now_unix()
+    );
+
+    let buyer_before_split = outcome_tokens(&dex, &buyer).await;
+    let seller_before_split = outcome_tokens(&dex, &seller).await;
+
     split_full_set(&dex, &buyer, &key).await;
     split_full_set(&dex, &seller, &key).await;
     invariant::await_quiescence(&r, &tracked, Phase::AfterSplit).await.expect("split quiescence");
+
+    // The effect: each trader now holds tokens of *both* outcomes. A rejected
+    // split leaves the holdings untouched, and the conservation check below
+    // would pass on a phase where nothing happened.
+    let buyer_after_split = outcome_tokens(&dex, &buyer).await;
+    let seller_after_split = outcome_tokens(&dex, &seller).await;
+    assert_split_minted("buyer", &buyer.note.address, &buyer_before_split, &buyer_after_split);
+    assert_split_minted("seller", &seller.note.address, &seller_before_split, &seller_after_split);
 
     let s4 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after split");
     invariant::assert_conserved(&s3, &s4, &ExternalDelta::none());
@@ -350,6 +415,32 @@ async fn proof_money_lifecycle_local() {
     invariant::await_quiescence(&r, &tracked, Phase::AfterTrade { expected_open_orders: 0 })
         .await
         .expect("trade quiescence");
+
+    // The effect, and the only positive proof that a trade happened: the two
+    // "the order is gone from the book" waits are equally satisfied by an
+    // order the book never accepted, and `expected_open_orders: 0` is equally
+    // satisfied by nothing having been placed at all. The token movement is
+    // not — it is exactly the traded amount, from the seller to the buyer.
+    // Both baselines were read after the split barrier, before the orders.
+    let buyer_traded = outcome_tokens(&dex, &buyer).await;
+    let seller_traded = outcome_tokens(&dex, &seller).await;
+    assert_eq!(
+        at(&buyer_traded, WINNING_OUTCOME),
+        at(&buyer_after_split, WINNING_OUTCOME) + ORDER_AMOUNT,
+        "the buyer did not receive the traded outcome tokens ({} -> {})",
+        at(&buyer_after_split, WINNING_OUTCOME),
+        at(&buyer_traded, WINNING_OUTCOME)
+    );
+    // Stated as an addition on the seller's side rather than a subtraction on
+    // the book's, so a failure reports the real numbers instead of panicking
+    // inside the assertion's own arithmetic.
+    assert_eq!(
+        at(&seller_after_split, WINNING_OUTCOME),
+        at(&seller_traded, WINNING_OUTCOME) + ORDER_AMOUNT,
+        "the seller did not give up the traded outcome tokens ({} -> {})",
+        at(&seller_after_split, WINNING_OUTCOME),
+        at(&seller_traded, WINNING_OUTCOME)
+    );
 
     let s5 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after trade");
     invariant::assert_conserved(&s4, &s5, &ExternalDelta::none());
@@ -706,18 +797,26 @@ async fn wait_owner_order(
     .await;
 }
 
-/// Wait until an operation sent to `pn_address` has been acknowledged.
+/// Settle an operation sent to `pn_address`: wait for the note's `_busy`
+/// marker to appear and then clear.
 ///
-/// Two phases, because the note's `_busy` marker is only set once the chain
-/// picks the external message up: a caller that checks straight away sees the
+/// Two phases, because the marker is only set once the chain picks the
+/// external message up: a caller that checks straight away sees the
 /// pre-message `None` and concludes the operation is finished before it has
-/// even started. Phase one waits for the marker to appear, phase two for it to
-/// clear. Never observing it is treated as "already done" — the operation can
-/// legitimately complete between two polls — since every phase barrier
-/// re-checks the same marker before its snapshot.
+/// even started.
+///
+/// **Returning is not evidence the operation succeeded**, and no caller may
+/// read it that way. Never seeing the marker is ambiguous by construction —
+/// the operation may have completed between two polls, or it may have been
+/// rejected by a `require` before `tvm.accept()` and never have existed, and
+/// those two are the same observation from here. Distinguishing them is the
+/// job of each phase's effect assertion; this function only keeps the scenario
+/// from sending a note its next operation while it is still busy with the
+/// last. Hence the short [`BUSY_APPEAR_ATTEMPTS`] budget: waiting longer buys
+/// no certainty, and the time comes out of a contract deadline.
 async fn wait_not_busy(dex: &Dex, pn_address: &str, op: &str) {
     let mut saw_busy = false;
-    for _ in 0..POLL_ATTEMPTS {
+    for _ in 0..BUSY_APPEAR_ATTEMPTS {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let d = dex.get_private_note_details(pn_address).await.expect("pn details");
         if d.busy_address.is_some() {
@@ -764,24 +863,86 @@ async fn read_creator_fee(dex: &Dex, pmp_addr: &str) -> u128 {
     dex.get_pmp_details(pmp_addr).await.expect("pmp details").creator_fee
 }
 
-/// A note's free NACKL balance — the same `_balance` field the resolve barrier
-/// compares against, so baseline and barrier describe the same quantity.
+/// A note's free NACKL balance, read through the same function the resolve
+/// barrier reads it with — one implementation of "the note's balance", so the
+/// baseline and the equality asserted against it cannot drift apart.
 async fn pn_balance(r: &ChainReader, pn_address: &str) -> u128 {
-    pn_nackl(&r.dex.get_private_note_details(pn_address).await.expect("pn details"))
+    invariant::pn_balance_opt(r, pn_address, TOKEN_TYPE_NACKL)
+        .await
+        .expect("read note balance")
+        .expect("the note must exist on chain to baseline its balance")
 }
 
 /// RootPN's accrued NACKL protocol fee, where the order book's fees land once
-/// it drains.
+/// it drains. Same function the resolve barrier uses, for the same reason as
+/// [`pn_balance`].
 async fn root_pn_protocol_fee(r: &ChainReader) -> u128 {
-    RootPn::new(Arc::clone(&r.ctx), dex_contract_params(RootPn::DEFAULT_ADDRESS))
-        .get_protocol_fee(ParamsOfGetProtocolFee { token_type: TOKEN_TYPE_NACKL })
+    invariant::protocol_fee(r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
         .await
-        .expect("RootPN getProtocolFee")
-        .value
+        .expect("read RootPN protocol fee")
 }
 
 /// Fees the order book has taken and not yet handed over. Meaningful only
 /// before the drain, which forwards them and zeroes the counter.
 async fn ob_total_protocol_fees(dex: &Dex, ob_addr: &str) -> u128 {
     dex.get_order_book_details(ob_addr).await.expect("order book details").total_protocol_fees
+}
+
+/// A note's outcome-token holdings for this scenario's market, indexed by
+/// outcome id. Empty when the note holds no stake record yet.
+///
+/// `_stakes` is keyed by a hash of the market identity that the client cannot
+/// cheaply recompute, so this leans on the scenario's own precondition: each
+/// rented note takes part in exactly one market, hence at most one record.
+/// More than one means the note came out of the pool already staked somewhere
+/// else, and picking a record would be a coin flip — so it fails instead of
+/// guessing.
+async fn outcome_tokens(dex: &Dex, note: &LeasedPn) -> Vec<u128> {
+    let addr = &note.note.address;
+    let stakes = dex.get_stakes(addr).await.expect("pn stakes").stakes;
+    assert!(
+        stakes.len() <= 1,
+        "note {addr} holds {} stake records; this scenario assumes one market per note and \
+         cannot tell which record is its own",
+        stakes.len()
+    );
+    let Some(record) = stakes.values().next() else { return Vec::new() };
+    let amounts = record
+        .get("amount")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("stake record of {addr} has no `amount` array: {record}"));
+    amounts
+        .iter()
+        .map(|v| {
+            // `uint128` decodes to a decimal string, never a JSON number.
+            let raw = v
+                .as_str()
+                .unwrap_or_else(|| panic!("outcome amount of {addr} is not a string: {v}"));
+            raw.parse().unwrap_or_else(|e| panic!("parse outcome amount `{raw}` of {addr}: {e}"))
+        })
+        .collect()
+}
+
+/// One outcome's holding out of [`outcome_tokens`]. An outcome the note has
+/// never held is absent from the vector and reads zero.
+fn at(holdings: &[u128], outcome: u32) -> u128 {
+    holdings.get(outcome as usize).copied().unwrap_or(0)
+}
+
+/// A split mints tokens of *every* outcome, so both have to grow. The exact
+/// amounts are the contract's own basket arithmetic (`t = collateral / Q`,
+/// `t * u_k` per outcome, with the remainder refunded), which this test
+/// deliberately does not recompute — restating that formula here would assert
+/// the implementation against itself, while the exact money is already covered
+/// by the conservation check.
+fn assert_split_minted(role: &str, addr: &str, before: &[u128], after: &[u128]) {
+    for outcome in [WINNING_OUTCOME, LOSING_OUTCOME] {
+        assert!(
+            at(after, outcome) > at(before, outcome),
+            "{role} note {addr} holds no more outcome-{outcome} tokens than before the split \
+             ({} -> {}) — `splitFullSet` never took effect",
+            at(before, outcome),
+            at(after, outcome)
+        );
+    }
 }

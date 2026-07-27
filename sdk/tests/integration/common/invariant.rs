@@ -774,7 +774,14 @@ async fn pn_fields_opt(r: &ChainReader, pn: &str) -> anyhow::Result<Option<Value
     storage_fields_opt(r, pn, PN_ABI).await
 }
 
-async fn pn_balance_opt(r: &ChainReader, pn: &str, tt: u32) -> anyhow::Result<Option<u128>> {
+/// A note's free balance in `tt` — `PrivateNote._balance`, without the escrow
+/// held against its resting orders. `None` when the account is not on chain.
+///
+/// Public because it is one half of an equality the [`Phase::AfterResolve`]
+/// barrier asserts: a scenario has to read its baseline through this same
+/// function, or the baseline and the barrier are two implementations of "the
+/// note's balance" free to drift apart.
+pub async fn pn_balance_opt(r: &ChainReader, pn: &str, tt: u32) -> anyhow::Result<Option<u128>> {
     let Some(fields) = pn_fields_opt(r, pn).await? else { return Ok(None) };
     Ok(Some(field_uint_map(&fields, PN_BALANCE)?.get(&tt).copied().unwrap_or(0)))
 }
@@ -799,7 +806,11 @@ fn pn_holdings(fields: Option<&Value>, token_types: &[u32]) -> anyhow::Result<BT
         .collect())
 }
 
-async fn protocol_fee(r: &ChainReader, root_pn: &str, tt: u32) -> anyhow::Result<u128> {
+/// `RootPN._protocolFees[tt]` — where an order book's fees land once it
+/// drains. Public for the same reason as [`pn_balance_opt`]: it is the other
+/// half of an equality [`Phase::AfterResolve`] asserts, and the scenario's
+/// baseline has to come from here rather than from a second reader.
+pub async fn protocol_fee(r: &ChainReader, root_pn: &str, tt: u32) -> anyhow::Result<u128> {
     Ok(RootPn::new(r.ctx.clone(), dex_contract_params(root_pn))
         .get_protocol_fee(ParamsOfGetProtocolFee { token_type: tt })
         .await
