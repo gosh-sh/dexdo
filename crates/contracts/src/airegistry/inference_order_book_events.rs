@@ -28,9 +28,11 @@ pub enum InferenceOrderBookEvent {
     Filled = 1003,
     Executed = 1004,
     SubscriptionPlaced = 1005,
-    CycleForfeited = 1006,
-    ForfeitClaimed = 1007,
+    // 1006 (CycleForfeitedEmit) and 1007 (ForfeitClaimedEmit) remain reserved in
+    // `modifiers.sol`, but the contract no longer declares or emits the matching
+    // events, so there is nothing to decode into.
     InferenceOrderBookDeployed = 1008,
+    OrderCancelRejected = 1009,
 }
 
 impl TryFrom<String> for InferenceOrderBookEvent {
@@ -53,9 +55,8 @@ impl TryFrom<String> for InferenceOrderBookEvent {
             1003 => Ok(InferenceOrderBookEvent::Filled),
             1004 => Ok(InferenceOrderBookEvent::Executed),
             1005 => Ok(InferenceOrderBookEvent::SubscriptionPlaced),
-            1006 => Ok(InferenceOrderBookEvent::CycleForfeited),
-            1007 => Ok(InferenceOrderBookEvent::ForfeitClaimed),
             1008 => Ok(InferenceOrderBookEvent::InferenceOrderBookDeployed),
+            1009 => Ok(InferenceOrderBookEvent::OrderCancelRejected),
             _ => Err(KitError::new(
                 KitModule::Event,
                 KitErrorCode::UnknownEvent,
@@ -109,20 +110,15 @@ pub enum DecodedInferenceOrderBookEvent {
         kind: InferenceOrderBookEvent,
         data: SubscriptionPlacedData,
     },
-    CycleForfeited {
-        event: Event,
-        kind: InferenceOrderBookEvent,
-        data: CycleForfeitedData,
-    },
-    ForfeitClaimed {
-        event: Event,
-        kind: InferenceOrderBookEvent,
-        data: ForfeitClaimedData,
-    },
     InferenceOrderBookDeployed {
         event: Event,
         kind: InferenceOrderBookEvent,
         data: OrderBookDeployedData,
+    },
+    OrderCancelRejected {
+        event: Event,
+        kind: InferenceOrderBookEvent,
+        data: OrderCancelRejectedData,
     },
 }
 
@@ -162,25 +158,17 @@ impl FromEvent for DecodedInferenceOrderBookEvent {
                     data,
                 })
             }
-            InferenceOrderBookEvent::CycleForfeited => {
-                let data = decode_or_err::<CycleForfeitedData>(event, contract)?;
-                Ok(DecodedInferenceOrderBookEvent::CycleForfeited {
-                    event: event.clone(),
-                    kind,
-                    data,
-                })
-            }
-            InferenceOrderBookEvent::ForfeitClaimed => {
-                let data = decode_or_err::<ForfeitClaimedData>(event, contract)?;
-                Ok(DecodedInferenceOrderBookEvent::ForfeitClaimed {
-                    event: event.clone(),
-                    kind,
-                    data,
-                })
-            }
             InferenceOrderBookEvent::InferenceOrderBookDeployed => {
                 let data = decode_or_err::<OrderBookDeployedData>(event, contract)?;
                 Ok(DecodedInferenceOrderBookEvent::InferenceOrderBookDeployed {
+                    event: event.clone(),
+                    kind,
+                    data,
+                })
+            }
+            InferenceOrderBookEvent::OrderCancelRejected => {
+                let data = decode_or_err::<OrderCancelRejectedData>(event, contract)?;
+                Ok(DecodedInferenceOrderBookEvent::OrderCancelRejected {
                     event: event.clone(),
                     kind,
                     data,
@@ -303,27 +291,14 @@ pub struct SubscriptionPlacedData {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-/// Payload of `InferenceOrderBookEvent::CycleForfeited`.
-pub struct CycleForfeitedData {
+/// Payload of `InferenceOrderBookEvent::OrderCancelRejected`. Emitted by
+/// `_doCancel` so a cancel that changes nothing still has an owner-observable
+/// outcome: `reason` is 0 when no such order rests on the book (already filled
+/// or cancelled) and 1 when `note` is not the order's owner.
+pub struct OrderCancelRejectedData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub order_id: u128,
     #[serde(deserialize_with = "deserialize_u8")]
-    pub cycle: u8,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub forfeited: u128,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub funded_ticks: u128,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-/// Payload of `InferenceOrderBookEvent::ForfeitClaimed`.
-pub struct ForfeitClaimedData {
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub order_id: u128,
-    #[serde(deserialize_with = "deserialize_u8")]
-    pub cycle: u8,
-    pub seller_note: String,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub amount: u128,
+    pub reason: u8,
+    pub note: String,
 }

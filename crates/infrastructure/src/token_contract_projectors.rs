@@ -44,11 +44,9 @@ pub async fn project_token_contract_event(
         "ContractDestroyed" => apply_terminal_close(tx, node, "DESTROYED").await,
         "StreamDisputed" => apply_disputed(tx, node).await,
         "ProbeBurned" => apply_terminal_close(tx, node, "PROBE_BURNED").await,
-        // Probe commission / accept / withdrawal carry no deal-level state the
+        // Seller bond / probe accept / withdrawal carry no deal-level state the
         // SETTLEMENT read-model needs; the skeleton seed already recorded the deal.
-        "ProbeCommissionFunded" | "ProbeAccepted" | "ShellWithdrawn" => {
-            Ok(ProjectionOutcome::Applied)
-        }
+        "SellerBondFunded" | "ProbeAccepted" | "ShellWithdrawn" => Ok(ProjectionOutcome::Applied),
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }
