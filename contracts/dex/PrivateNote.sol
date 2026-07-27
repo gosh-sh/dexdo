@@ -27,7 +27,7 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.28";
+    string constant version = "4.0.29";
 
     /// @notice Canonical-deal derivation anchors (note-funded model). The TokenContract
     ///         and RootModel code hashes/depths are NOT pinned constants here — they are
@@ -523,6 +523,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         uint256 modelHash,
         uint128 maxPricePerTick,
         uint128 ticks,
+        uint8   flags,
         uint128 escrow,
         bool    autoRenew
     ) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
@@ -533,8 +534,9 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // §3.1.1: forward this note's pubkey (gateway auth, recorded in the deal).
         address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
         // bounce:true — escrow returns to this note if the book rejects the placement.
+        // `flags` carries the subscription's TEE requirement (0 or FLAG_TEE); the book validates it.
         InferenceOrderBook(orderBook).placeSubscription{value: 2 vmshell, flag: 1, bounce: true, currencies: ecc}(
-            maxPricePerTick, ticks, autoRenew, _ephemeralPubkey);
+            maxPricePerTick, ticks, flags, autoRenew, _ephemeralPubkey);
     }
 
     /// @notice Cancel one resting inference order owned by this note (refunds any

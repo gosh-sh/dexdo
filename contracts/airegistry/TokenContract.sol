@@ -60,7 +60,7 @@ import "./InferenceOrderBook.sol";
 ///         4c.`reclaimOnTimeout()` — seller no-show after `STREAM_TIMEOUT`.
 ///         5. `withdrawShell`/`destroy` — seller pulls finalized SHELL (§3.5).
 contract TokenContract is AiRegistryModifiers {
-    string constant version = "4.0.28";
+    string constant version = "4.0.29";
 
     // Canonical AI SuperRoot account id (workchain 0) — same anchor IOB/PN pin. Used ONLY as the
     // fixed sink for `cleanupUnopened`'s residual-native sweep (so a permissionless caller cannot
@@ -76,7 +76,7 @@ contract TokenContract is AiRegistryModifiers {
     // book hash is authoritative — the TC needs no RootPN round-trip. The note does
     // NOT pin the TC code (RootPN bakes it into the note at deploy), so this pin is
     // one-way (TC->note) and the build stays cycle-free. Re-pin when PrivateNote is rebuilt.
-    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0x87c06324877d417343a4639db1be34e00b388d4bb23dd56df271c5057c9e4d8b;
+    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0x46239c6adea6cf767ec8e7ebcccc804bcb18370c000d2418e985c27510d8175b;
     uint16  constant PRIVATE_NOTE_CODE_DEPTH = 20;
 
     // Native value attached to THIS contract's cross-dapp messages (register / stream-lock /
@@ -292,6 +292,23 @@ contract TokenContract is AiRegistryModifiers {
         if (rebate > 0) { _finalizedOwed += rebate; }             // seller withdraws it
         _burnShell(netBurn);
         _feeAccrued = 0;
+        // Every streaming close (stop / dispute-resolve / abandon / reclaim-served) routes
+        // through here after `_ticksFinalized` is final, so this is the single point that
+        // publishes the deal's finalized volume to the reference-price median.
+        _reportFinalized();
+    }
+
+    /// @notice Publish this deal's CUMULATIVE finalized-tick count to the canonical
+    ///         InferenceOrderBook, which records only the new delta into the reference-price
+    ///         VWAP/median — so a match that is later refunded (never served) contributes no
+    ///         volume, killing the reserved-volume oracle manipulation. Cumulative + book-side
+    ///         delta is exactly-once, so extra calls are harmless; a deal that finalized nothing
+    ///         reports nothing. bounce:false — best-effort, never blocks the close it rides on.
+    function _reportFinalized() private {
+        if (_ticksFinalized == 0 || _iobHash == 0) { return; }
+        address orderBook = DexLib.computeInferenceOrderBookAddressFromHash(_iobHash, _iobDepth, _modelHash);
+        InferenceOrderBook(orderBook).reportFinalized{value: 1 vmshell, flag: 1, bounce: false}(
+            _sellerPubkey, _nonce, _pricePerTick, _ticksFinalized);
     }
 
     // ========================================================

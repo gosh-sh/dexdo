@@ -24,12 +24,12 @@ import "./InferenceOrderBook.sol";
 contract ModelRegistry {
 
     /// @notice Contract semantic version (kept in lockstep with the airegistry stack).
-    string constant version = "4.0.28";
+    string constant version = "4.0.29";
 
     // ── pinned InferenceOrderBook code (cascade-updated on version bump) ──
     /// @dev InferenceOrderBook 4.0.20 (tickSize=1M) code hash + depth. One model ⇒ one book.
-    uint256 constant IOB_CODE_HASH  = 0x16b01ec421b65902e7224c2807ba087dec172801adc0203cdbc47c317841b36f;
-    uint16  constant IOB_CODE_DEPTH = 34;
+    uint256 constant IOB_CODE_HASH  = 0x4d2387031620c01bdc0349c1dbf06c600e3cf4f137045f250d2d3d1b5d7031e6;
+    uint16  constant IOB_CODE_DEPTH = 35;
 
     /// @notice Self-top-up floor (mirrors the airegistry stack).
     uint64 constant MIN_BALANCE = 100 vmshell;
@@ -38,6 +38,17 @@ contract ModelRegistry {
     uint16 constant ERR_NOT_OWNER  = 100; // caller is not the owner key
     uint16 constant ERR_NO_PUBKEY  = 101; // deployed without a pubkey
     uint16 constant ERR_NOT_MODEL  = 102; // model is not registered
+    uint16 constant ERR_NAME_TOO_LONG = 103; // model name > 127 bytes (see MODEL_NAME_MAX)
+
+    // A canonical model name MUST fit one cell (<=127 bytes), the same bound the
+    // InferenceOrderBook / TokenContract constructors enforce. The book address is
+    // derived from `sha256(name)`, and `sha256`/SHA256U hashes only the FIRST cell —
+    // so a longer name is truncated to its first 127 bytes for the id while its entry
+    // key here is `tvm.hash(bytes(name))` over the FULL name. Without this bound two
+    // distinct long names sharing the first 127 bytes would be two registry entries
+    // but resolve to ONE order book (merged liquidity/oracle). Enforcing the bound on
+    // every write keeps both hashes injective over the name space → one entry ↔ one book.
+    uint16 constant MODEL_NAME_MAX = 127;
 
     /// @notice nameHash => registered.  nameHash = tvm.hash(bytes(name)).
     mapping(uint256 => bool) _models;
@@ -90,6 +101,7 @@ contract ModelRegistry {
     function setModel(string canonicalName) public onlyOwner {
         ensureBalance();
         if (!canonicalName.empty()) {
+            require(canonicalName.byteLength() <= MODEL_NAME_MAX, ERR_NAME_TOO_LONG);
             _models[_key(canonicalName)] = true;
         }
     }
@@ -99,7 +111,9 @@ contract ModelRegistry {
     function setModels(string[] names) public onlyOwner {
         ensureBalance();
         for (uint32 i = 0; i < names.length; i++) {
-            if (!names[i].empty()) {
+            // Skip empty AND over-long (>127) names rather than revert the whole batch —
+            // an over-long name would alias another entry's order book (see MODEL_NAME_MAX).
+            if (!names[i].empty() && names[i].byteLength() <= MODEL_NAME_MAX) {
                 _models[_key(names[i])] = true;
             }
         }

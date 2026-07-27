@@ -56,12 +56,12 @@ interface IPrivateNote {
 ///         quote/base + collateral, event-resolution shutdown, and PN callbacks
 ///         (inference order entry is fire-and-forget; the note tracks via getters).
 contract InferenceOrderBook is AiRegistryModifiers {
-    string constant version = "4.0.28";
+    string constant version = "4.0.29";
 
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x87c06324877d417343a4639db1be34e00b388d4bb23dd56df271c5057c9e4d8b;
+    uint256 constant NOTE_CODE_HASH  = 0x46239c6adea6cf767ec8e7ebcccc804bcb18370c000d2418e985c27510d8175b;
     uint16  constant NOTE_CODE_DEPTH = 20;
 
     // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
@@ -69,15 +69,15 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
     // contract that forwards SHELL on a fill, so the check must live HERE, not only in
     // the note: placeSellOffer is public and a direct call would bypass a note check).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x4f752accc67c087410acc7079fb9ba6f295b303c607f8487089252c6e3862a23;
-    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 10;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x5e37dd4f51a705100dc39a9e8a1d83e270c793b9f132a3c31e8c7f04aa809ac9;
+    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 12;
 
     // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
     // (its `_rootModelAddress` static is the seller's RootModel, NOT address(0)). To verify a
     // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
     // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
     // Re-pin whenever airegistry/RootModel is recompiled.
-    uint256 constant ROOT_MODEL_CODE_HASH  = 0x1fbafb5939b40a2d69584f5023f8a0339e3256c224e3e5c87104e9c0a22dd4e8;
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0x87e622b45a013a929626cc8c8d19a835c5fae55a660bc521ab8e34797ed38a5d;
     uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
 
     // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its
@@ -104,15 +104,30 @@ contract InferenceOrderBook is AiRegistryModifiers {
     uint16 constant ERR_NAME_TOO_LONG      = 343;
     uint16 constant ERR_BAD_MODEL_NAME     = 344;
 
-    // Order-type flags (spec §8 / dex parity).
+    // Order-type flags (spec §8 / dex parity): per-order execution instructions, not
+    // required to be symmetric between the two sides of a match (a taker IOC vs a
+    // resting maker, etc.).
     uint8 constant FLAG_IOC       = 0x01;
     uint8 constant FLAG_FOK       = 0x02;
     uint8 constant FLAG_MARKET    = 0x04;
     uint8 constant FLAG_POST_ONLY = 0x08;
     uint8 constant TAKER_FLAGS    = 0x07;
-    // Union of the four supported flag bits; any bit outside this mask is rejected at
-    // the order boundary so an unknown or mistyped bit can never rest or fill.
-    uint8 constant SUPPORTED_FLAGS = 0x0F;
+    // Capability flags: stable properties a buyer and a seller must AGREE on to match
+    // (a buyer requiring the capability only fills against a maker that offers it, and
+    // vice versa). Matched by the `CAP_FLAGS_MASK` slice, never by order-type bits.
+    // FLAG_TEE = the seller runs its inference inside a Trusted Execution Environment
+    // (self-asserted; the contract stores the claim, it cannot verify a real TEE).
+    // FLAG_TEE is a capability/requirement bit, ASYMMETRIC by order side: on a SELL it means
+    // "seller offers a TEE endpoint", on a BUY it means "buyer requires a TEE endpoint". It is
+    // orthogonal to the order-type bits (kept OUT of TAKER_FLAGS) and may combine with any of
+    // them. Self-asserted — the book compares only the declared bits, never off-chain evidence.
+    // Compatibility (see `_teeCompatible`): a BUY that requires TEE fills only a SELL that
+    // offers it; every other combination is compatible. TEE attestation itself is ordinary
+    // endpoint verification off-chain; a mismatch is handled by the existing dispute flow.
+    uint8 constant FLAG_TEE       = 0x10;
+    // Union of every supported flag bit; any bit outside this mask is rejected at the
+    // order boundary so an unknown or mistyped bit can never rest or fill.
+    uint8 constant SUPPORTED_FLAGS = 0x1F;
 
     // Gas / walk caps.
     uint8  constant MAX_MATCHES_PER_CALL = 30;
@@ -220,6 +235,11 @@ contract InferenceOrderBook is AiRegistryModifiers {
     struct DayData { uint64 day; uint256 priceVolSum; uint256 volSum; }
     mapping(uint8 => DayData) _daily;
     uint8 _curSlot;
+    // Per-TC cumulative finalized-tick high-water mark. `reportFinalized` records only the
+    // NEW delta into the reference-price stats, so a re-sent / bounced report never
+    // double-counts (exactly-once, same shape as the OEL count) and only irreversibly
+    // served ticks ever move the median.
+    mapping(address => uint128) _finalizedSeen;
 
     // ── §8 subscription state (keyed by resting BUY order id) ──
     struct Sub {
@@ -234,13 +254,13 @@ contract InferenceOrderBook is AiRegistryModifiers {
 
     address _deployerNote;
 
-    event InferenceOrderPlaced(uint128 orderId, bool isBuy, uint256 price, uint128 ticks, address note, address tokenContract, uint64 deadline);
+    event InferenceOrderPlaced(uint128 orderId, bool isBuy, uint256 price, uint128 ticks, address note, address tokenContract, uint64 deadline, uint8 flags);
     event InferenceOrderCancelled(uint128 orderId, uint128 refunded, address note);
     event InferenceOrderCancelRejected(uint128 orderId, uint8 reason, address note);
     event InferenceFilled(uint128 makerId, uint128 takerId, uint128 ticks, uint256 clearingPrice, address sellerTC, address buyerNote, address sellerNote);
     event InferenceExecuted(uint128 ticks, uint256 clearingPrice, uint128 cost);
     event InferenceRefunded(address note, uint128 amount);
-    event InferenceSubscriptionPlaced(uint128 orderId, address buyerNote, uint128 maxPrice, uint128 ticks, uint128 cycleBudget, bool autoRenew);
+    event InferenceSubscriptionPlaced(uint128 orderId, address buyerNote, uint128 maxPrice, uint128 ticks, uint128 cycleBudget, bool autoRenew, uint8 flags);
     /// @notice Emitted once at book deploy — lets an indexer map `modelHash` → the verified model name
     ///         (and which note opened the market). `modelName` is the genuine sha256 preimage.
     event InferenceOrderBookDeployed(address note, uint256 modelHash, string modelName);
@@ -337,6 +357,18 @@ contract InferenceOrderBook is AiRegistryModifiers {
     }
     function _unit(uint256 p) private pure returns (uint256) { return p + _tickFee(p); }
 
+    /// @notice Canonical TEE compatibility, decided from the actual BUY/SELL flags regardless
+    ///         of which side is maker or taker: `compatible = BUY has no FLAG_TEE || SELL has
+    ///         FLAG_TEE`. A TEE-requiring BUY fills only a TEE SELL; a non-TEE BUY fills either
+    ///         SELL; a non-TEE SELL must not consume a TEE-required BUY; a TEE SELL serves both.
+    ///         Applied everywhere executable liquidity is inspected so `_match`, `_fokFullyFillable`
+    ///         and `_executableCrosses` make identical decisions.
+    function _teeCompatible(bool takerIsBuy, uint8 takerFlags, uint8 makerFlags) private pure returns (bool) {
+        uint8 buyFlags  = takerIsBuy ? takerFlags : makerFlags;
+        uint8 sellFlags = takerIsBuy ? makerFlags : takerFlags;
+        return (buyFlags & FLAG_TEE) == 0 || (sellFlags & FLAG_TEE) != 0;
+    }
+
     // ========================================================
     // Level navigation
     // ========================================================
@@ -417,7 +449,12 @@ contract InferenceOrderBook is AiRegistryModifiers {
         _executedNotional += uint128(uint256(trade) * clearing);
         _executedTicks    += trade;
         _matchSeq += 1;
-        _recordTrade(uint128(clearing), trade);
+        // Reference-price volume is NOT recorded here: a match only reserves ticks that
+        // can still be unwound (funded-but-never-opened refunds the buyer in full via the
+        // TC's cleanupUnopened), so counting it would let reserved-then-refunded volume
+        // move the median for ~gas. Volume is recorded only from the TC's authenticated
+        // cumulative finalized-tick reports (`reportFinalized`), i.e. ticks actually served
+        // with payment + platform fee already irreversible.
         emit InferenceFilled{dest: address.makeAddrExtern(MatchedEmit, bitCntAddress)}(makerId, takerId, trade, clearing, sellerTC, buyerNote, sellerNote);
         emit InferenceExecuted{dest: address.makeAddrExtern(ExecutedEmit, bitCntAddress)}(trade, clearing, cost);
 
@@ -442,7 +479,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         `_match` could not settle in one atomic tx) or a walk past MAX_PRECHECK_LEVELS
     ///         returns false, so a FOK that cannot complete in a single transaction is
     ///         rejected rather than allowed to partially fill.
-    function _fokFullyFillable(bool takerIsBuy, uint256 takerPrice, bool isMarket, uint128 need, uint128 escrow) private view returns (bool) {
+    function _fokFullyFillable(bool takerIsBuy, uint256 takerPrice, bool isMarket, uint128 need, uint128 escrow, uint8 takerFlags) private view returns (bool) {
         uint128 remaining = need;
         uint128 leftEscrow = escrow;
         uint8 matches = 0;
@@ -462,6 +499,10 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 matches++;
                 Order mk = _orders[cur];
                 uint128 nextOrd = mk.nextAtPrice;
+                // TEE-incompatible: `_match` skips this maker, so the FOK simulation must too —
+                // otherwise mixed TEE/non-TEE volume could pass FOK then fail/partial for lack
+                // of compatible volume.
+                if (!_teeCompatible(takerIsBuy, takerFlags, mk.flags)) { cur = nextOrd; continue; }
                 bool makerSub = (!takerIsBuy) && _subs[cur].exists;
 
                 // Expired plain GTD bid (taker SELL side): `_match` refunds+removes it → 0 fill.
@@ -524,7 +565,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         Bounded by MAX_PRECHECK_LEVELS; fail-open past the budget so it never over-rejects.
     ///         POST_ONLY BUY tests the SELL side (no deadlines/subscriptions) → result unchanged;
     ///         this refines POST_ONLY SELL against the bid side.
-    function _executableCrosses(bool takerIsBuy, uint256 takerPrice) private view returns (bool) {
+    function _executableCrosses(bool takerIsBuy, uint256 takerPrice, uint8 takerFlags) private view returns (bool) {
         uint8 walked = 0;
         optional(uint256, PriceLevel) it = _bestOpposite(takerIsBuy);
         while (it.hasValue()) {
@@ -533,6 +574,9 @@ contract InferenceOrderBook is AiRegistryModifiers {
             uint128 cur = _levels[!takerIsBuy][lp].firstOrderId;
             while (cur != 0) {
                 Order mk = _orders[cur];
+                // TEE-incompatible: `_match` never settles this pair, so POST_ONLY does not cross
+                // it — an incompatible best quote must not reject an otherwise-valid POST_ONLY.
+                if (!_teeCompatible(takerIsBuy, takerFlags, mk.flags)) { cur = mk.nextAtPrice; continue; }
                 bool makerSub = (!takerIsBuy) && _subs[cur].exists;
                 bool executable = true;
                 if (!takerIsBuy && !makerSub && _isExpiredGtdBid(mk.deadline, false)) { executable = false; }
@@ -556,7 +600,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     function _match(
         uint128 takerId, bool takerIsBuy, uint256 takerPrice, bool isMarket,
         address takerNote, address takerTC, uint256 takerBuyerPubkey, uint128 amount, uint128 buyEscrow,
-        uint128 resumeFrom
+        uint128 resumeFrom, uint8 takerFlags
     ) private returns (uint128 remaining, uint128 leftoverEscrow, bool capped, uint128 nextResume) {
         remaining = amount;
         leftoverEscrow = buyEscrow;
@@ -588,6 +632,13 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 if (matches >= MAX_MATCHES_PER_CALL) { return (remaining, leftoverEscrow, true, cur); }
                 Order mk = _orders[cur];
                 uint128 nextOrd = mk.nextAtPrice;
+                // TEE compatibility filter: a TEE-required BUY only fills a TEE SELL (and a
+                // non-TEE SELL must not consume a TEE-required BUY); every other combination is
+                // compatible. An incompatible maker is SKIPPED — it stays resting untouched in
+                // its queue position for a counterparty that can use it — counted toward the
+                // per-tx budget so the walk stays bounded, and mirrored in _fokFullyFillable /
+                // _executableCrosses so the prechecks make the same decisions.
+                if (!_teeCompatible(takerIsBuy, takerFlags, mk.flags)) { matches++; cur = nextOrd; continue; }
                 // Clearing = the SELLER's ask, both directions (Variant 2):
                 //  - taker BUY: lp = the maker SELL's ask (already the seller's price);
                 //  - taker SELL: takerPrice = the taker SELL's ask (_pricePerTick), NOT the
@@ -601,7 +652,20 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 bool makerSub = (!takerIsBuy) && _subs[cur].exists;
                 if (makerSub) {
                     _subTouch(cur);
-                    if (!_subs[cur].exists) { cur = nextOrd; continue; }   // expired
+                    if (!_subs[cur].exists) {
+                        // Expired subscription cleaned up (up to SUB_CYCLES cycle refunds +
+                        // the expire refund = <= SUB_CYCLES+1 output messages inside _subTouch).
+                        // Charge that whole cost to the per-tx budget — otherwise sweeping many
+                        // expired subs at one level (they persist until a crossing SELL touches
+                        // them: there is no auto-removal) would emit unbounded messages in one tx,
+                        // blow the action/gas ceiling, revert with no progress, and a poison head
+                        // would freeze the queue. Charging it bounds total messages to <= MAX and
+                        // yields `capped` with the resume cursor, so the sweep converges over
+                        // several txs, committing the removals it already did each time.
+                        matches += SUB_CYCLES + 1;
+                        cur = nextOrd;
+                        continue;
+                    }
                     mk = _orders[cur];
                     nextOrd = mk.nextAtPrice;
                 }
@@ -833,14 +897,16 @@ contract InferenceOrderBook is AiRegistryModifiers {
     }
 
     // Subscription place is a book insertion → gated by QUEUE_PLACE_LIMIT like a normal place.
-    // `autoRenew` rides in `flags` (unused for subscription entries) to avoid widening the entry.
-    function _enqueueSubPlace(address owner, uint256 buyerPubkey, uint256 maxPrice, uint128 ticks, uint128 escrow, bool autoRenew) private {
+    // `flags` carries the real order flags (0 or FLAG_TEE) so the resting subscription keeps its
+    // TEE requirement for its whole life; `autoRenew` rides in `deadline` (unused for subscription
+    // entries) so it can no longer collide with the order flags.
+    function _enqueueSubPlace(address owner, uint256 buyerPubkey, uint8 flags, uint256 maxPrice, uint128 ticks, uint128 escrow, bool autoRenew) private {
         require(_queueSize < QUEUE_PLACE_LIMIT, ERR_QUEUE_FULL);
         uint8 slot = _allocSlot();
         _queue[slot] = QueueEntry({
             entryType: QENTRY_SUB_PLACE, owner: owner, buyerPubkey: buyerPubkey, isBuy: true,
-            flags: autoRenew ? uint8(1) : uint8(0), price: maxPrice,
-            amount: ticks, escrow: escrow, tokenContract: address(0), deadline: 0,
+            flags: flags, price: maxPrice,
+            amount: ticks, escrow: escrow, tokenContract: address(0), deadline: autoRenew ? uint64(1) : uint64(0),
             targetOrderId: 0, contOrderId: 0, contRemaining: 0, contLeftover: 0, contScanOrder: 0
         });
     }
@@ -896,6 +962,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         bool firstRun = (e.contOrderId == 0);
         uint128 orderId = firstRun ? _nextOrderId++ : e.contOrderId;
         bool isMarket = (e.flags & FLAG_MARKET) != 0;
+        uint8 takerFlags = e.flags;   // full taker flags — `_teeCompatible` reads the TEE bit by side
 
         if (firstRun) {
             // One resting SELL per deal TokenContract is now enforced by the TC
@@ -911,7 +978,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
             // POST_ONLY: reject only if it would cross a GENUINELY executable maker. Testing the
             // raw best level would falsely reject when that level is all expired GTD / cycle-
             // exhausted subscriptions; `_executableCrosses` skips those, mirroring `_match`.
-            if ((e.flags & FLAG_POST_ONLY) != 0 && _executableCrosses(e.isBuy, e.price)) {
+            if ((e.flags & FLAG_POST_ONLY) != 0 && _executableCrosses(e.isBuy, e.price, takerFlags)) {
                 if (e.isBuy && e.escrow > 0) { _payShell(e.owner, e.escrow); }
                 else if (!e.isBuy && e.tokenContract != address(0)) {
                     // SELL rejected before resting -> notify the TC (onSellClosed frees
@@ -921,7 +988,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 return false;
             }
             // FOK: precise all-or-nothing pre-check (per-order simulation of `_match`).
-            if ((e.flags & FLAG_FOK) != 0 && !_fokFullyFillable(e.isBuy, e.price, isMarket, e.amount, e.escrow)) {
+            if ((e.flags & FLAG_FOK) != 0 && !_fokFullyFillable(e.isBuy, e.price, isMarket, e.amount, e.escrow, takerFlags)) {
                 if (e.isBuy && e.escrow > 0) { _payShell(e.owner, e.escrow); }
                 else if (!e.isBuy && e.tokenContract != address(0)) {
                     ITokenContractDeal(e.tokenContract).onSellClosed{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}();  // free the TC's offer latch
@@ -934,7 +1001,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
             // InferenceOrderPlaced / onInferencePlaced (else clients would track an order that
             // never rested).
             emit InferenceOrderPlaced{dest: address.makeAddrExtern(OfferPlacedEmit, bitCntAddress)}(
-                orderId, e.isBuy, e.price, e.amount, e.owner, e.tokenContract, e.deadline);
+                orderId, e.isBuy, e.price, e.amount, e.owner, e.tokenContract, e.deadline, e.flags);
             IPrivateNote(e.owner).onInferencePlaced{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(
                 _modelHash, e.tokenContract, orderId, e.isBuy, e.price, e.amount);
         }
@@ -943,7 +1010,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         uint128 inEscrow   = firstRun ? e.escrow  : e.contLeftover;
         uint128 resumeFrom = firstRun ? 0 : e.contScanOrder;
         (uint128 remaining, uint128 leftover, bool capped, uint128 nextResume) =
-            _match(orderId, e.isBuy, e.price, isMarket, e.owner, e.tokenContract, e.buyerPubkey, inAmount, inEscrow, resumeFrom);
+            _match(orderId, e.isBuy, e.price, isMarket, e.owner, e.tokenContract, e.buyerPubkey, inAmount, inEscrow, resumeFrom, takerFlags);
 
         if (capped) {
             // Taker crossed > one tx of liquidity → persist cursor + scan position, resume
@@ -1097,8 +1164,11 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         buyer (no forfeit to sellers, §8 / PR627).
     /// @dev Rests as a standing bid (filled by incoming sells); does not take on
     ///      placement. Renewal = client re-places (§8.2); `autoRenew` is a hint.
-    function placeSubscription(uint128 maxPricePerTick, uint128 ticks, bool autoRenew, uint256 buyerPubkey) public {
+    function placeSubscription(uint128 maxPricePerTick, uint128 ticks, uint8 flags, bool autoRenew, uint256 buyerPubkey) public {
         ensureBalance();
+        // A semantic resting subscription accepts ONLY the TEE requirement bit — IOC/FOK/MARKET/
+        // POST_ONLY have no meaning for a standing multi-cycle bid, and any unknown bit is rejected.
+        require(flags == 0 || flags == FLAG_TEE, ERR_BAD_FLAGS);
         // A deal serves >= 2 ticks (probe + >=1 stream); a 1-tick subscription can never
         // fund a deal (fundFromOrderBook rejects < 2), so it is rejected up front — the
         // same floor placeBuyOrder enforces, and it keeps unfillable bids out of the book.
@@ -1116,7 +1186,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         tvm.accept();
         // Serialize behind the queue head (QENTRY_SUB_PLACE): the actual insertion runs in
         // _doPlaceSubscription when this entry reaches the head, never mid-continuation.
-        _enqueueSubPlace(msg.sender, buyerPubkey, maxPricePerTick, ticks, escrow, autoRenew);
+        _enqueueSubPlace(msg.sender, buyerPubkey, flags, maxPricePerTick, ticks, escrow, autoRenew);
         _processHeadCore();
     }
 
@@ -1126,19 +1196,19 @@ contract InferenceOrderBook is AiRegistryModifiers {
     function _doPlaceSubscription(QueueEntry e) private {
         uint128 orderId = _nextOrderId++;
         uint128 cycleBudget = e.escrow / uint128(SUB_CYCLES);
-        bool autoRenew = e.flags != 0;
+        bool autoRenew = e.deadline != 0;   // autoRenew rides in the entry's deadline field (see _enqueueSubPlace)
         _insertIntoBook(orderId, Order({
             note: e.owner, buyerPubkey: e.buyerPubkey, tokenContract: address(0), price: e.price,
             amount: e.amount, initialAmount: e.amount, filledAccum: 0,
             escrow: e.escrow, deadline: uint64(block.timestamp) + SUB_PERIOD, ts: uint64(block.timestamp),
-            flags: 0, isBuy: true,
+            flags: e.flags, isBuy: true,   // carry the subscription's TEE requirement for its whole life
             nextAtPrice: 0, prevAtPrice: 0, nextInOwner: 0, prevInOwner: 0
         }));
         _subs[orderId] = Sub({
             periodStart: uint64(block.timestamp), curCycle: 0,
             cycleBudget: cycleBudget, cycleSpent: 0, autoRenew: autoRenew, exists: true
         });
-        emit InferenceSubscriptionPlaced{dest: address.makeAddrExtern(SubscriptionPlacedEmit, bitCntAddress)}(orderId, e.owner, uint128(e.price), e.amount, cycleBudget, autoRenew);
+        emit InferenceSubscriptionPlaced{dest: address.makeAddrExtern(SubscriptionPlacedEmit, bitCntAddress)}(orderId, e.owner, uint128(e.price), e.amount, cycleBudget, autoRenew, e.flags);
     }
 
     function _subTouch(uint128 orderId) private {
@@ -1196,6 +1266,24 @@ contract InferenceOrderBook is AiRegistryModifiers {
         }
         _daily[_curSlot].priceVolSum += uint256(price) * uint256(ticks);
         _daily[_curSlot].volSum      += uint256(ticks);
+    }
+
+    /// @notice The canonical deal TokenContract reports its CUMULATIVE finalized-tick count
+    ///         (ticks served with payment + platform fee already irreversible). Only the new
+    ///         delta over what this TC has reported before is recorded into the reference-price
+    ///         VWAP/median, so reserved-but-refundable matches never move it and a re-sent /
+    ///         bounced report never double-counts. Auth = the caller IS the canonical TC for
+    ///         `(sellerPubkey, nonce)` (same derivation `placeSellOffer` / `fundFromOrderBook`
+    ///         bind), so no other account can inject reference-price volume. The TC forwards
+    ///         bounce:false, so a stale/foreign caller is accept-then-noop, never a revert.
+    function reportFinalized(uint256 sellerPubkey, uint64 nonce, uint128 pricePerTick, uint128 cumulativeFinalized) public {
+        ensureBalance();
+        if (msg.sender != _tokenContractAddr(sellerPubkey, nonce)) { return; }
+        tvm.accept();
+        uint128 seen = _finalizedSeen[msg.sender];
+        if (cumulativeFinalized <= seen) { return; }          // monotonic: never below the high-water mark
+        _finalizedSeen[msg.sender] = cumulativeFinalized;
+        _recordTrade(pricePerTick, cumulativeFinalized - seen);
     }
 
     function _weeklyMedian() private view returns (uint256) {
