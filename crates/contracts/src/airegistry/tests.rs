@@ -290,6 +290,7 @@ fn inference_order_book_params_match_abi() {
         serialized_keys(&ParamsOfPlaceSubscription {
             max_price_per_tick: 1,
             ticks: 1,
+            flags: 0,
             auto_renew: true,
             buyer_pubkey: "1".into(),
         }),

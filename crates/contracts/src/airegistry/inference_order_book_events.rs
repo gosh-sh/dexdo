@@ -219,6 +219,12 @@ pub struct OrderPlacedData {
     pub token_contract: String,
     #[serde(deserialize_with = "deserialize_u64")]
     pub deadline: u64,
+    /// Flag mask the placement carried (`IOC`/`FOK`/`MARKET`/`POST_ONLY`). The
+    /// book emits this for EVERY placement, including pure-taker and rejected
+    /// POST_ONLY orders that never rest, so it is what tells a resting order
+    /// from one that was never going to rest.
+    #[serde(deserialize_with = "deserialize_u8")]
+    pub flags: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -287,6 +293,9 @@ pub struct SubscriptionPlacedData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub cycle_budget: u128,
     pub auto_renew: bool,
+    /// Flag mask the subscription was placed with; see [`OrderPlacedData::flags`].
+    #[serde(deserialize_with = "deserialize_u8")]
+    pub flags: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -232,6 +232,8 @@ async fn inference_subscription_place_and_read() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 8,
+            // Rests as a standing bid — no taker/post-only bits.
+            flags: 0,
             escrow: 10_000_000_000,
             auto_renew: true,
         },

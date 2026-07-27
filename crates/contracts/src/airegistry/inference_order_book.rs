@@ -110,6 +110,9 @@ pub struct ParamsOfPlaceBuyOrder {
 pub struct ParamsOfPlaceSubscription {
     pub max_price_per_tick: u128,
     pub ticks: u128,
+    /// Same flag mask a limit buy takes (`IOC`/`FOK`/`MARKET`/`POST_ONLY`); a
+    /// subscription rests as a standing bid, so 0 is the ordinary value.
+    pub flags: u8,
     pub auto_renew: bool,
     /// `uint256`, decimal or hex string.
     pub buyer_pubkey: String,

@@ -496,6 +496,9 @@ pub struct ParamsOfPlaceInferenceSubscription {
     pub model_hash: String,
     pub max_price_per_tick: u128,
     pub ticks: u128,
+    /// Same flag mask a limit buy takes (`IOC`/`FOK`/`MARKET`/`POST_ONLY`); a
+    /// subscription rests as a standing bid, so 0 is the ordinary value.
+    pub flags: u8,
     pub escrow: u128,
     pub auto_renew: bool,
 }
@@ -1472,6 +1475,7 @@ mod inference_abi_tests {
                 model_hash: "1".into(),
                 max_price_per_tick: 1,
                 ticks: 1,
+                flags: 0,
                 escrow: 1,
                 auto_renew: true,
             }),
