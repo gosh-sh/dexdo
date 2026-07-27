@@ -58,7 +58,7 @@ reclaim`.
 | --- | --- | --- | --- |
 | `fund` | `fund` | — | Buyer pays the deposit straight to the deal. Argument-less: the buyer is bound beforehand via `authorizeDirectFund` and the deposit rides on the message value. |
 | `fund_from_order_book` | `fundFromOrderBook` | `ParamsOfFundFromOrderBook` | Funded from a matched order-book buy; sender must be the order book. |
-| `fund_probe_commission` | `fundProbeCommission` | — | Seller posts the probe commission (ECC[2] SHELL). |
+| `fund_seller_bond` | `fundSellerBond` | — | Seller posts the mirror bond of `2 * pricePerTick` (ECC[2] SHELL). |
 
 **Streaming lifecycle**
 
@@ -80,7 +80,8 @@ reclaim`.
 | Method | Contract method | Returns | Description |
 | --- | --- | --- | --- |
 | `get_state` | `getState` | `funded, opened, probe_accepted, disputed, deposit, prepaid, frozen, finalized_owed, prepaid_time, last_advance, dispute_time` | Full deal state machine + balances. |
-| `get_probe` | `getProbe` | `probe_funded, probe_locked, probe_commission` | Probe-tick funding state. |
+| `get_seller_bond` | `getSellerBond` | `bond_funded, bond_held, bond_required` | Seller mirror-bond state; `bond_required` is `2 * price_per_tick`. |
+| `get_offer` | `getOffer` | `offer_posted, closing` | Whether a sell offer is live on the book and whether the deal is closing. |
 | `get_config` | `getConfig` | `platform_fee_bps, settle_window, stream_timeout, dispute_window` | Protocol-wide constants (spec §9.1). |
 | `get_fees` | `getFees` | `fee_accrued, ticks_finalized, ever_disputed, rebate_max_bps, rebate_slope_bps` | Accrued platform fees + rebate parameters. |
 | `get_deal` | `getDeal` | `tick_size, price_per_tick, max_ticks` | Deal economics. |
@@ -105,10 +106,9 @@ BUY orders / subscriptions paid in SHELL escrow (spec §2 + §8).
 | `place_sell_offer` | `placeSellOffer` | `ParamsOfPlaceSellOffer { price_per_tick, max_ticks, flags, seller_pubkey, nonce, owner_note }` | Post a SELL offer; the book recomputes the canonical `TokenContract` address from `seller_pubkey + nonce` and requires the **caller** to be it, so the deal address is never taken from the message. Sender is the seller's `TokenContract`, not the note; `owner_note` records the note a fill settles back to. |
 | `place_buy_order` | `placeBuyOrder` | `ParamsOfPlaceBuyOrder { max_price_per_tick, ticks, flags, deadline, buyer_pubkey }` | Place a BUY order; sender (buyer note) forwards the SHELL escrow. `deadline = 0` is good-till-cancel. |
 | `place_subscription` | `placeSubscription` | `ParamsOfPlaceSubscription { max_price_per_tick, ticks, auto_renew, buyer_pubkey }` | Place a subscription (weekly semantic order, spec §8). |
-| `poke_subscription` | `pokeSubscription` | `ParamsOfOrderId { order_id }` | Roll a subscription onto its next cycle / forfeit the closing cycle's unspent budget. |
+| `poke_subscription` | `pokeSubscription` | `ParamsOfOrderId { order_id }` | Roll a subscription onto its next cycle; the closing cycle's unspent budget refunds to the buyer. |
 | `cancel_order` | `cancelOrder` | `ParamsOfOrderId { order_id }` | Cancel one resting order and refund its remaining escrow. |
 | `cancel_all_orders` | `cancelAllOrders` | — | Cancel every resting order owned by the caller. |
-| `claim_forfeit` | `claimForfeit` | `ParamsOfForfeit { order_id, cycle }` | Seller claims a share of a forfeited subscription cycle. |
 | `request_weekly_median` | `requestWeeklyMedian` | `ParamsOfRequestWeeklyMedian { event_id, oracle_list_hash, token_type }` | Ask the engine to refresh the model's reference price. |
 
 **Getters**
@@ -121,7 +121,6 @@ BUY orders / subscriptions paid in SHELL escrow (spec §2 + §8).
 | `get_stats` | `getStats` | `next_order_id, order_count, executed_notional, executed_ticks` | Book-wide counters. |
 | `get_queue_size` | `getQueueSize` | `size` | Pending match-queue depth. |
 | `get_subscription` | `getSubscription` | `ParamsOfOrderId { order_id }` → `exists, period_start, cur_cycle, cycle_budget, cycle_spent, auto_renew` | Subscription state. |
-| `get_forfeit` | `getForfeit` | `ParamsOfForfeit { order_id, cycle }` → `pool, funded_ticks` | Forfeited-cycle pool. |
 | `get_params` | `getParams` | `model_hash, platform_fee_bps` | Per-book parameters. |
 | `get_version` | `getVersion` | `version, name` | Contract version + name. |
 
@@ -145,22 +144,17 @@ on-chain.
 | `stream_dispute` | `streamDispute` | `ParamsOfStreamDeal` | Buyer note disputes the current ticks (§4.2). |
 | `stream_reclaim` | `streamReclaim` | `ParamsOfStreamDeal` | Buyer note reclaims a probe tick after the stream timeout (seller no-show). |
 
-**Stream locks** (concurrency guards around streaming calls)
+**Pending-buy state**
+
+The note-side stream/dispute locks are gone: the seller's collateral is the
+per-deal mirror bond inside the `TokenContract`, so a note is never frozen by an
+inference stream or dispute, and there is nothing for the SDK to take, release,
+or clear.
 
 | Method | Contract method | Description |
 | --- | --- | --- |
-| `stream_lock` / `stream_unlock` | `streamLock` / `streamUnlock` | Take / release the per-deal streaming lock. |
-| `stream_dispute_lock` / `stream_dispute_unlock` | `streamDisputeLock` / `streamDisputeUnlock` | Take / release the dispute lock. |
-| `force_clear_stream_locks` | `forceClearStreamLocks` | Clear stale locks once they exceed `STREAM_LOCK_MAX`. Owner-signed. |
-| `get_stream_locks` | `getStreamLocks` | Read the current lock state. |
 | `get_pending_place_buy_lock` / `get_pending_place_buy_token_type` | getters | Inspect a pending buy in flight. |
 | `get_inference_order_book_address` | `getInferenceOrderBookAddress` | Deterministic book address for a `modelHash`. |
-
-The four lock callbacks all take `ParamsOfStreamLock { seller_pubkey, nonce }`:
-the deal is named by the pair its address is derived from, not by the address
-itself. The note recomputes the canonical `TokenContract` from that pair and
-requires `msg.sender` to equal it, so a foreign caller cannot lock the note by
-naming someone else's deal.
 
 ---
 
@@ -179,9 +173,9 @@ inference e2e tests drive.
 
 **TokenContract (deal escrow, via the facade)**
 
-- `token_contract_open`, `token_contract_advance`, `token_contract_fund_probe_commission`
+- `token_contract_open`, `token_contract_advance`, `token_contract_fund_seller_bond`
 - `token_contract_resolve_dispute_timeout`, `token_contract_withdraw_shell`
-- `token_contract_get_state`, `token_contract_get_probe`, `token_contract_get_parties`, `token_contract_get_shell_balance`
+- `token_contract_get_state`, `token_contract_get_seller_bond`, `token_contract_get_parties`, `token_contract_get_shell_balance`
 
 **Order-book getters (decoded)**
 

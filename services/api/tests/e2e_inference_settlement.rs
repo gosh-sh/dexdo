@@ -9,7 +9,7 @@
 // NOT be paid that tick — `finalizedOwed` grows by less than one tick.
 //
 // Self-trade: one note is maker, taker, buyer AND seller. Lifecycle:
-//   book → TokenContract → sell+buy handover funds the TC → probe commission →
+//   book → TokenContract → sell+buy handover funds the TC → seller bond →
 //   open (freeze probe) → wait the probe window → advance (probe accepted,
 //   streaming tick prepaid) → IMMEDIATE stop → assert the streaming tick is unpaid.
 //
@@ -28,7 +28,7 @@ use std::time::UNIX_EPOCH;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
-use common::airegistry::fund_probe_commission_via_giver;
+use common::airegistry::fund_seller_bond_via_giver;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -45,6 +45,8 @@ const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
 const PRICE_PER_TICK: u128 = 1_000_000;
 const DEAL_TICKS: u128 = 4;
+// Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin.
+const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
 // Probe window is ~180s on-chain; wait it out plus a margin before `advance`.
 const PROBE_WAIT: Duration = Duration::from_secs(195);
 
@@ -141,12 +143,12 @@ async fn inference_settlement_immediate_stop_does_not_pay_streaming_tick() {
         return;
     }
 
-    // 4. Seller probe commission (internal SHELL message via the giver).
-    fund_probe_commission_via_giver(dex.context(), &tc, 200_000)
+    // 4. Seller mirror bond (internal SHELL message via the giver).
+    fund_seller_bond_via_giver(dex.context(), &tc, SELLER_BOND as u64)
         .await
-        .expect("fund probe commission via giver");
-    if !wait_probe_funded(&dex, &tc).await {
-        failures.push("probe commission never registered (probeFunded stayed false)".to_string());
+        .expect("fund seller bond via giver");
+    if !wait_seller_bond_funded(&dex, &tc).await {
+        failures.push("seller bond never registered (bondFunded stayed false)".to_string());
         finish(&dex, &note.address, &model_hash, &keys, failures).await;
         return;
     }
@@ -239,11 +241,11 @@ async fn wait_funded(dex: &Dex, tc: &str) -> bool {
     wait_state(dex, tc, |s| s.funded, "TokenContract to be funded").await
 }
 
-async fn wait_probe_funded(dex: &Dex, tc: &str) -> bool {
+async fn wait_seller_bond_funded(dex: &Dex, tc: &str) -> bool {
     for _ in 0..POLL_TICKS {
         tokio::time::sleep(POLL_TICK).await;
-        if let Ok(probe) = dex.token_contract_get_probe(tc).await
-            && probe.probe_funded
+        if let Ok(bond) = dex.token_contract_get_seller_bond(tc).await
+            && bond.bond_funded
         {
             return true;
         }

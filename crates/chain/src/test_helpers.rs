@@ -23,7 +23,7 @@ use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
 use dodex_contracts::airegistry::token_contract::ParamsOfWithdrawShell;
 use dodex_contracts::airegistry::token_contract::ResultOfGetOffer as TcOffer;
 use dodex_contracts::airegistry::token_contract::ResultOfGetParties as TcParties;
-use dodex_contracts::airegistry::token_contract::ResultOfGetProbe as TcProbe;
+use dodex_contracts::airegistry::token_contract::ResultOfGetSellerBond as TcSellerBond;
 use dodex_contracts::airegistry::token_contract::ResultOfGetState as TcState;
 use dodex_contracts::airegistry::token_contract::TokenContract;
 use dodex_contracts::dex::oracle::Oracle;
@@ -456,14 +456,14 @@ impl Dex {
             .map_err(Into::into)
     }
 
-    /// Seller posts the probe commission (`TokenContract.fundProbeCommission`).
-    pub async fn token_contract_fund_probe_commission(
+    /// Seller posts the mirror bond (`TokenContract.fundSellerBond`).
+    pub async fn token_contract_fund_seller_bond(
         &self,
         token_contract_address: &str,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
         TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
-            .fund_probe_commission(signer)
+            .fund_seller_bond(signer)
             .await
             .map_err(Into::into)
     }
@@ -504,12 +504,12 @@ impl Dex {
             .map_err(Into::into)
     }
 
-    pub async fn token_contract_get_probe(
+    pub async fn token_contract_get_seller_bond(
         &self,
         token_contract_address: &str,
-    ) -> ChainResult<TcProbe> {
+    ) -> ChainResult<TcSellerBond> {
         TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
-            .get_probe()
+            .get_seller_bond()
             .await
             .map_err(Into::into)
     }

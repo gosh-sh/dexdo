@@ -211,8 +211,8 @@ fn token_contract_results_decode_abi_shape() {
     use super::token_contract::ResultOfGetDeal;
     use super::token_contract::ResultOfGetFees;
     use super::token_contract::ResultOfGetParties;
-    use super::token_contract::ResultOfGetProbe;
     use super::token_contract::ResultOfGetSeller;
+    use super::token_contract::ResultOfGetSellerBond;
     use super::token_contract::ResultOfGetShellBalance;
     use super::token_contract::ResultOfGetState;
 
@@ -222,10 +222,11 @@ fn token_contract_results_decode_abi_shape() {
     assert_eq!(state.deposit, 1);
     assert_eq!(state.dispute_time, 1);
 
-    let probe: ResultOfGetProbe =
-        serde_json::from_value(sample_output_json(TOKEN_CONTRACT_ABI, "getProbe")).unwrap();
-    assert!(probe.probe_funded);
-    assert_eq!(probe.probe_commission, 1);
+    let bond: ResultOfGetSellerBond =
+        serde_json::from_value(sample_output_json(TOKEN_CONTRACT_ABI, "getSellerBond")).unwrap();
+    assert!(bond.bond_funded);
+    assert_eq!(bond.bond_held, 1);
+    assert_eq!(bond.bond_required, 1);
 
     let config: ResultOfGetConfig =
         serde_json::from_value(sample_output_json(TOKEN_CONTRACT_ABI, "getConfig")).unwrap();

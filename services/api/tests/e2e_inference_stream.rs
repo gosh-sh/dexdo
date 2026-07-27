@@ -6,7 +6,7 @@
 //   2. a TokenContract is deployed externally (self-rooted, giver-funded);
 //   3. the note posts a SELL offer and crosses it with a BUY ⇒ the book funds
 //      the TokenContract (handover);
-//   4. the giver posts the seller probe commission (an internal SHELL message —
+//   4. the giver posts the seller mirror bond (an internal SHELL message —
 //      `open()` requires it, and an external call cannot carry currency);
 //   5. seller `open()` freezes the probe tick;
 //   6. after SETTLE_WINDOW (180s) of buyer silence, seller `advance()` accepts
@@ -31,7 +31,7 @@ use std::time::UNIX_EPOCH;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
-use common::airegistry::fund_probe_commission_via_giver;
+use common::airegistry::fund_seller_bond_via_giver;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -48,6 +48,8 @@ const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
 const PRICE_PER_TICK: u128 = 1_000_000;
 const DEAL_TICKS: u128 = 4;
+// Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin.
+const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
 // SETTLE_WINDOW is 180s on-chain; wait it out plus a margin before `advance`.
 const SETTLE_WAIT: Duration = Duration::from_secs(195);
 
@@ -148,23 +150,23 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
         return;
     }
 
-    // 4. Seller probe commission (internal SHELL message via the giver).
-    fund_probe_commission_via_giver(dex.context(), &tc, 200_000)
+    // 4. Seller mirror bond (internal SHELL message via the giver).
+    fund_seller_bond_via_giver(dex.context(), &tc, SELLER_BOND as u64)
         .await
-        .expect("fund probe commission via giver");
-    let mut probe_funded = false;
+        .expect("fund seller bond via giver");
+    let mut bond_funded = false;
     for _ in 0..POLL_TICKS {
         tokio::time::sleep(POLL_TICK).await;
-        if let Ok(probe) = dex.token_contract_get_probe(&tc).await
-            && probe.probe_funded
+        if let Ok(bond) = dex.token_contract_get_seller_bond(&tc).await
+            && bond.bond_funded
         {
-            eprintln!("[e2e_stream] probe funded: locked={}", probe.probe_locked);
-            probe_funded = true;
+            eprintln!("[e2e_stream] seller bond funded: held={}", bond.bond_held);
+            bond_funded = true;
             break;
         }
     }
-    if !probe_funded {
-        failures.push("probe commission never registered (probeFunded stayed false)".to_string());
+    if !bond_funded {
+        failures.push("seller bond never registered (bondFunded stayed false)".to_string());
         finish(&dex, &note.address, &model_hash, &keys, failures).await;
         return;
     }

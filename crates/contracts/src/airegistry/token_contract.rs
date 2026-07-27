@@ -145,13 +145,14 @@ pub struct ResultOfGetState {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-/// Result of `TokenContract.getProbe`.
-pub struct ResultOfGetProbe {
-    pub probe_funded: bool,
+/// Result of `TokenContract.getSellerBond` — the seller's mirror bond, the only
+/// seller collateral held against the deal (spec §4.2).
+pub struct ResultOfGetSellerBond {
+    pub bond_funded: bool,
     #[serde(deserialize_with = "deserialize_u128")]
-    pub probe_locked: u128,
+    pub bond_held: u128,
     #[serde(deserialize_with = "deserialize_u128")]
-    pub probe_commission: u128,
+    pub bond_required: u128,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -291,12 +292,12 @@ impl TokenContract {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// # Seller posts the probe commission (ECC[2] SHELL)
+    /// # Seller posts the mirror bond (ECC[2] SHELL)
     ///
-    /// Original contract method: `fundProbeCommission`
-    pub async fn fund_probe_commission(&self, signer: Signer) -> KitResult<ResultOfSendMessage> {
+    /// Original contract method: `fundSellerBond`
+    pub async fn fund_seller_bond(&self, signer: Signer) -> KitResult<ResultOfSendMessage> {
         let call_set =
-            CallSet { function_name: "fundProbeCommission".to_string(), header: None, input: None };
+            CallSet { function_name: "fundSellerBond".to_string(), header: None, input: None };
         self.send_message(Some(call_set), None, signer).await
     }
 
@@ -417,9 +418,9 @@ impl TokenContract {
         self.call_get_method::<ResultOfGetState>("getState").await
     }
 
-    /// Original contract method: `getProbe`.
-    pub async fn get_probe(&self) -> KitResult<ResultOfGetProbe> {
-        self.call_get_method::<ResultOfGetProbe>("getProbe").await
+    /// Original contract method: `getSellerBond`.
+    pub async fn get_seller_bond(&self) -> KitResult<ResultOfGetSellerBond> {
+        self.call_get_method::<ResultOfGetSellerBond>("getSellerBond").await
     }
 
     /// Original contract method: `getOffer`.

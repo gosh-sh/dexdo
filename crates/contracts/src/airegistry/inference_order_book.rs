@@ -133,14 +133,6 @@ pub struct ParamsOfGetOrder {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Parameters for `claimForfeit` and the `getForfeit` getter.
-pub struct ParamsOfForfeit {
-    pub order_id: u128,
-    pub cycle: u8,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 /// Parameters for `InferenceOrderBook.requestWeeklyMedian`.
 pub struct ParamsOfRequestWeeklyMedian {
     /// `uint256`, decimal or hex string.
@@ -228,16 +220,6 @@ pub struct ResultOfGetSubscription {
     #[serde(deserialize_with = "deserialize_u128")]
     pub cycle_spent: u128,
     pub auto_renew: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-/// Result of `InferenceOrderBook.getForfeit`.
-pub struct ResultOfGetForfeit {
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub pool: u128,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub funded_ticks: u128,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -362,21 +344,6 @@ impl InferenceOrderBook {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// Original contract method: `claimForfeit`. Seller claims a share of a
-    /// forfeited subscription cycle.
-    pub async fn claim_forfeit(
-        &self,
-        params: ParamsOfForfeit,
-        signer: Signer,
-    ) -> KitResult<ResultOfSendMessage> {
-        let call_set = CallSet {
-            function_name: "claimForfeit".to_string(),
-            header: None,
-            input: Some(json!(params)),
-        };
-        self.send_message(Some(call_set), None, signer).await
-    }
-
     /// Original contract method: `requestWeeklyMedian`. Asks the matching
     /// engine to refresh the reference price for the model.
     pub async fn request_weekly_median(
@@ -429,11 +396,6 @@ impl InferenceOrderBook {
             params,
         )
         .await
-    }
-
-    /// Original contract method: `getForfeit`.
-    pub async fn get_forfeit(&self, params: ParamsOfForfeit) -> KitResult<ResultOfGetForfeit> {
-        self.call_get_method_with::<ResultOfGetForfeit, ParamsOfForfeit>("getForfeit", params).await
     }
 
     /// Original contract method: `getParams`.

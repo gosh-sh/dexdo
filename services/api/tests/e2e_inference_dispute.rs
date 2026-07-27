@@ -31,7 +31,7 @@ use std::time::UNIX_EPOCH;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
-use common::airegistry::fund_probe_commission_via_giver;
+use common::airegistry::fund_seller_bond_via_giver;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -50,9 +50,10 @@ const POLL_TICKS: u32 = 45;
 const PRICE_PER_TICK: u128 = 1_100_000_000;
 const DEAL_TICKS: u128 = 4;
 const BUY_ESCROW: u128 = 6_000_000_000;
-// Seller probe commission = PROBE_COMMISSION_BPS (250) * price + margin; it scales
-// with `price_per_tick`, so it must be derived from P (a fixed value under-funds it).
-const PROBE_COMMISSION: u128 = PRICE_PER_TICK * 250 / 10_000 + PRICE_PER_TICK / 100;
+// Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin;
+// it scales with `price_per_tick`, so it must be derived from P (a fixed value
+// under-funds it and `fundSellerBond` rejects the message).
+const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
 const PROBE_WAIT: Duration = Duration::from_secs(195);
 const DISPUTE_WINDOW_S: u64 = 600;
 const SETTLE_WINDOW_S: u64 = 660;
@@ -204,7 +205,7 @@ async fn inference_dispute_timeout_window_gated_settlement() {
 }
 
 /// Deploy a TokenContract for `nonce`, fund it via a sell↔buy handover, post the
-/// probe commission, and `open()` it (freezing the probe tick). Returns the TC.
+/// seller bond, and `open()` it (freezing the probe tick). Returns the TC.
 async fn setup_deal(
     dex: &Dex,
     note: &common::test_pns::TestPn,
@@ -253,21 +254,21 @@ async fn setup_deal(
         return Err("TokenContract never funded by the match".to_string());
     }
 
-    fund_probe_commission_via_giver(dex.context(), &tc, PROBE_COMMISSION as u64)
+    fund_seller_bond_via_giver(dex.context(), &tc, SELLER_BOND as u64)
         .await
-        .map_err(|e| format!("fund probe commission: {e:?}"))?;
-    let mut probe_funded = false;
+        .map_err(|e| format!("fund seller bond: {e:?}"))?;
+    let mut bond_funded = false;
     for _ in 0..POLL_TICKS {
         tokio::time::sleep(POLL_TICK).await;
-        if let Ok(p) = dex.token_contract_get_probe(&tc).await
-            && p.probe_funded
+        if let Ok(b) = dex.token_contract_get_seller_bond(&tc).await
+            && b.bond_funded
         {
-            probe_funded = true;
+            bond_funded = true;
             break;
         }
     }
-    if !probe_funded {
-        return Err("probe commission never registered".to_string());
+    if !bond_funded {
+        return Err("seller bond never registered".to_string());
     }
 
     dex.token_contract_open(&tc, ParamsOfOpen { endpoint_cipher: "00".to_string() }, signer())

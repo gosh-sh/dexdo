@@ -78,11 +78,12 @@ Acki Nacki is dApp-sharded, which shapes how these contracts are reached:
   cross a dApp boundary, so the fresh account is created + gassed by sending
   **ECC SHELL with flag 16** from the giver (flag 16 lands the ECC as the new
   account's native balance).
-- **`open()`** requires the seller probe commission already funded, and
-  `fundProbeCommission` only accepts an internal SHELL-bearing message (an
-  external signed call cannot carry currency). The e2e harness delivers it as a
-  call body from the giver (`sendCurrencyWithBody`), so no separate wallet is
-  needed.
+- **`open()`** requires the seller mirror bond already funded, and
+  `fundSellerBond` only accepts an internal SHELL-bearing message (an external
+  signed call cannot carry currency). The e2e harness delivers it as a call body
+  from the giver (`sendCurrencyWithBody`), so no separate wallet is needed. The
+  bond is `2 * pricePerTick`, so a test must derive the amount from P rather
+  than hardcoding it.
 
 ## End-to-end tests
 
@@ -94,7 +95,7 @@ through `dodex_chain::Dex` (no DB, no HTTP — there are no inference handlers):
 | `e2e_inference` | Note deploys the book, places a resting BUY with SHELL escrow, cancels it. |
 | `e2e_inference_match` | External `TokenContract` deploy + a SELL offer crossed by a BUY ⇒ the match funds the `TokenContract` (handover). |
 | `e2e_inference_clob` | Three flows: a partial fill (2-tick offer crossed by a 4-tick limit buy, 2 ticks rest) + `getBestBidAsk`/`getWeeklyMedianPrice`; a subscription (`placeInferenceSubscription` + `getSubscription`); and a match's `Filled` event confirmed by its routing id. |
-| `e2e_inference_stream` | Full deal lifecycle: match → probe commission → `open` → wait the 180s settle window → `advance` (probe accepted) → `streamStop`. Slow (~4 min). |
+| `e2e_inference_stream` | Full deal lifecycle: match → seller bond → `open` → wait the 180s settle window → `advance` (probe accepted) → `streamStop`. Slow (~4 min). |
 
 They share the seed-note pool (`tests/fixtures/seed_notes.json` /
 `E2E_SEED_NOTES`) like the other e2e tests; the note must additionally hold
@@ -132,8 +133,8 @@ struct's field names against the ABI event inputs.
   constructor.
 - **Continuation queue** (`processHead`) — needs `> MAX_MATCHES_PER_CALL`
   matches in one buy; depends on the deployed contract's constant.
-- **Subscription forfeit** (`pokeSubscription` / `claimForfeit`) — needs a
-  weekly cycle to roll over.
+- **Subscription roll** (`pokeSubscription`) — needs a weekly cycle to roll
+  over; the closing cycle's unspent budget refunds to the buyer.
 - **Longer probe variants** — probe burn, seller no-show reclaim, dispute
   timeout, each waiting a 600s on-chain window.
 - **Typed ext-out event payload decode** — blocked on the deployment skew noted

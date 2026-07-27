@@ -219,14 +219,14 @@ pub async fn deploy_token_contract(
     Ok(address)
 }
 
-/// Post the seller probe commission to a `TokenContract` from the default giver.
+/// Post the seller mirror bond to a `TokenContract` from the default giver.
 ///
-/// `TokenContract.fundProbeCommission` only accepts an INTERNAL message that
-/// carries ECC SHELL (an external signed call cannot carry currency, and
-/// `open()` requires the commission already funded). Rather than stand up a
-/// multisig just to send it, encode the call body and have the giver deliver
-/// SHELL + that body in one internal message. The method has no sender guard.
-pub async fn fund_probe_commission_via_giver(
+/// `TokenContract.fundSellerBond` only accepts an INTERNAL message that carries
+/// ECC SHELL (an external signed call cannot carry currency, and `open()`
+/// requires the bond already funded). Rather than stand up a multisig just to
+/// send it, encode the call body and have the giver deliver SHELL + that body
+/// in one internal message. The method has no sender guard.
+pub async fn fund_seller_bond_via_giver(
     ctx: Arc<ClientContext>,
     token_contract_addr: &str,
     shell_amount: u64,
@@ -236,7 +236,7 @@ pub async fn fund_probe_commission_via_giver(
         ParamsOfEncodeMessageBody {
             abi: Abi::Json(TOKEN_CONTRACT_ABI.to_string()),
             call_set: CallSet {
-                function_name: "fundProbeCommission".to_string(),
+                function_name: "fundSellerBond".to_string(),
                 header: None,
                 input: None,
             },
@@ -248,7 +248,7 @@ pub async fn fund_probe_commission_via_giver(
         },
     )
     .await
-    .map_err(|e| anyhow!("encode fundProbeCommission body: {e:?}"))?
+    .map_err(|e| anyhow!("encode fundSellerBond body: {e:?}"))?
     .body;
 
     let mut ecc = HashMap::new();
@@ -265,7 +265,7 @@ pub async fn fund_probe_commission_via_giver(
             Signer::None,
         )
         .await
-        .map_err(|e| anyhow!("giver fundProbeCommission → {token_contract_addr}: {e:?}"))?;
+        .map_err(|e| anyhow!("giver fundSellerBond → {token_contract_addr}: {e:?}"))?;
     Ok(())
 }
 
