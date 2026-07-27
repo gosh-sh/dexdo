@@ -618,7 +618,7 @@ impl Drop for LeasedPn {
 
 /// Whether `boc` — the account's raw state, or `None` if the gateway has no
 /// account at all — is structurally absent: the harness's single notion of
-/// "not there" (see `invariant::account_absent`), reused rather than
+/// "not there" (see `ChainReader::account_absent`), reused rather than
 /// reinvented. `None` and a BOC that decodes to `AccountNone` both count;
 /// neither is matched by error text — [`account_boc_is_none`] decides it
 /// structurally, straight off the decoded account.

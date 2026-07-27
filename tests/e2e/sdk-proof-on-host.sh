@@ -70,6 +70,61 @@ git -C "$DIR" fetch --depth 1 origin "$DEXDO_SHA" && git -C "$DIR" checkout -f F
 [ "$(git -C "$DIR" rev-parse HEAD)" = "$DEXDO_SHA" ] || { echo "FATAL: checkout HEAD != DEXDO_SHA"; exit 66; }
 lease_assert                                   # again immediately before driving the chain
 
+# Node and block-manager logs for a failed run, into this step's own output.
+#
+# The pipeline's own dump_logs step cannot cover the two steps that pipe this
+# script: they are marked `failure: ignore`, and Woodpecker swallows an ignored
+# step's error before it reaches the pipeline status -- so a run in which only
+# these fail ends green, and every step guarded by `when: status: [failure]` is
+# skipped. Dumping here depends on no CI status semantics at all, and the logs
+# land in the output of the step that actually failed, which is where a reader
+# looks first.
+#
+# Best-effort throughout, and inside a subshell: this runs while the script is
+# already on its way out, `errexit` is still armed, and a stopped container or a
+# log file the stand never created must not mask the real failure or replace its
+# exit status.
+dump_stand_logs() {
+  (
+    set +e
+    echo "===== stand logs after a failed run (ACKI_DIR=$ACKI_DIR) ====="
+    cd "$ACKI_DIR" || exit 0
+    echo '===== docker compose ps -a (state + exit codes) ====='
+    docker compose -f docker/dexdo-e2e.compose.yaml ps -a 2>/dev/null
+    for n in node0 node1 node2 node3 node4; do
+      echo "===== $n (logs/$n/node.log, tail 120) ====="
+      tail -n 120 "$ACKI_DIR/logs/$n/node.log" 2>/dev/null
+      echo "----- docker logs $n (tail 60) -----"
+      docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=60 "$n" 2>/dev/null
+    done
+    echo '===== block_manager (logs/bm0/bm.log, tail 200) ====='
+    tail -n 200 "$ACKI_DIR/logs/bm0/bm.log" 2>/dev/null
+    echo '----- docker logs block_manager (tail 100) -----'
+    docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=100 block_manager 2>/dev/null
+  )
+  return 0
+}
+
+# `rc` is captured first: everything after it clobbers `$?`. The handler then
+# re-exits with it, so the dump can never change what this script reports.
+#
+# `set +e` is load-bearing, not tidiness. The dump's `set +e` lives inside its
+# subshell, which keeps the dump itself complete but says nothing about the
+# status that subshell returns to here; with `errexit` still armed, a dump
+# command that fails -- `docker compose` against a stand that is already gone,
+# exactly the case worth dumping -- aborts this handler before `exit "$rc"` is
+# ever reached, and the script then reports the dump's status instead of the
+# suite's. Disabling `errexit` for the handler costs nothing: it is already on
+# its way out, and every command below is either guarded or advisory.
+on_exit() {
+  rc=$?
+  set +e
+  kill "$HB" 2>/dev/null || true
+  rm -f "$SUITE_PID_FILE"
+  [ "$rc" -eq 0 ] || dump_stand_logs
+  exit "$rc"
+}
+
 # The proof scenario's own hard timeout is 50 minutes and cold sdk
 # compilation is unbounded, both comfortably longer than any single
 # host-lease TTL window. Left unrenewed for that long, this run's own lease
@@ -112,7 +167,7 @@ SUITE_PID_FILE=$(mktemp)
   done
 ) &
 HB=$!
-trap 'kill "$HB" 2>/dev/null || true; rm -f "$SUITE_PID_FILE"' EXIT
+trap on_exit EXIT
 
 command -v cargo-nextest >/dev/null 2>&1 \
   || curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$HOME/.cargo/bin"

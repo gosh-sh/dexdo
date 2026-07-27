@@ -262,8 +262,8 @@ pub async fn prepare_oracle_event(
 /// the scenario would go on to stake into it; the resulting failure would
 /// surface much later with no obvious link back to the real cause.
 /// `setup_pmp` keeps its silent fallthrough — it is the shared entry point
-/// of the older `pmp`/`flows`/`history` modules — so the two tails
-/// deliberately differ on this one point.
+/// of the older `pmp`/`oracle`/`flows`/`history`/`pn_basic` modules — so the
+/// two tails deliberately differ on this one point.
 ///
 /// Returns only the PMP address, not `setup_pmp`'s full detail set: no
 /// caller of this two-phase split reads `oracle_list_hash`, so the extra
