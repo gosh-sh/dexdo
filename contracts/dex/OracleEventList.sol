@@ -16,7 +16,7 @@ interface IInferenceOB {
 contract OracleEventList is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.27";
+    string constant version = "4.0.28";
 
     // ── Range events (numeric outcomes): the price is resolved on-chain from an
     // InferenceOrderBook's weekly median, mapped to a numeric range = outcome.
@@ -51,6 +51,12 @@ contract OracleEventList is Modifiers {
 
     /// @notice Registry of events managed by this OracleEventList.
     mapping(uint256 => EventInfo) public _events;
+
+    /// @notice Active confirmation per canonical PMP: PMP address value => eventId it confirmed.
+    ///         Presence means this exact PMP holds one confirmation for that event, so
+    ///         `confirmEvent`/`cancelEvent` are idempotent per PMP and `onBounce` can find
+    ///         which event to release when a PMP's approveEvent cannot be delivered.
+    mapping(uint256 => uint256) _pmpConfirmed;
 
     /// @notice Emitted when a new event is added to the registry.
     /// @param eventId Deterministic event identifier hash.
@@ -233,16 +239,23 @@ contract OracleEventList is Modifiers {
         EventInfo eventInfo = _events[eventId];
         if ((eventInfo.deadline < block.timestamp) || (msg.currencies[CURRENCIES_ID_SHELL] < eventInfo.oracleFee)) {
             PMP(msg.sender).rejectEvent{value: 0.1 vmshell, flag: 1, currencies: msg.currencies, dest_dapp_id: ROOT_PN_DAPP_ID}();
-        } else {
+        } else if (!_pmpConfirmed.exists(msg.sender.value)) {
+            // First confirmation from this canonical PMP: pay the oracle, count it once and
+            // record the active confirmation. A repeat confirmEvent from the same PMP is then
+            // a no-op (cannot double-count), and onBounce can release this confirmation if the
+            // approveEvent below cannot be delivered.
             _oracle.transfer({value: 0.1 vmshell, flag: 1, currencies: msg.currencies, dest_dapp_id: ORACLE_DAPP_ID});
             eventInfo.count += 1;
             _events[eventId] = eventInfo;
+            _pmpConfirmed[msg.sender.value] = eventId;
+            // approveEvent keeps bounce=true (default): if it cannot be delivered its bounce
+            // reaches onBounce, which releases this confirmation's count.
             PMP(msg.sender).approveEvent{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(_oraclePubkey, eventInfo.outcomeNames, eventInfo.describe, eventInfo.eventName, eventInfo.trustAddr);
-            // Range event: this OEL is the single oracle, so it also sets the PMP
-            // timing (result-start = deadline). Sent after approveEvent so the
-            // trust-addr oracle is already registered (quorum-of-1 → applies).
+            // Range event: this OEL is the single oracle, so it also sets the PMP timing
+            // (result-start = deadline). Sent bounce:false so a submitSetTimings failure does
+            // not reach onBounce and wrongly release the already-delivered approveEvent's count.
             if (_rangeData[eventId].exists) {
-                PMP(msg.sender).submitSetTimings{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(eventInfo.deadline);
+                PMP(msg.sender).submitSetTimings{value: 0.1 vmshell, flag: 1, bounce: false, dest_dapp_id: ROOT_PN_DAPP_ID}(eventInfo.deadline);
             }
             address addrExtern = address.makeAddrExtern(ORACLE_EVENT_CONFIRMED, bitCntAddress);
             emit EventConfirmed{dest: addrExtern}(eventId, msg.sender);
@@ -287,7 +300,10 @@ contract OracleEventList is Modifiers {
         ensureBalance();
         uint32 outcomeId = _priceToOutcome(eventId, price);
         address pmp = DexLib.computePMPAddressFromHash(_pmpSaltedCodeHash, _pmpSaltedCodeDepth, eventId, oracleListHash, tokenType);
-        PMP(pmp).submitResolve{value: 0.2 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(outcomeId);
+        // bounce:false so a rejected resolution (PMP state/time guards) cannot bounce back into
+        // onBounce and be mistaken for a failed approveEvent, which would wrongly release this
+        // PMP's active confirmation. Only approveEvent drives the onBounce count self-heal.
+        PMP(pmp).submitResolve{value: 0.2 vmshell, flag: 1, bounce: false, dest_dapp_id: ROOT_PN_DAPP_ID}(outcomeId);
     }
 
     /// @notice Range-event data (bounds + bound OB) for off-chain inspection.
@@ -304,9 +320,38 @@ contract OracleEventList is Modifiers {
         public senderIs(DexLib.computePMPAddressFromHash(_pmpSaltedCodeHash, _pmpSaltedCodeDepth, eventId, oracleListHash, tokenType)) accept
     {
         ensureBalance();
-        EventInfo eventInfo = _events[eventId];
-        eventInfo.count -= 1;
-        _events[eventId] = eventInfo;
+        // Release only the confirmation this exact PMP holds, and only once. A repeat cancel,
+        // or a cancel that races with the approveEvent bounce already released by onBounce,
+        // finds no active confirmation and is a no-op — so the count can neither underflow nor
+        // drop a different PMP's confirmation.
+        if (_pmpConfirmed.exists(msg.sender.value)) {
+            delete _pmpConfirmed[msg.sender.value];
+            EventInfo eventInfo = _events[eventId];
+            if (eventInfo.count > 0) {
+                eventInfo.count -= 1;
+                _events[eventId] = eventInfo;
+            }
+        }
+    }
+
+    /// @notice When a confirming PMP's approveEvent cannot be delivered (the PMP self-destructed
+    ///         before or while confirming, or rejected the confirmation after being cancelled),
+    ///         its bounce returns here. Release the confirmation that PMP held so the event's
+    ///         count is not left leaked and the event can later be deleted. Idempotent with
+    ///         cancelEvent: whichever runs first clears the active flag, the other is a no-op.
+    onBounce(TvmSlice body) external {
+        body;
+        tvm.accept();
+        ensureBalance();
+        if (_pmpConfirmed.exists(msg.sender.value)) {
+            uint256 eventId = _pmpConfirmed[msg.sender.value];
+            delete _pmpConfirmed[msg.sender.value];
+            EventInfo eventInfo = _events[eventId];
+            if (eventInfo.count > 0) {
+                eventInfo.count -= 1;
+                _events[eventId] = eventInfo;
+            }
+        }
     }
 
     /// @notice Deletes an event when there are no active confirmations or deadline is expired.

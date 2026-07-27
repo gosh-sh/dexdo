@@ -122,27 +122,50 @@ library DexLib {
         });
     }
 
-    /// @notice Computes deterministic OrderBook address for a market.
+    /// @notice Computes deterministic OrderBook address for a market. The salt
+    ///         binds the book to the PrivateNote family and to the genuine PMP
+    ///         salted code hash, so the PMP identity is committed into the book
+    ///         address: only the genuine PMP can deploy the canonical book.
     /// @param PrivateNoteCode PrivateNote contract code used for salt.
+    /// @param pmpSaltedCodeHash Salted PMP code hash bound into the book salt.
+    /// @param pmpSaltedCodeDepth Salted PMP code depth bound into the book salt.
     /// @param orderBookCode OrderBook base code.
     /// @param eventId Event identifier.
     /// @param oracleListHash Oracle list hash.
     /// @param tokenType Token type.
     /// @return OrderBook deterministic address.
-    function computeOrderBookAddress(TvmCell PrivateNoteCode, TvmCell orderBookCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (address) {
-        TvmCell stateInit = buildOrderBookStateInit(PrivateNoteCode, orderBookCode, eventId, oracleListHash, tokenType);
+    function computeOrderBookAddress(TvmCell PrivateNoteCode, uint256 pmpSaltedCodeHash, uint16 pmpSaltedCodeDepth, TvmCell orderBookCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (address) {
+        TvmCell stateInit = buildOrderBookStateInit(PrivateNoteCode, pmpSaltedCodeHash, pmpSaltedCodeDepth, orderBookCode, eventId, oracleListHash, tokenType);
         return address.makeAddrStd(0, tvm.hash(stateInit));
+    }
+
+    /// @notice Convenience wrapper for callers that hold the base PMP code
+    ///         (RootPN, PrivateNote): derives the salted PMP code hash/depth and
+    ///         forwards to computeOrderBookAddress. The PMP itself uses the raw
+    ///         hash form with tvm.hash(tvm.code()) (its own ground-truth code).
+    /// @param PrivateNoteCode PrivateNote contract code used for salt.
+    /// @param pmpCode Base PMP contract code (unsalted).
+    /// @param orderBookCode OrderBook base code.
+    /// @param eventId Event identifier.
+    /// @param oracleListHash Oracle list hash.
+    /// @param tokenType Token type.
+    /// @return OrderBook deterministic address.
+    function computeOrderBookAddressFromPmpCode(TvmCell PrivateNoteCode, TvmCell pmpCode, TvmCell orderBookCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (address) {
+        TvmCell saltedPmp = buildPMPCode(PrivateNoteCode, pmpCode);
+        return computeOrderBookAddress(PrivateNoteCode, tvm.hash(saltedPmp), uint16(saltedPmp.depth()), orderBookCode, eventId, oracleListHash, tokenType);
     }
 
     /// @notice Builds OrderBook StateInit with salted code and static ids.
     /// @param PrivateNoteCode PrivateNote contract code used for salt.
+    /// @param pmpSaltedCodeHash Salted PMP code hash bound into the book salt.
+    /// @param pmpSaltedCodeDepth Salted PMP code depth bound into the book salt.
     /// @param orderBookCode OrderBook base code.
     /// @param eventId Event identifier.
     /// @param oracleListHash Oracle list hash.
     /// @param tokenType Token type.
     /// @return OrderBook StateInit cell.
-    function buildOrderBookStateInit(TvmCell PrivateNoteCode, TvmCell orderBookCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (TvmCell) {
-        TvmCell code = buildOrderBookCode(PrivateNoteCode, orderBookCode);
+    function buildOrderBookStateInit(TvmCell PrivateNoteCode, uint256 pmpSaltedCodeHash, uint16 pmpSaltedCodeDepth, TvmCell orderBookCode, uint256 eventId, uint256 oracleListHash, uint32 tokenType) public returns (TvmCell) {
+        TvmCell code = buildOrderBookCode(PrivateNoteCode, pmpSaltedCodeHash, pmpSaltedCodeDepth, orderBookCode);
         return abi.encodeStateInit({
             contr: OrderBook,
             varInit: { _eventId: eventId, _oracleListHash: oracleListHash, _tokenType: tokenType },
@@ -150,12 +173,16 @@ library DexLib {
         });
     }
 
-    /// @notice Produces salted OrderBook code where salt stores PrivateNote code.
+    /// @notice Produces salted OrderBook code. The salt stores the PrivateNote
+    ///         code plus the genuine PMP salted code hash/depth, committing the
+    ///         PMP identity into the book address.
     /// @param PrivateNoteCode PrivateNote contract code used as salt payload.
+    /// @param pmpSaltedCodeHash Salted PMP code hash stored in the salt.
+    /// @param pmpSaltedCodeDepth Salted PMP code depth stored in the salt.
     /// @param orderBookCode OrderBook base code.
     /// @return Salted OrderBook code cell.
-    function buildOrderBookCode(TvmCell PrivateNoteCode, TvmCell orderBookCode) public returns (TvmCell) {
-        TvmCell salt = abi.encode(PrivateNoteCode);
+    function buildOrderBookCode(TvmCell PrivateNoteCode, uint256 pmpSaltedCodeHash, uint16 pmpSaltedCodeDepth, TvmCell orderBookCode) public returns (TvmCell) {
+        TvmCell salt = abi.encode(PrivateNoteCode, pmpSaltedCodeHash, pmpSaltedCodeDepth);
         return abi.setCodeSalt(orderBookCode, salt);
     }
 

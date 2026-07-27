@@ -2,6 +2,27 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-07-25]
+
+### Changed
+
+- inference-market **4.0.28** — PR627 coherence pass: make code, ABI, and canon describe one seller-bond model (owner-approved via dexdo-cli-private PR522/PR627).
+  - **Seller-bond terminology, no dual path.** Renamed the seller-collateral entrypoints and surface — `fundProbeCommission → fundSellerBond`, `postProbeCommission → postSellerBond`, event `ProbeCommissionFunded → SellerBondFunded`, getter `getProbe → getSellerBond` (`bondFunded`/`bondHeld`/`bondRequired`), errors `ERR_PROBE_*_FUNDED → ERR_BOND_*_FUNDED` — and removed the dead `SELLER_PROBE_COMMISSION_BPS` constant. No compatibility alias (4.0.28 is not yet deployed). The bond is `2P` and the platform fee stays a separate buyer commission.
+  - **Note-lock fully removed.** Deleted the inert inference note-lock from `PrivateNote` (`streamLock`/`streamUnlock`/`streamDisputeLock`/`streamDisputeUnlock`/`getStreamLocks`/`forceClearStreamLocks`, the `_streamLocks`/`_disputeLocks` state and gate, the `IStreamNote` interface, `ERR_STREAM_LOCKED`, and `STREAM_LOCK_MAX`). The per-TC mirror bond is the seller's only at-risk mechanism; notes are never frozen by an inference stream or dispute.
+  - **`PRICE_STEP = 1e9` (1 SHELL)** confirmed canonical on limit SELL / limit BUY / subscription (market BUY exempt); canon (`SELLER_BOND`, §3.1.2 burn `P` vs `P`, §8 refund-to-buyer) aligned to the model.
+  - Full re-pin to the coherent head: `PrivateNote → 98179ac7`, `TokenContract → 2f6159b7`, `RootModel → 9b09eb90`, `SuperRoot → d35073ec`, `InferenceOrderBook → d61d91f0`, `ModelRegistry.IOB_CODE_HASH → f93508a1`, `RootPN → 25789d96`. Local pins.
+- inference-market **4.0.28** — three coordinated changes to the private-inference contracts:
+  - **Subscriptions: unused cycle budget refunds to the buyer** (no longer forfeited to sellers). Removed the per-seller forfeit accounting from `InferenceOrderBook` (the forfeit-pool / cycle-funded / cycle-seller maps, the cycle-forfeited and forfeit-claimed events, and the forfeit-claim entrypoint) and the matching `PrivateNote` relay. Sellers are still paid per delivered tick in their `TokenContract`; the matcher only throttles the weekly spend and returns the remainder to the buyer on cycle rollover, early full-fill, cancel, and expiry — no relationship graph is stored.
+  - **Seller collateral: a symmetric mirror bond held in the `TokenContract`** (spec §4.2). The seller posts a 2-tick bond (`fundProbeCommission` now funds `2P`, not a small commission) that mirrors the buyer's at-risk deposit `D`. On a dispute that reaches timeout with no concession, the disputed `D` is burned AND an equal `D` of the bond is burned (the seller gets nothing from the disputed ticks); the bond returns in full on a clean close, a concession, an abandon, or a seller no-show. Note-locking is removed — both sides' at-risk value lives inside the TC, so `PrivateNote` streams are never frozen; a new `abandonDispute` lets the buyer settle a dispute to the standard split.
+  - **Oracle (#588): a normal PMP cancellation now releases the `OracleEventList` event count.** `PMP.cancelEvent` (and the onBounce / rejectEvent cleanup) call `_releaseOracleCounts` exactly once via a `_countReleased` latch, and `OracleEventList.cancelEvent` guards against underflow — so a normally-cancelled confirmed event decrements its count to zero and can later be deleted.
+  - Full contract-stack re-pin: `InferenceOrderBook → c308b838`, `TokenContract → c50e36e8`, `RootModel → 0fa1ef35`, `SuperRoot → 35258fbb`, `ModelRegistry.IOB_CODE_HASH → c308b838`, `PrivateNote → 69948118`, `RootPN → 662f14ce`, `PMP → c5da4a1c`, `OracleEventList → d2278623`. Local pins.
+
+## [2026-07-24]
+
+### Changed
+
+- Vendored contracts → inference-market **4.0.28**: `InferenceOrderBook` hardening (issues #558–#567) — true fill-or-kill (per-order simulation), unknown flag-bit rejection, `ticks >= 2` subscriptions serialized through the match queue with the current-cycle forfeit settled on cancel, bounded expired-GTD cleanup, a terminal result for `cancelOrder`, POST_ONLY tested against executable liquidity, and a minimum price step of 1 SHELL (order prices must be a whole multiple of `1_000_000_000`). Re-pinned `ModelRegistry.IOB_CODE_HASH → 19014ccc`; local pins.
+
 ## [2026-06-10]
 
 ### Added

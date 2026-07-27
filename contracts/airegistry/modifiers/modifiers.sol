@@ -19,10 +19,6 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     // REBATE_MAX_BPS strictly < PLATFORM_FEE_BPS so net burn > 0 always.
     uint16 constant REBATE_MAX_BPS   = 200;       // 2.0% cap
     uint16 constant REBATE_SLOPE_BPS = 4;         // bps per tick (cap at 50 ticks)
-    // Seller probe commission (spec §3.1.2/§9.2): a percent of the tick price P,
-    // on the order of the platform fee on one tick. Returned to the seller on
-    // probe acceptance / no-show; burned with the probe tick on a probe stop.
-    uint16 constant SELLER_PROBE_COMMISSION_BPS = 250;   // 2.5% of P
     // Streaming-deal timing (spec §9.1). The advance window is PER-DEAL, scaled by
     // tick price so an idle stream drains at most ~0.1 SHELL/min (slope), capped:
     //   W = clamp(pricePerTick * STREAM_WINDOW_SECS_PER_SHELL / SHELL_UNIT,
@@ -63,8 +59,8 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant StreamDisputedEmit          = 724;
     uint128 constant DisputeResolvedEmit         = 725;
     uint128 constant StreamReclaimedEmit         = 726;
-    // Probe tick (spec §3.1.2)
-    uint128 constant ProbeCommissionFundedEmit   = 727;
+    // Probe / seller bond (spec §3.1.2 / §4.2)
+    uint128 constant SellerBondFundedEmit   = 727;
     uint128 constant ProbeAcceptedEmit           = 728;
     uint128 constant ProbeBurnedEmit             = 729;
     // InferenceOrderBook (spec §2 + §8) — dedicated 1000+ range (separate from registry/streaming/oracle 700s)
@@ -81,6 +77,7 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant CycleForfeitedEmit          = 1006;
     uint128 constant ForfeitClaimedEmit          = 1007;
     uint128 constant InferenceOBDeployedEmit     = 1008;
+    uint128 constant OfferCancelRejectedEmit     = 1009;
 
     modifier accept() {
         tvm.accept();

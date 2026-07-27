@@ -79,15 +79,6 @@
 			]
 		},
 		{
-			"name": "claimForfeit",
-			"inputs": [
-				{"name":"orderId","type":"uint128"},
-				{"name":"cycle","type":"uint8"}
-			],
-			"outputs": [
-			]
-		},
-		{
 			"name": "getWeeklyMedianPrice",
 			"inputs": [
 			],
@@ -167,17 +158,6 @@
 			]
 		},
 		{
-			"name": "getForfeit",
-			"inputs": [
-				{"name":"orderId","type":"uint128"},
-				{"name":"cycle","type":"uint8"}
-			],
-			"outputs": [
-				{"name":"pool","type":"uint128"},
-				{"name":"fundedTicks","type":"uint128"}
-			]
-		},
-		{
 			"name": "getParams",
 			"inputs": [
 			],
@@ -230,6 +210,16 @@
 			]
 		},
 		{
+			"name": "InferenceOrderCancelRejected",
+			"inputs": [
+				{"name":"orderId","type":"uint128"},
+				{"name":"reason","type":"uint8"},
+				{"name":"note","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "InferenceFilled",
 			"inputs": [
 				{"name":"makerId","type":"uint128"},
@@ -276,28 +266,6 @@
 			]
 		},
 		{
-			"name": "InferenceCycleForfeited",
-			"inputs": [
-				{"name":"orderId","type":"uint128"},
-				{"name":"cycle","type":"uint8"},
-				{"name":"forfeited","type":"uint128"},
-				{"name":"fundedTicks","type":"uint128"}
-			],
-			"outputs": [
-			]
-		},
-		{
-			"name": "InferenceForfeitClaimed",
-			"inputs": [
-				{"name":"orderId","type":"uint128"},
-				{"name":"cycle","type":"uint8"},
-				{"name":"sellerNote","type":"address"},
-				{"name":"amount","type":"uint128"}
-			],
-			"outputs": [
-			]
-		},
-		{
 			"name": "InferenceOrderBookDeployed",
 			"inputs": [
 				{"name":"note","type":"address"},
@@ -330,9 +298,6 @@
 		{"components":[{"name":"day","type":"uint64"},{"name":"priceVolSum","type":"uint256"},{"name":"volSum","type":"uint256"}],"init":false,"name":"_daily","type":"map(uint8,tuple)"},
 		{"init":false,"name":"_curSlot","type":"uint8"},
 		{"components":[{"name":"periodStart","type":"uint64"},{"name":"curCycle","type":"uint8"},{"name":"cycleBudget","type":"uint128"},{"name":"cycleSpent","type":"uint128"},{"name":"autoRenew","type":"bool"},{"name":"exists","type":"bool"}],"init":false,"name":"_subs","type":"map(uint128,tuple)"},
-		{"init":false,"name":"_forfeitPool","type":"map(uint128,map(uint8,uint128))"},
-		{"init":false,"name":"_cycleFundedTicks","type":"map(uint128,map(uint8,uint128))"},
-		{"init":false,"name":"_cycleSellerTicks","type":"map(uint128,map(uint8,map(address,uint128)))"},
 		{"init":false,"name":"_deployerNote","type":"address"}
 	]
 }

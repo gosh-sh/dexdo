@@ -33,42 +33,6 @@
 			]
 		},
 		{
-			"name": "streamLock",
-			"inputs": [
-				{"name":"sellerPubkey","type":"uint256"},
-				{"name":"nonce","type":"uint64"}
-			],
-			"outputs": [
-			]
-		},
-		{
-			"name": "streamUnlock",
-			"inputs": [
-				{"name":"sellerPubkey","type":"uint256"},
-				{"name":"nonce","type":"uint64"}
-			],
-			"outputs": [
-			]
-		},
-		{
-			"name": "streamDisputeLock",
-			"inputs": [
-				{"name":"sellerPubkey","type":"uint256"},
-				{"name":"nonce","type":"uint64"}
-			],
-			"outputs": [
-			]
-		},
-		{
-			"name": "streamDisputeUnlock",
-			"inputs": [
-				{"name":"sellerPubkey","type":"uint256"},
-				{"name":"nonce","type":"uint64"}
-			],
-			"outputs": [
-			]
-		},
-		{
 			"name": "onInferencePlaced",
 			"inputs": [
 				{"name":"modelHash","type":"uint256"},
@@ -92,23 +56,6 @@
 				{"name":"isBuy","type":"bool"}
 			],
 			"outputs": [
-			]
-		},
-		{
-			"name": "forceClearStreamLocks",
-			"inputs": [
-			],
-			"outputs": [
-			]
-		},
-		{
-			"name": "getStreamLocks",
-			"inputs": [
-			],
-			"outputs": [
-				{"name":"streamCount","type":"uint32"},
-				{"name":"disputeCount","type":"uint32"},
-				{"name":"lastChange","type":"uint64"}
 			]
 		},
 		{
@@ -159,16 +106,6 @@
 				{"name":"ticks","type":"uint128"},
 				{"name":"escrow","type":"uint128"},
 				{"name":"autoRenew","type":"bool"}
-			],
-			"outputs": [
-			]
-		},
-		{
-			"name": "claimInferenceForfeit",
-			"inputs": [
-				{"name":"modelHash","type":"uint256"},
-				{"name":"orderId","type":"uint128"},
-				{"name":"cycle","type":"uint8"}
 			],
 			"outputs": [
 			]
@@ -233,7 +170,7 @@
 			]
 		},
 		{
-			"name": "postProbeCommission",
+			"name": "postSellerBond",
 			"inputs": [
 				{"name":"nonce","type":"uint64"},
 				{"name":"amount","type":"uint128"}
@@ -954,11 +891,6 @@
 		{"init":false,"name":"_hasWithdrawn","type":"bool"},
 		{"init":false,"name":"_hasTransferred","type":"bool"},
 		{"init":false,"name":"_couponsValue","type":"uint128"},
-		{"init":false,"name":"_couponsTokenType","type":"uint32"},
-		{"init":false,"name":"_streamLocks","type":"map(address,bool)"},
-		{"init":false,"name":"_disputeLocks","type":"map(address,bool)"},
-		{"init":false,"name":"_streamLockCount","type":"uint32"},
-		{"init":false,"name":"_disputeLockCount","type":"uint32"},
-		{"init":false,"name":"_lastStreamLockChange","type":"uint64"}
+		{"init":false,"name":"_couponsTokenType","type":"uint32"}
 	]
 }

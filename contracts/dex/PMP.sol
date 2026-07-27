@@ -13,7 +13,7 @@ import "./libraries/DexLib.sol";
 contract PMP is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.27";
+    string constant version = "4.0.28";
 
     /// @notice PMP name (static, unique identifier)
     string _name;
@@ -112,6 +112,11 @@ contract PMP is Modifiers {
 
     /// @notice Cancellation flag
     bool _isCancelled;
+
+    /// @notice Latch: the confirmed OracleEventList counts have been released (decremented)
+    ///         for this event. Set by the FIRST of the normal cancel or the onBounce cleanup
+    ///         path so the two can never double-decrement an OEL count (#588).
+    bool _countReleased;
 
     /// @notice Mapping of confirmed oracle events
     mapping(uint256 => bool) _oracleEventsConfirmed;
@@ -272,7 +277,7 @@ contract PMP is Modifiers {
     event ClaimProcessed(address indexed note, uint128 payout, bool win);
 
     /// @notice Emitted when network fee was burned.
-    /// @dev The contract currently does not emit this event in the shown code; reserved for future accounting.
+    /// @dev Emitted once, at the first PMP approval, when the network fee is burned.
     /// @param amount Burned fee amount in native units.
     event NetworkFeeBurned(uint64 amount);
 
@@ -328,7 +333,7 @@ contract PMP is Modifiers {
         _privateNoteCode = PrivateNoteCode;
         _orderBookCode = orderBookCode;
         _orderBookAddress = DexLib.computeOrderBookAddress(
-            _privateNoteCode, _orderBookCode,
+            _privateNoteCode, tvm.hash(tvm.code()), uint16(tvm.code().depth()), _orderBookCode,
             _eventId, _oracleListHash, _tokenType
         );
         _approved = false;
@@ -359,16 +364,11 @@ contract PMP is Modifiers {
         ensureBalance();
         address addrExtern = address.makeAddrExtern(PMP_REJECTED_BY_ORACLE, bitCntAddress);
         emit PMPRejected{dest: addrExtern}();
-        
-        for ((uint256 key, bool value) : _oracleEventsConfirmed) {
-            if (value == true) {
-                OracleEventList(address.makeAddrStd(0, key)).cancelEvent{
-                    value: 0.1 vmshell,
-                    flag: 1,
-                    dest_dapp_id: ORACLE_DAPP_ID
-                }(_eventId, _oracleListHash, _tokenType);
-            }
-        }
+
+        // Release the confirmed oracle lists' counts once (#588) — the same idempotent
+        // path as normal cancel / onBounce, so reject after a normal cancel (or vice
+        // versa) cannot double-decrement.
+        _releaseOracleCounts();
 
         // Refund the deployer's initial stakes regardless of approval state:
         //   - Pre-approval (`_approvedOracleEvents == 0`): stakes still in PN's
@@ -429,6 +429,10 @@ contract PMP is Modifiers {
         if (_oracleEventsConfirmed[msg.sender.value] == true) {
             return;
         }
+        // Once the market is cancelled no further list confirmation is accepted: revert so
+        // the message bounces and the list decrements its own count in onBounce, rather than
+        // recording a confirmation after the counts were already released.
+        require(!_isCancelled, ERR_ALREADY_CANCELLED);
         if (_approvedOracleEvents >= _numberOfOracleEvents) {
             return;
         }
@@ -450,9 +454,11 @@ contract PMP is Modifiers {
                 PrivateNote(_deployer).onInitialStakesFailed{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
                     _eventId, _oracleListHash, _tokenType, refundTotal
                 );
-                // This OracleEventList (msg.sender) counted the event in confirmEvent; ask it to
-                // cancel so its per-event count is decremented before this PMP self-destructs.
-                // The oracle fee stays with the oracle here -- only the count is corrected.
+                // Release the count only on the list that confirmed (msg.sender): its
+                // approveEvent reached this PMP, so it will not bounce. Any other list whose
+                // approveEvent cannot be delivered to this destroyed PMP self-corrects its own
+                // count in its onBounce handler. The oracle fee stays with the oracle here --
+                // only the count is corrected.
                 OracleEventList(msg.sender).cancelEvent{
                     value: 0.1 vmshell, flag: 1, dest_dapp_id: ORACLE_DAPP_ID
                 }(_eventId, _oracleListHash, _tokenType);
@@ -474,6 +480,34 @@ contract PMP is Modifiers {
             );
         }
         _oracleEventsConfirmed[msg.sender.value] = true;
+        // Governance votes (setTimings / resolve / cancelEvent) are keyed by oracle
+        // pubkey, while the quorum is sized by the oracle-event-list count. Two lists
+        // sharing one oracle pubkey drop the distinct-voter count below quorum, so the
+        // event can never be approved and the deployer's initial stakes would be locked
+        // with no resolve or cancel path. Reject on the first duplicate pubkey: refund
+        // the initial stakes, cancel every confirmed list, and self-destruct before the
+        // duplicate is recorded.
+        if (_oracleEventsPubkeys.exists(oraclePubkey)) {
+            uint128 dupRefund = 0;
+            for (uint32 di = 0; di < _initialStakes.length; di++) {
+                dupRefund += _initialStakes[di];
+            }
+            PrivateNote(_deployer).onInitialStakesFailed{value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID}(
+                _eventId, _oracleListHash, _tokenType, dupRefund
+            );
+            // Release the count only on lists that confirmed (their approveEvent reached this
+            // PMP, so it will not bounce). A list whose approveEvent cannot be delivered to
+            // this destroyed PMP self-corrects its own count in its onBounce handler.
+            for ((uint256 dupKey, bool dupConfirmed) : _oracleEventsConfirmed) {
+                if (dupConfirmed) {
+                    OracleEventList(address.makeAddrStd(0, dupKey)).cancelEvent{
+                        value: 0.1 vmshell, flag: 1, dest_dapp_id: ORACLE_DAPP_ID
+                    }(_eventId, _oracleListHash, _tokenType);
+                }
+            }
+            selfdestruct(ROOT_PN_ADDRESS);
+            return;
+        }
         _oracleEventsPubkeys[oraclePubkey] = true;
         if (trustAddr.hasValue()) {
             require(!_oracleEventsAddress.exists(trustAddr.get()), ERR_ALREADY_INITIALIZED);
@@ -550,6 +584,11 @@ contract PMP is Modifiers {
         if (_stakeStart == 0) {
             require(resultStart >= uint64(block.timestamp) + MIN_RESULT_GAP, ERR_INVALID_PARAMS);
             _stakeStart = uint64(block.timestamp);
+            // The network fee is consumed when the market goes live. By this first
+            // approval every oracle fee has already been dispatched, so the only SHELL
+            // held by the contract is the network fee: burn it and report the burn.
+            gosh.burnecc(NETWORK_FEE_AMOUNT, CURRENCIES_ID_SHELL);
+            emit NetworkFeeBurned{dest: address.makeAddrExtern(PMP_NETWORK_FEE_BURNED, bitCntAddress)}(NETWORK_FEE_AMOUNT);
         }
 
         _resultStart = resultStart;
@@ -575,6 +614,24 @@ contract PMP is Modifiers {
         emit TimingsSet{dest: addrExtern}(_stakeStart, _computeStakeEnd(), _resultStart, _resultStart + GRACE_PERIOD);
     }
 
+    /// @notice Release (decrement) the confirmed OracleEventList counts for this event
+    ///         exactly once (#588). Idempotent via `_countReleased`, so the normal cancel
+    ///         and the onBounce cleanup can both call it without double-decrementing a count.
+    ///         Each confirmed list drops its confirmation for this event, letting the oracle
+    ///         later `deleteEvent` once every confirmed PMP has released (count reaches 0).
+    function _releaseOracleCounts() private {
+        if (_countReleased) return;
+        _countReleased = true;
+        for ((uint256 key, bool confirmed) : _oracleEventsConfirmed) {
+            if (confirmed) {
+                OracleEventList(address.makeAddrStd(0, key)).cancelEvent{
+                    value: 0.1 vmshell,
+                    flag: 1, dest_dapp_id: ORACLE_DAPP_ID
+                }(_eventId, _oracleListHash, _tokenType);
+            }
+        }
+    }
+
     /// @notice Cancels the event
     function cancelEvent() private {
         require(_approvedOracleEvents == _numberOfOracleEvents, ERR_NOT_APPROVED);
@@ -588,6 +645,10 @@ contract PMP is Modifiers {
         // on `_isCancelled` — so flipping the flag first is required for the
         // OB drain to start in the same tx as the cancel.
         ensureBalance();
+
+        // Release the confirmed OracleEventList counts (#588) so the event can later be
+        // deleted (deleteEvent requires count == 0). Idempotent with the onBounce path.
+        _releaseOracleCounts();
 
         address addrExtern = address.makeAddrExtern(PMP_EVENT_CANCELLED, bitCntAddress);
         emit EventCancelled{dest: addrExtern}();
@@ -694,6 +755,9 @@ contract PMP is Modifiers {
 
         address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
+        // Deployer's stake.amount trails the freeze-time clean refund until it is
+        // acknowledged; scope the guard to the deployer, mirroring split/merge.
+        require(!_normRefundPending || wallet != _deployer, ERR_NORM_REFUND_PENDING);
 
         tvm.accept();
         ensureBalance();
@@ -883,6 +947,8 @@ contract PMP is Modifiers {
         // in `_orderBookAddress`).
         TvmCell stateInit = DexLib.buildOrderBookStateInit(
             _privateNoteCode,
+            tvm.hash(tvm.code()),
+            uint16(tvm.code().depth()),
             _orderBookCode,
             _eventId,
             _oracleListHash,
@@ -893,7 +959,7 @@ contract PMP is Modifiers {
             stateInit: stateInit,
             value: 10 vmshell,
             flag: 1
-        }(tvm.hash(tvm.code()), tvm.code().depth(), _resultStart, _numOutcomes);
+        }(_resultStart, _numOutcomes);
 
         address addrExtern = address.makeAddrExtern(PMP_POOLS_FROZEN, bitCntAddress);
         emit PoolsFrozen{dest: addrExtern}(_baseTotalPool);
@@ -1463,6 +1529,12 @@ contract PMP is Modifiers {
                 flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
             }(residual, _tokenType, _eventId, _oracleListHash);
         }
+        // Release this PMP's OracleEventList confirmations before it disappears
+        // (#588): a resolved market self-destructs here, so without this the
+        // confirmed lists would hold the count raised forever and the event
+        // could never be deleted. Idempotent via `_countReleased`, so a close
+        // that already released on the cancel path is a no-op.
+        _releaseOracleCounts();
         selfdestruct(_deployer);
     }
 
@@ -1479,6 +1551,11 @@ contract PMP is Modifiers {
                 flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
             }(residual, _tokenType, _eventId, _oracleListHash);
         }
+        // Release this PMP's OracleEventList confirmations before self-destruct
+        // (#588). On the debt-refund resolve close the count would otherwise leak
+        // and block deleteEvent; on the cancelled close it was already released,
+        // and `_countReleased` makes this call a no-op there.
+        _releaseOracleCounts();
         selfdestruct(_deployer);
     }
 
@@ -1656,36 +1733,52 @@ contract PMP is Modifiers {
     /// - Prevents half-initialized market state after failed oracle interactions.
     /// @param body Bounced message body (unused, accepted to satisfy ABI).
     onBounce(TvmSlice body) external {
-        tvm.accept();
-        ensureBalance();
         body;
-        if (_oracleEventsConfirmed.exists(msg.sender.value)) {
-            // Only cancel oracles that have already confirmed (not the one that bounced)
-            for ((uint256 key, bool confirmed) : _oracleEventsConfirmed) {
-                if (confirmed) {
-                    OracleEventList(address.makeAddrStd(0, key)).cancelEvent{
-                        value: 0.1 vmshell,
-                        flag: 1, dest_dapp_id: ORACLE_DAPP_ID
-                    }(_eventId, _oracleListHash, _tokenType);
-                }
-            }
-
-            // Refund the deployer's initial stakes — symmetric with rejectEvent.
-            // Must fire regardless of `_approvedOracleEvents`: post-partial-approval
-            // the stakes are already committed in PN as `stake.amount[k]`, and
-            // without this callback they'd stay locked once the PMP is gone.
-            if (_initialStakes.length > 0) {
-                uint128 refundTotal = 0;
-                for (uint32 i = 0; i < _initialStakes.length; i++) {
-                    refundTotal += _initialStakes[i];
-                }
-                PrivateNote(_deployer).onInitialStakesFailed{
-                    value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
-                }(_eventId, _oracleListHash, _tokenType, refundTotal);
-            }
-
-            selfdestruct(ROOT_PN_ADDRESS);
+        tvm.accept();
+        // A bounce from a configured oracle list is one of two things:
+        //  (a) during a normal cancel (`_isCancelled`): a release `cancelEvent` that failed to
+        //      deliver. Re-arm exactly that list once, `bounce: false`, so the automatic resend is
+        //      strictly finite: the first release send bounces here, this single retry is sent one
+        //      way, and if it still cannot be delivered it does not bounce back — no further
+        //      onBounce, no gas loop. `OracleEventList.cancelEvent` is idempotent per canonical PMP
+        //      (a first delivery that actually landed cleared `_pmpConfirmed`), so the retry or a
+        //      late no-op cannot double-decrement. Keep the cancelled market intact: no refund, no
+        //      self-destruct, no `ensureBalance`.
+        //  (b) before cancel: a failed constructor-time oracle interaction. Run the half-init
+        //      cleanup — release the confirmed counts, refund the deployer's stakes, self-destruct.
+        if (!_oracleEventsConfirmed.exists(msg.sender.value)) {
+            return;
         }
+        if (_isCancelled) {
+            OracleEventList(msg.sender).cancelEvent{
+                value: 0.1 vmshell, flag: 1, bounce: false, dest_dapp_id: ORACLE_DAPP_ID
+            }(_eventId, _oracleListHash, _tokenType);
+            return;
+        }
+        ensureBalance();
+        _releaseOracleCounts();
+
+        // Refund the deployer's initial stakes — symmetric with rejectEvent.
+        // Must fire regardless of `_approvedOracleEvents`: post-partial-approval
+        // the stakes are already committed in PN as `stake.amount[k]`, and
+        // without this callback they'd stay locked once the PMP is gone.
+        if (_initialStakes.length > 0) {
+            uint128 refundTotal = 0;
+            for (uint32 i = 0; i < _initialStakes.length; i++) {
+                refundTotal += _initialStakes[i];
+            }
+            PrivateNote(_deployer).onInitialStakesFailed{
+                value: 0.1 vmshell, flag: 1, dest_dapp_id: ROOT_PN_DAPP_ID
+            }(_eventId, _oracleListHash, _tokenType, refundTotal);
+        }
+
+        // The bounced confirmEvent carries the oracle fee (SHELL) back. Return it
+        // to the deployer rather than sweeping it to RootPN on self-destruct,
+        // mirroring rejectEvent — the oracle rendered no service on a bounce.
+        if (uint128(msg.currencies[CURRENCIES_ID_SHELL]) > 0) {
+            _deployer.transfer({value: 0.1 vmshell, flag: 1, bounce: false, currencies: msg.currencies, dest_dapp_id: ROOT_PN_DAPP_ID});
+        }
+        selfdestruct(ROOT_PN_ADDRESS);
     }
 
     /// @notice Returns full current state of the PMP contract.
