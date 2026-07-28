@@ -32,7 +32,7 @@ use std::time::UNIX_EPOCH;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
-use common::airegistry::fund_seller_bond_via_giver;
+use common::airegistry::wait_inference_book_live;
 use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
@@ -44,6 +44,7 @@ use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
+use dodex_contracts::dex::private_note::ParamsOfPostSellerBond;
 use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
@@ -161,10 +162,15 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
         return;
     }
 
-    // 4. Seller mirror bond (internal SHELL message via the giver).
-    fund_seller_bond_via_giver(dex.context(), &tc, SELLER_BOND as u64)
-        .await
-        .expect("fund seller bond via giver");
+    // 4. Seller mirror bond, shipped from the note: the TC takes the bond from
+    //    its `_sellerNote` and refuses every other sender.
+    dex.post_seller_bond(
+        &note.address,
+        ParamsOfPostSellerBond { nonce, amount: SELLER_BOND },
+        signer(),
+    )
+    .await
+    .expect("postSellerBond accepted");
     let mut bond_funded = false;
     for _ in 0..POLL_TICKS {
         tokio::time::sleep(POLL_TICK).await;
@@ -256,13 +262,9 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
 }
 
 async fn wait_book_live(dex: &Dex, ob: &str) {
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if dex.inference_get_stats(ob).await.is_ok() {
-            return;
-        }
-    }
-    panic!("InferenceOrderBook did not become live within budget");
+    wait_inference_book_live(dex, ob, POLL_TICKS, POLL_TICK)
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
 }
 
 async fn wait_funded(dex: &Dex, tc: &str) -> bool {

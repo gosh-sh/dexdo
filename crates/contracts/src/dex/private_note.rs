@@ -471,6 +471,22 @@ pub struct ParamsOfPostSellOffer {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Parameters for `PrivateNote.postSellerBond`.
+///
+/// The seller mirror of the buyer's escrow: the note ships SHELL to its own
+/// canonical `TokenContract` for `nonce`, which is the ONLY sender the TC's
+/// `fundSellerBond` accepts. There is no wallet-funded path — the note is the
+/// seller's identity, and the bond returns to it on close.
+pub struct ParamsOfPostSellerBond {
+    /// Deal nonce the `TokenContract` address is derived from.
+    pub nonce: u64,
+    /// SHELL to attach. Must be at least the TC's `2 * pricePerTick`; the TC
+    /// keeps exactly that and refunds the excess to this note.
+    pub amount: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.placeInferenceBuy`.
 pub struct ParamsOfPlaceInferenceBuy {
     /// `uint256` model hash, decimal/hex string — identifies the book.
@@ -1198,6 +1214,30 @@ impl PrivateNote {
     ) -> KitResult<ResultOfSendMessage> {
         let call_set = CallSet {
             function_name: "postSellOffer".to_string(),
+            header: None,
+            input: Some(json!(params)),
+        };
+        self.send_message(Some(call_set), None, signer).await
+    }
+
+    /// # Post the seller mirror bond into the deal TokenContract
+    ///
+    /// Original contract method: `postSellerBond`
+    ///
+    /// Indirect and `bounce:false`: the note derives its canonical
+    /// `TokenContract` for `nonce` and calls `fundSellerBond` on it with the
+    /// SHELL attached. A TC that refuses (already open, already bonded, amount
+    /// below `2 * pricePerTick`) leaves no trace here — read `getSellerBond` to
+    /// confirm the bond registered.
+    ///
+    /// Should be signed with PrivateNote owner keys.
+    pub async fn post_seller_bond(
+        &self,
+        params: ParamsOfPostSellerBond,
+        signer: Signer,
+    ) -> KitResult<ResultOfSendMessage> {
+        let call_set = CallSet {
+            function_name: "postSellerBond".to_string(),
             header: None,
             input: Some(json!(params)),
         };

@@ -33,6 +33,7 @@ use std::time::UNIX_EPOCH;
 
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
+use common::airegistry::wait_inference_book_live;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
 use common::test_pns::TestPnPool;
@@ -104,28 +105,16 @@ async fn inference_order_book_buy_then_cancel_against_shellnet() {
     eprintln!("[e2e_inference] order_book={ob}");
 
     // 3. Wait until the book is live: its getters answer once it is Active.
-    let mut deployed = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        match dex.inference_get_stats(&ob).await {
-            Ok(stats) => {
-                eprintln!(
-                    "[e2e_inference] book live: order_count={} next_order_id={}",
-                    stats.order_count, stats.next_order_id
-                );
-                if stats.order_count != 0 {
-                    failures.push(format!(
-                        "fresh book should have order_count=0, got {}",
-                        stats.order_count
-                    ));
-                }
-                deployed = true;
-                break;
-            }
-            Err(err) => eprintln!("[e2e_inference] book not live yet (retry): {err:?}"),
-        }
+    let stats = wait_inference_book_live(&dex, &ob, POLL_TICKS, POLL_TICK)
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
+    eprintln!(
+        "[e2e_inference] book live: order_count={} next_order_id={}",
+        stats.order_count, stats.next_order_id
+    );
+    if stats.order_count != 0 {
+        failures.push(format!("fresh book should have order_count=0, got {}", stats.order_count));
     }
-    assert!(deployed, "InferenceOrderBook did not become live within budget");
 
     // 4. Place a resting BUY (flags=0 = limit/rest; no offers ⇒ it just rests).
     //    Escrow is physical SHELL held by the note.

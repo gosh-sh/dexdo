@@ -24,6 +24,7 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
 use common::airegistry::fetch_inference_event_ids;
+use common::airegistry::wait_inference_book_live;
 use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
@@ -44,6 +45,9 @@ const POLL_TICKS: u32 = 45;
 // 1e9); the book rejects sub-SHELL dust with ERR_BAD_PARAM before assigning an
 // order id, so a too-small price reads as "the order never rested".
 const PRICE_PER_TICK: u128 = 1_000_000_000;
+/// `ERR_NO_LIQUIDITY` in `contracts/airegistry/InferenceOrderBook.sol` — what
+/// `getWeeklyMedianPrice` raises while the book has recorded no finalized ticks.
+const ERR_NO_LIQUIDITY: u32 = 334;
 
 fn note_and_signer() -> (common::test_pns::TestPn, KeyPair) {
     let note = {
@@ -98,13 +102,10 @@ async fn deploy_book(
         )
         .await
         .expect("getInferenceOrderBookAddress");
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if dex.inference_get_stats(&ob).await.is_ok() {
-            return (ob, model_hash);
-        }
-    }
-    panic!("InferenceOrderBook did not become live within budget");
+    wait_inference_book_live(dex, &ob, POLL_TICKS, POLL_TICK)
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
+    (ob, model_hash)
 }
 
 #[tokio::test]
@@ -203,8 +204,21 @@ async fn inference_partial_fill_leaves_remainder() {
         }
         Err(err) => failures.push(format!("getBestBidAsk: {err:?}")),
     }
+    // A match reserves escrow that a cancel or a no-show still refunds, so it
+    // must NOT move the reference price: the book records VWAP volume only from
+    // `reportFinalized`, which the TokenContract sends once ticks are served and
+    // paid. This flow never settles, so the book is dry and the getter reverts
+    // with ERR_NO_LIQUIDITY. Asserting the revert (not just tolerating it) pins
+    // that separation — a build that credited the median on fill would pass a
+    // mere `is_err`, and so would any unrelated getter failure.
     match dex.inference_get_weekly_median_price(&ob).await {
-        Ok(median) => eprintln!("[e2e_clob] weeklyMedianPrice={median}"),
+        Ok(median) => failures.push(format!(
+            "getWeeklyMedianPrice returned {median} after a match with no settlement: \
+             an unfinalized fill must not feed the reference price"
+        )),
+        Err(err) if err.tvm_exit_code() == Some(ERR_NO_LIQUIDITY) => {
+            eprintln!("[e2e_clob] weeklyMedianPrice: dry book (ERR_NO_LIQUIDITY), as expected")
+        }
         Err(err) => failures.push(format!("getWeeklyMedianPrice: {err:?}")),
     }
 

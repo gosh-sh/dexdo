@@ -32,6 +32,7 @@ use std::time::UNIX_EPOCH;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
+use common::airegistry::wait_inference_book_live;
 use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
@@ -200,12 +201,8 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
 }
 
 async fn wait_book_live(dex: &Dex, ob: &str) {
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if dex.inference_get_stats(ob).await.is_ok() {
-            eprintln!("[e2e_match] book live");
-            return;
-        }
-    }
-    panic!("InferenceOrderBook did not become live within budget");
+    wait_inference_book_live(dex, ob, POLL_TICKS, POLL_TICK)
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
+    eprintln!("[e2e_match] book live");
 }

@@ -27,23 +27,22 @@ use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
 use ackinacki_kit::contracts::dapp::SystemDapp;
 use ackinacki_kit::contracts::event::query_events;
 use ackinacki_kit::contracts::giver::send_currency_with_flag_from_default_giver;
-use ackinacki_kit::contracts::giver::v3::GiverV3;
-use ackinacki_kit::contracts::giver::v3::ParamsOfSendCurrencyWithBody;
 use ackinacki_kit::contracts::traits::AccountAccessor;
 use ackinacki_kit::contracts::traits::SendMessage;
 use ackinacki_kit::tvm_client::abi::encode_message;
-use ackinacki_kit::tvm_client::abi::encode_message_body;
 use ackinacki_kit::tvm_client::abi::Abi;
 use ackinacki_kit::tvm_client::abi::CallSet;
 use ackinacki_kit::tvm_client::abi::DeploySet;
 use ackinacki_kit::tvm_client::abi::ParamsOfEncodeMessage;
-use ackinacki_kit::tvm_client::abi::ParamsOfEncodeMessageBody;
 use ackinacki_kit::tvm_client::abi::Signer;
+use ackinacki_kit::tvm_client::boc::decode_state_init;
+use ackinacki_kit::tvm_client::boc::ParamsOfDecodeStateInit;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
 use anyhow::anyhow;
 use base64::Engine as _;
 use dodex_chain::self_rooted_contract_params;
+use dodex_contracts::airegistry::inference_order_book::ResultOfGetStats;
 use dodex_contracts::airegistry::super_root::ParamsOfGetRootModelAddress;
 use dodex_contracts::airegistry::super_root::SuperRoot;
 use dodex_contracts::airegistry::token_contract::TokenContract;
@@ -55,6 +54,17 @@ const TOKEN_CONTRACT_TVC: &[u8] =
     include_bytes!("../../../../contracts/airegistry/TokenContract.tvc");
 const TOKEN_CONTRACT_ABI: &str =
     include_str!("../../../../contracts/airegistry/TokenContract.abi.json");
+/// The book image this checkout builds against. Only its code hash is used, and
+/// that is computed from the artifact at run time rather than written out as a
+/// literal, so it cannot drift from what the contracts build produced.
+const INFERENCE_ORDER_BOOK_TVC: &[u8] =
+    include_bytes!("../../../../contracts/airegistry/InferenceOrderBook.tvc");
+
+/// TVM hash of the empty cell — `sha256(0x00, 0x00)`. A deploy applies its
+/// StateInit before the constructor runs, so a StateInit whose code cell is
+/// empty still creates and funds the account; it just reports this hash and has
+/// nothing to execute, then or ever.
+const EMPTY_CELL_HASH: &str = "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7";
 
 /// ECC currency id for SHELL.
 const SHELL_CURRENCY_ID: u32 = 2;
@@ -69,6 +79,85 @@ const CREATION_SHELL: u64 = 200_000_000_000;
 /// SuperRoot-code / RootModel rotation re-pins this; keep it in sync with the
 /// contract constant.
 const SUPER_ROOT_ADDR: &str = "0:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
+
+/// Wait for a freshly deployed book to answer its getters; on timeout, say WHY
+/// it is dead instead of just reporting a timeout.
+///
+/// `note.deployInferenceOrderBook` sends `new InferenceOrderBook` with
+/// `bounce:false`, and the book's ctor guards on the deployer being a canonical
+/// note, so a refused deploy leaves nothing behind to observe — `getStats` just
+/// keeps failing. The account's own code hash is what separates the causes.
+pub async fn wait_inference_book_live(
+    dex: &dodex_chain::Dex,
+    order_book: &str,
+    ticks: u32,
+    tick: std::time::Duration,
+) -> Result<ResultOfGetStats, String> {
+    let mut last_err = "never polled".to_string();
+    for _ in 0..ticks {
+        tokio::time::sleep(tick).await;
+        match dex.inference_get_stats(order_book).await {
+            Ok(stats) => return Ok(stats),
+            Err(err) => last_err = format!("{err:?}"),
+        }
+    }
+    Err(format!(
+        "InferenceOrderBook {order_book} did not become live within budget: {}; \
+         last getStats error: {last_err}",
+        diagnose_dead_book(dex, order_book).await
+    ))
+}
+
+/// Name the reason a book never came up, from the one observable that survives
+/// a `bounce:false` deploy: the account's code hash.
+async fn diagnose_dead_book(dex: &dodex_chain::Dex, order_book: &str) -> String {
+    let account = match dex.inference_book_account(order_book).await {
+        Ok(account) => account,
+        Err(err) => return format!("account unreadable: {err:?}"),
+    };
+    let acc_type = &account.acc_type;
+    let balance = account.balance.as_deref().unwrap_or("?");
+    let expected = expected_book_code_hash();
+    match account.code_hash.as_deref() {
+        // RootPN.onCodeUpgrade calls tvm.resetStorage() and restores only 6
+        // codes; `_inferenceOrderBookCode` is deliberately left out to keep the
+        // upgrade message under the gateway's body limit. Every RootPN upgrade
+        // therefore wipes it, and every note minted afterwards bakes an empty
+        // book code that deploys a codeless account at a well-formed address.
+        Some(hash) if hash == EMPTY_CELL_HASH => format!(
+            "the account exists (acc_type={acc_type}, balance={balance}) but was deployed with an \
+             EMPTY code cell, so no constructor ever ran. The note's baked \
+             `_inferenceOrderBookCode` is empty — a RootPN upgrade wiped it and was not followed \
+             by RootPN.setInferenceOrderBookCode"
+        ),
+        Some(hash) if expected.as_deref().is_some_and(|want| want != hash) => format!(
+            "the book runs code {hash}, but this checkout builds \
+             {} — the note bakes a different InferenceOrderBook build",
+            expected.as_deref().unwrap_or("?")
+        ),
+        Some(_) => format!(
+            "the book carries the expected code (acc_type={acc_type}, balance={balance}) yet its \
+             getters do not answer — the network, not the deploy, is the suspect"
+        ),
+        None => format!("the account carries no state at all (acc_type={acc_type})"),
+    }
+}
+
+/// Code hash of the vendored `InferenceOrderBook.tvc`, or `None` if the
+/// artifact cannot be parsed (in which case the caller reports what it saw and
+/// skips the comparison rather than accusing the wrong side).
+fn expected_book_code_hash() -> Option<String> {
+    let ctx = Arc::new(ClientContext::new(Default::default()).ok()?);
+    decode_state_init(
+        ctx,
+        ParamsOfDecodeStateInit {
+            state_init: base64::engine::general_purpose::STANDARD.encode(INFERENCE_ORDER_BOOK_TVC),
+            boc_cache: None,
+        },
+    )
+    .ok()?
+    .code_hash
+}
 
 /// Wait for a TC's sell offer to rest in the book; on timeout, say WHICH hop
 /// dropped it instead of just reporting a timeout.
@@ -256,56 +345,6 @@ pub async fn deploy_token_contract(
     .map_err(|e| anyhow!("wait TokenContract {address} active: {e:?}"))?;
 
     Ok(address)
-}
-
-/// Post the seller mirror bond to a `TokenContract` from the default giver.
-///
-/// `TokenContract.fundSellerBond` only accepts an INTERNAL message that carries
-/// ECC SHELL (an external signed call cannot carry currency, and `open()`
-/// requires the bond already funded). Rather than stand up a multisig just to
-/// send it, encode the call body and have the giver deliver SHELL + that body
-/// in one internal message. The method has no sender guard.
-pub async fn fund_seller_bond_via_giver(
-    ctx: Arc<ClientContext>,
-    token_contract_addr: &str,
-    shell_amount: u64,
-) -> anyhow::Result<()> {
-    let body = encode_message_body(
-        ctx.clone(),
-        ParamsOfEncodeMessageBody {
-            abi: Abi::Json(TOKEN_CONTRACT_ABI.to_string()),
-            call_set: CallSet {
-                function_name: "fundSellerBond".to_string(),
-                header: None,
-                input: None,
-            },
-            is_internal: true,
-            signer: Signer::None,
-            processing_try_index: None,
-            address: Some(token_contract_addr.to_string()),
-            signature_id: None,
-        },
-    )
-    .await
-    .map_err(|e| anyhow!("encode fundSellerBond body: {e:?}"))?
-    .body;
-
-    let mut ecc = HashMap::new();
-    ecc.insert(SHELL_CURRENCY_ID, shell_amount);
-    GiverV3::new_default(ctx)
-        .send_currency_with_body(
-            ParamsOfSendCurrencyWithBody {
-                dest: token_contract_addr.to_string(),
-                value: 1_000_000_000,
-                ecc,
-                flag: 1,
-                body,
-            },
-            Signer::None,
-        )
-        .await
-        .map_err(|e| anyhow!("giver fundSellerBond → {token_contract_addr}: {e:?}"))?;
-    Ok(())
 }
 
 /// Fetch the routing ids of the external events an `InferenceOrderBook` emitted.
