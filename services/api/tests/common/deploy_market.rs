@@ -45,6 +45,7 @@ use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
 use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
+use dodex_contracts::dex::private_note::PrivateNote;
 use dodex_contracts::dex::root_oracle::ParamsOfDeployOracle;
 use dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress;
 use dodex_contracts::dex::root_pn::RootPn;
@@ -175,8 +176,15 @@ pub async fn deploy_ephemeral_market(
         .await
         .map_err(|e| anyhow!("get_pmp_address: {e:?}"))?
         .pmp_address;
-    wait_active(Pmp::new(context.clone(), dex_contract_params(&pmp_address)), 60, 2_000, "PMP")
-        .await?;
+    if wait_active(Pmp::new(context.clone(), dex_contract_params(&pmp_address)), 60, 2_000, "PMP")
+        .await
+        .is_err()
+    {
+        return Err(anyhow!(
+            "PMP never became Active at {pmp_address}\n{}",
+            diagnose_missing_pmp(context.clone(), &deployer.address, &pmp_address).await
+        ));
+    }
 
     // Oracle quorum lands a few seconds after deployPMP — poll PMP
     // details until `approved_oracle_events == number_of_oracle_events`.
@@ -436,6 +444,61 @@ async fn wait_pmp_timings(dex: &Dex, pmp_address: &str) -> anyhow::Result<Applie
         }
     }
     Err(anyhow!("PMP timings did not appear within 60s after submit_set_timings"))
+}
+
+/// Explain why a `deployPMP` produced no PMP account.
+///
+/// `deployPMP` carries `accept`, so the note takes the external message and only
+/// then runs its `require`s: a rejected deploy still looks like a delivered call
+/// and surfaces solely as this wait timing out. Nothing downstream names the
+/// cause, so read the two accounts that hold it.
+///
+/// The load-bearing comparison is the note's OWN `pmpCodeHash` against RootPN's.
+/// A note bakes the PMP code into its constructor, while `getPMPAddress` derives
+/// the address from RootPN's current code — so a note minted before a PMP-code
+/// rollout deploys its PMP somewhere nobody is watching, and every account query
+/// comes back empty exactly like a deploy that never happened.
+async fn diagnose_missing_pmp(
+    context: Arc<ClientContext>,
+    note_address: &str,
+    pmp_address: &str,
+) -> String {
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
+    let root = match root_pn.get_details().await {
+        Ok(d) => d,
+        Err(e) => return format!("  RootPN.getDetails unreadable: {e:?}"),
+    };
+    let note = PrivateNote::new(context, dex_contract_params(note_address));
+    let details = match note.get_details().await {
+        // An unreadable note is itself the answer: the deployer was never
+        // deployed, or the pool names an address this network does not have.
+        Err(e) => return format!("  note {note_address} getDetails unreadable: {e:?}"),
+        Ok(d) => d,
+    };
+
+    let mut out = format!("  note={note_address}\n  pmp(expected)={pmp_address}\n");
+    if details.pmp_code_hash != root.pmp_code_hash {
+        out.push_str(&format!(
+            "  PMP CODE MISMATCH: note baked {} but RootPN now serves {} — the note deployed \
+             its PMP from the old code, so it exists at a different address than the one \
+             getPMPAddress computed. Re-mint the seed notes.\n",
+            details.pmp_code_hash, root.pmp_code_hash
+        ));
+    } else {
+        out.push_str(&format!("  pmp_code_hash matches RootPN ({})\n", root.pmp_code_hash));
+    }
+    // The remaining `deployPMP` preconditions, in the order the contract checks
+    // them: a withdrawn or indebted note is refused outright, and the stake is
+    // debited from `balance[token_type]`.
+    out.push_str(&format!(
+        "  has_withdrawn={} busy_address={:?} coupons_value={}\n  balance={:?} locked_in_orders={:?}",
+        details.has_withdrawn,
+        details.busy_address,
+        details.coupons_value,
+        details.balance,
+        details.locked_in_orders,
+    ));
+    out
 }
 
 async fn wait_active<A: AccountAccessor>(
