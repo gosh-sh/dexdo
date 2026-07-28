@@ -967,15 +967,6 @@ impl PrivateNote {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// # Clear busy transfer state
-    ///
-    /// Original contract method: `clearTransferBusy`
-    pub async fn clear_transfer_busy(&self, signer: Signer) -> KitResult<ResultOfSendMessage> {
-        let call_set =
-            CallSet { function_name: "clearTransferBusy".to_string(), header: None, input: None };
-        self.send_message(Some(call_set), None, signer).await
-    }
-
     /// # Discard unused coupon
     ///
     /// Original contract method: `discardCoupon`
