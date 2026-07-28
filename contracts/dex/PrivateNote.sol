@@ -693,10 +693,15 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // dispatches, and no approveEvent / onInitialStakesAccepted / onInitialStakesFailed
         // ever fires — so require at least one name, keeping PN out of a permanent
         // `_busy` state with its initial stakes held in candidateAmount.
-        require(length > 0, ERR_INVALID_PARAMS);
+        // Cap outcome/list counts at ingress (< 20, matching the canonical OracleEventList's
+        // outcomeCount cap). Every per-outcome loop in the _busy-clearing callbacks
+        // (onInitialStakesAccepted / onSplitAccepted / onMergeAccepted / onBounce) iterates this
+        // count; an uncapped oversized market would gas-exhaust the only path that clears _busy and
+        // brick the note. Bounding it here also keeps PMP.approveEvent's mismatch-refund loop small.
+        require(length > 0 && length < 20, ERR_INVALID_PARAMS);
         require(length == oracleFee.length, ERR_INVALID_PARAMS);
         require(length == index.length, ERR_INVALID_PARAMS);
-        require(initialStakes.length > 0, ERR_INVALID_PARAMS);
+        require(initialStakes.length > 0 && initialStakes.length < 20, ERR_INVALID_PARAMS);
         require(_debt == 0, ERR_DEBT_NON_ZERO);
 
         // Validate initial stakes and compute total

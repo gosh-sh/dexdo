@@ -28,8 +28,8 @@ contract ModelRegistry {
 
     // ── pinned InferenceOrderBook code (cascade-updated on version bump) ──
     /// @dev InferenceOrderBook 4.0.20 (tickSize=1M) code hash + depth. One model ⇒ one book.
-    uint256 constant IOB_CODE_HASH  = 0xd8a3ad7f04803f68a663faa9b315b424155682f522b3146ddcc5b14120ed2d7e;
-    uint16  constant IOB_CODE_DEPTH = 35;
+    uint256 constant IOB_CODE_HASH  = 0x85561ec2f7d972799cbcf807817855fb2164103c67bde54ffcdce2eda66ee8cd;
+    uint16  constant IOB_CODE_DEPTH = 36;
 
     /// @notice Self-top-up floor (mirrors the airegistry stack).
     uint64 constant MIN_BALANCE = 100 vmshell;
@@ -52,6 +52,11 @@ contract ModelRegistry {
 
     /// @notice nameHash => registered.  nameHash = tvm.hash(bytes(name)).
     mapping(uint256 => bool) _models;
+
+    /// @notice Live cardinality of `_models`, maintained incrementally on every insert/remove so
+    ///         `count()` is O(1). A full-map scan would blow the get-method gas budget at the
+    ///         production scale (~8558+ entries).
+    uint32 _count;
 
     /// @dev Only the owner key may mutate. `accept` so the owner pays gas.
     modifier onlyOwner() {
@@ -102,7 +107,8 @@ contract ModelRegistry {
         ensureBalance();
         if (!canonicalName.empty()) {
             require(canonicalName.byteLength() <= MODEL_NAME_MAX, ERR_NAME_TOO_LONG);
-            _models[_key(canonicalName)] = true;
+            uint256 k = _key(canonicalName);
+            if (!_models[k]) { _models[k] = true; _count++; }   // count only NEW keys → incremental
         }
     }
 
@@ -114,7 +120,8 @@ contract ModelRegistry {
             // Skip empty AND over-long (>127) names rather than revert the whole batch —
             // an over-long name would alias another entry's order book (see MODEL_NAME_MAX).
             if (!names[i].empty() && names[i].byteLength() <= MODEL_NAME_MAX) {
-                _models[_key(names[i])] = true;
+                uint256 k = _key(names[i]);
+                if (!_models[k]) { _models[k] = true; _count++; }
             }
         }
     }
@@ -122,7 +129,8 @@ contract ModelRegistry {
     /// @notice Unregister a canonical model name.
     function removeModel(string canonicalName) public onlyOwner {
         ensureBalance();
-        delete _models[_key(canonicalName)];
+        uint256 k = _key(canonicalName);
+        if (_models[k]) { delete _models[k]; _count--; }
     }
 
     /// @notice Upgrade this contract's code in place (owner-gated). The fixed
@@ -140,6 +148,7 @@ contract ModelRegistry {
     ///     (single source of truth is re-seeded fresh after an upgrade).
     function onCodeUpgrade() private {
         delete _models;
+        _count = 0;
     }
 
     // ── getters ───────────────────────────────────────────────
@@ -162,11 +171,8 @@ contract ModelRegistry {
     }
 
     /// @notice Number of registered models.
-    function count() external view returns (uint32 n) {
-        for ((, bool v) : _models) {
-            v;
-            n++;
-        }
+    function count() external view returns (uint32) {
+        return _count;   // O(1) — no full-map scan (the set is unbounded at ~8558+ entries)
     }
 
     /// @notice The pinned book code hash + depth used for derivation.

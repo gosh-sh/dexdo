@@ -21,9 +21,9 @@ contract RootPN is Modifiers {
     // RootPN is not pinned by anyone, so pinning these here is cycle-free
     // (cascade-updated together with the note's baked copies).
     uint256 constant SUPER_ROOT_ADDR           = 0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c;
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x57e9e41df48d6171469292b8012533077202a3202ee28cb3f86f0e00c05275db;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xd5a43621a3873cd436aad52b172d769cd1735dacf20dccfd52daa8fab2ddd35c;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 12;
-    uint256 constant ROOT_MODEL_CODE_HASH      = 0x977ad659fda04de6e7ba47978a82bdf1539802cb7e29c9b73fd59bf10f9f42e9;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0x88eab99d8b9f0d194a6400c04f1978465e4c59c8abe7df929145affbb9422f5a;
     uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
 
     /// @notice Stored code of PrivateNote contract

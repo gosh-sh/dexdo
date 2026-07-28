@@ -194,7 +194,7 @@ contract OracleEventList is Modifiers {
         require(deadline >= uint64(block.timestamp) + MIN_RESULT_GAP, ERR_INVALID_PARAMS);
         ensureBalance();
         uint32 n = uint32(bounds.length);
-        require(n >= 1, ERR_INVALID_PARAMS);                         // ≥1 bound → ≥2 outcomes
+        require(n >= 1 && n < 19, ERR_INVALID_PARAMS);               // ≥1 bound → ≥2 outcomes; < 19 bounds → < 20 outcomes, caps the loop BEFORE it runs
         for (uint32 i = 1; i < n; i++) {
             require(bounds[i] > bounds[i - 1], ERR_INVALID_PARAMS);  // strictly increasing
         }
@@ -237,7 +237,14 @@ contract OracleEventList is Modifiers {
             return;
         }
         EventInfo eventInfo = _events[eventId];
-        if ((eventInfo.deadline < block.timestamp) || (msg.currencies[CURRENCIES_ID_SHELL] < eventInfo.oracleFee)) {
+        // A range event drives PMP.setTimings(result-start = deadline), which needs the same
+        // MIN_RESULT_GAP lead addRangeEvent enforced at creation. That lead can lapse between
+        // creation and this (later) confirm, so re-check it here — otherwise submitSetTimings
+        // (sent bounce:false below) reverts and silently wedges the PMP (approved, never opens).
+        uint64 minDeadline = _rangeData[eventId].exists
+            ? uint64(block.timestamp) + MIN_RESULT_GAP
+            : uint64(block.timestamp);
+        if ((eventInfo.deadline < minDeadline) || (msg.currencies[CURRENCIES_ID_SHELL] < eventInfo.oracleFee)) {
             PMP(msg.sender).rejectEvent{value: 0.1 vmshell, flag: 1, currencies: msg.currencies, dest_dapp_id: ROOT_PN_DAPP_ID}();
         } else if (!_pmpConfirmed.exists(msg.sender.value)) {
             // First confirmation from this canonical PMP: pay the oracle, count it once and
@@ -361,8 +368,11 @@ contract OracleEventList is Modifiers {
         EventInfo eventInfo = _events[eventId];
         if ((eventInfo.count == 0) && (eventInfo.deadline < block.timestamp)) {
             delete _events[eventId];
+            // Clear the range sidecar too: a later addEvent reusing the same params yields the same
+            // eventId hash, and a stale _rangeData.exists would wrongly drive the range flow.
+            if (_rangeData.exists(eventId)) { delete _rangeData[eventId]; }
         }
-    } 
+    }
     
     /// @notice Returns contract version
     /// @return value0 Contract semantic version.

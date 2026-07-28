@@ -61,7 +61,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0xc84845784612d76721be5a93120c27691158bb81306663b974a82b410cef758b;
+    uint256 constant NOTE_CODE_HASH  = 0x4712999eb88c096fef770755b21d3b6b3fde724967424a928507a5499767e812;
     uint16  constant NOTE_CODE_DEPTH = 20;
 
     // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
@@ -69,7 +69,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
     // contract that forwards SHELL on a fill, so the check must live HERE, not only in
     // the note: placeSellOffer is public and a direct call would bypass a note check).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x57e9e41df48d6171469292b8012533077202a3202ee28cb3f86f0e00c05275db;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xd5a43621a3873cd436aad52b172d769cd1735dacf20dccfd52daa8fab2ddd35c;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 12;
 
     // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
@@ -77,7 +77,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
     // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
     // Re-pin whenever airegistry/RootModel is recompiled.
-    uint256 constant ROOT_MODEL_CODE_HASH  = 0x977ad659fda04de6e7ba47978a82bdf1539802cb7e29c9b73fd59bf10f9f42e9;
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0x88eab99d8b9f0d194a6400c04f1978465e4c59c8abe7df929145affbb9422f5a;
     uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
 
     // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its
@@ -133,6 +133,10 @@ contract InferenceOrderBook is AiRegistryModifiers {
     uint8  constant MAX_MATCHES_PER_CALL = 30;
     uint8  constant MAX_CANCEL_PER_CALL  = 30;
     uint8  constant MAX_PRECHECK_LEVELS  = 40;
+    // Per-call cap on TOTAL makers EXAMINED in a level-walk (purge / POST_ONLY precheck). The
+    // resting book is unbounded and MAX_PRECHECK_LEVELS caps only price LEVELS, not makers within
+    // a level — so without this a single packed level could exhaust the tx gas budget.
+    uint16 constant MAX_SCAN_PER_CALL    = 100;
 
     // Queue (circular).
     uint8 constant QENTRY_PLACE      = 1;
@@ -567,12 +571,19 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         this refines POST_ONLY SELL against the bid side.
     function _executableCrosses(bool takerIsBuy, uint256 takerPrice, uint8 takerFlags) private view returns (bool) {
         uint8 walked = 0;
+        uint16 scanned = 0;
         optional(uint256, PriceLevel) it = _bestOpposite(takerIsBuy);
         while (it.hasValue()) {
             (uint256 lp, ) = it.get();
             if (!_crosses(takerIsBuy, takerPrice, false, lp)) { return false; }   // ordered levels → no worse level crosses
             uint128 cur = _levels[!takerIsBuy][lp].firstOrderId;
             while (cur != 0) {
+                // Bound the walk (the resting book is unbounded): past a fixed budget fail open like
+                // the MAX_PRECHECK_LEVELS cap below — POST_ONLY rests instead of paying unbounded gas
+                // on a level packed with non-executable makers. Counted BEFORE the TEE skip below so
+                // incompatible makers also consume the budget.
+                scanned++;
+                if (scanned >= MAX_SCAN_PER_CALL) { return false; }
                 Order mk = _orders[cur];
                 // TEE-incompatible: `_match` never settles this pair, so POST_ONLY does not cross
                 // it — an incompatible best quote must not reject an otherwise-valid POST_ONLY.
@@ -785,12 +796,18 @@ contract InferenceOrderBook is AiRegistryModifiers {
         optional(uint256, PriceLevel) it = _bestOpposite(false);   // best resting BUY
         uint8 walked = 0;
         uint8 purged = 0;
+        uint16 scanned = 0;
         while (it.hasValue()) {
             (uint256 lp, ) = it.get();
             if (!_crosses(false, takerPrice, isMarket, lp)) { break; }
             optional(uint256, PriceLevel) nxt = _nextOpposite(false, lp);   // capture before mutation
             uint128 cur = _levels[true][lp].firstOrderId;
             while (cur != 0) {
+                // Bound the walk over NON-expired bids too (the resting book is unbounded): past a
+                // fixed budget, stop — leftover expired bids are purged on a later placement or
+                // lazily by `_match`. Without this, a level packed with live makers is unbounded gas.
+                scanned++;
+                if (scanned >= MAX_SCAN_PER_CALL) { return; }
                 uint128 nextP = _orders[cur].nextAtPrice;
                 if (_isExpiredGtdBid(_orders[cur].deadline, _subs[cur].exists)) {
                     _refundAndRemove(cur);
@@ -960,6 +977,21 @@ contract InferenceOrderBook is AiRegistryModifiers {
     function _doPlaceHead() private returns (bool) {
         QueueEntry e = _queue[_queueHead];
         bool firstRun = (e.contOrderId == 0);
+
+        // GTD: the ingress check (deadline > now) only holds at SUBMIT. It can lapse while a BUY
+        // waits its turn in the pending queue, or across a multi-tx match continuation. Re-check on
+        // every (re)entry so a bid queued before its deadline never TAKES liquidity after it —
+        // refund the remaining escrow and drop, mirroring the maker-side `_isExpiredGtdBid` expiry.
+        // (Only BUYs carry a deadline.)
+        if (e.isBuy && e.deadline != 0 && e.deadline <= block.timestamp) {
+            uint128 refund = firstRun ? e.escrow : e.contLeftover;
+            if (refund > 0) {
+                _payShell(e.owner, refund);
+                emit InferenceRefunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(e.owner, refund);
+            }
+            return false;
+        }
+
         uint128 orderId = firstRun ? _nextOrderId++ : e.contOrderId;
         bool isMarket = (e.flags & FLAG_MARKET) != 0;
         uint8 takerFlags = e.flags;   // full taker flags — `_teeCompatible` reads the TEE bit by side
