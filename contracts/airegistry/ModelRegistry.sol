@@ -24,11 +24,11 @@ import "./InferenceOrderBook.sol";
 contract ModelRegistry {
 
     /// @notice Contract semantic version (kept in lockstep with the airegistry stack).
-    string constant version = "4.0.29";
+    string constant version = "4.0.30";
 
     // ── pinned InferenceOrderBook code (cascade-updated on version bump) ──
     /// @dev InferenceOrderBook 4.0.20 (tickSize=1M) code hash + depth. One model ⇒ one book.
-    uint256 constant IOB_CODE_HASH  = 0x4d2387031620c01bdc0349c1dbf06c600e3cf4f137045f250d2d3d1b5d7031e6;
+    uint256 constant IOB_CODE_HASH  = 0xd8a3ad7f04803f68a663faa9b315b424155682f522b3146ddcc5b14120ed2d7e;
     uint16  constant IOB_CODE_DEPTH = 35;
 
     /// @notice Self-top-up floor (mirrors the airegistry stack).

@@ -408,13 +408,6 @@
 			]
 		},
 		{
-			"name": "clearTransferBusy",
-			"inputs": [
-			],
-			"outputs": [
-			]
-		},
-		{
 			"name": "discardCoupon",
 			"inputs": [
 			],

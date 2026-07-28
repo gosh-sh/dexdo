@@ -447,6 +447,7 @@
 		{"init":false,"name":"_sellerNote","type":"address"},
 		{"init":false,"name":"_endpointCipher","type":"bytes"},
 		{"init":false,"name":"_funded","type":"bool"},
+		{"init":false,"name":"_fundedFromBook","type":"bool"},
 		{"init":false,"name":"_opened","type":"bool"},
 		{"init":false,"name":"_everOpened","type":"bool"},
 		{"init":false,"name":"_probeAccepted","type":"bool"},

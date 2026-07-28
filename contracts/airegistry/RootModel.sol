@@ -10,7 +10,7 @@ import "./TokenContract.sol";
 /// @notice Per-AI-model root. Stores the TokenContract code and registers
 ///         TokenContracts that anyone deploys with this RootModel as parent.
 contract RootModel is AiRegistryModifiers {
-    string constant version = "4.0.29";
+    string constant version = "4.0.30";
 
     // Native value attached to THIS contract's cross-dapp message (registerRoot).
     // Tunable; recipients self-fund via `accept`, so it only covers a non-accepting hop.
@@ -23,7 +23,7 @@ contract RootModel is AiRegistryModifiers {
     ///         specific TokenContract bytecode. To bump versions, rebuild
     ///         TokenContract, recompute the hash below, recompile
     ///         RootModel, and redeploy.
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x5e37dd4f51a705100dc39a9e8a1d83e270c793b9f132a3c31e8c7f04aa809ac9;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x57e9e41df48d6171469292b8012533077202a3202ee28cb3f86f0e00c05275db;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 12;
 
     event ContractDeployed(address self);

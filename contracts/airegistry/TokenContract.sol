@@ -60,7 +60,7 @@ import "./InferenceOrderBook.sol";
 ///         4c.`reclaimOnTimeout()` — seller no-show after `STREAM_TIMEOUT`.
 ///         5. `withdrawShell`/`destroy` — seller pulls finalized SHELL (§3.5).
 contract TokenContract is AiRegistryModifiers {
-    string constant version = "4.0.29";
+    string constant version = "4.0.30";
 
     // Canonical AI SuperRoot account id (workchain 0) — same anchor IOB/PN pin. Used ONLY as the
     // fixed sink for `cleanupUnopened`'s residual-native sweep (so a permissionless caller cannot
@@ -76,7 +76,7 @@ contract TokenContract is AiRegistryModifiers {
     // book hash is authoritative — the TC needs no RootPN round-trip. The note does
     // NOT pin the TC code (RootPN bakes it into the note at deploy), so this pin is
     // one-way (TC->note) and the build stays cycle-free. Re-pin when PrivateNote is rebuilt.
-    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0x46239c6adea6cf767ec8e7ebcccc804bcb18370c000d2418e985c27510d8175b;
+    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0xc84845784612d76721be5a93120c27691158bb81306663b974a82b410cef758b;
     uint16  constant PRIVATE_NOTE_CODE_DEPTH = 20;
 
     // Native value attached to THIS contract's cross-dapp messages (register / stream-lock /
@@ -150,6 +150,14 @@ contract TokenContract is AiRegistryModifiers {
     bytes   _endpointCipher;  // endpoint encrypted to the buyer's pubkey
 
     bool    _funded;
+    // True only when the deal was funded by a real InferenceOrderBook match
+    // (fundFromOrderBook), false for the direct off-book fund() path. Only a
+    // book-matched deal publishes its finalized volume to the reference-price
+    // median: the match went through a posted, price-step-valid ask, so the
+    // reported price is a real market price. Off-book direct-fund deals are
+    // privately negotiated (the seller sanctions their own buyer) and MUST NOT
+    // move the public oracle.
+    bool    _fundedFromBook;
     bool    _opened;
     // Latch: open() was ever called. cleanupUnopened is a permissionless no-show
     // recovery for a funded-but-NEVER-opened deal. The latch scopes it to that case
@@ -305,7 +313,9 @@ contract TokenContract is AiRegistryModifiers {
     ///         delta is exactly-once, so extra calls are harmless; a deal that finalized nothing
     ///         reports nothing. bounce:false — best-effort, never blocks the close it rides on.
     function _reportFinalized() private {
-        if (_ticksFinalized == 0 || _iobHash == 0) { return; }
+        // Only an order-book-matched deal (`_fundedFromBook`) publishes to the
+        // reference-price median; an off-book direct-fund deal reports nothing.
+        if (_ticksFinalized == 0 || _iobHash == 0 || !_fundedFromBook) { return; }
         address orderBook = DexLib.computeInferenceOrderBookAddressFromHash(_iobHash, _iobDepth, _modelHash);
         InferenceOrderBook(orderBook).reportFinalized{value: 1 vmshell, flag: 1, bounce: false}(
             _sellerPubkey, _nonce, _pricePerTick, _ticksFinalized);
@@ -391,6 +401,7 @@ contract TokenContract is AiRegistryModifiers {
             return;
         }
         _recordFunding(buyerNote, buyerPubkey, paid);
+        _fundedFromBook = true;   // real market fill → eligible to publish finalized volume
     }
 
     /// @notice Note-driven, single-call sell-offer post (spec §2.3). The seller's
@@ -501,8 +512,13 @@ contract TokenContract is AiRegistryModifiers {
     ///         burned `D` on a dispute that reaches timeout with no concession (§4.2).
     ///         Sent as an internal ECC[2] message (open() is external and cannot
     ///         carry value); the buyer's note is never touched.
+    ///         Only the seller's own canonical PrivateNote (`_sellerNote`) may fund the
+    ///         bond — the note IS the seller's identity, so the bond is posted from and
+    ///         returned to that note; an arbitrary external wallet cannot inject a bond
+    ///         and put the deal into a state the seller's note-driven path did not create.
     function fundSellerBond() public {
         ensureBalance();
+        require(msg.sender == _sellerNote, ERR_INVALID_SENDER);
         require(!_opened, ERR_ALREADY_OPEN);
         require(!_sellerBondFunded, ERR_BOND_ALREADY_FUNDED);
         mapping(uint32 => varuint32) currencies = msg.currencies;

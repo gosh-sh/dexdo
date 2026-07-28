@@ -13,7 +13,7 @@ import "../airegistry/TokenContract.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.29";
+    string constant version = "4.0.30";
 
     // Canonical SuperRoot account id + RootModel/TokenContract code hashes. Baked
     // into every PrivateNote at deploy (`deployPrivateNote`) so the note derives the
@@ -21,9 +21,9 @@ contract RootPN is Modifiers {
     // RootPN is not pinned by anyone, so pinning these here is cycle-free
     // (cascade-updated together with the note's baked copies).
     uint256 constant SUPER_ROOT_ADDR           = 0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c;
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x5e37dd4f51a705100dc39a9e8a1d83e270c793b9f132a3c31e8c7f04aa809ac9;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x57e9e41df48d6171469292b8012533077202a3202ee28cb3f86f0e00c05275db;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 12;
-    uint256 constant ROOT_MODEL_CODE_HASH      = 0x87e622b45a013a929626cc8c8d19a835c5fae55a660bc521ab8e34797ed38a5d;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0x977ad659fda04de6e7ba47978a82bdf1539802cb7e29c9b73fd59bf10f9f42e9;
     uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
 
     /// @notice Stored code of PrivateNote contract

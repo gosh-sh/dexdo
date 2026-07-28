@@ -10,7 +10,7 @@ import "./libraries/DexLib.sol";
 contract Oracle is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.29";
+    string constant version = "4.0.30";
 
     /// @notice Oracle owner pubkey used for access control.
     uint256 _oraclePubkey;

@@ -56,12 +56,12 @@ interface IPrivateNote {
 ///         quote/base + collateral, event-resolution shutdown, and PN callbacks
 ///         (inference order entry is fire-and-forget; the note tracks via getters).
 contract InferenceOrderBook is AiRegistryModifiers {
-    string constant version = "4.0.29";
+    string constant version = "4.0.30";
 
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x46239c6adea6cf767ec8e7ebcccc804bcb18370c000d2418e985c27510d8175b;
+    uint256 constant NOTE_CODE_HASH  = 0xc84845784612d76721be5a93120c27691158bb81306663b974a82b410cef758b;
     uint16  constant NOTE_CODE_DEPTH = 20;
 
     // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
@@ -69,7 +69,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
     // contract that forwards SHELL on a fill, so the check must live HERE, not only in
     // the note: placeSellOffer is public and a direct call would bypass a note check).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x5e37dd4f51a705100dc39a9e8a1d83e270c793b9f132a3c31e8c7f04aa809ac9;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x57e9e41df48d6171469292b8012533077202a3202ee28cb3f86f0e00c05275db;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 12;
 
     // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
@@ -77,7 +77,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
     // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
     // Re-pin whenever airegistry/RootModel is recompiled.
-    uint256 constant ROOT_MODEL_CODE_HASH  = 0x87e622b45a013a929626cc8c8d19a835c5fae55a660bc521ab8e34797ed38a5d;
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0x977ad659fda04de6e7ba47978a82bdf1539802cb7e29c9b73fd59bf10f9f42e9;
     uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
 
     // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its

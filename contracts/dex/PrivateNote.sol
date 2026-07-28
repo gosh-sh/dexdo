@@ -27,7 +27,7 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.29";
+    string constant version = "4.0.30";
 
     /// @notice Canonical-deal derivation anchors (note-funded model). The TokenContract
     ///         and RootModel code hashes/depths are NOT pinned constants here — they are
@@ -1665,21 +1665,13 @@ contract PrivateNote is Modifiers, ReplayProtection {
     }
 
     /// @notice Called by the receiving PrivateNote after crediting the transfer.
-    /// @dev Clears busy state. Sent with bounce: false — if it fails to arrive,
-    ///      use clearTransferBusy() as a recovery hatch.
+    /// @dev Clears busy state once the receiver has credited the transfer. This is the
+    ///      only path that clears `_busy` on success; the failure path is the offerTransfer
+    ///      bounce (onBounce). While `_busy` holds, no second transfer can start, so the
+    ///      pending amount always matches the single in-flight transfer's own bounce.
+    ///      Sent with bounce: false; ensureBalance keeps the note funded so it lands.
     function onTransferAccepted() public senderIs(_busy.get()) accept {
         ensureBalance();
-        _pendingTransferAmount = 0;
-        delete _busy;
-    }
-
-    /// @notice Recovery hatch: owner can force-clear a stuck transfer state.
-    /// @dev Only callable when a pending transfer exists (_pendingTransferAmount > 0).
-    ///      Does NOT restore balance — tokens are already at the destination.
-    ///      Use only after verifying off-chain that the receiver credited the tokens.
-    function clearTransferBusy() public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
-        ensureBalance();
-        require(_pendingTransferAmount > 0, ERR_INVALID_STATE);
         _pendingTransferAmount = 0;
         delete _busy;
     }
