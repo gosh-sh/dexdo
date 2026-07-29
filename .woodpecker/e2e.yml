@@ -10,28 +10,29 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  # The commit to pin is the one carrying the RootPN._deployedValues booking
-  # (acki-nacki 05d8c4664 on test/dex-4.0.30 at the time of writing), or
-  # whatever it becomes once that work reaches `dev`. NOT 01ef664282679576…:
-  # that is the v4.0.30 head this pipeline was first written against, and it
-  # predates the fix, so the preflight's booking check fails on a stand built
-  # from it.
+  # acki-nacki test/dex-4.0.30 head, carrying both the RootPN._deployedValues
+  # booking and the sold-0.80.0 build of RootPN. All four digests below were
+  # read off the registry for this SHA and each image's own
+  # org.opencontainers.image.revision label confirms it built from it.
   #
-  # allbin_img is the one image whose digest is load-bearing beyond running
-  # the network: copy_helpers takes zerostate-helper out of it, and the
-  # booking fix needs that binary's `call-internal` subcommand, which does not
-  # exist before the pinned commit. An older all-bin therefore fails the
-  # generator rather than the preflight -- earlier, but for the same reason.
+  # allbin_img's digest is load-bearing beyond running the network:
+  # copy_helpers takes zerostate-helper out of this image, and the booking fix
+  # needs that binary's `call-internal` subcommand (tvm-debugger cannot drive
+  # the call -- privateNoteDeployed emits an ext-out event and the debugger
+  # discards the resulting state). Verified present in this exact digest. An
+  # older all-bin fails the generator rather than the preflight.
   #
-  # Still blocked: images are built per-commit only for branches
-  # .woodpecker/ackinacki.yaml's `when` matches (main/dev/hotfix/*/*-rc, PRs
-  # into those, tags, manual runs), and test/dex-4.0.30 matches none of them.
-  # Waiting on the node team's push + build.
-  - &acki_sha "<SHA>"   # BLOCKED: pending the push+build of the commit described above
-  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:<digest>"        # BLOCKED: same
-  - &node_img "docker.gosh.sh/ackinacki-node@sha256:<digest>"             # BLOCKED: same
-  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:<digest>"        # BLOCKED: same
-  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:<digest>"      # BLOCKED: same
+  # The digests are immutable, but ACKI_SHA is a commit on a TEST branch:
+  # acki_clone fetches it by SHA, so a force-push that makes it unreachable
+  # breaks the clone step while the images keep working. That branch was
+  # already rewritten once (the commits this pin replaced no longer exist), so
+  # the risk is real, not theoretical -- move the pin to a `dev` commit once
+  # this work lands there.
+  - &acki_sha "ca6e101da93b3f1b6053b18c5ff6f5526a01645d"
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:893a958747ff3cd862e4637bf93543fcdd42a150adafbed8b4e590101d8c1f53"
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:89307cdbaa94cd24f49539856231c986d52e18454d6d9772c4044f54542ad5ca"
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:91ab2ac6a38e5048dec5369f6198b69e5449128600cb96b8cc818779cae6e0e6"
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:d53498d09ebc91151c6f346039e353c8e4876e3b393d57516bec3c16aa18b93e"
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
