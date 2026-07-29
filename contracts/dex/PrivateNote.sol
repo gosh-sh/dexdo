@@ -539,18 +539,6 @@ contract PrivateNote is Modifiers, ReplayProtection {
             maxPricePerTick, ticks, flags, autoRenew, _ephemeralPubkey);
     }
 
-    /// @notice Claim this note's pro-rata share of a subscription cycle's forfeited
-    ///         budget (spec §8.2). Sent FROM this note so the order book credits the
-    ///         caller (`msg.sender`) as a seller that served `orderId`'s `cycle`; the
-    ///         share is paid back to this note.
-    function claimInferenceForfeit(uint256 modelHash, uint128 orderId, uint8 cycle)
-        public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
-    {
-        ensureBalance();
-        address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
-        InferenceOrderBook(orderBook).claimForfeit{value: 2 vmshell, flag: 1, bounce: false}(orderId, cycle);
-    }
-
     /// @notice Cancel one resting inference order owned by this note (refunds any
     ///         held BUY escrow back to this note).
     function cancelInferenceOrder(uint256 modelHash, uint128 orderId)
@@ -1623,9 +1611,6 @@ contract PrivateNote is Modifiers, ReplayProtection {
         public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
     {
         ensureBalance();
-        // A stream/dispute lock means this note collateralises a live deal;
-        // transferring its balance out would drain value from under the lock.
-        _requireNotStreamLocked();
         require(!_hasWithdrawn, ERR_INVALID_STATE);
         require(!_busy.hasValue(), ERR_NOTE_BUSY);
         require(_stakes.empty(), ERR_NOTE_BUSY);

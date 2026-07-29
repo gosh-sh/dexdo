@@ -112,16 +112,6 @@
 			]
 		},
 		{
-			"name": "claimInferenceForfeit",
-			"inputs": [
-				{"name":"modelHash","type":"uint256"},
-				{"name":"orderId","type":"uint128"},
-				{"name":"cycle","type":"uint8"}
-			],
-			"outputs": [
-			]
-		},
-		{
 			"name": "cancelInferenceOrder",
 			"inputs": [
 				{"name":"modelHash","type":"uint256"},
