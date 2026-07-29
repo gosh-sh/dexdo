@@ -386,14 +386,18 @@ fn tvc_code_boc(ctx: &Arc<ClientContext>, tvc: &[u8]) -> anyhow::Result<String> 
     Ok(out.code)
 }
 
-/// The salt PMP and OrderBook are deployed with: `abi.encode(PrivateNoteCode)`.
+/// The salt **PMP** is deployed with: `abi.encode(PrivateNoteCode)`.
+///
+/// The OrderBook's salt is a different, three-part encoding — see
+/// [`order_book_salt`]. Reusing this one for it derives a hash that is wrong in
+/// a way nothing else notices.
 ///
 /// In the TVM ABI, `abi.encode(TvmCell)` stores the cell as a *reference*, so
 /// the salt is a wrapper cell with no data bits and exactly one ref — not the
 /// PrivateNote code cell itself. Salting with the raw code cell produces a
 /// different hash, and one that looks entirely reasonable, so the check would
-/// simply fail against a correct stand. `DexLib.buildPMPCode` /
-/// `buildOrderBookCode` are the contracts' side of this.
+/// simply fail against a correct stand. `DexLib.buildPMPCode` is the
+/// contracts' side of this.
 fn salt_wrapper(ctx: &Arc<ClientContext>, code_boc: &str) -> anyhow::Result<String> {
     let out = encode_boc(
         Arc::clone(ctx),
@@ -406,12 +410,8 @@ fn salt_wrapper(ctx: &Arc<ClientContext>, code_boc: &str) -> anyhow::Result<Stri
     Ok(out.boc)
 }
 
-/// Repr-hash of `base_code` once `salt` has been set on it.
-fn salted_code_hash(
-    ctx: &Arc<ClientContext>,
-    base_code: &str,
-    salt: &str,
-) -> anyhow::Result<String> {
+/// `base_code` with `salt` set on it, as a base64 BOC.
+fn salted_code(ctx: &Arc<ClientContext>, base_code: &str, salt: &str) -> anyhow::Result<String> {
     let salted = set_code_salt(
         Arc::clone(ctx),
         ParamsOfSetCodeSalt {
@@ -421,7 +421,53 @@ fn salted_code_hash(
         },
     )
     .map_err(|err| anyhow!("set code salt: {err}"))?;
-    boc_hash(ctx, &salted.code)
+    Ok(salted.code)
+}
+
+/// Repr-hash of `base_code` once `salt` has been set on it.
+fn salted_code_hash(
+    ctx: &Arc<ClientContext>,
+    base_code: &str,
+    salt: &str,
+) -> anyhow::Result<String> {
+    let salted = salted_code(ctx, base_code, salt)?;
+    boc_hash(ctx, &salted)
+}
+
+/// The salt an OrderBook is deployed with:
+/// `abi.encode(PrivateNoteCode, pmpSaltedCodeHash, pmpSaltedCodeDepth)`
+/// (`DexLib.buildOrderBookCode`).
+///
+/// Three components, not one — and the two numbers are properties of the
+/// *salted* PMP code, not of the shipped PMP image, so they can only be
+/// obtained by salting it first. In the encoding the cell becomes the single
+/// reference and the two integers become 256 + 16 data bits, which is what
+/// `order_book_salt_is_one_ref_and_272_bits` pins.
+fn order_book_salt(
+    ctx: &Arc<ClientContext>,
+    pn_code: &str,
+    pmp_code: &str,
+) -> anyhow::Result<String> {
+    let pmp_salted = salted_code(ctx, pmp_code, &salt_wrapper(ctx, pn_code)?)?;
+    let out = encode_boc(
+        Arc::clone(ctx),
+        ParamsOfEncodeBoc {
+            builder: vec![
+                BuilderOp::CellBoc { boc: pn_code.to_string() },
+                BuilderOp::Integer {
+                    size: 256,
+                    value: serde_json::Value::String(format!("0x{}", boc_hash(ctx, &pmp_salted)?)),
+                },
+                BuilderOp::Integer {
+                    size: 16,
+                    value: serde_json::Value::from(boc_depth(ctx, &pmp_salted)?),
+                },
+            ],
+            boc_cache: None,
+        },
+    )
+    .map_err(|err| anyhow!("encode order book salt: {err}"))?;
+    Ok(out.boc)
 }
 
 /// Reads a shipped TVC and returns its code cell, having first confirmed the
@@ -528,6 +574,39 @@ pub async fn assert_salted_code(
         deployed == want,
         "{deployed_addr}: deployed code hash {deployed} != {base_tvc_path} salted with \
          {salt_tvc_path} ({want})"
+    );
+    Ok(())
+}
+
+/// Salted code-hash check for the OrderBook a scenario's market spawns.
+///
+/// Separate from [`assert_salted_code`] because the salt is
+/// `abi.encode(PrivateNoteCode, pmpSaltedCodeHash, pmpSaltedCodeDepth)` rather
+/// than the PMP's single-cell encoding: the OrderBook's identity is bound to
+/// the PMP that spawned it, and both of those numbers come from the salted PMP
+/// code. All three images are the pinned ones shipped next to the manifest.
+pub async fn assert_order_book_salted_code(
+    r: &ChainReader,
+    deployed_addr: &str,
+) -> anyhow::Result<()> {
+    let manifest = load_manifest()?;
+    let dir = manifest_dir()?;
+
+    let pn_code = shipped_tvc_code(&r.ctx, &manifest, &dir, "PrivateNote.tvc")?;
+    let pmp_code = shipped_tvc_code(&r.ctx, &manifest, &dir, "PMP.tvc")?;
+    let ob_code = shipped_tvc_code(&r.ctx, &manifest, &dir, "OrderBook.tvc")?;
+    let salt = order_book_salt(&r.ctx, &pn_code, &pmp_code)?;
+    let want = normalize_u256_hex(&salted_code_hash(&r.ctx, &ob_code, &salt)?)?;
+
+    let boc = r
+        .account_boc(deployed_addr)
+        .await?
+        .ok_or_else(|| anyhow!("no account at {deployed_addr} to check salted code against"))?;
+    let deployed = normalize_u256_hex(&deployed_code_hash(&boc)?)?;
+    anyhow::ensure!(
+        deployed == want,
+        "{deployed_addr}: deployed code hash {deployed} != OrderBook.tvc salted with \
+         (PrivateNote.tvc, salted-PMP hash, salted-PMP depth) ({want})"
     );
     Ok(())
 }
@@ -879,6 +958,7 @@ mod tests {
     /// structural.
     const PN_TVC: &[u8] = include_bytes!("../../../../contracts/dex/PrivateNote.tvc");
     const PMP_TVC: &[u8] = include_bytes!("../../../../contracts/dex/PMP.tvc");
+    const OB_TVC: &[u8] = include_bytes!("../../../../contracts/dex/OrderBook.tvc");
 
     #[test]
     fn abi_semantic_hash_is_key_order_invariant() {
@@ -1034,6 +1114,45 @@ mod tests {
         let shape = boc_cell_shape(&wrapper).unwrap();
         assert_eq!(shape.data_bits, 0);
         assert_eq!(shape.refs, vec![boc_hash(&ctx, &pn_code).unwrap()]);
+    }
+
+    #[test]
+    fn order_book_salt_is_one_ref_and_272_bits() {
+        // `abi.encode(TvmCell, uint256, uint16)`: the cell goes in as the single
+        // reference, the two integers as 256 + 16 data bits. The shape is
+        // asserted rather than only the resulting hash, because every wrong
+        // layout here — the numbers swapped, a uint32 depth, the PMP's salted
+        // code as the ref instead of the note's — still produces a
+        // perfectly plausible-looking hash that simply never matches a correct
+        // stand, and the failure would read as "the chain is wrong".
+        let ctx = offline_context();
+        let pn_code = tvc_code_boc(&ctx, PN_TVC).unwrap();
+        let pmp_code = tvc_code_boc(&ctx, PMP_TVC).unwrap();
+
+        let salt = order_book_salt(&ctx, &pn_code, &pmp_code).unwrap();
+
+        let shape = boc_cell_shape(&salt).unwrap();
+        assert_eq!(shape.data_bits, 256 + 16);
+        assert_eq!(shape.refs, vec![boc_hash(&ctx, &pn_code).unwrap()]);
+    }
+
+    #[test]
+    fn order_book_salt_differs_from_the_pmp_single_cell_salt() {
+        // The defect this pins: applying the PMP's one-component salt to the
+        // OrderBook. Both calls succeed and both hashes look reasonable, so
+        // only a comparison against a real deployment tells them apart.
+        let ctx = offline_context();
+        let pn_code = tvc_code_boc(&ctx, PN_TVC).unwrap();
+        let pmp_code = tvc_code_boc(&ctx, PMP_TVC).unwrap();
+        let ob_code = tvc_code_boc(&ctx, OB_TVC).unwrap();
+
+        let correct =
+            salted_code_hash(&ctx, &ob_code, &order_book_salt(&ctx, &pn_code, &pmp_code).unwrap())
+                .unwrap();
+        let pmp_rule =
+            salted_code_hash(&ctx, &ob_code, &salt_wrapper(&ctx, &pn_code).unwrap()).unwrap();
+
+        assert_ne!(correct, pmp_rule);
     }
 
     #[test]
