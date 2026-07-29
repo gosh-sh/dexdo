@@ -25,9 +25,16 @@ variables:
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
+  # Compiles the twelve contracts that stage into contracts/0.81.0_compiled/.
+  # The version this tag resolves to is unconfirmed: if that path tracks the
+  # compiler version the way 0.80.0_compiled/ does for RootPN, this pin is
+  # wrong and belongs on an 0.81.0 release -- part of the node-team ask.
   - &sold_version "gosh_0.79.4-rc"
-  - &sold_old_version "<TBD>"   # BLOCKED: node-team ask -- which release built contracts/0.80.0_compiled/dex/RootPN.tvc
-  - &sold_old_sha256 "<TBD>"    # BLOCKED: sha256 of the sold_old release asset above, same ask
+  # RootPN.sol must be compiled with compiler version 0.80.0 -- which is what
+  # the contracts/0.80.0_compiled/ path it stages into denotes. Only the
+  # release asset is missing, not the answer to which version.
+  - &sold_old_version "<TBD>"   # BLOCKED: node-team ask -- sold 0.80.0 release tag (or literal asset URL)
+  - &sold_old_sha256 "<TBD>"    # BLOCKED: sha256 of that asset, same ask
   - &dex_test_notes_cnt "10"
   - &inventory_branch "main"
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
@@ -95,11 +102,13 @@ steps:
       - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-debugger-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
       - curl -sSL "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xz -C contracts/compiler
       - chmod +x contracts/compiler/*
-      # sold_old — the older compiler release RootPN's committed TVC was built
-      # with, and so the one its pin cascade has to be rebuilt with to
-      # reproduce that code hash — unpacks to a temp directory, never straight
-      # into contracts/compiler: that directory already holds the current
-      # `sold`, which the other 12 contracts still need to compile with.
+      # sold_old — compiler 0.80.0, the version RootPN.sol must be compiled
+      # with (the voucher prover parses RootPN's ext-out event and only this
+      # compiler emits the v1 header layout it can read). Named `sold_old`
+      # after the variable cascade_pins.py expects, not after any claim about
+      # its version ordering. Unpacks to a temp directory, never straight into
+      # contracts/compiler: that directory already holds the `sold` the other
+      # 12 contracts compile with.
       - curl -fsSL -o /tmp/sold_old.tar.gz "<TBD>/$SOLD_OLD_VER/..."
       - echo "$SOLD_OLD_SHA256  /tmp/sold_old.tar.gz" | sha256sum -c -
       - mkdir -p /tmp/sold_old_x && tar xz -f /tmp/sold_old.tar.gz -C /tmp/sold_old_x
