@@ -856,6 +856,7 @@ Response:
         "version": "instruct",
         "ref": "qwen--qwen2.5-32b--instruct"
       },
+      "contractVersion": "4.0.30",
       "status": "TRADING",
       "quoteAsset": "SHELL",
       "makerCommission": "-0.02",
@@ -881,6 +882,7 @@ Response fields:
 | `hasMore` | BOOLEAN | Whether more pages follow. |
 | `inferenceOrderBookAddress` | STRING | Stable market id — the model's order-book address. Pass it as `?inferenceOrderBookAddress=` to fetch this one market, and as the key for [`/api/v1/inference/depth`](#inference-depth). |
 | `model` | OBJECT | Model identity. `ref` is the canonical `producer--model--version`. `producer` / `name` / `version` MAY be `null` if the model identity is not yet known on chain; `ref` then carries the model hash. |
+| `contractVersion` | STRING \| null | Version of the deployed order-book contract backing this market (e.g. `"4.0.30"`). Distinct from `model.version`, which is the AI model's own version. `null` when the contract version is not yet known on chain. |
 | `status` | ENUM | `TRADING`. Reserved for future inactive states; clients MUST treat it as opaque. |
 | `quoteAsset` | STRING | Always `SHELL`. |
 | `makerCommission` | DECIMAL | Maker (**seller**) fee rate, a signed decimal string. The seller is never charged; a negative value (`"-0.02"` = −2%) is a **rebate credited to the seller** for delivering ticks cleanly. This is the rebate **cap**: the actual rebate ramps from `0` with delivered ticks and applies only on a clean, non-disputed close, so a given deal may credit less. |
@@ -922,6 +924,7 @@ Response:
 ```json
 {
   "inferenceOrderBookAddress": "0:ob-addr...",
+  "contractVersion": "4.0.30",
   "lastUpdateId": "76a23086a006700000000000000000000000000000000000000000000000000000000000000000007",
   "bids": [
     ["1000", "120"],
@@ -938,6 +941,7 @@ Each bid or ask item is `[pricePerTick, ticks]` — price in `SHELL` and the tot
 
 | Field | Type | Description |
 | --- | --- | --- |
+| `contractVersion` | STRING \| null | Version of the deployed order-book contract for this book (e.g. `"4.0.30"`). Same value as `contractVersion` in [`/api/v1/inference/markets`](#inference-markets) for the same `inferenceOrderBookAddress`. `null` when the contract version is not yet known on chain. |
 | `lastUpdateId` | STRING | Opaque chain-order cursor for this book. Lex-comparable: a larger string means a newer event has touched the book. Empty string when no order has landed yet. Do not parse it as an integer. |
 
 Errors:

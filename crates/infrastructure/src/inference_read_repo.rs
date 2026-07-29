@@ -47,6 +47,7 @@ struct InferenceMarketRow {
     producer: Option<String>,
     model_name: Option<String>,
     version: Option<String>,
+    contract_version: Option<String>,
     platform_fee_bps: Option<i32>,
     price_precision: Option<i32>,
     quantity_precision: Option<i32>,
@@ -71,7 +72,7 @@ struct InferenceDepthLevelRow {
 // by ORDER BY / keyset / cursor — see the design doc §6.1 NULL handling.
 const INFERENCE_MARKET_COLUMNS: &str = r#"
     id, orderbook_address, model_hash::text as model_hash, model_ref, producer,
-    model_name, model_version as version, platform_fee_bps, price_precision, quantity_precision,
+    model_name, model_version as version, version as contract_version, platform_fee_bps, price_precision, quantity_precision,
     tick_size, step_size, min_notional, reference_price::text as reference_price,
     coalesce(extract(epoch from created_at_chain)::bigint, 0) as created_at,
     coalesce((least(greatest(extract(epoch from created_at_chain), 0), 4102444800) * 1000000)::bigint, 0) as created_at_micros
@@ -265,6 +266,7 @@ fn assemble_inference_market(row: InferenceMarketRow) -> Result<InferenceMarket,
             version: row.version,
             model_ref,
         },
+        contract_version: row.contract_version,
         status: InferenceMarketStatus::Trading,
         quote_asset: "SHELL".to_string(),
         maker_commission,
@@ -286,15 +288,15 @@ async fn get_inference_depth_impl(
 ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
     // Resolve + visibility gate. A missing row is a client miss (-1121); a
     // reconciled row with NULL precision is corruption (-1500 via inference_scale).
-    let precisions: Option<(Option<i32>, Option<i32>)> = sqlx::query_as(
-        "select price_precision, quantity_precision from inference_markets \
+    let resolved: Option<(Option<i32>, Option<i32>, Option<String>)> = sqlx::query_as(
+        "select price_precision, quantity_precision, version from inference_markets \
          where orderbook_address = $1 and last_reconciled_at is not null",
     )
     .bind(orderbook_address)
     .fetch_optional(repo.pool())
     .await
     .context("resolve inference market for depth")?;
-    let Some((price_precision, quantity_precision)) = precisions else {
+    let Some((price_precision, quantity_precision, contract_version)) = resolved else {
         return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
     };
     let price_scale = inference_scale(price_precision, orderbook_address, "price_precision")?;
@@ -355,6 +357,7 @@ async fn get_inference_depth_impl(
 
     Ok(InferenceDepthSnapshot {
         orderbook_address: orderbook_address.to_string(),
+        contract_version,
         last_update_id: last_update_id.unwrap_or_default(),
         bids,
         asks,

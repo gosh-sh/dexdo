@@ -1395,6 +1395,13 @@ components:
             maxItems: 2
             minItems: 2
           description: Price levels as [pricePerTick, ticks] decimal-string pairs, best bid first.
+        contractVersion:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Version of the deployed order-book contract for this book; `null` when
+            not yet known on chain.
         inferenceOrderBookAddress:
           type: string
         lastUpdateId:
@@ -1416,6 +1423,14 @@ components:
       - minNotional
       - createdAt
       properties:
+        contractVersion:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Version of the deployed order-book contract (e.g. `"4.0.30"`). Distinct
+            from `model.version` (the AI model's own version). `null` when not yet
+            known on chain.
         createdAt:
           type: integer
           format: int64

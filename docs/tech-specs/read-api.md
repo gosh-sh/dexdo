@@ -436,6 +436,8 @@ Inference books have no multi-phase lifecycle. `status` is `TRADING` for every v
 
 Per row: render `model.{producer,name,version,ref}` from `model_ref` and its parsed parts (NULL parts → `model` carries only `ref`/hash — see the [model-id open question](indexer.md#inference-reconciler)); `takerCommission` (buyer-side, charged) from `platform_fee_bps ÷ 10 000` and `makerCommission` (seller-side rebate **cap**, credited → negative) as `−REBATE_MAX_BPS ÷ 10 000` — mirroring how `/api/v1/prediction/markets` sources `MAKER_COMMISSION` / `TAKER_COMMISSION` from global constants rather than per-row columns. The displayed values are the buyer-side fee and the seller rebate cap; the per-deal split (ramped rebate vs burn, spec §5.3/§5.4) is settlement state, not a market property. Then the precision block (`pricePrecision`, `quantityPrecision`, `tickSize`, `stepSize`, `minNotional`) from the row; `quoteAsset = "SHELL"`; `referencePrice` from `reference_price` decoded ÷ `10^9`, or **`null`** when the column is NULL (dry book — see [indexer.md §Inference reconciler](indexer.md#inference-reconciler)); `createdAt` from `created_at_chain`.
 
+`contractVersion` is passed through verbatim from [`inference_markets.version`](data-schema.md#inference_markets) — the **contract** version reported by the book's `getVersion()` getter (e.g. `"4.0.30"`), the same column the reconciler parses as semver for cross-version supersede resolution. It is **not** the model version: `model.version` renders from `model_version` (the `--version` component of the model name), and the two columns are kept distinct on purpose. `null` when the getter has not yet populated the column. No decode or validation — an unreconciled book is already hidden by the visibility gate, and whatever string the getter returned is served as-is.
+
 ### Pagination
 
 Same cursor machinery as `/api/v1/prediction/markets` (URL-safe base64 of `"<sort_key>:<id>"`). One sort mode: `sort=createdAt` (default, DESC, key `created_at_chain`) — `resultStart` from the prediction side does not apply (inference markets have no result timing). A corrupted cursor → `InvalidParameter` → 400.
@@ -459,7 +461,7 @@ Returns the order-book depth for one model — the inference analogue of [`/api/
 
 ### Resolution
 
-Resolve `inferenceOrderBookAddress` to `(orderbook_address, price_precision, quantity_precision)` via [`inference_markets`](data-schema.md#inference_markets). The book must be reconciled (`last_reconciled_at IS NOT NULL`); otherwise `InvalidMarketOrSymbol` → 404.
+Resolve `inferenceOrderBookAddress` to `(orderbook_address, price_precision, quantity_precision, version)` via [`inference_markets`](data-schema.md#inference_markets). The book must be reconciled (`last_reconciled_at IS NOT NULL`); otherwise `InvalidMarketOrSymbol` → 404. The resolved `version` is passed through verbatim as the response `contractVersion` (the same [`inference_markets.version`](data-schema.md#inference_markets) column and contract-vs-model distinction described under [`/api/v1/inference/markets` § Building the response](#building-the-response-1)); `null` until the book's `getVersion()` getter has populated it.
 
 ### Empty-book contract
 
