@@ -323,7 +323,10 @@ async fn proof_money_lifecycle_local() {
          margin — the stand is too slow for a {STAKE_PERIOD_PROOF}s market",
         stake_end.saturating_sub(now_unix()),
     );
-    invariant::await_quiescence(&r, &tracked, Phase::AfterStake).await.expect("stake quiescence");
+    let expected_pool = total_pool_before + 2 * STAKE_AMOUNT;
+    invariant::await_quiescence(&r, &tracked, Phase::AfterStake { pmp: &pmp_addr, expected_pool })
+        .await
+        .expect("stake quiescence");
 
     // The effect, asserted before the money check, because the money check
     // cannot see its absence: a `setStake` rejected before `tvm.accept()` —
@@ -333,8 +336,7 @@ async fn proof_money_lifecycle_local() {
     // against a market nobody staked into.
     let total_pool_after = dex.get_pmp_details(&pmp_addr).await.expect("pmp details").total_pool;
     assert_eq!(
-        total_pool_after,
-        total_pool_before + 2 * STAKE_AMOUNT,
+        total_pool_after, expected_pool,
         "the market's pool did not grow by the two stakes ({total_pool_before} -> \
          {total_pool_after}) — at least one `setStake` never took effect"
     );
@@ -356,9 +358,9 @@ async fn proof_money_lifecycle_local() {
         token_type: TOKEN_TYPE_NACKL,
         state: ObState::Live,
     });
-    preflight::assert_salted_code(&r, &ob_addr, "OrderBook.tvc", "PrivateNote.tvc")
+    preflight::assert_order_book_salted_code(&r, &ob_addr)
         .await
-        .expect("OrderBook code is the shipped image salted with PrivateNote");
+        .expect("OrderBook code is the shipped image salted for this PMP");
 
     // Normalisation refunds each pool's remainder to the deployer's note and
     // blocks split/merge until that note acknowledges it. Without this barrier
@@ -634,14 +636,35 @@ async fn stake(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey, outcome: u32)
 /// sent to at all.
 async fn pmp_freeze_now(ctx: &Arc<ClientContext>, dex: &Dex, pmp_addr: &str) {
     let contract = Pmp::new(Arc::clone(ctx), dex_contract_params(pmp_addr));
+    // The postcondition is "this market is frozen", not "this call froze it".
+    // Two things reach that state without us: `setTimings` freezes immediately
+    // when the window it sets has already closed, and any `splitFullSet` /
+    // `mergeFullSet` / resolve after `stakeEnd` freezes on the way through. A
+    // send that lands after either rejects with `ERR_ALREADY_FROZEN`, and the
+    // read above cannot reliably prevent that — it answers from committed
+    // state, so a market frozen a moment ago still reads as unfrozen.
+    //
+    // Hence: a send failure is not fatal here, the state check is the
+    // authority, and the last error is carried into the timeout message so a
+    // market that genuinely never freezes still says why.
+    let mut last_err = None;
     for _ in 0..POLL_ATTEMPTS {
         if dex.get_pmp_details(pmp_addr).await.expect("pmp details").frozen {
             return;
         }
-        contract.freeze_now(Signer::None).await.expect("freeze_now");
+        if let Err(err) = contract.freeze_now(Signer::None).await {
+            last_err = Some(err);
+        }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
-    panic!("PMP {pmp_addr} did not freeze within {}s", poll_budget_secs());
+    panic!(
+        "PMP {pmp_addr} did not freeze within {}s{}",
+        poll_budget_secs(),
+        match last_err {
+            Some(err) => format!("; last freezeNow error: {err:?}"),
+            None => "; every freezeNow was accepted".to_string(),
+        }
+    );
 }
 
 /// Split collateral into a full set of outcome tokens. Only legal between the
