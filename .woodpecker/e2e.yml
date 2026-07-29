@@ -3,7 +3,7 @@
 when:
   - event: pull_request
     branch: dev
-  - event: manual
+    evaluate: 'CI_COMMIT_PULL_REQUEST_LABELS | split(",") | any(# == "local-net")'
 
 depends_on:
   - build
