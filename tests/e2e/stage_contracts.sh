@@ -19,6 +19,15 @@ set -euo pipefail
 # pick up whatever the previous build happened to leave behind. This is the
 # generator's own contract set — dex: the 8 PrivateNote-adjacent contracts
 # placed straight from source; airegistry: the 5 AI-inference contracts.
+#
+# The compiler is chosen per CONTRACT, not per directory: RootPN and
+# exchange/USDCBridge are built with 0.80.0, everything else here (plus
+# exchange/DepositVoucher) with 0.81.0. Both exchange contracts are outside
+# this list on purpose — this script never rebuilds them, so their committed
+# artifacts survive untouched and the version split cannot be got wrong.
+# Anyone extending the lists below to cover exchange/ must build USDCBridge
+# with $SOLD_OLD: the zerostate generator loads its code unconditionally, so
+# a wrong-compiler build lands in every zerostate with nothing to flag it.
 DEX13=(PrivateNote RootPN PMP OrderBook Nullifier RootOracle Oracle OracleEventList)
 AIR5=(InferenceOrderBook TokenContract RootModel SuperRoot ModelRegistry)
 
@@ -77,6 +86,13 @@ for c in "${AIR5[@]}";  do cp "$STAGE/$c.tvc" "$STAGE/$c.abi.json" "$D081/airegi
 # perfectly staged run over an artifact this script has no business judging.
 n_tvc=$(find "$D080" "$D081/dex" "$D081/airegistry" -name '*.tvc' | wc -l)
 [ "$n_tvc" -eq 13 ] || { echo "FATAL: staged paths hold $n_tvc tvc files, expected 13"; exit 1; }
+# The one artifact outside those three directories that the generator still
+# loads unconditionally, and the only other 0.80.0 contract. This script has
+# no business rebuilding it -- but `rm -rf` on a sibling path is one typo away
+# from taking it out, and its absence would surface as a generator failure
+# well downstream of the cause.
+test -f "$BUILD_DIR/contracts/0.80.0_compiled/exchange/USDCBridge.tvc" \
+  || { echo "FATAL: exchange/USDCBridge.tvc is gone from the 0.80.0 tree — this script must not touch exchange/"; exit 1; }
 
 echo "==> [5/5] manifest from the staged artifacts"
 # Same tvm-cli binary the pin cascade above was pinned to (not whatever

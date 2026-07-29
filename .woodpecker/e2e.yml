@@ -10,31 +10,43 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  # Candidate values carried over from the version of this file that shipped
-  # with contracts v4.0.30: it ran against acki-nacki branch `test/dex-4.0.30`
-  # with `docker.gosh.sh/ackinacki-all-bin:01ef664282679576fc46d882655fc6e0927767f9`.
-  # That tag is an acki-nacki commit SHA (their pipeline tags every image with
-  # $CI_COMMIT_SHA), so it is a concrete candidate for the pin below and for
-  # resolving all four digests off the registry -- what it is NOT is a digest,
-  # which is the whole point of the ask, so it stays a comment until confirmed.
-  - &acki_sha "<SHA>"   # BLOCKED: acki-nacki commit to pin, chosen together with the image digests below (node-team ask)
-  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:<digest>"        # BLOCKED: same ask
-  - &node_img "docker.gosh.sh/ackinacki-node@sha256:<digest>"             # BLOCKED: same ask
-  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:<digest>"        # BLOCKED: same ask
-  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:<digest>"      # BLOCKED: same ask
+  # The commit to pin is the one carrying the RootPN._deployedValues booking
+  # (acki-nacki 05d8c4664 on test/dex-4.0.30 at the time of writing), or
+  # whatever it becomes once that work reaches `dev`. NOT 01ef664282679576…:
+  # that is the v4.0.30 head this pipeline was first written against, and it
+  # predates the fix, so the preflight's booking check fails on a stand built
+  # from it.
+  #
+  # allbin_img is the one image whose digest is load-bearing beyond running
+  # the network: copy_helpers takes zerostate-helper out of it, and the
+  # booking fix needs that binary's `call-internal` subcommand, which does not
+  # exist before the pinned commit. An older all-bin therefore fails the
+  # generator rather than the preflight -- earlier, but for the same reason.
+  #
+  # Still blocked: images are built per-commit only for branches
+  # .woodpecker/ackinacki.yaml's `when` matches (main/dev/hotfix/*/*-rc, PRs
+  # into those, tags, manual runs), and test/dex-4.0.30 matches none of them.
+  # Waiting on the node team's push + build.
+  - &acki_sha "<SHA>"   # BLOCKED: pending the push+build of the commit described above
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:<digest>"        # BLOCKED: same
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:<digest>"             # BLOCKED: same
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:<digest>"        # BLOCKED: same
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:<digest>"      # BLOCKED: same
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
-  # Compiles the twelve contracts that stage into contracts/0.81.0_compiled/.
-  # The version this tag resolves to is unconfirmed: if that path tracks the
-  # compiler version the way 0.80.0_compiled/ does for RootPN, this pin is
-  # wrong and belongs on an 0.81.0 release -- part of the node-team ask.
-  - &sold_version "gosh_0.79.4-rc"
-  # RootPN.sol must be compiled with compiler version 0.80.0 -- which is what
-  # the contracts/0.80.0_compiled/ path it stages into denotes. Only the
-  # release asset is missing, not the answer to which version.
-  - &sold_old_version "<TBD>"   # BLOCKED: node-team ask -- sold 0.80.0 release tag (or literal asset URL)
-  - &sold_old_sha256 "<TBD>"    # BLOCKED: sha256 of that asset, same ask
+  # Compiler per CONTRACT, not per directory. RootPN and exchange/USDCBridge
+  # are 0.80.0; the other twelve DEX/airegistry contracts and
+  # exchange/DepositVoucher are 0.81.0. This pipeline compiles only the
+  # thirteen that stage_contracts.sh stages, so it needs both compilers --
+  # never one for the whole tree.
+  - &sold_version "gosh_0.81.0"
+  - &sold_sha256 "79b43aab6ae2fdc35c1cb3b486453aa2cf4f2718c58b69ccefab1122c704853c"
+  # RootPN.sol is compiled with 0.80.0 permanently, not because that is what
+  # produced the current committed bytes. Anything else silently breaks the v1
+  # ext-out header the voucher prover reads.
+  - &sold_old_version "gosh_0.80.0"
+  - &sold_old_sha256 "389cf0ede80fc3acb5f904f950808383504ec3341cdc6b9132e850298db0c246"
   - &dex_test_notes_cnt "10"
   - &inventory_branch "main"
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
@@ -81,6 +93,7 @@ steps:
     environment:
       TVM_VER: *tvm_cli_version
       SOLD_VER: *sold_version
+      SOLD_SHA256: *sold_sha256
       SOLD_OLD_VER: *sold_old_version
       SOLD_OLD_SHA256: *sold_old_sha256
       DEX_TEST_NOTES_CNT: *dex_test_notes_cnt
@@ -100,19 +113,30 @@ steps:
       # exact versions acki-nacki CI pins so glibc/ABI match this runner.
       - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-cli-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
       - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-debugger-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
-      - curl -sSL "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xz -C contracts/compiler
+      # sold is verified before use, like sold_old below: an unverified
+      # compiler decides the bytecode every downstream hash in this pipeline
+      # is taken over, so it is the last thing that should be fetched on trust.
+      - curl -fsSL -o /tmp/sold.tar.gz "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz"
+      - echo "$SOLD_SHA256  /tmp/sold.tar.gz" | sha256sum -c -
+      - tar xz -f /tmp/sold.tar.gz -C contracts/compiler
       - chmod +x contracts/compiler/*
       # sold_old — compiler 0.80.0, the version RootPN.sol must be compiled
       # with (the voucher prover parses RootPN's ext-out event and only this
       # compiler emits the v1 header layout it can read). Named `sold_old`
       # after the variable cascade_pins.py expects, not after any claim about
-      # its version ordering. Unpacks to a temp directory, never straight into
-      # contracts/compiler: that directory already holds the `sold` the other
-      # 12 contracts compile with.
-      - curl -fsSL -o /tmp/sold_old.tar.gz "<TBD>/$SOLD_OLD_VER/..."
+      # its version ordering: 0.80.0 is in fact the LOWER of the two, and the
+      # other twelve contracts compile with 0.81.0. Unpacks to a temp
+      # directory, never straight into contracts/compiler: that directory
+      # already holds the `sold` those twelve need.
+      - curl -fsSL -o /tmp/sold_old.tar.gz "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_OLD_VER/sold_$${SOLD_OLD_VER}_linux_x86_64.tar.gz"
       - echo "$SOLD_OLD_SHA256  /tmp/sold_old.tar.gz" | sha256sum -c -
       - mkdir -p /tmp/sold_old_x && tar xz -f /tmp/sold_old.tar.gz -C /tmp/sold_old_x
       - mv /tmp/sold_old_x/sold contracts/compiler/sold_old
+      # Both compilers also ship inside the pinned checkout
+      # (contracts/compiler/sold{,_old}) as of acki-nacki bcc4667a0, so these
+      # downloads are strictly optional. They stay because a sha256-verified
+      # release asset is checkable on its own terms, while bytes in a checkout
+      # are only as pinned as the commit that carries them.
       - test -x contracts/compiler/sold_old && test -x contracts/compiler/sold
       - export PATH="$CI_WORKSPACE/.acki-nacki/contracts/compiler:$PATH"
       # Stages contracts/{dex,airegistry} fresh from this dodex checkout into the
