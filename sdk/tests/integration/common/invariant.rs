@@ -67,6 +67,7 @@ const PN_LOCKED_IN_ORDERS: &str = "_lockedInOrders";
 const PN_BUSY: &str = "_busy";
 const PN_OPEN_ORDER_COUNT: &str = "_openOrderCount";
 const PMP_NORM_REFUND_PENDING: &str = "_normRefundPending";
+const PMP_TOTAL_POOL: &str = "_totalPool";
 
 const QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -176,7 +177,18 @@ pub enum Phase<'a> {
         oracle_fee: u128,
         network_fee: u128,
     },
-    AfterStake,
+    /// A stake reaches the market as an internal message the sending note does
+    /// not wait for: the note can be idle again, with its own `_stakes` entry
+    /// already confirmed, while the read of the market that follows still
+    /// answers from a state the stake has not been applied to. Waiting on the
+    /// market's own pool is what closes that window — and it is the barrier's
+    /// job, not the assertion's: an assertion that polls cannot tell "not yet"
+    /// from "never", while a barrier that times out says exactly which pool
+    /// value it never saw.
+    AfterStake {
+        pmp: &'a str,
+        expected_pool: u128,
+    },
     /// Freeze normalisation refunds the notes and sets `_normRefundPending`;
     /// until the note acknowledges, the next `splitFullSet` reverts with
     /// `ERR_NORM_REFUND_PENDING`. Without this barrier the scenario itself
@@ -597,7 +609,18 @@ async fn phase_pending(
             Ok(None)
         }
 
-        Phase::AfterStake | Phase::AfterSplit | Phase::AfterTrade { .. } => Ok(None),
+        Phase::AfterStake { pmp, expected_pool } => {
+            let Some(fields) = r.storage_fields(pmp, PMP_ABI).await? else {
+                return Ok(Some(format!("PMP {pmp} is not deployed yet")));
+            };
+            let pool = field_u128(&fields, PMP_TOTAL_POOL)?;
+            if pool != *expected_pool {
+                return Ok(Some(format!("PMP {pmp} pool is {pool}, waiting for {expected_pool}")));
+            }
+            Ok(None)
+        }
+
+        Phase::AfterSplit | Phase::AfterTrade { .. } => Ok(None),
 
         Phase::AfterFreeze { pmp } => {
             let Some(fields) = r.storage_fields(pmp, PMP_ABI).await? else {
@@ -825,6 +848,13 @@ fn field_u32(fields: &Value, name: &str) -> anyhow::Result<u32> {
     raw.parse().with_context(|| format!("parse `{name}` value `{raw}`"))
 }
 
+fn field_u128(fields: &Value, name: &str) -> anyhow::Result<u128> {
+    let raw = field(fields, name)?
+        .as_str()
+        .ok_or_else(|| anyhow!("storage field `{name}` is not a string"))?;
+    raw.parse().with_context(|| format!("parse `{name}` value `{raw}`"))
+}
+
 fn field_bool(fields: &Value, name: &str) -> anyhow::Result<bool> {
     field(fields, name)?.as_bool().ok_or_else(|| anyhow!("storage field `{name}` is not a bool"))
 }
@@ -936,7 +966,7 @@ mod tests {
         // says the most about; the variant carries the number so the barrier
         // compares there like everywhere else.
         assert_eq!(expected_open_orders(&Phase::AfterTrade { expected_open_orders: 2 }), 2);
-        assert_eq!(expected_open_orders(&Phase::AfterStake), 0);
+        assert_eq!(expected_open_orders(&Phase::AfterStake { pmp: "0:pmp", expected_pool: 1 }), 0);
         assert_eq!(expected_open_orders(&Phase::AfterSplit), 0);
         assert_eq!(expected_open_orders(&Phase::AfterFreeze { pmp: "0:pmp" }), 0);
     }
@@ -1044,7 +1074,7 @@ mod tests {
                 "PrivateNote",
                 &[PN_BALANCE, PN_LOCKED_IN_ORDERS, PN_BUSY, PN_OPEN_ORDER_COUNT],
             ),
-            (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING]),
+            (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL]),
         ];
         for (abi_json, label, names) in checks {
             let abi: serde_json::Value = serde_json::from_str(abi_json).expect("parse abi json");
