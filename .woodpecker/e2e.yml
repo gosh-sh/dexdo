@@ -11,7 +11,7 @@ depends_on:
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
   - &acki_branch "test/dex-4.0.30"
-  - &allbin_image "docker.gosh.sh/ackinacki-all-bin:fafcecd22fe664e6d96209f8d4e59ea74ce89f6b"
+  - &allbin_image "docker.gosh.sh/ackinacki-all-bin:01ef664282679576fc46d882655fc6e0927767f9"
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
