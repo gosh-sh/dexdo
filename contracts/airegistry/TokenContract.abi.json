@@ -75,7 +75,7 @@
 			]
 		},
 		{
-			"name": "fundProbeCommission",
+			"name": "fundSellerBond",
 			"inputs": [
 			],
 			"outputs": [
@@ -119,6 +119,13 @@
 		},
 		{
 			"name": "resolveDisputeTimeout",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "abandonDispute",
 			"inputs": [
 			],
 			"outputs": [
@@ -184,13 +191,13 @@
 			]
 		},
 		{
-			"name": "getProbe",
+			"name": "getSellerBond",
 			"inputs": [
 			],
 			"outputs": [
-				{"name":"probeFunded","type":"bool"},
-				{"name":"probeLocked","type":"uint128"},
-				{"name":"probeCommission","type":"uint128"}
+				{"name":"bondFunded","type":"bool"},
+				{"name":"bondHeld","type":"uint128"},
+				{"name":"bondRequired","type":"uint128"}
 			]
 		},
 		{
@@ -314,7 +321,7 @@
 			]
 		},
 		{
-			"name": "ProbeCommissionFunded",
+			"name": "SellerBondFunded",
 			"inputs": [
 				{"name":"amount","type":"uint128"}
 			],
@@ -335,7 +342,7 @@
 			"inputs": [
 				{"name":"buyer","type":"address"},
 				{"name":"toSeller","type":"uint128"},
-				{"name":"commissionReturned","type":"uint128"}
+				{"name":"bondReturned","type":"uint128"}
 			],
 			"outputs": [
 			]
@@ -345,7 +352,7 @@
 			"inputs": [
 				{"name":"buyer","type":"address"},
 				{"name":"burnedProbe","type":"uint128"},
-				{"name":"burnedCommission","type":"uint128"},
+				{"name":"burnedBond","type":"uint128"},
 				{"name":"refundToBuyer","type":"uint128"}
 			],
 			"outputs": [
@@ -440,12 +447,13 @@
 		{"init":false,"name":"_sellerNote","type":"address"},
 		{"init":false,"name":"_endpointCipher","type":"bytes"},
 		{"init":false,"name":"_funded","type":"bool"},
+		{"init":false,"name":"_fundedFromBook","type":"bool"},
 		{"init":false,"name":"_opened","type":"bool"},
 		{"init":false,"name":"_everOpened","type":"bool"},
 		{"init":false,"name":"_probeAccepted","type":"bool"},
 		{"init":false,"name":"_disputed","type":"bool"},
-		{"init":false,"name":"_sellerProbeFunded","type":"bool"},
-		{"init":false,"name":"_sellerProbeLocked","type":"uint128"},
+		{"init":false,"name":"_sellerBondFunded","type":"bool"},
+		{"init":false,"name":"_sellerBond","type":"uint128"},
 		{"init":false,"name":"_deposit","type":"uint128"},
 		{"init":false,"name":"_prepaid","type":"uint128"},
 		{"init":false,"name":"_frozen","type":"uint128"},

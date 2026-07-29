@@ -13,7 +13,7 @@ import "../airegistry/TokenContract.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.27";
+    string constant version = "4.0.30";
 
     // Canonical SuperRoot account id + RootModel/TokenContract code hashes. Baked
     // into every PrivateNote at deploy (`deployPrivateNote`) so the note derives the
@@ -21,9 +21,9 @@ contract RootPN is Modifiers {
     // RootPN is not pinned by anyone, so pinning these here is cycle-free
     // (cascade-updated together with the note's baked copies).
     uint256 constant SUPER_ROOT_ADDR           = 0x0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c;
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x029dbf013ebcb356be93f5c1f594833014c4191445a021f1c773ca364249c240;
-    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 10;
-    uint256 constant ROOT_MODEL_CODE_HASH      = 0xb88723892c07ad3b12eee921b98c3b79d1b853b8af41749474f3536ec1060de8;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xd5a43621a3873cd436aad52b172d769cd1735dacf20dccfd52daa8fab2ddd35c;
+    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 12;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0x88eab99d8b9f0d194a6400c04f1978465e4c59c8abe7df929145affbb9422f5a;
     uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
 
     /// @notice Stored code of PrivateNote contract
@@ -154,9 +154,13 @@ contract RootPN is Modifiers {
     /// @param amount — Amount withdrawn
     event ProtocolFeeWithdrawn(address to, uint256 dapp_id, uint32 tokenType, uint128 amount);
 
-    /// @notice Root constructor
+    /// @notice Root constructor — intentionally unreachable.
+    /// @dev This root is only ever brought up via the stub + `updateCode`
+    ///      bootstrap, which installs the code and `_ownerPubkey` through
+    ///      `onCodeUpgrade` and does not run this constructor. A direct deploy is
+    ///      not a supported path, so it is rejected outright.
     constructor() {
-        tvm.accept();
+        require(false, ERR_NOT_ALLOWED_CONSTRUCTOR);
     }
 
     /// @notice Ensures minimal native balance for root operations
@@ -330,23 +334,30 @@ contract RootPN is Modifiers {
         // Require a non-zero ephemeral key: eph=0 would make msg.pubkey()==0 pass
         // onlyOwnerPubkey on every PN method, so a zero key is rejected up front.
         require(ephemeralPubkey != 0, ERR_INVALID_PARAMS);
+        // Bind the message signer to the ephemeral key (mirrors
+        // sendEccShellToPrivateNote). The proof only commits ephemeralPubkey as a
+        // single field element via _u256ToFr, which is not injective over 256 bits
+        // (~5 congruent siblings share one Fr), so the zk check alone does NOT pin
+        // the full key: a third party could replay the proof with a congruent
+        // sibling and deploy the note at the same (dih-derived) address under a key
+        // nobody holds, permanently locking the deposit. Requiring the signer to
+        // hold the ephemeral secret closes this — at the cost of third-party deploy.
+        require(msg.pubkey() == ephemeralPubkey, ERR_INVALID_SENDER);
         // SHELL_FEE (300) is the gas-only token used by sendEccShellToPrivateNote.
         // RootPN custodies only type-2 ECC, not type-300, so a PN's main ledger
         // must not hold SHELL_FEE; deployment for the fee-only token is rejected.
         require(tokenType != CURRENCIES_ID_SHELL_FEE, ERR_INVALID_PARAMS);
 
-        // Bind ephemeralPubkey to the proof. The halo2 circuit emits
-        // ephemeralPubkey as instance 4; any mismatch between the caller-supplied
-        // value and the one baked into the proof aborts zkhalo2verify, so the
-        // pubkey cannot be substituted without re-running the prover against the
-        // committed secret.
+        // Bind ephemeralPubkey to the proof as instance 4. NOTE: _u256ToFr reduces
+        // mod FR_MODULUS, so this pins only the Fr projection of the key, not its
+        // full 256 bits — the msg.pubkey() gate above is what binds the exact key.
         //
         // CIRCUIT/PROVER CONTRACT:
         //   pubInputs[0] = depositIdentifierHash
         //   pubInputs[1] = finalLayerHistoricalHashRoot
         //   pubInputs[2] = voucherNominalFr
         //   pubInputs[3] = tokenTypeFr
-        //   pubInputs[4] = ephemeralPubkey (raw uint256 big-endian 32 bytes)
+        //   pubInputs[4] = ephemeralPubkey (Fr, _u256ToFr of the raw uint256)
         // The halo2 prover MUST expose the same 5-field instance vector.
         bytes pubInputs;
         pubInputs.append(bytes(bytes32(depositIdentifierHash)));
@@ -562,7 +573,7 @@ contract RootPN is Modifiers {
     /// @param amount Accumulated protocol fee amount.
     function collectProtocolFee(uint256 eventId, uint256 oracleListHash, uint32 tokenType, uint128 amount)
         public
-        senderIs(DexLib.computeOrderBookAddress(_privateNoteCode, _orderBookCode, eventId, oracleListHash, tokenType))
+        senderIs(DexLib.computeOrderBookAddressFromPmpCode(_privateNoteCode, _pmpCode, _orderBookCode, eventId, oracleListHash, tokenType))
         accept
     {
         ensureBalance();

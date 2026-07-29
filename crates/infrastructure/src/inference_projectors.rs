@@ -54,10 +54,12 @@ pub async fn project_inference_event(
         "InferenceSubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
         "InferenceOrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
         "InferenceFilled" => apply_inference_filled(tx, event, node).await,
+        // Observability-only. `InferenceOrderCancelRejected` fires from `_doCancel`
+        // when the cancel matched no resting order or came from a foreign owner —
+        // by construction the book did not change, so there is no row to touch.
         "InferenceExecuted"
         | "InferenceRefunded"
-        | "InferenceCycleForfeited"
-        | "InferenceForfeitClaimed"
+        | "InferenceOrderCancelRejected"
         | "InferenceOrderBookDeployed" => Ok(ProjectionOutcome::Applied),
         _ => Ok(ProjectionOutcome::Unknown),
     }

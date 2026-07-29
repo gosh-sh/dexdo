@@ -17,7 +17,7 @@
 // id) and funded with ECC SHELL via flag 16 — native value does not cross a
 // dApp boundary on Acki Nacki (see `common::airegistry::deploy_token_contract`).
 // The streaming settlement (open/advance/stop) and probe model need timed
-// windows (180-600s) and are covered separately.
+// windows (600-1200s at these prices) and are covered separately.
 //
 //   cargo test -p dodex-api --test e2e_inference_match -- --ignored --nocapture
 //
@@ -32,6 +32,8 @@ use std::time::UNIX_EPOCH;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
+use common::airegistry::wait_inference_book_live;
+use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -45,7 +47,11 @@ use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45; // 90s budget per wait.
-const PRICE_PER_TICK: u128 = 1_000_000;
+
+// A limit price must be a positive whole multiple of `PRICE_STEP` (1 SHELL =
+// 1e9); the book rejects sub-SHELL dust with ERR_BAD_PARAM before assigning an
+// order id, so a too-small price reads as "the order never rested".
+const PRICE_PER_TICK: u128 = 1_000_000_000;
 const OFFER_TICKS: u128 = 2;
 
 fn unique_suffix() -> u128 {
@@ -129,27 +135,8 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
         .expect("postSellOffer accepted");
 
     // Wait until the offer rests in the book.
-    let mut offer_rested = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        let Ok(stats) = dex.inference_get_stats(&ob).await else { continue };
-        if stats.order_count >= 1 {
-            eprintln!("[e2e_match] sell offer resting (order_count={})", stats.order_count);
-            offer_rested = true;
-            break;
-        }
-    }
-    if !offer_rested {
-        // note → postFromNote → placeSellOffer is `bounce:false` end to end, so a
-        // lost offer surfaces nowhere. The TC's own latch says which hop dropped
-        // it: still set ⇒ the book never answered, cleared ⇒ the book refused it
-        // and called `onSellClosed`, unreadable ⇒ the note addressed a TC that is
-        // not the one deployed here.
-        let latch = match dex.token_contract_get_offer(&tc).await {
-            Ok(o) => format!("offerPosted={} closing={}", o.offer_posted, o.closing),
-            Err(err) => format!("getOffer unreadable: {err:?}"),
-        };
-        failures.push(format!("sell offer never rested in the book ({latch})"));
+    if let Err(diag) = wait_sell_offer_rested(&dex, &ob, &tc, POLL_TICKS, POLL_TICK).await {
+        failures.push(diag);
     }
 
     // 4. Crossing BUY (taker): same price ⇒ matches the resting sell.
@@ -159,7 +146,8 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: OFFER_TICKS,
-            escrow: 3_000_000,
+            // >= ticks * (price + 2.5% fee) = 2 * 1.025e9.
+            escrow: 3_000_000_000,
             flags: 1,
             deadline: 0,
         },
@@ -213,12 +201,8 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
 }
 
 async fn wait_book_live(dex: &Dex, ob: &str) {
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if dex.inference_get_stats(ob).await.is_ok() {
-            eprintln!("[e2e_match] book live");
-            return;
-        }
-    }
-    panic!("InferenceOrderBook did not become live within budget");
+    wait_inference_book_live(dex, ob, POLL_TICKS, POLL_TICK)
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
+    eprintln!("[e2e_match] book live");
 }

@@ -98,10 +98,6 @@ pub const SWEEP_MUST_BE_EMPTY_OR_ZERO: &[&str] = &[
     "_openOrderCount",
     "_openOrdersByEvent",
     "_clientOrderIds",
-    "_streamLocks",
-    "_disputeLocks",
-    "_streamLockCount",
-    "_disputeLockCount",
 ];
 
 /// Boolean-typed storage fields that must be exactly `false`. Split out from
@@ -822,8 +818,8 @@ mod tests {
     /// passing as clean.
     #[test]
     fn sweep_lists_cover_private_note_abi_fields() {
-        // Closed against the ground-truth ABI on this branch: 53 fields =
-        // 25 must-be-empty-or-zero + 4 must-be-false + 24 allowed. This ABI
+        // Closed against the ground-truth ABI on this branch: 48 fields =
+        // 21 must-be-empty-or-zero + 4 must-be-false + 23 allowed. This ABI
         // has no `_timestamp` field; instead it carries `messages` /
         // `lastMessage` — gosh replay-protection state that mutates during
         // operations but does not block reuse.
@@ -849,7 +845,6 @@ mod tests {
             "_rootModelCodeDepth",
             "_debtTokenType",
             "_couponsTokenType",
-            "_lastStreamLockChange",
             "_lastHash", // hash of the last external message (replay guard); survives operations
             "_opNonce",  // monotonic count of all operations ever run; nonzero on a reused note
         ];

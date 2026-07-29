@@ -511,7 +511,7 @@ async fn probe_burned_is_terminal_close() {
     let mut tx = pool.begin().await.unwrap();
     let ev_pb = ev(
         "ProbeBurned",
-        serde_json::json!({"buyer":"0:b","burnedProbe":"10","burnedCommission":"5","refundToBuyer":"85"}),
+        serde_json::json!({"buyer":"0:b","burnedProbe":"10","burnedBond":"5","refundToBuyer":"85"}),
     );
     assert_eq!(project(&mut tx, &ev_pb, &node(tc, "co-1")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();

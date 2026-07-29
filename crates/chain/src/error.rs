@@ -33,6 +33,11 @@ impl ChainError {
     /// failure if there is one. Returns `None` for transport, decode,
     /// or non-TVM failures — the caller maps those to a generic
     /// "unexpected" surface.
+    ///
+    /// The SDK reports the code in two shapes: a message the node refused
+    /// nests it under `node_error.extensions.details`, while a getter the SDK
+    /// ran locally (`run_tvm`) puts it flat on `data` alongside `phase`. Both
+    /// are the same `require`, so both are read here.
     pub fn tvm_exit_code(&self) -> Option<u32> {
         let client_err = match self {
             ChainError::Kit(kit) => kit.tvm_error.as_ref()?,
@@ -40,7 +45,11 @@ impl ChainError {
             ChainError::Decode(_) => return None,
         };
         let data: TvmData = serde_json::from_value(client_err.data().clone()).ok()?;
-        data.node_error?.extensions?.details?.exit_code
+        data.node_error
+            .and_then(|n| n.extensions)
+            .and_then(|e| e.details)
+            .and_then(|d| d.exit_code)
+            .or(data.exit_code)
     }
 }
 
@@ -72,6 +81,9 @@ impl std::error::Error for ChainError {}
 struct TvmData {
     #[serde(default)]
     node_error: Option<TvmNodeError>,
+    /// Set when the SDK executed the method itself rather than sending it.
+    #[serde(default)]
+    exit_code: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +149,18 @@ mod tests {
     fn tvm_exit_code_handles_direct_client_error() {
         let err = ChainError::Client(tvm_with_exit(102));
         assert_eq!(err.tvm_exit_code(), Some(102));
+    }
+
+    /// A reverting getter never reaches the node, so the SDK reports the
+    /// `require` flat on `data` with no `node_error` wrapper.
+    #[test]
+    fn tvm_exit_code_reads_a_locally_run_getter_revert() {
+        let err = ChainError::Client(ClientError::new(
+            414,
+            "Contract execution was terminated with error",
+            serde_json::json!({ "phase": "computeVm", "exit_code": 334, "exit_arg": "0" }),
+        ));
+        assert_eq!(err.tvm_exit_code(), Some(334));
     }
 
     #[test]

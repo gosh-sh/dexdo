@@ -6,17 +6,18 @@
 //   2. a TokenContract is deployed externally (self-rooted, giver-funded);
 //   3. the note posts a SELL offer and crosses it with a BUY ⇒ the book funds
 //      the TokenContract (handover);
-//   4. the giver posts the seller probe commission (an internal SHELL message —
+//   4. the giver posts the seller mirror bond (an internal SHELL message —
 //      `open()` requires it, and an external call cannot carry currency);
 //   5. seller `open()` freezes the probe tick;
-//   6. after SETTLE_WINDOW (180s) of buyer silence, seller `advance()` accepts
-//      the probe — `finalizedOwed` grows, `probeAccepted` flips true;
+//   6. after the advance window (600s at a 1-SHELL tick) of buyer silence, the
+//      seller `advance()`s and the probe is accepted — `finalizedOwed` grows and
+//      `probeAccepted` flips true;
 //   7. buyer `streamStop()` closes the stream and settles.
 //
 // This proves the whole streaming state machine (open → advance → stop, the
 // probe-tick money model in §3.1.2) against a live contract through our
-// wrappers. It is SLOW: it sleeps out the real 180s on-chain settle window, so
-// a run takes ~3-4 minutes.
+// wrappers. It is SLOW: it sleeps out the real 600s on-chain advance window, so
+// a run takes ~11-12 minutes.
 //
 //   cargo test -p dodex-api --test e2e_inference_stream -- --ignored --nocapture
 //
@@ -31,7 +32,8 @@ use std::time::UNIX_EPOCH;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
-use common::airegistry::fund_probe_commission_via_giver;
+use common::airegistry::wait_inference_book_live;
+use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -42,21 +44,28 @@ use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
+use dodex_contracts::dex::private_note::ParamsOfPostSellerBond;
 use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
-const PRICE_PER_TICK: u128 = 1_000_000;
+// A limit price must be a positive whole multiple of `PRICE_STEP` (1 SHELL =
+// 1e9), so 1 SHELL is the cheapest deal this test can open.
+const PRICE_PER_TICK: u128 = 1_000_000_000;
 const DEAL_TICKS: u128 = 4;
-// SETTLE_WINDOW is 180s on-chain; wait it out plus a margin before `advance`.
-const SETTLE_WAIT: Duration = Duration::from_secs(195);
+// Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin.
+const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
+// The advance window is per-deal and price-scaled: W = clamp(P*600/1e9, 180,
+// 3600), so at the minimum 1-SHELL price it is 600s, not the 180s floor. Wait it
+// out plus a margin before `advance`.
+const SETTLE_WAIT: Duration = Duration::from_secs(615);
 
 fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
 
 #[tokio::test]
-#[ignore = "requires shellnet + seed_notes.json; sleeps out the 180s settle window (~4 min)"]
+#[ignore = "requires shellnet + seed_notes.json; sleeps out the 600s advance window (~12 min)"]
 async fn inference_stream_open_advance_stop_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -125,7 +134,11 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
     dex.post_sell_offer(&note.address, ParamsOfPostSellOffer { flags: 0, nonce }, signer())
         .await
         .expect("postSellOffer accepted");
-    wait_until(&dex, &ob, |s| s.order_count >= 1, "sell offer to rest").await;
+    if let Err(diag) = wait_sell_offer_rested(&dex, &ob, &tc, POLL_TICKS, POLL_TICK).await {
+        failures.push(diag);
+        finish(&dex, &note.address, &model_hash, &keys, failures).await;
+        return;
+    }
 
     dex.place_inference_buy(
         &note.address,
@@ -133,7 +146,8 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: DEAL_TICKS,
-            escrow: 6_000_000,
+            // >= ticks * (price + 2.5% fee) = 4 * 1.025e9 = 4.1e9.
+            escrow: 6_000_000_000,
             flags: 1,
             deadline: 0,
         },
@@ -148,23 +162,28 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
         return;
     }
 
-    // 4. Seller probe commission (internal SHELL message via the giver).
-    fund_probe_commission_via_giver(dex.context(), &tc, 200_000)
-        .await
-        .expect("fund probe commission via giver");
-    let mut probe_funded = false;
+    // 4. Seller mirror bond, shipped from the note: the TC takes the bond from
+    //    its `_sellerNote` and refuses every other sender.
+    dex.post_seller_bond(
+        &note.address,
+        ParamsOfPostSellerBond { nonce, amount: SELLER_BOND },
+        signer(),
+    )
+    .await
+    .expect("postSellerBond accepted");
+    let mut bond_funded = false;
     for _ in 0..POLL_TICKS {
         tokio::time::sleep(POLL_TICK).await;
-        if let Ok(probe) = dex.token_contract_get_probe(&tc).await
-            && probe.probe_funded
+        if let Ok(bond) = dex.token_contract_get_seller_bond(&tc).await
+            && bond.bond_funded
         {
-            eprintln!("[e2e_stream] probe funded: locked={}", probe.probe_locked);
-            probe_funded = true;
+            eprintln!("[e2e_stream] seller bond funded: held={}", bond.bond_held);
+            bond_funded = true;
             break;
         }
     }
-    if !probe_funded {
-        failures.push("probe commission never registered (probeFunded stayed false)".to_string());
+    if !bond_funded {
+        failures.push("seller bond never registered (bondFunded stayed false)".to_string());
         finish(&dex, &note.address, &model_hash, &keys, failures).await;
         return;
     }
@@ -191,7 +210,7 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
     }
 
     // 6. Wait out the on-chain settle window, then accept the probe.
-    eprintln!("[e2e_stream] sleeping {}s for SETTLE_WINDOW…", SETTLE_WAIT.as_secs());
+    eprintln!("[e2e_stream] sleeping {}s for the advance window…", SETTLE_WAIT.as_secs());
     tokio::time::sleep(SETTLE_WAIT).await;
     dex.token_contract_advance(&tc, signer()).await.expect("TokenContract.advance accepted");
     let mut accepted = false;
@@ -243,28 +262,9 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
 }
 
 async fn wait_book_live(dex: &Dex, ob: &str) {
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if dex.inference_get_stats(ob).await.is_ok() {
-            return;
-        }
-    }
-    panic!("InferenceOrderBook did not become live within budget");
-}
-
-async fn wait_until<F>(dex: &Dex, ob: &str, pred: F, what: &str)
-where
-    F: Fn(&dodex_contracts::airegistry::inference_order_book::ResultOfGetStats) -> bool,
-{
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if let Ok(stats) = dex.inference_get_stats(ob).await
-            && pred(&stats)
-        {
-            return;
-        }
-    }
-    panic!("timed out waiting for {what}");
+    wait_inference_book_live(dex, ob, POLL_TICKS, POLL_TICK)
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
 }
 
 async fn wait_funded(dex: &Dex, tc: &str) -> bool {

@@ -29,7 +29,7 @@ pub enum TokenContractEvent {
     StreamDisputed = 724,
     DisputeResolved = 725,
     StreamReclaimed = 726,
-    ProbeCommissionFunded = 727,
+    SellerBondFunded = 727,
     ProbeAccepted = 728,
     ProbeBurned = 729,
     ContractDeployed = 703,
@@ -59,7 +59,7 @@ impl TryFrom<String> for TokenContractEvent {
             724 => Ok(TokenContractEvent::StreamDisputed),
             725 => Ok(TokenContractEvent::DisputeResolved),
             726 => Ok(TokenContractEvent::StreamReclaimed),
-            727 => Ok(TokenContractEvent::ProbeCommissionFunded),
+            727 => Ok(TokenContractEvent::SellerBondFunded),
             728 => Ok(TokenContractEvent::ProbeAccepted),
             729 => Ok(TokenContractEvent::ProbeBurned),
             _ => Err(KitError::new(
@@ -85,71 +85,19 @@ impl TokenContractEvent {
 
 /// Typed decoded `TokenContract` external event.
 pub enum DecodedTokenContractEvent {
-    ContractDeployed {
-        event: Event,
-        kind: TokenContractEvent,
-        data: ContractDeployedData,
-    },
-    StreamFunded {
-        event: Event,
-        kind: TokenContractEvent,
-        data: StreamFundedData,
-    },
-    ProbeCommissionFunded {
-        event: Event,
-        kind: TokenContractEvent,
-        data: ProbeCommissionFundedData,
-    },
-    StreamOpened {
-        event: Event,
-        kind: TokenContractEvent,
-        data: StreamOpenedData,
-    },
-    ProbeAccepted {
-        event: Event,
-        kind: TokenContractEvent,
-        data: ProbeAcceptedData,
-    },
-    ProbeBurned {
-        event: Event,
-        kind: TokenContractEvent,
-        data: ProbeBurnedData,
-    },
-    TickFinalized {
-        event: Event,
-        kind: TokenContractEvent,
-        data: TickFinalizedData,
-    },
-    StreamStopped {
-        event: Event,
-        kind: TokenContractEvent,
-        data: StreamStoppedData,
-    },
-    StreamDisputed {
-        event: Event,
-        kind: TokenContractEvent,
-        data: StreamDisputedData,
-    },
-    DisputeResolved {
-        event: Event,
-        kind: TokenContractEvent,
-        data: DisputeResolvedData,
-    },
-    StreamReclaimed {
-        event: Event,
-        kind: TokenContractEvent,
-        data: StreamReclaimedData,
-    },
-    ShellWithdrawn {
-        event: Event,
-        kind: TokenContractEvent,
-        data: ShellWithdrawnData,
-    },
-    ContractDestroyed {
-        event: Event,
-        kind: TokenContractEvent,
-        data: ContractDestroyedData,
-    },
+    ContractDeployed { event: Event, kind: TokenContractEvent, data: ContractDeployedData },
+    StreamFunded { event: Event, kind: TokenContractEvent, data: StreamFundedData },
+    SellerBondFunded { event: Event, kind: TokenContractEvent, data: SellerBondFundedData },
+    StreamOpened { event: Event, kind: TokenContractEvent, data: StreamOpenedData },
+    ProbeAccepted { event: Event, kind: TokenContractEvent, data: ProbeAcceptedData },
+    ProbeBurned { event: Event, kind: TokenContractEvent, data: ProbeBurnedData },
+    TickFinalized { event: Event, kind: TokenContractEvent, data: TickFinalizedData },
+    StreamStopped { event: Event, kind: TokenContractEvent, data: StreamStoppedData },
+    StreamDisputed { event: Event, kind: TokenContractEvent, data: StreamDisputedData },
+    DisputeResolved { event: Event, kind: TokenContractEvent, data: DisputeResolvedData },
+    StreamReclaimed { event: Event, kind: TokenContractEvent, data: StreamReclaimedData },
+    ShellWithdrawn { event: Event, kind: TokenContractEvent, data: ShellWithdrawnData },
+    ContractDestroyed { event: Event, kind: TokenContractEvent, data: ContractDestroyedData },
 }
 
 impl FromEvent for DecodedTokenContractEvent {
@@ -164,13 +112,9 @@ impl FromEvent for DecodedTokenContractEvent {
                 let data = decode_or_err::<StreamFundedData>(event, contract)?;
                 Ok(DecodedTokenContractEvent::StreamFunded { event: event.clone(), kind, data })
             }
-            TokenContractEvent::ProbeCommissionFunded => {
-                let data = decode_or_err::<ProbeCommissionFundedData>(event, contract)?;
-                Ok(DecodedTokenContractEvent::ProbeCommissionFunded {
-                    event: event.clone(),
-                    kind,
-                    data,
-                })
+            TokenContractEvent::SellerBondFunded => {
+                let data = decode_or_err::<SellerBondFundedData>(event, contract)?;
+                Ok(DecodedTokenContractEvent::SellerBondFunded { event: event.clone(), kind, data })
             }
             TokenContractEvent::StreamOpened => {
                 let data = decode_or_err::<StreamOpenedData>(event, contract)?;
@@ -253,8 +197,8 @@ pub struct StreamFundedData {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-/// Payload of `TokenContractEvent::ProbeCommissionFunded`.
-pub struct ProbeCommissionFundedData {
+/// Payload of `TokenContractEvent::SellerBondFunded`.
+pub struct SellerBondFundedData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub amount: u128,
 }
@@ -276,7 +220,7 @@ pub struct ProbeAcceptedData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub to_seller: u128,
     #[serde(deserialize_with = "deserialize_u128")]
-    pub commission_returned: u128,
+    pub bond_returned: u128,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -287,7 +231,7 @@ pub struct ProbeBurnedData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub burned_probe: u128,
     #[serde(deserialize_with = "deserialize_u128")]
-    pub burned_commission: u128,
+    pub burned_bond: u128,
     #[serde(deserialize_with = "deserialize_u128")]
     pub refund_to_buyer: u128,
 }

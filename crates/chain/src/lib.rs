@@ -37,6 +37,8 @@ pub use dto::OwnedOrders;
 pub use error::ChainError;
 pub use error::ChainResult;
 #[cfg(feature = "test-helpers")]
+pub use test_helpers::IobAccount;
+#[cfg(feature = "test-helpers")]
 pub use test_helpers::OracleEvents;
 #[cfg(feature = "test-helpers")]
 pub use test_helpers::PmpDetails;

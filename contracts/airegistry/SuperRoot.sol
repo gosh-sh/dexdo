@@ -20,7 +20,7 @@ import "./RootModel.sol";
 ///         via their `_superRootAddress` static, which is mixed into the
 ///         derivation here.
 contract SuperRoot is AiRegistryModifiers {
-    string constant version = "4.0.27";
+    string constant version = "4.0.30";
 
     /// @notice Canonical code hash of the child RootModel. The constructor
     ///         rejects any caller-supplied code whose `tvm.hash` does not
@@ -33,7 +33,7 @@ contract SuperRoot is AiRegistryModifiers {
     ///         the value returned by `tvm.decodeStateInit(tvc).code` then
     ///         `tvm.hash`. It is the same as the `code_hash` field
     ///         printed by `tvm-cli decode stateinit --tvc <file>`.
-    uint256 constant ROOT_MODEL_CODE_HASH = 0xb88723892c07ad3b12eee921b98c3b79d1b853b8af41749474f3536ec1060de8;
+    uint256 constant ROOT_MODEL_CODE_HASH = 0x88eab99d8b9f0d194a6400c04f1978465e4c59c8abe7df929145affbb9422f5a;
 
     event RootRegistered(address rootAddress);
 

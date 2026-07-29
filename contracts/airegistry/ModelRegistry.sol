@@ -24,12 +24,12 @@ import "./InferenceOrderBook.sol";
 contract ModelRegistry {
 
     /// @notice Contract semantic version (kept in lockstep with the airegistry stack).
-    string constant version = "4.0.27";
+    string constant version = "4.0.30";
 
     // ── pinned InferenceOrderBook code (cascade-updated on version bump) ──
     /// @dev InferenceOrderBook 4.0.20 (tickSize=1M) code hash + depth. One model ⇒ one book.
-    uint256 constant IOB_CODE_HASH  = 0x65ca031c9b66305b870741971da9095eb678d4350a9762f39224eb7678f60910;
-    uint16  constant IOB_CODE_DEPTH = 33;
+    uint256 constant IOB_CODE_HASH  = 0xf32d28ead150ba0832456d5f51f51d0e666463100baf27134e083e5fc5159649;
+    uint16  constant IOB_CODE_DEPTH = 36;
 
     /// @notice Self-top-up floor (mirrors the airegistry stack).
     uint64 constant MIN_BALANCE = 100 vmshell;
@@ -38,9 +38,25 @@ contract ModelRegistry {
     uint16 constant ERR_NOT_OWNER  = 100; // caller is not the owner key
     uint16 constant ERR_NO_PUBKEY  = 101; // deployed without a pubkey
     uint16 constant ERR_NOT_MODEL  = 102; // model is not registered
+    uint16 constant ERR_NAME_TOO_LONG = 103; // model name > 127 bytes (see MODEL_NAME_MAX)
+
+    // A canonical model name MUST fit one cell (<=127 bytes), the same bound the
+    // InferenceOrderBook / TokenContract constructors enforce. The book address is
+    // derived from `sha256(name)`, and `sha256`/SHA256U hashes only the FIRST cell —
+    // so a longer name is truncated to its first 127 bytes for the id while its entry
+    // key here is `tvm.hash(bytes(name))` over the FULL name. Without this bound two
+    // distinct long names sharing the first 127 bytes would be two registry entries
+    // but resolve to ONE order book (merged liquidity/oracle). Enforcing the bound on
+    // every write keeps both hashes injective over the name space → one entry ↔ one book.
+    uint16 constant MODEL_NAME_MAX = 127;
 
     /// @notice nameHash => registered.  nameHash = tvm.hash(bytes(name)).
     mapping(uint256 => bool) _models;
+
+    /// @notice Live cardinality of `_models`, maintained incrementally on every insert/remove so
+    ///         `count()` is O(1). A full-map scan would blow the get-method gas budget at the
+    ///         production scale (~8558+ entries).
+    uint32 _count;
 
     /// @dev Only the owner key may mutate. `accept` so the owner pays gas.
     modifier onlyOwner() {
@@ -90,7 +106,9 @@ contract ModelRegistry {
     function setModel(string canonicalName) public onlyOwner {
         ensureBalance();
         if (!canonicalName.empty()) {
-            _models[_key(canonicalName)] = true;
+            require(canonicalName.byteLength() <= MODEL_NAME_MAX, ERR_NAME_TOO_LONG);
+            uint256 k = _key(canonicalName);
+            if (!_models[k]) { _models[k] = true; _count++; }   // count only NEW keys → incremental
         }
     }
 
@@ -99,8 +117,11 @@ contract ModelRegistry {
     function setModels(string[] names) public onlyOwner {
         ensureBalance();
         for (uint32 i = 0; i < names.length; i++) {
-            if (!names[i].empty()) {
-                _models[_key(names[i])] = true;
+            // Skip empty AND over-long (>127) names rather than revert the whole batch —
+            // an over-long name would alias another entry's order book (see MODEL_NAME_MAX).
+            if (!names[i].empty() && names[i].byteLength() <= MODEL_NAME_MAX) {
+                uint256 k = _key(names[i]);
+                if (!_models[k]) { _models[k] = true; _count++; }
             }
         }
     }
@@ -108,7 +129,8 @@ contract ModelRegistry {
     /// @notice Unregister a canonical model name.
     function removeModel(string canonicalName) public onlyOwner {
         ensureBalance();
-        delete _models[_key(canonicalName)];
+        uint256 k = _key(canonicalName);
+        if (_models[k]) { delete _models[k]; _count--; }
     }
 
     /// @notice Upgrade this contract's code in place (owner-gated). The fixed
@@ -126,6 +148,7 @@ contract ModelRegistry {
     ///     (single source of truth is re-seeded fresh after an upgrade).
     function onCodeUpgrade() private {
         delete _models;
+        _count = 0;
     }
 
     // ── getters ───────────────────────────────────────────────
@@ -148,11 +171,8 @@ contract ModelRegistry {
     }
 
     /// @notice Number of registered models.
-    function count() external view returns (uint32 n) {
-        for ((, bool v) : _models) {
-            v;
-            n++;
-        }
+    function count() external view returns (uint32) {
+        return _count;   // O(1) — no full-map scan (the set is unbounded at ~8558+ entries)
     }
 
     /// @notice The pinned book code hash + depth used for derivation.

@@ -10,6 +10,7 @@
 // The prod api/infrastructure build leaves `test-helpers` off so
 // `Dex` exposes only the trader-path methods in `client.rs`.
 
+use ackinacki_kit::contracts::traits::AccountAccessor;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 use dodex_contracts::airegistry::inference_order_book::InferenceOrderBook;
@@ -21,9 +22,10 @@ use dodex_contracts::airegistry::inference_order_book::ResultOfGetStats as IobSt
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetSubscription as IobSubscription;
 use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
 use dodex_contracts::airegistry::token_contract::ParamsOfWithdrawShell;
+use dodex_contracts::airegistry::token_contract::ResultOfGetFees as TcFees;
 use dodex_contracts::airegistry::token_contract::ResultOfGetOffer as TcOffer;
 use dodex_contracts::airegistry::token_contract::ResultOfGetParties as TcParties;
-use dodex_contracts::airegistry::token_contract::ResultOfGetProbe as TcProbe;
+use dodex_contracts::airegistry::token_contract::ResultOfGetSellerBond as TcSellerBond;
 use dodex_contracts::airegistry::token_contract::ResultOfGetState as TcState;
 use dodex_contracts::airegistry::token_contract::TokenContract;
 use dodex_contracts::dex::oracle::Oracle;
@@ -43,6 +45,7 @@ use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceSubscription;
 use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
+use dodex_contracts::dex::private_note::ParamsOfPostSellerBond;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
 use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
 use dodex_contracts::dex::private_note::PrivateNote;
@@ -66,6 +69,19 @@ pub type PmpDetails = PmpKitDetails;
 /// Shape returned by `OracleEventList.getEvents`. `.events` is a
 /// `HashMap<String, serde_json::Value>` keyed by event id.
 pub type OracleEvents = ResultOfGetEvents;
+
+/// Account-level state of an `InferenceOrderBook`, independent of whether its
+/// getters run. Returned by `Dex::inference_book_account`.
+#[derive(Debug, Clone)]
+pub struct IobAccount {
+    /// `AccountStatus` rendered for a message: `Active`, `Uninit`, `Frozen`,
+    /// `NonExist`.
+    pub acc_type: String,
+    /// Hash of the account's code cell. `None` before the account holds state.
+    pub code_hash: Option<String>,
+    /// Native balance in nanovmshell.
+    pub balance: Option<String>,
+}
 
 impl Dex {
     // ── PrivateNote (deployer-side) ──────────────────────────────────
@@ -280,6 +296,20 @@ impl Dex {
             .map_err(Into::into)
     }
 
+    /// Post the seller mirror bond from the note. The TC accepts the bond from
+    /// its `_sellerNote` and nothing else, so this is the only funding path.
+    pub async fn post_seller_bond(
+        &self,
+        pn_address: &str,
+        params: ParamsOfPostSellerBond,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .post_seller_bond(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn place_inference_buy(
         &self,
         pn_address: &str,
@@ -388,6 +418,24 @@ impl Dex {
             .map_err(Into::into)
     }
 
+    /// Raw account state of a book, for telling apart the ways a book can fail
+    /// to answer its getters. `getStats` reports the same "cannot run" error
+    /// whether the account is missing, uninitialised, or carries a code cell
+    /// that has no runnable code — only the account itself separates them.
+    pub async fn inference_book_account(
+        &self,
+        order_book_address: &str,
+    ) -> ChainResult<IobAccount> {
+        let ob = InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address));
+        ob.fetch_account().await?;
+        let account = ob.account().lock().await;
+        Ok(IobAccount {
+            acc_type: format!("{:?}", account.acc_type),
+            code_hash: account.code_hash.clone(),
+            balance: account.balance.as_ref().map(ToString::to_string),
+        })
+    }
+
     pub async fn inference_get_queue_size(&self, order_book_address: &str) -> ChainResult<u8> {
         InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
             .get_queue_size()
@@ -456,14 +504,14 @@ impl Dex {
             .map_err(Into::into)
     }
 
-    /// Seller posts the probe commission (`TokenContract.fundProbeCommission`).
-    pub async fn token_contract_fund_probe_commission(
+    /// Seller posts the mirror bond (`TokenContract.fundSellerBond`).
+    pub async fn token_contract_fund_seller_bond(
         &self,
         token_contract_address: &str,
         signer: Signer,
     ) -> ChainResult<ResultOfSendMessage> {
         TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
-            .fund_probe_commission(signer)
+            .fund_seller_bond(signer)
             .await
             .map_err(Into::into)
     }
@@ -504,12 +552,25 @@ impl Dex {
             .map_err(Into::into)
     }
 
-    pub async fn token_contract_get_probe(
+    pub async fn token_contract_get_seller_bond(
         &self,
         token_contract_address: &str,
-    ) -> ChainResult<TcProbe> {
+    ) -> ChainResult<TcSellerBond> {
         TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
-            .get_probe()
+            .get_seller_bond()
+            .await
+            .map_err(Into::into)
+    }
+
+    /// `ticksFinalized` here is the only bond-free measure of "did the seller get
+    /// paid for a tick": `finalizedOwed` also carries the returned seller bond and
+    /// the close rebate, both of which dwarf a single tick.
+    pub async fn token_contract_get_fees(
+        &self,
+        token_contract_address: &str,
+    ) -> ChainResult<TcFees> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .get_fees()
             .await
             .map_err(Into::into)
     }

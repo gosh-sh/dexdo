@@ -358,6 +358,7 @@
 		{"init":false,"name":"_stakeStart","type":"uint64"},
 		{"init":false,"name":"_resultStart","type":"uint64"},
 		{"init":false,"name":"_isCancelled","type":"bool"},
+		{"init":false,"name":"_countReleased","type":"bool"},
 		{"init":false,"name":"_oracleEventsConfirmed","type":"map(uint256,bool)"},
 		{"init":false,"name":"_oracleEventsPubkeys","type":"map(uint256,bool)"},
 		{"init":false,"name":"_oracleEventsAddress","type":"map(uint256,uint256)"},

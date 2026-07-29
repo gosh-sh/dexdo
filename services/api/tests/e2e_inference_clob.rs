@@ -24,6 +24,8 @@ use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::deploy_token_contract;
 use common::airegistry::fetch_inference_event_ids;
+use common::airegistry::wait_inference_book_live;
+use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
@@ -39,7 +41,13 @@ use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
 
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45;
-const PRICE_PER_TICK: u128 = 1_000_000;
+// A limit price must be a positive whole multiple of `PRICE_STEP` (1 SHELL =
+// 1e9); the book rejects sub-SHELL dust with ERR_BAD_PARAM before assigning an
+// order id, so a too-small price reads as "the order never rested".
+const PRICE_PER_TICK: u128 = 1_000_000_000;
+/// `ERR_NO_LIQUIDITY` in `contracts/airegistry/InferenceOrderBook.sol` — what
+/// `getWeeklyMedianPrice` raises while the book has recorded no finalized ticks.
+const ERR_NO_LIQUIDITY: u32 = 334;
 
 fn note_and_signer() -> (common::test_pns::TestPn, KeyPair) {
     let note = {
@@ -94,13 +102,10 @@ async fn deploy_book(
         )
         .await
         .expect("getInferenceOrderBookAddress");
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        if dex.inference_get_stats(&ob).await.is_ok() {
-            return (ob, model_hash);
-        }
-    }
-    panic!("InferenceOrderBook did not become live within budget");
+    wait_inference_book_live(dex, &ob, POLL_TICKS, POLL_TICK)
+        .await
+        .unwrap_or_else(|err| panic!("{err}"));
+    (ob, model_hash)
 }
 
 #[tokio::test]
@@ -131,19 +136,12 @@ async fn inference_partial_fill_leaves_remainder() {
     dex.post_sell_offer(&note.address, ParamsOfPostSellOffer { flags: 0, nonce }, signer())
         .await
         .expect("postSellOffer");
-    let mut rested = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        let Ok(stats) = dex.inference_get_stats(&ob).await else { continue };
-        if stats.order_count >= 1 {
-            rested = true;
-            break;
-        }
-    }
     // Assert the precondition instead of falling through: with no resting ask the
     // buy below has nothing to cross, and the real cause resurfaces much later as a
     // misleading "match never funded" / ERR_NO_LIQUIDITY out of getWeeklyMedianPrice.
-    assert!(rested, "sell offer never rested in the book — no liquidity to match");
+    if let Err(diag) = wait_sell_offer_rested(&dex, &ob, &tc, POLL_TICKS, POLL_TICK).await {
+        panic!("{diag} — no liquidity to match");
+    }
 
     // 4-tick limit BUY crosses: 2 fill (fund the TC), 2 rest.
     dex.place_inference_buy(
@@ -152,7 +150,8 @@ async fn inference_partial_fill_leaves_remainder() {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 4,
-            escrow: 6_000_000,
+            // >= ticks * (price + 2.5% fee) = 4 * 1.025e9 = 4.1e9.
+            escrow: 6_000_000_000,
             flags: 0,
             deadline: 0,
         },
@@ -205,8 +204,21 @@ async fn inference_partial_fill_leaves_remainder() {
         }
         Err(err) => failures.push(format!("getBestBidAsk: {err:?}")),
     }
+    // A match reserves escrow that a cancel or a no-show still refunds, so it
+    // must NOT move the reference price: the book records VWAP volume only from
+    // `reportFinalized`, which the TokenContract sends once ticks are served and
+    // paid. This flow never settles, so the book is dry and the getter reverts
+    // with ERR_NO_LIQUIDITY. Asserting the revert (not just tolerating it) pins
+    // that separation — a build that credited the median on fill would pass a
+    // mere `is_err`, and so would any unrelated getter failure.
     match dex.inference_get_weekly_median_price(&ob).await {
-        Ok(median) => eprintln!("[e2e_clob] weeklyMedianPrice={median}"),
+        Ok(median) => failures.push(format!(
+            "getWeeklyMedianPrice returned {median} after a match with no settlement: \
+             an unfinalized fill must not feed the reference price"
+        )),
+        Err(err) if err.tvm_exit_code() == Some(ERR_NO_LIQUIDITY) => {
+            eprintln!("[e2e_clob] weeklyMedianPrice: dry book (ERR_NO_LIQUIDITY), as expected")
+        }
         Err(err) => failures.push(format!("getWeeklyMedianPrice: {err:?}")),
     }
 
@@ -227,14 +239,16 @@ async fn inference_subscription_place_and_read() {
     let (ob, model_hash) = deploy_book(&dex, &note.address, &model_name, signer()).await;
     eprintln!("[e2e_clob] subscription order_book={ob}");
 
-    // escrow must be >= ticks * (price + platform fee); 8 * (1M + 2.5%) = 8.2M.
+    // escrow must be >= ticks * (price + platform fee); 8 * (1e9 + 2.5%) = 8.2e9.
     dex.place_inference_subscription(
         &note.address,
         ParamsOfPlaceInferenceSubscription {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 8,
-            escrow: 10_000_000,
+            // Rests as a standing bid — no taker/post-only bits.
+            flags: 0,
+            escrow: 10_000_000_000,
             auto_renew: true,
         },
         signer(),
@@ -308,26 +322,19 @@ async fn inference_match_emits_filled_event() {
     dex.post_sell_offer(&note.address, ParamsOfPostSellOffer { flags: 0, nonce }, signer())
         .await
         .expect("postSellOffer");
-    let mut rested = false;
-    for _ in 0..POLL_TICKS {
-        tokio::time::sleep(POLL_TICK).await;
-        let Ok(stats) = dex.inference_get_stats(&ob).await else { continue };
-        if stats.order_count >= 1 {
-            rested = true;
-            break;
-        }
+    // Same precondition as above: a missing ask surfaces much later as a
+    // misleading "match never funded" / ERR_NO_LIQUIDITY.
+    if let Err(diag) = wait_sell_offer_rested(&dex, &ob, &tc, POLL_TICKS, POLL_TICK).await {
+        panic!("{diag} — no liquidity to match");
     }
-    // Assert the precondition instead of falling through: with no resting ask the
-    // buy below has nothing to cross, and the real cause resurfaces much later as a
-    // misleading "match never funded" / ERR_NO_LIQUIDITY out of getWeeklyMedianPrice.
-    assert!(rested, "sell offer never rested in the book — no liquidity to match");
     dex.place_inference_buy(
         &note.address,
         ParamsOfPlaceInferenceBuy {
             model_hash: model_hash.clone(),
             max_price_per_tick: PRICE_PER_TICK,
             ticks: 2,
-            escrow: 3_000_000,
+            // >= ticks * (price + 2.5% fee) = 2 * 1.025e9.
+            escrow: 3_000_000_000,
             flags: 1,
             deadline: 0,
         },

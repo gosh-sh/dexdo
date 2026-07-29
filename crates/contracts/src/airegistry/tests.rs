@@ -211,8 +211,8 @@ fn token_contract_results_decode_abi_shape() {
     use super::token_contract::ResultOfGetDeal;
     use super::token_contract::ResultOfGetFees;
     use super::token_contract::ResultOfGetParties;
-    use super::token_contract::ResultOfGetProbe;
     use super::token_contract::ResultOfGetSeller;
+    use super::token_contract::ResultOfGetSellerBond;
     use super::token_contract::ResultOfGetShellBalance;
     use super::token_contract::ResultOfGetState;
 
@@ -222,10 +222,11 @@ fn token_contract_results_decode_abi_shape() {
     assert_eq!(state.deposit, 1);
     assert_eq!(state.dispute_time, 1);
 
-    let probe: ResultOfGetProbe =
-        serde_json::from_value(sample_output_json(TOKEN_CONTRACT_ABI, "getProbe")).unwrap();
-    assert!(probe.probe_funded);
-    assert_eq!(probe.probe_commission, 1);
+    let bond: ResultOfGetSellerBond =
+        serde_json::from_value(sample_output_json(TOKEN_CONTRACT_ABI, "getSellerBond")).unwrap();
+    assert!(bond.bond_funded);
+    assert_eq!(bond.bond_held, 1);
+    assert_eq!(bond.bond_required, 1);
 
     let config: ResultOfGetConfig =
         serde_json::from_value(sample_output_json(TOKEN_CONTRACT_ABI, "getConfig")).unwrap();
@@ -289,6 +290,7 @@ fn inference_order_book_params_match_abi() {
         serialized_keys(&ParamsOfPlaceSubscription {
             max_price_per_tick: 1,
             ticks: 1,
+            flags: 0,
             auto_renew: true,
             buyer_pubkey: "1".into(),
         }),
@@ -368,7 +370,7 @@ fn event_ids_match_modifiers() {
     assert_eq!(Tc::StreamDisputed as u128, 724);
     assert_eq!(Tc::DisputeResolved as u128, 725);
     assert_eq!(Tc::StreamReclaimed as u128, 726);
-    assert_eq!(Tc::ProbeCommissionFunded as u128, 727);
+    assert_eq!(Tc::SellerBondFunded as u128, 727);
     assert_eq!(Tc::ProbeAccepted as u128, 728);
     assert_eq!(Tc::ProbeBurned as u128, 729);
 
@@ -378,9 +380,10 @@ fn event_ids_match_modifiers() {
     assert_eq!(Iob::Filled as u128, 1003);
     assert_eq!(Iob::Executed as u128, 1004);
     assert_eq!(Iob::SubscriptionPlaced as u128, 1005);
-    assert_eq!(Iob::CycleForfeited as u128, 1006);
-    assert_eq!(Iob::ForfeitClaimed as u128, 1007);
+    // 1006/1007 are the retired forfeit ids — reserved in modifiers.sol, no
+    // matching ABI event, so deliberately absent from the enum.
     assert_eq!(Iob::InferenceOrderBookDeployed as u128, 1008);
+    assert_eq!(Iob::OrderCancelRejected as u128, 1009);
 }
 
 #[test]
@@ -428,13 +431,17 @@ fn event_payloads_decode_abi_shape() {
     decodes!(iob::ExecutedData, INFERENCE_ORDER_BOOK_ABI, "InferenceExecuted");
     decodes!(iob::RefundedData, INFERENCE_ORDER_BOOK_ABI, "InferenceRefunded");
     decodes!(iob::SubscriptionPlacedData, INFERENCE_ORDER_BOOK_ABI, "InferenceSubscriptionPlaced");
-    decodes!(iob::CycleForfeitedData, INFERENCE_ORDER_BOOK_ABI, "InferenceCycleForfeited");
-    decodes!(iob::ForfeitClaimedData, INFERENCE_ORDER_BOOK_ABI, "InferenceForfeitClaimed");
     decodes!(iob::OrderBookDeployedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderBookDeployed");
+    decodes!(
+        iob::OrderCancelRejectedData,
+        INFERENCE_ORDER_BOOK_ABI,
+        "InferenceOrderCancelRejected"
+    );
 
     // TokenContract (700-range streaming).
     decodes!(tc::StreamFundedData, TOKEN_CONTRACT_ABI, "StreamFunded");
     decodes!(tc::StreamOpenedData, TOKEN_CONTRACT_ABI, "StreamOpened");
+    decodes!(tc::SellerBondFundedData, TOKEN_CONTRACT_ABI, "SellerBondFunded");
     decodes!(tc::ProbeAcceptedData, TOKEN_CONTRACT_ABI, "ProbeAccepted");
     decodes!(tc::ProbeBurnedData, TOKEN_CONTRACT_ABI, "ProbeBurned");
     decodes!(tc::TickFinalizedData, TOKEN_CONTRACT_ABI, "TickFinalized");

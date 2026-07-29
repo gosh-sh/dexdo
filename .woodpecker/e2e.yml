@@ -10,6 +10,13 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
+  # Candidate values carried over from the version of this file that shipped
+  # with contracts v4.0.30: it ran against acki-nacki branch `test/dex-4.0.30`
+  # with `docker.gosh.sh/ackinacki-all-bin:01ef664282679576fc46d882655fc6e0927767f9`.
+  # That tag is an acki-nacki commit SHA (their pipeline tags every image with
+  # $CI_COMMIT_SHA), so it is a concrete candidate for the pin below and for
+  # resolving all four digests off the registry -- what it is NOT is a digest,
+  # which is the whole point of the ask, so it stays a comment until confirmed.
   - &acki_sha "<SHA>"   # BLOCKED: acki-nacki commit to pin, chosen together with the image digests below (node-team ask)
   - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:<digest>"        # BLOCKED: same ask
   - &node_img "docker.gosh.sh/ackinacki-node@sha256:<digest>"             # BLOCKED: same ask
