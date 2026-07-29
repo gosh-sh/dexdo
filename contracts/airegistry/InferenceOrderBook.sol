@@ -366,7 +366,10 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         FLAG_TEE`. A TEE-requiring BUY fills only a TEE SELL; a non-TEE BUY fills either
     ///         SELL; a non-TEE SELL must not consume a TEE-required BUY; a TEE SELL serves both.
     ///         Applied everywhere executable liquidity is inspected so `_match`, `_fokFullyFillable`
-    ///         and `_executableCrosses` make identical decisions.
+    ///         and `_executableCrosses` classify a given maker the same way. The prechecks still
+    ///         part ways with `_match` once their walk budgets run out: only `_match` resumes across
+    ///         transactions, so each precheck then answers in its own conservative direction —
+    ///         reject the placement rather than let it fill past what the walk inspected.
     function _teeCompatible(bool takerIsBuy, uint8 takerFlags, uint8 makerFlags) private pure returns (bool) {
         uint8 buyFlags  = takerIsBuy ? takerFlags : makerFlags;
         uint8 sellFlags = takerIsBuy ? makerFlags : takerFlags;
@@ -566,7 +569,10 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         `_fokFullyFillable` use: walk opposite levels best-first, skip makers `_match`
     ///         would not settle — expired GTD bids and expired / cycle-exhausted subscriptions —
     ///         and report whether the FIRST genuinely executable maker crosses `takerPrice`.
-    ///         Bounded by MAX_PRECHECK_LEVELS; fail-open past the budget so it never over-rejects.
+    ///         Both walk budgets — MAX_SCAN_PER_CALL per maker and MAX_PRECHECK_LEVELS per level —
+    ///         fail closed: returning "no cross" lets `_doPlaceHead` call `_match`, which neither
+    ///         budget binds (its own per-tx cap resumes across txs via the queue cursor), so it
+    ///         could settle a maker deeper than this walk reached and violate POST_ONLY.
     ///         POST_ONLY BUY tests the SELL side (no deadlines/subscriptions) → result unchanged;
     ///         this refines POST_ONLY SELL against the bid side.
     function _executableCrosses(bool takerIsBuy, uint256 takerPrice, uint8 takerFlags) private view returns (bool) {
@@ -578,12 +584,12 @@ contract InferenceOrderBook is AiRegistryModifiers {
             if (!_crosses(takerIsBuy, takerPrice, false, lp)) { return false; }   // ordered levels → no worse level crosses
             uint128 cur = _levels[!takerIsBuy][lp].firstOrderId;
             while (cur != 0) {
-                // Bound the walk (the resting book is unbounded): past a fixed budget fail open like
-                // the MAX_PRECHECK_LEVELS cap below — POST_ONLY rests instead of paying unbounded gas
-                // on a level packed with non-executable makers. Counted BEFORE the TEE skip below so
-                // incompatible makers also consume the budget.
+                // Bound the walk (the resting book is unbounded). Exhaustion must fail closed:
+                // `_doPlaceHead` interprets false as safe to call `_match`, which can continue past
+                // this cap and consume a deeper crossing maker. Counted BEFORE the TEE skip below
+                // so incompatible makers also consume the budget.
                 scanned++;
-                if (scanned >= MAX_SCAN_PER_CALL) { return false; }
+                if (scanned >= MAX_SCAN_PER_CALL) { return true; }
                 Order mk = _orders[cur];
                 // TEE-incompatible: `_match` never settles this pair, so POST_ONLY does not cross
                 // it — an incompatible best quote must not reject an otherwise-valid POST_ONLY.
@@ -596,7 +602,10 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 cur = mk.nextAtPrice;
             }
             walked++;
-            if (walked >= MAX_PRECHECK_LEVELS) { return false; }
+            // Level budget exhausted: fail closed for the same reason as the per-maker cap above.
+            // `_match` is not bound by this budget and resumes across txs, so answering "no cross"
+            // here could still end in a fill on a level this walk never reached.
+            if (walked >= MAX_PRECHECK_LEVELS) { return true; }
             it = _nextOpposite(takerIsBuy, lp);
         }
         return false;

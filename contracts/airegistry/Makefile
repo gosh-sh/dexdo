@@ -1,3 +1,3 @@
-TVCS := SuperRoot RootModel TokenContract InferenceOrderBook ModelRegistry
+TVCS := SuperRoot RootModel TokenContract InferenceOrderBook
 
 include ../Makefile.inc
