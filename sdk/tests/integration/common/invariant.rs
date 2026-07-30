@@ -68,6 +68,8 @@ const PN_BUSY: &str = "_busy";
 const PN_OPEN_ORDER_COUNT: &str = "_openOrderCount";
 const PMP_NORM_REFUND_PENDING: &str = "_normRefundPending";
 const PMP_TOTAL_POOL: &str = "_totalPool";
+const PMP_FROZEN: &str = "_frozen";
+const PN_STAKES: &str = "_stakes";
 
 const QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -613,11 +615,22 @@ async fn phase_pending(
             let Some(fields) = r.storage_fields(pmp, PMP_ABI).await? else {
                 return Ok(Some(format!("PMP {pmp} is not deployed yet")));
             };
-            let pool = field_u128(&fields, PMP_TOTAL_POOL)?;
-            if pool != *expected_pool {
-                return Ok(Some(format!("PMP {pmp} pool is {pool}, waiting for {expected_pool}")));
+            let mut noted = 0usize;
+            for pn in &t.pns {
+                if let Some(f) = r.storage_fields(pn, PN_ABI).await? {
+                    if !field(&f, PN_STAKES)?.as_object().is_none_or(serde_json::Map::is_empty) {
+                        noted += 1;
+                    }
+                }
             }
-            Ok(None)
+            stake_barrier_verdict(
+                pmp,
+                field_u128(&fields, PMP_TOTAL_POOL)?,
+                *expected_pool,
+                field_bool(&fields, PMP_FROZEN)?,
+                noted,
+                t.pns.len(),
+            )
         }
 
         Phase::AfterSplit | Phase::AfterTrade { .. } => Ok(None),
@@ -848,6 +861,44 @@ fn field_u32(fields: &Value, name: &str) -> anyhow::Result<u32> {
     raw.parse().with_context(|| format!("parse `{name}` value `{raw}`"))
 }
 
+/// Pure core of the post-stake barrier: given what the chain says, decide
+/// between settled, not yet, and never.
+///
+/// The third case is the one worth spelling out. Freeze normalisation rewrites
+/// the pool, so once the market is frozen the value this barrier waits for is
+/// unreachable and polling on can only end in a timeout that blames the pool.
+/// The staking window is a tenth of the distance to `resultStart` — tens of
+/// seconds — so a market freezing during this phase is ordinary, not exotic.
+///
+/// Which of the two causes it was is reported as evidence rather than as a
+/// verdict: a stake rejected before `tvm.accept()` leaves the sending note
+/// without a `_stakes` entry, while stakes that landed and were merely observed
+/// late leave every note holding one. Naming the count lets the reader decide,
+/// and keeps this from confidently asserting the wrong one.
+fn stake_barrier_verdict(
+    pmp: &str,
+    pool: u128,
+    expected_pool: u128,
+    frozen: bool,
+    notes_with_stakes: usize,
+    notes_total: usize,
+) -> anyhow::Result<Option<String>> {
+    if pool == expected_pool {
+        return Ok(None);
+    }
+    if frozen {
+        return Err(anyhow!(
+            "PMP {pmp} is frozen with pool {pool}, and this barrier was waiting for \
+             {expected_pool} — freeze normalisation rewrites the pool, so that value can no \
+             longer arrive. Notes holding a stake entry: {notes_with_stakes}/{notes_total}. \
+             Short of the total means a stake was rejected before `tvm.accept()` (outside the \
+             window, below the minimum, market not approved); complete means both stakes \
+             landed and the staking window closed before this barrier saw the pool."
+        ));
+    }
+    Ok(Some(format!("PMP {pmp} pool is {pool}, waiting for {expected_pool}")))
+}
+
 fn field_u128(fields: &Value, name: &str) -> anyhow::Result<u128> {
     let raw = field(fields, name)?
         .as_str()
@@ -958,6 +1009,33 @@ mod tests {
         assert_eq!(h.get(&2), Some(&7));
         // A currency the note has never held still reads zero, not absent.
         assert_eq!(h.get(&3), Some(&0));
+    }
+
+    #[test]
+    fn stake_barrier_settles_when_the_pool_reaches_the_expected_value() {
+        assert!(stake_barrier_verdict("0:pmp", 100, 100, false, 2, 2).unwrap().is_none());
+        // Frozen is irrelevant once the value is there: the phase is settled,
+        // and a market that froze immediately afterwards changes nothing about
+        // what this barrier was asked to confirm.
+        assert!(stake_barrier_verdict("0:pmp", 100, 100, true, 2, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn stake_barrier_keeps_waiting_while_the_market_is_open() {
+        let pending = stake_barrier_verdict("0:pmp", 90, 100, false, 1, 2).unwrap();
+        assert!(pending.expect("still pending").contains("waiting for 100"));
+    }
+
+    #[test]
+    fn stake_barrier_stops_dead_once_the_market_freezes_short() {
+        // The regression: without this, the barrier polls a value freeze
+        // normalisation has already made unreachable, times out two minutes
+        // later, and blames the pool.
+        let err = stake_barrier_verdict("0:pmp", 90, 100, true, 1, 2)
+            .expect_err("a frozen market short of the pool is terminal, not pending");
+        let msg = err.to_string();
+        assert!(msg.contains("frozen"), "{msg}");
+        assert!(msg.contains("1/2"), "the evidence has to name the count: {msg}");
     }
 
     #[test]
@@ -1072,9 +1150,9 @@ mod tests {
             (
                 PN_ABI,
                 "PrivateNote",
-                &[PN_BALANCE, PN_LOCKED_IN_ORDERS, PN_BUSY, PN_OPEN_ORDER_COUNT],
+                &[PN_BALANCE, PN_LOCKED_IN_ORDERS, PN_BUSY, PN_OPEN_ORDER_COUNT, PN_STAKES],
             ),
-            (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL]),
+            (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL, PMP_FROZEN]),
         ];
         for (abi_json, label, names) in checks {
             let abi: serde_json::Value = serde_json::from_str(abi_json).expect("parse abi json");
