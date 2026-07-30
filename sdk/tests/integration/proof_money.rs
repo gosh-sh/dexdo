@@ -62,22 +62,13 @@
 //! relies on it.
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
 
 use ackinacki_kit::tvm_client::abi::Signer;
-use ackinacki_kit::tvm_client::ClientContext;
-use dodex_contracts::dex::order_book::OrderBook;
 use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
-use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
-use dodex_contracts::dex::private_note::ParamsOfSetStake;
 use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
 use dodex_contracts::dex::private_note::ParamsOfStakeKey;
 use dodex_contracts::dex::root_pn::RootPn;
-use dodex_sdk::dex_contract_params;
 use dodex_sdk::Dex;
 
 use crate::common::allocator;
@@ -100,8 +91,15 @@ use crate::common::invariant::TrackedContracts;
 use crate::common::invariant::TrackedOb;
 use crate::common::invariant::TrackedPmp;
 use crate::common::locks;
+use crate::common::market::oracle_signer;
+use crate::common::market::pmp_freeze_now;
+use crate::common::market::set_timings_and_approve;
+use crate::common::market::stake;
+use crate::common::market::wait_order_book;
 use crate::common::misc::now_unix;
-use crate::common::misc::wait_active;
+use crate::common::misc::poll_until;
+use crate::common::misc::wait_not_busy;
+use crate::common::misc::wait_until;
 use crate::common::pmp;
 use crate::common::pmp::OracleEventCtx;
 use crate::common::preflight;
@@ -146,27 +144,6 @@ const ORDER_PRICE_BPS: &str = "5000";
 /// The outcome the oracle resolves to, and the one the buyer stakes on.
 const WINNING_OUTCOME: u32 = 0;
 const LOSING_OUTCOME: u32 = 1;
-
-/// Slack added when waiting out a contract deadline. The gates are compared
-/// against block timestamps while this test compares against the host clock,
-/// and a message that arrives a second early is simply rejected — leaving the
-/// following barrier to time out on a condition that never had a chance to
-/// become true.
-const CHAIN_CLOCK_SLACK_SECS: u64 = 5;
-
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// 30 × 2 s = 60 s, the suite's standard ceiling for one acknowledged
-/// operation.
-const POLL_ATTEMPTS: usize = 30;
-
-/// How long [`wait_not_busy`] looks for a note to *become* busy before giving
-/// up on ever seeing it. Deliberately short: not seeing the marker proves
-/// nothing either way — the operation may have completed between two polls, or
-/// been rejected outright and never existed — so there is nothing to be gained
-/// by waiting longer, and every second spent here comes out of a deadline the
-/// scenario has to meet. What distinguishes the two cases is each phase's
-/// effect assertion, not this loop.
-const BUSY_APPEAR_ATTEMPTS: usize = 5;
 
 #[tokio::test]
 #[ignore = "requires a from-scratch local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID, E2E_MANIFEST"]
@@ -279,14 +256,7 @@ async fn proof_money_lifecycle_local() {
     // its own, which is why it shares the deploy phase's assertion; the
     // approval poll is its acknowledgement.
     let requested_result_start = now_unix() + STAKE_PERIOD_PROOF;
-    dex.submit_set_timings(
-        &pmp_addr,
-        ParamsOfSubmitSetTimings { result_start: requested_result_start },
-        oracle_signer(&ev),
-    )
-    .await
-    .expect("submit_set_timings");
-    wait_pmp_approved(dex, &pmp_addr).await;
+    set_timings_and_approve(dex, &pmp_addr, &ev, requested_result_start).await;
 
     let s1 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after deploy");
     invariant::assert_conserved(&sum0, &s1, &ExternalDelta::none());
@@ -594,79 +564,6 @@ fn signed(v: u128) -> i128 {
 // Chain operations
 // ---------------------------------------------------------------------------
 
-/// The oracle's own keys — `submitSetTimings` and `submitResolve` are votes,
-/// authenticated against the oracle set the market was deployed with.
-fn oracle_signer(ev: &OracleEventCtx) -> Signer {
-    Signer::Keys { keys: ev.oracle_keys.clone() }
-}
-
-/// Stake [`STAKE_AMOUNT`] on `outcome` and wait for the market to acknowledge
-/// it. A note refuses a second operation while the first is in flight, so the
-/// acknowledgement is a precondition of whatever the scenario does next, not
-/// only of the barrier.
-async fn stake(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey, outcome: u32) {
-    dex.set_stake(
-        &note.note.address,
-        ParamsOfSetStake {
-            event_id: key.event_id.clone(),
-            oracle_list_hash: key.oracle_list_hash.clone(),
-            token_type: key.token_type,
-            outcome,
-            amount: STAKE_AMOUNT,
-            use_coupon: false,
-        },
-        Signer::Keys { keys: note.note.keys.clone() },
-    )
-    .await
-    .expect("set_stake");
-    wait_not_busy(dex, &note.note.address, "set_stake").await;
-}
-
-/// Freeze the market now that the staking window has closed. Unsigned: the
-/// entry point checks the deadline and the market's state, never a caller
-/// identity.
-///
-/// Re-sent while the market is still unfrozen, because the deadline is checked
-/// against a block timestamp: a message that arrives a moment early is
-/// rejected before the contract accepts it, and an external message that is
-/// rejected leaves no trace at the sender — sending is fire-and-forget, so
-/// nothing here can observe the rejection and a single attempt would leave the
-/// scenario waiting for an order book nobody is going to deploy. The state is
-/// re-read before every attempt so a market that is already frozen is never
-/// sent to at all.
-async fn pmp_freeze_now(ctx: &Arc<ClientContext>, dex: &Dex, pmp_addr: &str) {
-    let contract = Pmp::new(Arc::clone(ctx), dex_contract_params(pmp_addr));
-    // The postcondition is "this market is frozen", not "this call froze it".
-    // Two things reach that state without us: `setTimings` freezes immediately
-    // when the window it sets has already closed, and any `splitFullSet` /
-    // `mergeFullSet` / resolve after `stakeEnd` freezes on the way through. A
-    // send that lands after either rejects with `ERR_ALREADY_FROZEN`, and the
-    // read above cannot reliably prevent that — it answers from committed
-    // state, so a market frozen a moment ago still reads as unfrozen.
-    //
-    // Hence: a send failure is not fatal here, the state check is the
-    // authority, and the last error is carried into the timeout message so a
-    // market that genuinely never freezes still says why.
-    let mut last_err = None;
-    for _ in 0..POLL_ATTEMPTS {
-        if dex.get_pmp_details(pmp_addr).await.expect("pmp details").frozen {
-            return;
-        }
-        if let Err(err) = contract.freeze_now(Signer::None).await {
-            last_err = Some(err);
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    panic!(
-        "PMP {pmp_addr} did not freeze within {}s{}",
-        poll_budget_secs(),
-        match last_err {
-            Some(err) => format!("; last freezeNow error: {err:?}"),
-            None => "; every freezeNow was accepted".to_string(),
-        }
-    );
-}
-
 /// Split collateral into a full set of outcome tokens. Only legal between the
 /// freeze and `resultStart`, and only once the deployer note has acknowledged
 /// the normalisation refund.
@@ -757,34 +654,6 @@ async fn claim(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey) {
 // Waiting
 // ---------------------------------------------------------------------------
 
-/// Sleep until `deadline` has passed on the chain's side of the clock. See
-/// [`CHAIN_CLOCK_SLACK_SECS`] for why the host clock alone is not enough.
-async fn wait_until(deadline_unix: u64) {
-    let target = deadline_unix + CHAIN_CLOCK_SLACK_SECS;
-    let now = now_unix();
-    if now < target {
-        tokio::time::sleep(Duration::from_secs(target - now)).await;
-    }
-}
-
-async fn wait_pmp_approved(dex: &Dex, pmp_addr: &str) {
-    poll_until(&format!("PMP {pmp_addr} did not become approved"), || async {
-        dex.get_pmp_details(pmp_addr).await.expect("pmp details").approved
-    })
-    .await;
-}
-
-/// Wait for the order book the freeze deploys, and return its address. The
-/// address is derived deterministically and the getter answers with it long
-/// before the account exists, so the wait is on the account being active, not
-/// on the getter answering.
-async fn wait_order_book(ctx: &Arc<ClientContext>, dex: &Dex, pmp_addr: &str) -> String {
-    let ob_addr = dex.get_order_book_address(pmp_addr).await.expect("get_order_book_address");
-    let contract = OrderBook::new(Arc::clone(ctx), dex_contract_params(&ob_addr));
-    wait_active(&contract, "OrderBook").await;
-    ob_addr
-}
-
 async fn wait_resolved(dex: &Dex, pmp_addr: &str, outcome_id: u32) {
     poll_until(&format!("PMP {pmp_addr} did not resolve to outcome {outcome_id}"), || async {
         dex.get_pmp_details(pmp_addr).await.expect("pmp details").resolved_outcome
@@ -821,63 +690,6 @@ async fn wait_owner_order(
         },
     )
     .await;
-}
-
-/// Settle an operation sent to `pn_address`: wait for the note's `_busy`
-/// marker to appear and then clear.
-///
-/// Two phases, because the marker is only set once the chain picks the
-/// external message up: a caller that checks straight away sees the
-/// pre-message `None` and concludes the operation is finished before it has
-/// even started.
-///
-/// **Returning is not evidence the operation succeeded**, and no caller may
-/// read it that way. Never seeing the marker is ambiguous by construction —
-/// the operation may have completed between two polls, or it may have been
-/// rejected by a `require` before `tvm.accept()` and never have existed, and
-/// those two are the same observation from here. Distinguishing them is the
-/// job of each phase's effect assertion; this function only keeps the scenario
-/// from sending a note its next operation while it is still busy with the
-/// last. Hence the short [`BUSY_APPEAR_ATTEMPTS`] budget: waiting longer buys
-/// no certainty, and the time comes out of a contract deadline.
-async fn wait_not_busy(dex: &Dex, pn_address: &str, op: &str) {
-    let mut saw_busy = false;
-    for _ in 0..BUSY_APPEAR_ATTEMPTS {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let d = dex.get_private_note_details(pn_address).await.expect("pn details");
-        if d.busy_address.is_some() {
-            saw_busy = true;
-            break;
-        }
-    }
-    if !saw_busy {
-        return;
-    }
-    poll_until(&format!("note {pn_address} stayed busy after {op}"), || async {
-        dex.get_private_note_details(pn_address).await.expect("pn details").busy_address.is_none()
-    })
-    .await;
-}
-
-/// Poll `probe` until it answers `true`, or panic after [`POLL_ATTEMPTS`]
-/// tries. `what` is phrased as the failure, so the panic reads as a statement
-/// about what never happened.
-async fn poll_until<F, Fut>(what: &str, mut probe: F)
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = bool>,
-{
-    for _ in 0..POLL_ATTEMPTS {
-        if probe().await {
-            return;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    panic!("{what} within {}s", poll_budget_secs());
-}
-
-fn poll_budget_secs() -> u64 {
-    POLL_ATTEMPTS as u64 * POLL_INTERVAL.as_secs()
 }
 
 // ---------------------------------------------------------------------------

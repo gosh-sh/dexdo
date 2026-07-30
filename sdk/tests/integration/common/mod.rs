@@ -39,6 +39,7 @@ pub mod chain_reader;
 pub mod context;
 pub mod invariant;
 pub mod keys;
+pub mod market;
 pub mod misc;
 pub mod ob_pool;
 pub mod pmp;
