@@ -65,8 +65,6 @@ use std::collections::BTreeMap;
 
 use ackinacki_kit::tvm_client::abi::Signer;
 use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
-use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
-use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
 use dodex_contracts::dex::private_note::ParamsOfStakeKey;
 use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::Dex;
@@ -91,11 +89,16 @@ use crate::common::invariant::TrackedContracts;
 use crate::common::invariant::TrackedOb;
 use crate::common::invariant::TrackedPmp;
 use crate::common::locks;
+use crate::common::market::at;
 use crate::common::market::oracle_signer;
+use crate::common::market::outcome_tokens;
+use crate::common::market::place_limit;
 use crate::common::market::pmp_freeze_now;
 use crate::common::market::set_timings_and_approve;
+use crate::common::market::split_full_set;
 use crate::common::market::stake;
 use crate::common::market::wait_order_book;
+use crate::common::market::wait_owner_order;
 use crate::common::misc::now_unix;
 use crate::common::misc::poll_until;
 use crate::common::misc::wait_not_busy;
@@ -362,8 +365,8 @@ async fn proof_money_lifecycle_local() {
     let buyer_before_split = outcome_tokens(dex, &buyer).await;
     let seller_before_split = outcome_tokens(dex, &seller).await;
 
-    split_full_set(dex, &buyer, &key).await;
-    split_full_set(dex, &seller, &key).await;
+    split_full_set(dex, &buyer, &key, SPLIT_COLLATERAL).await;
+    split_full_set(dex, &seller, &key, SPLIT_COLLATERAL).await;
     invariant::await_quiescence(&r, &tracked, Phase::AfterSplit).await.expect("split quiescence");
 
     // The effect: each trader now holds tokens of *both* outcomes. A rejected
@@ -564,25 +567,6 @@ fn signed(v: u128) -> i128 {
 // Chain operations
 // ---------------------------------------------------------------------------
 
-/// Split collateral into a full set of outcome tokens. Only legal between the
-/// freeze and `resultStart`, and only once the deployer note has acknowledged
-/// the normalisation refund.
-async fn split_full_set(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey) {
-    dex.split_full_set(
-        &note.note.address,
-        ParamsOfSplitFullSet {
-            event_id: key.event_id.clone(),
-            oracle_list_hash: key.oracle_list_hash.clone(),
-            token_type: key.token_type,
-            collateral: SPLIT_COLLATERAL,
-        },
-        Signer::Keys { keys: note.note.keys.clone() },
-    )
-    .await
-    .expect("split_full_set");
-    wait_not_busy(dex, &note.note.address, "split_full_set").await;
-}
-
 /// One trade: the seller rests a limit sell, the buyer crosses it at the same
 /// price. The maker has to be on the book before the taker arrives, or the buy
 /// rests instead of matching and the trade never happens.
@@ -602,42 +586,16 @@ async fn place_and_match(
     let sell_coid = coid_base;
     let buy_coid = coid_base + 1;
 
-    place_limit(dex, seller, key, false, sell_coid).await;
+    place_limit(dex, seller, key, WINNING_OUTCOME, false, ORDER_PRICE_BPS, ORDER_AMOUNT, sell_coid)
+        .await;
     wait_owner_order(dex, ob_addr, &seller.note.dih_dec, sell_coid, true).await;
 
-    place_limit(dex, buyer, key, true, buy_coid).await;
+    place_limit(dex, buyer, key, WINNING_OUTCOME, true, ORDER_PRICE_BPS, ORDER_AMOUNT, buy_coid)
+        .await;
     // Gone from the owner index on both sides is what proves a fill rather
     // than two orders resting past each other.
     wait_owner_order(dex, ob_addr, &seller.note.dih_dec, sell_coid, false).await;
     wait_owner_order(dex, ob_addr, &buyer.note.dih_dec, buy_coid, false).await;
-}
-
-async fn place_limit(
-    dex: &Dex,
-    note: &LeasedPn,
-    key: &ParamsOfStakeKey,
-    is_buy: bool,
-    client_order_id: u128,
-) {
-    dex.place_order(
-        &note.note.address,
-        ParamsOfPlaceOrder {
-            event_id: key.event_id.clone(),
-            oracle_list_hash: key.oracle_list_hash.clone(),
-            token_type: key.token_type,
-            outcome_id: WINNING_OUTCOME,
-            is_buy,
-            price: ORDER_PRICE_BPS.to_string(),
-            amount: ORDER_AMOUNT,
-            flags: 0,
-            min_amount: 0,
-            epoch_id: 0,
-            client_order_id,
-        },
-        Signer::Keys { keys: note.note.keys.clone() },
-    )
-    .await
-    .expect("place_order");
 }
 
 /// Claim the note's winnings. Accepted only once the order book has finished
@@ -666,29 +624,6 @@ async fn wait_order_book_done(dex: &Dex, pmp_addr: &str) {
     poll_until(&format!("order book of PMP {pmp_addr} did not finish draining"), || async {
         dex.get_pmp_shutdown_state(pmp_addr).await.expect("pmp shutdown state").order_book_done
     })
-    .await;
-}
-
-/// Wait for a client order id to appear in (or disappear from) the book's
-/// owner index.
-async fn wait_owner_order(
-    dex: &Dex,
-    ob_addr: &str,
-    deposit_identifier_hash: &str,
-    client_order_id: u128,
-    want_present: bool,
-) {
-    let what = if want_present { "appear in" } else { "disappear from" };
-    poll_until(
-        &format!("order {client_order_id} of {deposit_identifier_hash} did not {what} the book"),
-        || async {
-            let owned = dex
-                .get_orders_by_owner(ob_addr, deposit_identifier_hash.to_string())
-                .await
-                .expect("get_orders_by_owner");
-            owned.orders.iter().any(|o| o.client_order_id == client_order_id) == want_present
-        },
-    )
     .await;
 }
 
@@ -735,38 +670,6 @@ async fn ob_total_protocol_fees(dex: &Dex, ob_addr: &str) -> u128 {
 /// More than one means the note came out of the pool already staked somewhere
 /// else, and picking a record would be a coin flip — so it fails instead of
 /// guessing.
-async fn outcome_tokens(dex: &Dex, note: &LeasedPn) -> Vec<u128> {
-    let addr = &note.note.address;
-    let stakes = dex.get_stakes(addr).await.expect("pn stakes").stakes;
-    assert!(
-        stakes.len() <= 1,
-        "note {addr} holds {} stake records; this scenario assumes one market per note and \
-         cannot tell which record is its own",
-        stakes.len()
-    );
-    let Some(record) = stakes.values().next() else { return Vec::new() };
-    let amounts = record
-        .get("amount")
-        .and_then(|v| v.as_array())
-        .unwrap_or_else(|| panic!("stake record of {addr} has no `amount` array: {record}"));
-    amounts
-        .iter()
-        .map(|v| {
-            // `uint128` decodes to a decimal string, never a JSON number.
-            let raw = v
-                .as_str()
-                .unwrap_or_else(|| panic!("outcome amount of {addr} is not a string: {v}"));
-            raw.parse().unwrap_or_else(|e| panic!("parse outcome amount `{raw}` of {addr}: {e}"))
-        })
-        .collect()
-}
-
-/// One outcome's holding out of [`outcome_tokens`]. An outcome the note has
-/// never held is absent from the vector and reads zero.
-fn at(holdings: &[u128], outcome: u32) -> u128 {
-    holdings.get(outcome as usize).copied().unwrap_or(0)
-}
-
 /// A split mints tokens of *every* outcome, so both have to grow. The exact
 /// amounts are the contract's own basket arithmetic (`t = collateral / Q`,
 /// `t * u_k` per outcome, with the remainder refunded), which this test

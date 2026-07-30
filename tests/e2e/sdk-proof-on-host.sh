@@ -197,6 +197,12 @@ if [ "${SUITE:-proof}" = proof ]; then
     --dir "$LEDGER_DIR" --run-id "$E2E_RUN_ID" --manifest "$MANIFEST"
   FILTER='test(=proof_money::proof_money_lifecycle_local)'
   THREADS=1
+elif [ "$SUITE" = orders ]; then
+  # Also joins the proof run's generation. Runs last of the four: it spends a
+  # third deployer note and both trader notes, so anything after it would find
+  # the pool empty.
+  FILTER='test(=resting_orders::non_crossing_orders_rest_and_cancel_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

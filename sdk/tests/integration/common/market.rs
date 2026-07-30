@@ -28,7 +28,10 @@ use ackinacki_kit::tvm_client::ClientContext;
 use dodex_contracts::dex::order_book::OrderBook;
 use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
 use dodex_contracts::dex::pmp::Pmp;
+use dodex_contracts::dex::private_note::ParamsOfCancelOrderByClient;
+use dodex_contracts::dex::private_note::ParamsOfPlaceOrder;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
+use dodex_contracts::dex::private_note::ParamsOfSplitFullSet;
 use dodex_contracts::dex::private_note::ParamsOfStakeKey;
 use dodex_e2e_harness::locks::ChainLockGuard;
 use dodex_sdk::dex_contract_params;
@@ -118,6 +121,145 @@ pub async fn stake(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey, outcome: 
     .await
     .expect("set_stake");
     wait_not_busy(dex, &note.note.address, "set_stake").await;
+}
+
+/// Split `collateral` into a full set of outcome tokens. Only legal between
+/// the freeze and `resultStart`, and only once the deployer note has
+/// acknowledged the normalisation refund.
+pub async fn split_full_set(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey, collateral: u128) {
+    dex.split_full_set(
+        &note.note.address,
+        ParamsOfSplitFullSet {
+            event_id: key.event_id.clone(),
+            oracle_list_hash: key.oracle_list_hash.clone(),
+            token_type: key.token_type,
+            collateral,
+        },
+        Signer::Keys { keys: note.note.keys.clone() },
+    )
+    .await
+    .expect("split_full_set");
+    wait_not_busy(dex, &note.note.address, "split_full_set").await;
+}
+
+/// Place one limit order. Fire-and-forget: sending says nothing about what
+/// the book did with it, and resting and filling look identical from here.
+/// [`wait_owner_order`] is what tells them apart, and a caller that needs the
+/// sending note settled as well waits on that separately — this deliberately
+/// does neither, so that a caller cannot mistake "sent" for "rested".
+#[allow(clippy::too_many_arguments)]
+pub async fn place_limit(
+    dex: &Dex,
+    note: &LeasedPn,
+    key: &ParamsOfStakeKey,
+    outcome_id: u32,
+    is_buy: bool,
+    price_bps: &str,
+    amount: u128,
+    client_order_id: u128,
+) {
+    dex.place_order(
+        &note.note.address,
+        ParamsOfPlaceOrder {
+            event_id: key.event_id.clone(),
+            oracle_list_hash: key.oracle_list_hash.clone(),
+            token_type: key.token_type,
+            outcome_id,
+            is_buy,
+            price: price_bps.to_string(),
+            amount,
+            flags: 0,
+            min_amount: 0,
+            epoch_id: 0,
+            client_order_id,
+        },
+        Signer::Keys { keys: note.note.keys.clone() },
+    )
+    .await
+    .expect("place_order");
+}
+
+/// Cancel one of the note's live orders by the client id it was placed with.
+pub async fn cancel_by_client(
+    dex: &Dex,
+    note: &LeasedPn,
+    key: &ParamsOfStakeKey,
+    client_order_id: u128,
+) {
+    dex.cancel_order_by_client(
+        &note.note.address,
+        ParamsOfCancelOrderByClient {
+            event_id: key.event_id.clone(),
+            oracle_list_hash: key.oracle_list_hash.clone(),
+            token_type: key.token_type,
+            client_order_id,
+        },
+        Signer::Keys { keys: note.note.keys.clone() },
+    )
+    .await
+    .expect("cancel_order_by_client");
+    wait_not_busy(dex, &note.note.address, "cancel_order_by_client").await;
+}
+
+/// Wait for a client order id to appear in (or disappear from) the book's
+/// owner index.
+pub async fn wait_owner_order(
+    dex: &Dex,
+    ob_addr: &str,
+    deposit_identifier_hash: &str,
+    client_order_id: u128,
+    want_present: bool,
+) {
+    let what = if want_present { "appear in" } else { "disappear from" };
+    poll_until(
+        &format!("order {client_order_id} of {deposit_identifier_hash} did not {what} the book"),
+        || async {
+            let owned = dex
+                .get_orders_by_owner(ob_addr, deposit_identifier_hash.to_string())
+                .await
+                .expect("get_orders_by_owner");
+            owned.orders.iter().any(|o| o.client_order_id == client_order_id) == want_present
+        },
+    )
+    .await;
+}
+
+/// A note's outcome-token holdings, indexed by outcome.
+///
+/// Read out of the note's single stake record, which is what makes the
+/// one-market-per-note assumption explicit rather than silent: with two
+/// records there is no way to tell from here which market's tokens these are,
+/// and picking either would make every assertion built on it meaningless.
+pub async fn outcome_tokens(dex: &Dex, note: &LeasedPn) -> Vec<u128> {
+    let addr = &note.note.address;
+    let stakes = dex.get_stakes(addr).await.expect("pn stakes").stakes;
+    assert!(
+        stakes.len() <= 1,
+        "note {addr} holds {} stake records; this scenario assumes one market per note and \
+         cannot tell which record is its own",
+        stakes.len()
+    );
+    let Some(record) = stakes.values().next() else { return Vec::new() };
+    let amounts = record
+        .get("amount")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("stake record of {addr} has no `amount` array: {record}"));
+    amounts
+        .iter()
+        .map(|v| {
+            // `uint128` decodes to a decimal string, never a JSON number.
+            let raw = v
+                .as_str()
+                .unwrap_or_else(|| panic!("outcome amount of {addr} is not a string: {v}"));
+            raw.parse().unwrap_or_else(|e| panic!("parse outcome amount `{raw}` of {addr}: {e}"))
+        })
+        .collect()
+}
+
+/// One outcome's holding out of [`outcome_tokens`]. An outcome the note has
+/// never held is absent from the vector and reads zero.
+pub fn at(holdings: &[u128], outcome: u32) -> u128 {
+    holdings.get(outcome as usize).copied().unwrap_or(0)
 }
 
 /// Freeze the market now that the staking window has closed. Unsigned: the

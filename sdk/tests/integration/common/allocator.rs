@@ -1410,18 +1410,25 @@ mod tests {
     /// spec edit that drops a group surfaces as a scenario failing to rent,
     /// 20 minutes into a pipeline, on a stand that then has to be rebuilt.
     ///
-    /// - `Dep` 2: `proof_money` rents one and releases it clean, but
-    ///   `parallel_setup` runs two processes that each rent one *at the same
-    ///   time*, and both steps share a ledger generation (`E2E_RUN_ID` is the
-    ///   pipeline number, bootstrapped only by the proof step).
-    /// - `Trd` 2: `proof_money`'s buyer and seller, held simultaneously.
-    ///   `usdc_release` also takes one as its transfer destination, but later
-    ///   and after `proof_money` has returned both, so it raises no peak.
+    /// - `Dep` 3: `proof_money` rents one and gives it back, so it costs
+    ///   nothing. `parallel_setup` rents two *at once* — one per process — and
+    ///   quarantines both, which spends them. `resting_orders` runs after that
+    ///   and needs a third. Two would leave it with nothing to deploy from.
+    /// - `Trd` 2: `proof_money` takes two and returns both, `usdc_release`
+    ///   borrows one and returns it, and `resting_orders` takes two and spends
+    ///   them — but it is the last step, so nothing needs one afterwards. Two
+    ///   is both the peak and the total.
     /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
-    ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good —
-    ///   so one per stand is one per run.
+    ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
+    ///
+    /// Counted as **spent per generation, not held at once**, which is the
+    /// distinction that matters: the steps share one ledger generation
+    /// (`E2E_RUN_ID` is the pipeline number, bootstrapped only by the proof
+    /// step), and a quarantined note never comes back within it. A peak-
+    /// concurrency figure would have said two `Dep` notes suffice, and the
+    /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 2), (PnProfile::Trd, 2), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 3), (PnProfile::Trd, 2), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

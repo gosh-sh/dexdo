@@ -786,6 +786,27 @@ pub async fn pn_balance_opt(r: &ChainReader, pn: &str, tt: u32) -> anyhow::Resul
     Ok(Some(field_uint_map(&fields, PN_BALANCE)?.get(&tt).copied().unwrap_or(0)))
 }
 
+/// The other half of [`pn_balance_opt`]: what the note has escrowed against
+/// its resting orders in `tt` (`PrivateNote._lockedInOrders`). Placing a buy
+/// moves collateral from one to the other, so a scenario checking that
+/// movement has to read both through the same decoder or the two readings
+/// describe different states.
+pub async fn pn_locked_opt(r: &ChainReader, pn: &str, tt: u32) -> anyhow::Result<Option<u128>> {
+    let Some(fields) = pn_fields_opt(r, pn).await? else { return Ok(None) };
+    Ok(Some(field_uint_map(&fields, PN_LOCKED_IN_ORDERS)?.get(&tt).copied().unwrap_or(0)))
+}
+
+/// How many orders the note believes it has resting
+/// (`PrivateNote._openOrderCount`). The note's own count, not the book's —
+/// the two are updated by different contracts, and a scenario asserting the
+/// book holds an order wants to know the note agrees.
+pub async fn pn_open_order_count(r: &ChainReader, pn: &str) -> anyhow::Result<u32> {
+    let fields = pn_fields_opt(r, pn)
+        .await?
+        .ok_or_else(|| anyhow!("note {pn} holds no account on this stand"))?;
+    field_u32(&fields, PN_OPEN_ORDER_COUNT)
+}
+
 /// A note's holdings per currency: its free balance plus what is escrowed
 /// against its resting orders. Dropping the escrow would read every placed
 /// order as a loss.

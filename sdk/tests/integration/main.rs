@@ -39,4 +39,5 @@ mod parallel_setup;
 mod pmp;
 mod pn_basic;
 mod proof_money;
+mod resting_orders;
 mod usdc_release;

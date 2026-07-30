@@ -317,3 +317,28 @@ E2E_RUN_ID=<generation> \
 
 The source note is quarantined afterwards and never rented again: `withdrawTokens` latches
 `_hasWithdrawn`, and every DEX operation on a note refuses once it is set.
+
+### Resting and cancelling (`resting_orders`)
+
+`non_crossing_orders_rest_and_cancel_local` puts a seller's ask and a buyer's bid, below it,
+on the same book and asserts that neither moves: `OrderBook.Order.amount` is the *remaining*
+size, so finding the full amount still there is a direct statement that nothing matched. It
+then cancels both and asserts that every reading returns to its pre-placement value — the
+buyer's free collateral and escrow, and the seller's outcome tokens.
+
+The two orders belong to different notes on purpose. One note could hold both sides, but then
+a self-trade guard rather than the prices could be what keeps them apart, and the scenario
+would claim more than it tested.
+
+It is the first consumer of `common::market::deploy_ephemeral_market`, and the last of the
+SDK steps on a stand: it spends a deployer note and both trader notes, so anything after it
+finds the pool empty. Like `usdc_release` it takes `ChainLockGuard::shared` and runs no
+preflight.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=resting_orders::non_crossing_orders_rest_and_cancel_local)'
+```
