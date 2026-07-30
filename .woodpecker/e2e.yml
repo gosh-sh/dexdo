@@ -153,7 +153,16 @@ steps:
       - export BUILD_DIR="$CI_WORKSPACE/.acki-nacki" DODEX_DIR="$CI_WORKSPACE"
       - bash "$CI_WORKSPACE/tests/e2e/stage_contracts.sh"
       - make compile_contracts
-      - DEX_TEST_NOTES_CNT="$DEX_TEST_NOTES_CNT" python3 contracts/scripts/generate_zerostate.py
+      # DISABLE_BLACKLIST skips deploying the blacklist indexer
+      # (generate_zerostate.py:682) and is what acki-nacki's own ci_test targets
+      # pass. Nothing in the DEX contracts or in these suites touches that
+      # contract, and skipping it takes a noticeable slice off generation.
+      #
+      # The generator tests the variable's PRESENCE, not its value
+      # (`os.getenv(...) is not None`), so `DISABLE_BLACKLIST=0` would disable
+      # the blacklist just as thoroughly. To re-enable it, remove the
+      # assignment — do not set it to a falsy value.
+      - DEX_TEST_NOTES_CNT="$DEX_TEST_NOTES_CNT" DISABLE_BLACKLIST=true python3 contracts/scripts/generate_zerostate.py
       - test -f config/zerostate && test -f config/block_manager1_signing.keys.json && test -f docker/.env && test -f config/dex_contracts_manifest.json
 
   inventory_clone:
