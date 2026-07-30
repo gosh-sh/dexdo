@@ -196,7 +196,14 @@ E2E_NETWORK_ENDPOINT="http://127.0.0.1:8888" cargo nextest run --manifest-path s
 
 ### Shared account pool (`common::allocator::Allocator`)
 
-Some integration tests rent pre-baked `PrivateNote`s from a shared pool file (`dex_test_notes.keys.json`, a JSON array of `{pn_address, pn_pubkey_hex, pn_seckey_hex, pn_dih_hex}` rows) instead of deploying their own. `Allocator::new` locates that file via, in order, `E2E_SEED_NOTES` then `PN_POOL_PATH`; it errors if neither is set. Only the last `E2E_SDK_TAIL_COUNT` entries (default 3) of the file are ever rented — the head of the same pool is reserved for the api-e2e suite.
+Some integration tests rent pre-baked `PrivateNote`s from a shared pool file (`dex_test_notes.keys.json`, a JSON array of `{pn_address, pn_pubkey_hex, pn_seckey_hex, pn_dih_hex}` rows, each optionally carrying a `profile` label) instead of deploying their own. `Allocator::new` locates that file via, in order, `E2E_SEED_NOTES` then `PN_POOL_PATH`; it errors if neither is set.
+
+The pool is shared with the api-e2e suite, and how the two suites divide it depends on how the pool was baked:
+
+- **No note carries a `profile`** — the pool is a run of identical notes (the zerostate generator's `DEX_TEST_NOTES_CNT` path). Every note is interchangeable, so only position can separate the two suites: this suite rents the last `E2E_SDK_TAIL_COUNT` entries (default 3), and the head is left to api-e2e.
+- **Notes carry a `profile`** — the pool was baked from a `DEX_TEST_NOTES_SPEC`, where each group of notes has a label, a token type, a balance, and its own ECC seeding. Position then means nothing and `E2E_SDK_TAIL_COUNT` is ignored: this suite rents only the notes whose label it recognises, wherever they sit in the file, and a request for one role never returns a note baked for another. Labels are `PN-DEP`, `PN-TRD`, `PN-CONS`, `PN-CPN`, `PN-SHELL`, `PN-USDC`, `PN-INF`, `PN-ROT`; any other label marks a note this suite will not touch.
+
+A rent that finds no free note of the requested role reports what the pool actually holds, per label, so an exhausted pool and a pool never baked with that role are told apart at the point of failure.
 
 ```sh
 E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json E2E_SDK_TAIL_COUNT=5 \
@@ -224,7 +231,7 @@ It asserts how the stand was **generated**, so it has to run before anything tou
 
 It reads everything the two sections above list, plus `E2E_RUN_ID` — the ledger generation the run belongs to. The test panics immediately if it is unset.
 
-**Every attempt needs its own generation.** A panic anywhere in the scenario drops its three leases, and `Drop` quarantines each note rather than returning it to the pool, so the tail this run drew from is used up. Re-running under the same `E2E_RUN_ID` then fails at `rent` with "no Free note left in the tail". Changing the variable alone is not enough either: `Allocator::new` only *opens* an existing generation, and an id the ledger does not carry fails with `StaleRun`. Start a new one with the bootstrapper before each attempt:
+**Every attempt needs its own generation.** A panic anywhere in the scenario drops its three leases, and `Drop` quarantines each note rather than returning it to the pool, so the notes this run drew from are used up. Re-running under the same `E2E_RUN_ID` then fails at `rent`, which reports no free note left along with what the pool holds. Changing the variable alone is not enough either: `Allocator::new` only *opens* an existing generation, and an id the ledger does not carry fails with `StaleRun`. Start a new one with the bootstrapper before each attempt:
 
 ```sh
 cargo run --manifest-path sdk/Cargo.toml --bin ledger-bootstrap -- \
@@ -234,7 +241,7 @@ cargo run --manifest-path sdk/Cargo.toml --bin ledger-bootstrap -- \
 Two things make it exclusive of everything else on the stand:
 
 - it holds `b0.lock` (in the seed file's own directory) in **exclusive** mode for its whole duration, so it blocks until every scenario holding that lock in shared mode has finished, and they block while it runs;
-- it rents three notes — deployer, buyer, seller — which is the whole rentable tail at the default `E2E_SDK_TAIL_COUNT` of 3.
+- it rents three notes — one `PN-DEP` deployer and two `PN-TRD` traders — which on an unprofiled pool is the whole rentable tail at the default `E2E_SDK_TAIL_COUNT` of 3.
 
 ```sh
 E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \

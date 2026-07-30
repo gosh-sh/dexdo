@@ -36,9 +36,12 @@
 //! The account-pool allocator that consumes this verdict — [`Allocator`] and
 //! [`LeasedPn`], with the rent / taint / `release_clean` lifecycle — follows
 //! below in this same file. [`Allocator`] loads the on-disk pool of pre-baked
-//! `PrivateNote`s (`dex_test_notes.keys.json`), registers its tail slice as
-//! `Free` in the shared [`Ledger`], and hands out leases from that tail only —
-//! the head of the pool is reserved for the api-e2e suite. A leased note comes
+//! `PrivateNote`s (`dex_test_notes.keys.json`), registers the slots it owns as
+//! `Free` in the shared [`Ledger`], and hands out leases from those only — the
+//! rest of the pool belongs to the api-e2e suite, which reads the same file.
+//! Which slots those are is decided by the pool itself
+//! ([`sdk_owned_indices`]): the notes labelled with a role this harness knows
+//! when the pool declares profiles, the index tail when it does not. A leased note comes
 //! back to the pool only through [`LeasedPn::release_clean`], which re-reads
 //! the note's on-chain state and quarantines it (never reuses it) unless that
 //! state is genuinely clean. Anything else — an explicit [`LeasedPn::taint`]
@@ -200,10 +203,11 @@ const PN_ABI: &str = include_str!("../../../../contracts/dex/PrivateNote.abi.jso
 /// unset.
 const DEFAULT_SDK_TAIL: usize = 3;
 
-/// The role a rented note is about to play in a scenario. Reserved for
-/// profile-aware pool partitioning: the allocator here draws every profile
-/// from the same tail slice, uniformly — nothing yet gives one profile a
-/// dedicated sub-range.
+/// The role a rented note is about to play in a scenario, and — on a pool
+/// baked from a generator spec — the group of notes it may be drawn from.
+/// [`PnProfile::seed_label`] is the whole coupling to the generator: the
+/// label it returns is what `DEX_TEST_NOTES_SPEC` writes into each note's
+/// `profile` field.
 // Only Dep/Trd/Shell are constructed anywhere; Cons/Cpn/Usdc/Inf/Rot name the
 // rest of the role vocabulary a scenario may declare.
 #[allow(dead_code)]
@@ -217,6 +221,45 @@ pub enum PnProfile {
     Usdc,
     Inf,
     Rot,
+}
+
+impl PnProfile {
+    /// Every role, for tests that must cover the whole vocabulary rather than
+    /// whichever variants happened to be spelled out at the time.
+    pub const ALL: &'static [PnProfile] = &[
+        PnProfile::Dep,
+        PnProfile::Trd,
+        PnProfile::Cons,
+        PnProfile::Cpn,
+        PnProfile::Shell,
+        PnProfile::Usdc,
+        PnProfile::Inf,
+        PnProfile::Rot,
+    ];
+
+    /// The `profile` string a spec-baked note carries for this role. Written
+    /// as an exhaustive match on purpose: a new variant fails to compile here
+    /// until someone decides what the generator calls it.
+    pub fn seed_label(&self) -> &'static str {
+        match self {
+            PnProfile::Dep => "PN-DEP",
+            PnProfile::Trd => "PN-TRD",
+            PnProfile::Cons => "PN-CONS",
+            PnProfile::Cpn => "PN-CPN",
+            PnProfile::Shell => "PN-SHELL",
+            PnProfile::Usdc => "PN-USDC",
+            PnProfile::Inf => "PN-INF",
+            PnProfile::Rot => "PN-ROT",
+        }
+    }
+
+    /// The inverse of [`PnProfile::seed_label`]. `None` means the label is
+    /// not one this harness owns — a note reserved for another suite — which
+    /// is a routing fact, not an error: the api-e2e suite draws from the same
+    /// seed file and its notes must simply never be leased here.
+    pub fn from_seed_label(label: &str) -> Option<PnProfile> {
+        PnProfile::ALL.iter().copied().find(|p| p.seed_label() == label)
+    }
 }
 
 /// Why a note was pulled from the pool and will never be leased again this
@@ -255,12 +298,19 @@ fn taint_reason_string(reason: &TaintReason) -> String {
 /// (`"0x0"`, `"0x1"`, …), not a padded 256-bit hash; extra fields the real
 /// generator emits (`tokenType`, `value`) are simply not named here, so serde
 /// ignores them instead of failing the parse.
+///
+/// `profile` is the label the generator's spec gave this note's group. It is
+/// absent from a pool baked as N identical notes and `null` on rows the
+/// generator wrote without a spec, so it is optional twice over — hence
+/// `#[serde(default)]` on top of the `Option`.
 #[derive(Deserialize)]
 struct SeedNoteFile {
     pn_dih_hex: String,
     pn_address: String,
     pn_pubkey_hex: String,
     pn_seckey_hex: String,
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 /// One pre-baked account from the seed file, ready to be leased.
@@ -271,6 +321,11 @@ pub struct SeedNote {
     /// expect.
     pub dih_dec: String,
     pub keys: KeyPair,
+    /// The label the generator's spec gave this note, verbatim — `None` for a
+    /// pool baked as N identical notes. Kept as the raw string rather than a
+    /// [`PnProfile`] because a label this harness does not recognise is
+    /// meaningful (it marks a note another suite owns), not a parse error.
+    pub profile: Option<String>,
 }
 
 /// Parses the seed file at `seed` into every note it declares, in file order.
@@ -290,6 +345,7 @@ pub fn load_seed_notes(seed: &Path) -> anyhow::Result<Vec<SeedNote>> {
                 address: r.pn_address,
                 dih_dec: dih_hex_to_dec(&r.pn_dih_hex)?,
                 keys: KeyPair { public: r.pn_pubkey_hex, secret: r.pn_seckey_hex },
+                profile: r.profile,
             })
         })
         .collect()
@@ -350,15 +406,52 @@ fn sdk_tail_count() -> anyhow::Result<usize> {
     tail_count_from(std::env::var("E2E_SDK_TAIL_COUNT").ok().as_deref())
 }
 
+/// Which slots of the pool this suite may register and lease — the pure core
+/// of the head/tail split, decided from the pool's own composition.
+///
+/// Two pools reach the harness from the same generator and need different
+/// rules, which is why this is a decision and not a slice:
+///
+/// - **No note declares a profile** (`DEX_TEST_NOTES_CNT`): every note is
+///   interchangeable, so nothing but position can separate this suite from
+///   the api-e2e head — the last `tail` slots, exactly as before profiles
+///   existed.
+/// - **Notes declare profiles** (`DEX_TEST_NOTES_SPEC`): position stops
+///   meaning anything and `tail` is ignored. This suite owns the notes whose
+///   label it recognises ([`PnProfile::from_seed_label`]); a label it does
+///   not own marks another suite's note and is skipped wherever it sits.
+///
+/// A pool that mixes the two — some labels, some `null` — is treated as
+/// profiled, and the unlabelled notes are owned by nobody. The generator does
+/// not produce that shape; if it ever does, leaving those notes alone is the
+/// direction that cannot hand a scenario a note it did not ask for.
+fn sdk_owned_indices(profiles: &[Option<&str>], tail: usize) -> Vec<usize> {
+    if profiles.iter().all(Option::is_none) {
+        return (profiles.len().saturating_sub(tail)..profiles.len()).collect();
+    }
+    profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.is_some_and(|l| PnProfile::from_seed_label(l).is_some()))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Rents pre-baked `PrivateNote`s out of a shared pool for the lifetime of an
-/// e2e run. Only the pool's tail (last `sdk_tail` entries, in seed-file order)
-/// is ever leased — the head is reserved for the api-e2e suite, which draws
-/// from the same seed file independently.
+/// e2e run. Only the slots this suite owns are ever leased — the rest belong
+/// to the api-e2e suite, which draws from the same seed file independently.
+/// [`sdk_owned_indices`] decides which those are: labels when the pool
+/// declares them, the index tail when it does not.
 pub struct Allocator {
     /// Every seed note, in file order.
     notes: Vec<SeedNote>,
     ledger: Arc<Ledger>,
-    sdk_tail: usize,
+    /// Indices into `notes` this suite may lease, ascending.
+    owned: Vec<usize>,
+    /// Whether the pool declares profiles at all. Decides whether a `rent`
+    /// request is a filter (spec-baked pool) or just a role annotation
+    /// (`DEX_TEST_NOTES_CNT` pool, where every note is interchangeable).
+    profiled: bool,
 }
 
 impl Allocator {
@@ -389,43 +482,47 @@ impl Allocator {
     /// Registration is idempotent and additive only: [`Ledger::bootstrap`]
     /// starts a generation with an empty `notes` map, so without this no
     /// `rent` would ever find a `Free` note. This does one [`Ledger::with_txn`]
-    /// that inserts a `Free` entry for every tail address *absent* from the
+    /// that inserts a `Free` entry for every owned address *absent* from the
     /// map; an address already present — `Leased`, `Quarantined`, or `Free`
     /// from an earlier process's registration this same generation — is left
     /// untouched. That "absent only" rule is what keeps a quarantine from a
     /// prior run inside this generation from reviving just because a later
     /// process re-registers.
     ///
-    /// Errors if the pool has fewer notes than `tail`: a tail that reaches
-    /// past the intended boundary would silently register, rent, and
-    /// quarantine head slots reserved for the api-e2e suite — a pool sized
+    /// On an unprofiled pool, errors if it has fewer notes than `tail`: a tail
+    /// that reaches past the intended boundary would silently register, rent,
+    /// and quarantine head slots reserved for the api-e2e suite — a pool sized
     /// wrong for the configured tail is a configuration error, not something
-    /// to degrade through quietly.
+    /// to degrade through quietly. A profiled pool has no such boundary to
+    /// overrun, `tail` decides nothing there, and its size is checked by
+    /// nothing but a scenario failing to find the role it asked for.
     pub fn with_seed_path_and_tail(
         run_id: &str,
         seed: &Path,
         tail: usize,
     ) -> anyhow::Result<Allocator> {
         let notes = load_seed_notes(seed)?;
+        let profiles: Vec<Option<&str>> = notes.iter().map(|n| n.profile.as_deref()).collect();
+        let profiled = profiles.iter().any(Option::is_some);
 
         anyhow::ensure!(
-            notes.len() >= tail,
+            profiled || notes.len() >= tail,
             "seed file {} has {} note(s), fewer than the requested tail of {tail} — \
              the tail would reach into the api-e2e head",
             seed.display(),
             notes.len()
         );
 
+        let owned = sdk_owned_indices(&profiles, tail);
+
         let dir = seed
             .parent()
             .ok_or_else(|| anyhow!("seed path {} has no parent directory", seed.display()))?;
         let ledger = Arc::new(Ledger::open(dir, run_id));
 
-        let tail_start = notes.len() - tail;
-        let tail_addrs: Vec<String> =
-            notes[tail_start..].iter().map(|n| n.address.clone()).collect();
+        let owned_addrs: Vec<String> = owned.iter().map(|&i| notes[i].address.clone()).collect();
         ledger.with_txn(|f| {
-            for addr in &tail_addrs {
+            for addr in &owned_addrs {
                 f.notes.entry(addr.clone()).or_insert_with(|| NoteState::Free {
                     ecc_shell_remaining: None,
                     balances: BTreeMap::new(),
@@ -433,37 +530,70 @@ impl Allocator {
             }
         })?;
 
-        Ok(Allocator { notes, ledger, sdk_tail: tail })
+        Ok(Allocator { notes, ledger, owned, profiled })
     }
 
-    fn tail(&self) -> &[SeedNote] {
-        &self.notes[self.notes.len() - self.sdk_tail..]
+    /// The notes this suite may lease, in file order.
+    fn owned_notes(&self) -> impl Iterator<Item = &SeedNote> {
+        self.owned.iter().map(|&i| &self.notes[i])
     }
 
-    /// Leases the first `Free` note found in the tail, in file order, marking
-    /// it `Leased { pid, test }` in the same transaction that reads it — two
-    /// concurrent `rent` calls can never be handed the same address. Errors
-    /// once every tail note is `Leased` or `Quarantined`.
-    pub fn rent(&self, _profile: PnProfile, test: &str) -> anyhow::Result<LeasedPn> {
+    /// How many notes the pool holds per declared label — the evidence a
+    /// failed `rent` reports instead of a bare "none left". Counts the whole
+    /// pool, not just what this suite owns, so a request that fails because
+    /// every matching note belongs to another suite says so.
+    fn label_census(&self) -> String {
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for n in &self.notes {
+            *counts.entry(n.profile.as_deref().unwrap_or("<unprofiled>")).or_default() += 1;
+        }
+        counts.iter().map(|(l, c)| format!("{l}x{c}")).collect::<Vec<_>>().join(", ")
+    }
+
+    /// Leases the first `Free` note that can play `profile`, in file order,
+    /// marking it `Leased { pid, test }` in the same transaction that reads it
+    /// — two concurrent `rent` calls can never be handed the same address.
+    ///
+    /// What "can play `profile`" means depends on the pool. On a spec-baked
+    /// pool it is the notes labelled with that role and nothing else: a note
+    /// baked for another role holds the wrong token type, or no SHELL, and
+    /// handing it over would fail the scenario several steps later, somewhere
+    /// that says nothing about the pool. On a `DEX_TEST_NOTES_CNT` pool every
+    /// note is identical, so the role is an annotation and every owned note
+    /// qualifies.
+    pub fn rent(&self, profile: PnProfile, test: &str) -> anyhow::Result<LeasedPn> {
         let pid = std::process::id();
-        let tail = self.tail();
+        let want = if self.profiled { Some(profile.seed_label()) } else { None };
+        let candidates: Vec<&SeedNote> = self
+            .owned_notes()
+            .filter(|n| match want {
+                None => true,
+                Some(label) => n.profile.as_deref() == Some(label),
+            })
+            .collect();
         let picked = self.ledger.with_txn(|f| {
-            for note in tail {
+            for note in &candidates {
                 if matches!(f.notes.get(&note.address), Some(NoteState::Free { .. })) {
                     f.notes.insert(
                         note.address.clone(),
                         NoteState::Leased { pid, test: test.to_string() },
                     );
-                    return Some(note.clone());
+                    return Some((*note).clone());
                 }
             }
             None
         })?;
-        let note = picked.ok_or_else(|| {
-            anyhow!(
+        let note = picked.ok_or_else(|| match want {
+            Some(label) => anyhow!(
+                "allocator: no Free note with profile `{label}` for test `{test}` — \
+                 the pool holds {}, of which {} carry that label",
+                self.label_census(),
+                candidates.len()
+            ),
+            None => anyhow!(
                 "allocator: no Free note left in the {}-slot tail for test `{test}`",
-                tail.len()
-            )
+                candidates.len()
+            ),
         })?;
         Ok(LeasedPn { note, ledger: Arc::clone(&self.ledger), released: false })
     }
@@ -868,24 +998,9 @@ mod tests {
 
     // ---- Allocator: rent / taint / release_clean ----------------------
 
-    /// Mirrors the real `dex_test_notes.keys.json` shape exactly (see
-    /// `SeedNoteFile` above): a short `pn_dih_hex`, and extra fields
-    /// (`tokenType`, `value`) the parser must tolerate rather than choke on.
+    /// `n` notes with no declared profile — the `DEX_TEST_NOTES_CNT` pool.
     fn fake_seed(dir: &Path, n: usize) -> PathBuf {
-        let rows: Vec<_> = (0..n)
-            .map(|i| {
-                serde_json::json!({
-                    "pn_dih_hex": format!("0x{i:x}"),
-                    "pn_address": format!("0:{:064x}", i),
-                    "tokenType": 1, "value": 1_000_000_000_000u64,
-                    "pn_pubkey_hex": format!("{:064x}", i + 1),
-                    "pn_seckey_hex": format!("{:064x}", i + 100),
-                })
-            })
-            .collect();
-        let p = dir.join("dex_test_notes.keys.json");
-        std::fs::write(&p, serde_json::to_vec(&rows).unwrap()).unwrap();
-        p
+        fake_seed_profiled(dir, &vec![None; n])
     }
 
     /// Recovers the index `fake_seed` encoded into an address
@@ -1142,6 +1257,214 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("has 2 note"), "error should name the pool size: {msg}");
         assert!(msg.contains("tail of 3"), "error should name the requested tail: {msg}");
+    }
+
+    #[test]
+    fn load_seed_notes_reads_the_declared_profile() {
+        // The generator emits `profile` only when it baked the pool from a
+        // spec; on the `DEX_TEST_NOTES_CNT` path the field is present but
+        // `null`. Both shapes have to survive the same parser, because both
+        // reach the harness from the same generator.
+        let d = TempDir::new().unwrap();
+        let rows = serde_json::json!([
+            {
+                "pn_dih_hex": "0x0", "pn_address": format!("0:{:064x}", 0),
+                "profile": "PN-TRD", "tokenType": 1, "value": 1u64,
+                "pn_pubkey_hex": format!("{:064x}", 1), "pn_seckey_hex": format!("{:064x}", 2),
+            },
+            {
+                "pn_dih_hex": "0x1", "pn_address": format!("0:{:064x}", 1),
+                "profile": serde_json::Value::Null, "tokenType": 1, "value": 1u64,
+                "pn_pubkey_hex": format!("{:064x}", 3), "pn_seckey_hex": format!("{:064x}", 4),
+            },
+        ]);
+        let p = d.path().join("dex_test_notes.keys.json");
+        std::fs::write(&p, serde_json::to_vec(&rows).unwrap()).unwrap();
+
+        let notes = load_seed_notes(&p).unwrap();
+        assert_eq!(notes[0].profile.as_deref(), Some("PN-TRD"));
+        assert_eq!(notes[1].profile, None, "a null profile is an unclassified note, not a label");
+    }
+
+    /// One note per entry, with that entry's declared profile — the shape the
+    /// generator writes from a `DEX_TEST_NOTES_SPEC`. A `None` entry writes
+    /// the row with no `profile` key at all, which is how a pool baked from
+    /// `DEX_TEST_NOTES_CNT` reads back.
+    ///
+    /// Mirrors the real `dex_test_notes.keys.json` exactly (see `SeedNoteFile`
+    /// above): a short `pn_dih_hex`, and extra fields (`tokenType`, `value`)
+    /// the parser must tolerate rather than choke on.
+    fn fake_seed_profiled(dir: &Path, labels: &[Option<&str>]) -> PathBuf {
+        let rows: Vec<_> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let mut row = serde_json::json!({
+                    "pn_dih_hex": format!("0x{i:x}"),
+                    "pn_address": format!("0:{:064x}", i),
+                    "tokenType": 1, "value": 1_000_000_000_000u64,
+                    "pn_pubkey_hex": format!("{:064x}", i + 1),
+                    "pn_seckey_hex": format!("{:064x}", i + 100),
+                });
+                if let Some(l) = label {
+                    row["profile"] = serde_json::json!(l);
+                }
+                row
+            })
+            .collect();
+        let p = dir.join("dex_test_notes.keys.json");
+        std::fs::write(&p, serde_json::to_vec(&rows).unwrap()).unwrap();
+        p
+    }
+
+    #[test]
+    fn rent_serves_the_note_carrying_the_requested_profile() {
+        // The SHELL note sits in the middle, so picking "the first free one"
+        // would return a NACKL note and the scenario would fail much later,
+        // on a deploy, for reasons nobody would trace back to the allocator.
+        let d = TempDir::new().unwrap();
+        let seed = fake_seed_profiled(
+            d.path(),
+            &[Some("PN-API"), Some("PN-TRD"), Some("PN-SHELL"), Some("PN-TRD")],
+        );
+        Ledger::bootstrap(d.path(), "p1", None).unwrap();
+        let a = Allocator::with_seed_path_and_tail("p1", &seed, 3).unwrap();
+
+        let leased = a.rent(PnProfile::Shell, "t").unwrap();
+        assert_eq!(index_of(&leased.note.address), 2);
+    }
+
+    #[test]
+    fn rent_never_serves_a_note_owned_by_another_suite() {
+        // Every note this harness owns is taken; the two PN-API notes are
+        // still free, and must stay untouchable rather than become a
+        // last-resort fallback.
+        let d = TempDir::new().unwrap();
+        let seed = fake_seed_profiled(
+            d.path(),
+            &[Some("PN-API"), Some("PN-TRD"), Some("PN-API"), Some("PN-TRD")],
+        );
+        Ledger::bootstrap(d.path(), "p2", None).unwrap();
+        let a = Allocator::with_seed_path_and_tail("p2", &seed, 3).unwrap();
+
+        let l1 = a.rent(PnProfile::Trd, "t").unwrap();
+        let l2 = a.rent(PnProfile::Trd, "t").unwrap();
+        for l in [&l1, &l2] {
+            assert!(matches!(index_of(&l.note.address), 1 | 3));
+        }
+        assert!(a.rent(PnProfile::Trd, "t").is_err(), "PN-API notes are not a fallback");
+    }
+
+    #[test]
+    fn rent_for_an_absent_profile_names_what_the_pool_actually_holds() {
+        // A failure that only said "no free note" would send whoever hits it
+        // looking for a leak. The pool census says the real thing: this pool
+        // was never baked with that role.
+        let d = TempDir::new().unwrap();
+        let seed = fake_seed_profiled(d.path(), &[Some("PN-TRD"), Some("PN-TRD"), Some("PN-DEP")]);
+        Ledger::bootstrap(d.path(), "p3", None).unwrap();
+        let a = Allocator::with_seed_path_and_tail("p3", &seed, 3).unwrap();
+
+        // `LeasedPn` is deliberately not `Debug` (it carries secret keys), so
+        // the error comes out by match rather than `unwrap_err`.
+        let err = match a.rent(PnProfile::Usdc, "t") {
+            Ok(_) => panic!("a pool with no PN-USDC note must not satisfy a USDC request"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("PN-USDC"), "the requested label belongs in the message: {msg}");
+        assert!(msg.contains("PN-TRD"), "so does what the pool holds instead: {msg}");
+        assert!(msg.contains("PN-DEP"), "the whole census, not just the biggest group: {msg}");
+    }
+
+    #[test]
+    fn a_profiled_pool_smaller_than_the_tail_still_loads() {
+        // `tail` governs the unprofiled pool only. Rejecting a profiled pool
+        // for being shorter than a number that no longer decides anything
+        // would make the two paths disagree about what a valid pool is.
+        let d = TempDir::new().unwrap();
+        let seed = fake_seed_profiled(d.path(), &[Some("PN-TRD")]);
+        Ledger::bootstrap(d.path(), "p4", None).unwrap();
+        let a = Allocator::with_seed_path_and_tail("p4", &seed, 3).unwrap();
+        assert_eq!(index_of(&a.rent(PnProfile::Trd, "t").unwrap().note.address), 0);
+    }
+
+    #[test]
+    fn an_unprofiled_pool_still_serves_every_role_uniformly() {
+        // The path CI runs today: no labels anywhere, so a role request is
+        // not a filter and must not become one.
+        let d = TempDir::new().unwrap();
+        let seed = fake_seed_profiled(d.path(), &[None, None, None, None]);
+        Ledger::bootstrap(d.path(), "p5", None).unwrap();
+        let a = Allocator::with_seed_path_and_tail("p5", &seed, 2).unwrap();
+
+        assert!(a.rent(PnProfile::Usdc, "t").is_ok(), "an unlabelled note serves any role");
+        assert!(a.rent(PnProfile::Shell, "t").is_ok());
+        assert!(a.rent(PnProfile::Trd, "t").is_err(), "and the tail still bounds the pool");
+    }
+
+    #[test]
+    fn an_unprofiled_pool_is_owned_by_its_tail() {
+        // The `DEX_TEST_NOTES_CNT` pool carries no labels at all, so the only
+        // thing that can separate this suite's notes from the api-e2e head is
+        // still the index tail.
+        let profiles = vec![None; 10];
+        assert_eq!(sdk_owned_indices(&profiles, 3), vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn a_profiled_pool_is_owned_by_label_regardless_of_position() {
+        // The point of the whole change: ownership stops depending on where
+        // the spec happened to put a group. Here the harness's notes sit at
+        // the head and the foreign ones at the tail — the exact arrangement
+        // that would make an index tail hand out the wrong notes.
+        let profiles = vec![Some("PN-TRD"), Some("PN-DEP"), Some("PN-API"), Some("PN-API")];
+        assert_eq!(sdk_owned_indices(&profiles, 3), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_pool_of_only_foreign_labels_is_owned_by_nothing() {
+        // Not an error at this layer: registration simply has nothing to
+        // register, and `rent` is where a scenario finds out, with the pool
+        // census in the message.
+        let profiles = vec![Some("PN-API"); 4];
+        assert_eq!(sdk_owned_indices(&profiles, 3), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn every_profile_round_trips_through_its_seed_label() {
+        // A collision would show up here too: two variants sharing a label
+        // means the second one cannot come back from `from_seed_label`.
+        for p in PnProfile::ALL {
+            assert_eq!(
+                PnProfile::from_seed_label(p.seed_label()),
+                Some(*p),
+                "{p:?} does not survive a round trip through `{}`",
+                p.seed_label()
+            );
+        }
+
+        // Tripwire, not decoration: this match has no wildcard arm, so adding
+        // a variant to `PnProfile` stops compiling right here — which is the
+        // reminder that `ALL` above needs the new variant, without which the
+        // loop would keep passing while covering one role less.
+        match PnProfile::Dep {
+            PnProfile::Dep
+            | PnProfile::Trd
+            | PnProfile::Cons
+            | PnProfile::Cpn
+            | PnProfile::Shell
+            | PnProfile::Usdc
+            | PnProfile::Inf
+            | PnProfile::Rot => {}
+        }
+    }
+
+    #[test]
+    fn an_unowned_label_is_not_a_profile_of_this_harness() {
+        // The api-e2e suite draws from the same file. Its notes must read as
+        // "someone else's", not as a parse failure and not as a wildcard.
+        assert_eq!(PnProfile::from_seed_label("PN-API"), None);
     }
 
     #[test]
