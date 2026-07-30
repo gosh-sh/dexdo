@@ -281,19 +281,17 @@ steps:
   # the book permanently above it. Moving these steps after or alongside
   # deploy_dexdo would fail them for a reason unrelated to the code they test.
   #
-  # `failure: ignore` on both: they are reported but do not stop the pipeline.
-  # Neither has yet completed a run against a real stand, each does a cold
-  # cargo build of the sdk workspace on the host, and the proof scenario alone
-  # budgets up to 50 minutes — so a failure here is at least as likely to be
-  # the step's own immaturity as a defect in the code. Blocking on them would
-  # sink deploy_dexdo and e2e_tests with them and cost the pre-existing
-  # end-to-end suite its signal. Make them blocking once each has produced a
-  # green run against a real stand.
+  # Both are blocking. They were not, until each had completed a green run
+  # against a real stand — the condition that made a failure here at least as
+  # likely to be the step's own immaturity as a defect in the code. Both have
+  # now done so, so a failure is a defect and must stop the pipeline: an
+  # ignored failure keeps its step's state visible but leaves the pipeline
+  # green, which is precisely how a regression in the harness would go
+  # unnoticed.
   sdk_proof:
     depends_on:
       - net_up
     image: *ansible_image
-    failure: ignore
     environment:
       E2E_HOST: { from_secret: e2e_host }
       E2E_CI_USER: { from_secret: e2e_ci_user }
@@ -311,14 +309,13 @@ steps:
         ACKI_DIR='$ACKI_DIR'
         bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
-  # Non-blocking for the same reason as sdk_proof above, and additionally
-  # because it depends on it: a step chained behind an ignored failure would
-  # otherwise be the one that stops the pipeline instead.
+  # Depends on sdk_proof: the two share the host lease and the stand, and
+  # running them concurrently would have them rent notes from the same pool at
+  # the same time.
   sdk_parallel_acceptance:
     depends_on:
       - sdk_proof
     image: *ansible_image
-    failure: ignore
     environment:
       E2E_HOST: { from_secret: e2e_host }
       E2E_CI_USER: { from_secret: e2e_ci_user }

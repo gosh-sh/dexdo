@@ -72,13 +72,16 @@ lease_assert                                   # again immediately before drivin
 
 # Node and block-manager logs for a failed run, into this step's own output.
 #
-# The pipeline's own dump_logs step cannot cover the two steps that pipe this
-# script: they are marked `failure: ignore`, and Woodpecker swallows an ignored
-# step's error before it reaches the pipeline status -- so a run in which only
-# these fail ends green, and every step guarded by `when: status: [failure]` is
-# skipped. Dumping here depends on no CI status semantics at all, and the logs
-# land in the output of the step that actually failed, which is where a reader
-# looks first.
+# The pipeline's dump_logs step now covers the steps that pipe this script --
+# they are blocking, so their failure reaches the pipeline status and the
+# `when: status: [failure]` guard fires. This dump is kept anyway, for two
+# reasons that do not depend on that: it lands in the output of the step that
+# actually failed, which is where a reader looks first, and it needs no CI
+# status semantics to work at all. That second property is why it was written
+# in the first place -- while these steps were `failure: ignore`, Woodpecker
+# swallowed their error before it reached the pipeline status, so a run in
+# which only they failed ended green and every failure-guarded step was
+# skipped. Restoring that flag would silently take dump_logs away again.
 #
 # Best-effort throughout, and inside a subshell: this runs while the script is
 # already on its way out, `errexit` is still armed, and a stopped container or a
