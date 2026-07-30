@@ -59,6 +59,7 @@ use crate::common::context::CURRENCY_ID_SHELL;
 /// here instead of decoding into silently wrong numbers.
 const PN_ABI: &str = include_str!("../../../../contracts/dex/PrivateNote.abi.json");
 const PMP_ABI: &str = include_str!("../../../../contracts/dex/PMP.abi.json");
+const ROOT_ABI: &str = include_str!("../../../../contracts/dex/RootPN.abi.json");
 
 // Storage fields read straight off an account BOC. Named once so the
 // ABI-pinning test can prove they still exist in the contract.
@@ -70,6 +71,12 @@ const PMP_NORM_REFUND_PENDING: &str = "_normRefundPending";
 const PMP_TOTAL_POOL: &str = "_totalPool";
 const PMP_FROZEN: &str = "_frozen";
 const PN_STAKES: &str = "_stakes";
+/// The latch `withdrawTokens` sets and `revertWithdraw` clears — the only
+/// thing that tells a withdraw on its way from one RootPN handed back.
+const PN_HAS_WITHDRAWN: &str = "_hasWithdrawn";
+/// RootPN's tally of what it owes the notes, per token type. There is no
+/// getter for it, so it is read off the account BOC like everything here.
+const ROOT_DEPLOYED_VALUES: &str = "_deployedValues";
 
 const QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -899,6 +906,202 @@ fn stake_barrier_verdict(
     Ok(Some(format!("PMP {pmp} pool is {pool}, waiting for {expected_pool}")))
 }
 
+/// Every place one token type can sit around a withdraw, for one token type.
+///
+/// `note_custodied` and `root_reserve` are the two halves of the same money:
+/// `PrivateNote._balance[tt]` is bookkeeping, and the currency backing it is
+/// physically held by RootPN. `root_booked` is RootPN's own tally of what it
+/// owes across all notes. A withdraw has to move all three and the
+/// destination together, which is what makes them worth reading as one shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseSnapshot {
+    /// `PrivateNote._balance[tt]` — what the note is owed.
+    pub note_custodied: u128,
+    /// The note account's own `currencies[CURRENCY_ID_SHELL]`. Not custodied
+    /// by RootPN and not part of `_balance`; `withdrawTokens` drains it in the
+    /// same message, so it settles on the same barrier.
+    pub note_shell: u128,
+    /// `RootPN._deployedValues[tt]`.
+    pub root_booked: u128,
+    /// The RootPN account's own `currencies[tt]` — the physical backing.
+    pub root_reserve: u128,
+    /// The destination account's own `currencies[tt]`.
+    pub dest: u128,
+}
+
+/// Every way the observed movement differs from a correct release of
+/// `before.note_custodied`, named. Empty means the release was exact.
+///
+/// All violations are collected rather than returned one at a time: which
+/// *combination* moved wrongly is the diagnosis. A booking debited with no
+/// reserve behind it, and both moving with nothing arriving, are different
+/// defects, and reporting only the first found would make them look alike.
+pub fn release_violations(before: &ReleaseSnapshot, after: &ReleaseSnapshot) -> Vec<String> {
+    let amount = before.note_custodied;
+    let mut out = Vec::new();
+
+    if after.note_custodied != 0 {
+        out.push(format!(
+            "the note still books {} after withdrawing (`_balance` is deleted outright)",
+            after.note_custodied
+        ));
+    }
+    if after.note_shell != 0 {
+        out.push(format!(
+            "the note still holds {} physical SHELL; `withdrawTokens` attaches its whole pool \
+             to the message, so a withdrawn note that keeps any could still fund an order",
+            after.note_shell
+        ));
+    }
+    if after.root_booked + amount != before.root_booked {
+        out.push(format!(
+            "RootPN's booking went {} -> {} for a withdraw of {amount}",
+            before.root_booked, after.root_booked
+        ));
+    }
+    if after.root_reserve + amount != before.root_reserve {
+        out.push(format!(
+            "RootPN's physical reserve went {} -> {} for a withdraw of {amount}",
+            before.root_reserve, after.root_reserve
+        ));
+    }
+    if after.dest != before.dest + amount {
+        out.push(format!(
+            "the destination went {} -> {} for a withdraw of {amount}",
+            before.dest, after.dest
+        ));
+    }
+    out
+}
+
+/// Reads every side of a withdraw for one token type in one pass.
+///
+/// A missing account is an error here, unlike in [`snapshot`]: all three
+/// accounts are named by the caller from the seed pool and the manifest, so
+/// one of them not existing means the stand is not the one this scenario was
+/// pointed at — which waiting cannot fix.
+pub async fn release_snapshot(
+    r: &ChainReader,
+    note: &str,
+    root_pn: &str,
+    dest: &str,
+    tt: u32,
+) -> anyhow::Result<ReleaseSnapshot> {
+    let note_fields = r
+        .storage_fields(note, PN_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("note {note} holds no account on this stand"))?;
+    let root_fields = r
+        .storage_fields(root_pn, ROOT_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("RootPN {root_pn} holds no account on this stand"))?;
+
+    Ok(ReleaseSnapshot {
+        note_custodied: field_uint_map(&note_fields, PN_BALANCE)?.get(&tt).copied().unwrap_or(0),
+        note_shell: r.account_ecc(note).await?.ecc.get(&CURRENCY_ID_SHELL).copied().unwrap_or(0),
+        root_booked: field_uint_map(&root_fields, ROOT_DEPLOYED_VALUES)?
+            .get(&tt)
+            .copied()
+            .unwrap_or(0),
+        root_reserve: r.account_ecc(root_pn).await?.ecc.get(&tt).copied().unwrap_or(0),
+        dest: r.account_ecc(dest).await?.ecc.get(&tt).copied().unwrap_or(0),
+    })
+}
+
+/// Blocks until the withdraw of `before.note_custodied` has reached `dest`,
+/// and returns the settled state for the caller to compare against `before`.
+///
+/// The loop's only job is to carry the one fact a single read cannot hold —
+/// whether `_hasWithdrawn` has ever been true — into
+/// [`release_barrier_verdict`], which makes every decision. See that function
+/// for why the note's state alone cannot tell a refused withdraw from one
+/// that has not started.
+pub async fn await_release(
+    r: &ChainReader,
+    note: &str,
+    root_pn: &str,
+    dest: &str,
+    tt: u32,
+    before: &ReleaseSnapshot,
+) -> anyhow::Result<ReleaseSnapshot> {
+    let expected_dest = before.dest + before.note_custodied;
+    let deadline = Instant::now() + QUIESCENCE_TIMEOUT;
+    let mut latched_earlier = false;
+
+    loop {
+        let now = release_snapshot(r, note, root_pn, dest, tt).await?;
+        let fields = r
+            .storage_fields(note, PN_ABI)
+            .await?
+            .ok_or_else(|| anyhow!("note {note} vanished mid-withdraw"))?;
+        let latched_now = field_bool(&fields, PN_HAS_WITHDRAWN)?;
+        latched_earlier |= latched_now;
+
+        let pending = release_barrier_verdict(
+            latched_earlier,
+            latched_now,
+            now.note_custodied,
+            before.note_custodied,
+            now.dest,
+            expected_dest,
+        )?;
+        let Some(reason) = pending else { return Ok(now) };
+
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "release barrier timed out after {}s, still pending: {reason}",
+                QUIESCENCE_TIMEOUT.as_secs()
+            ));
+        }
+        tokio::time::sleep(QUIESCENCE_POLL_INTERVAL).await;
+    }
+}
+
+/// Pure core of the post-withdraw barrier: settled, not yet, or never.
+///
+/// A withdraw is refused, not failed: when RootPN cannot cover the requested
+/// amounts it calls `PrivateNote.revertWithdraw`, which restores `_balance`
+/// and clears `_hasWithdrawn`. The note then looks **exactly** as it did
+/// before the withdraw was ever sent — same balance, same cleared latch — so
+/// the note's state alone cannot say which of the two it is. A barrier
+/// deciding from it would call every run refused on its first poll.
+///
+/// What separates them is history, which is why `latched_earlier` is a
+/// parameter and not a second read: the caller carries "this barrier has seen
+/// `_hasWithdrawn` true at some point". A cleared latch that was never set is
+/// a withdraw still on its way; a cleared latch that *was* set is RootPN
+/// handing the money back, and no amount of further waiting will credit the
+/// destination.
+///
+/// The destination's own credit is what "settled" means, deliberately: it is
+/// the last effect in the chain (note drains, RootPN debits custody, transfer
+/// lands), so waiting on it covers every earlier one. Waiting on the note
+/// instead would let the assertions read a destination the money had not
+/// reached yet.
+fn release_barrier_verdict(
+    latched_earlier: bool,
+    latched_now: bool,
+    note_balance_now: u128,
+    note_balance_before: u128,
+    dest_now: u128,
+    dest_expected: u128,
+) -> anyhow::Result<Option<String>> {
+    if dest_now == dest_expected {
+        return Ok(None);
+    }
+    if latched_earlier && !latched_now && note_balance_now == note_balance_before {
+        return Err(anyhow!(
+            "the withdraw was reverted: `_hasWithdrawn` went true and back to false and the \
+             note's balance is {note_balance_now} again, which is what \
+             `PrivateNote.revertWithdraw` leaves behind. RootPN refuses the whole transfer \
+             when either its physical currency reserve or `_deployedValues` fails to cover a \
+             requested token type, so the destination will never be credited and this barrier \
+             would otherwise poll until it timed out and blamed the transfer."
+        ));
+    }
+    Ok(Some(format!("destination holds {dest_now}, waiting for {dest_expected}")))
+}
+
 fn field_u128(fields: &Value, name: &str) -> anyhow::Result<u128> {
     let raw = field(fields, name)?
         .as_str()
@@ -1038,6 +1241,98 @@ mod tests {
         assert!(msg.contains("1/2"), "the evidence has to name the count: {msg}");
     }
 
+    fn released(before_custodied: u128) -> (ReleaseSnapshot, ReleaseSnapshot) {
+        let before = ReleaseSnapshot {
+            note_custodied: before_custodied,
+            note_shell: 900,
+            root_booked: 5_000,
+            root_reserve: 7_000,
+            dest: 42,
+        };
+        let after = ReleaseSnapshot {
+            note_custodied: 0,
+            note_shell: 0,
+            root_booked: 5_000 - before_custodied,
+            root_reserve: 7_000 - before_custodied,
+            dest: 42 + before_custodied,
+        };
+        (before, after)
+    }
+
+    #[test]
+    fn a_clean_release_moves_every_side_by_the_same_amount() {
+        let (before, after) = released(1_000);
+        assert!(release_violations(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn custody_debited_without_the_destination_credited_is_named() {
+        // Money leaving one side and not arriving at the other is the failure
+        // this whole scenario exists to catch: the release path is exactly
+        // where a token type nobody has withdrawn before could lose value.
+        let (before, mut after) = released(1_000);
+        after.dest = before.dest;
+        let v = release_violations(&before, &after);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("destination"), "{v:?}");
+    }
+
+    #[test]
+    fn a_note_still_holding_its_shell_pool_is_named() {
+        // `withdrawTokens` attaches the note's whole physical ECC[2] to the
+        // message precisely so a withdrawn note cannot still fund anything.
+        let (before, mut after) = released(1_000);
+        after.note_shell = 1;
+        let v = release_violations(&before, &after);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("SHELL"), "{v:?}");
+    }
+
+    #[test]
+    fn every_side_that_moved_wrongly_is_reported_at_once() {
+        // One violation at a time would hide the shape of the failure — a
+        // booking debited but no reserve moved reads very differently from
+        // both moving and the destination missing out.
+        let (before, mut after) = released(1_000);
+        after.root_booked += 1;
+        after.root_reserve += 1;
+        after.dest -= 1;
+        assert_eq!(release_violations(&before, &after).len(), 3);
+    }
+
+    #[test]
+    fn release_barrier_settles_once_the_destination_is_credited() {
+        assert!(release_barrier_verdict(true, true, 0, 1_000, 5_000, 5_000).unwrap().is_none());
+    }
+
+    #[test]
+    fn release_barrier_does_not_read_an_unstarted_withdraw_as_a_refusal() {
+        // The trap this whole signature exists for. Before the note processes
+        // the call, and after RootPN refuses and the note reverts, the note
+        // looks *identical*: `_hasWithdrawn` false, balance intact. Deciding
+        // from the note alone would fail the run on its first poll, every
+        // time, and blame RootPN's liquidity for it.
+        let pending = release_barrier_verdict(false, false, 1_000, 1_000, 0, 5_000).unwrap();
+        assert!(pending.expect("still pending").contains("5000"));
+    }
+
+    #[test]
+    fn release_barrier_stops_dead_when_root_pn_reverts_the_withdraw() {
+        let err = release_barrier_verdict(true, false, 1_000, 1_000, 0, 5_000)
+            .expect_err("a reverted withdraw can never credit the destination");
+        let msg = err.to_string();
+        assert!(msg.contains("reverted"), "{msg}");
+        assert!(msg.contains("1000"), "the evidence has to name the restored balance: {msg}");
+    }
+
+    #[test]
+    fn release_barrier_keeps_waiting_while_the_transfer_is_in_flight() {
+        // Note drained and latched, destination not yet credited: the ordinary
+        // window between RootPN debiting custody and the transfer landing.
+        let pending = release_barrier_verdict(true, true, 0, 1_000, 0, 5_000).unwrap();
+        assert!(pending.expect("still pending").contains("5000"));
+    }
+
     #[test]
     fn only_after_trade_expects_resting_orders() {
         // Skipping the check for `AfterTrade` would drop it from the phase it
@@ -1146,13 +1441,21 @@ mod tests {
 
     #[test]
     fn storage_field_names_exist_in_the_contract_abis() {
-        let checks: [(&str, &str, &[&str]); 2] = [
+        let checks: [(&str, &str, &[&str]); 3] = [
             (
                 PN_ABI,
                 "PrivateNote",
-                &[PN_BALANCE, PN_LOCKED_IN_ORDERS, PN_BUSY, PN_OPEN_ORDER_COUNT, PN_STAKES],
+                &[
+                    PN_BALANCE,
+                    PN_LOCKED_IN_ORDERS,
+                    PN_BUSY,
+                    PN_OPEN_ORDER_COUNT,
+                    PN_STAKES,
+                    PN_HAS_WITHDRAWN,
+                ],
             ),
             (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL, PMP_FROZEN]),
+            (ROOT_ABI, "RootPN", &[ROOT_DEPLOYED_VALUES]),
         ];
         for (abi_json, label, names) in checks {
             let abi: serde_json::Value = serde_json::from_str(abi_json).expect("parse abi json");

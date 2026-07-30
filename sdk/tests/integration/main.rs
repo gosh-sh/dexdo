@@ -39,3 +39,4 @@ mod parallel_setup;
 mod pmp;
 mod pn_basic;
 mod proof_money;
+mod usdc_release;

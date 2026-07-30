@@ -1415,7 +1415,13 @@ mod tests {
     ///   time*, and both steps share a ledger generation (`E2E_RUN_ID` is the
     ///   pipeline number, bootstrapped only by the proof step).
     /// - `Trd` 2: `proof_money`'s buyer and seller, held simultaneously.
-    const SCENARIOS_RENT: &[(PnProfile, usize)] = &[(PnProfile::Dep, 2), (PnProfile::Trd, 2)];
+    ///   `usdc_release` also takes one as its transfer destination, but later
+    ///   and after `proof_money` has returned both, so it raises no peak.
+    /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
+    ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good —
+    ///   so one per stand is one per run.
+    const SCENARIOS_RENT: &[(PnProfile, usize)] =
+        &[(PnProfile::Dep, 2), (PnProfile::Trd, 2), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

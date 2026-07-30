@@ -289,3 +289,31 @@ It takes `ChainLockGuard::shared`, not `proof_money`'s exclusive hold — this i
 shared mode exists for, two chain-mutating scenarios running at once. Because each side
 deploys a real market and leaves it live, neither note can be returned clean; both end
 the run quarantined under an explicit reason instead.
+
+### USDC release (`usdc_release`)
+
+`usdc_release_local` withdraws a note's whole USDC balance and asserts, exactly, that the
+note's `_balance[3]` and physical SHELL pool are gone, that `RootPN._deployedValues[3]` and
+RootPN's own `currencies[3]` each fall by the withdrawn amount, and that the destination
+gains it. Custody of a third token type is exercised by the stand's own fixture; release is
+not exercised by anything else, and it is the half that fails quietly.
+
+The destination is a second leased note. `RootPN.withdrawTokens` transfers without a
+`dest_dapp_id`, so the recipient has to live in RootPN's dApp, and a leased note is the one
+account no concurrent process may touch — which is what allows an equality instead of a
+lower bound.
+
+It needs a pool baked with a `PN-USDC` group, takes `ChainLockGuard::shared`, and runs no
+preflight: every assertion is a delta against a baseline read moments earlier, so unlike
+`proof_money` it neither needs a pristine stand nor spends one.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=usdc_release::usdc_release_local)'
+```
+
+The source note is quarantined afterwards and never rented again: `withdrawTokens` latches
+`_hasWithdrawn`, and every DEX operation on a note refuses once it is set.

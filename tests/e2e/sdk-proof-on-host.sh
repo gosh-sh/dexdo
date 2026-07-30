@@ -197,6 +197,12 @@ if [ "${SUITE:-proof}" = proof ]; then
     --dir "$LEDGER_DIR" --run-id "$E2E_RUN_ID" --manifest "$MANIFEST"
   FILTER='test(=proof_money::proof_money_lifecycle_local)'
   THREADS=1
+elif [ "$SUITE" = release ]; then
+  # No bootstrap: this joins the generation the proof run opened, which is
+  # what lets it lease notes that scenario already returned. It takes no
+  # preflight either, so it does not care that the stand has served a wave.
+  FILTER='test(=usdc_release::usdc_release_local)'
+  THREADS=1
 else
   FILTER='test(parallel_setup)'
   THREADS=2
