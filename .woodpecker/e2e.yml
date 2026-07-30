@@ -11,14 +11,18 @@ depends_on:
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
   # acki-nacki test/dex-4.0.30 head, carrying the RootPN._deployedValues
-  # booking, the sold-0.80.0 build of RootPN, and the stand fixes this pipeline
-  # needs to run at all: the block-producer API is advertised and published on
-  # the host interface (a client outside the docker network cannot follow a
-  # redirect to `nodeN:8600`), and each node waits for its gossip seeds' DNS
-  # before `node-helper config` resolves them, which otherwise kills whichever
-  # nodes lose that race at boot. All four digests below were
-  # read off the registry for this SHA and each image's own
-  # org.opencontainers.image.revision label confirms it built from it.
+  # booking, the sold-0.80.0 build of RootPN, the profiled test-note fixture
+  # (DEX_TEST_NOTES_SPEC, which this pipeline does not set -- without it the
+  # generator emits DEX_TEST_NOTES_CNT identical notes exactly as before, the
+  # only difference in its output being a `"profile": null` field the seed
+  # parser ignores), and the stand fixes this pipeline needs to run at all: the
+  # block-producer API is advertised and published on the host interface (a
+  # client outside the docker network cannot follow a redirect to
+  # `nodeN:8600`), and each node waits for its gossip seeds' DNS before
+  # `node-helper config` resolves them, which otherwise kills whichever nodes
+  # lose that race at boot. All four digests below were read off the registry
+  # for this SHA and each image's own org.opencontainers.image.revision label
+  # confirms it built from it.
   #
   # allbin_img's digest is load-bearing beyond running the network:
   # copy_helpers takes zerostate-helper out of this image, and the booking fix
@@ -33,11 +37,11 @@ variables:
   # already rewritten once (the commits this pin replaced no longer exist), so
   # the risk is real, not theoretical -- move the pin to a `dev` commit once
   # this work lands there.
-  - &acki_sha "4caaf82ac469af88b67a95b92c05dbce9a98155e"
-  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:a3caee4efbf9245cc5c81d922b876dedbcd2c8373a013905094d11a4e80e85e1"
-  - &node_img "docker.gosh.sh/ackinacki-node@sha256:c4ba1190e31a6603b3dc7b3476fb98e3108b09577a8726b09a0f3b75202edc63"
-  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:9253ab2e6d4cb926758e509ca01749c88421dd4d31173a40f0f3f34359812030"
-  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:857c64e53d2a41933c86263f7c7aff3fbb94273fc547f6fc217edd0c0354bef3"
+  - &acki_sha "e0f3c47e74dc0d642fdf896428dcd03ea9f022d3"
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:1ee9cec484f27659e4b4d0e2182ca79485929b23c659bd772e58786f9bb1d2c7"
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:00af55c1fb597d89f8afb469a43eb21c991c9db911ff7a6161ad934218fc4a03"
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:a45e15d363cb6f4ef4aca5bdc82d7fe225cca2b6dea97c1838ffbf7208dea962"
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:536daa6b37a70f3170274ad5bcd906c4ed367d041e9d216c63a61cd6f53e997a"
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
