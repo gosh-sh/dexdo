@@ -10,8 +10,13 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  # acki-nacki test/dex-4.0.30 head, carrying both the RootPN._deployedValues
-  # booking and the sold-0.80.0 build of RootPN. All four digests below were
+  # acki-nacki test/dex-4.0.30 head, carrying the RootPN._deployedValues
+  # booking, the sold-0.80.0 build of RootPN, and the stand fixes this pipeline
+  # needs to run at all: the block-producer API is advertised and published on
+  # the host interface (a client outside the docker network cannot follow a
+  # redirect to `nodeN:8600`), and each node waits for its gossip seeds' DNS
+  # before `node-helper config` resolves them, which otherwise kills whichever
+  # nodes lose that race at boot. All four digests below were
   # read off the registry for this SHA and each image's own
   # org.opencontainers.image.revision label confirms it built from it.
   #
@@ -28,11 +33,11 @@ variables:
   # already rewritten once (the commits this pin replaced no longer exist), so
   # the risk is real, not theoretical -- move the pin to a `dev` commit once
   # this work lands there.
-  - &acki_sha "ca6e101da93b3f1b6053b18c5ff6f5526a01645d"
-  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:893a958747ff3cd862e4637bf93543fcdd42a150adafbed8b4e590101d8c1f53"
-  - &node_img "docker.gosh.sh/ackinacki-node@sha256:89307cdbaa94cd24f49539856231c986d52e18454d6d9772c4044f54542ad5ca"
-  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:91ab2ac6a38e5048dec5369f6198b69e5449128600cb96b8cc818779cae6e0e6"
-  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:d53498d09ebc91151c6f346039e353c8e4876e3b393d57516bec3c16aa18b93e"
+  - &acki_sha "4caaf82ac469af88b67a95b92c05dbce9a98155e"
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:a3caee4efbf9245cc5c81d922b876dedbcd2c8373a013905094d11a4e80e85e1"
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:c4ba1190e31a6603b3dc7b3476fb98e3108b09577a8726b09a0f3b75202edc63"
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:9253ab2e6d4cb926758e509ca01749c88421dd4d31173a40f0f3f34359812030"
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:857c64e53d2a41933c86263f7c7aff3fbb94273fc547f6fc217edd0c0354bef3"
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
