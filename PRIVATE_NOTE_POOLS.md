@@ -18,7 +18,7 @@ what to generate and where to drop it.
 | `sdk/pn_pool_deployers.json` | A `pn_pool.json` used as the **market-deployer** pool. Reusing a funded PN as deployer lets `mint_ob_pool` skip minting a fresh halo2 voucher (~3 min/market). | `mint_pn_pool` | `mint_ob_pool --deployer-pn-pool <path>` |
 | `sdk/ob_pool.json` | Pool of **pre-warmed OrderBook markets** (addresses + oracle/deployer keys), so a script can grab a live market without paying the ~10–15 min deploy. | `sdk/src/bin/mint_ob_pool.rs` | ad-hoc scripts |
 | `tests/fixtures/seed_notes.json` | The **e2e fixture pool**, in the **seed_notes format** (not the pool shape below) — the `.seed_notes.json` sidecar `mint_pn_pool` writes. CI fetches it from S3; each e2e test claims one slot. See `tests/fixtures/README.md`. | `mint_pn_pool` (sidecar) | `services/api/tests` → `TestPnPool::load()` |
-| `dex_test_notes.keys.json` (path given by `E2E_SEED_NOTES` / `PN_POOL_PATH`) | The **stand pool**, shared by the `sdk/` e2e harness and the api-e2e suite — also the seed_notes format, so any seed_notes file works. How the two divide it depends on how it was baked (see below). The file's own directory also hosts the shared ledger (`ledger.json`/`ledger.lock`) that tracks each note's lease/quarantine state across concurrent test processes. | supplied out of band, or baked into the stand's zerostate | `sdk/tests/integration` → `common::allocator::Allocator`, and `services/api/tests` → `TestPnPool::load()` |
+| `dex_test_notes.keys.json` (path given by `E2E_SEED_NOTES` / `PN_POOL_PATH`) | The **stand pool**, shared by the `sdk/` e2e harness and the api-e2e suite — also the seed_notes format, so any seed_notes file works. How the two divide it depends on how it was baked (see below). The file's own directory also hosts the shared ledger (`ledger.json`/`ledger.lock`) that tracks each note's lease/quarantine state across concurrent test processes. | supplied out of band, or baked into the stand's zerostate from [`tests/e2e/dex_test_notes.spec.json`](tests/e2e/dex_test_notes.spec.json) | `sdk/tests/integration` → `common::allocator::Allocator`, and `services/api/tests` → `TestPnPool::load()` |
 
 ### Dividing the stand pool
 
@@ -42,7 +42,13 @@ decided by the file itself:
 
 A suite that finds no note of its own in a profiled pool fails at load with
 the pool's label census, rather than running against notes baked for someone
-else.
+else. Both suites also pin the shipped spec against what they rent, so a
+group dropped or renamed there fails a unit test rather than a stand run.
+
+The e2e pipeline bakes its stand from
+[`tests/e2e/dex_test_notes.spec.json`](tests/e2e/dex_test_notes.spec.json).
+The group order in that file is not load-bearing — ownership is by label on
+both sides — it only decides which `deposit_hash` each note gets.
 
 ## Format
 

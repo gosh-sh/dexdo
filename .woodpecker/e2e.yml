@@ -12,10 +12,9 @@ variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
   # acki-nacki test/dex-4.0.30 head, carrying the RootPN._deployedValues
   # booking, the sold-0.80.0 build of RootPN, the profiled test-note fixture
-  # (DEX_TEST_NOTES_SPEC, which this pipeline does not set -- without it the
-  # generator emits DEX_TEST_NOTES_CNT identical notes exactly as before, the
-  # only difference in its output being a `"profile": null` field the seed
-  # parser ignores), and the stand fixes this pipeline needs to run at all: the
+  # (DEX_TEST_NOTES_SPEC, which gen_zerostate below feeds the group list this
+  # stand's pool is baked from), and the stand fixes this pipeline needs to
+  # run at all: the
   # block-producer API is advertised and published on the host interface (a
   # client outside the docker network cannot follow a redirect to
   # `nodeN:8600`), and each node waits for its gossip seeds' DNS before
@@ -57,7 +56,11 @@ variables:
   # ext-out header the voucher prover reads.
   - &sold_old_version "gosh_0.80.0"
   - &sold_old_sha256 "389cf0ede80fc3acb5f904f950808383504ec3341cdc6b9132e850298db0c246"
-  - &dex_test_notes_cnt "10"
+  # The note pool the stand is baked with, as groups rather than a count.
+  # Relative to $CI_WORKSPACE; the generator takes either a path or the JSON
+  # itself. Both suites that read the resulting pool own their notes by label,
+  # so the order of the groups here decides only which deposit_hash each gets.
+  - &dex_test_notes_spec "tests/e2e/dex_test_notes.spec.json"
   - &inventory_branch "main"
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
   - &acki_dir_on_host "/opt/acki-nacki"
@@ -106,7 +109,7 @@ steps:
       SOLD_SHA256: *sold_sha256
       SOLD_OLD_VER: *sold_old_version
       SOLD_OLD_SHA256: *sold_old_sha256
-      DEX_TEST_NOTES_CNT: *dex_test_notes_cnt
+      DEX_TEST_NOTES_SPEC: *dex_test_notes_spec
       ACKI_SHA: *acki_sha
       DEXDO_NODE_IMG: *node_img
       DEXDO_GQL_IMG: *gql_img
@@ -166,7 +169,7 @@ steps:
       # (`os.getenv(...) is not None`), so `DISABLE_BLACKLIST=0` would disable
       # the blacklist just as thoroughly. To re-enable it, remove the
       # assignment — do not set it to a falsy value.
-      - DEX_TEST_NOTES_CNT="$DEX_TEST_NOTES_CNT" DISABLE_BLACKLIST=true python3 contracts/scripts/generate_zerostate.py
+      - DEX_TEST_NOTES_SPEC="$CI_WORKSPACE/$DEX_TEST_NOTES_SPEC" DISABLE_BLACKLIST=true python3 contracts/scripts/generate_zerostate.py
       - test -f config/zerostate && test -f config/block_manager1_signing.keys.json && test -f docker/.env && test -f config/dex_contracts_manifest.json
 
   inventory_clone:

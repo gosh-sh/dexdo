@@ -46,11 +46,38 @@ fn index_of(address: &str) -> usize {
     usize::from_str_radix(address.trim_start_matches("0:"), 16).unwrap()
 }
 
+/// The spec the e2e pipeline bakes the stand's note pool from.
+const STAND_NOTES_SPEC: &str = include_str!("../../../tests/e2e/dex_test_notes.spec.json");
+
+/// The e2e tests here index their note as `notes[k % len]` with `k` running
+/// 0..=9, so ten notes give each test its own. Fewer is not broken — the
+/// suite runs single-threaded, and notes carrying the same label are
+/// interchangeable, so a shorter pool just means more tests share one — but
+/// it changes which tests share, and each shared note then pays for more
+/// market deploys out of the same balance.
+const API_NOTES_FOR_ONE_EACH: u64 = 10;
+
+#[test]
+fn the_stand_spec_gives_every_test_here_a_note_of_its_own() {
+    let groups: Vec<serde_json::Value> = serde_json::from_str(STAND_NOTES_SPEC).unwrap();
+    let declared = groups
+        .iter()
+        .find(|g| g["profile"] == API_PROFILE)
+        .map(|g| g["count"].as_u64().unwrap())
+        .unwrap_or(0);
+    assert!(
+        declared >= API_NOTES_FOR_ONE_EACH,
+        "the stand spec declares {declared} `{API_PROFILE}` note(s); \
+         {API_NOTES_FOR_ONE_EACH} keep one per test"
+    );
+}
+
 #[test]
 fn an_unprofiled_pool_belongs_to_this_suite_whole() {
-    // The `DEX_TEST_NOTES_CNT` pool CI bakes today. Every note is identical,
-    // the sdk harness confines itself to the tail by index, and this suite
-    // indexes the whole file — which is exactly what it must keep doing.
+    // A pool baked by note count rather than from a spec: every note is
+    // identical, the sdk harness confines itself to the tail by index, and
+    // this suite indexes the whole file — which is exactly what it must keep
+    // doing for any seed file that predates profiles.
     let profiles = vec![None; 10];
     assert_eq!(api_owned_indices(&profiles), (0..10).collect::<Vec<_>>());
 }

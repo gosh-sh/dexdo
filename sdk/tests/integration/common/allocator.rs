@@ -1391,8 +1391,9 @@ mod tests {
 
     #[test]
     fn an_unprofiled_pool_still_serves_every_role_uniformly() {
-        // The path CI runs today: no labels anywhere, so a role request is
-        // not a filter and must not become one.
+        // No labels anywhere, so a role request is not a filter and must not
+        // become one — a pool baked by note count, or any seed file predating
+        // profiles, still has to serve every scenario.
         let d = TempDir::new().unwrap();
         let seed = fake_seed_profiled(d.path(), &[None, None, None, None]);
         Ledger::bootstrap(d.path(), "p5", None).unwrap();
@@ -1401,6 +1402,57 @@ mod tests {
         assert!(a.rent(PnProfile::Usdc, "t").is_ok(), "an unlabelled note serves any role");
         assert!(a.rent(PnProfile::Shell, "t").is_ok());
         assert!(a.rent(PnProfile::Trd, "t").is_err(), "and the tail still bounds the pool");
+    }
+
+    /// What the scenarios in this crate rent at once, per role, and why that
+    /// many. The stand's pool is baked from a spec checked into this repo, so
+    /// this is the one place where the two can be compared — without it, a
+    /// spec edit that drops a group surfaces as a scenario failing to rent,
+    /// 20 minutes into a pipeline, on a stand that then has to be rebuilt.
+    ///
+    /// - `Dep` 2: `proof_money` rents one and releases it clean, but
+    ///   `parallel_setup` runs two processes that each rent one *at the same
+    ///   time*, and both steps share a ledger generation (`E2E_RUN_ID` is the
+    ///   pipeline number, bootstrapped only by the proof step).
+    /// - `Trd` 2: `proof_money`'s buyer and seller, held simultaneously.
+    const SCENARIOS_RENT: &[(PnProfile, usize)] = &[(PnProfile::Dep, 2), (PnProfile::Trd, 2)];
+
+    /// The spec the e2e pipeline bakes the stand's note pool from.
+    const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");
+
+    fn stand_spec_counts() -> BTreeMap<String, u64> {
+        let groups: Vec<Value> = serde_json::from_str(STAND_NOTES_SPEC).unwrap();
+        groups
+            .iter()
+            .map(|g| (g["profile"].as_str().unwrap().to_string(), g["count"].as_u64().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn the_stand_spec_supplies_every_role_the_scenarios_rent() {
+        let counts = stand_spec_counts();
+        for (profile, needed) in SCENARIOS_RENT {
+            let have = counts.get(profile.seed_label()).copied().unwrap_or(0);
+            assert!(
+                have >= *needed as u64,
+                "the stand spec declares {have} `{}` note(s); the scenarios hold {needed} at once",
+                profile.seed_label()
+            );
+        }
+    }
+
+    #[test]
+    fn every_label_in_the_stand_spec_belongs_to_a_suite() {
+        // A typo'd label is not a parse error anywhere — it just bakes notes
+        // nobody owns, and the suite that wanted them fails to rent much
+        // later. `PN-API` is the api-e2e suite's; everything else has to be a
+        // role this harness knows.
+        for label in stand_spec_counts().keys() {
+            assert!(
+                label == "PN-API" || PnProfile::from_seed_label(label).is_some(),
+                "`{label}` is owned by neither suite"
+            );
+        }
     }
 
     #[test]
