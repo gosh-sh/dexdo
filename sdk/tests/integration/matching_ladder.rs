@@ -312,10 +312,17 @@ async fn a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local() {
         taker_tokens_mid + TAKE2_AMOUNT,
         "the walking taker did not receive the {TAKE2_AMOUNT} tokens it bought"
     );
+    // The maker's position does **not** move here, and that is the claim. A
+    // sell takes the outcome tokens out of `stake.amount` when the order is
+    // placed — `resting_orders` asserts exactly that — so by fill time they
+    // are already gone, and the fill converts them into collateral rather than
+    // debiting the stake a second time. A book that debited again would leave
+    // the maker short of tokens it had already handed over.
     assert_eq!(
         at(&outcome_tokens(dex, &maker).await, OUTCOME),
-        maker_tokens_before - TAKE2_AMOUNT,
-        "the maker gave up something other than exactly what the taker received"
+        maker_tokens_before,
+        "the fill moved the maker's stake, which the placement had already debited — the tokens \
+         were taken twice"
     );
 
     // The clearing prices, stated as what the taker was actually charged. The
