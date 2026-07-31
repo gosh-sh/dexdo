@@ -394,12 +394,18 @@ E2E_RUN_ID=<generation> \
 
 ### Shutdown with resting orders (`shutdown_orders`)
 
-`a_drain_refunds_orders_that_were_still_resting_local` rests an ask and a bid below it — not
+`a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local` rests an ask and a bid below it — not
 crossing, so both survive — and resolves the market. Resolving shuts the book down, and the
 drain has to refund what it cancels: the bid's collateral returns to the taker's `_balance`
 with `_lockedInOrders` back where it started, the ask's outcome tokens return to the maker's
 stake record, and both notes' `_openOrderCount` falls to zero. `proof_money` reaches
 `resultStart` with an empty book, so none of that was exercised.
+
+The drain also hands the book's protocol fees to RootPN — the only way they ever get there,
+since the book holds them until it dies — and the owner then withdraws them with
+`withdrawProtocolFees`, which being owner-only also checks that the stand's RootPN is owned by
+the key its zerostate claims. One filled trade precedes the resting pair so that there are fees
+at all; without it both fee assertions would hold for a book that never earned anything.
 
 The failure it guards is invisible after the fact: the book is destroyed in the same message
 that reports the drain complete, so the orders are gone from every index and the escrow behind
@@ -415,5 +421,5 @@ E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
 E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
 E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
-    -E 'test(=shutdown_orders::a_drain_refunds_orders_that_were_still_resting_local)'
+    -E 'test(=shutdown_orders::a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local)'
 ```

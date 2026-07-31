@@ -22,7 +22,17 @@
 //! - the **ask's outcome tokens** return to the maker's stake record;
 //! - both notes' `_openOrderCount` falls back to zero, because the note-side
 //!   counter and the book's resting set are updated by different contracts
-//!   and a drain that refunded without decrementing would strand the note.
+//!   and a drain that refunded without decrementing would strand the note;
+//! - **RootPN is credited the book's own tally** of protocol fees. The book
+//!   holds them until it dies, so the drain is the only way they ever get
+//!   there, and the tally has to be read while the book still exists;
+//! - **the owner can take them out again.** `withdrawProtocolFees` is
+//!   owner-only, so this doubles as a check that the stand's RootPN really is
+//!   owned by the key its zerostate says it is.
+//!
+//! One filled trade precedes the resting pair, purely so there are fees to
+//! hand over: without it both fee assertions would be true of a book that
+//! never earned anything.
 //!
 //! ## What it does not assert, and why
 //!
@@ -43,6 +53,14 @@
 //! Reads `E2E_NETWORK_ENDPOINT`, `E2E_SEED_NOTES` and `E2E_RUN_ID`; no
 //! manifest and no preflight, for the reasons `usdc_release` gives.
 
+use std::sync::Arc;
+
+use ackinacki_kit::tvm_client::abi::Signer;
+use ackinacki_kit::tvm_client::crypto::KeyPair;
+use dodex_contracts::dex::root_pn::ParamsOfWithdrawProtocolFees;
+use dodex_contracts::dex::root_pn::RootPn;
+use dodex_sdk::dex_contract_params;
+
 use crate::common::allocator;
 use crate::common::allocator::PnProfile;
 use crate::common::chain_reader;
@@ -57,6 +75,7 @@ use crate::common::market::resolve_and_drain;
 use crate::common::market::split_full_set;
 use crate::common::market::wait_owner_order;
 use crate::common::misc::now_unix;
+use crate::common::misc::poll_until;
 use crate::common::misc::wait_not_busy;
 use crate::common::misc::wait_until;
 
@@ -78,12 +97,24 @@ const BID_BPS: &str = "6000";
 const ASK_BPS: &str = "8000";
 const ORDER_AMOUNT: u128 = 30_000_000_000;
 
-/// Collateral the maker splits to get something to offer.
-const SPLIT_COLLATERAL: u128 = 100_000_000_000;
+/// Collateral the maker splits to get something to offer. Enough for the
+/// crossing pair below as well as the resting ask.
+const SPLIT_COLLATERAL: u128 = 200_000_000_000;
+
+/// One filled trade before the resting pair, purely so the book accrues
+/// protocol fees for the drain to hand over. Priced where both sides cross.
+const TRADE_BPS: &str = "7000";
+const TRADE_AMOUNT: u128 = 30_000_000_000;
+
+/// Where the owner sends the withdrawn fees. RootPN takes the destination
+/// dApp as a parameter here (unlike the note-side withdraw, which stays in
+/// its sender's), so a leased note is a legitimate target and — being leased
+/// — the only kind whose balance nothing else can move.
+const FEE_DEST_DAPP: &str = "4";
 
 #[tokio::test]
 #[ignore = "requires a local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID"]
-async fn a_drain_refunds_orders_that_were_still_resting_local() {
+async fn a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local() {
     let run_id = std::env::var("E2E_RUN_ID").expect("E2E_RUN_ID must be set by the bootstrapper");
     let ledger_dir = allocator::seed_dir().expect("seed notes directory");
     let b0 = locks::ChainLockGuard::shared(&ledger_dir).expect("acquire b0.lock shared");
@@ -103,15 +134,27 @@ async fn a_drain_refunds_orders_that_were_still_resting_local() {
 
     split_full_set(dex, &maker, &market.key, SPLIT_COLLATERAL).await;
 
-    // Baselines before either order exists. Read after placement they would
-    // describe the escrowed state, and the comparison after the drain would
-    // be a tautology.
+    let ask_coid = nonce as u128 * 10;
+    let bid_coid = ask_coid + 1;
+    let (trade_ask, trade_buy) = (ask_coid + 2, ask_coid + 3);
+
+    // One trade first. The drain hands the book's protocol fees to RootPN,
+    // and with no fill there would be none to hand over — the fee assertions
+    // below would then be true of a book that never earned anything.
+    place_limit(dex, &maker, &market.key, OUTCOME, false, TRADE_BPS, TRADE_AMOUNT, trade_ask).await;
+    wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, trade_ask, true).await;
+    place_limit(dex, &taker, &market.key, OUTCOME, true, TRADE_BPS, TRADE_AMOUNT, trade_buy).await;
+    wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, trade_ask, false).await;
+    wait_not_busy(dex, &maker.note.address, "trade ask").await;
+    wait_not_busy(dex, &taker.note.address, "trade buy").await;
+
+    // Baselines, read after the trade and before either resting order exists.
+    // Taken any earlier they would carry the trade's own movements; taken
+    // later they would describe the escrowed state and the comparison after
+    // the drain would be a tautology.
     let maker_tokens_before = outcome_tokens(dex, &maker).await;
     let taker_free_before = pn_balance(&r, &taker.note.address).await;
     let taker_locked_before = pn_locked(&r, &taker.note.address).await;
-
-    let ask_coid = nonce as u128 * 10;
-    let bid_coid = ask_coid + 1;
 
     place_limit(dex, &maker, &market.key, OUTCOME, false, ASK_BPS, ORDER_AMOUNT, ask_coid).await;
     wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, ask_coid, true).await;
@@ -139,6 +182,23 @@ async fn a_drain_refunds_orders_that_were_still_resting_local() {
         at(&maker_tokens_before, OUTCOME),
         "the ask did not take the maker's outcome tokens"
     );
+
+    // The book's own tally, read while it still exists: the drain hands
+    // exactly this to RootPN and then destroys the book, so afterwards there
+    // is nothing left to compare against.
+    let book_fees = dex
+        .get_order_book_details(&market.order_book)
+        .await
+        .expect("order book details")
+        .total_protocol_fees;
+    assert!(
+        book_fees > 0,
+        "the book accrued no protocol fees, so the hand-over and withdrawal below would be \
+         assertions about nothing"
+    );
+    let root_fees_before = invariant::protocol_fee(&r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
+        .await
+        .expect("read RootPN protocol fees");
 
     wait_until(market.result_start).await;
     resolve_and_drain(dex, &market.pmp, &market.oracle, OUTCOME).await;
@@ -170,6 +230,63 @@ async fn a_drain_refunds_orders_that_were_still_resting_local() {
     assert_eq!(open_orders(&r, &maker.note.address).await, 0, "the maker still counts an order");
     assert_eq!(open_orders(&r, &taker.note.address).await, 0, "the taker still counts an order");
 
+    // The drain also hands the book's protocol fees to RootPN, which is the
+    // only way they ever get there — the book holds them until it dies.
+    let root_fees_after = invariant::protocol_fee(&r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
+        .await
+        .expect("read RootPN protocol fees");
+    assert_eq!(
+        root_fees_after,
+        root_fees_before + book_fees,
+        "RootPN was credited something other than the book's own tally of {book_fees}"
+    );
+
+    // And the owner can take them out. Owner-only, so this doubles as a check
+    // that the stand's RootPN really is owned by the key its zerostate says.
+    let owner = root_pn_owner_keys(&ledger_dir);
+    let dest_before = r
+        .account_ecc(&taker.note.address)
+        .await
+        .expect("read destination ECC")
+        .ecc
+        .get(&TOKEN_TYPE_NACKL)
+        .copied()
+        .unwrap_or(0);
+
+    RootPn::new(Arc::clone(ctx), dex_contract_params(RootPn::DEFAULT_ADDRESS))
+        .withdraw_protocol_fees(
+            ParamsOfWithdrawProtocolFees {
+                to: taker.note.address.clone(),
+                dapp_id: FEE_DEST_DAPP.to_string(),
+                token_type: TOKEN_TYPE_NACKL,
+                amount: book_fees,
+            },
+            Signer::Keys { keys: owner },
+        )
+        .await
+        .expect("withdraw_protocol_fees");
+
+    poll_until("RootPN never paid the protocol fees out", || async {
+        invariant::protocol_fee(&r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
+            .await
+            .expect("read RootPN protocol fees")
+            == root_fees_before
+    })
+    .await;
+    let dest_after = r
+        .account_ecc(&taker.note.address)
+        .await
+        .expect("read destination ECC")
+        .ecc
+        .get(&TOKEN_TYPE_NACKL)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        dest_after,
+        dest_before + book_fees,
+        "the withdrawn fees left RootPN's books but did not arrive"
+    );
+
     maker.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     taker.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     deployer.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
@@ -194,4 +311,15 @@ async fn pn_locked(r: &chain_reader::ChainReader, pn_address: &str) -> u128 {
 /// How many orders the note believes it has resting.
 async fn open_orders(r: &chain_reader::ChainReader, pn_address: &str) -> u32 {
     invariant::pn_open_order_count(r, pn_address).await.expect("read open order count")
+}
+
+/// RootPN's owner keypair, which the zerostate generator writes beside the
+/// seed notes as `PMPRoot.keys.json` — the same key it hands RootPN's
+/// constructor as `pubkey`.
+fn root_pn_owner_keys(ledger_dir: &std::path::Path) -> KeyPair {
+    let path = ledger_dir.join("PMPRoot.keys.json");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read RootPN owner keys at {}: {e}", path.display()));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("parse RootPN owner keys at {}: {e}", path.display()))
 }
