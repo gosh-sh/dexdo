@@ -12,8 +12,16 @@
 //! ## What it asserts
 //!
 //! One maker rests an ask, one taker rests a bid below it — deliberately not
-//! crossing, so both survive to `resultStart` — and the market is then
-//! resolved:
+//! crossing, so both survive to `resultStart` — with a batch of further bids
+//! behind them, and the market is then resolved.
+//!
+//! The batch is there for one reason: a drain retires a fixed number of order
+//! ids per call and schedules itself again while any remain, so a book with
+//! more than that is the only one whose drain has to continue at all. The
+//! count is asserted before the resolve rather than assumed, since a book
+//! under the limit would quietly turn this back into the single-pass case.
+//!
+//! What the drain then has to do:
 //!
 //! - the **bid's collateral** returns to the taker: `_lockedInOrders` back to
 //!   its pre-order value and `_balance` back to its own. The contract refunds
@@ -26,9 +34,13 @@
 //! - **RootPN is credited the book's own tally** of protocol fees. The book
 //!   holds them until it dies, so the drain is the only way they ever get
 //!   there, and the tally has to be read while the book still exists;
-//! - **the owner can take them out again.** `withdrawProtocolFees` is
-//!   owner-only, so this doubles as a check that the stand's RootPN really is
-//!   owned by the key its zerostate says it is.
+//! - **the owner can take them out again**, and **only** the owner, and only
+//!   as much as accrued. `withdrawProtocolFees` pays to an address its caller
+//!   names, so the two guards on it are all that stands between every market's
+//!   fees and anyone who asks; both are exercised after the successful
+//!   withdrawal, with the total re-read afterwards to show neither attempt
+//!   moved anything. The successful one doubles as a check that the stand's
+//!   RootPN really is owned by the key its zerostate says it is.
 //!
 //! One filled trade precedes the resting pair, purely so there are fees to
 //! hand over: without it both fee assertions would be true of a book that
@@ -57,6 +69,8 @@ use std::sync::Arc;
 
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
+use dodex_contracts::dex::order_book::OrderBookOrder;
+use dodex_contracts::dex::private_note::ParamsOfPlaceBatch;
 use dodex_contracts::dex::root_pn::ParamsOfWithdrawProtocolFees;
 use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
@@ -74,15 +88,17 @@ use crate::common::market::place_limit;
 use crate::common::market::resolve_and_drain;
 use crate::common::market::split_full_set;
 use crate::common::market::wait_owner_order;
+use crate::common::misc::assert_exit_code;
 use crate::common::misc::now_unix;
 use crate::common::misc::poll_until;
 use crate::common::misc::wait_not_busy;
 use crate::common::misc::wait_until;
 
 /// Distance to `resultStart`. A tenth of it is the staking window the fixture
-/// waits out; the rest has to cover a split and two placements with room to
-/// spare, and whatever is left over is spent idling until the market closes.
-const STAKE_PERIOD_SHUTDOWN: u64 = 180;
+/// waits out; the rest has to cover a split, a batch and three placements with
+/// room to spare, and whatever is left over is spent idling until the market
+/// closes.
+const STAKE_PERIOD_SHUTDOWN: u64 = 240;
 
 /// How much budget must remain once both orders are resting. Below this the
 /// stand is too slow for the market this scenario sizes, and saying so beats
@@ -105,6 +121,29 @@ const SPLIT_COLLATERAL: u128 = 200_000_000_000;
 /// protocol fees for the drain to hand over. Priced where both sides cross.
 const TRADE_BPS: &str = "7000";
 const TRADE_AMOUNT: u128 = 30_000_000_000;
+
+/// A batch of bids resting alongside the pair, sized so the book carries more
+/// orders than one drain pass can walk. Mirrors `MAX_SHUTDOWN_BATCH`, which is
+/// the number of order ids the book retires per call.
+const MAX_SHUTDOWN_BATCH: u128 = 10;
+
+/// The batch itself — `MAX_BATCH_SIZE`, the most a single placement may carry.
+const EXTRA_BIDS: u128 = 10;
+
+/// Each of them, at `BID_BPS`. Worth 12 NACKL, clear of the minimum notional.
+const EXTRA_BID_AMOUNT: u128 = 20_000_000_000;
+
+/// The largest amount `withdrawProtocolFees` could ever be asked for, which is
+/// therefore always more than has accrued — no reading of the current total is
+/// needed, and nothing another scenario does can make it valid.
+const MORE_THAN_ACCRUED: u128 = u128::MAX;
+
+/// `ERR_INVALID_PARAMS` — the withdrawal's own bounds check.
+const ERR_INVALID_PARAMS: u16 = 129;
+
+/// `ERR_INVALID_SENDER` — `onlyOwnerPubkey` refusing a signature that is not
+/// the root owner's.
+const ERR_INVALID_SENDER: u16 = 101;
 
 /// Where the owner sends the withdrawn fees. RootPN takes the destination
 /// dApp as a parameter here (unlike the note-side withdraw, which stays in
@@ -163,6 +202,47 @@ async fn a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local() {
     wait_not_busy(dex, &maker.note.address, "rest ask").await;
     wait_not_busy(dex, &taker.note.address, "rest bid").await;
 
+    // A batch of further bids, so the drain has more to retire than it can
+    // reach in one call. The book walks a fixed number of order ids per pass
+    // and schedules itself again while any are left; a drain that reported
+    // itself complete after the first pass would abandon everything behind it,
+    // and the refund assertions below are what would notice.
+    let batch_first_coid = ask_coid + 10;
+    let batch: Vec<OrderBookOrder> = (0..EXTRA_BIDS)
+        .map(|i| OrderBookOrder {
+            outcome_id: OUTCOME,
+            is_buy: true,
+            flags: 0,
+            price: BID_BPS.to_string(),
+            amount: EXTRA_BID_AMOUNT,
+            min_amount: 0,
+            epoch_id: 0,
+            client_order_id: batch_first_coid + i,
+        })
+        .collect();
+    dex.place_batch(
+        &taker.note.address,
+        ParamsOfPlaceBatch {
+            event_id: market.key.event_id.clone(),
+            oracle_list_hash: market.key.oracle_list_hash.clone(),
+            token_type: market.key.token_type,
+            orders: batch,
+            cancel_ids: Vec::new(),
+        },
+        Signer::Keys { keys: taker.note.keys.clone() },
+    )
+    .await
+    .expect("place_batch");
+    wait_owner_order(
+        dex,
+        &market.order_book,
+        &taker.note.dih_dec,
+        batch_first_coid + EXTRA_BIDS - 1,
+        true,
+    )
+    .await;
+    wait_not_busy(dex, &taker.note.address, "rest the batch of bids").await;
+
     assert!(
         now_unix() + RESTING_MARGIN_SECS < market.result_start,
         "only {}s left before the market closes, less than the {RESTING_MARGIN_SECS}s margin — \
@@ -186,11 +266,28 @@ async fn a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local() {
     // The book's own tally, read while it still exists: the drain hands
     // exactly this to RootPN and then destroys the book, so afterwards there
     // is nothing left to compare against.
-    let book_fees = dex
-        .get_order_book_details(&market.order_book)
-        .await
-        .expect("order book details")
-        .total_protocol_fees;
+    let details =
+        dex.get_order_book_details(&market.order_book).await.expect("order book details");
+    let book_fees = details.total_protocol_fees;
+
+    // And what makes the drain a multi-pass one: it retires `MAX_SHUTDOWN_BATCH`
+    // order ids per call, and the book holds more than that — both in orders
+    // still resting and in ids ever issued, which is what the pass actually
+    // walks. Stated here rather than assumed, because a change to either
+    // constant would quietly turn this back into the single-pass case the rest
+    // of the suite already covers.
+    assert!(
+        details.order_count > MAX_SHUTDOWN_BATCH,
+        "{} orders are resting, not more than the {MAX_SHUTDOWN_BATCH} a single drain pass \
+         retires",
+        details.order_count
+    );
+    assert!(
+        details.next_order_id > MAX_SHUTDOWN_BATCH + 1,
+        "the book has issued {} order ids, few enough for one pass to walk them all",
+        details.next_order_id - 1
+    );
+
     assert!(
         book_fees > 0,
         "the book accrued no protocol fees, so the hand-over and withdrawal below would be \
@@ -285,6 +382,63 @@ async fn a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local() {
         dest_after,
         dest_before + book_fees,
         "the withdrawn fees left RootPN's books but did not arrive"
+    );
+
+    // ── and the two ways it must not work ─────────────────────────────────
+    //
+    // RootPN holds every market's protocol fees together, so both guards are
+    // the only thing between one book's earnings and anyone who asks. Neither
+    // attempt changes anything, which is asserted after both rather than
+    // between them: a guard that let the call through would show up in the
+    // total whichever of the two did it.
+    let root_pn = RootPn::new(Arc::clone(ctx), dex_contract_params(RootPn::DEFAULT_ADDRESS));
+    let fees_before_negatives =
+        invariant::protocol_fee(&r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
+            .await
+            .expect("read RootPN protocol fees");
+
+    assert_exit_code(
+        root_pn
+            .withdraw_protocol_fees(
+                ParamsOfWithdrawProtocolFees {
+                    to: taker.note.address.clone(),
+                    dapp_id: FEE_DEST_DAPP.to_string(),
+                    token_type: TOKEN_TYPE_NACKL,
+                    amount: MORE_THAN_ACCRUED,
+                },
+                Signer::Keys { keys: root_pn_owner_keys(&ledger_dir) },
+            )
+            .await,
+        ERR_INVALID_PARAMS,
+        "the owner withdrawing more than has ever accrued",
+    );
+
+    // The same call, correct in every respect but the signature. The note's
+    // own keys are a real keypair that is simply not the root owner's, which
+    // is the case that matters: fees are payable to an address the caller
+    // chooses, so anyone able to sign could name their own.
+    assert_exit_code(
+        root_pn
+            .withdraw_protocol_fees(
+                ParamsOfWithdrawProtocolFees {
+                    to: taker.note.address.clone(),
+                    dapp_id: FEE_DEST_DAPP.to_string(),
+                    token_type: TOKEN_TYPE_NACKL,
+                    amount: 1,
+                },
+                Signer::Keys { keys: taker.note.keys.clone() },
+            )
+            .await,
+        ERR_INVALID_SENDER,
+        "a stranger withdrawing protocol fees",
+    );
+
+    assert_eq!(
+        invariant::protocol_fee(&r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
+            .await
+            .expect("read RootPN protocol fees"),
+        fees_before_negatives,
+        "a refused withdrawal moved protocol fees anyway"
     );
 
     maker.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
