@@ -28,6 +28,7 @@ use anyhow::Context;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::ClientContext;
 use dodex_contracts::dex::order_book::OrderBook;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
 use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
 use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::private_note::ParamsOfCancelOrderByClient;
@@ -367,6 +368,36 @@ pub async fn pmp_freeze_now(ctx: &Arc<ClientContext>, dex: &Dex, pmp_addr: &str)
             None => "; every freezeNow was accepted".to_string(),
         }
     );
+}
+
+pub async fn wait_resolved(dex: &Dex, pmp_addr: &str, outcome_id: u32) {
+    poll_until(&format!("PMP {pmp_addr} did not resolve to outcome {outcome_id}"), || async {
+        dex.get_pmp_details(pmp_addr).await.expect("pmp details").resolved_outcome
+            == Some(outcome_id)
+    })
+    .await;
+}
+
+pub async fn wait_order_book_done(dex: &Dex, pmp_addr: &str) {
+    poll_until(&format!("order book of PMP {pmp_addr} did not finish draining"), || async {
+        dex.get_pmp_shutdown_state(pmp_addr).await.expect("pmp shutdown state").order_book_done
+    })
+    .await;
+}
+
+/// Resolve the market and wait until its order book has finished draining.
+///
+/// Resolving is what shuts the book down; the drain then cancels whatever
+/// still rests, refunds it to the owning notes, hands the book's protocol
+/// fees to RootPN and destroys the book in the same message that reports
+/// completion. Both waits are needed and neither implies the other: the
+/// market can report a resolved outcome while the book is still refunding.
+pub async fn resolve_and_drain(dex: &Dex, pmp_addr: &str, ev: &OracleEventCtx, outcome_id: u32) {
+    dex.submit_resolve(pmp_addr, ParamsOfSubmitResolve { outcome_id }, oracle_signer(ev))
+        .await
+        .expect("submit_resolve");
+    wait_resolved(dex, pmp_addr, outcome_id).await;
+    wait_order_book_done(dex, pmp_addr).await;
 }
 
 /// Wait for the order book the freeze deploys, and return its address. The

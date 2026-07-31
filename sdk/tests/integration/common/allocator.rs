@@ -1413,12 +1413,14 @@ mod tests {
     /// - `Dep` 4: `proof_money` rents one and gives it back, so it costs
     ///   nothing. `parallel_setup` rents two *at once* — one per process — and
     ///   quarantines both. `resting_orders` and `market_orders` then deploy a
-    ///   market each and quarantine theirs, and `matching_ladder` a third.
-    ///   Two of the five are spent before any of those steps starts.
+    ///   market each and quarantine theirs, and `matching_ladder` and
+    ///   `shutdown_orders` one each after them. Two of the six are spent
+    ///   before any of those steps starts.
     /// - `Trd` 4: `proof_money` takes two and returns both, and `usdc_release`
     ///   borrows one and returns it — none of that costs anything.
-    ///   `resting_orders`, `market_orders` and `matching_ladder` take two
-    ///   each and spend them, which is the whole six.
+    ///   `resting_orders`, `market_orders`, `matching_ladder` and
+    ///   `shutdown_orders` take two each and spend them, which is the whole
+    ///   eight.
     ///
     /// The pool grows by three notes per market-deploying scenario, because a
     /// note that has traded holds a stake record and outcome tokens and can
@@ -1435,7 +1437,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 5), (PnProfile::Trd, 6), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 6), (PnProfile::Trd, 8), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

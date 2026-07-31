@@ -213,6 +213,11 @@ elif [ "$SUITE" = ladder ]; then
   # market-deploying suites; the spec sizes the pool for all of them.
   FILTER='test(=matching_ladder::a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local)'
   THREADS=1
+elif [ "$SUITE" = shutdown ]; then
+  # Last of the seven. Also the slowest: it has to idle until the market's
+  # `resultStart` before there is anything to observe.
+  FILTER='test(=shutdown_orders::a_drain_refunds_orders_that_were_still_resting_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

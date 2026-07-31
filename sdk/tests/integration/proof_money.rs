@@ -98,9 +98,10 @@ use crate::common::market::set_timings_and_approve;
 use crate::common::market::split_full_set;
 use crate::common::market::stake;
 use crate::common::market::wait_order_book;
+use crate::common::market::wait_order_book_done;
 use crate::common::market::wait_owner_order;
+use crate::common::market::wait_resolved;
 use crate::common::misc::now_unix;
-use crate::common::misc::poll_until;
 use crate::common::misc::wait_not_busy;
 use crate::common::misc::wait_until;
 use crate::common::pmp;
@@ -611,21 +612,6 @@ async fn claim(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey) {
 // ---------------------------------------------------------------------------
 // Waiting
 // ---------------------------------------------------------------------------
-
-async fn wait_resolved(dex: &Dex, pmp_addr: &str, outcome_id: u32) {
-    poll_until(&format!("PMP {pmp_addr} did not resolve to outcome {outcome_id}"), || async {
-        dex.get_pmp_details(pmp_addr).await.expect("pmp details").resolved_outcome
-            == Some(outcome_id)
-    })
-    .await;
-}
-
-async fn wait_order_book_done(dex: &Dex, pmp_addr: &str) {
-    poll_until(&format!("order book of PMP {pmp_addr} did not finish draining"), || async {
-        dex.get_pmp_shutdown_state(pmp_addr).await.expect("pmp shutdown state").order_book_done
-    })
-    .await;
-}
 
 // ---------------------------------------------------------------------------
 // Baseline readers

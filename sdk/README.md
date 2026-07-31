@@ -391,3 +391,29 @@ E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=matching_ladder::a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local)'
 ```
+
+### Shutdown with resting orders (`shutdown_orders`)
+
+`a_drain_refunds_orders_that_were_still_resting_local` rests an ask and a bid below it — not
+crossing, so both survive — and resolves the market. Resolving shuts the book down, and the
+drain has to refund what it cancels: the bid's collateral returns to the taker's `_balance`
+with `_lockedInOrders` back where it started, the ask's outcome tokens return to the maker's
+stake record, and both notes' `_openOrderCount` falls to zero. `proof_money` reaches
+`resultStart` with an empty book, so none of that was exercised.
+
+The failure it guards is invisible after the fact: the book is destroyed in the same message
+that reports the drain complete, so the orders are gone from every index and the escrow behind
+them would simply be missing from notes with no record of having lost it.
+
+`claim` before the drain (`ERR_ORDERBOOK_NOT_SHUTDOWN`) is deliberately **not** asserted. The
+guard leaves no trace a caller can read, so "rejected" and "never arrived" are the same
+observation, and a check that re-read unchanged balances would pass whether or not the gate
+exists. The module says so, and says why the gate matters anyway.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=shutdown_orders::a_drain_refunds_orders_that_were_still_resting_local)'
+```
