@@ -135,10 +135,15 @@ const EXTRA_BIDS: u128 = 10;
 /// Each of them, at `BID_BPS`. Worth 12 NACKL, clear of the minimum notional.
 const EXTRA_BID_AMOUNT: u128 = 20_000_000_000;
 
-/// The largest amount `withdrawProtocolFees` could ever be asked for, which is
-/// therefore always more than has accrued — no reading of the current total is
-/// needed, and nothing another scenario does can make it valid.
-const MORE_THAN_ACCRUED: u128 = u128::MAX;
+/// An amount no market will ever have accrued — 18 billion NACKL — so no
+/// reading of the current total is needed and nothing another scenario does
+/// can make the request legitimate.
+///
+/// `u64::MAX` rather than the `uint128` parameter's own ceiling: the contract
+/// wrapper encodes its arguments through `serde_json`, whose numbers stop at
+/// 64 bits, so a larger figure fails while being serialised and never reaches
+/// the guard this is meant to try.
+const MORE_THAN_ACCRUED: u128 = u64::MAX as u128;
 
 /// How long the refused withdrawals are given to fail to happen. A payment
 /// that was going to land has landed by then — the successful one above was
