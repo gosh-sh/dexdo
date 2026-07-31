@@ -810,6 +810,40 @@ pub async fn pn_has_transferred(r: &ChainReader, pn: &str) -> anyhow::Result<boo
     field_bool(&fields, PN_HAS_TRANSFERRED)
 }
 
+/// What the market still owes anyone — `PMP.getUnclaimedBalance`, the real
+/// collateral behind its pools.
+///
+/// The figure every payout is clamped to, and what `_finalizeResidualClose`
+/// sweeps to the creator on the way out. A scenario that expects a market to
+/// close with nothing left over can say so as an equality on this, read
+/// *before* the closing call — which is the only way to say it without racing
+/// a residual transfer that is still in flight.
+pub async fn pmp_unclaimed(r: &ChainReader, pmp: &str) -> anyhow::Result<u128> {
+    Pmp::new(r.ctx.clone(), dex_contract_params(pmp))
+        .get_unclaimed_balance()
+        .await
+        .map_err(|e| anyhow!("PMP {pmp} getUnclaimedBalance: {e}"))
+        .map(|b| b.value)
+}
+
+/// Whether the market is still waiting for its creator to acknowledge the
+/// freeze-time normalisation refund (`PMP._normRefundPending`).
+///
+/// The freeze hands the mod-G remainder of each clean pool back to the
+/// creator, and until that note acknowledges it, the creator's own
+/// `splitFullSet` and `cancelStake` revert with `ERR_NORM_REFUND_PENDING` —
+/// the creator's stake record trails the refund, so the market refuses to act
+/// on a figure it knows to be stale. Nothing else is blocked, which is why a
+/// scenario that only trades never notices this and one whose creator touches
+/// its own stake has to wait for it.
+pub async fn pmp_norm_refund_pending(r: &ChainReader, pmp: &str) -> anyhow::Result<bool> {
+    let fields = r
+        .storage_fields(pmp, PMP_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("PMP {pmp} holds no account on this stand"))?;
+    field_bool(&fields, PMP_NORM_REFUND_PENDING)
+}
+
 /// How many orders the note believes it has resting
 /// (`PrivateNote._openOrderCount`). The note's own count, not the book's —
 /// the two are updated by different contracts, and a scenario asserting the

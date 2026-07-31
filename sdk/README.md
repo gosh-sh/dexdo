@@ -330,7 +330,7 @@ The two orders belong to different notes on purpose. One note could hold both si
 a self-trade guard rather than the prices could be what keeps them apart, and the scenario
 would claim more than it tested.
 
-It is the first consumer of `common::market::deploy_ephemeral_market`, and spends the deployer and both trader notes it takes, which is what the pool is sized for. Like `usdc_release` it takes `ChainLockGuard::shared` and runs no
+It brings its market up with `common::market::deploy_ephemeral_market`, and spends the deployer and both trader notes it takes, which is what the pool is sized for. Like `usdc_release` it takes `ChainLockGuard::shared` and runs no
 preflight.
 
 ```sh
@@ -475,4 +475,34 @@ E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
 E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=bounce_recovery::a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local)'
+```
+
+### Cancelled event (`cancelled_event`)
+
+`a_cancelled_event_refunds_every_stake_and_closes_the_market_local` covers the other way a market
+can end: the oracles decide the event cannot be settled, and every stake has to come back instead
+of anyone being paid. Cancelling while the staking window is still open is the easy case and the
+live suite already covers it. This one cancels **after the freeze**, when an `OrderBook` exists
+and holds collateral, which is where the three gates are: `_isCancelled` alone triggers the
+order-book shutdown, `PMP.cancelStake` refuses until the book has finished draining, and
+`PrivateNote.cancelStake` refuses again until the note's own open-order counter has come back to
+zero — the book reports done when it has finished *sending* the cancels, which is not when the
+note has finished receiving them.
+
+The closing claim is made before the closing call, not after: with every other staker refunded,
+the market's unclaimed balance must equal exactly what its creator is still owed. Anything above
+that leaves as residual to the creator on self-destruct, where a balance check could no longer
+tell it apart from the refund itself — and a check made after the account disappears races the
+residual transfer, which can still be in flight.
+
+Takes one deployer note and one trader note, and is the one scenario that unwinds everything it
+does, so both have a real chance of passing the sweep and returning to the pool. The spec is
+sized as though they will not.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=cancelled_event::a_cancelled_event_refunds_every_stake_and_closes_the_market_local)'
 ```

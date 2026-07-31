@@ -23,10 +23,9 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
-
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::ClientContext;
+use anyhow::Context;
 use dodex_contracts::dex::order_book::OrderBook;
 use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
 use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
@@ -305,6 +304,41 @@ pub fn at(holdings: &[u128], outcome: u32) -> u128 {
     holdings.get(outcome as usize).copied().unwrap_or(0)
 }
 
+/// Vote the event cancelled and wait until the market records it.
+///
+/// The vote is counted per oracle and only executes on quorum; with the single
+/// oracle these markets are deployed with, one vote is the quorum. A repeat
+/// vote from the same oracle returns silently rather than reverting, so the
+/// send says nothing — `is_cancelled` is what does.
+#[allow(dead_code)]
+pub async fn cancel_event_and_wait(dex: &Dex, pmp_addr: &str, ev: &OracleEventCtx) {
+    dex.submit_cancel_event(pmp_addr, oracle_signer(ev)).await.expect("submit_cancel_event");
+    poll_until(&format!("PMP {pmp_addr} did not record the cancel vote"), || async {
+        dex.get_pmp_details(pmp_addr).await.expect("pmp details").is_cancelled
+    })
+    .await;
+}
+
+/// Cancel one note's stake and wait for the refund to land in its record.
+///
+/// The barrier is the note's stake record disappearing, which is also the
+/// discriminator: `onStakeCancelled` deletes it and credits `_balance` in the
+/// same message, while every way the call can be refused — a market that is
+/// not cancelled, a book still draining, an order still open — leaves the
+/// record exactly where it was. Waiting on `_busy` instead would prove
+/// nothing: the first poll can land before the note has even set it.
+#[allow(dead_code)]
+pub async fn cancel_stake(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey) {
+    let addr = &note.note.address;
+    dex.cancel_stake(addr, key.clone(), Signer::Keys { keys: note.note.keys.clone() })
+        .await
+        .expect("cancel_stake");
+    poll_until(&format!("note {addr} still holds its stake record after cancelStake"), || async {
+        dex.get_stakes(addr).await.expect("pn stakes").stakes.is_empty()
+    })
+    .await;
+}
+
 /// An ABI-decoded unsigned integer, as a number.
 ///
 /// `tvm_abi`'s detokenizer encodes a `uint256` as `"0x"` + 64 hex digits and
@@ -424,12 +458,6 @@ pub async fn wait_order_book(ctx: &Arc<ClientContext>, dex: &Dex, pmp_addr: &str
 ///
 /// `_guard` proves the caller already holds `ChainLockGuard`; see
 /// `prepare_oracle_event` for why nothing here calls `flock` itself.
-///
-/// **This composition has never run against a chain.** Every step it calls is
-/// exercised by `proof_money` on every pipeline run, and the order matches
-/// that scenario's own bring-up line for line — but nothing yet calls this
-/// function, so the first scenario that does should expect to be the one
-/// debugging it, and should not read a green pipeline as evidence about this.
 #[allow(dead_code)]
 pub async fn deploy_ephemeral_market(
     ctx: &Arc<ClientContext>,
@@ -439,6 +467,36 @@ pub async fn deploy_ephemeral_market(
     nonce: u64,
     stake_period: u64,
 ) -> EphemeralMarket {
+    let prepared = prepare_ephemeral_market(ctx, dex, guard, deployer, nonce, stake_period).await;
+    freeze_prepared_market(ctx, dex, prepared).await
+}
+
+/// A market that exists and is approved, with its staking window still open.
+///
+/// The half of the bring-up a scenario wants when its subject is the staking
+/// window itself: stakes are only accepted between the approval and
+/// `stake_end`, and [`deploy_ephemeral_market`] passes straight through that
+/// window on its way to an order book.
+#[allow(dead_code)]
+pub struct PreparedMarket {
+    pub pmp: String,
+    pub key: ParamsOfStakeKey,
+    pub oracle: OracleEventCtx,
+    /// When the market stops accepting stakes and will accept a freeze.
+    pub stake_end: u64,
+    pub result_start: u64,
+}
+
+/// Bring a market up as far as the open staking window.
+#[allow(dead_code)]
+pub async fn prepare_ephemeral_market(
+    ctx: &Arc<ClientContext>,
+    dex: &Dex,
+    guard: &ChainLockGuard,
+    deployer: &LeasedPn,
+    nonce: u64,
+    stake_period: u64,
+) -> PreparedMarket {
     let oracle = prepare_oracle_event(ctx, dex, guard, nonce).await;
     let pmp = deploy_pmp_with_deployer(ctx, dex, deployer, &oracle, guard).await;
 
@@ -454,11 +512,29 @@ pub async fn deploy_ephemeral_market(
         token_type: TOKEN_TYPE_NACKL,
     };
 
-    wait_until(details.stake_end).await;
+    PreparedMarket {
+        pmp,
+        key,
+        oracle,
+        stake_end: details.stake_end,
+        result_start: details.result_start,
+    }
+}
+
+/// Wait the staking window out, freeze, and wait for the order book the freeze
+/// deploys.
+#[allow(dead_code)]
+pub async fn freeze_prepared_market(
+    ctx: &Arc<ClientContext>,
+    dex: &Dex,
+    prepared: PreparedMarket,
+) -> EphemeralMarket {
+    let PreparedMarket { pmp, key, oracle, stake_end, result_start } = prepared;
+    wait_until(stake_end).await;
     pmp_freeze_now(ctx, dex, &pmp).await;
     let order_book = wait_order_book(ctx, dex, &pmp).await;
 
-    EphemeralMarket { pmp, order_book, key, oracle, result_start: details.result_start }
+    EphemeralMarket { pmp, order_book, key, oracle, result_start }
 }
 
 #[cfg(test)]

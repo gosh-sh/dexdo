@@ -1410,27 +1410,34 @@ mod tests {
     /// spec edit that drops a group surfaces as a scenario failing to rent,
     /// 20 minutes into a pipeline, on a stand that then has to be rebuilt.
     ///
-    /// - `Dep` 4: `proof_money` rents one and gives it back, so it costs
+    /// - `Dep` 8: `proof_money` rents one and gives it back, so it costs
     ///   nothing. `parallel_setup` rents two *at once* — one per process — and
-    ///   quarantines both. `resting_orders` and `market_orders` then deploy a
-    ///   market each and quarantine theirs, and `matching_ladder` and
-    ///   `shutdown_orders` and `price_above_par` one each after them. Two of
-    ///   the seven are spent before any of those steps starts.
-    /// - `Trd` 4: `proof_money` takes two and returns both, and `usdc_release`
-    ///   borrows one and returns it — none of that costs anything.
-    ///   `resting_orders`, `market_orders`, `matching_ladder`,
+    ///   quarantines both. `resting_orders`, `market_orders`,
+    ///   `matching_ladder`, `shutdown_orders`, `price_above_par` and
+    ///   `cancelled_event` deploy a market each and spend one apiece. Two of
+    ///   the eight are gone before any of those steps starts.
+    /// - `Trd` 12: `proof_money` takes two and returns both, and
+    ///   `usdc_release` borrows one and returns it — none of that costs
+    ///   anything. `resting_orders`, `market_orders`, `matching_ladder`,
     ///   `shutdown_orders` and `price_above_par` take two each and spend
     ///   them; `bounce_recovery` takes one more and spends it too —
     ///   `initTransfer` latches `_hasTransferred`, which the sweep counts as
-    ///   dirty for good. Eleven in all.
+    ///   dirty for good. `cancelled_event` takes the twelfth.
+    /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
+    ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
     ///
     /// The pool grows by three notes per market-deploying scenario, because a
     /// note that has traded holds a stake record and outcome tokens and can
     /// never be handed back clean. That is the sweep doing its job, not a
     /// defect — but it is the cost the spec pays per scenario, and it is why
     /// these numbers are derived here rather than rounded up.
-    /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
-    ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
+    ///
+    /// `cancelled_event` is budgeted the same way and may well cost nothing:
+    /// it is the one scenario that unwinds everything it does — the stake is
+    /// refunded, the record deleted, the order drained, the market gone — so
+    /// both its notes have a real chance of passing the sweep. The spec is
+    /// sized for them failing it anyway, because a pool sized on that hope is
+    /// a pipeline that dies 20 minutes in when the hope turns out wrong.
     ///
     /// Counted as **spent per generation, not held at once**, which is the
     /// distinction that matters: the steps share one ledger generation
@@ -1439,7 +1446,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 7), (PnProfile::Trd, 11), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 8), (PnProfile::Trd, 12), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

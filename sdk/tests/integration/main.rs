@@ -28,6 +28,7 @@
 //! `tests/integration/<name>/mod.rs` for the multi-file `common` module).
 
 mod bounce_recovery;
+mod cancelled_event;
 mod common;
 mod discovery;
 mod flows;
