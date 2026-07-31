@@ -31,6 +31,21 @@
 //! - **Cancelling gives back exactly what placing took.** Every one of those
 //!   readings returns to its pre-placement value, to the unit.
 //!
+//! ## And then the case where those two figures differ
+//!
+//! A cancel that returns what placing took is the easy half: nothing had
+//! happened to the order. The half with something to get wrong is a cancel
+//! after a *partial* fill, where part of the lock has been spent and the rest
+//! is still escrowed — refund the original lock and the filled part has been
+//! paid for twice; refund nothing and the remainder is stranded.
+//!
+//! So a second bid is rested, a smaller sell crosses it, and the remainder is
+//! cancelled. The bid's own remaining size is asserted first, because every
+//! figure after it depends on the fill having been exactly the size the ask
+//! offered. Then: escrow back to its baseline, and the buyer short by what the
+//! filled part cost and no more — bounded below by the exact token cost and
+//! above by a fee cap, never by a restatement of the contract's fee formula.
+//!
 //! ## Why the two orders belong to different notes
 //!
 //! A single note could hold both sides, and the pool has the notes to spare
@@ -62,9 +77,9 @@ use crate::common::misc::wait_not_busy;
 
 /// Distance to `resultStart`. The staking window is a tenth of it and is
 /// waited out by the fixture; the rest is this scenario's budget for a split,
-/// two placements and two cancels, each of which is an acknowledged note
-/// operation.
-const STAKE_PERIOD_ORDERS: u64 = 240;
+/// two placements and two cancels, and then a second bid, a crossing sell and
+/// one more cancel — each an acknowledged note operation.
+const STAKE_PERIOD_ORDERS: u64 = 360;
 
 /// The outcome both orders are placed on. They can only fail to cross if they
 /// are on the same book.
@@ -73,8 +88,8 @@ const OUTCOME: u32 = 0;
 /// Bid strictly below ask, both multiples of the 10 bps tick. At
 /// [`ORDER_AMOUNT`] the bid is worth 18 NACKL and the ask 24, each clearing
 /// the 10 NACKL minimum notional.
-const BID_BPS: &str = "6000";
-const ASK_BPS: &str = "8000";
+const BID_BPS: u128 = 6_000;
+const ASK_BPS: u128 = 8_000;
 
 /// A multiple of the 0.01 NACKL lot size, and well inside the ~50 outcome
 /// tokens a [`SPLIT_COLLATERAL`] split mints.
@@ -82,6 +97,29 @@ const ORDER_AMOUNT: u128 = 30_000_000_000;
 
 /// Collateral the seller splits to get something to sell.
 const SPLIT_COLLATERAL: u128 = 100_000_000_000;
+
+/// How much of the second bid the seller crosses. Less than the bid, so the
+/// rest of it stays on the book — a whole fill would make the cancel that
+/// follows the same easy case the first half already covers.
+const PARTIAL_FILL_AMOUNT: u128 = 20_000_000_000;
+
+/// What that fill costs at the bid's own price: the exact figure the buyer
+/// should be left short of, with the remainder of its lock returned.
+const PARTIAL_FILL_COST: u128 = PARTIAL_FILL_AMOUNT * BID_BPS / FULL_PERCENT;
+
+const FULL_PERCENT: u128 = 10_000;
+const MIN_ORDER_NOTIONAL_NACKL: u128 = 10_000_000_000;
+const LOT_SIZE_NACKL: u128 = 10_000_000;
+
+/// An upper bound on the taker fee, not the contract's formula (0.045%) —
+/// restating that here would check the implementation against itself.
+const FEE_CAP_PERMILLE: u128 = 1;
+
+// The crossing sell has to be a valid order in its own right, and small
+// enough to leave the bid resting.
+const _: () = assert!(PARTIAL_FILL_AMOUNT < ORDER_AMOUNT);
+const _: () = assert!(PARTIAL_FILL_COST >= MIN_ORDER_NOTIONAL_NACKL);
+const _: () = assert!(PARTIAL_FILL_AMOUNT.is_multiple_of(LOT_SIZE_NACKL));
 
 #[tokio::test]
 #[ignore = "requires a local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID"]
@@ -121,10 +159,30 @@ async fn non_crossing_orders_rest_and_cancel_local() {
     let sell_coid = nonce as u128 * 10;
     let buy_coid = sell_coid + 1;
 
-    place_limit(dex, &seller, &market.key, OUTCOME, false, ASK_BPS, ORDER_AMOUNT, sell_coid).await;
+    place_limit(
+        dex,
+        &seller,
+        &market.key,
+        OUTCOME,
+        false,
+        &ASK_BPS.to_string(),
+        ORDER_AMOUNT,
+        sell_coid,
+    )
+    .await;
     wait_owner_order(dex, &market.order_book, &seller.note.dih_dec, sell_coid, true).await;
 
-    place_limit(dex, &buyer, &market.key, OUTCOME, true, BID_BPS, ORDER_AMOUNT, buy_coid).await;
+    place_limit(
+        dex,
+        &buyer,
+        &market.key,
+        OUTCOME,
+        true,
+        &BID_BPS.to_string(),
+        ORDER_AMOUNT,
+        buy_coid,
+    )
+    .await;
     wait_owner_order(dex, &market.order_book, &buyer.note.dih_dec, buy_coid, true).await;
 
     // The book holding both orders is not yet the notes having finished with
@@ -147,12 +205,12 @@ async fn non_crossing_orders_rest_and_cancel_local() {
     // the two spellings of the same price are not the same string.
     assert_eq!(
         abi_uint(&sell.price).expect("ask price"),
-        abi_uint(ASK_BPS).expect("ask literal"),
+        ASK_BPS,
         "the ask rests at a price it was not placed with"
     );
     assert_eq!(
         abi_uint(&buy.price).expect("bid price"),
-        abi_uint(BID_BPS).expect("bid literal"),
+        BID_BPS,
         "the bid rests at a price it was not placed with"
     );
     assert_eq!((sell.outcome_id, buy.outcome_id), (OUTCOME, OUTCOME));
@@ -208,6 +266,90 @@ async fn non_crossing_orders_rest_and_cancel_local() {
         at(&outcome_tokens(dex, &seller).await, OUTCOME),
         at(&seller_tokens_before, OUTCOME),
         "cancelling the ask did not return the seller's outcome tokens"
+    );
+
+    // ── cancelling an order that was already partly filled ────────────────
+    // The cancel above returned a lock nothing had touched, which is the easy
+    // case: the refund equals what was taken. A partly filled order is where
+    // the two figures come apart — part of the lock has been spent and the
+    // rest is still escrowed, and a book that refunded the original lock
+    // would be paying for the filled part twice.
+    let partial_bid = buy_coid + 1;
+    let partial_ask = buy_coid + 2;
+    let free_before_partial = pn_balance(&r, &buyer.note.address).await;
+    let locked_before_partial = pn_locked(&r, &buyer.note.address).await;
+
+    place_limit(
+        dex,
+        &buyer,
+        &market.key,
+        OUTCOME,
+        true,
+        &BID_BPS.to_string(),
+        ORDER_AMOUNT,
+        partial_bid,
+    )
+    .await;
+    wait_owner_order(dex, &market.order_book, &buyer.note.dih_dec, partial_bid, true).await;
+    wait_not_busy(dex, &buyer.note.address, "place the bid to be partly filled").await;
+
+    // A sell for less than the bid holds: it crosses, takes its part, and
+    // leaves the rest of the bid resting.
+    place_limit(
+        dex,
+        &seller,
+        &market.key,
+        OUTCOME,
+        false,
+        &BID_BPS.to_string(),
+        PARTIAL_FILL_AMOUNT,
+        partial_ask,
+    )
+    .await;
+    wait_not_busy(dex, &seller.note.address, "the crossing sell").await;
+    wait_not_busy(dex, &buyer.note.address, "the partial fill").await;
+
+    let bid_left = owned_order(dex, &market.order_book, &buyer.note.dih_dec, partial_bid).await;
+    assert_eq!(
+        bid_left.amount,
+        ORDER_AMOUNT - PARTIAL_FILL_AMOUNT,
+        "the bid has {} left rather than {}, so it was not filled by exactly the {PARTIAL_FILL_AMOUNT} \
+         the ask offered — the cancel below would then be refunding an amount this scenario cannot \
+         predict",
+        bid_left.amount,
+        ORDER_AMOUNT - PARTIAL_FILL_AMOUNT
+    );
+
+    cancel_by_client(dex, &buyer, &market.key, partial_bid).await;
+    wait_owner_order(dex, &market.order_book, &buyer.note.dih_dec, partial_bid, false).await;
+    wait_not_busy(dex, &buyer.note.address, "cancel the partly filled bid").await;
+
+    assert_eq!(
+        pn_locked(&r, &buyer.note.address).await,
+        locked_before_partial,
+        "cancelling a partly filled bid left collateral escrowed against an order that is gone"
+    );
+    // What is left is what the fill cost, and nothing else. The lower bound is
+    // exact — the tokens at the price they cleared at; the upper bound is a
+    // fee cap rather than the fee, so this does not restate the contract's own
+    // arithmetic. A refund of the *original* lock would put the buyer above
+    // `free_before_partial`, and no refund at all would put it a whole
+    // `ORDER_AMOUNT` notional below.
+    let spent = free_before_partial - pn_balance(&r, &buyer.note.address).await;
+    assert!(
+        spent >= PARTIAL_FILL_COST,
+        "the buyer spent {spent} on a fill worth {PARTIAL_FILL_COST} — it got tokens it did not \
+         pay for"
+    );
+    assert!(
+        spent <= PARTIAL_FILL_COST + PARTIAL_FILL_COST * FEE_CAP_PERMILLE / 1000,
+        "the buyer spent {spent}, more than the {PARTIAL_FILL_COST} the filled part cost plus any \
+         plausible fee: the unfilled remainder of the lock did not come back"
+    );
+    assert_eq!(
+        at(&outcome_tokens(dex, &buyer).await, OUTCOME),
+        PARTIAL_FILL_AMOUNT,
+        "the buyer holds something other than the {PARTIAL_FILL_AMOUNT} tokens the fill gave it"
     );
 
     // Both notes still hold a market's stake record and outcome tokens, which

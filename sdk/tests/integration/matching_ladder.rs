@@ -36,14 +36,36 @@
 //! exactly as two would, at two notes instead of four — and the pool is sized
 //! per scenario.
 //!
+//! ## The walk, which the first taker deliberately is not
+//!
+//! Note what the arrangement above proves and does not: the taker's 30 fits
+//! inside the 0.60 level, so the assertion is that it **stopped** there. That
+//! is level *priority*. Walking — one order consuming more than one level — is
+//! a different claim, and a second taker makes it: 25 more at 0.70, which
+//! clears what is left of 0.60 and continues into 0.70.
+//!
+//! That order also carries the price-improvement claim, because it is priced
+//! at 0.70 throughout while 10 of its 25 fill at 0.60:
+//!
+//! - a book clearing each portion at **its own maker's** price collects
+//!   `10×0.60 + 15×0.70 = 16.5` and refunds the rest of what was locked;
+//! - a book clearing the whole order at the **taker's** limit collects
+//!   `25×0.70 = 17.5`.
+//!
+//! One NACKL apart, against a fee of at most a few thousandths — so a
+//! two-sided bound on what the taker was charged separates them cleanly while
+//! leaving the fee formula unrestated. Restating it would check the
+//! implementation against itself.
+//!
+//! Last, the same trade is read as conservation on the collateral leg: what
+//! the taker paid equals what the maker received plus what the book kept.
+//! That is the reading that catches a floor taken twice or a rounding
+//! remainder with no owner — neither shows up in a token count, and both are
+//! invisible from either side alone.
+//!
 //! ## What this does not cover
 //!
-//! `buyerRefund` on price improvement (the taker locks at 0.70 and pays 0.60,
-//! and the difference comes back) is visible here only as "less was spent
-//! than was locked", which is weaker than an equality; asserting the amount
-//! means restating the contract's fee arithmetic. Conservation across both
-//! legs is `proof_money`'s Σ-check, not repeated here. Self-matching and IOC
-//! into an empty side are separate units.
+//! Self-matching and IOC into an empty side are separate units.
 //!
 //! Reads `E2E_NETWORK_ENDPOINT`, `E2E_SEED_NOTES` and `E2E_RUN_ID`; no
 //! manifest and no preflight, for the reasons `usdc_release` gives.
@@ -54,7 +76,6 @@ use crate::common::chain_reader;
 use crate::common::context::TOKEN_TYPE_NACKL;
 use crate::common::invariant;
 use crate::common::locks;
-use crate::common::market::abi_uint;
 use crate::common::market::at;
 use crate::common::market::deploy_ephemeral_market;
 use crate::common::market::outcome_tokens;
@@ -68,8 +89,11 @@ const OUTCOME: u32 = 0;
 
 /// The two ask levels. `BEST_BPS` is the better price for a buyer, so a
 /// correct walk empties it before touching `WORSE_BPS`.
-const BEST_BPS: &str = "6000";
-const WORSE_BPS: &str = "7000";
+const BEST_BPS: u128 = 6_000;
+const WORSE_BPS: u128 = 7_000;
+const FULL_PERCENT: u128 = 10_000;
+
+const _: () = assert!(BEST_BPS < WORSE_BPS, "the best level must be the cheaper one for a buyer");
 
 /// Each ask. At `BEST_BPS` this is worth 12 NACKL, clearing the 10 NACKL
 /// minimum notional with room to spare.
@@ -82,6 +106,40 @@ const TAKE_AMOUNT: u128 = 30_000_000_000;
 
 /// What the taker's fill leaves on A2.
 const A2_REMAINING: u128 = ASK_AMOUNT + ASK_AMOUNT - TAKE_AMOUNT;
+
+/// The second taker, which starts where the first stopped: it clears what is
+/// left of the 0.60 level and continues into 0.70. Two price levels in one
+/// order — the walk itself, which the first taker deliberately does not do.
+const TAKE2_AMOUNT: u128 = 25_000_000_000;
+
+/// What that leaves on A3.
+const A3_REMAINING: u128 = A2_REMAINING + ASK_AMOUNT - TAKE2_AMOUNT;
+
+/// What the second taker owes if each portion cleared at *its own maker's*
+/// price — the whole claim of the phase, since the order is priced at 0.70 and
+/// a book that charged its own limit price would collect
+/// `TAKE2_AMOUNT × 0.70` instead.
+const TAKE2_COST: u128 = A2_REMAINING * BEST_BPS / FULL_PERCENT
+    + (TAKE2_AMOUNT - A2_REMAINING) * WORSE_BPS / FULL_PERCENT;
+
+/// What the same size would cost with no price improvement at all.
+const TAKE2_COST_UNIMPROVED: u128 = TAKE2_AMOUNT * WORSE_BPS / FULL_PERCENT;
+
+/// An upper bound on the taker fee — deliberately a bound and not the
+/// contract's formula (0.045%), which restating here would check the
+/// implementation against itself. A tenth of a percent is more than double the
+/// real rate and still an order of magnitude below the improvement being
+/// asserted, so the two cannot be confused for one another.
+const FEE_CAP_PERMILLE: u128 = 1;
+
+// The second taker has to cross the level boundary and stop inside A3: sized
+// short it never leaves 0.60 and proves nothing new, sized long it empties the
+// book and "A3 is gone" says nothing about where it stopped.
+const _: () = assert!(TAKE2_AMOUNT > A2_REMAINING);
+const _: () = assert!(TAKE2_AMOUNT < A2_REMAINING + ASK_AMOUNT);
+// And the improvement has to dominate the fee, or the bound below cannot tell
+// "charged at the makers' prices" from "charged at the limit price".
+const _: () = assert!(TAKE2_COST_UNIMPROVED - TAKE2_COST > TAKE2_COST * FEE_CAP_PERMILLE / 1000);
 
 /// Collateral the maker splits. Three asks need 60 outcome tokens; a split of
 /// this yields roughly 100 of each.
@@ -132,7 +190,8 @@ async fn a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local() {
     // A1 and A2, and two placements in flight at once would leave it to
     // chance which arrived first.
     for (coid, price) in [(a1, BEST_BPS), (a2, BEST_BPS), (a3, WORSE_BPS)] {
-        place_limit(dex, &maker, &market.key, OUTCOME, false, price, ASK_AMOUNT, coid).await;
+        place_limit(dex, &maker, &market.key, OUTCOME, false, &price.to_string(), ASK_AMOUNT, coid)
+            .await;
         wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, coid, true).await;
     }
 
@@ -141,7 +200,17 @@ async fn a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local() {
 
     // Priced at the worse level on purpose: the taker can afford either, so
     // only level priority decides what it gets.
-    place_limit(dex, &taker, &market.key, OUTCOME, true, WORSE_BPS, TAKE_AMOUNT, take_coid).await;
+    place_limit(
+        dex,
+        &taker,
+        &market.key,
+        OUTCOME,
+        true,
+        &WORSE_BPS.to_string(),
+        TAKE_AMOUNT,
+        take_coid,
+    )
+    .await;
     wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, a1, false).await;
     wait_not_busy(dex, &taker.note.address, "taker buy").await;
     wait_not_busy(dex, &maker.note.address, "asks filled").await;
@@ -201,9 +270,116 @@ async fn a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local() {
         "a fully filled buy left collateral locked"
     );
 
+    // ── the walk itself: one order across two price levels ────────────────
+    // The first taker stopped inside the better level, which is what proved
+    // priority. This one starts there and has to continue into the worse one,
+    // so it is the order that actually walks.
+    let take2_coid = base + 5;
+    let maker_free_before = pn_free(&r, &maker.note.address).await;
+    let maker_tokens_before = at(&outcome_tokens(dex, &maker).await, OUTCOME);
+    let taker_held_before = pn_free(&r, &taker.note.address).await + pn_locked(&r, &taker).await;
+    let taker_tokens_mid = at(&outcome_tokens(dex, &taker).await, OUTCOME);
+    let book_fees_before = book_fees(dex, &market.order_book).await;
+
+    place_limit(
+        dex,
+        &taker,
+        &market.key,
+        OUTCOME,
+        true,
+        &WORSE_BPS.to_string(),
+        TAKE2_AMOUNT,
+        take2_coid,
+    )
+    .await;
+    wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, a2, false).await;
+    wait_not_busy(dex, &taker.note.address, "the walking taker").await;
+    wait_not_busy(dex, &maker.note.address, "asks filled across levels").await;
+
+    let resting = maker_orders(dex, &market.order_book, &maker.note.dih_dec).await;
+    assert!(!resting.contains_key(&a2), "A2 survived a taker that was sized past it");
+    let a3_left = *resting
+        .get(&a3)
+        .unwrap_or_else(|| panic!("A3 left the book entirely; the taker should have left part"));
+    assert_eq!(
+        a3_left, A3_REMAINING,
+        "A3 has {a3_left} left, not {A3_REMAINING} — the taker did not continue into 0.70 with \
+         exactly what 0.60 could not fill"
+    );
+
+    assert_eq!(
+        at(&outcome_tokens(dex, &taker).await, OUTCOME),
+        taker_tokens_mid + TAKE2_AMOUNT,
+        "the walking taker did not receive the {TAKE2_AMOUNT} tokens it bought"
+    );
+    assert_eq!(
+        at(&outcome_tokens(dex, &maker).await, OUTCOME),
+        maker_tokens_before - TAKE2_AMOUNT,
+        "the maker gave up something other than exactly what the taker received"
+    );
+
+    // The clearing prices, stated as what the taker was actually charged. The
+    // order is priced at 0.70 throughout, so a book that cleared it at its own
+    // limit would collect `TAKE2_COST_UNIMPROVED`; one that cleared each
+    // portion at its maker's price collects `TAKE2_COST` and refunds the
+    // difference. The upper bound is a fee cap rather than the fee, so this
+    // pins the prices without restating the contract's fee arithmetic.
+    let taker_paid =
+        taker_held_before - (pn_free(&r, &taker.note.address).await + pn_locked(&r, &taker).await);
+    assert!(
+        taker_paid >= TAKE2_COST,
+        "the taker paid {taker_paid} for a basket worth {TAKE2_COST} at the makers' own prices — \
+         less than the tokens cost"
+    );
+    assert!(
+        taker_paid <= TAKE2_COST + TAKE2_COST * FEE_CAP_PERMILLE / 1000,
+        "the taker paid {taker_paid}, above {TAKE2_COST} plus any plausible fee and toward the \
+         {TAKE2_COST_UNIMPROVED} its own limit price would have cost: the 0.60 portion was not \
+         cleared at 0.60, or the improvement was not refunded"
+    );
+
+    // Conservation across the trade, on the collateral leg. The taker's outlay
+    // has to land somewhere and nowhere else: the maker's proceeds plus the
+    // protocol's share of the fee. This is the reading that catches a floor
+    // taken twice or a rounding remainder left with no owner — neither shows
+    // up in a token count, and both would be invisible to either side alone.
+    let maker_gained = pn_free(&r, &maker.note.address).await - maker_free_before;
+    let protocol_gained = book_fees(dex, &market.order_book).await - book_fees_before;
+    assert_eq!(
+        taker_paid,
+        maker_gained + protocol_gained,
+        "the taker paid {taker_paid}, the maker received {maker_gained} and the book kept \
+         {protocol_gained}: {} went nowhere",
+        taker_paid as i128 - (maker_gained + protocol_gained) as i128
+    );
+
     maker.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     taker.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     deployer.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
+}
+
+/// The note's free NACKL — `_balance`, without what its orders hold.
+async fn pn_free(r: &chain_reader::ChainReader, pn_address: &str) -> u128 {
+    invariant::pn_balance_opt(r, pn_address, TOKEN_TYPE_NACKL)
+        .await
+        .expect("read note balance")
+        .unwrap_or_else(|| panic!("note {pn_address} is not on chain"))
+}
+
+/// The note's NACKL escrowed against its resting orders.
+async fn pn_locked(r: &chain_reader::ChainReader, note: &allocator::LeasedPn) -> u128 {
+    invariant::pn_locked_opt(r, &note.note.address, TOKEN_TYPE_NACKL)
+        .await
+        .expect("read note escrow")
+        .expect("note is on chain")
+}
+
+/// The protocol's share of the fees this book has taken so far. Read off the
+/// book rather than off RootPN: the hand-over only happens at shutdown, so
+/// until then RootPN knows nothing about a trade that has already been paid
+/// for.
+async fn book_fees(dex: &dodex_sdk::Dex, ob_addr: &str) -> u128 {
+    dex.get_order_book_details(ob_addr).await.expect("order book details").total_protocol_fees
 }
 
 /// The maker's live orders as `client_order_id -> remaining size`.
@@ -223,16 +399,4 @@ async fn maker_orders(
         .into_iter()
         .map(|o| (o.client_order_id, o.amount))
         .collect()
-}
-
-/// Kept honest against the ABI encoding trap `market::abi_uint` documents:
-/// the prices in this scenario are only ever compared through it.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_best_level_is_the_cheaper_one_for_a_buyer() {
-        assert!(abi_uint(BEST_BPS).unwrap() < abi_uint(WORSE_BPS).unwrap());
-    }
 }
