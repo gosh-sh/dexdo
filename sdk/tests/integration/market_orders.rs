@@ -63,7 +63,7 @@ use crate::common::market::outcome_tokens;
 use crate::common::market::place_limit;
 use crate::common::market::place_order_with_flags;
 use crate::common::market::split_full_set;
-use crate::common::market::try_place_order;
+use crate::common::market::place_order_full;
 use crate::common::market::wait_owner_order;
 use crate::common::market::FLAG_IOC;
 use crate::common::market::FLAG_MARKET;
@@ -376,7 +376,7 @@ async fn orders_that_must_not_rest_never_rest_local() {
     // A minimum fill size is stated in tokens; a market buy's amount is
     // collateral. There is no exchange rate between the two until a fill
     // picks one, so the combination is refused rather than interpreted.
-    let _ = try_place_order(
+    let _ = place_order_full(
         dex,
         &buyer,
         &market.key,
@@ -386,6 +386,7 @@ async fn orders_that_must_not_rest_never_rest_local() {
         MARKET_BUY_QUOTE,
         FLAG_MARKET,
         MIN_FILL_ON_MARKET,
+        0,
         refused_coid,
     )
     .await;
@@ -396,7 +397,7 @@ async fn orders_that_must_not_rest_never_rest_local() {
     // client id as the one above: the note reserves that id before it
     // validates anything, so an id still held here would refuse this order
     // for the wrong reason — and the control at the end would then fail.
-    let _ = try_place_order(
+    let _ = place_order_full(
         dex,
         &buyer,
         &market.key,
@@ -405,6 +406,7 @@ async fn orders_that_must_not_rest_never_rest_local() {
         "0",
         BELOW_MIN_NOTIONAL,
         FLAG_MARKET,
+        0,
         0,
         refused_coid,
     )

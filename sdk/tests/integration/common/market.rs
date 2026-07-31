@@ -200,38 +200,67 @@ pub async fn place_order_with_flags(
     flags: u8,
     client_order_id: u128,
 ) {
-    dex.place_order(
-        &note.note.address,
-        ParamsOfPlaceOrder {
-            event_id: key.event_id.clone(),
-            oracle_list_hash: key.oracle_list_hash.clone(),
-            token_type: key.token_type,
-            outcome_id,
-            is_buy,
-            price: price_bps.to_string(),
-            amount,
-            flags,
-            min_amount: 0,
-            epoch_id: 0,
-            client_order_id,
-        },
-        Signer::Keys { keys: note.note.keys.clone() },
+    place_order_full(
+        dex,
+        note,
+        key,
+        outcome_id,
+        is_buy,
+        price_bps,
+        amount,
+        flags,
+        0,
+        0,
+        client_order_id,
     )
     .await
     .expect("place_order");
 }
 
-/// [`place_order_with_flags`] with the success expectation dropped and
-/// `min_amount` spelled out.
-///
-/// Both differences exist for the same caller — the negatives. Their
-/// hard-wired `min_amount: 0` puts one of the refusals out of reach entirely,
-/// and while a refusal after `tvm.accept()` is not reported to the sender at
-/// all, one before it may be: the `expect` above would turn that into a panic
-/// rather than a reading. Neither the value nor the error is asserted on here;
-/// what a refusal costs the note is.
+/// [`place_limit`] into a named segment of the book. Levels are keyed by
+/// `epochId`, so two orders that would cross at their prices never see each
+/// other unless they name the same one — which is a claim only a caller that
+/// can name a segment other than `0` can make.
 #[allow(clippy::too_many_arguments)]
-pub async fn try_place_order(
+pub async fn place_limit_in_epoch(
+    dex: &Dex,
+    note: &LeasedPn,
+    key: &ParamsOfStakeKey,
+    outcome_id: u32,
+    is_buy: bool,
+    price_bps: &str,
+    amount: u128,
+    epoch_id: u64,
+    client_order_id: u128,
+) {
+    place_order_full(
+        dex,
+        note,
+        key,
+        outcome_id,
+        is_buy,
+        price_bps,
+        amount,
+        0,
+        0,
+        epoch_id,
+        client_order_id,
+    )
+    .await
+    .expect("place_order");
+}
+
+/// Every parameter of a placement, and no expectation about the outcome.
+///
+/// The helpers above are this one with the parameters their callers never
+/// vary pinned, and with the send's own result asserted. Both differences
+/// matter to the negatives: they need `min_amount` and `epoch_id` spelled
+/// out, and a refusal after `tvm.accept()` is not reported to the sender at
+/// all while one before it may be — so the `expect` above would turn an
+/// observation into a panic. Neither the value nor the error is asserted on
+/// by those callers; what a refusal costs the note is.
+#[allow(clippy::too_many_arguments)]
+pub async fn place_order_full(
     dex: &Dex,
     note: &LeasedPn,
     key: &ParamsOfStakeKey,
@@ -241,6 +270,7 @@ pub async fn try_place_order(
     amount: u128,
     flags: u8,
     min_amount: u128,
+    epoch_id: u64,
     client_order_id: u128,
 ) -> Result<dodex_sdk::ResultOfBlockchainWrite, dodex_sdk::errors::AppError> {
     dex.place_order(
@@ -255,7 +285,7 @@ pub async fn try_place_order(
             amount,
             flags,
             min_amount,
-            epoch_id: 0,
+            epoch_id,
             client_order_id,
         },
         Signer::Keys { keys: note.note.keys.clone() },

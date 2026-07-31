@@ -1417,8 +1417,9 @@ mod tests {
     ///   `cancelled_event` deploy a market each and spend one apiece.
     ///   `bounce_deploy` takes two: one for the market it never freezes, and
     ///   one for the market that fails to come up — the second is offered
-    ///   back, since a bounced deploy leaves the note where it found it. Two
-    ///   of the ten are gone before any of those steps starts.
+    ///   back, since a bounced deploy leaves the note where it found it.
+    ///   `book_segments` deploys one more. Two of the eleven are gone before
+    ///   any of those steps starts.
     /// - `Trd` 13: `proof_money` takes two and returns both, and
     ///   `usdc_release` borrows one and returns it — none of that costs
     ///   anything. `resting_orders`, `market_orders`, `matching_ladder`,
@@ -1426,7 +1427,8 @@ mod tests {
     ///   them; `bounce_recovery` takes one more and spends it too —
     ///   `initTransfer` latches `_hasTransferred`, which the sweep counts as
     ///   dirty for good. `cancelled_event` takes the twelfth and
-    ///   `bounce_deploy` the thirteenth.
+    ///   `bounce_deploy` the thirteenth; `book_segments` takes two more, one
+    ///   per side of the orders it keeps apart.
     /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
     ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
     ///
@@ -1450,7 +1452,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 10), (PnProfile::Trd, 13), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 11), (PnProfile::Trd, 15), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

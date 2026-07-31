@@ -251,6 +251,12 @@ elif [ "$SUITE" = cancelled ]; then
   # does, which is why it gets the longest market of the set.
   FILTER='test(=cancelled_event::a_cancelled_event_refunds_every_stake_and_closes_the_market_local)'
   THREADS=1
+elif [ "$SUITE" = segments ]; then
+  # Nothing here fills: every phase is about two orders that could trade and
+  # do not, or a batch the note declines. Needs both outcomes of one market,
+  # which is why it splits rather than stakes.
+  FILTER='test(=book_segments::segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
