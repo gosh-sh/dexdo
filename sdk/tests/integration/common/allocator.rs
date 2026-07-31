@@ -1410,14 +1410,15 @@ mod tests {
     /// spec edit that drops a group surfaces as a scenario failing to rent,
     /// 20 minutes into a pipeline, on a stand that then has to be rebuilt.
     ///
-    /// - `Dep` 3: `proof_money` rents one and gives it back, so it costs
+    /// - `Dep` 4: `proof_money` rents one and gives it back, so it costs
     ///   nothing. `parallel_setup` rents two *at once* — one per process — and
-    ///   quarantines both, which spends them. `resting_orders` runs after that
-    ///   and needs a third. Two would leave it with nothing to deploy from.
-    /// - `Trd` 2: `proof_money` takes two and returns both, `usdc_release`
-    ///   borrows one and returns it, and `resting_orders` takes two and spends
-    ///   them — but it is the last step, so nothing needs one afterwards. Two
-    ///   is both the peak and the total.
+    ///   quarantines both. `resting_orders` and `market_orders` then deploy a
+    ///   market each and quarantine theirs. Two of the four are spent before
+    ///   either of those steps starts.
+    /// - `Trd` 4: `proof_money` takes two and returns both, and `usdc_release`
+    ///   borrows one and returns it — none of that costs anything.
+    ///   `resting_orders` and `market_orders` take two each and spend them,
+    ///   which is the whole four.
     /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
     ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
     ///
@@ -1428,7 +1429,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 3), (PnProfile::Trd, 2), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 4), (PnProfile::Trd, 4), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

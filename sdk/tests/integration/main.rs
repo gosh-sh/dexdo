@@ -32,6 +32,7 @@ mod discovery;
 mod flows;
 mod history;
 mod ledger_race;
+mod market_orders;
 mod multitoken;
 mod oracle;
 mod order_book;

@@ -330,9 +330,7 @@ The two orders belong to different notes on purpose. One note could hold both si
 a self-trade guard rather than the prices could be what keeps them apart, and the scenario
 would claim more than it tested.
 
-It is the first consumer of `common::market::deploy_ephemeral_market`, and the last of the
-SDK steps on a stand: it spends a deployer note and both trader notes, so anything after it
-finds the pool empty. Like `usdc_release` it takes `ChainLockGuard::shared` and runs no
+It is the first consumer of `common::market::deploy_ephemeral_market`, and spends the deployer and both trader notes it takes, which is what the pool is sized for. Like `usdc_release` it takes `ChainLockGuard::shared` and runs no
 preflight.
 
 ```sh
@@ -341,4 +339,27 @@ E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
 E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=resting_orders::non_crossing_orders_rest_and_cancel_local)'
+```
+
+### Market orders (`market_orders`)
+
+`a_market_buy_fills_and_never_rests_local` rests an ask and then sends a market buy carrying
+more collateral than that ask can absorb, so a remainder is guaranteed. `OrderBook` inserts an
+unfilled remainder into the book for a limit order and returns it to the caller for a market
+one, and the difference is what this pins: the buyer's owner index comes back empty, its
+`_openOrderCount` is zero, and it has nothing left in `_lockedInOrders`. The failure it guards
+is silent — a market order that rested would hold escrow its owner believes it got back.
+
+The fill itself is asserted in tokens, not collateral: the buyer gains exactly the ask's size.
+What the fill *cost* is the contract's fee arithmetic, and restating it here would assert the
+implementation against itself.
+
+Note that `amount` on a market buy is denominated in quote, not in outcome tokens.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=market_orders::a_market_buy_fills_and_never_rests_local)'
 ```

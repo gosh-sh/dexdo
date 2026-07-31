@@ -160,6 +160,41 @@ pub async fn place_limit(
     amount: u128,
     client_order_id: u128,
 ) {
+    place_order_with_flags(
+        dex,
+        note,
+        key,
+        outcome_id,
+        is_buy,
+        price_bps,
+        amount,
+        0,
+        client_order_id,
+    )
+    .await;
+}
+
+/// `OrderBook`'s market-order flag. A market order carries no usable price —
+/// the book substitutes the extreme of its side — and, unlike a limit order,
+/// never rests: whatever it cannot fill is returned to the caller instead of
+/// being inserted into the book.
+pub const FLAG_MARKET: u8 = 0x04;
+
+/// [`place_limit`] with the order flags spelled out. Separate because the
+/// flags change what `amount` *means*: a market buy denominates it in quote
+/// (collateral), a limit order in base (outcome tokens).
+#[allow(clippy::too_many_arguments)]
+pub async fn place_order_with_flags(
+    dex: &Dex,
+    note: &LeasedPn,
+    key: &ParamsOfStakeKey,
+    outcome_id: u32,
+    is_buy: bool,
+    price_bps: &str,
+    amount: u128,
+    flags: u8,
+    client_order_id: u128,
+) {
     dex.place_order(
         &note.note.address,
         ParamsOfPlaceOrder {
@@ -170,7 +205,7 @@ pub async fn place_limit(
             is_buy,
             price: price_bps.to_string(),
             amount,
-            flags: 0,
+            flags,
             min_amount: 0,
             epoch_id: 0,
             client_order_id,

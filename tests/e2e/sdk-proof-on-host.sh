@@ -203,6 +203,11 @@ elif [ "$SUITE" = orders ]; then
   # the pool empty.
   FILTER='test(=resting_orders::non_crossing_orders_rest_and_cancel_local)'
   THREADS=1
+elif [ "$SUITE" = market ]; then
+  # Last of the five. Like the orders suite it spends a deployer and two
+  # trader notes, and the spec sizes the pool for both.
+  FILTER='test(=market_orders::a_market_buy_fills_and_never_rests_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
