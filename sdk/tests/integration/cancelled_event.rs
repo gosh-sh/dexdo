@@ -191,7 +191,16 @@ async fn a_cancelled_event_refunds_every_stake_and_closes_the_market_local() {
     })
     .await;
 
-    wait_owner_order(dex, &market.order_book, &staker.note.dih_dec, coid, false).await;
+    // Not "the order left the book" — there is no book left to ask. The drain
+    // hands the protocol fees to RootPN and destroys the account in the same
+    // message that reports completion, so a query here fails outright rather
+    // than answering "no such order". Its absence is the stronger statement
+    // anyway, and it is what this asserts.
+    poll_until(&format!("order book {} outlived its drain", market.order_book), || async {
+        r.account_absent(&market.order_book).await.expect("read the order book's account")
+    })
+    .await;
+
     assert_eq!(
         pn_locked(&r, &staker.note.address).await,
         staker_locked_before,
