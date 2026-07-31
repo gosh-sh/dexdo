@@ -40,6 +40,7 @@ mod order_book;
 mod parallel_setup;
 mod pmp;
 mod pn_basic;
+mod price_above_par;
 mod proof_money;
 mod resting_orders;
 mod shutdown_orders;

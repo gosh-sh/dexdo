@@ -423,3 +423,28 @@ E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=shutdown_orders::a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local)'
 ```
+
+### A price above par (`price_above_par`)
+
+`a_trade_above_par_costs_more_than_the_tokens_it_buys_local` trades one outcome token at 1.5
+collateral — half again what it can ever redeem for. Prices are basis points against
+`FULL_PERCENT = 10000` and the contracts put no upper bound on them: the book checks the tick
+multiple and the minimum notional and nothing else.
+
+Every other scenario prices below par, where a buy's collateral cost (`amount * price / 10000`)
+is smaller than the token count. Above par that inequality flips, so the test is that the buyer
+pays **at least** the notional it offered: a cap at par anywhere in the pricing would show up as
+the buyer paying no more than the token count. A bound rather than an equality, because the
+exact figure includes the contract's fee and restating that would check the implementation
+against itself. The seller's side is asserted the same way, on the account that received it.
+
+It keeps its own suite: if a price above par breaks the book, the damage should not be tangled
+up in another scenario's assertions.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=price_above_par::a_trade_above_par_costs_more_than_the_tokens_it_buys_local)'
+```

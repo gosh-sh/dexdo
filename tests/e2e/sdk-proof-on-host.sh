@@ -218,6 +218,12 @@ elif [ "$SUITE" = shutdown ]; then
   # `resultStart` before there is anything to observe.
   FILTER='test(=shutdown_orders::a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local)'
   THREADS=1
+elif [ "$SUITE" = abovepar ]; then
+  # Adversarial pricing, kept in its own suite: if a price above par breaks
+  # the book, the damage should not be tangled up in another scenario's
+  # assertions.
+  FILTER='test(=price_above_par::a_trade_above_par_costs_more_than_the_tokens_it_buys_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
