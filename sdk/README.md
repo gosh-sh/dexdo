@@ -341,27 +341,30 @@ E2E_RUN_ID=<generation> \
     -E 'test(=resting_orders::non_crossing_orders_rest_and_cancel_local)'
 ```
 
-### Market orders (`market_orders`)
+### Orders that must not rest (`market_orders`)
 
-`a_market_buy_fills_and_never_rests_local` rests an ask and then sends a market buy carrying
-more collateral than that ask can absorb, so a remainder is guaranteed. `OrderBook` inserts an
-unfilled remainder into the book for a limit order and returns it to the caller for a market
-one, and the difference is what this pins: the buyer's owner index comes back empty, its
-`_openOrderCount` is zero, and it has nothing left in `_lockedInOrders`. The failure it guards
-is silent — a market order that rested would hold escrow its owner believes it got back.
+`orders_that_must_not_rest_never_rest_local` walks one market through three phases, each
+reaching `OrderBook`'s never-rest branch from a different side: a market buy over a resting ask
+(`amount` in quote, remainder returned verbatim), a market sell over a resting bid (`amount` in
+base, remainder returned through the collateral conversion), and an IOC order into a book with
+nothing on either side. Each asserts the same shape — the sender's owner index empty afterwards
+and its `_lockedInOrders` exactly what it was before. Escrow is the half that matters: an order
+that rested would hold collateral, one that vanished without refunding would spend it.
 
-The fill itself is asserted in tokens, not collateral: the buyer gains exactly the ask's size.
-What the fill *cost* is the contract's fee arithmetic, and restating it here would assert the
-implementation against itself.
+The fills are asserted in tokens, never against a re-derivation of the contract's fee
+arithmetic. Phase 1 additionally asserts the buyer paid something, since a market order that
+matched nothing would satisfy the escrow reading too.
 
-Note that `amount` on a market buy is denominated in quote, not in outcome tokens.
+Three phases share one market and one pair of notes deliberately: they test one branch from
+three sides, and a scenario each would cost three notes and a pipeline step apiece for no extra
+coverage.
 
 ```sh
-E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
-E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
-E2E_RUN_ID=<generation> \
-  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
-    -E 'test(=market_orders::a_market_buy_fills_and_never_rests_local)'
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \\
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \\
+E2E_RUN_ID=<generation> \\
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \\
+    -E 'test(=market_orders::orders_that_must_not_rest_never_rest_local)'
 ```
 
 ### Matching priority (`matching_ladder`)

@@ -180,6 +180,11 @@ pub async fn place_limit(
 /// being inserted into the book.
 pub const FLAG_MARKET: u8 = 0x04;
 
+/// Immediate-or-cancel. Shares `FLAG_MARKET`'s never-rest branch in the book
+/// — whatever it cannot fill right now is returned — but keeps a usable
+/// price, so it is the flag for "cross what is there at my price or nothing".
+pub const FLAG_IOC: u8 = 0x01;
+
 /// [`place_limit`] with the order flags spelled out. Separate because the
 /// flags change what `amount` *means*: a market buy denominates it in quote
 /// (collateral), a limit order in base (outcome tokens).

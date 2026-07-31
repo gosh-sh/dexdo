@@ -1,34 +1,39 @@
-//! A market order takes the liquidity it finds and leaves nothing behind.
+//! Orders that must not rest, on all three paths through the branch that
+//! decides it.
 //!
-//! Every order this suite has ever placed was a limit order. A market order
-//! is a different instrument in two ways that the book implements as one
-//! branch each, and nothing exercises either:
+//! Every order the suite had placed was a plain limit order. `OrderBook`
+//! treats an unfilled remainder in exactly one place — inserted into the book
+//! for a limit order, returned to the caller for a market, IOC or FOK one —
+//! and nothing exercised the returning side. The failure it guards against is
+//! silent and permanent: an order that rested when it should not would sit
+//! there holding escrow its owner believes it got back.
 //!
-//! - **It never rests.** `OrderBook` inserts an unfilled remainder into the
-//!   book for a limit order and returns it to the caller for a market one.
-//!   The failure mode is silent and permanent: a market order that rested
-//!   would sit on the book holding escrow that its owner believes it got back.
-//! - **A market buy is denominated in quote.** `amount` is collateral, not
-//!   outcome tokens, and the unfilled part comes back unscaled by any price.
+//! One market, three phases, each reaching that branch differently:
 //!
-//! ## What it asserts
+//! 1. **Market buy over a resting ask.** `amount` is denominated in quote, and
+//!    the unfilled part comes back unscaled by any price.
+//! 2. **Market sell over a resting bid.** `amount` is in base instead, and the
+//!    remainder returns through the book's collateral conversion rather than
+//!    verbatim — the same branch, different arithmetic on either side of it.
+//! 3. **IOC into a book with nothing on either side.** The degenerate case:
+//!    nothing to fill, so the whole order is returned. A book that rested it
+//!    instead is indistinguishable from one that simply found no match, right
+//!    up until the escrow reading.
 //!
-//! A seller rests an ask; a buyer sends a market buy carrying more collateral
-//! than that ask can absorb, so there is necessarily a remainder:
+//! Each phase asserts the same shape — the sender's owner index is empty
+//! afterwards, and its `_lockedInOrders` is exactly what it was before the
+//! order. Escrow is the half that matters: an order that rested would hold
+//! collateral, and an order that vanished without refunding would spend it.
 //!
-//! - the ask is gone from the seller's index — the market order really did
-//!   meet liquidity, which is what stops the rest of this from passing
-//!   against an empty book;
-//! - the buyer's index is **empty** and its `_openOrderCount` is zero: the
-//!   remainder did not rest;
-//! - the buyer holds exactly the ask's size in outcome tokens — the fill was
-//!   the whole ask and nothing more;
-//! - the buyer has **nothing** left in `_lockedInOrders`. This is the escrow
-//!   half of "never rests", and it is stated as an equality against the
-//!   pre-order reading rather than against a re-derivation of what the fill
-//!   cost: the contract's fee arithmetic is its own business, but a market
-//!   order finishing with collateral still locked is a defect under any
-//!   arithmetic.
+//! What the fills *cost* is never asserted against a re-derivation of the
+//! contract's fee arithmetic — that would check the implementation against
+//! itself. Phases 1 and 2 assert the fill in tokens, which is exact, and
+//! phase 1 additionally asserts that the buyer paid *something*, since a
+//! market order that matched nothing would satisfy the escrow reading too.
+//!
+//! The three phases share one market and one pair of notes on purpose: they
+//! test one branch from three sides, and a scenario each would cost three
+//! notes and a pipeline step apiece for no extra coverage.
 //!
 //! Reads `E2E_NETWORK_ENDPOINT`, `E2E_SEED_NOTES` and `E2E_RUN_ID`; no
 //! manifest and no preflight, for the reasons `usdc_release` gives.
@@ -46,6 +51,7 @@ use crate::common::market::place_limit;
 use crate::common::market::place_order_with_flags;
 use crate::common::market::split_full_set;
 use crate::common::market::wait_owner_order;
+use crate::common::market::FLAG_IOC;
 use crate::common::market::FLAG_MARKET;
 use crate::common::misc::wait_not_busy;
 
@@ -64,9 +70,25 @@ const MARKET_BUY_QUOTE: u128 = 40_000_000_000;
 /// Collateral the seller splits to get something to sell.
 const SPLIT_COLLATERAL: u128 = 100_000_000_000;
 
+/// The bid the seller rests once it has been paid, so the market sell has
+/// something to hit. At `BID_BPS` it is worth 12 NACKL.
+const BID_BPS: &str = "6000";
+const BID_AMOUNT: u128 = 20_000_000_000;
+
+/// The market sell, in **base** — every token the buy above obtained, which
+/// is more than the bid can absorb.
+const MARKET_SELL_BASE: u128 = ASK_AMOUNT;
+
+/// The IOC order sent into a book with nothing on either side.
+const IOC_AMOUNT: u128 = 20_000_000_000;
+
+// The sell has to exceed the bid, or there is no remainder and the scenario
+// says nothing about what happens to one.
+const _: () = assert!(MARKET_SELL_BASE > BID_AMOUNT);
+
 #[tokio::test]
 #[ignore = "requires a local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID"]
-async fn a_market_buy_fills_and_never_rests_local() {
+async fn orders_that_must_not_rest_never_rest_local() {
     let run_id = std::env::var("E2E_RUN_ID").expect("E2E_RUN_ID must be set by the bootstrapper");
     let ledger_dir = allocator::seed_dir().expect("seed notes directory");
     let b0 = locks::ChainLockGuard::shared(&ledger_dir).expect("acquire b0.lock shared");
@@ -158,6 +180,100 @@ async fn a_market_buy_fills_and_never_rests_local() {
         buyer_free_after < buyer_free_before,
         "the buyer's free collateral did not fall ({buyer_free_before} -> {buyer_free_after}), \
          so nothing was paid for the tokens it holds"
+    );
+
+    // ── the same branch from the sell side ────────────────────────────────
+    //
+    // A market sell denominates `amount` in outcome tokens rather than quote,
+    // and its unfilled part comes back through `_collateralFor` rather than
+    // being returned unscaled. Same branch in the book, different arithmetic
+    // on either side of it, so the buy above does not cover this.
+    //
+    // The seller was paid in collateral for the ask; it now bids some of that
+    // back, giving the market sell something to hit.
+    let bid_coid = ask_coid + 10;
+    place_limit(dex, &seller, &market.key, OUTCOME, true, BID_BPS, BID_AMOUNT, bid_coid).await;
+    wait_owner_order(dex, &market.order_book, &seller.note.dih_dec, bid_coid, true).await;
+
+    let sell_tokens_before = outcome_tokens(dex, &buyer).await;
+    let sell_coid = ask_coid + 11;
+
+    // More tokens than the bid can absorb, so there is again a remainder to
+    // account for.
+    place_order_with_flags(
+        dex,
+        &buyer,
+        &market.key,
+        OUTCOME,
+        false,
+        "0",
+        MARKET_SELL_BASE,
+        FLAG_MARKET,
+        sell_coid,
+    )
+    .await;
+    wait_owner_order(dex, &market.order_book, &seller.note.dih_dec, bid_coid, false).await;
+    wait_not_busy(dex, &buyer.note.address, "market sell").await;
+    wait_not_busy(dex, &seller.note.address, "bid filled").await;
+
+    let after_sell = dex
+        .get_orders_by_owner(&market.order_book, buyer.note.dih_dec.clone())
+        .await
+        .expect("get_orders_by_owner");
+    assert!(
+        after_sell.orders.is_empty(),
+        "the market sell left {} order(s) resting",
+        after_sell.orders.len()
+    );
+    assert_eq!(
+        at(&outcome_tokens(dex, &buyer).await, OUTCOME),
+        at(&sell_tokens_before, OUTCOME) - BID_AMOUNT,
+        "the market sell gave up something other than exactly the {BID_AMOUNT} the bid took; \
+         the unsold remainder must come back rather than rest"
+    );
+
+    // ── and with no liquidity at all ──────────────────────────────────────
+    //
+    // Both sides of the book are empty now. An IOC order takes the same
+    // never-rest branch, and this is the degenerate case of it: nothing to
+    // fill, so the whole order is returned. A book that rested it instead
+    // would look identical to one that simply found no match — until the
+    // escrow reading below.
+    let ioc_free_before = pn_balance(&r, &buyer.note.address).await;
+    let ioc_locked_before = pn_locked(&r, &buyer.note.address).await;
+    let ioc_coid = ask_coid + 12;
+
+    place_order_with_flags(
+        dex,
+        &buyer,
+        &market.key,
+        OUTCOME,
+        true,
+        BID_BPS,
+        IOC_AMOUNT,
+        FLAG_IOC,
+        ioc_coid,
+    )
+    .await;
+    wait_not_busy(dex, &buyer.note.address, "ioc into an empty book").await;
+
+    let after_ioc = dex
+        .get_orders_by_owner(&market.order_book, buyer.note.dih_dec.clone())
+        .await
+        .expect("get_orders_by_owner");
+    assert!(
+        after_ioc.orders.is_empty(),
+        "the IOC order rested in an empty book instead of being returned"
+    );
+    assert_eq!(
+        pn_locked(&r, &buyer.note.address).await,
+        ioc_locked_before,
+        "the IOC order kept collateral locked after filling nothing"
+    );
+    assert_eq!(
+        pn_balance(&r, &buyer.note.address).await,
+        ioc_free_before,
+        "an IOC order that filled nothing still cost the note collateral"
     );
 
     seller.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });

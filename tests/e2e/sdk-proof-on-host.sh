@@ -206,7 +206,7 @@ elif [ "$SUITE" = orders ]; then
 elif [ "$SUITE" = market ]; then
   # Last of the five. Like the orders suite it spends a deployer and two
   # trader notes, and the spec sizes the pool for both.
-  FILTER='test(=market_orders::a_market_buy_fills_and_never_rests_local)'
+  FILTER='test(=market_orders::orders_that_must_not_rest_never_rest_local)'
   THREADS=1
 elif [ "$SUITE" = ladder ]; then
   # Last of the six. Spends a deployer and two trader notes like the other
