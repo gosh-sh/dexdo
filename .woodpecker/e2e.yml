@@ -328,7 +328,21 @@ steps:
   # Depends on sdk_proof: the two share the host lease and the stand, and
   # running them concurrently would have them rent notes from the same pool at
   # the same time.
+  # From here on every step declares `status: [success, failure]`. The chain of
+  # `depends_on` is what orders these steps on the one host they share; it is
+  # not a statement that each needs the previous to have passed. Without the
+  # clause a single failing scenario skips every later one, so a run reports
+  # the first broken thing and says nothing about the other nine -- four
+  # consecutive pipelines cost an hour each to surface one failure at a time.
+  # The stand is still up and the lease still held, so they may as well run.
+  #
+  # `sdk_proof` deliberately keeps no clause of its own: it is the step that
+  # opens the ledger generation the others lease their notes from. If it fails
+  # they will fail too, but quickly and with a legible allocator error rather
+  # than by being invisible.
   sdk_parallel_acceptance:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_proof
     image: *ansible_image
@@ -354,6 +368,8 @@ steps:
   # Last of the three: it leases a note the proof run returns, and it
   # quarantines the pool's only PN-USDC note for the rest of the generation.
   sdk_usdc_release:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_parallel_acceptance
     image: *ansible_image
@@ -378,6 +394,8 @@ steps:
   # that both needs a market of its own and spends the notes it takes, so
   # anything after it would find the pool empty.
   sdk_resting_orders:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_usdc_release
     image: *ansible_image
@@ -401,6 +419,8 @@ steps:
   # Market-order semantics, last of the SDK steps for the same reason the
   # orders suite was before it: it spends the notes it takes.
   sdk_market_orders:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_resting_orders
     image: *ansible_image
@@ -424,6 +444,8 @@ steps:
   # Matching priority: which resting order a taker eats first. Last of the
   # SDK steps, for the same note-spending reason as the two before it.
   sdk_matching_ladder:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_market_orders
     image: *ansible_image
@@ -448,6 +470,8 @@ steps:
   # them. Last of the SDK steps and the slowest, since it idles until
   # `resultStart` before there is anything to look at.
   sdk_shutdown_orders:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_matching_ladder
     image: *ansible_image
@@ -471,6 +495,8 @@ steps:
   # A trade above par: prices have no upper bound, and the arithmetic that
   # breaks above one is the arithmetic nothing else exercises.
   sdk_price_above_par:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_shutdown_orders
     image: *ansible_image
@@ -494,6 +520,8 @@ steps:
   # Bounce recovery: a note that paid something that was not there. No
   # market and one note, so it is the cheapest step on the stand.
   sdk_bounce_recovery:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_price_above_par
     image: *ansible_image
@@ -515,6 +543,8 @@ steps:
         bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
   sdk_cancelled_event:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_bounce_recovery
     image: *ansible_image
@@ -536,6 +566,8 @@ steps:
         bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
   sdk_bounce_deploy:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_cancelled_event
     image: *ansible_image
@@ -557,6 +589,8 @@ steps:
         bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
   assert_deploy_dexdo:
+    when:
+      - status: [success, failure]
     depends_on:
       - sdk_bounce_deploy
     image: *ansible_image
@@ -571,6 +605,8 @@ steps:
         "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
 
   deploy_dexdo:
+    when:
+      - status: [success, failure]
     depends_on:
       - assert_deploy_dexdo
     image: *ansible_image
@@ -588,6 +624,8 @@ steps:
         -e dexdo_seed_notes_src="$CI_WORKSPACE/$SEED_NOTES_WS"
 
   assert_e2e_tests:
+    when:
+      - status: [success, failure]
     depends_on:
       - deploy_dexdo
     image: *ansible_image
@@ -602,6 +640,8 @@ steps:
         "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
 
   e2e_tests:
+    when:
+      - status: [success, failure]
     depends_on:
       - assert_e2e_tests
     image: *ansible_image

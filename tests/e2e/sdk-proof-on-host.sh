@@ -122,6 +122,16 @@ dump_stand_logs() {
 on_exit() {
   rc=$?
   set +e
+  # Kill the heartbeat's `sleep` BEFORE the heartbeat itself, and not only for
+  # tidiness: the subshell inherits this script's stdout/stderr, which over SSH
+  # are the pipes the client waits on for EOF. `sleep` is a separate process
+  # that survives its parent, keeps those pipes open, and pins every step to
+  # the next multiple of the heartbeat interval no matter how long the suite
+  # actually took -- which is why steps measured 303s for a 14s test and 604s
+  # for a 150s one. Killing the child first also ends the loop on its own: the
+  # `while sleep 300` condition fails, so the subshell exits without spawning
+  # another.
+  pkill -P "$HB" 2>/dev/null
   kill "$HB" 2>/dev/null || true
   rm -f "$SUITE_PID_FILE"
   [ "$rc" -eq 0 ] || dump_stand_logs
