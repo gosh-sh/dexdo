@@ -1410,19 +1410,23 @@ mod tests {
     /// spec edit that drops a group surfaces as a scenario failing to rent,
     /// 20 minutes into a pipeline, on a stand that then has to be rebuilt.
     ///
-    /// - `Dep` 8: `proof_money` rents one and gives it back, so it costs
+    /// - `Dep` 10: `proof_money` rents one and gives it back, so it costs
     ///   nothing. `parallel_setup` rents two *at once* — one per process — and
     ///   quarantines both. `resting_orders`, `market_orders`,
     ///   `matching_ladder`, `shutdown_orders`, `price_above_par` and
-    ///   `cancelled_event` deploy a market each and spend one apiece. Two of
-    ///   the eight are gone before any of those steps starts.
-    /// - `Trd` 12: `proof_money` takes two and returns both, and
+    ///   `cancelled_event` deploy a market each and spend one apiece.
+    ///   `bounce_deploy` takes two: one for the market it never freezes, and
+    ///   one for the market that fails to come up — the second is offered
+    ///   back, since a bounced deploy leaves the note where it found it. Two
+    ///   of the ten are gone before any of those steps starts.
+    /// - `Trd` 13: `proof_money` takes two and returns both, and
     ///   `usdc_release` borrows one and returns it — none of that costs
     ///   anything. `resting_orders`, `market_orders`, `matching_ladder`,
     ///   `shutdown_orders` and `price_above_par` take two each and spend
     ///   them; `bounce_recovery` takes one more and spends it too —
     ///   `initTransfer` latches `_hasTransferred`, which the sweep counts as
-    ///   dirty for good. `cancelled_event` takes the twelfth.
+    ///   dirty for good. `cancelled_event` takes the twelfth and
+    ///   `bounce_deploy` the thirteenth.
     /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
     ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
     ///
@@ -1446,7 +1450,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 8), (PnProfile::Trd, 12), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 10), (PnProfile::Trd, 13), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

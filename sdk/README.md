@@ -506,3 +506,36 @@ E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=cancelled_event::a_cancelled_event_refunds_every_stake_and_closes_the_market_local)'
 ```
+
+### Bounced deploy and bounced orders (`bounce_deploy`)
+
+`a_bounced_deploy_and_a_bounced_order_both_give_the_money_back_local` covers the two bounce
+branches that move real money, which `bounce_recovery` deliberately leaves alone because they need
+a market.
+
+The first names an oracle event list that was never deployed. The note debits its initial stakes
+and attaches the oracle fee plus the network fee as **physical** SHELL; the market is created, its
+`confirmEvent` bounces off an address with no account, and `onBounce` refunds and self-destructs.
+The loss this used to leave was invisible to a conservation check — value moved from the note to
+`RootPN`, both inside the tracked set, so the system total stayed right while the deployer was out
+of pocket. Only a per-account delta sees it, which is why the invariant helper has a physical mode
+at all. As of contracts v4.0.30 `onBounce` mirrors `rejectEvent` and forwards the bounced oracle
+fee back; the network fee is not in that message and leaves with the self-destruct, so the
+assertion is that the deployer is down by exactly the network fee and `RootPN` up by exactly the
+same.
+
+The second sends orders before the freeze, when the `OrderBook` address is derivable but the
+account is not there. Buy and sell fail differently and are both covered — a buy has collateral
+moved into `_pendingPlaceBuyLock`, a sell has outcome tokens taken out of `stake.amount` — and a
+third order reusing a bounced client order id proves the id was released. `_opNonce` is the
+discriminator throughout: restoring a balance leaves the note looking exactly as it did before the
+order, so "unchanged" is equally true of an order that was refused outright, but `placeOrder` bumps
+that counter after its checks and nothing ever clears it.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=bounce_deploy::a_bounced_deploy_and_a_bounced_order_both_give_the_money_back_local)'
+```

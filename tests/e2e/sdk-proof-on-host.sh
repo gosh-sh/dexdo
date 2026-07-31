@@ -229,6 +229,12 @@ elif [ "$SUITE" = bounce ]; then
   # counterparties it addresses are chosen because nothing is there.
   FILTER='test(=bounce_recovery::a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local)'
   THREADS=1
+elif [ "$SUITE" = bouncedeploy ]; then
+  # The two bounce branches that move real money: a market whose oracle list
+  # is not there, and orders sent before the book exists. Needs a market for
+  # the second half only, and never freezes it.
+  FILTER='test(=bounce_deploy::a_bounced_deploy_and_a_bounced_order_both_give_the_money_back_local)'
+  THREADS=1
 elif [ "$SUITE" = cancelled ]; then
   # The other way a market can end. Needs the staking window, so it brings the
   # market up in two halves and stakes in between — the only suite here that

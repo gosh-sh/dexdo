@@ -82,6 +82,11 @@ const ROOT_DEPLOYED_VALUES: &str = "_deployedValues";
 /// makes it the one way to tell a bounced transfer from one the note refused
 /// before `tvm.accept()` and left no other trace of.
 const PN_HAS_TRANSFERRED: &str = "_hasTransferred";
+/// The note's all-time operation counter, bumped by every order operation and
+/// never reset — which is what makes it usable as evidence that an order was
+/// accepted at all. Contrast `_busyOpNonce`, the in-flight one the sweep
+/// requires to be zero at rest.
+const PN_OP_NONCE: &str = "_opNonce";
 
 const QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -810,6 +815,21 @@ pub async fn pn_has_transferred(r: &ChainReader, pn: &str) -> anyhow::Result<boo
     field_bool(&fields, PN_HAS_TRANSFERRED)
 }
 
+/// The note's all-time order-operation counter (`PrivateNote._opNonce`).
+///
+/// `placeOrder`, `cancelOrder`, `cancelOrderByClient` and `placeBatch` each
+/// increment it, and nothing ever clears it. That makes it the one readable
+/// proof that an order operation was *accepted*: an operation refused by a
+/// `require` leaves the note byte-identical, so a scenario checking that a
+/// bounce restored a balance cannot otherwise tell recovery apart from a call
+/// that never ran.
+pub async fn pn_op_nonce(r: &ChainReader, pn: &str) -> anyhow::Result<u64> {
+    let fields = pn_fields_opt(r, pn)
+        .await?
+        .ok_or_else(|| anyhow!("note {pn} holds no account on this stand"))?;
+    field_u64(&fields, PN_OP_NONCE)
+}
+
 /// What the market still owes anyone — `PMP.getUnclaimedBalance`, the real
 /// collateral behind its pools.
 ///
@@ -931,6 +951,13 @@ fn field_uint_map(fields: &Value, name: &str) -> anyhow::Result<BTreeMap<u32, u1
 
 /// Integers narrower than 256 bits decode to decimal strings, not JSON numbers.
 fn field_u32(fields: &Value, name: &str) -> anyhow::Result<u32> {
+    let raw = field(fields, name)?
+        .as_str()
+        .ok_or_else(|| anyhow!("storage field `{name}` is not a string"))?;
+    raw.parse().with_context(|| format!("parse `{name}` value `{raw}`"))
+}
+
+fn field_u64(fields: &Value, name: &str) -> anyhow::Result<u64> {
     let raw = field(fields, name)?
         .as_str()
         .ok_or_else(|| anyhow!("storage field `{name}` is not a string"))?;
@@ -1522,6 +1549,7 @@ mod tests {
                     PN_STAKES,
                     PN_HAS_WITHDRAWN,
                     PN_HAS_TRANSFERRED,
+                    PN_OP_NONCE,
                 ],
             ),
             (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL, PMP_FROZEN]),

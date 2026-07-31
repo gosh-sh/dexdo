@@ -27,6 +27,7 @@
 //! Each `mod` declaration here pulls in `tests/integration/<name>.rs` (or
 //! `tests/integration/<name>/mod.rs` for the multi-file `common` module).
 
+mod bounce_deploy;
 mod bounce_recovery;
 mod cancelled_event;
 mod common;
