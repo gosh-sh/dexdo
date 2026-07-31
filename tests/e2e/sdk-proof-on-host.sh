@@ -224,6 +224,11 @@ elif [ "$SUITE" = abovepar ]; then
   # assertions.
   FILTER='test(=price_above_par::a_trade_above_par_costs_more_than_the_tokens_it_buys_local)'
   THREADS=1
+elif [ "$SUITE" = bounce ]; then
+  # The cheapest suite here: no market, no deployer, one note. The
+  # counterparties it addresses are chosen because nothing is there.
+  FILTER='test(=bounce_recovery::a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

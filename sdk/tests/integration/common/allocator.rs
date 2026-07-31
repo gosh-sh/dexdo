@@ -1420,7 +1420,9 @@ mod tests {
     ///   borrows one and returns it — none of that costs anything.
     ///   `resting_orders`, `market_orders`, `matching_ladder`,
     ///   `shutdown_orders` and `price_above_par` take two each and spend
-    ///   them, which is the whole ten.
+    ///   them; `bounce_recovery` takes one more and spends it too —
+    ///   `initTransfer` latches `_hasTransferred`, which the sweep counts as
+    ///   dirty for good. Eleven in all.
     ///
     /// The pool grows by three notes per market-deploying scenario, because a
     /// note that has traded holds a stake record and outcome tokens and can
@@ -1437,7 +1439,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 7), (PnProfile::Trd, 10), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 7), (PnProfile::Trd, 11), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

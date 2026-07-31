@@ -448,3 +448,31 @@ E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=price_above_par::a_trade_above_par_costs_more_than_the_tokens_it_buys_local)'
 ```
+
+### Bounce recovery (`bounce_recovery`)
+
+`a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local` sends two operations to
+counterparties that do not exist — an `initTransfer` to an undeployed note and a `setStake`
+against an underived market — and asserts the note gets its collateral back both times. Every
+note operation is fire-and-forget: it debits itself, sets `_busy` to the counterparty and
+sends, so `onBounce` is the only thing between the owner and a note that is both poorer and
+permanently locked.
+
+Each phase carries its own discriminator, because "the balance is unchanged" is equally true of
+an operation that was refused before `tvm.accept()` and left no trace. The transfer's is
+`_hasTransferred`, latched on acceptance and never cleared; the stake's is the `_stakes` record
+a bounced stake leaves behind. The second also proves the first: `setStake` refuses outright
+when `_busy` is set, so a record existing at all means the transfer's bounce really did unlock
+the note.
+
+Needs no market, no deployer and one note — the cheapest suite on the stand. The note is spent:
+`_hasTransferred` is dirty for good by the pool sweep, correctly, since a note that has moved
+value out is not interchangeable with a fresh one.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=bounce_recovery::a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local)'
+```

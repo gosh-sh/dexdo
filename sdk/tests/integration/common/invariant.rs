@@ -77,6 +77,11 @@ const PN_HAS_WITHDRAWN: &str = "_hasWithdrawn";
 /// RootPN's tally of what it owes the notes, per token type. There is no
 /// getter for it, so it is read off the account BOC like everything here.
 const ROOT_DEPLOYED_VALUES: &str = "_deployedValues";
+/// Latched by `initTransfer` the moment the note accepts one, and never
+/// cleared. The only outward sign that a transfer was processed at all, which
+/// makes it the one way to tell a bounced transfer from one the note refused
+/// before `tvm.accept()` and left no other trace of.
+const PN_HAS_TRANSFERRED: &str = "_hasTransferred";
 
 const QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -796,6 +801,15 @@ pub async fn pn_locked_opt(r: &ChainReader, pn: &str, tt: u32) -> anyhow::Result
     Ok(Some(field_uint_map(&fields, PN_LOCKED_IN_ORDERS)?.get(&tt).copied().unwrap_or(0)))
 }
 
+/// Whether the note has ever accepted an `initTransfer`
+/// (`PrivateNote._hasTransferred`). Latched, never cleared — see the constant.
+pub async fn pn_has_transferred(r: &ChainReader, pn: &str) -> anyhow::Result<bool> {
+    let fields = pn_fields_opt(r, pn)
+        .await?
+        .ok_or_else(|| anyhow!("note {pn} holds no account on this stand"))?;
+    field_bool(&fields, PN_HAS_TRANSFERRED)
+}
+
 /// How many orders the note believes it has resting
 /// (`PrivateNote._openOrderCount`). The note's own count, not the book's —
 /// the two are updated by different contracts, and a scenario asserting the
@@ -1473,6 +1487,7 @@ mod tests {
                     PN_OPEN_ORDER_COUNT,
                     PN_STAKES,
                     PN_HAS_WITHDRAWN,
+                    PN_HAS_TRANSFERRED,
                 ],
             ),
             (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL, PMP_FROZEN]),
