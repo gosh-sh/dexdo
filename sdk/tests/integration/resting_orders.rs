@@ -43,8 +43,15 @@
 //! cancelled. The bid's own remaining size is asserted first, because every
 //! figure after it depends on the fill having been exactly the size the ask
 //! offered. Then: escrow back to its baseline, and the buyer short by what the
-//! filled part cost and no more — bounded below by the exact token cost and
-//! above by a fee cap, never by a restatement of the contract's fee formula.
+//! filled part cost and no more.
+//!
+//! Note which side that buyer is on. Its bid was resting and the ask crossed
+//! into it, so it is the **maker**: it pays no taker fee and earns a rebate,
+//! ending up marginally *below* the tokens' price. The bounds are stated in
+//! that direction — never more than the token cost, never further below it
+//! than a rebate can account for — and both are caps rather than the
+//! contract's fee formula, which restated here would check the implementation
+//! against itself.
 //!
 //! ## Why the two orders belong to different notes
 //!
@@ -329,22 +336,32 @@ async fn non_crossing_orders_rest_and_cancel_local() {
         locked_before_partial,
         "cancelling a partly filled bid left collateral escrowed against an order that is gone"
     );
-    // What is left is what the fill cost, and nothing else. The lower bound is
-    // exact — the tokens at the price they cleared at; the upper bound is a
-    // fee cap rather than the fee, so this does not restate the contract's own
-    // arithmetic. A refund of the *original* lock would put the buyer above
-    // `free_before_partial`, and no refund at all would put it a whole
-    // `ORDER_AMOUNT` notional below.
+    // What is left is what the fill cost, and nothing else.
+    //
+    // Which way the fee points is decided by which side rested: this buyer's
+    // bid was on the book and the ask crossed into it, so the buyer is the
+    // **maker**. It pays no taker fee — it earns a rebate, three quarters of
+    // the fee the seller paid — and therefore ends up marginally *below* the
+    // tokens' price rather than above it. The bounds say exactly that: never
+    // more than the token cost, and never further below it than a rebate can
+    // account for. Both bounds are caps rather than the contract's own
+    // arithmetic, which restated here would check the implementation against
+    // itself.
+    //
+    // The two failures this separates are far outside that band: no refund at
+    // all leaves the buyer a whole `ORDER_AMOUNT` notional down, and a refund
+    // of the *original* lock leaves it barely down at all.
     let spent = free_before_partial - pn_balance(&r, &buyer.note.address).await;
     assert!(
-        spent >= PARTIAL_FILL_COST,
-        "the buyer spent {spent} on a fill worth {PARTIAL_FILL_COST} — it got tokens it did not \
-         pay for"
+        spent <= PARTIAL_FILL_COST,
+        "the buyer spent {spent} on a fill worth {PARTIAL_FILL_COST} — a resting bid is the maker \
+         side and is never charged more than the tokens' price"
     );
     assert!(
-        spent <= PARTIAL_FILL_COST + PARTIAL_FILL_COST * FEE_CAP_PERMILLE / 1000,
-        "the buyer spent {spent}, more than the {PARTIAL_FILL_COST} the filled part cost plus any \
-         plausible fee: the unfilled remainder of the lock did not come back"
+        spent >= PARTIAL_FILL_COST - PARTIAL_FILL_COST * FEE_CAP_PERMILLE / 1000,
+        "the buyer spent only {spent} of the {PARTIAL_FILL_COST} the filled part cost, further \
+         below it than a maker rebate can explain: the cancel refunded more than the unfilled \
+         remainder"
     );
     assert_eq!(
         at(&outcome_tokens(dex, &buyer).await, OUTCOME),
