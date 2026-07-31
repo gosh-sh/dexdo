@@ -63,9 +63,42 @@
 //! remainder with no owner — neither shows up in a token count, and both are
 //! invisible from either side alone.
 //!
+//! ## Trading with yourself
+//!
+//! Nothing stops one note from taking its own resting order — the book
+//! matches on price and arrival, not on owner. What stops it from being worth
+//! doing is the fee: the taker side pays it in full, the maker side gets three
+//! quarters of it back as a rebate, and the quarter that stays with the book
+//! is a strict loss. A third phase makes that trade and reads the loss against
+//! the book's own protocol-fee counter. They have to be the same number: a
+//! rebate that ever exceeded the fee would make wash-trading pay, and the
+//! ledger would show the note ending richer than it started.
+//!
+//! ## The remainders a floor leaves behind
+//!
+//! A buy locks what its whole size costs, once. Its fills are charged one at a
+//! time, each floored to a whole unit of collateral, so a size delivered in
+//! several fills costs slightly less than the same size in one — and the
+//! difference sits in the order's lock with nobody to claim it. The fourth
+//! phase arranges exactly that: a resting buy consumed by three market sells
+//! whose sizes make every fill lose a fraction, and a lock that ends one unit
+//! above the sum of the fills.
+//!
+//! What it reads afterwards is that the note's escrow is **empty**, not one
+//! unit short of it. A book that decremented only what the fills consumed
+//! would leave that unit locked forever, invisible to every reading except
+//! this one.
+//!
+//! The same phase carries the fee split, because two accounts see it from
+//! opposite sides: the buyer's collateral is short by the fills' cost minus
+//! the rebates it collected, the seller's is up by the same cost minus the
+//! fees it paid, and the book keeps the difference. Each total is recovered
+//! from its own account, so asserting that they add up is a statement about
+//! where the money went rather than a re-derivation of the rate it went at.
+//!
 //! ## What this does not cover
 //!
-//! Self-matching and IOC into an empty side are separate units.
+//! IOC into an empty side is a separate unit.
 //!
 //! Reads `E2E_NETWORK_ENDPOINT`, `E2E_SEED_NOTES` and `E2E_RUN_ID`; no
 //! manifest and no preflight, for the reasons `usdc_release` gives.
@@ -80,8 +113,11 @@ use crate::common::market::at;
 use crate::common::market::deploy_ephemeral_market;
 use crate::common::market::outcome_tokens;
 use crate::common::market::place_limit;
+use crate::common::market::place_order_with_flags;
 use crate::common::market::split_full_set;
 use crate::common::market::wait_owner_order;
+use crate::common::market::FLAG_MARKET;
+use crate::common::misc::poll_until;
 use crate::common::misc::wait_not_busy;
 
 const STAKE_PERIOD_LADDER: u64 = 300;
@@ -141,9 +177,72 @@ const _: () = assert!(TAKE2_AMOUNT < A2_REMAINING + ASK_AMOUNT);
 // "charged at the makers' prices" from "charged at the limit price".
 const _: () = assert!(TAKE2_COST_UNIMPROVED - TAKE2_COST > TAKE2_COST * FEE_CAP_PERMILLE / 1000);
 
-/// Collateral the maker splits. Three asks need 60 outcome tokens; a split of
-/// this yields roughly 100 of each.
+/// Collateral the maker splits. Three asks need 60 outcome tokens, the
+/// self-match another 20, and the floor phase's buy is paid for in collateral
+/// rather than tokens; a split of this yields roughly 100 of each.
 const SPLIT_COLLATERAL: u128 = 200_000_000_000;
+
+/// The 10 NACKL floor under any order's value, mirroring
+/// `MIN_ORDER_NOTIONAL_NACKL`.
+const MIN_ORDER_NOTIONAL: u128 = 10_000_000_000;
+
+/// The 0.01 NACKL lot every limit order's size is quantised to.
+const LOT: u128 = 10_000_000;
+
+/// The tick every price is quantised to.
+const TICK: u128 = 10;
+
+/// The self-match. Priced under `WORSE_BPS` so A3 stays out of reach and the
+/// note's own ask is the only thing its buy can find.
+const SELF_BPS: u128 = 6_000;
+const SELF_AMOUNT: u128 = 20_000_000_000;
+
+const _: () = assert!(SELF_BPS < WORSE_BPS);
+const _: () = assert!(SELF_AMOUNT.is_multiple_of(LOT));
+const _: () = assert!(SELF_AMOUNT * SELF_BPS / FULL_PERCENT >= MIN_ORDER_NOTIONAL);
+
+/// The floor phase's resting buy. The price is a tick multiple that is *not* a
+/// multiple of the 1000 that would make every fill's cost land on a whole
+/// unit — without that, no arrangement of fills loses anything to the floor
+/// and the phase asserts an empty set.
+const RESIDUAL_BPS: u128 = 6_010;
+const RESIDUAL_AMOUNT: u128 = 20_000_000_000;
+
+/// The three market sells that consume it. Market orders are not lot-quantised
+/// — that is what allows sizes whose cost has a fractional part at all — and
+/// they add up to the buy exactly, so the third one closes it.
+const FILL_A: u128 = 6_666_666_666;
+const FILL_B: u128 = 6_666_666_666;
+const FILL_C: u128 = RESIDUAL_AMOUNT - FILL_A - FILL_B;
+
+/// What each of them costs, floored per fill the way the book floors it.
+const COST_A: u128 = FILL_A * RESIDUAL_BPS / FULL_PERCENT;
+const COST_B: u128 = FILL_B * RESIDUAL_BPS / FULL_PERCENT;
+const COST_C: u128 = FILL_C * RESIDUAL_BPS / FULL_PERCENT;
+const SUM_FILL_COST: u128 = COST_A + COST_B + COST_C;
+
+/// What the same size costs charged in one go — the figure the order's lock is
+/// sized from.
+const WHOLE_ORDER_COST: u128 = RESIDUAL_AMOUNT * RESIDUAL_BPS / FULL_PERCENT;
+
+/// The gap between the two: collateral the buyer locked, the fills never
+/// consumed, and nobody would ever ask for.
+const FLOOR_RESIDUAL: u128 = WHOLE_ORDER_COST - SUM_FILL_COST;
+
+/// How many fills that phase makes. A floored three-quarters can fall short of
+/// the exact one by less than a unit each time, and no more.
+const RESIDUAL_FILLS: u128 = 3;
+
+// The point of the arrangement: charged fill by fill, the order costs strictly
+// less than its own lock. Without this the phase would assert that an empty
+// escrow is empty.
+const _: () = assert!(FLOOR_RESIDUAL > 0);
+const _: () = assert!(RESIDUAL_BPS.is_multiple_of(TICK));
+const _: () = assert!(RESIDUAL_AMOUNT.is_multiple_of(LOT));
+const _: () = assert!(WHOLE_ORDER_COST >= MIN_ORDER_NOTIONAL);
+const _: () = assert!(FILL_A + FILL_B + FILL_C == RESIDUAL_AMOUNT);
+// And it must not cross A3, which is still resting from the phases above.
+const _: () = assert!(RESIDUAL_BPS < WORSE_BPS);
 
 // The taker has to clear one whole ask and stop inside the next. Sized into an
 // even division, "A2 has 10 left" becomes "A2 is gone" and the ordering claim
@@ -358,6 +457,216 @@ async fn a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local() {
         "the taker paid {taker_paid}, the maker received {maker_gained} and the book kept \
          {protocol_gained}: {} went nowhere",
         taker_paid as i128 - (maker_gained + protocol_gained) as i128
+    );
+
+    // ── one note on both sides ────────────────────────────────────────────
+    //
+    // The book has no notion of who owns what it matches, so a note can take
+    // its own order. What makes that pointless rather than free is the fee
+    // split: the taker leg pays the fee, the maker leg is rebated three
+    // quarters of it, and the quarter left with the book is the whole of the
+    // trade's result. Both legs land on the same note, so its net is readable
+    // as one number — and has to equal what the book kept.
+    let self_ask_coid = base + 6;
+    let self_buy_coid = base + 7;
+    let maker_tokens_at_self = at(&outcome_tokens(dex, &maker).await, OUTCOME);
+    assert!(
+        maker_tokens_at_self >= SELF_AMOUNT,
+        "the maker holds {maker_tokens_at_self} outcome-{OUTCOME} tokens, not the {SELF_AMOUNT} \
+         the self-match needs"
+    );
+    let self_free_before = pn_free(&r, &maker.note.address).await;
+    let self_fees_before = book_fees(dex, &market.order_book).await;
+
+    place_limit(
+        dex,
+        &maker,
+        &market.key,
+        OUTCOME,
+        false,
+        &SELF_BPS.to_string(),
+        SELF_AMOUNT,
+        self_ask_coid,
+    )
+    .await;
+    wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, self_ask_coid, true).await;
+
+    place_limit(
+        dex,
+        &maker,
+        &market.key,
+        OUTCOME,
+        true,
+        &SELF_BPS.to_string(),
+        SELF_AMOUNT,
+        self_buy_coid,
+    )
+    .await;
+    // The ask leaving the book is the match; both legs settle on the one note,
+    // so waiting for it to go quiet covers the rest.
+    wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, self_ask_coid, false).await;
+    wait_not_busy(dex, &maker.note.address, "the self-match").await;
+
+    assert_eq!(
+        at(&outcome_tokens(dex, &maker).await, OUTCOME),
+        maker_tokens_at_self,
+        "a note that sold {SELF_AMOUNT} tokens to itself and bought them back does not hold what \
+         it started with"
+    );
+    assert_eq!(
+        pn_locked(&r, &maker).await,
+        0,
+        "the self-match left collateral locked; both of its orders are gone"
+    );
+
+    // The claim. A wash trade costs the note exactly the book's cut — no more,
+    // which would mean collateral leaking somewhere unnamed, and no less,
+    // which would mean the rebate paying for the privilege of trading with
+    // yourself.
+    let self_after = pn_free(&r, &maker.note.address).await;
+    let self_loss = self_free_before.checked_sub(self_after).unwrap_or_else(|| {
+        panic!(
+            "the note came out of a trade with itself richer ({self_free_before} -> \
+             {self_after}) — the rebate paid for more than the fee cost"
+        )
+    });
+    let self_kept = book_fees(dex, &market.order_book).await - self_fees_before;
+    assert!(self_kept > 0, "a self-match at {SELF_BPS} bps cost the book's counter nothing");
+    assert_eq!(
+        self_loss, self_kept,
+        "the note is out {self_loss} on a trade with itself while the book kept {self_kept}: \
+         wash-trading is either subsidised or overcharged by {}",
+        self_loss as i128 - self_kept as i128
+    );
+
+    // ── what a floor leaves in the lock ───────────────────────────────────
+    //
+    // The buy below is locked for what its whole size costs and charged for
+    // each fill separately, floored. Three fills, each losing a fraction, end
+    // one unit under the lock — and that unit has to come back rather than sit
+    // in escrow forever.
+    let residual_coid = base + 8;
+    let residual_free_before = pn_free(&r, &maker.note.address).await;
+    let residual_tokens_before = at(&outcome_tokens(dex, &maker).await, OUTCOME);
+    let seller_free_before = pn_free(&r, &taker.note.address).await;
+    let seller_tokens_before = at(&outcome_tokens(dex, &taker).await, OUTCOME);
+    let residual_fees_before = book_fees(dex, &market.order_book).await;
+    assert!(
+        seller_tokens_before >= RESIDUAL_AMOUNT,
+        "the seller holds {seller_tokens_before} outcome-{OUTCOME} tokens, not the \
+         {RESIDUAL_AMOUNT} this phase sells"
+    );
+
+    place_limit(
+        dex,
+        &maker,
+        &market.key,
+        OUTCOME,
+        true,
+        &RESIDUAL_BPS.to_string(),
+        RESIDUAL_AMOUNT,
+        residual_coid,
+    )
+    .await;
+    wait_owner_order(dex, &market.order_book, &maker.note.dih_dec, residual_coid, true).await;
+
+    let mut left = RESIDUAL_AMOUNT;
+    for (i, fill) in [FILL_A, FILL_B, FILL_C].into_iter().enumerate() {
+        let before = left;
+        place_order_with_flags(
+            dex,
+            &taker,
+            &market.key,
+            OUTCOME,
+            false,
+            "0",
+            fill,
+            FLAG_MARKET,
+            base + 20 + i as u128,
+        )
+        .await;
+        // Wait for the bid to move at all, then say what it moved to. Polling
+        // for the expected figure would turn a wrong one into a timeout.
+        poll_until(&format!("market sell {} never reached the bid", i + 1), || async {
+            maker_orders(dex, &market.order_book, &maker.note.dih_dec)
+                .await
+                .get(&residual_coid)
+                .copied()
+                != Some(before)
+        })
+        .await;
+        wait_not_busy(dex, &taker.note.address, "market sell into the resting bid").await;
+        left -= fill;
+
+        let resting = maker_orders(dex, &market.order_book, &maker.note.dih_dec).await;
+        let seen = resting.get(&residual_coid).copied();
+        let want = if left == 0 { None } else { Some(left) };
+        assert_eq!(
+            seen, want,
+            "after selling {fill} into it the bid holds {seen:?}, not {want:?}"
+        );
+    }
+    wait_not_busy(dex, &maker.note.address, "the bid filling out").await;
+
+    // The drain. The lock was sized from `WHOLE_ORDER_COST` and the fills only
+    // ever consumed `SUM_FILL_COST`; the difference is returned on the fill
+    // that closes the order, so escrow ends empty rather than holding
+    // `FLOOR_RESIDUAL` nobody can reach.
+    assert_eq!(
+        pn_locked(&r, &maker).await,
+        0,
+        "the closed buy left {FLOOR_RESIDUAL} of floor residual locked instead of returning it"
+    );
+    assert_eq!(
+        at(&outcome_tokens(dex, &maker).await, OUTCOME),
+        residual_tokens_before + RESIDUAL_AMOUNT,
+        "the buyer did not receive the {RESIDUAL_AMOUNT} tokens its bid was filled with"
+    );
+    assert_eq!(
+        at(&outcome_tokens(dex, &taker).await, OUTCOME),
+        seller_tokens_before - RESIDUAL_AMOUNT,
+        "the seller gave up something other than the {RESIDUAL_AMOUNT} tokens it sold"
+    );
+
+    // Each side's totals, recovered from its own account: the buyer is short
+    // the fills' cost less what it was rebated, the seller is up that cost
+    // less what it paid in fees.
+    let buyer_out = residual_free_before - pn_free(&r, &maker.note.address).await;
+    let total_rebate = SUM_FILL_COST.checked_sub(buyer_out).unwrap_or_else(|| {
+        panic!(
+            "the buyer is out {buyer_out} on fills worth {SUM_FILL_COST} — more than the tokens \
+             cost, with a rebate that is supposed to come back on top"
+        )
+    });
+    let seller_in = pn_free(&r, &taker.note.address).await - seller_free_before;
+    let total_fee = SUM_FILL_COST.checked_sub(seller_in).unwrap_or_else(|| {
+        panic!(
+            "the seller received {seller_in} for fills worth {SUM_FILL_COST} — more than the \
+             tokens were sold for, with a fee that is supposed to come off the top"
+        )
+    });
+    let protocol_kept = book_fees(dex, &market.order_book).await - residual_fees_before;
+
+    assert!(total_fee > 0, "three fills worth {SUM_FILL_COST} cost the taker no fee at all");
+    assert_eq!(
+        protocol_kept,
+        total_fee - total_rebate,
+        "the taker paid {total_fee} in fees, {total_rebate} came back to the maker and the book \
+         kept {protocol_kept}: {} is unaccounted for",
+        total_fee as i128 - total_rebate as i128 - protocol_kept as i128
+    );
+
+    // And the split itself: three quarters, floored per fill, so the rebate is
+    // never rounded up and never short by a whole unit per fill.
+    assert!(
+        total_rebate * 4 <= total_fee * 3,
+        "the maker was rebated {total_rebate} of a {total_fee} fee — more than the three quarters \
+         it is owed"
+    );
+    assert!(
+        total_rebate * 4 > total_fee * 3 - 4 * RESIDUAL_FILLS,
+        "the maker was rebated {total_rebate} of a {total_fee} fee, short of three quarters by \
+         more than the flooring of {RESIDUAL_FILLS} fills can account for"
     );
 
     maker.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
