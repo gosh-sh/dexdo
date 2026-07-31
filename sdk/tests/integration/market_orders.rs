@@ -34,10 +34,14 @@
 //! naming the fee.
 //!
 //! A fourth phase covers the two things a market order may not carry — a
-//! minimum fill size, and a buy worth less than the minimum notional. Both are
-//! refused by the note before the book is involved, and the phase reads what
-//! that costs the sender: nothing, down to the client id, which the two
-//! refusals reserve and release in turn.
+//! minimum fill size, and a buy worth less than the minimum notional. Neither
+//! refusal is legible as an error: the note accepts the external message
+//! before it validates, and the send does not wait for the transaction that
+//! aborts. So the phase reads the refusal as the absence of its effects —
+//! nothing rested, nothing locked, nothing spent — with `_opNonce` saying
+//! *who* refused, since it only advances where the note dispatches to the
+//! book. A valid order carrying the same client id closes the phase, because
+//! "nothing happened" is equally true of a message that never arrived.
 //!
 //! The three phases share one market and one pair of notes on purpose: they
 //! test one branch from three sides, and a scenario each would cost three
@@ -63,10 +67,9 @@ use crate::common::market::try_place_order;
 use crate::common::market::wait_owner_order;
 use crate::common::market::FLAG_IOC;
 use crate::common::market::FLAG_MARKET;
-use crate::common::misc::assert_exit_code;
 use crate::common::misc::wait_not_busy;
 
-const STAKE_PERIOD_ORDERS: u64 = 240;
+const STAKE_PERIOD_ORDERS: u64 = 300;
 const OUTCOME: u32 = 0;
 
 /// Basis-point denominator, mirroring the contracts' `FULL_PERCENT`.
@@ -128,13 +131,6 @@ const MIN_FILL_ON_MARKET: u128 = 10_000_000;
 const REUSED_CID_AMOUNT: u128 = 20_000_000_000;
 
 const _: () = assert!(REUSED_CID_AMOUNT * BID_BPS / FULL_PERCENT >= MIN_ORDER_NOTIONAL);
-
-/// `ERR_INVALID_PARAMS` — the note's answer to a combination of parameters it
-/// will not send at all.
-const ERR_INVALID_PARAMS: u16 = 129;
-
-/// `ERR_ORDER_TOO_SMALL` — under the minimum notional.
-const ERR_ORDER_TOO_SMALL: u16 = 160;
 
 #[tokio::test]
 #[ignore = "requires a local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID"]
@@ -358,71 +354,95 @@ async fn orders_that_must_not_rest_never_rest_local() {
 
     // ── and the two a market order may not carry ──────────────────────────
     //
-    // Both rules are enforced twice — once by the note before it sends, once
-    // by the book before it queues — because a bad entry that reached the
-    // queue would stall every order behind it. The note's copy is the one
-    // reachable from here, and it is the one that decides whether the order
-    // costs the sender anything at all.
+    // Both rules are enforced twice — once by the note before it sends
+    // anything, once by the book before it queues the entry — because a bad
+    // entry that reached the queue would stall every order behind it. Which
+    // of the two answered is not a matter of taste: `_opNonce` advances only
+    // where the note dispatches a batch to the book, so a nonce that has not
+    // moved says the note refused on its own and the book never heard of it.
     //
-    // The two refusals deliberately share a client id. Reserving that id is
-    // the first thing the note does, before either check, so the second
-    // refusal answering its own complaint rather than "this id is taken" is
-    // what proves the first rolled the reservation back.
+    // The refusal cannot be read as an error. The note accepts the external
+    // message before it validates anything, so a `require` that fires
+    // afterwards leaves an aborted transaction — and the send does not wait
+    // for a transaction to report on. What it does leave is the absence of
+    // every effect a placement has, which is what this reads. "Nothing
+    // happened" is equally true of a message that never arrived, so a valid
+    // order carrying the same client id closes the phase as the control.
     let refused_coid = ask_coid + 13;
     let held_before = pn_balance(&r, &buyer.note.address).await
         + pn_locked(&r, &buyer.note.address).await;
+    let nonce_before = op_nonce(&r, &buyer.note.address).await;
 
     // A minimum fill size is stated in tokens; a market buy's amount is
     // collateral. There is no exchange rate between the two until a fill
     // picks one, so the combination is refused rather than interpreted.
-    assert_exit_code(
-        try_place_order(
-            dex,
-            &buyer,
-            &market.key,
-            OUTCOME,
-            true,
-            "0",
-            MARKET_BUY_QUOTE,
-            FLAG_MARKET,
-            MIN_FILL_ON_MARKET,
-            refused_coid,
-        )
-        .await,
-        ERR_INVALID_PARAMS,
-        "a market order carrying a minimum fill size",
-    );
+    let _ = try_place_order(
+        dex,
+        &buyer,
+        &market.key,
+        OUTCOME,
+        true,
+        "0",
+        MARKET_BUY_QUOTE,
+        FLAG_MARKET,
+        MIN_FILL_ON_MARKET,
+        refused_coid,
+    )
+    .await;
+    wait_not_busy(dex, &buyer.note.address, "a market order with a minimum fill size").await;
 
     // And a market buy's amount *is* its value, so the minimum notional
-    // applies to it directly rather than through a price.
-    assert_exit_code(
-        try_place_order(
-            dex,
-            &buyer,
-            &market.key,
-            OUTCOME,
-            true,
-            "0",
-            BELOW_MIN_NOTIONAL,
-            FLAG_MARKET,
-            0,
-            refused_coid,
-        )
-        .await,
-        ERR_ORDER_TOO_SMALL,
-        "a market buy one unit under the minimum notional",
+    // applies to it directly rather than through a price. Sent with the same
+    // client id as the one above: the note reserves that id before it
+    // validates anything, so an id still held here would refuse this order
+    // for the wrong reason — and the control at the end would then fail.
+    let _ = try_place_order(
+        dex,
+        &buyer,
+        &market.key,
+        OUTCOME,
+        true,
+        "0",
+        BELOW_MIN_NOTIONAL,
+        FLAG_MARKET,
+        0,
+        refused_coid,
+    )
+    .await;
+    wait_not_busy(dex, &buyer.note.address, "a market buy under the minimum notional").await;
+
+    // Neither reached the book.
+    assert_eq!(
+        op_nonce(&r, &buyer.note.address).await,
+        nonce_before,
+        "the note dispatched a batch for an order it should have refused itself"
+    );
+    let after_refusals = dex
+        .get_orders_by_owner(&market.order_book, buyer.note.dih_dec.clone())
+        .await
+        .expect("get_orders_by_owner");
+    assert!(
+        after_refusals.orders.is_empty(),
+        "a refused order rested anyway: {} on the book",
+        after_refusals.orders.len()
     );
 
-    // Neither cost anything: a refused order never reached the book, so
-    // nothing was locked against it and nothing was spent.
+    // And neither cost anything: no lock taken, nothing spent, no order the
+    // note believes in.
     assert_eq!(
         pn_balance(&r, &buyer.note.address).await + pn_locked(&r, &buyer.note.address).await,
         held_before,
         "a refused order moved collateral"
     );
+    assert_eq!(
+        open_orders(&r, &buyer.note.address).await,
+        0,
+        "the note counts an open order it never placed"
+    );
 
-    // The last of it: the client id both refusals reserved is free, which a
-    // valid order carrying it demonstrates by resting.
+    // The control. Same client id, same path, one valid order — it rests, so
+    // the two above were refused rather than lost, and the id they reserved
+    // was handed back.
     place_limit(
         dex,
         &buyer,
@@ -435,6 +455,11 @@ async fn orders_that_must_not_rest_never_rest_local() {
     )
     .await;
     wait_owner_order(dex, &market.order_book, &buyer.note.dih_dec, refused_coid, true).await;
+    assert!(
+        op_nonce(&r, &buyer.note.address).await > nonce_before,
+        "a valid order left the note's nonce where the refused ones did — the placement path \
+         itself is not working, and the readings above say nothing"
+    );
     cancel_by_client(dex, &buyer, &market.key, refused_coid).await;
 
     seller.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
@@ -461,4 +486,12 @@ async fn pn_locked(r: &chain_reader::ChainReader, pn_address: &str) -> u128 {
 /// How many orders the note believes it has resting.
 async fn open_orders(r: &chain_reader::ChainReader, pn_address: &str) -> u32 {
     invariant::pn_open_order_count(r, pn_address).await.expect("read open order count")
+}
+
+/// The note's order-operation counter — `_opNonce`, bumped once per batch it
+/// dispatches to a book and never otherwise. An order refused during
+/// validation never reaches the bump, so this separates "the note said no"
+/// from "the book said no", which no balance reading can.
+async fn op_nonce(r: &chain_reader::ChainReader, pn_address: &str) -> u64 {
+    invariant::pn_op_nonce(r, pn_address).await.expect("read the note's op nonce")
 }

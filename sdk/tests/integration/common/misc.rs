@@ -128,34 +128,6 @@ pub async fn wait_active<T: AccountAccessor>(contract: &T, label: &str) {
         .unwrap_or_else(|e| panic!("wait {label} active: {e:?}"));
 }
 
-/// Assert a call was refused by the contract with a specific exit code.
-///
-/// `expected` is the `require`'s error constant, and matching on it rather
-/// than on failure alone is what makes the assertion about the guard the
-/// scenario means: a call misdirected, mis-signed or sent to a busy note also
-/// fails, and every one of those would satisfy "it did not go through" while
-/// proving nothing about the branch under test.
-/// Generic over the error type because the same guard is reachable through
-/// two clients: the SDK's own calls surface an `AppError`, the contract
-/// wrappers a `KitError`, and both carry the exit code to the same place once
-/// converted.
-pub fn assert_exit_code<T, E>(result: Result<T, E>, expected: u16, what: &str)
-where
-    T: std::fmt::Debug,
-    E: Into<dodex_sdk::errors::AppError>,
-{
-    let want = expected.to_string();
-    match result.map_err(Into::into) {
-        Err(e) if e.error_code.as_deref() == Some(want.as_str()) => {}
-        Err(e) => panic!(
-            "{what}: refused with exit code {:?}, not the expected {want} — the call failed for \
-             some other reason than the one under test (full error: {e:?})",
-            e.error_code
-        ),
-        Ok(v) => panic!("{what}: went through instead of failing with exit code {want}: {v:?}"),
-    }
-}
-
 pub fn pn_nackl(details: &dodex_sdk::PrivateNoteDetails) -> u128 {
     details.balance.get(&TOKEN_TYPE_NACKL.to_string()).copied().unwrap_or_default()
 }

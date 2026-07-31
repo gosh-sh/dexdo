@@ -224,11 +224,12 @@ pub async fn place_order_with_flags(
 /// [`place_order_with_flags`] with the success expectation dropped and
 /// `min_amount` spelled out.
 ///
-/// Both differences exist for the same caller: an order the note refuses is
-/// the whole observation, and one of the refusals is about `min_amount`
-/// itself. The `expect` in the helpers above would turn that observation into
-/// a panic before it could be read, and their hard-wired `min_amount: 0` puts
-/// the combination out of reach.
+/// Both differences exist for the same caller — the negatives. Their
+/// hard-wired `min_amount: 0` puts one of the refusals out of reach entirely,
+/// and while a refusal after `tvm.accept()` is not reported to the sender at
+/// all, one before it may be: the `expect` above would turn that into a panic
+/// rather than a reading. Neither the value nor the error is asserted on here;
+/// what a refusal costs the note is.
 #[allow(clippy::too_many_arguments)]
 pub async fn try_place_order(
     dex: &Dex,

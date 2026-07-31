@@ -37,9 +37,12 @@
 //! - **the owner can take them out again**, and **only** the owner, and only
 //!   as much as accrued. `withdrawProtocolFees` pays to an address its caller
 //!   names, so the two guards on it are all that stands between every market's
-//!   fees and anyone who asks; both are exercised after the successful
-//!   withdrawal, with the total re-read afterwards to show neither attempt
-//!   moved anything. The successful one doubles as a check that the stand's
+//!   fees and anyone who asks. Both are tried after the successful withdrawal
+//!   and read as the absence of a payment on both sides — the total RootPN
+//!   still owes, and the balance of the account the caller named — because
+//!   neither refusal is legible as an error from a send that does not wait for
+//!   a transaction. The permitted call is the control that says both readings
+//!   do move when they are allowed to, and doubles as a check that the stand's
 //!   RootPN really is owned by the key its zerostate says it is.
 //!
 //! One filled trade precedes the resting pair, purely so there are fees to
@@ -88,7 +91,6 @@ use crate::common::market::place_limit;
 use crate::common::market::resolve_and_drain;
 use crate::common::market::split_full_set;
 use crate::common::market::wait_owner_order;
-use crate::common::misc::assert_exit_code;
 use crate::common::misc::now_unix;
 use crate::common::misc::poll_until;
 use crate::common::misc::wait_not_busy;
@@ -138,12 +140,10 @@ const EXTRA_BID_AMOUNT: u128 = 20_000_000_000;
 /// needed, and nothing another scenario does can make it valid.
 const MORE_THAN_ACCRUED: u128 = u128::MAX;
 
-/// `ERR_INVALID_PARAMS` — the withdrawal's own bounds check.
-const ERR_INVALID_PARAMS: u16 = 129;
-
-/// `ERR_INVALID_SENDER` — `onlyOwnerPubkey` refusing a signature that is not
-/// the root owner's.
-const ERR_INVALID_SENDER: u16 = 101;
+/// How long the refused withdrawals are given to fail to happen. A payment
+/// that was going to land has landed by then — the successful one above was
+/// visible well inside a single poll budget.
+const NEGATIVE_SETTLE_SECS: u64 = 15;
 
 /// Where the owner sends the withdrawn fees. RootPN takes the destination
 /// dApp as a parameter here (unlike the note-side withdraw, which stays in
@@ -386,59 +386,77 @@ async fn a_drain_refunds_resting_orders_and_hands_over_protocol_fees_local() {
 
     // ── and the two ways it must not work ─────────────────────────────────
     //
-    // RootPN holds every market's protocol fees together, so both guards are
-    // the only thing between one book's earnings and anyone who asks. Neither
-    // attempt changes anything, which is asserted after both rather than
-    // between them: a guard that let the call through would show up in the
-    // total whichever of the two did it.
+    // RootPN holds every market's protocol fees together and pays them to an
+    // address its caller names, so these two guards are the whole of what
+    // stands between one book's earnings and anyone who asks.
+    //
+    // Neither refusal is legible as an error. The bounds check fires after
+    // `tvm.accept()`, so it leaves an aborted transaction the send never
+    // waits for; the owner check fires before it, and where the node draws
+    // that line is not something a scenario should encode. What both leave is
+    // the absence of a payment, read on both sides — the total RootPN still
+    // owes, and the balance of the account the caller tried to pay. The
+    // successful withdrawal just above is the control that says a permitted
+    // call does move both.
     let root_pn = RootPn::new(Arc::clone(ctx), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     let fees_before_negatives =
         invariant::protocol_fee(&r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
             .await
             .expect("read RootPN protocol fees");
 
-    assert_exit_code(
-        root_pn
-            .withdraw_protocol_fees(
-                ParamsOfWithdrawProtocolFees {
-                    to: taker.note.address.clone(),
-                    dapp_id: FEE_DEST_DAPP.to_string(),
-                    token_type: TOKEN_TYPE_NACKL,
-                    amount: MORE_THAN_ACCRUED,
-                },
-                Signer::Keys { keys: root_pn_owner_keys(&ledger_dir) },
-            )
-            .await,
-        ERR_INVALID_PARAMS,
-        "the owner withdrawing more than has ever accrued",
-    );
+    // More than has ever accrued — asked for as the largest amount the
+    // parameter can carry, so no reading of the current total is needed and
+    // nothing another scenario does can make it legitimate.
+    let _ = root_pn
+        .withdraw_protocol_fees(
+            ParamsOfWithdrawProtocolFees {
+                to: taker.note.address.clone(),
+                dapp_id: FEE_DEST_DAPP.to_string(),
+                token_type: TOKEN_TYPE_NACKL,
+                amount: MORE_THAN_ACCRUED,
+            },
+            Signer::Keys { keys: root_pn_owner_keys(&ledger_dir) },
+        )
+        .await;
 
     // The same call, correct in every respect but the signature. The note's
     // own keys are a real keypair that is simply not the root owner's, which
-    // is the case that matters: fees are payable to an address the caller
-    // chooses, so anyone able to sign could name their own.
-    assert_exit_code(
-        root_pn
-            .withdraw_protocol_fees(
-                ParamsOfWithdrawProtocolFees {
-                    to: taker.note.address.clone(),
-                    dapp_id: FEE_DEST_DAPP.to_string(),
-                    token_type: TOKEN_TYPE_NACKL,
-                    amount: 1,
-                },
-                Signer::Keys { keys: taker.note.keys.clone() },
-            )
-            .await,
-        ERR_INVALID_SENDER,
-        "a stranger withdrawing protocol fees",
-    );
+    // is the case that matters: the destination is the caller's to choose, so
+    // anyone able to sign could name their own.
+    let _ = root_pn
+        .withdraw_protocol_fees(
+            ParamsOfWithdrawProtocolFees {
+                to: taker.note.address.clone(),
+                dapp_id: FEE_DEST_DAPP.to_string(),
+                token_type: TOKEN_TYPE_NACKL,
+                amount: 1,
+            },
+            Signer::Keys { keys: taker.note.keys.clone() },
+        )
+        .await;
 
+    // Settled by the same barrier the successful withdrawal used: if either
+    // call were going to pay out, it would have by the time a poll of this
+    // length has run its course.
+    tokio::time::sleep(std::time::Duration::from_secs(NEGATIVE_SETTLE_SECS)).await;
     assert_eq!(
         invariant::protocol_fee(&r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
             .await
             .expect("read RootPN protocol fees"),
         fees_before_negatives,
         "a refused withdrawal moved protocol fees anyway"
+    );
+    let dest_settled = r
+        .account_ecc(&taker.note.address)
+        .await
+        .expect("read destination ECC")
+        .ecc
+        .get(&TOKEN_TYPE_NACKL)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        dest_settled, dest_after,
+        "a refused withdrawal paid the caller's chosen destination anyway"
     );
 
     maker.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
