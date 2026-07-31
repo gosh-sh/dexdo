@@ -50,6 +50,7 @@ use crate::common::chain_reader;
 use crate::common::context::TOKEN_TYPE_NACKL;
 use crate::common::invariant;
 use crate::common::locks;
+use crate::common::market::abi_uint;
 use crate::common::market::at;
 use crate::common::market::cancel_by_client;
 use crate::common::market::deploy_ephemeral_market;
@@ -141,8 +142,19 @@ async fn non_crossing_orders_rest_and_cancel_local() {
     assert_eq!(sell.amount, ORDER_AMOUNT, "the ask was partially filled by a bid below it");
     assert_eq!(buy.amount, ORDER_AMOUNT, "the bid was partially filled by an ask above it");
     assert!(!sell.is_buy && buy.is_buy, "the two orders are not on opposite sides");
-    assert_eq!(sell.price, ASK_BPS, "the ask rests at a price it was not placed with");
-    assert_eq!(buy.price, BID_BPS, "the bid rests at a price it was not placed with");
+    // Compared as numbers: `price` is a `uint256`, which the ABI decoder
+    // returns as padded hex while the placement passed a decimal string, so
+    // the two spellings of the same price are not the same string.
+    assert_eq!(
+        abi_uint(&sell.price).expect("ask price"),
+        abi_uint(ASK_BPS).expect("ask literal"),
+        "the ask rests at a price it was not placed with"
+    );
+    assert_eq!(
+        abi_uint(&buy.price).expect("bid price"),
+        abi_uint(BID_BPS).expect("bid literal"),
+        "the bid rests at a price it was not placed with"
+    );
     assert_eq!((sell.outcome_id, buy.outcome_id), (OUTCOME, OUTCOME));
 
     assert_eq!(open_orders(&r, &seller.note.address).await, 1, "the seller has one resting ask");

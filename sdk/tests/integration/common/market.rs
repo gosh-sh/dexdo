@@ -23,6 +23,8 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
+
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::ClientContext;
 use dodex_contracts::dex::order_book::OrderBook;
@@ -262,6 +264,26 @@ pub fn at(holdings: &[u128], outcome: u32) -> u128 {
     holdings.get(outcome as usize).copied().unwrap_or(0)
 }
 
+/// An ABI-decoded unsigned integer, as a number.
+///
+/// `tvm_abi`'s detokenizer encodes a `uint256` as `"0x"` + 64 hex digits and
+/// every narrower width as a plain decimal string, so a field's *type* — not
+/// its value — decides which one comes back. `OrderBook`'s price is a
+/// `uint256`, which is why a bare `assert_eq!(order.price, "8000")` compares a
+/// decimal literal against `0x…1f40` and fails on a correct book.
+///
+/// The prefix is the only safe discriminator, and the reason is worth stating:
+/// `"8000"` is a well-formed value in both encodings and means two different
+/// numbers in them. Guessing by trying hex first and falling back would read
+/// every decimal price as a much larger one.
+pub fn abi_uint(raw: &str) -> anyhow::Result<u128> {
+    match raw.strip_prefix("0x") {
+        Some(hex) => u128::from_str_radix(hex, 16)
+            .with_context(|| format!("`{raw}` is 0x-prefixed but not a hex integer")),
+        None => raw.parse().with_context(|| format!("`{raw}` is not a decimal integer")),
+    }
+}
+
 /// Freeze the market now that the staking window has closed. Unsigned: the
 /// entry point checks the deadline and the market's state, never a caller
 /// identity.
@@ -366,4 +388,31 @@ pub async fn deploy_ephemeral_market(
     let order_book = wait_order_book(ctx, dex, &pmp).await;
 
     EphemeralMarket { pmp, order_book, key, oracle, result_start: details.result_start }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_uint256_comes_back_as_padded_hex_and_reads_as_its_value() {
+        assert_eq!(
+            abi_uint("0x0000000000000000000000000000000000000000000000000000001f40").unwrap(),
+            8000
+        );
+    }
+
+    #[test]
+    fn a_narrow_width_comes_back_decimal_and_is_not_read_as_hex() {
+        // The whole reason the prefix is the discriminator: read as hex this
+        // would be 32768, and every decimal price in the suite would compare
+        // against a number four times too large.
+        assert_eq!(abi_uint("8000").unwrap(), 8000);
+    }
+
+    #[test]
+    fn a_value_in_neither_encoding_is_an_error() {
+        assert!(abi_uint("0xzz").is_err());
+        assert!(abi_uint("1f40").is_err());
+    }
 }
