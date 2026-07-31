@@ -87,6 +87,9 @@ const PN_HAS_TRANSFERRED: &str = "_hasTransferred";
 /// accepted at all. Contrast `_busyOpNonce`, the in-flight one the sweep
 /// requires to be zero at rest.
 const PN_OP_NONCE: &str = "_opNonce";
+/// Which stake the note's last stake-shaped operation concerned. Survives the
+/// bounce that undoes the operation — see [`pn_last_stake_hash`].
+const PN_LAST_HASH: &str = "_lastHash";
 
 const QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -813,6 +816,32 @@ pub async fn pn_has_transferred(r: &ChainReader, pn: &str) -> anyhow::Result<boo
         .await?
         .ok_or_else(|| anyhow!("note {pn} holds no account on this stand"))?;
     field_bool(&fields, PN_HAS_TRANSFERRED)
+}
+
+/// Which stake the note's last stake-shaped operation was about
+/// (`PrivateNote._lastHash`).
+///
+/// Written by `setStake`, `cancelStake`, `deleteStake` and the split/merge
+/// pair on their way out, and cleared by nothing — including the bounce
+/// handlers, which read it to find the record they are restoring. That makes
+/// it the durable trace of "this note accepted such an operation", where the
+/// record itself is not: a `setStake` that bounces on a note holding no
+/// confirmed position leaves `stake.amount` all zero, and `onBounce` deletes
+/// the record entirely.
+///
+/// Returned as the ABI's own spelling — a `uint256`, so `0x` and 64 hex
+/// digits — because callers compare it against an earlier reading rather than
+/// against a number. Comparing against zero would be wrong on a recycled
+/// note: the pool sweep does not require this field to be empty, so a note
+/// can arrive already carrying one.
+pub async fn pn_last_stake_hash(r: &ChainReader, pn: &str) -> anyhow::Result<String> {
+    let fields = pn_fields_opt(r, pn)
+        .await?
+        .ok_or_else(|| anyhow!("note {pn} holds no account on this stand"))?;
+    Ok(field(&fields, PN_LAST_HASH)?
+        .as_str()
+        .ok_or_else(|| anyhow!("storage field `{PN_LAST_HASH}` is not a string"))?
+        .to_string())
 }
 
 /// The note's all-time order-operation counter (`PrivateNote._opNonce`).
@@ -1550,6 +1579,7 @@ mod tests {
                     PN_HAS_WITHDRAWN,
                     PN_HAS_TRANSFERRED,
                     PN_OP_NONCE,
+                    PN_LAST_HASH,
                 ],
             ),
             (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL, PMP_FROZEN]),

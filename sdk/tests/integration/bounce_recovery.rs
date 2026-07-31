@@ -31,11 +31,19 @@
 //! healthy one that simply restored its balance look identical if you only
 //! read the balance.
 //!
-//! What separates them is that a `setStake` which *was* accepted leaves a
-//! `_stakes` entry behind even when it bounces (the branch zeroes
-//! `candidateAmount` and writes the record back), while one refused by a stuck
-//! `_busy` leaves `_stakes` empty. So the second phase both tests its own
-//! branch and proves the first phase really did unlock the note.
+//! What separates them is `_lastHash`. `setStake` writes it on its way out,
+//! naming the stake the operation is about, and nothing clears it — the bounce
+//! handler itself reads it to find the record it is restoring. So a
+//! `_lastHash` that changed is proof the note accepted the operation, and the
+//! second phase both tests its own branch and proves the first really did
+//! unlock the note.
+//!
+//! The `_stakes` record is emphatically *not* that proof, though it looks like
+//! it should be. A `setStake` that bounces on a note holding no confirmed
+//! position leaves `stake.amount` all zero, and `onBounce` deletes the record
+//! outright — so "the record is there" is what a correct recovery does **not**
+//! produce here. An earlier version of this scenario asserted exactly that and
+//! failed against a contract that was behaving correctly.
 //!
 //! Reads `E2E_NETWORK_ENDPOINT`, `E2E_SEED_NOTES` and `E2E_RUN_ID`. Needs no
 //! market, no deployer and no preflight — the counterparties it addresses are
@@ -123,6 +131,13 @@ async fn a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local() {
     );
 
     // ── 2. stake into a market that is not there ──────────────────────────
+    // Read before sending: the discriminator is that this changes, not that it
+    // holds any particular value. A note comes out of the pool sweep-clean,
+    // but `_lastHash` is not one of the fields the sweep requires to be empty,
+    // so a recycled note can arrive already carrying one.
+    let last_hash_before =
+        invariant::pn_last_stake_hash(&r, &addr).await.expect("read the last-stake trace");
+
     dex.set_stake(
         &addr,
         ParamsOfSetStake {
@@ -140,16 +155,27 @@ async fn a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local() {
 
     wait_not_busy(dex, &addr, "the bounced stake").await;
 
-    // The discriminator. A `setStake` that reached the note leaves this
-    // record behind even though it bounced; one refused by a `_busy` the
-    // first bounce failed to clear would have left `_stakes` untouched —
-    // and the balance reading below would then be equally true of a note
-    // that never did anything at all.
-    let stakes = dex.get_stakes(&addr).await.expect("pn stakes").stakes;
+    // The discriminator. `setStake` names the stake it is about in
+    // `_lastHash` on its way out and nothing clears it, so a change here is
+    // proof the note accepted the operation; one refused by a `_busy` the
+    // first bounce failed to clear leaves it exactly as it was — and the
+    // balance reading below would then be equally true of a note that never
+    // did anything at all.
+    //
+    // Not the `_stakes` record: a bounced first stake leaves `stake.amount`
+    // all zero and `onBounce` deletes the record, so its absence is what a
+    // correct recovery looks like. See the module header.
+    let last_hash_after =
+        invariant::pn_last_stake_hash(&r, &addr).await.expect("read the last-stake trace");
+    assert_ne!(
+        last_hash_after, last_hash_before,
+        "the note never accepted the stake, so the first bounce left it locked and the balance \
+         below is unchanged for the wrong reason"
+    );
     assert!(
-        !stakes.is_empty(),
-        "the note has no stake record, so the second operation never took effect — the first \
-         bounce left it locked"
+        dex.get_stakes(&addr).await.expect("pn stakes").stakes.is_empty(),
+        "the bounced stake left a record behind; with nothing confirmed on it, `onBounce` should \
+         have deleted it rather than leaving an empty one for the owner to trip over"
     );
     assert_eq!(
         pn_balance(&r, &addr).await,
