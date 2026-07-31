@@ -262,6 +262,12 @@ elif [ "$SUITE" = mm ]; then
   # unwinds and then has to wait out the market before it can settle.
   FILTER='test(=mm_cycle::a_maker_quotes_gets_taken_unwinds_and_settles_local)'
   THREADS=1
+elif [ "$SUITE" = coupon ]; then
+  # Three markets end to end, because a coupon needs a note with nothing and
+  # the only way to arrive at one is to lose a market first. The slowest
+  # scenario on the stand by some way.
+  FILTER='test(=coupon_debt::a_coupon_is_won_with_and_the_debt_it_leaves_is_bet_against_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

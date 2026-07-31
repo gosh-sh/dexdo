@@ -1,7 +1,7 @@
 [
   {"profile": "PN-API",   "count": 10, "tokenType": 1, "value": 1000000000000},
-  {"profile": "PN-DEP",   "count": 12, "tokenType": 1, "value": 1000000000000},
-  {"profile": "PN-TRD",   "count": 17, "tokenType": 1, "value": 1000000000000},
+  {"profile": "PN-DEP",   "count": 15, "tokenType": 1, "value": 1000000000000},
+  {"profile": "PN-TRD",   "count": 18, "tokenType": 1, "value": 1000000000000},
   {"profile": "PN-SHELL", "count": 1,  "tokenType": 2, "value": 1000000000000},
   {"profile": "PN-USDC",  "count": 1,  "tokenType": 3, "value": 1000000000}
 ]

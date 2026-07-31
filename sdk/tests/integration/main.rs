@@ -22,6 +22,8 @@
 //!   `StaleRun`. No chain, not `#[ignore]`d — runs on every PR.
 //! - `book_segments` — orders that would cross kept apart by epoch and by
 //!   outcome, and the rules `placeBatch` enforces on the two lists it takes.
+//! - `coupon_debt` — the free coupon a broke note can mint, the debt it comes
+//!   with, and both of them across three markets.
 //! - `mm_cycle` — a maker's whole sequence: quote both sides in one batch,
 //!   get taken on part of it, cancel by name and then wholesale, merge the
 //!   inventory back, and settle.
@@ -37,6 +39,7 @@ mod bounce_deploy;
 mod bounce_recovery;
 mod cancelled_event;
 mod common;
+mod coupon_debt;
 mod discovery;
 mod flows;
 mod history;

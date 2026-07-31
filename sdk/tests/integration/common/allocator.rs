@@ -1418,8 +1418,11 @@ mod tests {
     ///   `bounce_deploy` takes two: one for the market it never freezes, and
     ///   one for the market that fails to come up — the second is offered
     ///   back, since a bounced deploy leaves the note where it found it.
-    ///   `book_segments` and `mm_cycle` deploy one each. Two of the twelve
-    ///   are gone before any of those steps starts.
+    ///   `book_segments` and `mm_cycle` deploy one each, and `coupon_debt`
+    ///   three — a coupon needs a note that has already lost a market, been
+    ///   paid out of a second and bet its debt in a third, and none of the
+    ///   three can be reused because a claim is what ends each one. Two of
+    ///   the fifteen are gone before any of those steps starts.
     /// - `Trd` 13: `proof_money` takes two and returns both, and
     ///   `usdc_release` borrows one and returns it — none of that costs
     ///   anything. `resting_orders`, `market_orders`, `matching_ladder`,
@@ -1430,6 +1433,9 @@ mod tests {
     ///   `bounce_deploy` the thirteenth; `book_segments` takes two more, one
     ///   per side of the orders it keeps apart, and `mm_cycle` two more
     ///   again, for the maker and the taker that lifts its quote.
+    ///   `coupon_debt` takes one, and spends it in a way nothing else does:
+    ///   the note ends holding a coupon and a debt, both of which the sweep
+    ///   counts as dirty and neither of which any other scenario wants.
     /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
     ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
     ///
@@ -1453,7 +1459,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 12), (PnProfile::Trd, 17), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 15), (PnProfile::Trd, 18), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

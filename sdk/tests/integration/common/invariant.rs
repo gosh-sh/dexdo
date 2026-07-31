@@ -71,6 +71,10 @@ const PMP_NORM_REFUND_PENDING: &str = "_normRefundPending";
 const PMP_TOTAL_POOL: &str = "_totalPool";
 const PMP_FROZEN: &str = "_frozen";
 const PMP_SPLIT_MERGE_Q: &str = "_splitMergeQ";
+const PMP_TOTAL_COUPON_POOL: &str = "_totalCouponPool";
+const PMP_TOTAL_DEBT_POOL: &str = "_totalDebtPool";
+const PN_COUPONS_VALUE: &str = "_couponsValue";
+const PN_DEBT: &str = "_debt";
 const PN_STAKES: &str = "_stakes";
 /// The latch `withdrawTokens` sets and `revertWithdraw` clears — the only
 /// thing that tells a withdraw on its way from one RootPN handed back.
@@ -891,6 +895,55 @@ pub async fn pmp_split_merge_q(r: &ChainReader, pmp: &str) -> anyhow::Result<u12
     field_u128(&fields, PMP_SPLIT_MERGE_Q)
 }
 
+/// The coupon nominal the note is currently holding — `PrivateNote._couponsValue`.
+///
+/// Coupons are not collateral: staking one moves this and leaves `_balance`
+/// alone, which is the whole difference between a coupon bet and a real one
+/// and the only way to tell them apart from outside.
+pub async fn pn_coupons_value(r: &ChainReader, pn: &str) -> anyhow::Result<u128> {
+    let fields = r
+        .storage_fields(pn, PN_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("note {pn} holds no account on this stand"))?;
+    field_u128(&fields, PN_COUPONS_VALUE)
+}
+
+/// What the note owes — `PrivateNote._debt`.
+///
+/// Minted at 5% of a coupon's nominal when the coupon is issued, grown by
+/// every coupon payout, and repaid only out of the profit of a winning debt
+/// bet. Nothing else touches it, and `withdrawTokens` refuses while it is
+/// non-zero.
+pub async fn pn_debt(r: &ChainReader, pn: &str) -> anyhow::Result<u128> {
+    let fields = r
+        .storage_fields(pn, PN_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("note {pn} holds no account on this stand"))?;
+    field_u128(&fields, PN_DEBT)
+}
+
+/// The market's coupon pool — `PMP._totalCouponPool`, the virtual side of its
+/// books. Coupon stakes never move real collateral, so this is the only place
+/// one of them shows up.
+pub async fn pmp_total_coupon_pool(r: &ChainReader, pmp: &str) -> anyhow::Result<u128> {
+    let fields = r
+        .storage_fields(pmp, PMP_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("PMP {pmp} holds no account on this stand"))?;
+    field_u128(&fields, PMP_TOTAL_COUPON_POOL)
+}
+
+/// The market's debt pool — `PMP._totalDebtPool`. A note with a debt stakes
+/// real collateral into this rather than the clean pool, which is what makes
+/// the bet type readable without the event.
+pub async fn pmp_total_debt_pool(r: &ChainReader, pmp: &str) -> anyhow::Result<u128> {
+    let fields = r
+        .storage_fields(pmp, PMP_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("PMP {pmp} holds no account on this stand"))?;
+    field_u128(&fields, PMP_TOTAL_DEBT_POOL)
+}
+
 /// Whether the market is still waiting for its creator to acknowledge the
 /// freeze-time normalisation refund (`PMP._normRefundPending`).
 ///
@@ -1596,12 +1649,21 @@ mod tests {
                     PN_HAS_TRANSFERRED,
                     PN_OP_NONCE,
                     PN_LAST_HASH,
+                    PN_COUPONS_VALUE,
+                    PN_DEBT,
                 ],
             ),
             (
                 PMP_ABI,
                 "PMP",
-                &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL, PMP_FROZEN, PMP_SPLIT_MERGE_Q],
+                &[
+                    PMP_NORM_REFUND_PENDING,
+                    PMP_TOTAL_POOL,
+                    PMP_FROZEN,
+                    PMP_SPLIT_MERGE_Q,
+                    PMP_TOTAL_COUPON_POOL,
+                    PMP_TOTAL_DEBT_POOL,
+                ],
             ),
             (ROOT_ABI, "RootPN", &[ROOT_DEPLOYED_VALUES]),
         ];

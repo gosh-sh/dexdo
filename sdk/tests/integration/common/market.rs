@@ -108,20 +108,39 @@ pub async fn wait_pmp_approved(dex: &Dex, pmp_addr: &str) {
 /// acknowledgement is a precondition of whatever the scenario does next, not
 /// only of a barrier.
 pub async fn stake(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey, outcome: u32) {
-    dex.set_stake(
-        &note.note.address,
-        ParamsOfSetStake {
-            event_id: key.event_id.clone(),
-            oracle_list_hash: key.oracle_list_hash.clone(),
-            token_type: key.token_type,
-            outcome,
-            amount: STAKE_AMOUNT,
-            use_coupon: false,
-        },
-        Signer::Keys { keys: note.note.keys.clone() },
-    )
-    .await
-    .expect("set_stake");
+    stake_amount(dex, note, key, outcome, STAKE_AMOUNT, false).await;
+}
+
+/// [`stake`] with the amount and the funding source spelled out.
+///
+/// `use_coupon` is the whole difference between a bet that moves collateral
+/// and one that does not: a coupon stake is drawn from `_couponsValue` and
+/// leaves `_balance` untouched, which is the only way to tell the two apart
+/// from outside the market. Sending is not evidence the market took it — a
+/// stake the market refuses bounces, and what the bounce restores is each
+/// caller's own assertion.
+pub async fn stake_amount(
+    dex: &Dex,
+    note: &LeasedPn,
+    key: &ParamsOfStakeKey,
+    outcome: u32,
+    amount: u128,
+    use_coupon: bool,
+) {
+    let _ = dex
+        .set_stake(
+            &note.note.address,
+            ParamsOfSetStake {
+                event_id: key.event_id.clone(),
+                oracle_list_hash: key.oracle_list_hash.clone(),
+                token_type: key.token_type,
+                outcome,
+                amount,
+                use_coupon,
+            },
+            Signer::Keys { keys: note.note.keys.clone() },
+        )
+        .await;
     wait_not_busy(dex, &note.note.address, "set_stake").await;
 }
 
