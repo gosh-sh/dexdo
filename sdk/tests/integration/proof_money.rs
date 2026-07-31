@@ -366,9 +366,47 @@ async fn proof_money_lifecycle_local() {
     let buyer_before_split = outcome_tokens(dex, &buyer).await;
     let seller_before_split = outcome_tokens(dex, &seller).await;
 
-    split_full_set(dex, &buyer, &key, SPLIT_COLLATERAL).await;
-    split_full_set(dex, &seller, &key, SPLIT_COLLATERAL).await;
+    // A split is quantised: the market mints whole baskets of `Q` collateral
+    // each and hands the rest straight back. Splitting an exact multiple would
+    // leave nothing to hand back and make "the remainder was refunded"
+    // unfalsifiable, so the amount is deliberately half a basket over one.
+    let basket = invariant::pmp_split_merge_q(&r, &pmp_addr).await.expect("read the split basket");
+    assert!(
+        basket > 1,
+        "the market's split basket is {basket}, too small to leave a remainder — this phase \
+         cannot tell a refund from a whole-amount charge"
+    );
+    let baskets = SPLIT_COLLATERAL / basket;
+    assert!(baskets > 0, "{SPLIT_COLLATERAL} does not cover one basket of {basket}");
+    let split_used = baskets * basket;
+    let split_refund = basket / 2;
+    let split_sent = split_used + split_refund;
+
+    let buyer_bal_before_split = pn_balance(&r, &buyer.note.address).await;
+    let seller_bal_before_split = pn_balance(&r, &seller.note.address).await;
+
+    split_full_set(dex, &buyer, &key, split_sent).await;
+    split_full_set(dex, &seller, &key, split_sent).await;
     invariant::await_quiescence(&r, &tracked, Phase::AfterSplit).await.expect("split quiescence");
+
+    // What each of them is actually out: the whole baskets, and not the
+    // half-basket they sent on top. Conservation alone would not catch a
+    // remainder kept by the market — it would still be inside the tracked set,
+    // just on the wrong side of it.
+    for (role, note, before) in [
+        ("buyer", &buyer, buyer_bal_before_split),
+        ("seller", &seller, seller_bal_before_split),
+    ] {
+        let after = pn_balance(&r, &note.note.address).await;
+        assert_eq!(
+            after,
+            before - split_used,
+            "the {role} sent {split_sent} into a split of {baskets} baskets of {basket} and is \
+             out {}, not the {split_used} those baskets cost — the {split_refund} over was not \
+             returned",
+            before - after
+        );
+    }
 
     // The effect: each trader now holds tokens of *both* outcomes. A rejected
     // split leaves the holdings untouched, and the conservation check below
@@ -434,6 +472,19 @@ async fn proof_money_lifecycle_local() {
     // counter.
     let expected_protocol_fee = ob_total_protocol_fees(dex, &ob_addr).await;
 
+    // The book this drain is about to run against is empty, and saying so is
+    // what makes it the empty-book case rather than an unexamined one: the
+    // trade above consumed both of its orders, and `shutdown_orders` is the
+    // scenario that closes a book with orders still on it. A drain that only
+    // worked when there was something to cancel would pass there and fail
+    // here, silently, because nothing else distinguishes the two.
+    assert_eq!(
+        dex.get_order_book_details(&ob_addr).await.expect("order book details").order_count,
+        0,
+        "the book still holds orders going into the drain; this scenario is the one that closes \
+         an empty one"
+    );
+
     wait_until(result_start).await;
     dex.submit_resolve(
         &pmp_addr,
@@ -448,6 +499,15 @@ async fn proof_money_lifecycle_local() {
     // the book in the same message that reports completion. `claim` is gated
     // on that report.
     wait_order_book_done(dex, &pmp_addr).await;
+    // The report and the book's own death are the same message, so the flag
+    // being set means the account is gone. Read rather than assumed: a book
+    // that reported completion and stayed alive would keep answering for
+    // protocol fees RootPN has already been credited with, and the tracked sum
+    // below would count them twice.
+    assert!(
+        r.account_absent(&ob_addr).await.expect("read the order book account"),
+        "the order book reported its shutdown complete but its account is still there"
+    );
     // Declared drained only now, and only because the report has arrived: a
     // snapshot or barrier would otherwise keep reading an account that no
     // longer exists, and counting fees RootPN has already been credited with.

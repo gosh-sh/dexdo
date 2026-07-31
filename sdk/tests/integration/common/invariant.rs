@@ -70,6 +70,7 @@ const PN_OPEN_ORDER_COUNT: &str = "_openOrderCount";
 const PMP_NORM_REFUND_PENDING: &str = "_normRefundPending";
 const PMP_TOTAL_POOL: &str = "_totalPool";
 const PMP_FROZEN: &str = "_frozen";
+const PMP_SPLIT_MERGE_Q: &str = "_splitMergeQ";
 const PN_STAKES: &str = "_stakes";
 /// The latch `withdrawTokens` sets and `revertWithdraw` clears — the only
 /// thing that tells a withdraw on its way from one RootPN handed back.
@@ -875,6 +876,21 @@ pub async fn pmp_unclaimed(r: &ChainReader, pmp: &str) -> anyhow::Result<u128> {
         .map(|b| b.value)
 }
 
+/// The basket a split is quantised to — `PMP._splitMergeQ`, fixed at the
+/// freeze as the sum of the per-outcome unit sizes.
+///
+/// `splitFullSet` mints `floor(collateral / Q)` baskets and hands the
+/// remainder straight back, so a scenario that wants to say what a split cost
+/// has to know Q: without it, collateral kept and collateral refunded are the
+/// same reading.
+pub async fn pmp_split_merge_q(r: &ChainReader, pmp: &str) -> anyhow::Result<u128> {
+    let fields = r
+        .storage_fields(pmp, PMP_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("PMP {pmp} holds no account on this stand"))?;
+    field_u128(&fields, PMP_SPLIT_MERGE_Q)
+}
+
 /// Whether the market is still waiting for its creator to acknowledge the
 /// freeze-time normalisation refund (`PMP._normRefundPending`).
 ///
@@ -1582,7 +1598,11 @@ mod tests {
                     PN_LAST_HASH,
                 ],
             ),
-            (PMP_ABI, "PMP", &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL, PMP_FROZEN]),
+            (
+                PMP_ABI,
+                "PMP",
+                &[PMP_NORM_REFUND_PENDING, PMP_TOTAL_POOL, PMP_FROZEN, PMP_SPLIT_MERGE_Q],
+            ),
             (ROOT_ABI, "RootPN", &[ROOT_DEPLOYED_VALUES]),
         ];
         for (abi_json, label, names) in checks {
