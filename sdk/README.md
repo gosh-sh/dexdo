@@ -363,3 +363,28 @@ E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=market_orders::a_market_buy_fills_and_never_rests_local)'
 ```
+
+### Matching priority (`matching_ladder`)
+
+`a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local` rests three asks — two at
+0.60 and one at 0.70 — and buys 30 at 0.70, enough to clear one and part of the next. Exactly
+one outcome is correct: the first 0.60 ask is gone, the second has 10 left, and the 0.70 ask is
+untouched. `Order.amount` is the remaining size, so that middle reading carries both the
+partial fill and the ordering — a book serving the newest order in a level first would have
+emptied the other one instead.
+
+The three asks come from one note on purpose: the level FIFO holds orders in arrival order
+regardless of owner, so one maker exercises it exactly as two would, at half the notes. Each is
+confirmed on the book before the next is sent, since arrival order is the property under test.
+
+Not covered here: `buyerRefund` on price improvement (visible only as "spent less than locked",
+which is weaker than an equality), conservation across both legs (that is `proof_money`'s
+Σ-check), self-matching, and IOC into an empty side.
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=matching_ladder::a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local)'
+```

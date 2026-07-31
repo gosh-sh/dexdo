@@ -1413,12 +1413,18 @@ mod tests {
     /// - `Dep` 4: `proof_money` rents one and gives it back, so it costs
     ///   nothing. `parallel_setup` rents two *at once* — one per process — and
     ///   quarantines both. `resting_orders` and `market_orders` then deploy a
-    ///   market each and quarantine theirs. Two of the four are spent before
-    ///   either of those steps starts.
+    ///   market each and quarantine theirs, and `matching_ladder` a third.
+    ///   Two of the five are spent before any of those steps starts.
     /// - `Trd` 4: `proof_money` takes two and returns both, and `usdc_release`
     ///   borrows one and returns it — none of that costs anything.
-    ///   `resting_orders` and `market_orders` take two each and spend them,
-    ///   which is the whole four.
+    ///   `resting_orders`, `market_orders` and `matching_ladder` take two
+    ///   each and spend them, which is the whole six.
+    ///
+    /// The pool grows by three notes per market-deploying scenario, because a
+    /// note that has traded holds a stake record and outcome tokens and can
+    /// never be handed back clean. That is the sweep doing its job, not a
+    /// defect — but it is the cost the spec pays per scenario, and it is why
+    /// these numbers are derived here rather than rounded up.
     /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
     ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
     ///
@@ -1429,7 +1435,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 4), (PnProfile::Trd, 4), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 5), (PnProfile::Trd, 6), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

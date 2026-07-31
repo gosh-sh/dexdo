@@ -208,6 +208,11 @@ elif [ "$SUITE" = market ]; then
   # trader notes, and the spec sizes the pool for both.
   FILTER='test(=market_orders::a_market_buy_fills_and_never_rests_local)'
   THREADS=1
+elif [ "$SUITE" = ladder ]; then
+  # Last of the six. Spends a deployer and two trader notes like the other
+  # market-deploying suites; the spec sizes the pool for all of them.
+  FILTER='test(=matching_ladder::a_taker_walks_levels_best_first_and_a_level_in_arrival_order_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
