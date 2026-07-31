@@ -22,6 +22,9 @@
 //!   `StaleRun`. No chain, not `#[ignore]`d — runs on every PR.
 //! - `book_segments` — orders that would cross kept apart by epoch and by
 //!   outcome, and the rules `placeBatch` enforces on the two lists it takes.
+//! - `mm_cycle` — a maker's whole sequence: quote both sides in one batch,
+//!   get taken on part of it, cancel by name and then wholesale, merge the
+//!   inventory back, and settle.
 //! - `parallel_setup` — two market setups against a live chain, run as a
 //!   pair, proving each side takes a different note, derives a different
 //!   nonce, and lands on a different market address.
@@ -40,6 +43,7 @@ mod history;
 mod ledger_race;
 mod market_orders;
 mod matching_ladder;
+mod mm_cycle;
 mod multitoken;
 mod oracle;
 mod order_book;

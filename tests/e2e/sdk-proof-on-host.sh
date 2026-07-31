@@ -257,6 +257,11 @@ elif [ "$SUITE" = segments ]; then
   # which is why it splits rather than stakes.
   FILTER='test(=book_segments::segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local)'
   THREADS=1
+elif [ "$SUITE" = mm ]; then
+  # The longest-running scenario after the proof: it quotes, gets taken,
+  # unwinds and then has to wait out the market before it can settle.
+  FILTER='test(=mm_cycle::a_maker_quotes_gets_taken_unwinds_and_settles_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
