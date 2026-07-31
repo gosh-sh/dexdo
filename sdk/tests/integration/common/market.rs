@@ -221,6 +221,47 @@ pub async fn place_order_with_flags(
     .expect("place_order");
 }
 
+/// [`place_order_with_flags`] with the success expectation dropped and
+/// `min_amount` spelled out.
+///
+/// Both differences exist for the same caller: an order the note refuses is
+/// the whole observation, and one of the refusals is about `min_amount`
+/// itself. The `expect` in the helpers above would turn that observation into
+/// a panic before it could be read, and their hard-wired `min_amount: 0` puts
+/// the combination out of reach.
+#[allow(clippy::too_many_arguments)]
+pub async fn try_place_order(
+    dex: &Dex,
+    note: &LeasedPn,
+    key: &ParamsOfStakeKey,
+    outcome_id: u32,
+    is_buy: bool,
+    price_bps: &str,
+    amount: u128,
+    flags: u8,
+    min_amount: u128,
+    client_order_id: u128,
+) -> Result<dodex_sdk::ResultOfBlockchainWrite, dodex_sdk::errors::AppError> {
+    dex.place_order(
+        &note.note.address,
+        ParamsOfPlaceOrder {
+            event_id: key.event_id.clone(),
+            oracle_list_hash: key.oracle_list_hash.clone(),
+            token_type: key.token_type,
+            outcome_id,
+            is_buy,
+            price: price_bps.to_string(),
+            amount,
+            flags,
+            min_amount,
+            epoch_id: 0,
+            client_order_id,
+        },
+        Signer::Keys { keys: note.note.keys.clone() },
+    )
+    .await
+}
+
 /// Cancel one of the note's live orders by the client id it was placed with.
 pub async fn cancel_by_client(
     dex: &Dex,

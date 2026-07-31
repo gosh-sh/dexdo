@@ -28,8 +28,16 @@
 //! What the fills *cost* is never asserted against a re-derivation of the
 //! contract's fee arithmetic — that would check the implementation against
 //! itself. Phases 1 and 2 assert the fill in tokens, which is exact, and
-//! phase 1 additionally asserts that the buyer paid *something*, since a
-//! market order that matched nothing would satisfy the escrow reading too.
+//! phase 1 bounds what the buyer is out: at least the ask's worth, at most
+//! that plus any plausible fee. The quote it locked is more than twice that,
+//! so the bound separates a returned remainder from a kept one without ever
+//! naming the fee.
+//!
+//! A fourth phase covers the two things a market order may not carry — a
+//! minimum fill size, and a buy worth less than the minimum notional. Both are
+//! refused by the note before the book is involved, and the phase reads what
+//! that costs the sender: nothing, down to the client id, which the two
+//! refusals reserve and release in turn.
 //!
 //! The three phases share one market and one pair of notes on purpose: they
 //! test one branch from three sides, and a scenario each would cost three
@@ -45,22 +53,32 @@ use crate::common::context::TOKEN_TYPE_NACKL;
 use crate::common::invariant;
 use crate::common::locks;
 use crate::common::market::at;
+use crate::common::market::cancel_by_client;
 use crate::common::market::deploy_ephemeral_market;
 use crate::common::market::outcome_tokens;
 use crate::common::market::place_limit;
 use crate::common::market::place_order_with_flags;
 use crate::common::market::split_full_set;
+use crate::common::market::try_place_order;
 use crate::common::market::wait_owner_order;
 use crate::common::market::FLAG_IOC;
 use crate::common::market::FLAG_MARKET;
+use crate::common::misc::assert_exit_code;
 use crate::common::misc::wait_not_busy;
 
 const STAKE_PERIOD_ORDERS: u64 = 240;
 const OUTCOME: u32 = 0;
 
+/// Basis-point denominator, mirroring the contracts' `FULL_PERCENT`.
+const FULL_PERCENT: u128 = 10_000;
+
 /// The resting ask: 30 outcome tokens at 0.60, worth 18 NACKL.
-const ASK_BPS: &str = "6000";
+const ASK_BPS: u128 = 6_000;
 const ASK_AMOUNT: u128 = 30_000_000_000;
+
+/// What that ask is worth — what the market buy below actually spends, as
+/// against the much larger quote it locks.
+const ASK_COST: u128 = ASK_AMOUNT * ASK_BPS / FULL_PERCENT;
 
 /// The market buy, in **quote**. Comfortably more than the ask is worth, so a
 /// remainder is guaranteed — which is the only reason this scenario can say
@@ -72,7 +90,7 @@ const SPLIT_COLLATERAL: u128 = 100_000_000_000;
 
 /// The bid the seller rests once it has been paid, so the market sell has
 /// something to hit. At `BID_BPS` it is worth 12 NACKL.
-const BID_BPS: &str = "6000";
+const BID_BPS: u128 = 6_000;
 const BID_AMOUNT: u128 = 20_000_000_000;
 
 /// The market sell, in **base** — every token the buy above obtained, which
@@ -85,6 +103,38 @@ const IOC_AMOUNT: u128 = 20_000_000_000;
 // The sell has to exceed the bid, or there is no remainder and the scenario
 // says nothing about what happens to one.
 const _: () = assert!(MARKET_SELL_BASE > BID_AMOUNT);
+// And the buy has to lock far more than the ask is worth, or "the unspent
+// part came back" is a statement about a rounding error.
+const _: () = assert!(MARKET_BUY_QUOTE > 2 * ASK_COST);
+
+/// An upper bound on the taker fee, deliberately not the contract's rate
+/// (0.045%): restating that here would check the implementation against
+/// itself. A tenth of a percent is more than double the real rate and orders
+/// of magnitude below the quote this phase asserts came back.
+const FEE_CAP_PERMILLE: u128 = 1;
+
+/// The 10 NACKL floor under any order's value, mirroring
+/// `MIN_ORDER_NOTIONAL_NACKL`.
+const MIN_ORDER_NOTIONAL: u128 = 10_000_000_000;
+
+/// A market buy one unit under that floor.
+const BELOW_MIN_NOTIONAL: u128 = MIN_ORDER_NOTIONAL - 1;
+
+/// A minimum fill size of one lot, attached to an order that cannot carry one.
+const MIN_FILL_ON_MARKET: u128 = 10_000_000;
+
+/// The buy placed with a client id two refusals have already used. Worth
+/// 12 NACKL at `BID_BPS`, so it is a valid order in its own right.
+const REUSED_CID_AMOUNT: u128 = 20_000_000_000;
+
+const _: () = assert!(REUSED_CID_AMOUNT * BID_BPS / FULL_PERCENT >= MIN_ORDER_NOTIONAL);
+
+/// `ERR_INVALID_PARAMS` — the note's answer to a combination of parameters it
+/// will not send at all.
+const ERR_INVALID_PARAMS: u16 = 129;
+
+/// `ERR_ORDER_TOO_SMALL` — under the minimum notional.
+const ERR_ORDER_TOO_SMALL: u16 = 160;
 
 #[tokio::test]
 #[ignore = "requires a local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID"]
@@ -111,7 +161,17 @@ async fn orders_that_must_not_rest_never_rest_local() {
     let ask_coid = nonce as u128 * 10;
     let buy_coid = ask_coid + 1;
 
-    place_limit(dex, &seller, &market.key, OUTCOME, false, ASK_BPS, ASK_AMOUNT, ask_coid).await;
+    place_limit(
+        dex,
+        &seller,
+        &market.key,
+        OUTCOME,
+        false,
+        &ASK_BPS.to_string(),
+        ASK_AMOUNT,
+        ask_coid,
+    )
+    .await;
     // The ask has to be on the book *before* the market buy is sent, or the
     // buy finds nothing, fills nothing, and every assertion below still holds
     // for the wrong reason.
@@ -173,13 +233,23 @@ async fn orders_that_must_not_rest_never_rest_local() {
         buyer_locked_before,
         "the market buy left collateral locked, which only a resting order should do"
     );
-    // And it did pay: without this the reading above is equally true of a
-    // market order that never matched anything.
+    // And it paid for the fill and only the fill. The quote locked is more
+    // than twice what the ask was worth, so the two readings are far apart:
+    // a book that kept the unmatched part would leave the buyer short by
+    // `MARKET_BUY_QUOTE`, not by `ASK_COST`. The upper bound carries the fee
+    // rather than restating it.
     let buyer_free_after = pn_balance(&r, &buyer.note.address).await;
+    let buyer_paid = (buyer_free_before + buyer_locked_before)
+        - (buyer_free_after + pn_locked(&r, &buyer.note.address).await);
     assert!(
-        buyer_free_after < buyer_free_before,
-        "the buyer's free collateral did not fall ({buyer_free_before} -> {buyer_free_after}), \
-         so nothing was paid for the tokens it holds"
+        buyer_paid >= ASK_COST,
+        "the buyer paid {buyer_paid} for tokens worth {ASK_COST}"
+    );
+    assert!(
+        buyer_paid <= ASK_COST + ASK_COST * FEE_CAP_PERMILLE / 1000,
+        "the buyer is out {buyer_paid} on a fill worth {ASK_COST}, against the \
+         {MARKET_BUY_QUOTE} its market order locked — the quote it did not spend was not \
+         returned"
     );
 
     // ── the same branch from the sell side ────────────────────────────────
@@ -192,7 +262,17 @@ async fn orders_that_must_not_rest_never_rest_local() {
     // The seller was paid in collateral for the ask; it now bids some of that
     // back, giving the market sell something to hit.
     let bid_coid = ask_coid + 10;
-    place_limit(dex, &seller, &market.key, OUTCOME, true, BID_BPS, BID_AMOUNT, bid_coid).await;
+    place_limit(
+        dex,
+        &seller,
+        &market.key,
+        OUTCOME,
+        true,
+        &BID_BPS.to_string(),
+        BID_AMOUNT,
+        bid_coid,
+    )
+    .await;
     wait_owner_order(dex, &market.order_book, &seller.note.dih_dec, bid_coid, true).await;
 
     let sell_tokens_before = outcome_tokens(dex, &buyer).await;
@@ -249,7 +329,7 @@ async fn orders_that_must_not_rest_never_rest_local() {
         &market.key,
         OUTCOME,
         true,
-        BID_BPS,
+        &BID_BPS.to_string(),
         IOC_AMOUNT,
         FLAG_IOC,
         ioc_coid,
@@ -275,6 +355,87 @@ async fn orders_that_must_not_rest_never_rest_local() {
         ioc_free_before,
         "an IOC order that filled nothing still cost the note collateral"
     );
+
+    // ── and the two a market order may not carry ──────────────────────────
+    //
+    // Both rules are enforced twice — once by the note before it sends, once
+    // by the book before it queues — because a bad entry that reached the
+    // queue would stall every order behind it. The note's copy is the one
+    // reachable from here, and it is the one that decides whether the order
+    // costs the sender anything at all.
+    //
+    // The two refusals deliberately share a client id. Reserving that id is
+    // the first thing the note does, before either check, so the second
+    // refusal answering its own complaint rather than "this id is taken" is
+    // what proves the first rolled the reservation back.
+    let refused_coid = ask_coid + 13;
+    let held_before = pn_balance(&r, &buyer.note.address).await
+        + pn_locked(&r, &buyer.note.address).await;
+
+    // A minimum fill size is stated in tokens; a market buy's amount is
+    // collateral. There is no exchange rate between the two until a fill
+    // picks one, so the combination is refused rather than interpreted.
+    assert_exit_code(
+        try_place_order(
+            dex,
+            &buyer,
+            &market.key,
+            OUTCOME,
+            true,
+            "0",
+            MARKET_BUY_QUOTE,
+            FLAG_MARKET,
+            MIN_FILL_ON_MARKET,
+            refused_coid,
+        )
+        .await,
+        ERR_INVALID_PARAMS,
+        "a market order carrying a minimum fill size",
+    );
+
+    // And a market buy's amount *is* its value, so the minimum notional
+    // applies to it directly rather than through a price.
+    assert_exit_code(
+        try_place_order(
+            dex,
+            &buyer,
+            &market.key,
+            OUTCOME,
+            true,
+            "0",
+            BELOW_MIN_NOTIONAL,
+            FLAG_MARKET,
+            0,
+            refused_coid,
+        )
+        .await,
+        ERR_ORDER_TOO_SMALL,
+        "a market buy one unit under the minimum notional",
+    );
+
+    // Neither cost anything: a refused order never reached the book, so
+    // nothing was locked against it and nothing was spent.
+    assert_eq!(
+        pn_balance(&r, &buyer.note.address).await + pn_locked(&r, &buyer.note.address).await,
+        held_before,
+        "a refused order moved collateral"
+    );
+
+    // The last of it: the client id both refusals reserved is free, which a
+    // valid order carrying it demonstrates by resting.
+    place_limit(
+        dex,
+        &buyer,
+        &market.key,
+        OUTCOME,
+        true,
+        &BID_BPS.to_string(),
+        REUSED_CID_AMOUNT,
+        refused_coid,
+    )
+    .await;
+    wait_owner_order(dex, &market.order_book, &buyer.note.dih_dec, refused_coid, true).await;
+    cancel_by_client(dex, &buyer, &market.key, refused_coid).await;
 
     seller.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     buyer.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
