@@ -74,8 +74,22 @@ const OUTCOME: u32 = 0;
 
 /// A bid far below par, on an empty book: nothing to cross, so it rests, and
 /// the collateral it locks is what the drain has to give back.
-const RESTING_PRICE_BPS: &str = "3000";
-const RESTING_AMOUNT: u128 = 20_000_000_000;
+const RESTING_PRICE_BPS: u128 = 3_000;
+const RESTING_AMOUNT: u128 = 40_000_000_000;
+
+/// The floor the book applies to `amount * price / FULL_PERCENT`
+/// (`MIN_ORDER_NOTIONAL_NACKL`) and the denominator it is measured against.
+/// An order under the floor is refused before it can rest — which, at a price
+/// this far below par, is easy to walk into by choosing a round amount: the
+/// pair above buys 40 tokens for 12 NACKL, and 20 tokens would have bought 6
+/// and been thrown out. The assertion is a compile error rather than a run so
+/// a later edit to either number cannot discover this on a stand.
+const MIN_ORDER_NOTIONAL_NACKL: u128 = 10_000_000_000;
+const FULL_PERCENT: u128 = 10_000;
+const _: () =
+    assert!(RESTING_AMOUNT * RESTING_PRICE_BPS / FULL_PERCENT >= MIN_ORDER_NOTIONAL_NACKL);
+/// And a whole number of lots, or the book refuses it for the other reason.
+const _: () = assert!(RESTING_AMOUNT.is_multiple_of(10_000_000));
 
 #[tokio::test]
 #[ignore = "requires a local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID"]
@@ -129,8 +143,17 @@ async fn a_cancelled_event_refunds_every_stake_and_closes_the_market_local() {
     let staker_free_before = pn_balance(&r, &staker.note.address).await;
     let staker_locked_before = pn_locked(&r, &staker.note.address).await;
 
-    place_limit(dex, &staker, &market.key, OUTCOME, true, RESTING_PRICE_BPS, RESTING_AMOUNT, coid)
-        .await;
+    place_limit(
+        dex,
+        &staker,
+        &market.key,
+        OUTCOME,
+        true,
+        &RESTING_PRICE_BPS.to_string(),
+        RESTING_AMOUNT,
+        coid,
+    )
+    .await;
     wait_owner_order(dex, &market.order_book, &staker.note.dih_dec, coid, true).await;
 
     let staker_locked_resting = pn_locked(&r, &staker.note.address).await;
