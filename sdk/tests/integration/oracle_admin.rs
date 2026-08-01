@@ -53,7 +53,9 @@ use crate::common::context::ORACLE_FEE;
 use crate::common::keys::gen_keys;
 use crate::common::locks;
 use crate::common::misc::event_entry_name;
+use crate::common::misc::now_unix;
 use crate::common::misc::poll_until;
+use crate::common::misc::wait_until;
 use crate::common::pmp::prepare_oracle_event;
 
 /// The two lists this scenario adds beyond the one every oracle is born with.
@@ -62,9 +64,18 @@ const THIRD_LIST: u128 = 2;
 
 const _: () = assert!(SECOND_LIST != 0 && THIRD_LIST != 0 && SECOND_LIST != THIRD_LIST);
 
-/// How long an event stays valid. Far enough out that nothing here expires
-/// while it runs.
-const EVENT_DEADLINE: u64 = 2_000_000_000;
+/// How long the event this scenario retracts stays valid.
+///
+/// A list only lets go of an event once nothing has confirmed it *and* its
+/// deadline has passed — and `addEvent` refuses a deadline that is already
+/// past. So the two rules bracket this figure: far enough ahead to be
+/// accepted, near enough to be waited out inside a test.
+const EVENT_LIFETIME: u64 = 30;
+
+/// The slack added before the retraction is attempted, for the same reason
+/// `wait_until` adds it everywhere else: the deadline is compared against a
+/// block timestamp, not the host clock.
+const DEADLINE_SLACK: u64 = 10;
 
 #[tokio::test]
 #[ignore = "requires a local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID"]
@@ -133,7 +144,9 @@ async fn an_oracle_owns_its_lists_and_only_its_owner_may_write_to_them_local() {
 
     // ── an event in one list is unknown to the other ──────────────────────
     let event_name = format!("AdmEvt{nonce:08x}");
-    add_event(dex, &second, &event_name, &Signer::Keys { keys: ev.oracle_keys.clone() }).await;
+    let deadline = now_unix() + EVENT_LIFETIME;
+    add_event(dex, &second, &event_name, deadline, &Signer::Keys { keys: ev.oracle_keys.clone() })
+        .await;
     let event_id = poll_for_event(dex, &second, &event_name).await;
 
     assert!(
@@ -147,7 +160,7 @@ async fn an_oracle_owns_its_lists_and_only_its_owner_may_write_to_them_local() {
 
     // ── and one a stranger may not add ────────────────────────────────────
     let refused_name = format!("AdmRef{nonce:08x}");
-    add_event(dex, &second, &refused_name, &stranger).await;
+    add_event(dex, &second, &refused_name, deadline, &stranger).await;
     assert!(
         find_event(dex, &second, &refused_name).await.is_none(),
         "a key that is not the oracle's published an event on its list"
@@ -155,9 +168,11 @@ async fn an_oracle_owns_its_lists_and_only_its_owner_may_write_to_them_local() {
 
     // ── retracting one ────────────────────────────────────────────────────
     //
-    // Nothing has been confirmed against this event and its deadline is far
-    // off, so the list has no reason to keep it — except ownership, which is
-    // what the stranger's attempt is for.
+    // A list lets go of an event only once nothing has confirmed it and its
+    // deadline has passed. Nothing has confirmed this one; the deadline is
+    // waited out here, because until it is, `deleteEvent` is a silent no-op
+    // for the owner too and the stranger's attempt below would prove nothing.
+    wait_until(deadline + DEADLINE_SLACK).await;
     delete_event(dex, &second, &event_id, &stranger).await;
     assert!(
         find_event(dex, &second, &event_name).await.is_some(),
@@ -199,7 +214,7 @@ async fn deploy_list(
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
 }
 
-async fn add_event(dex: &dodex_sdk::Dex, list: &str, name: &str, signer: &Signer) {
+async fn add_event(dex: &dodex_sdk::Dex, list: &str, name: &str, deadline: u64, signer: &Signer) {
     let mut outcomes = HashMap::new();
     outcomes.insert(0_u32, "Team A".to_string());
     outcomes.insert(1_u32, "Team B".to_string());
@@ -209,7 +224,7 @@ async fn add_event(dex: &dodex_sdk::Dex, list: &str, name: &str, signer: &Signer
             ParamsOfAddEvent {
                 event_name: name.to_string(),
                 oracle_fee: ORACLE_FEE,
-                deadline: EVENT_DEADLINE,
+                deadline,
                 describe: "Who wins?".to_string(),
                 outcome_names: outcomes,
                 trust_addr: None,

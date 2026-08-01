@@ -19,8 +19,11 @@
 //!
 //! None of the six answers. They are `require`s past `tvm.accept()`, so what
 //! each leaves is nothing — and "nothing" is also what an unsent message
-//! leaves, which is why the order is then cancelled and the same six are
-//! walked again, where they have to work.
+//! leaves. So the order is cancelled and one of the six is made again, where
+//! it has to work. The one chosen is the forfeit: it is barred by the open
+//! order and by nothing else, whereas a transfer or a coupon would still be
+//! refused afterwards for wanting an empty stake record, which this note does
+//! not have and is not the subject.
 //!
 //! ## And the two sizes a market will not take
 //!
@@ -207,34 +210,28 @@ async fn a_resting_order_bars_every_exit_and_a_market_refuses_impossible_baskets
     })
     .await;
 
-    let before_transfer = free(&r, &note.note.address).await;
-    let sink_before = free(&r, &sink.note.address).await;
+    // Forfeiting is the control, not transferring: `initTransfer` also
+    // requires an empty stake record, and this note has one from the split,
+    // so it would be refused for a second reason and prove nothing about the
+    // first. A forfeit is barred by the open order alone.
+    let stakes_before = stake_count(dex, &note).await;
+    assert_eq!(stakes_before, 1, "the note has no stake record left to forfeit");
+
     let _ = dex
-        .init_transfer(
+        .delete_stake(
             &note.note.address,
-            ParamsOfInitTransfer {
-                dest_deposit_hash: sink.note.dih_dec.clone(),
-                token_type: TOKEN_TYPE_NACKL,
-                amount: TRANSFER_AMOUNT,
-            },
+            market.key.clone(),
             Signer::Keys { keys: note.note.keys.clone() },
         )
         .await;
-    wait_not_busy(dex, &note.note.address, "a transfer with no orders in the way").await;
-    poll_until("the transfer never arrived once the order was gone", || async {
-        free(&r, &sink.note.address).await == sink_before + TRANSFER_AMOUNT
+    wait_not_busy(dex, &note.note.address, "a forfeit with no orders in the way").await;
+    poll_until("the forfeit never went through once the order was gone", || async {
+        stake_count(dex, &note).await == 0
     })
     .await;
-    assert_eq!(
-        free(&r, &note.note.address).await,
-        before_transfer - TRANSFER_AMOUNT,
-        "the transfer that finally worked cost the sender something other than what it sent"
-    );
 
-    note.taint(allocator::TaintReason::DirtyState {
-        fields: vec!["_stakes".to_string(), "_hasTransferred".to_string()],
-    });
-    sink.taint(allocator::TaintReason::DirtyState { fields: vec!["_balance".to_string()] });
+    note.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
+    sink.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     deployer.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
 }
 

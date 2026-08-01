@@ -34,7 +34,10 @@
 //!    the market's own balance check rather than being a call anyone makes,
 //!    so the first touch after `resultStart` starts it — and that touch
 //!    cannot come from the note, which is still holding the order the drain
-//!    is about to cancel and whose claim gate refuses while it does.
+//!    is about to cancel and whose exits are all barred while it is. Nor can
+//!    it be a claim from anyone: `_orderBookDone` is checked before
+//!    `tvm.accept()`, so a claim rolls the trigger back with itself. The
+//!    creator forfeits instead, which has no guard but the sender's.
 //! 7. **The resolve**, and a claim that is finally paid.
 //! 8. **A second claim** pays nothing: the note deleted its own record on the
 //!    first, so there is no longer anything to present.
@@ -181,14 +184,18 @@ async fn a_market_stops_accepting_things_as_its_windows_close_local() {
 
     // ── a claim with the book done and no answer yet ─────────────────────
     //
-    // The drain is not a call anyone makes: it is wired into the PMP's own
-    // balance check, so the first thing to touch the market after
-    // `resultStart` starts it. That cannot be this note — it is still holding
-    // the order the drain is about to cancel, and its own claim gate refuses
-    // while any of its orders are open. The creator does it instead, with a
-    // claim of its own that is refused for the same reason as everything else
-    // here and triggers the drain on its way through.
-    claim(dex, &creator, &market).await;
+    // The drain is wired into the PMP's own balance check, so a call that
+    // reaches it starts the drain — but most of the market's entry points
+    // guard themselves first, and a `require` that fires rolls the trigger
+    // back with everything else. `claim` is one of those: `_orderBookDone` is
+    // checked before `tvm.accept()`, so a claim can never be the thing that
+    // makes it true. Forfeiting is not — its only guard is on the sender, so
+    // it accepts, reaches the balance check and completes.
+    //
+    // The creator does it, because this note cannot: it is still holding the
+    // order the drain is about to cancel, and every exit of its own is barred
+    // while that order is open.
+    forfeit(dex, &creator, &market).await;
     crate::common::market::wait_order_book_done(dex, &market.pmp).await;
     wait_not_busy(dex, &note.note.address, "the drain reaching the note").await;
 
@@ -244,6 +251,24 @@ async fn a_market_stops_accepting_things_as_its_windows_close_local() {
     note.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     latecomer.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     creator.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
+}
+
+/// Hand a stake back to the market and take nothing for it — the one call
+/// that reaches the market's balance check without a state guard in front of
+/// it, and so the only one that can start a drain.
+async fn forfeit(
+    dex: &dodex_sdk::Dex,
+    note: &allocator::LeasedPn,
+    market: &crate::common::market::EphemeralMarket,
+) {
+    let _ = dex
+        .delete_stake(
+            &note.note.address,
+            market.key.clone(),
+            Signer::Keys { keys: note.note.keys.clone() },
+        )
+        .await;
+    wait_not_busy(dex, &note.note.address, "delete_stake").await;
 }
 
 async fn claim(
