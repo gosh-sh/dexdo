@@ -46,6 +46,7 @@ use crate::common::locks;
 use crate::common::market::cancel_by_client;
 use crate::common::market::freeze_prepared_market;
 use crate::common::market::prepare_ephemeral_market;
+use crate::common::misc::now_unix;
 use crate::common::market::resolve_and_drain;
 use crate::common::market::stake_amount;
 use crate::common::market::wait_owner_order;
@@ -56,10 +57,25 @@ use crate::common::misc::wait_until;
 
 /// The market that resolves inside the test, and the one that has to outlive
 /// it with an order still resting on its book.
-const SHORT_PERIOD: u64 = 260;
-const LONG_PERIOD: u64 = 560;
+///
+/// A market's staking window is a *tenth* of its life, so these are sized by
+/// what has to fit inside that tenth rather than by the whole: the first
+/// market has to still be taking stakes when the note gets to it, and the
+/// second one is prepared afterwards, which takes a minute and a half of
+/// oracle, event, deploy and quorum.
+const SHORT_PERIOD: u64 = 400;
+const LONG_PERIOD: u64 = 800;
 
-const _: () = assert!(LONG_PERIOD > SHORT_PERIOD + 120, "the second market has to outlast the first");
+/// The fraction of a market's life its staking window occupies —
+/// `_computeStakeEnd`. Named here because every deadline below is derived
+/// from it rather than from the period.
+const STAKE_WINDOW_DIVISOR: u64 = 10;
+
+const _: () = assert!(LONG_PERIOD > SHORT_PERIOD + 300, "the second market has to outlast the first");
+// One staking call has to fit inside the first market's window with room to
+// spare. Sized against the whole period, this is the constant that silently
+// stops being true.
+const _: () = assert!(SHORT_PERIOD / STAKE_WINDOW_DIVISOR >= 40);
 
 const OUTCOME: u32 = 0;
 const FULL_PERCENT: u128 = 10_000;
@@ -106,24 +122,23 @@ async fn one_note_in_two_markets_keeps_them_apart_local() {
     // Both markets are brought to their open staking window before either is
     // frozen, so the note can stake in both and the two windows overlap
     // instead of running end to end.
+    // Each market is staked into as soon as it opens, before the next one is
+    // built. Preparing a market takes a minute and a half — oracle, event,
+    // deploy, quorum — and a staking window is a tenth of a market's life, so
+    // building both first leaves the first one's window long closed by the
+    // time anything reaches it. A stake into a closed window is refused
+    // without answering, and the only trace is a record that never appears.
+    //
+    // The count after each is the cheapest reading of the keying: two
+    // markets, two records. Keyed by anything less than the market, the
+    // second would have landed on top of the first.
     let nonce_a = alloc.next_nonce().expect("allocate an oracle-name nonce");
     let prep_a = prepare_ephemeral_market(ctx, dex, &b0, &dep_a, nonce_a, SHORT_PERIOD).await;
+    stake_into(dex, &trader, &prep_a, "the first market", 1).await;
+
     let nonce_b = alloc.next_nonce().expect("allocate an oracle-name nonce");
     let prep_b = prepare_ephemeral_market(ctx, dex, &b0, &dep_b, nonce_b, LONG_PERIOD).await;
-
-    stake_amount(dex, &trader, &prep_a.key, OUTCOME, STAKE, false).await;
-    stake_amount(dex, &trader, &prep_b.key, OUTCOME, STAKE, false).await;
-
-    // The first reading, and the cheapest: two markets, two records. Keyed by
-    // anything less than the market, the second stake would have landed on
-    // top of the first.
-    let stakes = dex.get_stakes(&trader.note.address).await.expect("stakes").stakes;
-    assert_eq!(
-        stakes.len(),
-        2,
-        "the note holds {} stake record(s) after staking in two markets",
-        stakes.len()
-    );
+    stake_into(dex, &trader, &prep_b, "the second market", 2).await;
 
     let market_a = freeze_prepared_market(ctx, dex, prep_a).await;
     let market_b = freeze_prepared_market(ctx, dex, prep_b).await;
@@ -228,6 +243,38 @@ async fn one_note_in_two_markets_keeps_them_apart_local() {
     trader.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     dep_a.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     dep_b.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
+}
+
+/// Stake into a market that has just opened, and say what the note holds
+/// afterwards.
+///
+/// The window is checked first, because a stake sent into a closed one is
+/// refused without answering and the only evidence is a record that never
+/// appears — a failure that reads as "the records are keyed wrong" when it is
+/// really "the scenario was too slow". The count is asserted per market for
+/// the same reason: it names which of the two refused.
+async fn stake_into(
+    dex: &dodex_sdk::Dex,
+    note: &allocator::LeasedPn,
+    prepared: &crate::common::market::PreparedMarket,
+    which: &str,
+    expected_records: usize,
+) {
+    assert!(
+        now_unix() < prepared.stake_end,
+        "{which} stopped taking stakes at {} and it is already {} — the scenario spent its \
+         staking window building something else",
+        prepared.stake_end,
+        now_unix()
+    );
+    stake_amount(dex, note, &prepared.key, OUTCOME, STAKE, false).await;
+    let stakes = dex.get_stakes(&note.note.address).await.expect("stakes").stakes;
+    assert_eq!(
+        stakes.len(),
+        expected_records,
+        "after staking into {which} the note holds {} stake record(s), not {expected_records}",
+        stakes.len()
+    );
 }
 
 /// Rest a bid on one market's book and wait for it to be there.
