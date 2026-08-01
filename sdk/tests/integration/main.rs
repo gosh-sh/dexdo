@@ -54,6 +54,8 @@
 //!   pair, proving each side takes a different note, derives a different
 //!   nonce, and lands on a different market address.
 //!
+//! - `replay` — the same signed message sent again, which no ordinary SDK
+//!   call can do because each builds a fresh one.
 //! - `usdc_market` — a whole market denominated in a six-decimal token, and
 //!   the fill so small the taker fee floors to nothing inside it.
 //!
@@ -89,6 +91,7 @@ mod pmp;
 mod pn_basic;
 mod price_above_par;
 mod proof_money;
+mod replay;
 mod resting_orders;
 mod shutdown_orders;
 mod usdc_market;

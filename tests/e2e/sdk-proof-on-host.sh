@@ -313,6 +313,11 @@ elif [ "$SUITE" = impostor ]; then
   # nobody appointed. Nothing may happen, and then the market has to work.
   FILTER='test(=impostor_calls::the_protocols_own_vocabulary_is_not_available_to_strangers_local)'
   THREADS=1
+elif [ "$SUITE" = replay ]; then
+  # The only scenario that sends the same signed message twice, which needs
+  # the message encoded once and posted raw rather than built per call.
+  FILTER='test(=replay::one_signed_instruction_is_carried_out_once_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
