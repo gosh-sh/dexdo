@@ -60,6 +60,7 @@ use crate::common::market::resolve_and_drain;
 use crate::common::market::stake_amount;
 use crate::common::market::wait_owner_order;
 use crate::common::misc::now_unix;
+use crate::common::misc::poll_until;
 use crate::common::misc::wait_not_busy;
 use crate::common::misc::wait_until;
 
@@ -199,10 +200,22 @@ async fn a_market_stops_accepting_things_as_its_windows_close_local() {
     crate::common::market::wait_order_book_done(dex, &market.pmp).await;
     wait_not_busy(dex, &note.note.address, "the drain reaching the note").await;
 
+    // By now the book is not merely empty — it is gone. Its last message
+    // carries its whole balance to the market and destroys the account in the
+    // same action that reports the drain complete, so nothing can be asked of
+    // it any more and the drain has to be read off the note it refunded: the
+    // order is no longer one of the note's open ones and the collateral behind
+    // it is back. That reading is also what the claim below depends on, since
+    // a claim counts the note's open orders on this market before anything
+    // else.
     assert!(
-        order_absent(dex, &market.order_book, &note.note.dih_dec, early_cid).await,
-        "the drain left the note's order on a book that has finished shutting down"
+        r.account_absent(&market.order_book).await.expect("read the drained book's account"),
+        "the market reported its book drained while the book is still on chain"
     );
+    poll_until("the drain never reached the note whose order it cancelled", || async {
+        open_orders(&r, &note.note.address).await == 0 && locked(&r, &note.note.address).await == 0
+    })
+    .await;
 
     // Now the note is past one of a claim's two conditions and short of the
     // other: the book is done, the market has not resolved. It pays nothing,
@@ -298,6 +311,12 @@ async fn order_absent(
         .orders
         .iter()
         .any(|o| o.client_order_id == client_order_id)
+}
+
+/// How many orders the note itself believes it has resting — `_openOrderCount`,
+/// which the drain's per-order refund is what brings back to zero.
+async fn open_orders(r: &chain_reader::ChainReader, pn_address: &str) -> u32 {
+    invariant::pn_open_order_count(r, pn_address).await.expect("read open order count")
 }
 
 async fn free(r: &chain_reader::ChainReader, pn_address: &str) -> u128 {
