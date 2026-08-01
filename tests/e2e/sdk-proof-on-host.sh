@@ -298,6 +298,11 @@ elif [ "$SUITE" = clock ]; then
   # happen inside them, so it is slow for the number of calls it makes.
   FILTER='test(=market_clock::a_market_stops_accepting_things_as_its_windows_close_local)'
   THREADS=1
+elif [ "$SUITE" = gates ]; then
+  # Six refused exits, two refused baskets, and one control that has to work.
+  # No market waits, so it is quick for the number of calls it makes.
+  FILTER='test(=exit_gates::a_resting_order_bars_every_exit_and_a_market_refuses_impossible_baskets_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

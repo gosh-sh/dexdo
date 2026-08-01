@@ -24,6 +24,9 @@
 //!   outcome, and the rules `placeBatch` enforces on the two lists it takes.
 //! - `coupon_debt` — the free coupon a broke note can mint, the debt it comes
 //!   with, and both of them across three markets.
+//! - `exit_gates` — the six ways out of a market, all barred while any order
+//!   of the note's is still resting, and the two basket sizes a market
+//!   refuses outright.
 //! - `forfeit_close` — a market that resolves to outcome 1 rather than 0, and
 //!   the three stakes walked away from instead of claimed, the last of which
 //!   closes it.
@@ -59,6 +62,7 @@ mod cancelled_event;
 mod common;
 mod coupon_debt;
 mod discovery;
+mod exit_gates;
 mod flows;
 mod forfeit_close;
 mod history;
