@@ -95,11 +95,33 @@ const EPOCH_TWO: u64 = 2;
 
 const _: () = assert!(EPOCH_ONE != EPOCH_TWO);
 
-/// The batch phase's own orders, priced where nothing else is resting.
-const BATCH_BID_BPS: u128 = 5_000;
-const BATCH_AMOUNT: u128 = 20_000_000_000;
+/// The segment the batch phase works in, and the reason it has one: the
+/// phases above leave orders resting, and one of them is a bid on this outcome
+/// at a price any ask the batch places would cross. A phase that shares a
+/// segment with an earlier phase's leftovers is not testing what it says it
+/// is — it is racing them.
+const EPOCH_BATCH: u64 = 3;
 
+const _: () = assert!(EPOCH_BATCH != EPOCH_ONE && EPOCH_BATCH != EPOCH_TWO);
+const _: () = assert!(EPOCH_BATCH != 0, "epoch 0 is where every other scenario places");
+
+/// The pair the cancels-first claim rests on: a bid and an ask at the same
+/// price, so an ask placed before the cancellation would trade with the bid
+/// instead of resting.
+const BATCH_CROSS_BPS: u128 = 5_000;
+
+/// The ladders, priced under that pair so ten bids arriving later cannot eat
+/// the ask the batch left resting.
+const BATCH_BID_BPS: u128 = 4_000;
+const BATCH_AMOUNT: u128 = 30_000_000_000;
+
+const _: () = assert!(BATCH_BID_BPS < BATCH_CROSS_BPS, "the ladder must not reach the ask");
 const _: () = assert!(BATCH_AMOUNT * BATCH_BID_BPS / FULL_PERCENT >= MIN_ORDER_NOTIONAL);
+const _: () = assert!(BATCH_AMOUNT * BATCH_CROSS_BPS / FULL_PERCENT >= MIN_ORDER_NOTIONAL);
+
+/// Collateral the maker splits. The asks it writes come out of this: one in
+/// the epoch phase, one on the other outcome, and the batch phase's own.
+const SPLIT_COLLATERAL: u128 = 300_000_000_000;
 
 /// `MAX_BATCH_SIZE` — the most either list of a batch may carry.
 const MAX_BATCH: usize = 10;
@@ -129,14 +151,15 @@ async fn segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local
 
     // Both outcomes, because the second phase sells the one the first does
     // not. A split mints the whole set, so one call covers both.
-    split_full_set(dex, &maker, &market.key, 200_000_000_000).await;
+    split_full_set(dex, &maker, &market.key, SPLIT_COLLATERAL).await;
     let maker_tokens = outcome_tokens(dex, &maker).await;
-    for outcome in [OUTCOME_A, OUTCOME_B] {
+    for (outcome, needed) in
+        [(OUTCOME_A, SEGMENT_AMOUNT + BATCH_AMOUNT), (OUTCOME_B, SEGMENT_AMOUNT)]
+    {
         assert!(
-            at(&maker_tokens, outcome) >= 2 * SEGMENT_AMOUNT,
-            "the split left the maker {} outcome-{outcome} tokens, short of the {} its asks need",
-            at(&maker_tokens, outcome),
-            2 * SEGMENT_AMOUNT
+            at(&maker_tokens, outcome) >= needed,
+            "the split left the maker {} outcome-{outcome} tokens, short of the {needed} its              asks on that outcome need",
+            at(&maker_tokens, outcome)
         );
     }
 
@@ -265,9 +288,10 @@ async fn segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local
 
     // ── what a batch does, and what it refuses ────────────────────────────
     //
-    // The maker's book segment is empty at `BATCH_BID_BPS`, so everything
-    // below rests rather than trading, and the phase can read placements
-    // against cancellations without a fill in the way.
+    // In a segment of its own, because the phases above left orders resting
+    // and one of them is a bid this phase's ask would cross. Nothing else has
+    // ever been placed in `EPOCH_BATCH`, so everything here rests or trades
+    // only against the rest of this phase.
     let batch_base = base + 100;
     let resting_before = owner_orders(dex, &market.order_book, &maker.note.dih_dec).await.len();
 
@@ -276,14 +300,15 @@ async fn segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local
     // ask would find the bid and trade with its own owner.
     let victim_bid = batch_base + 1;
     let widow_ask = batch_base + 2;
-    place_limit(
+    place_limit_in_epoch(
         dex,
         &maker,
         &market.key,
         OUTCOME_A,
         true,
-        &BATCH_BID_BPS.to_string(),
+        &BATCH_CROSS_BPS.to_string(),
         BATCH_AMOUNT,
+        EPOCH_BATCH,
         victim_bid,
     )
     .await;
@@ -296,7 +321,7 @@ async fn segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local
         dex,
         &maker,
         &market,
-        vec![order_at(OUTCOME_A, false, BATCH_BID_BPS, BATCH_AMOUNT, widow_ask)],
+        vec![order_at(OUTCOME_A, false, BATCH_CROSS_BPS, BATCH_AMOUNT, widow_ask)],
         vec![victim_id],
     )
     .await;
@@ -430,7 +455,7 @@ async fn segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local
     // The client ids the refused batches carried are free again — the note
     // reserves them before it validates, and a valid order proves it gave
     // them back.
-    place_limit(
+    place_limit_in_epoch(
         dex,
         &maker,
         &market.key,
@@ -438,6 +463,7 @@ async fn segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local
         true,
         &BATCH_BID_BPS.to_string(),
         BATCH_AMOUNT,
+        EPOCH_BATCH,
         refused_cids,
     )
     .await;
@@ -468,7 +494,7 @@ fn order_at(
         price: price_bps.to_string(),
         amount,
         min_amount: 0,
-        epoch_id: 0,
+        epoch_id: EPOCH_BATCH,
         client_order_id,
     }
 }
