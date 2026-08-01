@@ -40,6 +40,9 @@
 //!   pair, proving each side takes a different note, derives a different
 //!   nonce, and lands on a different market address.
 //!
+//! - `usdc_market` — a whole market denominated in a six-decimal token, and
+//!   the fill so small the taker fee floors to nothing inside it.
+//!
 //! Each `mod` declaration here pulls in `tests/integration/<name>.rs` (or
 //! `tests/integration/<name>/mod.rs` for the multi-file `common` module).
 
@@ -69,4 +72,5 @@ mod price_above_par;
 mod proof_money;
 mod resting_orders;
 mod shutdown_orders;
+mod usdc_market;
 mod usdc_release;

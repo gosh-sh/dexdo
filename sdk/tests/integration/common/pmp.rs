@@ -388,17 +388,47 @@ pub async fn deploy_pmp_with_deployer(
     dex: &Dex,
     deployer: &LeasedPn,
     ev: &OracleEventCtx,
+    guard: &ChainLockGuard,
+) -> String {
+    deploy_pmp_in_currency(
+        context,
+        dex,
+        deployer,
+        ev,
+        guard,
+        TOKEN_TYPE_NACKL,
+        DEPLOYER_SEED_AMOUNT,
+    )
+    .await
+}
+
+/// [`deploy_pmp_with_deployer`] for a market denominated in something other
+/// than NACKL.
+///
+/// Both extra parameters travel together on purpose: a market's currency
+/// decides what its creator's initial stakes are *denominated in*, and the
+/// figure NACKL uses is a hundred thousand times too large for a token with
+/// six decimals. Passing one without the other is the mistake this signature
+/// makes impossible.
+#[allow(dead_code)]
+pub async fn deploy_pmp_in_currency(
+    context: &Arc<ClientContext>,
+    dex: &Dex,
+    deployer: &LeasedPn,
+    ev: &OracleEventCtx,
     _guard: &ChainLockGuard,
+    token_type: u32,
+    seed_per_outcome: u128,
 ) -> String {
     dex.deploy_pmp(
         &deployer.note.address,
         ParamsOfDeployPmp {
             event_id: ev.event_id.clone(),
             oracle_fee: vec![ORACLE_FEE],
-            token_type: TOKEN_TYPE_NACKL,
+            token_type,
             names: vec![ev.oracle_name.clone()],
             index: vec![0],
-            initial_stakes: vec![DEPLOYER_SEED_AMOUNT, DEPLOYER_SEED_AMOUNT],
+            initial_stakes: vec![seed_per_outcome, seed_per_outcome],
         },
         Signer::Keys { keys: deployer.note.keys.clone() },
     )
@@ -412,7 +442,7 @@ pub async fn deploy_pmp_with_deployer(
         .get_pmp_address(ParamsOfGetPmpAddress {
             event_id: ev.event_id.clone(),
             names: vec![ev.oracle_name.clone()],
-            token_type: TOKEN_TYPE_NACKL,
+            token_type,
         })
         .await
         .expect("get_pmp_address")

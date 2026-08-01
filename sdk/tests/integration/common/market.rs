@@ -50,7 +50,6 @@ use crate::common::misc::poll_until;
 use crate::common::misc::wait_active;
 use crate::common::misc::wait_not_busy;
 use crate::common::misc::wait_until;
-use crate::common::pmp::deploy_pmp_with_deployer;
 use crate::common::pmp::prepare_oracle_event;
 use crate::common::pmp::OracleEventCtx;
 
@@ -588,8 +587,49 @@ pub async fn prepare_ephemeral_market(
     nonce: u64,
     stake_period: u64,
 ) -> PreparedMarket {
+    prepare_ephemeral_market_in(
+        ctx,
+        dex,
+        guard,
+        deployer,
+        nonce,
+        stake_period,
+        TOKEN_TYPE_NACKL,
+        crate::common::context::DEPLOYER_SEED_AMOUNT,
+    )
+    .await
+}
+
+/// [`prepare_ephemeral_market`] for a market denominated in another currency.
+///
+/// The currency is part of a market's identity — it is hashed into the
+/// address alongside the event and the oracle list — so it has to be chosen
+/// here rather than assumed, and the creator's initial stakes have to be
+/// denominated in it. Both travel together for the reason
+/// `deploy_pmp_in_currency` gives.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub async fn prepare_ephemeral_market_in(
+    ctx: &Arc<ClientContext>,
+    dex: &Dex,
+    guard: &ChainLockGuard,
+    deployer: &LeasedPn,
+    nonce: u64,
+    stake_period: u64,
+    token_type: u32,
+    seed_per_outcome: u128,
+) -> PreparedMarket {
     let oracle = prepare_oracle_event(ctx, dex, guard, nonce).await;
-    let pmp = deploy_pmp_with_deployer(ctx, dex, deployer, &oracle, guard).await;
+    let pmp = crate::common::pmp::deploy_pmp_in_currency(
+        ctx,
+        dex,
+        deployer,
+        &oracle,
+        guard,
+        token_type,
+        seed_per_outcome,
+    )
+    .await;
 
     set_timings_and_approve(dex, &pmp, &oracle, now_unix() + stake_period).await;
 
@@ -600,7 +640,7 @@ pub async fn prepare_ephemeral_market(
     let key = ParamsOfStakeKey {
         event_id: details.event_id.clone(),
         oracle_list_hash: details.oracle_list_hash.clone(),
-        token_type: TOKEN_TYPE_NACKL,
+        token_type,
     };
 
     PreparedMarket {

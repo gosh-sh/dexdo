@@ -283,6 +283,11 @@ elif [ "$SUITE" = markets ]; then
   # this one waits longer than most of the set.
   FILTER='test(=multi_market::one_note_in_two_markets_keeps_them_apart_local)'
   THREADS=1
+elif [ "$SUITE" = usdcmarket ]; then
+  # The only market in the suite that is not priced in NACKL, and the only
+  # place a taker fee can round away to nothing.
+  FILTER='test(=usdc_market::a_market_in_a_six_decimal_token_trades_and_rounds_its_fee_away_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

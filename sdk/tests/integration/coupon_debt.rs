@@ -100,14 +100,17 @@ const COUPON_DEBT: u128 = COUPON_NOMINAL * 5 / 100;
 
 /// `MIN_VALUE` for NACKL — the stake minimum, and so the ceiling every balance
 /// has to be under before a coupon may be minted.
-const MIN_STAKE: u128 = 1_000_000_000;
+const MIN_STAKE: u128 = 10_000_000;
 
-/// The 0.01 NACKL lot a stake is quantised to. Staking a balance down to its
-/// lot remainder leaves less than one lot behind, which is what makes the
-/// remainder small enough for the coupon gate without needing it to be zero.
+/// The 0.01 NACKL lot a stake is quantised to.
+///
+/// It is the same figure as the stake minimum, and that coincidence is what
+/// makes the coupon reachable at all: a balance staked down to its lot
+/// remainder keeps strictly less than one lot, which is therefore strictly
+/// under the minimum. Nothing has to reach zero.
 const LOT: u128 = 10_000_000;
 
-const _: () = assert!(LOT < MIN_STAKE, "a lot remainder has to fit under the stake minimum");
+const _: () = assert!(LOT <= MIN_STAKE, "a lot remainder has to fit under the stake minimum");
 
 /// What the note bets with its coupon. Comfortably over the stake minimum and
 /// comfortably under the market's coupon ceiling, which is 5% of the outcome's
@@ -179,7 +182,7 @@ async fn a_coupon_is_won_with_and_the_debt_it_leaves_is_bet_against_local() {
     assert!(
         leftovers < MIN_STAKE,
         "the note came out of a lost bet holding {leftovers}, at or above the {MIN_STAKE} \
-         minimum — the coupon gate will refuse it"
+         stake minimum — the coupon gate refuses any balance that could still be staked"
     );
     assert!(
         dex.get_stakes(&note.note.address).await.expect("stakes").stakes.is_empty(),

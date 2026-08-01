@@ -1447,8 +1447,12 @@ mod tests {
     ///   resolve and the one that claims a winning outcome after it.
     ///   `multi_market` takes one and leaves it holding a stake and a resting
     ///   order in a market that outlives the scenario.
-    /// - `Usdc` 1: `usdc_release`'s source note. Nothing returns it — a
-    ///   withdrawn note latches `_hasWithdrawn` and is quarantined for good.
+    /// - `Usdc` 4: `usdc_release`'s source note, and three more for
+    ///   `usdc_market` — a creator, a maker and a taker, all of which have to
+    ///   hold the currency the market is denominated in, because a market's
+    ///   currency is part of its identity and its creator's initial stakes are
+    ///   denominated in it. Nothing returns any of them: the first latches
+    ///   `_hasWithdrawn`, and the other three end holding stakes.
     ///
     /// The pool grows by three notes per market-deploying scenario, because a
     /// note that has traded holds a stake record and outcome tokens and can
@@ -1470,7 +1474,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 19), (PnProfile::Trd, 21), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 19), (PnProfile::Trd, 21), (PnProfile::Usdc, 4)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");
