@@ -27,6 +27,9 @@
 //! - `forfeit_close` — a market that resolves to outcome 1 rather than 0, and
 //!   the three stakes walked away from instead of claimed, the last of which
 //!   closes it.
+//! - `market_clock` — the other side of every deadline a market has: a stake
+//!   after the window, an order after the book closed, a claim before the
+//!   resolve and one after it has already been paid.
 //! - `mm_cycle` — a maker's whole sequence: quote both sides in one batch,
 //!   get taken on part of it, cancel by name and then wholesale, merge the
 //!   inventory back, and settle.
@@ -60,6 +63,7 @@ mod flows;
 mod forfeit_close;
 mod history;
 mod ledger_race;
+mod market_clock;
 mod market_orders;
 mod matching_ladder;
 mod mm_cycle;

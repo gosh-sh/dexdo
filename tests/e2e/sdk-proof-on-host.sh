@@ -293,6 +293,11 @@ elif [ "$SUITE" = refusals ]; then
   # nothing. No market waits and no fills, so it is one of the quicker steps.
   FILTER='test(=order_refusals::orders_that_must_not_be_placed_are_refused_by_one_layer_or_the_other_local)'
   THREADS=1
+elif [ "$SUITE" = clock ]; then
+  # Mostly spent waiting for windows to close rather than for anything to
+  # happen inside them, so it is slow for the number of calls it makes.
+  FILTER='test(=market_clock::a_market_stops_accepting_things_as_its_windows_close_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
