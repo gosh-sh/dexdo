@@ -278,6 +278,11 @@ elif [ "$SUITE" = quorum ]; then
   # place a vote that does not execute can be observed at all.
   FILTER='test(=oracle_quorum::a_market_with_three_oracles_moves_only_on_two_of_them_local)'
   THREADS=1
+elif [ "$SUITE" = markets ]; then
+  # Two markets in one scenario, the second outliving the first by design, so
+  # this one waits longer than most of the set.
+  FILTER='test(=multi_market::one_note_in_two_markets_keeps_them_apart_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

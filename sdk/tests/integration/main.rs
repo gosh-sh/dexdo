@@ -30,6 +30,9 @@
 //! - `mm_cycle` — a maker's whole sequence: quote both sides in one batch,
 //!   get taken on part of it, cancel by name and then wholesale, merge the
 //!   inventory back, and settle.
+//! - `multi_market` — one note staking and quoting in two markets at once:
+//!   the order ids that collide, the locks that must not, and the claim gate
+//!   that counts one market's orders rather than the note's.
 //! - `oracle_quorum` — a market answering to three oracles: what one vote
 //!   cannot do, what a repeated one does not add, and what a changed one
 //!   moves.
@@ -54,6 +57,7 @@ mod ledger_race;
 mod market_orders;
 mod matching_ladder;
 mod mm_cycle;
+mod multi_market;
 mod multitoken;
 mod oracle;
 mod oracle_quorum;
