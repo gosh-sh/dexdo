@@ -1433,8 +1433,9 @@ mod tests {
     ///   twenty-first — the latter's creator does more than deploy, since the
     ///   drain is wired into the market's balance check and somebody with no
     ///   open orders has to be the first to touch it past the deadline.
-    ///   `exit_gates` deploys the twenty-second. Two of the twenty-two are
-    ///   gone before any of those steps starts.
+    ///   `exit_gates` deploys the twenty-second and `impostor_calls` the
+    ///   twenty-third. Two of the twenty-three are gone before any of those
+    ///   steps starts.
     /// - `Trd` 13: `proof_money` takes two and returns both, and
     ///   `usdc_release` borrows one and returns it — none of that costs
     ///   anything. `resting_orders`, `market_orders`, `matching_ladder`,
@@ -1458,6 +1459,8 @@ mod tests {
     ///   things late. `exit_gates` takes two more: the note whose exits are
     ///   barred, and the destination its transfer finally reaches — which
     ///   ends holding currency it did not start with, so neither comes back.
+    ///   `impostor_calls` takes one: the note whose stake, order and money a
+    ///   stranger tries to move on its behalf.
     /// - `Usdc` 4: `usdc_release`'s source note, and three more for
     ///   `usdc_market` — a creator, a maker and a taker, all of which have to
     ///   hold the currency the market is denominated in, because a market's
@@ -1485,7 +1488,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 22), (PnProfile::Trd, 27), (PnProfile::Usdc, 4)];
+        &[(PnProfile::Dep, 23), (PnProfile::Trd, 28), (PnProfile::Usdc, 4)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

@@ -922,6 +922,20 @@ pub async fn pn_debt(r: &ChainReader, pn: &str) -> anyhow::Result<u128> {
     field_u128(&fields, PN_DEBT)
 }
 
+/// Everything the market holds — `PMP._totalPool`, which every accepted
+/// stake grows and nothing else does.
+///
+/// The reading a scenario wants when the question is whether a stake was
+/// taken at all, rather than whose it was: a market that grew on a stranger's
+/// word shows here and nowhere on the note that supposedly sent it.
+pub async fn pmp_total_pool(r: &ChainReader, pmp: &str) -> anyhow::Result<u128> {
+    let fields = r
+        .storage_fields(pmp, PMP_ABI)
+        .await?
+        .ok_or_else(|| anyhow!("PMP {pmp} holds no account on this stand"))?;
+    field_u128(&fields, PMP_TOTAL_POOL)
+}
+
 /// The market's coupon pool — `PMP._totalCouponPool`, the virtual side of its
 /// books. Coupon stakes never move real collateral, so this is the only place
 /// one of them shows up.

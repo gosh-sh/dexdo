@@ -16,6 +16,9 @@
 //! - `proof_money` — one market's whole lifecycle against a from-scratch local
 //!   stand, with an exact per-currency conservation assertion after every
 //!   phase.
+//! - `impostor_calls` — the protocol's own internal vocabulary spoken by a
+//!   stranger: six calls a market's parts make to each other, every one of
+//!   them reachable from outside and every one of them guarded.
 //! - `ledger_race` — hermetic multiprocess contention on the shared ledger:
 //!   real OS processes rent/release/quarantine the same note pool
 //!   concurrently, and a worker from a superseded generation gets
@@ -68,6 +71,7 @@ mod exit_gates;
 mod flows;
 mod forfeit_close;
 mod history;
+mod impostor_calls;
 mod ledger_race;
 mod market_clock;
 mod market_orders;

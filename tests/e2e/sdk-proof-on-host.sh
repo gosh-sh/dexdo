@@ -308,6 +308,11 @@ elif [ "$SUITE" = oracleadmin ]; then
   # touches is oracle-side, so it waits for nothing but its own messages.
   FILTER='test(=oracle_admin::an_oracle_owns_its_lists_and_only_its_owner_may_write_to_them_local)'
   THREADS=1
+elif [ "$SUITE" = impostor ]; then
+  # Six of the protocol's own internal calls, made from outside by a keypair
+  # nobody appointed. Nothing may happen, and then the market has to work.
+  FILTER='test(=impostor_calls::the_protocols_own_vocabulary_is_not_available_to_strangers_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
