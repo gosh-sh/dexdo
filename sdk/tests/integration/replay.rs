@@ -27,6 +27,19 @@
 //! of `_opNonce` — with the first send's success as the control that the
 //! message was well-formed to begin with.
 //!
+//! ## The window the whole scenario has to live inside
+//!
+//! The same hook that rejects a repeat also rejects a message that has
+//! expired, and one whose expiry is more than five minutes out. Those two
+//! bracket everything below: a replay sent after the expiry it carries is
+//! turned away for **being late**, not for being a repeat, and the three
+//! readings would be satisfied by a message that never reached the guard at
+//! all. So the expiry is set explicitly rather than left to the client's
+//! default of well under a minute, as far out as the hook will take it, and
+//! the scenario asserts at the end that it was still inside that window when
+//! the last replay went out. Without that assertion a slow stand turns this
+//! scenario into one that passes without testing anything.
+//!
 //! The instruction replayed is an order rather than a stake, for two reasons.
 //! `_opNonce` moves only where the note dispatches to a book, so it is a
 //! reading a stake would not give; and an order needs no open staking window,
@@ -41,6 +54,7 @@ use ackinacki_kit::contracts::traits::AbiAccessor;
 use ackinacki_kit::contracts::traits::AddressAccessor;
 use ackinacki_kit::contracts::traits::EncodeMessage;
 use ackinacki_kit::tvm_client::abi::CallSet;
+use ackinacki_kit::tvm_client::abi::FunctionHeader;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::processing;
 use ackinacki_kit::tvm_client::processing::ParamsOfSendMessage;
@@ -56,11 +70,20 @@ use crate::common::invariant;
 use crate::common::locks;
 use crate::common::market::deploy_ephemeral_market;
 use crate::common::market::wait_owner_order;
+use crate::common::misc::now_unix;
 use crate::common::misc::wait_not_busy;
 
 const STAKE_PERIOD_REPLAY: u64 = 400;
 const OUTCOME: u32 = 0;
 const LOT: u128 = 10_000_000;
+
+/// How long the one signed message stays valid.
+///
+/// The note's replay hook refuses an expiry more than five minutes ahead of
+/// the block it arrives in, so this is that ceiling less a minute of slack for
+/// the chain's clock sitting behind the host's. Everything the scenario sends
+/// has to go out inside it, which the assertion at the end enforces.
+const MESSAGE_LIFETIME: u64 = 240;
 
 /// What the one signed instruction asks for. Large enough that a second lock
 /// would be unmistakable in the escrow.
@@ -93,9 +116,10 @@ async fn one_signed_instruction_is_carried_out_once_local() {
     // BOC — the same bytes, the same signature, the same hash — which is what
     // no ordinary SDK call can do, since each builds a fresh one.
     let pn = PrivateNote::new(Arc::clone(ctx), dex_contract_params(&note.note.address));
+    let expire_at = now_unix() + MESSAGE_LIFETIME;
     let call = CallSet {
         function_name: "placeOrder".to_string(),
-        header: None,
+        header: Some(FunctionHeader { expire: Some(expire_at as u32), time: None, pubkey: None }),
         input: Some(json!({
             "eventId": market.key.event_id,
             "oracleListHash": market.key.oracle_list_hash,
@@ -162,6 +186,15 @@ async fn one_signed_instruction_is_carried_out_once_local() {
             "replay {attempt} reached the book far enough to advance the note's counter"
         );
     }
+
+    // The readings above are only about replay while the message they replay
+    // is still one the note would otherwise have taken. Past its expiry the
+    // same hook refuses it for being late, and every one of them would hold
+    // for a message that never reached the replay check at all.
+    assert!(
+        now_unix() < expire_at,
+        "the replays went out after the message they replay had expired, so nothing above          distinguishes a refused repeat from a message that was simply too late"
+    );
 
     note.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
     creator.taint(allocator::TaintReason::DirtyState { fields: vec!["_stakes".to_string()] });
