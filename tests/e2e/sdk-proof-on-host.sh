@@ -303,6 +303,11 @@ elif [ "$SUITE" = gates ]; then
   # No market waits, so it is quick for the number of calls it makes.
   FILTER='test(=exit_gates::a_resting_order_bars_every_exit_and_a_market_refuses_impossible_baskets_local)'
   THREADS=1
+elif [ "$SUITE" = oracleadmin ]; then
+  # The one scenario on the stand that builds no market at all: everything it
+  # touches is oracle-side, so it waits for nothing but its own messages.
+  FILTER='test(=oracle_admin::an_oracle_owns_its_lists_and_only_its_owner_may_write_to_them_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

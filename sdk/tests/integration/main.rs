@@ -39,6 +39,8 @@
 //! - `multi_market` — one note staking and quoting in two markets at once:
 //!   the order ids that collide, the locks that must not, and the claim gate
 //!   that counts one market's orders rather than the note's.
+//! - `oracle_admin` — an oracle's own housekeeping: lists beyond the first,
+//!   events published and retracted, and the owner check on each of them.
 //! - `oracle_quorum` — a market answering to three oracles: what one vote
 //!   cannot do, what a repeated one does not add, and what a changed one
 //!   moves.
@@ -74,6 +76,7 @@ mod mm_cycle;
 mod multi_market;
 mod multitoken;
 mod oracle;
+mod oracle_admin;
 mod oracle_quorum;
 mod order_book;
 mod order_refusals;
