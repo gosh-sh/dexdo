@@ -21,11 +21,17 @@
 //! stake records are keyed by market and there have to be two of them.
 //!
 //! Then a resting buy on each book, both of them the first order their book
-//! has seen, so both are order 1. Both have to rest, the note's escrow has to
-//! hold the sum of the two locks, and cancelling one has to return exactly
-//! that one's lock and leave the other order untouched. A flat key would
-//! have made the second placement overwrite the first, and the cancellation
-//! would then have released the wrong figure — or nothing.
+//! has seen, so both are order 1. What each escrows is measured as it is
+//! placed rather than recomputed: a buy locks its cost *plus* a reserve for
+//! the fee it might pay, and that reserve is the contract's arithmetic, not
+//! this scenario's. The two bids are priced differently on purpose, so the
+//! two locks differ.
+//!
+//! The claim is then the cancellation. Taking the first market's bid off its
+//! book has to release exactly what that bid took. Under a key that ignored
+//! the book, the second placement would have overwritten the first's record,
+//! and this cancellation would hand back the *other* bid's figure — which is
+//! a different number precisely because the prices are.
 //!
 //! Last, the first market resolves while the order on the second is still
 //! resting, and the note claims. That claim is what says the gate is
@@ -148,8 +154,18 @@ async fn one_note_in_two_markets_keeps_them_apart_local() {
     let (cid_a, cid_b) = (base + 1, base + 2);
     let locked_before = pn_locked(&r, &trader.note.address).await;
 
+    // Each placement's escrow is measured as it happens. What a buy locks is
+    // its cost *plus* a reserve for the fee it might pay, and this scenario
+    // deliberately does not recompute that reserve — it reads what each order
+    // actually took, which is the figure the cancellation below has to give
+    // back.
     rest_bid(dex, &trader, &market_a, BID_A_BPS, cid_a).await;
+    let after_a = pn_locked(&r, &trader.note.address).await;
+    let lock_a = after_a - locked_before;
+
     rest_bid(dex, &trader, &market_b, BID_B_BPS, cid_b).await;
+    let after_both = pn_locked(&r, &trader.note.address).await;
+    let lock_b = after_both - after_a;
 
     let id_a = order_id(dex, &market_a.order_book, &trader.note.dih_dec, cid_a).await;
     let id_b = order_id(dex, &market_b.order_book, &trader.note.dih_dec, cid_b).await;
@@ -160,12 +176,17 @@ async fn one_note_in_two_markets_keeps_them_apart_local() {
          {id_b:?}), so this arrangement is not the collision it is meant to be"
     );
 
-    // Both locks are held at once. A record keyed by id alone would have kept
-    // one of the two.
-    assert_eq!(
-        pn_locked(&r, &trader.note.address).await,
-        locked_before + LOCK_A + LOCK_B,
-        "the note is not escrowing both bids at once"
+    // Each lock covers at least its own order's cost, and the two differ —
+    // which is what makes the cancellation below able to say which one came
+    // back. The prices are chosen for exactly that.
+    assert!(
+        lock_a >= LOCK_A && lock_b >= LOCK_B,
+        "the two bids escrowed {lock_a} and {lock_b}, short of the {LOCK_A} and {LOCK_B} they \
+         cost"
+    );
+    assert_ne!(
+        lock_a, lock_b,
+        "both bids escrowed {lock_a}, so releasing one could not be told from releasing the other"
     );
     assert_eq!(
         open_orders(&r, &trader.note.address).await,
@@ -184,10 +205,17 @@ async fn one_note_in_two_markets_keeps_them_apart_local() {
     })
     .await;
 
+    let released = after_both - pn_locked(&r, &trader.note.address).await;
+    assert_eq!(
+        released, lock_a,
+        "cancelling the first market's bid released {released}, not the {lock_a} that bid took — \
+         {lock_b} is what the other one took, and releasing that instead is what a record keyed \
+         by order id alone would do, since both orders are number {FIRST_ORDER_ID}"
+    );
     assert_eq!(
         pn_locked(&r, &trader.note.address).await,
-        locked_before + LOCK_B,
-        "cancelling the first market's bid released something other than exactly its own lock"
+        locked_before + lock_b,
+        "what is left escrowed is not the second market's bid alone"
     );
     assert_eq!(
         order_size(dex, &market_b.order_book, &trader.note.dih_dec, cid_b).await,
