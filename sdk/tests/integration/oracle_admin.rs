@@ -159,8 +159,14 @@ async fn an_oracle_owns_its_lists_and_only_its_owner_may_write_to_them_local() {
     );
 
     // ── and one a stranger may not add ────────────────────────────────────
+    //
+    // On a deadline of its own rather than the one above: that one is minutes
+    // from lapsing by design, and a list refuses an event whose deadline has
+    // already passed no matter who offers it. Sharing it would leave a refusal
+    // that says nothing about ownership.
     let refused_name = format!("AdmRef{nonce:08x}");
-    add_event(dex, &second, &refused_name, deadline, &stranger).await;
+    let refused_deadline = now_unix() + EVENT_LIFETIME;
+    add_event(dex, &second, &refused_name, refused_deadline, &stranger).await;
     assert!(
         find_event(dex, &second, &refused_name).await.is_none(),
         "a key that is not the oracle's published an event on its list"
@@ -237,11 +243,7 @@ async fn add_event(dex: &dodex_sdk::Dex, list: &str, name: &str, deadline: u64, 
 
 async fn delete_event(dex: &dodex_sdk::Dex, list: &str, event_id: &str, signer: &Signer) {
     let _ = dex
-        .delete_event(
-            list,
-            ParamsOfDeleteEvent { event_id: event_id.to_string() },
-            signer.clone(),
-        )
+        .delete_event(list, ParamsOfDeleteEvent { event_id: event_id.to_string() }, signer.clone())
         .await;
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
 }
