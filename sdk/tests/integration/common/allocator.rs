@@ -1410,7 +1410,7 @@ mod tests {
     /// spec edit that drops a group surfaces as a scenario failing to rent,
     /// 20 minutes into a pipeline, on a stand that then has to be rebuilt.
     ///
-    /// - `Dep` 10: `proof_money` rents one and gives it back, so it costs
+    /// - `Dep` 25: `proof_money` rents one and gives it back, so it costs
     ///   nothing. `parallel_setup` rents two *at once* — one per process — and
     ///   quarantines both. `resting_orders`, `market_orders`,
     ///   `matching_ladder`, `shutdown_orders`, `price_above_par` and
@@ -1434,9 +1434,13 @@ mod tests {
     ///   drain is wired into the market's balance check and somebody with no
     ///   open orders has to be the first to touch it past the deadline.
     ///   `exit_gates` deploys the twenty-second and `impostor_calls` the
-    ///   twenty-third, and `replay` the twenty-fourth. Two of the twenty-four
-    ///   are gone before any of those steps starts.
-    /// - `Trd` 13: `proof_money` takes two and returns both, and
+    ///   twenty-third, and `replay` the twenty-fourth. `event_rejects` takes
+    ///   the twenty-fifth, and is the only scenario that deploys five markets
+    ///   from one note: four of them are refused and hand everything back, so
+    ///   the note is where it started until the fifth, which is the one that
+    ///   comes up. Two of the twenty-five are gone before any of those steps
+    ///   starts.
+    /// - `Trd` 29: `proof_money` takes two and returns both, and
     ///   `usdc_release` borrows one and returns it — none of that costs
     ///   anything. `resting_orders`, `market_orders`, `matching_ladder`,
     ///   `shutdown_orders` and `price_above_par` take two each and spend
@@ -1489,7 +1493,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 24), (PnProfile::Trd, 29), (PnProfile::Usdc, 4)];
+        &[(PnProfile::Dep, 25), (PnProfile::Trd, 29), (PnProfile::Usdc, 4)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

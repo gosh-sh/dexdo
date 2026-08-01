@@ -318,6 +318,12 @@ elif [ "$SUITE" = replay ]; then
   # the message encoded once and posted raw rather than built per call.
   FILTER='test(=replay::one_signed_instruction_is_carried_out_once_local)'
   THREADS=1
+elif [ "$SUITE" = rejects ]; then
+  # Five markets deployed from one note, four of which are refused by the
+  # oracle they name. Its only wait is the half-minute an event needs to
+  # outlive its own deadline, and that runs out under two other phases.
+  FILTER='test(=event_rejects::a_market_its_oracle_refuses_unwinds_and_leaves_no_confirmation_behind_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

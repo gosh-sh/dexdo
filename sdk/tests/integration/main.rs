@@ -27,6 +27,9 @@
 //!   outcome, and the rules `placeBatch` enforces on the two lists it takes.
 //! - `coupon_debt` — the free coupon a broke note can mint, the debt it comes
 //!   with, and both of them across three markets.
+//! - `event_rejects` — the four ways a market is refused by the oracle it
+//!   named, and the two places the fee ends up depending on which of them
+//!   refused it.
 //! - `exit_gates` — the six ways out of a market, all barred while any order
 //!   of the note's is still resting, and the two basket sizes a market
 //!   refuses outright.
@@ -69,6 +72,7 @@ mod cancelled_event;
 mod common;
 mod coupon_debt;
 mod discovery;
+mod event_rejects;
 mod exit_gates;
 mod flows;
 mod forfeit_close;
