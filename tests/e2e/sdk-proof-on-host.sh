@@ -273,6 +273,11 @@ elif [ "$SUITE" = forfeit ]; then
   # the only one that ends on a forfeit rather than a last claim.
   FILTER='test(=forfeit_close::a_market_resolves_away_from_zero_and_closes_on_a_forfeit_local)'
   THREADS=1
+elif [ "$SUITE" = quorum ]; then
+  # The only market in the suite with more than one oracle, and so the only
+  # place a vote that does not execute can be observed at all.
+  FILTER='test(=oracle_quorum::a_market_with_three_oracles_moves_only_on_two_of_them_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

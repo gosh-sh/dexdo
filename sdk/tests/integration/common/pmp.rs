@@ -153,8 +153,49 @@ pub struct OracleEventCtx {
 pub async fn prepare_oracle_event(
     context: &Arc<ClientContext>,
     dex: &Dex,
+    guard: &ChainLockGuard,
+    nonce: u64,
+) -> OracleEventCtx {
+    prepare_oracle_member(context, dex, guard, nonce, 0).await
+}
+
+/// Prepare `count` oracles that all carry the **same** event.
+///
+/// An event's id is `tvm.hash(name, deadline, describe, outcomes)` — nothing
+/// about the list it was added to — so the same event published by several
+/// oracles has one id, and a market can name all of them against it. That is
+/// the only way to build a market with a quorum to reach: `deployPMP` takes a
+/// vector of oracle names for a single event id.
+#[allow(dead_code)]
+pub async fn prepare_oracle_quorum(
+    context: &Arc<ClientContext>,
+    dex: &Dex,
+    guard: &ChainLockGuard,
+    nonce: u64,
+    count: usize,
+) -> Vec<OracleEventCtx> {
+    let mut out = Vec::with_capacity(count);
+    for member in 0..count {
+        out.push(prepare_oracle_member(context, dex, guard, nonce, member).await);
+    }
+    let first = &out[0].event_id;
+    for (i, o) in out.iter().enumerate() {
+        assert_eq!(
+            &o.event_id, first,
+            "oracle {i} published event id {}, not the {first} the others did — a market cannot \
+             name oracles that disagree about which event they are confirming",
+            o.event_id
+        );
+    }
+    out
+}
+
+async fn prepare_oracle_member(
+    context: &Arc<ClientContext>,
+    dex: &Dex,
     _guard: &ChainLockGuard,
     nonce: u64,
+    member: usize,
 ) -> OracleEventCtx {
     use dodex_contracts::dex::oracle::Oracle;
     use dodex_contracts::dex::oracle_event_list::OracleEventList;
@@ -162,7 +203,7 @@ pub async fn prepare_oracle_event(
 
     let oracle_keys = gen_keys(context.clone());
     let ephemeral_keys = gen_keys(context.clone());
-    let oracle_name = format!("Fnd{nonce:08x}");
+    let oracle_name = format!("Fnd{nonce:08x}{member}");
 
     // Top up RootOracle
     let root_oracle =
@@ -271,6 +312,77 @@ pub async fn prepare_oracle_event(
 ///
 /// `_guard` proves the caller already holds `ChainLockGuard`; see
 /// `prepare_oracle_event` for why this function never calls `flock` itself.
+/// Deploy a market that names several oracles for one event.
+///
+/// The vector's order is part of the market's identity — `oracleListHash` is
+/// computed from the names — so the same slice has to be handed to the deploy
+/// and to the address computation, which is why this takes one and does both.
+#[allow(dead_code)]
+pub async fn deploy_pmp_with_oracles(
+    context: &Arc<ClientContext>,
+    dex: &Dex,
+    deployer: &LeasedPn,
+    oracles: &[OracleEventCtx],
+    _guard: &ChainLockGuard,
+) -> String {
+    assert!(!oracles.is_empty(), "a market needs at least one oracle");
+    let names: Vec<String> = oracles.iter().map(|o| o.oracle_name.clone()).collect();
+    let event_id = oracles[0].event_id.clone();
+
+    dex.deploy_pmp(
+        &deployer.note.address,
+        ParamsOfDeployPmp {
+            event_id: event_id.clone(),
+            oracle_fee: vec![ORACLE_FEE; names.len()],
+            token_type: TOKEN_TYPE_NACKL,
+            names: names.clone(),
+            index: vec![0; names.len()],
+            initial_stakes: vec![DEPLOYER_SEED_AMOUNT, DEPLOYER_SEED_AMOUNT],
+        },
+        Signer::Keys { keys: deployer.note.keys.clone() },
+    )
+    .await
+    .expect("deploy_pmp");
+
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
+    let pmp_address = root_pn
+        .get_pmp_address(ParamsOfGetPmpAddress {
+            event_id,
+            names,
+            token_type: TOKEN_TYPE_NACKL,
+        })
+        .await
+        .expect("get_pmp_address")
+        .pmp_address;
+
+    let pmp_contract = Pmp::new(context.clone(), dex_contract_params(&pmp_address));
+    wait_active(&pmp_contract, "PMP").await;
+
+    // Every named oracle has to confirm before the market will take a vote on
+    // anything, so this waits for all of them rather than for a majority: the
+    // quorum this scenario is about is the one among *confirmed* oracles.
+    let mut last = (0_u128, 0_u128);
+    for _ in 0..40 {
+        let d = dex.get_pmp_details(&pmp_address).await.expect("pmp details");
+        last = (d.approved_oracle_events, d.number_of_oracle_events);
+        if d.number_of_oracle_events == oracles.len() as u128
+            && d.approved_oracle_events >= d.number_of_oracle_events
+        {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            return pmp_address;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+    panic!(
+        "PMP {pmp_address} never had all {} of its oracles confirm: approved={}, declared={}",
+        oracles.len(),
+        last.0,
+        last.1
+    );
+}
+
 pub async fn deploy_pmp_with_deployer(
     context: &Arc<ClientContext>,
     dex: &Dex,

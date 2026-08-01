@@ -1424,7 +1424,10 @@ mod tests {
     ///   three can be reused because a claim is what ends each one.
     ///   `forfeit_close` deploys one more, and spends it in the one way no
     ///   other scenario does: its creator forfeits rather than claims, which
-    ///   is what closes the market. Two of the sixteen are gone before any of
+    ///   is what closes the market. `oracle_quorum` deploys the seventeenth,
+    ///   and is the only market-deploying scenario that rents no trader at
+    ///   all — nothing stakes into it, because what it watches is the vote
+    ///   that fails to execute. Two of the seventeen are gone before any of
     ///   those steps starts.
     /// - `Trd` 13: `proof_money` takes two and returns both, and
     ///   `usdc_release` borrows one and returns it — none of that costs
@@ -1464,7 +1467,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 16), (PnProfile::Trd, 20), (PnProfile::Usdc, 1)];
+        &[(PnProfile::Dep, 17), (PnProfile::Trd, 20), (PnProfile::Usdc, 1)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

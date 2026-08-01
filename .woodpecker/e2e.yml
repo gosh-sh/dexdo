@@ -680,6 +680,29 @@ steps:
         ACKI_DIR='$ACKI_DIR'
         bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
+  sdk_oracle_quorum:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_forfeit_close
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=quorum
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
   assert_deploy_dexdo:
     when:
       - status: [success, failure]
@@ -689,6 +712,7 @@ steps:
       - sdk_mm_cycle
       - sdk_coupon_debt
       - sdk_forfeit_close
+      - sdk_oracle_quorum
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -776,6 +800,7 @@ steps:
       - sdk_mm_cycle
       - sdk_coupon_debt
       - sdk_forfeit_close
+      - sdk_oracle_quorum
     image: *ansible_image
     when:
       - status: [ failure ]
@@ -826,6 +851,7 @@ steps:
       - sdk_mm_cycle
       - sdk_coupon_debt
       - sdk_forfeit_close
+      - sdk_oracle_quorum
     image: *ansible_image
     directory: .acki-nacki/ansible
     when:
