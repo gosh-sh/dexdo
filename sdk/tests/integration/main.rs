@@ -36,6 +36,9 @@
 //! - `oracle_quorum` — a market answering to three oracles: what one vote
 //!   cannot do, what a repeated one does not add, and what a changed one
 //!   moves.
+//! - `order_refusals` — every order that must not be placed, sorted by which
+//!   of the two layers refuses it: the note, which never dispatches it, or
+//!   the book, which sends it back.
 //! - `parallel_setup` — two market setups against a live chain, run as a
 //!   pair, proving each side takes a different note, derives a different
 //!   nonce, and lands on a different market address.
@@ -65,6 +68,7 @@ mod multitoken;
 mod oracle;
 mod oracle_quorum;
 mod order_book;
+mod order_refusals;
 mod parallel_setup;
 mod pmp;
 mod pn_basic;

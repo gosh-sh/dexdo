@@ -288,6 +288,11 @@ elif [ "$SUITE" = usdcmarket ]; then
   # place a taker fee can round away to nothing.
   FILTER='test(=usdc_market::a_market_in_a_six_decimal_token_trades_and_rounds_its_fee_away_local)'
   THREADS=1
+elif [ "$SUITE" = refusals ]; then
+  # Fifteen orders that must not be placed and two cancellations that must do
+  # nothing. No market waits and no fills, so it is one of the quicker steps.
+  FILTER='test(=order_refusals::orders_that_must_not_be_placed_are_refused_by_one_layer_or_the_other_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
