@@ -24,6 +24,9 @@
 //!   outcome, and the rules `placeBatch` enforces on the two lists it takes.
 //! - `coupon_debt` — the free coupon a broke note can mint, the debt it comes
 //!   with, and both of them across three markets.
+//! - `forfeit_close` — a market that resolves to outcome 1 rather than 0, and
+//!   the three stakes walked away from instead of claimed, the last of which
+//!   closes it.
 //! - `mm_cycle` — a maker's whole sequence: quote both sides in one batch,
 //!   get taken on part of it, cancel by name and then wholesale, merge the
 //!   inventory back, and settle.
@@ -42,6 +45,7 @@ mod common;
 mod coupon_debt;
 mod discovery;
 mod flows;
+mod forfeit_close;
 mod history;
 mod ledger_race;
 mod market_orders;

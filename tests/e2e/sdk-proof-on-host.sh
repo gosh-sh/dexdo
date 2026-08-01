@@ -268,6 +268,11 @@ elif [ "$SUITE" = coupon ]; then
   # scenario on the stand by some way.
   FILTER='test(=coupon_debt::a_coupon_is_won_with_and_the_debt_it_leaves_is_bet_against_local)'
   THREADS=1
+elif [ "$SUITE" = forfeit ]; then
+  # The only market in the suite that resolves anywhere but outcome 0, and
+  # the only one that ends on a forfeit rather than a last claim.
+  FILTER='test(=forfeit_close::a_market_resolves_away_from_zero_and_closes_on_a_forfeit_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no
