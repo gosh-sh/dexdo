@@ -340,6 +340,18 @@ steps:
   # spends per GENERATION, not what it holds at once, and a quarantined note
   # never returns within one. Peak concurrency rises from 1 scenario to 4; total
   # consumption is what it always was.
+  #
+  # The known hazard, written down because it is easy to misread when it bites:
+  # external messages serialise PER ACCOUNT on chain, and the root singletons
+  # (`RootOracle`, `RootPN`) are shared by every scenario. Two `deployOracle`
+  # calls landing on the same shard-time slot leave the loser with exit_code 52
+  # and a market that never comes up. `tests/fixtures/README.md` documents that
+  # happening to the api-e2e suite, which is why THAT suite runs
+  # `--test-threads 1`. Four lanes have run green twice (#206, #207) — this
+  # stand is private and quiet where shellnet is not, and a lane's oracle
+  # deploys are spread across twenty minutes rather than bunched at t=0 — but
+  # two green runs are evidence, not proof. A scenario failing with its market
+  # simply absent, on a lane boundary, is this and not its own logic.
   sdk_proof:
     depends_on:
       - net_up

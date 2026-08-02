@@ -95,7 +95,12 @@ through `dodex_chain::Dex` (no DB, no HTTP — there are no inference handlers):
 | `e2e_inference` | Note deploys the book, places a resting BUY with SHELL escrow, cancels it. |
 | `e2e_inference_match` | External `TokenContract` deploy + a SELL offer crossed by a BUY ⇒ the match funds the `TokenContract` (handover). |
 | `e2e_inference_clob` | Three flows: a partial fill (2-tick offer crossed by a 4-tick limit buy, 2 ticks rest) + `getBestBidAsk`/`getWeeklyMedianPrice`; a subscription (`placeInferenceSubscription` + `getSubscription`); and a match's `Filled` event confirmed by its routing id. |
-| `e2e_inference_stream` | Full deal lifecycle: match → seller bond → `open` → wait the 180s settle window → `advance` (probe accepted) → `streamStop`. Slow (~4 min). |
+| `e2e_inference_stream` | Full deal lifecycle: match → seller bond → `open` → wait the 180s probe window → `advance` (probe accepted) → `streamStop`. Slow (~4 min). |
+| `e2e_inference_settlement` | The same lifecycle stopped **immediately** after the probe: the streaming tick's acceptance window is still open, so the seller must not be paid for it. Slow (~4 min). |
+| `e2e_inference_twosided` | Buyer and seller are **different notes** — every other test here is a self-trade. Funds a two-tick deal and drains it: two `advance`s, `finalizedOwed` = 2P, no prepaid tick, no buffer, no deposit. Slow (~15 min: a 180s probe window then a 600s streaming one). |
+| `e2e_inference_orders` | The book as an order book, with no deal at all: two bids, a single `cancelInferenceOrder` by id that takes only its own, and a buy whose deadline has already passed — refused before `tvm.accept()`, so `nextOrderId` never moves. Fast (~35 s). |
+| `e2e_inference_range` | A numeric **range** market end to end: a closed deal gives the book a median, `addRangeEvent` binds bounds to that book, `confirmEvent` sets the market's clock by itself, and `resolveRange` turns the price into an outcome. Slow (~11 min). |
+| `e2e_inference_dispute` | The dispute branch. Excluded from CI on its own merits — it waits a ~1200s acceptance window (~25 min). |
 
 They share the seed-note pool (`tests/fixtures/seed_notes.json` /
 `E2E_SEED_NOTES`) like the other e2e tests; the note must additionally hold
@@ -106,7 +111,25 @@ cargo test -p dodex-api --test e2e_inference -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_match -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_clob -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_stream -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_settlement -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_twosided -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_orders -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_range -- --ignored --nocapture
 ```
+
+Everything above except `e2e_inference_dispute` runs in the e2e pipeline's
+`e2e_tests` step. Two of them declare a longer per-binary timeout in
+[`.config/nextest.toml`](../../.config/nextest.toml): the `ci-e2e` profile
+terminates a test after 600 s, and both `twosided` and `range` wait on-chain
+windows that are longer than that by contract, not by accident.
+
+**A deal only publishes its price when it closes.** `_recordTrade` is reachable
+only from `reportFinalized`, which the `TokenContract` calls from `_settleFees`
+— on the close, never on a match or an `advance`. A match that is later
+refunded served nothing, so counting it would let anyone move the reference
+price with orders they never honour. Anything that needs
+`getWeeklyMedianPrice` (the range cycle, above) therefore has to run a deal to
+a genuine close first.
 
 The `e2e_inference_clob` Filled check asserts the event by its routing id, not
 its decoded payload. Typed body decode of these ext-out events returns tvm

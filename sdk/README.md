@@ -539,3 +539,58 @@ E2E_RUN_ID=<generation> \
   cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
     -E 'test(=bounce_deploy::a_bounced_deploy_and_a_bounced_order_both_give_the_money_back_local)'
 ```
+
+### The rest of the suite
+
+The sections above grew one essay per scenario, which stopped scaling somewhere
+around the tenth. Everything added since is listed here instead, and each
+scenario's own module header carries the reasoning at the same depth those
+sections do — that header is the source of truth, not this table. **Add a row,
+not a section.**
+
+| Scenario | Test name (for `-E 'test(=…)'`) | What it covers |
+| --- | --- | --- |
+| `book_segments` | `book_segments::segments_keep_crossing_orders_apart_and_a_batch_is_all_or_nothing_local` | Orders that would cross kept apart by epoch and by outcome, and the two rules `placeBatch` enforces on the lists it takes. |
+| `mm_cycle` | `mm_cycle::a_maker_quotes_gets_taken_unwinds_and_settles_local` | A maker's whole sequence: quote both sides in one batch, get taken on part of it, cancel by name and then wholesale, merge the inventory back, settle. |
+| `coupon_debt` | `coupon_debt::a_coupon_is_won_with_and_the_debt_it_leaves_is_bet_against_local` | The free coupon a broke note can mint, the debt it comes with, and both across three markets — including formula 17's repayment. |
+| `forfeit_close` | `forfeit_close::a_market_resolves_away_from_zero_and_closes_on_a_forfeit_local` | A market resolving to outcome 1 rather than 0, and three stakes walked away from instead of claimed, the last of which closes it. |
+| `oracle_quorum` | `oracle_quorum::a_market_with_three_oracles_moves_only_on_two_of_them_local` | A market answering to three oracles: what one vote cannot do, what a repeated one does not add, what a changed one moves. |
+| `multi_market` | `multi_market::one_note_in_two_markets_keeps_them_apart_local` | One note staking and quoting in two markets at once: colliding order ids, locks that must not collide, and the claim gate that counts one market's orders rather than the note's. |
+| `usdc_market` | `usdc_market::a_market_in_a_six_decimal_token_trades_and_rounds_its_fee_away_local` | A whole market in a six-decimal token, and the fill small enough that the taker fee floors to nothing. |
+| `order_refusals` | `order_refusals::orders_that_must_not_be_placed_are_refused_by_one_layer_or_the_other_local` | Every order that must not be placed, sorted by which layer refuses it — the note, which never dispatches it, or the book, which sends it back. |
+| `market_clock` | `market_clock::a_market_stops_accepting_things_as_its_windows_close_local` | The far side of every deadline: a stake after the window, an order after the book closed, a claim before the resolve and one after it has been paid. |
+| `exit_gates` | `exit_gates::a_resting_order_bars_every_exit_and_a_market_refuses_impossible_baskets_local` | The six ways out of a market, all barred while any order of the note's still rests, and the two basket sizes a market refuses outright. |
+| `oracle_admin` | `oracle_admin::an_oracle_owns_its_lists_and_only_its_owner_may_write_to_them_local` | An oracle's housekeeping: lists beyond the first, events published and retracted, and the owner check on each. |
+| `impostor_calls` | `impostor_calls::the_protocols_own_vocabulary_is_not_available_to_strangers_local` | Seven of the protocol's own internal calls made from outside — each at the moment the genuine article would have gone through, so the sender check is the only thing left to refuse them. |
+| `replay` | `replay::one_signed_instruction_is_carried_out_once_local` | The same signed message posted three times, which no ordinary SDK call can do because each builds a fresh one. |
+| `event_rejects` | `event_rejects::a_market_its_oracle_refuses_unwinds_and_leaves_no_confirmation_behind_local` | Four ways a market is refused by the oracle it named, and the two places the fee ends up depending on which refused it. |
+
+Every one of them takes the same shape as the runs above:
+
+```sh
+E2E_NETWORK_ENDPOINT=http://127.0.0.1:8888 \
+E2E_SEED_NOTES=/path/to/dex_test_notes.keys.json \
+E2E_RUN_ID=<generation> \
+  cargo nextest run --manifest-path sdk/Cargo.toml --run-ignored only \
+    -E 'test(=<one of the names above>)'
+```
+
+`E2E_RUN_ID` names the ledger **generation**. Only `proof_money` bootstraps one;
+every other scenario joins the generation already open under that id, which is
+what lets them lease notes an earlier scenario returned. Pass the same id to
+each run of a session, and a fresh one when you want a clean pool.
+
+### How these run in CI
+
+One pipeline step per scenario, each pinned to exactly one test name in
+[`../tests/e2e/sdk-proof-on-host.sh`](../tests/e2e/sdk-proof-on-host.sh). The
+steps are **four parallel lanes** rooted at `sdk_proof`, which runs first and
+alone: it is the only scenario that takes `b0.lock` exclusively — it measures
+conservation and needs a chain nobody else is moving — and the only one that
+bootstraps the generation the rest join. Every other scenario takes the lock
+shared, which is the harness saying it expects company.
+
+Adding a scenario means three edits, and the first alone does nothing: the `mod`
+line in `tests/integration/main.rs`, a `SUITE=` branch with its `test(=…)`
+filter, and a step in [`../.woodpecker/e2e.yml`](../.woodpecker/e2e.yml) at the
+end of the shortest lane.
