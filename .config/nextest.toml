@@ -68,6 +68,17 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 filter = 'binary(e2e_inference_twosided)'
 slow-timeout = { period = "60s", terminate-after = 25 }
 
+# `e2e_inference_range` waits two on-chain clocks in sequence, and neither is
+# negotiable. First a deal has to reach a CLOSE before the book has a reference
+# price at all — a match publishes nothing, by design — which costs the 180s
+# probe window. Then the range event needs a deadline far enough out that the
+# list still sees `MIN_RESULT_GAP` of lead when the market is deployed against
+# it, which is another ~240s. Neither clock can overlap the other: the deadline
+# is only meaningful once the price it resolves from exists.
+[[profile.ci-e2e.overrides]]
+filter = 'binary(e2e_inference_range)'
+slow-timeout = { period = "60s", terminate-after = 20 }
+
 # The sdk-e2e profile (used by the sdk workspace's proof/acceptance suites)
 # lives in sdk/.config/nextest.toml, not here: sdk/ is a separate Cargo
 # workspace with its own root, and nextest auto-discovers config relative to
