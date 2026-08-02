@@ -200,8 +200,9 @@ async fn a_book_cancels_the_order_it_was_asked_to_and_never_takes_an_expired_one
     }
     match dex.inference_get_best_bid_ask(&ob).await {
         Ok(top) if top.has_bid => {
-            if top.bid != BETTER_PRICE.to_string() {
-                failures.push(format!("the best bid is {}, not {BETTER_PRICE}", top.bid));
+            let bid = price_of(&top.bid);
+            if bid != BETTER_PRICE {
+                failures.push(format!("the best bid is {bid}, not {BETTER_PRICE}"));
             }
         }
         Ok(_) => failures.push("the book has no best bid with two resting buys".to_string()),
@@ -248,10 +249,10 @@ async fn a_book_cancels_the_order_it_was_asked_to_and_never_takes_an_expired_one
     }
     match dex.inference_get_best_bid_ask(&ob).await {
         Ok(top) if top.has_bid => {
-            if top.bid != WORSE_PRICE.to_string() {
+            let bid = price_of(&top.bid);
+            if bid != WORSE_PRICE {
                 failures.push(format!(
-                    "the best bid is {} after the better one was cancelled, not {WORSE_PRICE}",
-                    top.bid
+                    "the best bid is {bid} after the better one was cancelled, not {WORSE_PRICE}"
                 ));
             }
         }
@@ -296,6 +297,23 @@ async fn a_book_cancels_the_order_it_was_asked_to_and_never_takes_an_expired_one
     }
 
     finish(&dex, &note.address, &model_hash, signer(), failures).await;
+}
+
+/// A price the way the ABI hands it back.
+///
+/// `uint256` comes across as a 0x-prefixed hex string, not a decimal one, so
+/// comparing it against `2000000000` fails on representation while the price
+/// itself is exactly right — which is what this test did on its first run
+/// against a stand. Parse rather than compare text, and take either shape, so a
+/// decoder that changes its mind about the format cannot read as a change in
+/// the book's prices.
+fn price_of(raw: &str) -> u128 {
+    let t = raw.trim();
+    let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(hex) => u128::from_str_radix(hex, 16).ok(),
+        None => t.parse::<u128>().ok(),
+    };
+    parsed.unwrap_or_else(|| panic!("price {raw} is neither a decimal nor a hex uint256"))
 }
 
 async fn place_buy(
