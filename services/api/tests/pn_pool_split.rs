@@ -50,8 +50,8 @@ fn index_of(address: &str) -> usize {
 const STAND_NOTES_SPEC: &str = include_str!("../../../tests/e2e/dex_test_notes.spec.json");
 
 /// The e2e tests here index their note as `notes[k % len]` with `k` running
-/// 0..=11, so twelve notes give each test its own. Two of the twelve go to
-/// one test: `e2e_inference_twosided` needs a seller and a buyer that are
+/// 0..=12, so thirteen notes give each test its own. Two of the thirteen go
+/// to one test: `e2e_inference_twosided` needs a seller and a buyer that are
 /// genuinely different accounts, which is the whole of what it has to say.
 ///
 /// Fewer is not broken — the suite runs single-threaded, and notes carrying
@@ -62,7 +62,7 @@ const STAND_NOTES_SPEC: &str = include_str!("../../../tests/e2e/dex_test_notes.s
 /// onto one note and turn it back into the self-trade it exists to stop being,
 /// which is why it asserts the two addresses differ rather than trusting the
 /// arithmetic.
-const API_NOTES_FOR_ONE_EACH: u64 = 12;
+const API_NOTES_FOR_ONE_EACH: u64 = 13;
 
 #[test]
 fn the_stand_spec_gives_every_test_here_a_note_of_its_own() {
