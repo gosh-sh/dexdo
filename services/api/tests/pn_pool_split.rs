@@ -50,12 +50,19 @@ fn index_of(address: &str) -> usize {
 const STAND_NOTES_SPEC: &str = include_str!("../../../tests/e2e/dex_test_notes.spec.json");
 
 /// The e2e tests here index their note as `notes[k % len]` with `k` running
-/// 0..=9, so ten notes give each test its own. Fewer is not broken — the
-/// suite runs single-threaded, and notes carrying the same label are
-/// interchangeable, so a shorter pool just means more tests share one — but
-/// it changes which tests share, and each shared note then pays for more
-/// market deploys out of the same balance.
-const API_NOTES_FOR_ONE_EACH: u64 = 10;
+/// 0..=11, so twelve notes give each test its own. Two of the twelve go to
+/// one test: `e2e_inference_twosided` needs a seller and a buyer that are
+/// genuinely different accounts, which is the whole of what it has to say.
+///
+/// Fewer is not broken — the suite runs single-threaded, and notes carrying
+/// the same label are interchangeable, so a shorter pool just means more tests
+/// share one — but it changes which tests share, and each shared note then
+/// pays for more market deploys out of the same balance. For the two-sided
+/// test a short pool is worse than that: `k % len` would fold its two indices
+/// onto one note and turn it back into the self-trade it exists to stop being,
+/// which is why it asserts the two addresses differ rather than trusting the
+/// arithmetic.
+const API_NOTES_FOR_ONE_EACH: u64 = 12;
 
 #[test]
 fn the_stand_spec_gives_every_test_here_a_note_of_its_own() {

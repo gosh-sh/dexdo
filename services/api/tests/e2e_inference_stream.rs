@@ -9,15 +9,15 @@
 //   4. the giver posts the seller mirror bond (an internal SHELL message —
 //      `open()` requires it, and an external call cannot carry currency);
 //   5. seller `open()` freezes the probe tick;
-//   6. after the advance window (600s at a 1-SHELL tick) of buyer silence, the
-//      seller `advance()`s and the probe is accepted — `finalizedOwed` grows and
+//   6. after the probe window (a fixed 180s) of buyer silence, the seller
+//      `advance()`s and the probe is accepted — `finalizedOwed` grows and
 //      `probeAccepted` flips true;
 //   7. buyer `streamStop()` closes the stream and settles.
 //
 // This proves the whole streaming state machine (open → advance → stop, the
 // probe-tick money model in §3.1.2) against a live contract through our
-// wrappers. It is SLOW: it sleeps out the real 600s on-chain advance window, so
-// a run takes ~11-12 minutes.
+// wrappers. It is SLOW: it sleeps out the real 180s on-chain probe window, so a
+// run takes ~5 minutes.
 //
 //   cargo test -p dodex-api --test e2e_inference_stream -- --ignored --nocapture
 //
@@ -55,17 +55,23 @@ const PRICE_PER_TICK: u128 = 1_000_000_000;
 const DEAL_TICKS: u128 = 4;
 // Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin.
 const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
-// The advance window is per-deal and price-scaled: W = clamp(P*600/1e9, 180,
-// 3600), so at the minimum 1-SHELL price it is 600s, not the 180s floor. Wait it
-// out plus a margin before `advance`.
-const SETTLE_WAIT: Duration = Duration::from_secs(615);
+// What the FIRST `advance` has to wait out — which is not the per-deal
+// streaming window this used to sleep.
+//
+// `advance` picks its window by phase: while the probe is unaccepted it uses
+// the fixed `PROBE_WINDOW` (180s), and only afterwards do later advances use
+// the per-deal `_settleWindow` = clamp(P*600/1e9, 180, 3600), which is 600s at
+// this test's 1-SHELL price. The window is measured from `_prepaidTime`, which
+// `open()` sets. This test never gets past the probe, so 600s was seven minutes
+// of waiting for a gate that had already opened.
+const PROBE_WAIT: Duration = Duration::from_secs(180 + 45);
 
 fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
 
 #[tokio::test]
-#[ignore = "requires shellnet + seed_notes.json; sleeps out the 600s advance window (~12 min)"]
+#[ignore = "requires shellnet + seed_notes.json; sleeps out the 180s probe window (~5 min)"]
 async fn inference_stream_open_advance_stop_against_shellnet() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
@@ -209,9 +215,9 @@ async fn inference_stream_open_advance_stop_against_shellnet() {
         return;
     }
 
-    // 6. Wait out the on-chain settle window, then accept the probe.
-    eprintln!("[e2e_stream] sleeping {}s for the advance window…", SETTLE_WAIT.as_secs());
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // 6. Wait out the probe window, then accept the probe.
+    eprintln!("[e2e_stream] sleeping {}s for the probe window…", PROBE_WAIT.as_secs());
+    tokio::time::sleep(PROBE_WAIT).await;
     dex.token_contract_advance(&tc, signer()).await.expect("TokenContract.advance accepted");
     let mut accepted = false;
     for _ in 0..POLL_TICKS {
