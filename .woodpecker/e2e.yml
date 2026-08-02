@@ -304,6 +304,42 @@ steps:
   # ignored failure keeps its step's state visible but leaves the pipeline
   # green, which is precisely how a regression in the harness would go
   # unnoticed.
+  #
+  # ── the SDK scenarios run in four lanes ──────────────────────────────────
+  #
+  # `sdk_proof` runs alone, ahead of everything, for two reasons that happen to
+  # coincide: it is the only scenario that takes `b0.lock` EXCLUSIVELY (it is
+  # the conservation run and needs a chain nobody else is moving), and it is the
+  # only one that bootstraps the ledger generation every other step joins
+  # (`E2E_RUN_ID`). Every other scenario takes the lock SHARED, which is the
+  # harness saying it was built to run beside its peers.
+  #
+  # After it the 24 remaining scenarios fan out into four chains. They were a
+  # single 91-minute chain until 2026-08-02, which put the pipeline 3 minutes
+  # under the repo's 120-minute cap before wave 6 added anything — #203 then
+  # went over and was cancelled mid-run, which skips teardown and strands the
+  # host lease. Almost all of that 91 minutes is a scenario ASLEEP waiting out a
+  # staking window, a result window or a drain, so the lanes overlap the waiting
+  # rather than the work: the longest lane is ~21 minutes.
+  #
+  # The lanes are balanced by the per-step durations pipeline #202 measured, not
+  # by scenario count. Re-balance them from a real run rather than by eye if a
+  # scenario's cost changes — the numbers are in the pipeline API, and the
+  # per-step overhead is 8 seconds, so a step's duration IS its test's duration.
+  #
+  # Two placements are deliberate rather than incidental:
+  #   * `usdc_market` and `usdc_release` share a lane. They are the only
+  #     consumers of the `PN-USDC` group, which the stand spec bakes 4 of, and
+  #     between them they want exactly 4 — in different lanes they could hold
+  #     them at the same moment and one would fail to rent.
+  #   * `parallel_acceptance` sits in a lane rather than beside `proof`: it
+  #     spawns two processes of its own, so it is already the widest single
+  #     step, and it is cheap enough (29s) to sit anywhere.
+  #
+  # Note-pool sizing needs no change: `SCENARIOS_RENT` counts what the suite
+  # spends per GENERATION, not what it holds at once, and a quarantined note
+  # never returns within one. Peak concurrency rises from 1 scenario to 4; total
+  # consumption is what it always was.
   sdk_proof:
     depends_on:
       - net_up
@@ -344,7 +380,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_proof
+      - sdk_replay
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -397,7 +433,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_usdc_release
+      - sdk_book_segments
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -422,7 +458,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_resting_orders
+      - sdk_forfeit_close
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -447,7 +483,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_market_orders
+      - sdk_usdc_market
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -473,7 +509,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_matching_ladder
+      - sdk_mm_cycle
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -498,7 +534,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_shutdown_orders
+      - sdk_resting_orders
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -523,7 +559,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_price_above_par
+      - sdk_oracle_admin
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -546,7 +582,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_bounce_recovery
+      - sdk_price_above_par
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -569,7 +605,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_cancelled_event
+      - sdk_event_rejects
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -592,7 +628,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_bounce_deploy
+      - sdk_shutdown_orders
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -615,7 +651,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_book_segments
+      - sdk_proof
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -638,7 +674,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_mm_cycle
+      - sdk_proof
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -684,7 +720,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_forfeit_close
+      - sdk_proof
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -707,7 +743,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_oracle_quorum
+      - sdk_proof
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -753,7 +789,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_usdc_market
+      - sdk_market_clock
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -776,7 +812,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_order_refusals
+      - sdk_oracle_quorum
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -799,7 +835,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_market_clock
+      - sdk_order_refusals
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -845,7 +881,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_oracle_admin
+      - sdk_matching_ladder
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -891,7 +927,7 @@ steps:
     when:
       - status: [success, failure]
     depends_on:
-      - sdk_replay
+      - sdk_market_orders
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
