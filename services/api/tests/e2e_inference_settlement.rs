@@ -18,7 +18,7 @@
 //   open (freeze probe) → wait the probe window → advance (probe accepted,
 //   streaming tick prepaid) → IMMEDIATE stop → assert the streaming tick is unpaid.
 //
-// Slow: sleeps out the real ~600s probe window (~11-12 min).
+// Slow: sleeps out the real 180s probe window (~5 min).
 //
 //   cargo test -p dodex-api --test e2e_inference_settlement -- --ignored --nocapture
 //
@@ -56,16 +56,21 @@ const PRICE_PER_TICK: u128 = 1_000_000_000;
 const DEAL_TICKS: u128 = 4;
 // Seller mirror bond = `TokenContract._bondAmount()` = 2P, plus a small margin.
 const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
-// The probe-acceptance window is per-deal and price-scaled: W = clamp(P*600/1e9,
-// 180, 3600), so at the minimum 1-SHELL price it is 600s, not the 180s floor.
-const PROBE_WAIT: Duration = Duration::from_secs(615);
+// Probe acceptance is NOT gated by the per-deal streaming window. `advance`
+// picks its window by phase: while the probe is unaccepted it uses the fixed
+// `PROBE_WINDOW` (180s), and only later advances use `_settleWindow` =
+// clamp(P*600/1e9, 180, 3600). The window is measured from `_prepaidTime`,
+// which `open()` sets. Waiting 615s here was waiting the streaming window for
+// a gate that opens at 180 — and the `ci-e2e` profile terminates a test at
+// 600s, so this test could not have passed under it at all.
+const PROBE_WAIT: Duration = Duration::from_secs(180 + 45);
 
 fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
 
 #[tokio::test]
-#[ignore = "requires shellnet + seed_notes.json; sleeps out the ~600s probe window (~12 min)"]
+#[ignore = "requires shellnet + seed_notes.json; sleeps out the 180s probe window (~5 min)"]
 async fn inference_settlement_immediate_stop_does_not_pay_streaming_tick() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()

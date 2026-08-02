@@ -53,6 +53,21 @@ serial-inference-reconciler = { max-threads = 1 }
 [profile.ci-e2e]
 slow-timeout = { period = "60s", terminate-after = 10 }
 
+# One exception to the cap above, and it is not a hang: `e2e_inference_twosided`
+# streams a deal past its probe tick, and the window every advance after the
+# probe waits is the contract's own `_settleWindow` = clamp(P*600/1e9, 180,
+# 3600). The book prices in whole SHELL (`PRICE_STEP`), so the cheapest possible
+# deal still waits 600s for its second tick — 180s for the probe plus 600s for
+# the one after it, before anything this test asserts can be true. No reading of
+# the contract makes that shorter; the only way under 600s is to not stream at
+# all, which is the coverage the test exists for.
+#
+# 25 minutes rather than 10, so a genuinely stuck run still fails the pipeline
+# instead of hanging it.
+[[profile.ci-e2e.overrides]]
+filter = 'binary(e2e_inference_twosided)'
+slow-timeout = { period = "60s", terminate-after = 25 }
+
 # The sdk-e2e profile (used by the sdk workspace's proof/acceptance suites)
 # lives in sdk/.config/nextest.toml, not here: sdk/ is a separate Cargo
 # workspace with its own root, and nextest auto-discovers config relative to

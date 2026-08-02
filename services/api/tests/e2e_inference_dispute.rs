@@ -29,7 +29,7 @@
 // payout for the disputed tick.
 //
 // VERY slow: both windows scale with the 2-SHELL tick price, so it sleeps out a
-// ~1200s probe window AND a ~1200s acceptance window (~45 min).
+// a 180s probe window AND a ~1200s acceptance window (~25 min).
 //
 //   cargo test -p dodex-api --test e2e_inference_dispute -- --ignored --nocapture
 //
@@ -75,9 +75,11 @@ const BUY_ESCROW: u128 = 10_000_000_000;
 // it scales with `price_per_tick`, so it must be derived from P (a fixed value
 // under-funds it and `fundSellerBond` rejects the message).
 const SELLER_BOND: u128 = 2 * PRICE_PER_TICK + PRICE_PER_TICK / 100;
-// Probe acceptance is gated by the same price-scaled window, so this waits out
-// W = 1200s, not the 180s floor.
-const PROBE_WAIT: Duration = Duration::from_secs(1215);
+// Probe acceptance is gated by the fixed `PROBE_WINDOW` (180s), not by the
+// price-scaled `_settleWindow` — `advance` picks by phase and the probe is
+// unaccepted at this point. Only the dispute and streaming windows below scale
+// with the price, and they are what keep this test out of CI.
+const PROBE_WAIT: Duration = Duration::from_secs(180 + 45);
 const DISPUTE_WINDOW_S: u64 = 600;
 const SETTLE_WINDOW_S: u64 = 1200;
 
@@ -86,7 +88,7 @@ fn unique_suffix() -> u128 {
 }
 
 #[tokio::test]
-#[ignore = "requires shellnet + seed_notes.json; sleeps out the ~1200s probe + ~1200s acceptance window (~45 min)"]
+#[ignore = "requires shellnet + seed_notes.json; sleeps out a 180s probe + ~1200s acceptance window (~25 min)"]
 async fn inference_dispute_timeout_burns_mark_for_mark() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
