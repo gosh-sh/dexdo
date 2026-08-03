@@ -30,6 +30,7 @@ use crate::common::pn::deploy_pn;
 use crate::common::pn::ensure_root_pn_funded;
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_deploy_private_note_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -44,6 +45,7 @@ async fn test_deploy_private_note_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_change_owner_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -83,6 +85,7 @@ async fn test_change_owner_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_transfer_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -115,6 +118,7 @@ async fn test_transfer_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_withdraw_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -142,6 +146,7 @@ async fn test_withdraw_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_pn_full_lifecycle_via_dex() {
     let context = create_context();
     let dex = create_dex();

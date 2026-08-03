@@ -24,6 +24,7 @@ use crate::common::pn::deploy_funded_pn;
 use crate::common::pn::ensure_root_pn_funded;
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_pmp_happy_path_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -101,6 +102,7 @@ async fn test_pmp_happy_path_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_pmp_cancel_path_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -164,6 +166,7 @@ async fn test_pmp_cancel_path_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_pmp_losing_stake_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -238,6 +241,7 @@ async fn test_pmp_losing_stake_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_pmp_two_stakers_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -347,6 +351,7 @@ async fn test_pmp_two_stakers_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_delete_stake_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -434,6 +439,7 @@ async fn test_delete_stake_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_external_staker_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -567,6 +573,7 @@ async fn test_external_staker_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_multiple_stakes_same_market_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -676,6 +683,7 @@ async fn test_multiple_stakes_same_market_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_pmp_address_verification() {
     let context = create_context();
     let dex = create_dex();

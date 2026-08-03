@@ -193,12 +193,12 @@ the **openapi-drift** job fails otherwise:
 cargo run -p dodex-api --bin gen-openapi -- --out docs/openapi.yaml
 ```
 
-The **sdk-harness-tests** job gates a filtered, hermetic subset of the `sdk/`
-workspace — no network needed:
+The **sdk-harness-tests** job gates the hermetic part of the `sdk/` workspace —
+no network needed, and no filter, because everything in there that needs a chain
+is `#[ignore]`d:
 
 ```sh
-cargo nextest run --manifest-path sdk/Cargo.toml \
-  -E 'test(ledger) + test(allocator) + test(invariant) + test(sweep) + test(preflight) + test(endpoint_) + test(chain_reader) + test(locks)'
+cargo nextest run --manifest-path sdk/Cargo.toml
 ```
 
 `sdk/` and `tools/` are separate workspaces — build and test them from their own
@@ -237,14 +237,12 @@ case you're in:
   that runs it from that workspace's directory, the same way `sdk-harness-tests`
   does for `sdk/` below.
 - **A hermetic test in `sdk/`** (the `dodex-sdk` lib, the `dodex-e2e-harness`
-  crate, or the integration binary's `common/` helpers) → gated **only if its
-  name matches** the `sdk-harness-tests` job's nextest filter in
-  [`.github/workflows/pr-tests.yml`](.github/workflows/pr-tests.yml) — currently
-  `ledger`, `allocator`, `invariant`, `sweep`, `preflight`, `endpoint_`,
-  `chain_reader`, `locks`. That job runs `cargo nextest run --manifest-path
-  sdk/Cargo.toml` scoped to those names; a hermetic test outside them is not
-  gated even though nothing stops it from running locally. Add its name (or a
-  shared substring) to the filter, or it stays untested in CI.
+  crate, or the integration binary's `common/` helpers) → **nothing to wire.**
+  The `sdk-harness-tests` job in
+  [`.github/workflows/pr-tests.yml`](.github/workflows/pr-tests.yml) runs the
+  whole workspace unfiltered, so a hermetic test is gated by having been
+  written. Just do not leave a chain-touching one un-`#[ignore]`d: it would join
+  that job and drive a live network from a PR.
 - **A live-network test in `sdk/`** (the integration binary's chain-touching
   scenarios) → **not run by `pr-tests.yml`,** and covered by
   [`.woodpecker/e2e.yml`](.woodpecker/e2e.yml) only if a fixed filter in
@@ -262,14 +260,13 @@ case you're in:
   at the end of whichever lane is shortest; the lane comment in
   `.woodpecker/e2e.yml` says how they were balanced and from what.
 
-  Nothing outside those filters is selected by any job. In particular
-  the older chain-touching modules — `pn_basic`, `pmp`, `oracle`, `discovery`,
-  `flows`, `history`, `multitoken` — contribute 25 tests that are **not**
-  `#[ignore]`d and are named by no filter anywhere: they run in no CI job at
-  all, yet `cargo nextest run --manifest-path sdk/Cargo.toml` with no `-E`
-  drives them straight against a live public network (shellnet, the default in
-  `common::context::network_endpoint`) and spends test tokens. Scope your local
-  runs with `-E`, and do not take a green unfiltered run as CI coverage.
+  Nothing outside those filters is selected by any job. The older
+  chain-touching modules — `pn_basic`, `pmp`, `oracle`, `discovery`, `flows`,
+  `history`, `multitoken` — are named by no filter anywhere and so run nowhere;
+  they are `#[ignore]`d, which is what keeps an unfiltered local run from
+  driving them against a live public network (shellnet, the default in
+  `common::context::network_endpoint`) and spending test tokens. A green
+  unfiltered run therefore says nothing about them.
 
   Extending real coverage means extending those filters, not `pr-tests.yml`. A
   test that runs in neither place is documentation, not a gate — say so in the

@@ -182,6 +182,13 @@ FullSetStakeConfirmed, FullSetStakeCancelled, TransferInitiated, TransferReceive
 
 SDK integration tests are located in `sdk/tests/integration/`. Most exercise on-chain flows and require a live Acki-Nacki network with a giver (e.g., Shellnet); a few — `ledger_race` among them — are fully hermetic and need no network at all (see below).
 
+Everything that needs a chain is marked `#[ignore]`, so a plain `cargo nextest
+run` on a fresh checkout runs only the hermetic tests and passes with no network
+and no configuration. The on-chain ones are selected explicitly with
+`--run-ignored only` plus a filter, as every recipe below does. The reason
+string on each `#[ignore]` says what that particular test needs — a funded
+giver, a pre-baked note pool, or an already-deployed set of oracles.
+
 By default, tests connect to Shellnet (`https://shellnet.ackinacki.org`). To run against a different network, set the `E2E_NETWORK_ENDPOINT` environment variable with a full URL including the scheme:
 
 ```sh

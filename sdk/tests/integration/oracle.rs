@@ -15,6 +15,7 @@ use crate::common::misc::now_unix;
 use crate::common::pmp::setup_pmp;
 
 #[tokio::test]
+#[ignore = "requires a live network with oracles already deployed on it"]
 async fn test_oracle_withdraw_fees_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -80,6 +81,7 @@ async fn test_oracle_withdraw_fees_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network with oracles already deployed on it"]
 async fn test_discover_oracles_and_markets_via_dex() {
     let dex = create_dex();
 

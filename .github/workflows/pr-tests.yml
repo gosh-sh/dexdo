@@ -155,17 +155,21 @@ jobs:
         with: { shared-key: sdk-tests, cache-on-failure: true }
       - uses: taiki-e/install-action@nextest
 
-      # Only the harness's non-ignored unit tests (ledger/allocator/invariant/
-      # sweep/preflight/endpoint/chain_reader/locks families) — sdk/ is its own
-      # workspace and sits outside `cargo nextest run --workspace` above, and
-      # the selection must be non-empty or this step would pass having tested
-      # nothing.
+      # sdk/ is its own workspace and sits outside `cargo nextest run
+      # --workspace` above, so it gets its own run. No filter: everything in
+      # there that needs a chain is `#[ignore]`d, so a plain run is exactly the
+      # hermetic set — and a new hermetic test is picked up by having been
+      # written, rather than by happening to match one of a list of name
+      # patterns.
+      #
+      # The count guard stays. Without it this step would pass just as happily
+      # having run nothing at all, which is what an over-eager `#[ignore]` or a
+      # broken test binary would look like.
       - name: nextest (sdk harness units)
         run: |
-          N=$(cargo nextest list --manifest-path sdk/Cargo.toml -E 'test(ledger) + test(allocator) + test(invariant) + test(sweep) + test(preflight) + test(endpoint_) + test(chain_reader) + test(locks)' | grep -c '::')
-          test "$N" -ge 10
-          cargo nextest run --manifest-path sdk/Cargo.toml --no-fail-fast \
-            -E 'test(ledger) + test(allocator) + test(invariant) + test(sweep) + test(preflight) + test(endpoint_) + test(chain_reader) + test(locks)'
+          N=$(cargo nextest list --manifest-path sdk/Cargo.toml | grep -c '::')
+          test "$N" -ge 60
+          cargo nextest run --manifest-path sdk/Cargo.toml --no-fail-fast
 
   # Gated e2e: only after fmt/clippy, tests and openapi-drift are green.
   # Delegates to the reusable e2e-shellnet workflow (real shellnet,
