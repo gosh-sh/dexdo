@@ -99,7 +99,10 @@ through `dodex_chain::Dex` (no DB, no HTTP — there are no inference handlers):
 | `e2e_inference_settlement` | The same lifecycle stopped **immediately** after the probe: the streaming tick's acceptance window is still open, so the seller must not be paid for it. Slow (~4 min). |
 | `e2e_inference_twosided` | Buyer and seller are **different notes** — every other test here is a self-trade. Funds a two-tick deal and drains it: two `advance`s, `finalizedOwed` = 2P, no prepaid tick, no buffer, no deposit. Slow (~15 min: a 180s probe window then a 600s streaming one). |
 | `e2e_inference_orders` | The book as an order book, with no deal at all: two bids, a single `cancelInferenceOrder` by id that takes only its own, and a buy whose deadline has already passed — refused before `tvm.accept()`, so `nextOrderId` never moves. Fast (~35 s). |
-| `e2e_inference_range` | A numeric **range** market end to end: a closed deal gives the book a median, `addRangeEvent` binds bounds to that book, `confirmEvent` sets the market's clock by itself, and `resolveRange` turns the price into an outcome. Slow (~11 min). |
+| `e2e_inference_range` | A numeric **range** market end to end: a closed deal gives the book a median, `addRangeEvent` binds bounds to that book, `confirmEvent` sets the market's clock by itself, and `resolveRange` turns the price into an outcome. Slow (~9 min). |
+| `e2e_inference_subscription` | A §8 subscription as real liquidity: a seller's offer crosses the standing bid and the deal names the subscription's owner as its buyer, the per-cycle spend moves, and `pokeSubscription` leaves a live subscription alone both before and after the fill. The cycle roll itself is a week away and out of reach. Fast (~3 min). |
+| `e2e_inference_recovery` | The two ways out of a deal the seller abandoned: `streamCleanup` on one never opened (deposit refunded, bond back to the seller's note, deal destroyed) and `streamReclaim` on one opened and left (buyer pays nothing for the probe, bond credited inside the deal). Includes the refusal that separates them — cleanup declines an opened deal of the same age. Slow (~20 min: a 600s and a 900s window in parallel). |
+| `e2e_inference_funding` | `fundDeployShell`: a note pays its own canonical RootModel and `TokenContract` addresses, and the deal contract then deploys onto that address with no giver in the run. Fast (~2 min). |
 | `e2e_inference_dispute` | The dispute branch. Excluded from CI on its own merits — it waits a ~1200s acceptance window (~25 min). |
 
 They share the seed-note pool (`tests/fixtures/seed_notes.json` /
@@ -115,13 +118,21 @@ cargo test -p dodex-api --test e2e_inference_settlement -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_twosided -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_orders -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_range -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_subscription -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_recovery -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_funding -- --ignored --nocapture
 ```
 
 Everything above except `e2e_inference_dispute` runs in the e2e pipeline's
-`e2e_tests` step. Two of them declare a longer per-binary timeout in
+`e2e_tests` step. Three of them declare a longer per-binary timeout in
 [`.config/nextest.toml`](../../.config/nextest.toml): the `ci-e2e` profile
-terminates a test after 600 s, and both `twosided` and `range` wait on-chain
-windows that are longer than that by contract, not by accident.
+terminates a test after 600 s, and `twosided`, `range` and `recovery` wait
+on-chain windows that are longer than that by contract, not by accident.
+
+Most of these deploy their `TokenContract` off the shared shellnet giver
+because it is the cheap route. It is not the route the contracts are designed
+around — a seller in production has only a note — so the note-funded path is
+covered on its own by `e2e_inference_funding`.
 
 **A deal only publishes its price when it closes.** `_recordTrade` is reachable
 only from `reportFinalized`, which the `TokenContract` calls from `_settleFees`

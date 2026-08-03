@@ -141,6 +141,11 @@ pub struct ResultOfGetState {
     pub last_advance: u64,
     #[serde(deserialize_with = "deserialize_u64")]
     pub dispute_time: u64,
+    /// When the order-book match handed this deal its escrow. The no-show
+    /// cleanup window (`MATCH_OPEN_TIMEOUT`) is measured from here, so a
+    /// caller can tell how long it still has to wait rather than guess.
+    #[serde(deserialize_with = "deserialize_u64")]
+    pub funded_time: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

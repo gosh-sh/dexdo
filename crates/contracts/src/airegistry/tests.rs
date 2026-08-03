@@ -221,6 +221,7 @@ fn token_contract_results_decode_abi_shape() {
     assert!(state.funded);
     assert_eq!(state.deposit, 1);
     assert_eq!(state.dispute_time, 1);
+    assert_eq!(state.funded_time, 1);
 
     let bond: ResultOfGetSellerBond =
         serde_json::from_value(sample_output_json(TOKEN_CONTRACT_ABI, "getSellerBond")).unwrap();

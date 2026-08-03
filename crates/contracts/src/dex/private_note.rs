@@ -487,6 +487,26 @@ pub struct ParamsOfPostSellerBond {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Parameters for `PrivateNote.fundDeployShell`.
+///
+/// Pre-funds the seller's cross-dApp deploy targets so no external operational
+/// wallet is needed. Both targets are DERIVED from this note's own key (plus
+/// `nonce` for the deal contract) — the call takes no address, so SHELL sent
+/// this way can only ever reach the note's own canonical RootModel and
+/// `TokenContract`.
+pub struct ParamsOfFundDeployShell {
+    /// Deal nonce the `TokenContract` address is derived from. Only used for
+    /// the `TokenContract` target; the RootModel is per-key.
+    pub nonce: u64,
+    /// SHELL for the canonical RootModel of this note's key. `0` skips it.
+    pub root_model_shell: u128,
+    /// SHELL for the canonical `TokenContract` of `(this note's key, nonce)`.
+    /// `0` skips it.
+    pub tc_shell: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.placeInferenceBuy`.
 pub struct ParamsOfPlaceInferenceBuy {
     /// `uint256` model hash, decimal/hex string — identifies the book.
@@ -511,11 +531,17 @@ pub struct ParamsOfPlaceInferenceSubscription {
     /// `uint256` model hash, decimal/hex string — identifies the book.
     pub model_hash: String,
     pub max_price_per_tick: u128,
+    /// Must be `>= 2`, and the escrow has to fund two ticks in EVERY cycle:
+    /// the book rejects a subscription whose `escrow / SUB_CYCLES` cannot buy
+    /// a probe plus one stream tick at `max_price_per_tick`.
     pub ticks: u128,
-    /// Same flag mask a limit buy takes (`IOC`/`FOK`/`MARKET`/`POST_ONLY`); a
-    /// subscription rests as a standing bid, so 0 is the ordinary value.
+    /// A standing multi-cycle bid takes only the TEE-requirement bit: the
+    /// taker bits (`IOC`/`FOK`/`MARKET`) and `POST_ONLY` have no meaning for
+    /// it and the book rejects them, so 0 is the ordinary value.
     pub flags: u8,
     pub escrow: u128,
+    /// Client hint only — renewal is a re-place (§8.2). The book stores it and
+    /// hands it back through `getSubscription`; nothing on chain acts on it.
     pub auto_renew: bool,
 }
 
@@ -538,8 +564,9 @@ pub struct ParamsOfCancelAllInferenceOrders {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Parameters for the streaming-deal driver methods `streamStop` and
-/// `streamDispute` (buyer note → deal `TokenContract`).
+/// Parameters for the streaming-deal driver methods `streamStop`,
+/// `streamDispute`, `streamReclaim` and `streamCleanup` (buyer note → deal
+/// `TokenContract`).
 pub struct ParamsOfStreamDeal {
     pub token_contract: String,
 }
@@ -1370,6 +1397,53 @@ impl PrivateNote {
         self.send_message(Some(call_set), None, signer).await
     }
 
+    /// # Buyer note recovers a funded deal the seller never opened
+    ///
+    /// Original contract method: `streamCleanup`
+    ///
+    /// Distinct from [`Self::stream_reclaim`], which exits a deal that WAS
+    /// opened and then abandoned. This one is scoped to the never-opened case
+    /// by a permanent latch on the deal: it refunds the whole deposit, returns
+    /// the seller's bond unslashed (nothing was delivered, so no fee and no
+    /// penalty) and destroys the deal contract.
+    ///
+    /// Should be signed with PrivateNote owner keys.
+    pub async fn stream_cleanup(
+        &self,
+        params: ParamsOfStreamDeal,
+        signer: Signer,
+    ) -> KitResult<ResultOfSendMessage> {
+        let call_set = CallSet {
+            function_name: "streamCleanup".to_string(),
+            header: None,
+            input: Some(json!(params)),
+        };
+        self.send_message(Some(call_set), None, signer).await
+    }
+
+    /// # Pre-fund the note's own cross-dApp deploy targets with SHELL
+    ///
+    /// Original contract method: `fundDeployShell`
+    ///
+    /// The deploy of a RootModel or a deal `TokenContract` is a cross-dApp
+    /// message, which only activates if the target address already holds
+    /// SHELL. This ships it there from the note itself, so a seller needs no
+    /// external operational wallet to get a deal contract on chain.
+    ///
+    /// Should be signed with PrivateNote owner keys.
+    pub async fn fund_deploy_shell(
+        &self,
+        params: ParamsOfFundDeployShell,
+        signer: Signer,
+    ) -> KitResult<ResultOfSendMessage> {
+        let call_set = CallSet {
+            function_name: "fundDeployShell".to_string(),
+            header: None,
+            input: Some(json!(params)),
+        };
+        self.send_message(Some(call_set), None, signer).await
+    }
+
     // ─── Getters ──────────────────────────────────────────────────────
 
     /// # Get salted PMP code and hash
@@ -1520,6 +1594,14 @@ mod inference_abi_tests {
             keys(&ParamsOfCancelAllInferenceOrders { model_hash: "1".into() }),
             abi_input_names("cancelAllInferenceOrders")
         );
+        assert_eq!(
+            keys(&ParamsOfFundDeployShell { nonce: 1, root_model_shell: 1, tc_shell: 1 }),
+            abi_input_names("fundDeployShell")
+        );
+        assert_eq!(
+            keys(&ParamsOfPostSellerBond { nonce: 1, amount: 1 }),
+            abi_input_names("postSellerBond")
+        );
     }
 
     #[test]
@@ -1531,6 +1613,14 @@ mod inference_abi_tests {
         assert_eq!(
             keys(&ParamsOfStreamDeal { token_contract: "0:1".into() }),
             abi_input_names("streamReclaim")
+        );
+        assert_eq!(
+            keys(&ParamsOfStreamDeal { token_contract: "0:1".into() }),
+            abi_input_names("streamCleanup")
+        );
+        assert_eq!(
+            keys(&ParamsOfStreamDeal { token_contract: "0:1".into() }),
+            abi_input_names("streamDispute")
         );
         // The four note-side stream/dispute lock callbacks are gone: the seller's
         // per-deal mirror bond in TokenContract is the only collateral, so the

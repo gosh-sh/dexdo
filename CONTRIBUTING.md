@@ -216,12 +216,22 @@ case you're in:
   in the root [`Cargo.toml`](Cargo.toml) (see *Adding a service*). No new crate,
   no coverage.
 - **A `#[ignore]`d e2e (chain) test** → the gated job runs **only `dodex-api`**
-  (`cargo nextest run -p dodex-api --run-ignored only --test-threads 1`). Put the
-  test in `services/api/tests/` as `e2e_*`, or it never runs. If it needs new
+  (`cargo nextest run -p dodex-api --run-ignored only`). Put the test in
+  `services/api/tests/` as `e2e_*`, or it never runs. If it needs new
   fixtures/secrets (e.g. seed notes), wire them into
-  [`.github/workflows/e2e-shellnet.yml`](.github/workflows/e2e-shellnet.yml). New
-  on-chain flows are single-threaded and spend test tokens — keep them `#[ignore]`d
-  so they stay out of the fast PR job.
+  [`.github/workflows/e2e-shellnet.yml`](.github/workflows/e2e-shellnet.yml).
+  These spend test tokens — keep them `#[ignore]`d so they stay out of the fast
+  PR job.
+
+  Give the test **its own note** out of the pool (`pool.notes[k]`, with `k` the
+  next free index) and bump the `PN-API` count in
+  [`tests/e2e/dex_test_notes.spec.json`](tests/e2e/dex_test_notes.spec.json) and
+  `API_NOTES_FOR_ONE_EACH` in `services/api/tests/pn_pool_split.rs` to match —
+  a unit test fails if they disagree. A test that shares a note with another
+  must also be added to the `serial-e2e-shared` group in
+  [`.config/nextest.toml`](.config/nextest.toml), as must anything touching the
+  test database: the woodpecker e2e step runs this suite four at a time, and
+  that group is the whole of what keeps sharers apart.
 - **A test in `tools/`** → **no CI job runs these today** — `--workspace` excludes
   it and nothing else references that workspace from any workflow. Add a CI step
   that runs it from that workspace's directory, the same way `sdk-harness-tests`

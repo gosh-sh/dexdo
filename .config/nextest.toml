@@ -44,6 +44,7 @@ test-group = 'serial-inference-reconciler'
 serial-reprojection = { max-threads = 1 }
 serial-capture-cursor = { max-threads = 1 }
 serial-inference-reconciler = { max-threads = 1 }
+serial-e2e-shared = { max-threads = 1 }
 
 # Profile for the Woodpecker e2e run (.woodpecker/e2e.yml) against a live
 # ephemeral network. The chain client has no per-call timeout, so if the network
@@ -52,6 +53,29 @@ serial-inference-reconciler = { max-threads = 1 }
 # of hanging for hours. Inherits the default profile's overrides + test-groups.
 [profile.ci-e2e]
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# Most of this suite is bounded by on-chain windows it sleeps through, not by
+# anything it competes for: every test picks its own note out of the pool and
+# builds its own market, so run in parallel they mostly wait side by side
+# instead of one after another. The exceptions are collected here and pinned to
+# one at a time:
+#
+#   * `e2e_inference`, `e2e_inference_clob` and `e2e_register_account` all take
+#     the SAME note. A note serialises its own operations through `_busy` and
+#     rejects a repeated message body outright, so two of these at once would
+#     have one of them silently dropped;
+#   * the trader-path binaries read and write the shared test database.
+#
+# Everything outside this group holds a note nobody else does and never touches
+# the database, so it needs no help. Note that the group only constrains this
+# suite — it is the reason `--test-threads` above 1 is safe here at all.
+[[profile.ci-e2e.overrides]]
+filter = '''
+    binary(e2e_inference) | binary(e2e_inference_clob) | binary(e2e_register_account)
+  | binary(e2e_batch_orders) | binary(e2e_buy_full_set) | binary(e2e_cancel_batch_orders)
+  | binary(e2e_cancel_order) | binary(e2e_order)
+'''
+test-group = 'serial-e2e-shared'
 
 # One exception to the cap above, and it is not a hang: `e2e_inference_twosided`
 # streams a deal past its probe tick, and the window every advance after the
@@ -78,6 +102,21 @@ slow-timeout = { period = "60s", terminate-after = 25 }
 [[profile.ci-e2e.overrides]]
 filter = 'binary(e2e_inference_range)'
 slow-timeout = { period = "60s", terminate-after = 20 }
+
+# `e2e_inference_recovery` outwaits the two clocks a buyer has to survive before
+# either escape hatch opens: `MATCH_OPEN_TIMEOUT` (600s from the match, for a
+# deal the seller never opened) and the deal's own reclaim window (its
+# `settleWindow` plus grace, 900s from the open at the cheapest tick the book
+# will price). The two run concurrently — one sleep covers both — so the floor
+# is the longer of them plus the setup that has to precede it.
+#
+# 30 minutes rather than 25: the sleep is measured to an absolute deadline read
+# off the chain, so a slow stand pushes the setup AND the deadline out together
+# and the whole run stretches. The cap is there to catch a hang, and a hang
+# still hits it.
+[[profile.ci-e2e.overrides]]
+filter = 'binary(e2e_inference_recovery)'
+slow-timeout = { period = "60s", terminate-after = 30 }
 
 # The sdk-e2e profile (used by the sdk workspace's proof/acceptance suites)
 # lives in sdk/.config/nextest.toml, not here: sdk/ is a separate Cargo
