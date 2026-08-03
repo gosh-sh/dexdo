@@ -93,7 +93,14 @@ pub struct IobAccount {
 ///
 /// A cross-dApp deploy target is funded BEFORE its code arrives, so the only
 /// thing that separates "pre-funded and waiting" from "nothing happened" is
-/// the pair of these two fields — a getter cannot be called on either.
+/// these fields — a getter cannot be called on either.
+///
+/// Both balances are here because SHELL arrives in two different places
+/// depending on how it was sent. An ordinary ECC transfer (`flag: 1`) lands in
+/// `shell`; a `flag: 16` send — the one a cross-dApp deploy target needs, and
+/// the only one that leaves it able to activate — converts it into `native`
+/// instead and leaves `shell` at zero. Reading one and not the other reads a
+/// successful funding as nothing having happened.
 #[derive(Debug, Clone)]
 pub struct AccountShell {
     /// `AccountStatus` rendered for a message: `Active`, `Uninit`, `Frozen`,
@@ -103,6 +110,8 @@ pub struct AccountShell {
     /// chain's own ledger, not a contract field — distinct from a note's
     /// internal `_balance`, which only tracks what the note minted for itself.
     pub shell: u128,
+    /// Native balance, in nanovmshell. Where a `flag: 16` credit ends up.
+    pub native: u128,
 }
 
 impl Dex {
@@ -717,6 +726,11 @@ impl Dex {
             shell: account
                 .ecc
                 .get(&SHELL_ECC_ID)
+                .and_then(|v| v.to_string().parse::<u128>().ok())
+                .unwrap_or(0),
+            native: account
+                .balance
+                .as_ref()
                 .and_then(|v| v.to_string().parse::<u128>().ok())
                 .unwrap_or(0),
         })

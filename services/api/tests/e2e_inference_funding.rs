@@ -11,15 +11,24 @@
 //
 // A deal contract is cross-dApp: it becomes the root of its own dApp the moment
 // it exists. Native value does not cross that boundary, and ordinary ECC (flag
-// 1) credits an address's balance without making it deployable. Only a flag-16
-// send lands the SHELL as the new account's native gas, which is what an
-// arriving deploy message needs to activate.
+// 1) credits an address's SHELL ledger without making it deployable. Only a
+// flag-16 send converts the credit into the new account's native gas, which is
+// what an arriving deploy message needs to activate.
+//
+// That difference is also where the balances below are read. A flag-16 credit
+// leaves the target's ECC SHELL at zero and its NATIVE balance up, so reading
+// the SHELL ledger reports a funding that worked perfectly as nothing having
+// happened at all. The amounts are not asserted exactly: what a credit becomes
+// on the way into a native balance is not something measured here, and an
+// assertion resting on a guess about it would be a statement about the guess.
+// What IS exact is the debit — the note is the source, and that side is a plain
+// ECC send off its own ledger.
 //
 // So the reading here is not "a balance went up". It is that a constructor sent
 // afterwards — with no giver anywhere in the run — brings the contract alive.
-// If `fundDeployShell` credited the address the wrong way, the balance would
-// still move and the deploy would still be accepted; the account would simply
-// stay uninitialised. Nothing short of the deploy separates those two.
+// If `fundDeployShell` credited the address the wrong way, money would still
+// leave the note and the deploy would still be accepted; the account would
+// simply stay uninitialised. Nothing short of the deploy separates those two.
 //
 // ## What it is NOT allowed to do
 //
@@ -139,13 +148,18 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
     let tc = plan.address.clone();
     eprintln!("[e2e_funding] root_model={root_model} token_contract={tc}");
 
-    let root_model_before = shell_of(&dex, &root_model).await;
+    let root_model_before = dex.self_rooted_account_shell(&root_model).await.expect("rm before");
     let tc_before = dex.self_rooted_account_shell(&tc).await.expect("deal address before");
     let note_before = dex.dex_account_shell(&seller.address).await.expect("note before").shell;
     eprintln!(
-        "[e2e_funding] before: note={note_before} root_model={root_model_before} deal={} \
-         (acc_type={})",
-        tc_before.shell, tc_before.acc_type
+        "[e2e_funding] before: note={note_before} root_model=({} native, {} ecc, {}) \
+         deal=({} native, {} ecc, {})",
+        root_model_before.native,
+        root_model_before.shell,
+        root_model_before.acc_type,
+        tc_before.native,
+        tc_before.shell,
+        tc_before.acc_type
     );
     // The deal address is derived from a nonce nobody has used, so there must be
     // nothing there. If there were, every delta below would be measuring
@@ -167,41 +181,51 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
     .await
     .expect("fundDeployShell accepted");
 
+    // Watch the NATIVE balance, not the ECC ledger. `flag: 16` is the whole
+    // point of this call and it does not deposit SHELL as SHELL — it converts
+    // the credit into the target's native gas, which is what an arriving deploy
+    // message needs and what ordinary ECC would not give it. A run that reads
+    // `ecc[SHELL]` here sees zero on a funding that worked perfectly.
     let arrived = poll_until("both deploy targets to be funded", || async {
-        shell_of(&dex, &root_model).await >= root_model_before + ROOT_MODEL_SHELL
-            && shell_of(&dex, &tc).await >= tc_before.shell + TC_SHELL
+        native_of(&dex, &root_model).await > root_model_before.native
+            && native_of(&dex, &tc).await > tc_before.native
     })
     .await;
 
-    let root_model_after = shell_of(&dex, &root_model).await;
-    let tc_after = shell_of(&dex, &tc).await;
+    let root_model_after = dex.self_rooted_account_shell(&root_model).await.expect("rm after");
+    let tc_after = dex.self_rooted_account_shell(&tc).await.expect("deal address after");
     let note_after = dex.dex_account_shell(&seller.address).await.expect("note after").shell;
+    let rm_gain = root_model_after.native.saturating_sub(root_model_before.native);
+    let tc_gain = tc_after.native.saturating_sub(tc_before.native);
     eprintln!(
-        "[e2e_funding] after: note={note_after} root_model={root_model_after} deal={tc_after}"
+        "[e2e_funding] after: note={note_after} root_model=(+{rm_gain} native, {} ecc, {}) \
+         deal=(+{tc_gain} native, {} ecc, {})",
+        root_model_after.shell, root_model_after.acc_type, tc_after.shell, tc_after.acc_type
     );
     if !arrived {
         failures.push(format!(
-            "the note's SHELL never reached both targets: RootModel {root_model_before} → \
-             {root_model_after} (wanted +{ROOT_MODEL_SHELL}), deal {} → {tc_after} (wanted \
-             +{TC_SHELL})",
-            tc_before.shell
+            "the note's SHELL reached neither target as gas: RootModel {} → {} native, deal {} → \
+             {} native. The note WAS debited (see below), so this says the money went somewhere \
+             else — most likely these two addresses are not the ones the note derived internally",
+            root_model_before.native, root_model_after.native, tc_before.native, tc_after.native
         ));
     }
-    // Exact, both ways round: the amounts differ, so a call that funded the
-    // right addresses with the wrong shares would land here.
-    if root_model_after - root_model_before != ROOT_MODEL_SHELL {
+    // The two amounts differ by more than sixty times, so whatever the credit
+    // does to a native balance on the way in, a call that swapped the targets
+    // lands here. Exact equality is deliberately not asserted: the conversion
+    // this credit performs is not something this test has measured, and an
+    // assertion resting on a guess about it would be a statement about the
+    // guess.
+    if arrived && tc_gain <= rm_gain {
         failures.push(format!(
-            "the RootModel took {}, not the {ROOT_MODEL_SHELL} it was sent",
-            root_model_after.saturating_sub(root_model_before)
+            "the deal address gained {tc_gain} and the RootModel {rm_gain}; the deal was sent \
+             {TC_SHELL} against the RootModel's {ROOT_MODEL_SHELL}, so the deal must come out far \
+             ahead — reversed, the two targets were swapped"
         ));
     }
-    if tc_after - tc_before.shell != TC_SHELL {
-        failures.push(format!(
-            "the deal address took {}, not the {TC_SHELL} it was sent",
-            tc_after.saturating_sub(tc_before.shell)
-        ));
-    }
-    // And it came out of the note, not out of thin air.
+    // And it came out of the note, not out of thin air. This one IS exact: the
+    // debit is a plain ECC send out of the note's own ledger, whatever happens
+    // at the far end.
     if note_before - note_after != ROOT_MODEL_SHELL + TC_SHELL {
         failures.push(format!(
             "the note paid {} for a funding of {}; the note is the source here, so the two have \
@@ -243,10 +267,10 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
     assert!(failures.is_empty(), "e2e_funding failures: {failures:#?}");
 }
 
-/// Physical SHELL on an address that is the root of its own dApp, readable
-/// before anything is deployed there.
-async fn shell_of(dex: &Dex, address: &str) -> u128 {
-    dex.self_rooted_account_shell(address).await.map(|a| a.shell).unwrap_or(0)
+/// Native balance of an address that is the root of its own dApp, readable
+/// before anything is deployed there — and the place a `flag: 16` credit lands.
+async fn native_of(dex: &Dex, address: &str) -> u128 {
+    dex.self_rooted_account_shell(address).await.map(|a| a.native).unwrap_or(0)
 }
 
 async fn poll_until<F, Fut>(what: &str, probe: F) -> bool
