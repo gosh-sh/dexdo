@@ -36,7 +36,11 @@ variables:
   # already rewritten once (the commits this pin replaced no longer exist), so
   # the risk is real, not theoretical -- move the pin to a `dev` commit once
   # this work lands there.
-  - &acki_sha "78097e8cd7661742278878535d086595b66645a5"
+  #
+  # This pin is one commit ahead of the last: its only content is the e2e
+  # runner's `--test-threads`, raised from 1 to 4. Nothing else differs, so it
+  # bakes the same zerostate from the same contracts as the pin before it.
+  - &acki_sha "91d7d5d0e2809dfa83c3c87689cc315ed7527238"
   - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:1ee9cec484f27659e4b4d0e2182ca79485929b23c659bd772e58786f9bb1d2c7"
   - &node_img "docker.gosh.sh/ackinacki-node@sha256:00af55c1fb597d89f8afb469a43eb21c991c9db911ff7a6161ad934218fc4a03"
   - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:a45e15d363cb6f4ef4aca5bdc82d7fe225cca2b6dea97c1838ffbf7208dea962"
