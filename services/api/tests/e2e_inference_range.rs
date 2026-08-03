@@ -66,6 +66,9 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use ackinacki_kit::contracts::account::AccountStatus;
+use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
+use ackinacki_kit::contracts::traits::AccountAccessor;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::generate_random_sign_keys;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
@@ -81,6 +84,7 @@ use common::test_pns::TestPnPool;
 use dodex_chain::dex_contract_params;
 use dodex_chain::Dex;
 use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
+use dodex_contracts::dex::oracle::Oracle;
 use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
 use dodex_contracts::dex::oracle_event_list::OracleEventList;
 use dodex_contracts::dex::oracle_event_list::ParamsOfAddRangeEvent;
@@ -385,14 +389,23 @@ async fn a_range_market_resolves_into_the_bucket_its_books_price_falls_in() {
     )
     .await
     .expect("deploy_oracle accepted");
+    // `get_oracle_address` is a RootOracle getter and answers from a derivation,
+    // so it is happy long before anything exists at that address. Everything
+    // after it is asked OF the oracle, and of the list the oracle's constructor
+    // deploys — both have to be Active first, or the getter comes back
+    // `AccountIsNotActive` rather than late. A fixed sleep is not the same
+    // thing: it is a guess about a deploy whose duration nobody controls.
     let oracle_address = dex.get_oracle_address(oracle_name.clone()).await.expect("oracle address");
+    wait_active(Oracle::new(ctx.clone(), dex_contract_params(&oracle_address)), "Oracle").await;
     let el_address = dex
         .get_event_list_address(&oracle_address, ParamsOfGetEventListAddress { index: 0 })
         .await
         .expect("event list address");
-    // The list is deployed by the oracle's constructor; give it a moment before
-    // writing to it.
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    wait_active(
+        OracleEventList::new(ctx.clone(), dex_contract_params(&el_address)),
+        "the oracle's event list",
+    )
+    .await;
 
     let el = OracleEventList::new(ctx.clone(), dex_contract_params(&el_address));
     let event_name = format!("RangeEvt{suffix:x}");
@@ -564,6 +577,18 @@ async fn a_range_market_resolves_into_the_bucket_its_books_price_falls_in() {
     }
 
     finish(&dex, &note, &model_hash, failures).await;
+}
+
+/// Wait for an account to exist and be runnable before asking it anything.
+async fn wait_active<A: AccountAccessor>(handle: A, label: &str) {
+    handle
+        .wait_account(ParamsOfWaitAccount {
+            status: AccountStatus::Active,
+            attempts: Some(POLL_TICKS as u8),
+            attempts_timeout: Some(POLL_TICK.as_millis() as u64),
+        })
+        .await
+        .unwrap_or_else(|e| panic!("wait {label} active: {e:?}"));
 }
 
 async fn poll_deal<F>(dex: &Dex, tc: &str, what: &str, probe: F) -> bool
