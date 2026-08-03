@@ -39,6 +39,13 @@
 // deriving both addresses independently, from the canonical SuperRoot and from
 // the deploy message itself, and checking the money arrived exactly there.
 //
+// The two targets are funded in two calls, one each, rather than one call
+// funding both. That is not caution about the amounts — it is the only way to
+// say anything about the OTHER half of each call: `amount 0 = skip`, which the
+// contract documents and which nothing had checked. Each call therefore carries
+// its own negative, and the negative is answered by the same field moving under
+// the other call.
+//
 //   cargo test -p dodex-api --test e2e_inference_funding -- --ignored --nocapture
 //
 // === SECURITY NOTE === see e2e_inference.rs.
@@ -63,22 +70,18 @@ use dodex_contracts::dex::private_note::ParamsOfFundDeployShell;
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45; // 90s budget per wait.
 
-/// SHELL for the deal contract. The same amount the giver-funded route sends,
-/// so the deploy that follows is asked to work under identical conditions and
-/// the funding route is the only thing that differs.
-const TC_SHELL: u128 = 200_000_000_000;
-
-/// SHELL for the canonical RootModel. Nothing is deployed there in this run —
-/// the point is only that the note reaches its OWN RootModel address and no
-/// other — so a nominal amount is enough, and a distinct one at that: two
-/// different numbers cannot be swapped between the targets unnoticed.
-const ROOT_MODEL_SHELL: u128 = 3_000_000_000;
-
-const _: () = assert!(
-    TC_SHELL != ROOT_MODEL_SHELL,
-    "the two targets must be told apart by amount, or a call that funded the wrong one would read \
-     the same"
-);
+/// What each target is funded with. One amount for both, and it is the amount
+/// the giver-funded route sends: a deploy target has to arrive at a balance that
+/// can actually carry a constructor, and this is the only figure known to.
+///
+/// A smaller, "nominal" amount is not a cheaper way to say the same thing. A
+/// first cut of this test sent the RootModel 3 SHELL to keep the two targets
+/// distinguishable by amount; the account came into existence and its balance
+/// came out at zero, which says a credit that small does not survive the trip.
+/// Telling the targets apart is done by funding them in separate calls instead
+/// — which costs one more call and, unlike an amount, cannot be confused by
+/// anything.
+const TARGET_SHELL: u128 = 200_000_000_000;
 
 /// Deal terms. Nothing trades here; they exist because the constructor demands
 /// a coherent set and because the address depends on none of them — it comes
@@ -172,73 +175,129 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
         assert!(failures.is_empty(), "e2e_funding failures: {failures:#?}");
     }
 
-    // ── 2. the note pays for both ─────────────────────────────────────────
+    // ── 2. the deal address, and only the deal address ────────────────────
+    //
+    // `tcShell` alone: the RootModel share is zero, which the contract
+    // documents as "skip". So this call both funds one target exactly and says
+    // the other branch does nothing — and because the two targets are funded by
+    // separate calls, neither can be mistaken for the other.
     dex.fund_deploy_shell(
         &seller.address,
-        ParamsOfFundDeployShell { nonce, root_model_shell: ROOT_MODEL_SHELL, tc_shell: TC_SHELL },
+        ParamsOfFundDeployShell { nonce, root_model_shell: 0, tc_shell: TARGET_SHELL },
         signer_of(&seller),
     )
     .await
-    .expect("fundDeployShell accepted");
+    .expect("fundDeployShell(tc) accepted");
 
     // Watch the NATIVE balance, not the ECC ledger. `flag: 16` is the whole
     // point of this call and it does not deposit SHELL as SHELL — it converts
     // the credit into the target's native gas, which is what an arriving deploy
     // message needs and what ordinary ECC would not give it. A run that reads
     // `ecc[SHELL]` here sees zero on a funding that worked perfectly.
-    let arrived = poll_until("both deploy targets to be funded", || async {
-        native_of(&dex, &root_model).await > root_model_before.native
-            && native_of(&dex, &tc).await > tc_before.native
+    let tc_funded = poll_until("the deal address to be funded", || async {
+        native_of(&dex, &tc).await >= tc_before.native + TARGET_SHELL
     })
     .await;
-
-    let root_model_after = dex.self_rooted_account_shell(&root_model).await.expect("rm after");
     let tc_after = dex.self_rooted_account_shell(&tc).await.expect("deal address after");
-    let note_after = dex.dex_account_shell(&seller.address).await.expect("note after").shell;
-    let rm_gain = root_model_after.native.saturating_sub(root_model_before.native);
-    let tc_gain = tc_after.native.saturating_sub(tc_before.native);
+    let rm_untouched = dex.self_rooted_account_shell(&root_model).await.expect("rm after tc");
+    let note_after_tc = dex.dex_account_shell(&seller.address).await.expect("note after tc").shell;
     eprintln!(
-        "[e2e_funding] after: note={note_after} root_model=(+{rm_gain} native, {} ecc, {}) \
-         deal=(+{tc_gain} native, {} ecc, {})",
-        root_model_after.shell, root_model_after.acc_type, tc_after.shell, tc_after.acc_type
+        "[e2e_funding] after tc: note={note_after_tc} deal=(+{} native, {}) root_model=({} native, {})",
+        tc_after.native.saturating_sub(tc_before.native),
+        tc_after.acc_type,
+        rm_untouched.native,
+        rm_untouched.acc_type
     );
-    if !arrived {
+    if !tc_funded {
         failures.push(format!(
-            "the note's SHELL reached neither target as gas: RootModel {} → {} native, deal {} → \
-             {} native. The note WAS debited (see below), so this says the money went somewhere \
-             else — most likely these two addresses are not the ones the note derived internally",
-            root_model_before.native, root_model_after.native, tc_before.native, tc_after.native
+            "the deal address went {} → {} native for a send of {TARGET_SHELL}",
+            tc_before.native, tc_after.native
         ));
     }
-    // The two amounts differ by more than sixty times, so whatever the credit
-    // does to a native balance on the way in, a call that swapped the targets
-    // lands here. Exact equality is deliberately not asserted: the conversion
-    // this credit performs is not something this test has measured, and an
-    // assertion resting on a guess about it would be a statement about the
-    // guess.
-    if arrived && tc_gain <= rm_gain {
+    if tc_after.native - tc_before.native != TARGET_SHELL {
         failures.push(format!(
-            "the deal address gained {tc_gain} and the RootModel {rm_gain}; the deal was sent \
-             {TC_SHELL} against the RootModel's {ROOT_MODEL_SHELL}, so the deal must come out far \
-             ahead — reversed, the two targets were swapped"
+            "the deal address gained {}, not the {TARGET_SHELL} it was sent — a flag-16 credit \
+             arrives whole or it is not what a deploy can spend",
+            tc_after.native.saturating_sub(tc_before.native)
         ));
     }
-    // And it came out of the note, not out of thin air. This one IS exact: the
-    // debit is a plain ECC send out of the note's own ledger, whatever happens
-    // at the far end.
-    if note_before - note_after != ROOT_MODEL_SHELL + TC_SHELL {
+    // Zero means skip, and skip means nothing at all — not a message carrying
+    // nothing, which would leave the account existing and empty.
+    if rm_untouched.native != root_model_before.native
+        || rm_untouched.acc_type != root_model_before.acc_type
+    {
         failures.push(format!(
-            "the note paid {} for a funding of {}; the note is the source here, so the two have \
-             to agree",
-            note_before.saturating_sub(note_after),
-            ROOT_MODEL_SHELL + TC_SHELL
+            "a rootModelShell of 0 still touched the RootModel: {} ({}) → {} ({})",
+            root_model_before.native,
+            root_model_before.acc_type,
+            rm_untouched.native,
+            rm_untouched.acc_type
+        ));
+    }
+    if note_before - note_after_tc != TARGET_SHELL {
+        failures.push(format!(
+            "the note paid {} for a one-target funding of {TARGET_SHELL}",
+            note_before.saturating_sub(note_after_tc)
         ));
     }
     if !failures.is_empty() {
         assert!(failures.is_empty(), "e2e_funding failures: {failures:#?}");
     }
 
-    // ── 3. and the deploy lands on it ─────────────────────────────────────
+    // ── 3. and now the other target, on its own ───────────────────────────
+    //
+    // The mirror of the call above: this one skips the deal and funds the
+    // per-key RootModel. Nothing is deployed there — what is being said is only
+    // that the note reaches its OWN RootModel address, the one derived from its
+    // key and no caller's input.
+    dex.fund_deploy_shell(
+        &seller.address,
+        ParamsOfFundDeployShell { nonce, root_model_shell: TARGET_SHELL, tc_shell: 0 },
+        signer_of(&seller),
+    )
+    .await
+    .expect("fundDeployShell(rootModel) accepted");
+
+    let rm_funded = poll_until("the RootModel address to be funded", || async {
+        native_of(&dex, &root_model).await >= root_model_before.native + TARGET_SHELL
+    })
+    .await;
+    let root_model_after = dex.self_rooted_account_shell(&root_model).await.expect("rm after");
+    let tc_unchanged = dex.self_rooted_account_shell(&tc).await.expect("deal after rm");
+    let note_after = dex.dex_account_shell(&seller.address).await.expect("note after").shell;
+    eprintln!(
+        "[e2e_funding] after rm: note={note_after} root_model=(+{} native, {}) deal=({} native, {})",
+        root_model_after.native.saturating_sub(root_model_before.native),
+        root_model_after.acc_type,
+        tc_unchanged.native,
+        tc_unchanged.acc_type
+    );
+    if !rm_funded || root_model_after.native - root_model_before.native != TARGET_SHELL {
+        failures.push(format!(
+            "the RootModel went {} → {} native for a send of {TARGET_SHELL}. The note is debited \
+             either way (checked below), so a zero here says the money went to an address this \
+             test did not derive — the note builds its target from the RootPN-baked RootModel code \
+             hash, and `SuperRoot.getRootModelAddress` is a second opinion, not the same one",
+            root_model_before.native, root_model_after.native
+        ));
+    }
+    if tc_unchanged.native != tc_after.native {
+        failures.push(format!(
+            "a tcShell of 0 still moved the deal address: {} → {} native",
+            tc_after.native, tc_unchanged.native
+        ));
+    }
+    if note_after_tc - note_after != TARGET_SHELL {
+        failures.push(format!(
+            "the note paid {} for the second one-target funding of {TARGET_SHELL}",
+            note_after_tc.saturating_sub(note_after)
+        ));
+    }
+    if !failures.is_empty() {
+        assert!(failures.is_empty(), "e2e_funding failures: {failures:#?}");
+    }
+
+    // ── 4. and the deploy lands on it ─────────────────────────────────────
     //
     // No giver is involved. If the note had credited the address any other way,
     // this constructor would be accepted and the account would stay uninit.
