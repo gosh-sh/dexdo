@@ -3,17 +3,13 @@
 //! chain-driving scenario waits on.
 
 use std::future::Future;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use ackinacki_kit::contracts::account::AccountStatus;
 use ackinacki_kit::contracts::account::ParamsOfWaitAccount;
-use ackinacki_kit::contracts::giver::v3::top_up_native_with_giver_if_below;
 use ackinacki_kit::contracts::traits::AccountAccessor;
-use ackinacki_kit::contracts::traits::AddressAccessor;
-use ackinacki_kit::tvm_client::ClientContext;
 use dodex_sdk::Dex;
 
 use crate::common::context::TOKEN_TYPE_NACKL;
@@ -187,71 +183,6 @@ where
 fn now_nanos_tail(modulus: u64) -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(0)
         % modulus
-}
-
-/// Top up a singleton's native gas, and make sure the credit actually landed.
-///
-/// The kit's `top_up_native_with_giver_if_below` sends ONE giver message, waits
-/// three seconds, prints whatever balance it then sees, and returns `Ok`
-/// regardless of what that balance was. So a giver message the network dropped
-/// is indistinguishable from a successful top-up, and the caller walks into a
-/// deploy with no gas behind it. From the outside that is an `exit_code 52` in
-/// the compute phase, naming nothing.
-///
-/// Dropping one is ordinary here rather than exceptional: the block manager
-/// takes a few requests a second and every scenario lane reaches for the same
-/// giver, so the more of them run side by side the likelier it gets. Hence a
-/// re-send until the balance genuinely clears the floor — and a panic that says
-/// what happened if it never does, instead of leaving the next call to fail
-/// with an exit code.
-pub async fn ensure_native_gas<T>(
-    context: Arc<ClientContext>,
-    contract: &T,
-    min_native: u64,
-    top_up: u64,
-    label: &str,
-) where
-    T: AccountAccessor + AddressAccessor,
-{
-    const CREDIT_ATTEMPTS: u32 = 4;
-    for attempt in 1..=CREDIT_ATTEMPTS {
-        top_up_native_with_giver_if_below(context.clone(), contract, min_native, top_up, label)
-            .await
-            .unwrap_or_else(|e| panic!("{label}: top up native gas: {e:?}"));
-        for _ in 0..POLL_ATTEMPTS {
-            if native_balance(contract).await >= u128::from(min_native) {
-                return;
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-        eprintln!(
-            "{label}: giver credit {attempt}/{CREDIT_ATTEMPTS} never landed (balance {} is still \
-             below {min_native}); re-sending",
-            native_balance(contract).await
-        );
-    }
-    panic!(
-        "{label}: native gas never reached {min_native} after {CREDIT_ATTEMPTS} giver credits. \
-         Whatever runs next needs that gas, so it would fail in the compute phase with an exit \
-         code and nothing else to say"
-    );
-}
-
-/// Native balance of an account, or 0 if it cannot be read right now. A read
-/// that fails is not evidence of an empty account — it is just not evidence of
-/// a funded one, which is all the caller above is asking about.
-async fn native_balance<T: AccountAccessor>(contract: &T) -> u128 {
-    if contract.fetch_account().await.is_err() {
-        return 0;
-    }
-    contract
-        .account()
-        .lock()
-        .await
-        .balance
-        .as_ref()
-        .and_then(|v| v.to_string().parse::<u128>().ok())
-        .unwrap_or(0)
 }
 
 pub fn pn_nackl(details: &dodex_sdk::PrivateNoteDetails) -> u128 {

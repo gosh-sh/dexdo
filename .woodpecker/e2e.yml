@@ -361,9 +361,11 @@ steps:
   #
   # Do not read the RootOracle top-up line above such a failure as the cause.
   # #223 printed one that had not moved the balance, which was true and
-  # unrelated: the singleton held 114 vmshell, far more than a deploy spends.
-  # A top-up that silently does nothing is its own defect and is fixed
-  # separately (`ensure_native_gas`); it is not what exit_code 52 means.
+  # unrelated — and the "fix" for it broke all twenty-five scenarios in #226.
+  # That top-up is ALLOWED to do nothing: `RootOracle`'s native balance on a
+  # from-scratch stand reads negative, no giver credit brings it positive, and
+  # every scenario deploys against it anyway because the contract mints its own
+  # gas in `ensureBalance()`. The threshold it is compared against is advisory.
   sdk_proof:
     depends_on:
       - net_up
