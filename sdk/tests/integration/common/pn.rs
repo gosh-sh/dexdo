@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ackinacki_kit::contracts::giver::v3::send_currency_with_flag_from_default_giver;
-use ackinacki_kit::contracts::giver::v3::top_up_native_with_giver_if_below;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
@@ -23,6 +22,7 @@ use crate::common::context::ECC_SHELL_DEPOSIT;
 use crate::common::context::PMP_DEPOSIT;
 use crate::common::context::TOKEN_TYPE_NACKL;
 use crate::common::keys::gen_keys;
+use crate::common::misc::ensure_native_gas;
 use crate::common::misc::wait_active;
 use crate::common::voucher::make_voucher_proof;
 
@@ -186,15 +186,7 @@ pub async fn deploy_funded_pn(
 pub async fn ensure_root_pn_funded(context: &Arc<ClientContext>) {
     let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     wait_active(&root_pn, "RootPN").await;
-    top_up_native_with_giver_if_below(
-        context.clone(),
-        &root_pn,
-        120_000_000_000,
-        50_000_000_000,
-        "RootPN",
-    )
-    .await
-    .expect("top up RootPN native gas");
+    ensure_native_gas(context.clone(), &root_pn, 120_000_000_000, 50_000_000_000, "RootPN").await;
     let mut ecc = HashMap::new();
     ecc.insert(CURRENCY_ID_NACKL, PMP_DEPOSIT * 2);
     ecc.insert(CURRENCY_ID_SHELL, ECC_SHELL_DEPOSIT * 2);

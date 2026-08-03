@@ -346,16 +346,24 @@ steps:
   # consumption is what it always was.
   #
   # The known hazard, written down because it is easy to misread when it bites:
-  # external messages serialise PER ACCOUNT on chain, and the root singletons
-  # (`RootOracle`, `RootPN`) are shared by every scenario. Two `deployOracle`
-  # calls landing on the same shard-time slot leave the loser with exit_code 52
-  # and a market that never comes up. `tests/fixtures/README.md` documents that
-  # happening to the api-e2e suite, which is why THAT suite runs
-  # `--test-threads 1`. Four lanes have run green twice (#206, #207) — this
-  # stand is private and quiet where shellnet is not, and a lane's oracle
-  # deploys are spread across twenty minutes rather than bunched at t=0 — but
-  # two green runs are evidence, not proof. A scenario failing with its market
-  # simply absent, on a lane boundary, is this and not its own logic.
+  # the root singletons (`RootOracle`, `RootPN`) are shared by every scenario,
+  # and so is the giver that keeps them in gas. It bit in #223 — `exit_gates`
+  # died on `deployOracle` with exit_code 52, four seconds in, right after its
+  # own log said the RootOracle top-up had not moved the balance.
+  #
+  # The cause was the top-up, not the deploy. The kit's
+  # `top_up_native_with_giver_if_below` sends one giver message, waits three
+  # seconds and returns `Ok` whatever it then reads, so a message the network
+  # dropped reads as a successful credit; `common::misc::ensure_native_gas` now
+  # re-sends until the balance actually clears the floor. Four lanes reaching
+  # for one giver is what made a dropped message likely enough to see.
+  #
+  # The other half of the hazard is real and unmitigated: external messages
+  # serialise PER ACCOUNT on chain, so two `deployOracle` calls landing on the
+  # same shard-time slot still leave the loser with exit_code 52 and a market
+  # that never comes up. Distinguish them by the log line before the failure —
+  # a top-up that did not land is the first; a market simply absent, on a lane
+  # boundary, with the gas there, is the second.
   sdk_proof:
     depends_on:
       - net_up

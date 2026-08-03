@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ackinacki_kit::contracts::giver::v3::top_up_native_with_giver_if_below;
 use ackinacki_kit::tvm_client::abi::Signer;
 use ackinacki_kit::tvm_client::crypto::KeyPair;
 use ackinacki_kit::tvm_client::ClientContext;
@@ -25,6 +24,7 @@ use crate::common::context::PMP_DEPOSIT;
 use crate::common::context::TOKEN_TYPE_NACKL;
 use crate::common::keys::gen_keys;
 use crate::common::locks::ChainLockGuard;
+use crate::common::misc::ensure_native_gas;
 use crate::common::misc::event_entry_name;
 use crate::common::misc::now_unix;
 use crate::common::misc::wait_active;
@@ -51,15 +51,8 @@ pub async fn deploy_oracle_with_event(
     let root_oracle =
         RootOracle::new(context.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS));
     wait_active(&root_oracle, "RootOracle").await;
-    top_up_native_with_giver_if_below(
-        context.clone(),
-        &root_oracle,
-        120_000_000_000,
-        50_000_000_000,
-        "RootOracle",
-    )
-    .await
-    .expect("top up RootOracle native gas");
+    ensure_native_gas(context.clone(), &root_oracle, 120_000_000_000, 50_000_000_000, "RootOracle")
+        .await;
 
     dex.deploy_oracle(
         ParamsOfDeployOracle {
@@ -209,15 +202,8 @@ async fn prepare_oracle_member(
     let root_oracle =
         RootOracle::new(context.clone(), dex_contract_params(RootOracle::DEFAULT_ADDRESS));
     wait_active(&root_oracle, "RootOracle").await;
-    top_up_native_with_giver_if_below(
-        context.clone(),
-        &root_oracle,
-        120_000_000_000,
-        50_000_000_000,
-        "RootOracle",
-    )
-    .await
-    .expect("top up RootOracle native gas");
+    ensure_native_gas(context.clone(), &root_oracle, 120_000_000_000, 50_000_000_000, "RootOracle")
+        .await;
 
     dex.deploy_oracle(
         ParamsOfDeployOracle {
