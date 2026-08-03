@@ -23,6 +23,7 @@ use crate::common::context::PMP_DEPOSIT;
 use crate::common::context::TOKEN_TYPE_NACKL;
 use crate::common::keys::gen_keys;
 use crate::common::misc::ensure_native_gas;
+use crate::common::misc::send_past_replay_guard;
 use crate::common::misc::wait_active;
 use crate::common::voucher::make_voucher_proof;
 
@@ -41,24 +42,23 @@ pub async fn deploy_pn(
     let dih_dec = proof::hex_u256_to_dec(&zk.deposit_identifier_hash_hex);
     let epk_dec = proof::pubkey_to_dec(&keys.public);
 
-    dex.deploy_private_note(
-        ParamsOfDeployPrivateNote {
-            zkproof: zk.proof,
-            deposit_identifier_hash: dih_dec.clone(),
-            final_layer_historical_hash_root: proof::hex_u256_to_dec(
-                &zk.final_layer_historical_hash_root_hex,
-            ),
-            voucher_nominal_fr: proof::hex_u256_to_dec(&zk.voucher_nominal_fr_hex),
-            token_type_fr: proof::hex_u256_to_dec(&zk.token_type_fr_hex),
-            ephemeral_pubkey: epk_dec,
-            value: zk.voucher_value,
-            token_type: zk.voucher_token_type,
-            layer_number: zk.layer_number,
-        },
-        signer,
-    )
-    .await
-    .expect("deploy_private_note");
+    let deploy = ParamsOfDeployPrivateNote {
+        zkproof: zk.proof,
+        deposit_identifier_hash: dih_dec.clone(),
+        final_layer_historical_hash_root: proof::hex_u256_to_dec(
+            &zk.final_layer_historical_hash_root_hex,
+        ),
+        voucher_nominal_fr: proof::hex_u256_to_dec(&zk.voucher_nominal_fr_hex),
+        token_type_fr: proof::hex_u256_to_dec(&zk.token_type_fr_hex),
+        ephemeral_pubkey: epk_dec,
+        value: zk.voucher_value,
+        token_type: zk.voucher_token_type,
+        layer_number: zk.layer_number,
+    };
+    send_past_replay_guard("deploy_private_note", || {
+        dex.deploy_private_note(deploy.clone(), signer.clone())
+    })
+    .await;
 
     let pn_address = dex
         .get_private_note_address(ParamsOfGetPrivateNoteAddress {
@@ -88,24 +88,23 @@ pub async fn deploy_pn_with_keys(
     let dih_dec = proof::hex_u256_to_dec(&zk.deposit_identifier_hash_hex);
     let epk_dec = proof::pubkey_to_dec(&keys.public);
 
-    dex.deploy_private_note(
-        ParamsOfDeployPrivateNote {
-            zkproof: zk.proof,
-            deposit_identifier_hash: dih_dec.clone(),
-            final_layer_historical_hash_root: proof::hex_u256_to_dec(
-                &zk.final_layer_historical_hash_root_hex,
-            ),
-            voucher_nominal_fr: proof::hex_u256_to_dec(&zk.voucher_nominal_fr_hex),
-            token_type_fr: proof::hex_u256_to_dec(&zk.token_type_fr_hex),
-            ephemeral_pubkey: epk_dec,
-            value: zk.voucher_value,
-            token_type: zk.voucher_token_type,
-            layer_number: zk.layer_number,
-        },
-        signer,
-    )
-    .await
-    .expect("deploy_pn_with_keys");
+    let deploy = ParamsOfDeployPrivateNote {
+        zkproof: zk.proof,
+        deposit_identifier_hash: dih_dec.clone(),
+        final_layer_historical_hash_root: proof::hex_u256_to_dec(
+            &zk.final_layer_historical_hash_root_hex,
+        ),
+        voucher_nominal_fr: proof::hex_u256_to_dec(&zk.voucher_nominal_fr_hex),
+        token_type_fr: proof::hex_u256_to_dec(&zk.token_type_fr_hex),
+        ephemeral_pubkey: epk_dec,
+        value: zk.voucher_value,
+        token_type: zk.voucher_token_type,
+        layer_number: zk.layer_number,
+    };
+    send_past_replay_guard("deploy_pn_with_keys", || {
+        dex.deploy_private_note(deploy.clone(), signer.clone())
+    })
+    .await;
 
     let pn_address = dex
         .get_private_note_address(ParamsOfGetPrivateNoteAddress {

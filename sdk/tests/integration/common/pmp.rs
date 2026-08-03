@@ -27,6 +27,7 @@ use crate::common::locks::ChainLockGuard;
 use crate::common::misc::ensure_native_gas;
 use crate::common::misc::event_entry_name;
 use crate::common::misc::now_unix;
+use crate::common::misc::send_past_replay_guard;
 use crate::common::misc::wait_active;
 use crate::common::pn::deploy_funded_pn;
 use crate::common::pn::ensure_root_pn_funded;
@@ -54,15 +55,16 @@ pub async fn deploy_oracle_with_event(
     ensure_native_gas(context.clone(), &root_oracle, 120_000_000_000, 50_000_000_000, "RootOracle")
         .await;
 
-    dex.deploy_oracle(
-        ParamsOfDeployOracle {
-            oracle_pubkey: proof::pubkey_to_dec(&oracle_keys.public),
-            oracle_name: oracle_name.clone(),
-        },
-        Signer::Keys { keys: ephemeral_keys },
-    )
-    .await
-    .expect("deploy_oracle");
+    send_past_replay_guard("deploy_oracle", || {
+        dex.deploy_oracle(
+            ParamsOfDeployOracle {
+                oracle_pubkey: proof::pubkey_to_dec(&oracle_keys.public),
+                oracle_name: oracle_name.clone(),
+            },
+            Signer::Keys { keys: ephemeral_keys.clone() },
+        )
+    })
+    .await;
 
     let oracle_address =
         dex.get_oracle_address(oracle_name.clone()).await.expect("get_oracle_address");
@@ -205,15 +207,16 @@ async fn prepare_oracle_member(
     ensure_native_gas(context.clone(), &root_oracle, 120_000_000_000, 50_000_000_000, "RootOracle")
         .await;
 
-    dex.deploy_oracle(
-        ParamsOfDeployOracle {
-            oracle_pubkey: proof::pubkey_to_dec(&oracle_keys.public),
-            oracle_name: oracle_name.clone(),
-        },
-        Signer::Keys { keys: ephemeral_keys },
-    )
-    .await
-    .expect("deploy_oracle");
+    send_past_replay_guard("deploy_oracle", || {
+        dex.deploy_oracle(
+            ParamsOfDeployOracle {
+                oracle_pubkey: proof::pubkey_to_dec(&oracle_keys.public),
+                oracle_name: oracle_name.clone(),
+            },
+            Signer::Keys { keys: ephemeral_keys.clone() },
+        )
+    })
+    .await;
 
     let oracle_address =
         dex.get_oracle_address(oracle_name.clone()).await.expect("get_oracle_address");

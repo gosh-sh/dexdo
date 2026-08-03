@@ -346,24 +346,24 @@ steps:
   # consumption is what it always was.
   #
   # The known hazard, written down because it is easy to misread when it bites:
-  # the root singletons (`RootOracle`, `RootPN`) are shared by every scenario,
-  # and so is the giver that keeps them in gas. It bit in #223 — `exit_gates`
-  # died on `deployOracle` with exit_code 52, four seconds in, right after its
-  # own log said the RootOracle top-up had not moved the balance.
+  # the root singletons (`RootOracle`, `RootPN`) are addressed by every
+  # scenario, with EXTERNAL messages. An external message carries a `timestamp`
+  # header, and the contract compares it against the last stamp it accepted —
+  # so two lanes deploying against the same singleton do not have to collide
+  # inside a millisecond for one to lose. Arriving out of order is enough, and
+  # the older stamp is thrown out with exit_code 52, which the TVM Solidity
+  # runtime defines as "Replay protection exception".
   #
-  # The cause was the top-up, not the deploy. The kit's
-  # `top_up_native_with_giver_if_below` sends one giver message, waits three
-  # seconds and returns `Ok` whatever it then reads, so a message the network
-  # dropped reads as a successful credit; `common::misc::ensure_native_gas` now
-  # re-sends until the balance actually clears the floor. Four lanes reaching
-  # for one giver is what made a dropped message likely enough to see.
+  # It bit in #223: `exit_gates` died on `deployOracle` four seconds in.
+  # `common::misc::send_past_replay_guard` now re-sends on exactly that code —
+  # safe because 52 is raised BEFORE `tvm.accept()`, so the rejected message was
+  # never applied and the retry is a first attempt, not a second.
   #
-  # The other half of the hazard is real and unmitigated: external messages
-  # serialise PER ACCOUNT on chain, so two `deployOracle` calls landing on the
-  # same shard-time slot still leave the loser with exit_code 52 and a market
-  # that never comes up. Distinguish them by the log line before the failure —
-  # a top-up that did not land is the first; a market simply absent, on a lane
-  # boundary, with the gas there, is the second.
+  # Do not read the RootOracle top-up line above such a failure as the cause.
+  # #223 printed one that had not moved the balance, which was true and
+  # unrelated: the singleton held 114 vmshell, far more than a deploy spends.
+  # A top-up that silently does nothing is its own defect and is fixed
+  # separately (`ensure_native_gas`); it is not what exit_code 52 means.
   sdk_proof:
     depends_on:
       - net_up

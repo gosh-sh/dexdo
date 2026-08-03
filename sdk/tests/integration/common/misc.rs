@@ -132,6 +132,63 @@ pub async fn wait_active<T: AccountAccessor>(contract: &T, label: &str) {
         .unwrap_or_else(|e| panic!("wait {label} active: {e:?}"));
 }
 
+/// Re-send an external message the replay guard threw out.
+///
+/// Every scenario addresses the same root singletons — `RootOracle` for
+/// `deployOracle`, `RootPN` for `deployPrivateNote` — and an external message
+/// to one of them carries a `timestamp` header the contract compares against
+/// the last stamp it accepted. Two lanes need not collide inside the same
+/// millisecond for that to bite: arriving out of order is enough, and whichever
+/// carries the older stamp is thrown out with exit code 52.
+///
+/// That rejection happens BEFORE `tvm.accept()`, so nothing was applied. A
+/// re-send is therefore not a second go at a half-finished operation — it is
+/// the first go at one that never started, and the fresh timestamp it carries
+/// is the whole of what it was missing.
+///
+/// Anything else is a real failure and panics with what the chain said.
+pub async fn send_past_replay_guard<F, Fut, T>(what: &str, mut send: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, dodex_sdk::errors::AppError>>,
+{
+    /// `52` — "Replay protection exception" in the TVM Solidity runtime.
+    const REPLAY_REJECTED: &str = "52";
+    const SEND_ATTEMPTS: u32 = 5;
+
+    for attempt in 1..=SEND_ATTEMPTS {
+        match send().await {
+            Ok(value) => return value,
+            Err(err)
+                if err.error_code.as_deref() == Some(REPLAY_REJECTED)
+                    && attempt < SEND_ATTEMPTS =>
+            {
+                // Back off by an amount no other lane is likely to pick, so two
+                // that collided do not collide again in step: the attempt
+                // number separates lanes that are at different attempts, the
+                // clock's own tail separates lanes that are at the same one.
+                let jitter = now_nanos_tail(300);
+                eprintln!(
+                    "{what}: replay protection rejected the send on attempt \
+                     {attempt}/{SEND_ATTEMPTS}; re-sending in {}ms with a fresh timestamp",
+                    200 * u64::from(attempt) + jitter
+                );
+                tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt) + jitter)).await;
+            }
+            Err(err) => panic!("{what}: {err:?}"),
+        }
+    }
+    unreachable!("the last attempt either returns or panics")
+}
+
+/// Low bits of the wall clock, for spreading retries that would otherwise line
+/// up. Not randomness and not relied on as such — just something two processes
+/// are unlikely to share.
+fn now_nanos_tail(modulus: u64) -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(0)
+        % modulus
+}
+
 /// Top up a singleton's native gas, and make sure the credit actually landed.
 ///
 /// The kit's `top_up_native_with_giver_if_below` sends ONE giver message, waits
