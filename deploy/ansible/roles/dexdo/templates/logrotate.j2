@@ -1,0 +1,42 @@
+#!/bin/bash
+# Rendered by Ansible (deploy/ansible/roles/dexdo/templates/logrotate.j2). Do NOT
+# edit on the host — it is overwritten on the next deploy; change the template.
+
+set -e
+
+# Guard: this rotates /etc/logrotate.d system-wide, so only ever run in a
+# container.
+if [[ -f /.dockerenv ]] || grep -Eq '(lxc|docker)' /proc/1/cgroup; then
+    :
+else
+    echo "Docker only!"
+    exit 1
+fi
+
+rm -f /etc/logrotate.d/*
+# Match the app's dated live files (<service>.log.<YYYY-MM-DD>, dodex-logging's
+# daily rotation) ONLY — the date is anchored so this does NOT also match
+# logrotate's own rotated output (<name>.1, .2.gz, ...), which would otherwise
+# be re-rotated on every run and defeat the retention count.
+cat >/etc/logrotate.d/dexdo <<EOF
+/logsdir/*/*.log.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] {
+    missingok
+    rotate {{ dexdo_log_rotate_amount }}
+    size {{ dexdo_log_rotate_size }}
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+}
+EOF
+
+cat /etc/logrotate.d/dexdo
+
+chown 0:0 /etc/logrotate.d /etc/logrotate.d/dexdo
+chmod 755 /etc/logrotate.d
+chmod 644 /etc/logrotate.d/dexdo
+
+echo "{{ dexdo_log_rotate_spec }} * * * /usr/sbin/logrotate -v /etc/logrotate.conf" > /etc/crontabs/root
+
+echo "Starting crond"
+crond -f

@@ -156,6 +156,7 @@ steps:
         -e dexdo_image_tag=$CI_COMMIT_SHA
         -e dexdo_seed_accounts=true
         -e dexdo_seed_notes_src="$CI_WORKSPACE/$SEED_NOTES_WS"
+        -e dexdo_logrotate_enabled=false
 
   e2e_tests:
     depends_on:

@@ -20,6 +20,11 @@ dexdo_image_tag: latest-dev
 
 # --- Host layout ------------------------------------------------------------
 dexdo_deploy_dir: /opt/dexdo
+# Where the services write their log files. Defaults under the deploy dir; break
+# it out to its own disk/mount per environment when you want logs off the system
+# disk or surviving a redeploy. Per-service subdirs `<dir>/api` and
+# `<dir>/indexer` are bind-mounted to /app/logs.
+dexdo_logs_dir: "{{ dexdo_deploy_dir }}/logs"
 # Run api + indexer with the host's network stack (network_mode: host) instead
 # of the compose bridge. Off by default. Turn on ONLY when the chain must be
 # reached over the host's 127.0.0.1 — e2e, where a co-located single-compose
@@ -87,6 +92,26 @@ dexdo_database_url: "postgresql://{{ dexdo_db_user }}:{{ dexdo_db_password | url
 dexdo_otel_endpoint: ""
 dexdo_otel_metrics_protocol: grpc
 dexdo_otel_service_name: dodex-indexer-test
+
+# --- Logging & rotation -----------------------------------------------------
+# The api + indexer already write per-service, daily-rotated files under
+# `dexdo_logs_dir/<service>` (bind-mounted to /app/logs) via the dodex-logging
+# crate: <service>.log.<date> (+ .noise.log), pruned to LOG_MAX_FILES days.
+# Daily rotation bounds age but NOT size, so a bundled logrotate sidecar adds a
+# size cap on top (rotate by size, with copytruncate since the services keep the
+# files open).
+# logrotate sidecar: a tiny container that rotates the on-host log files by
+# size. Turn off for throwaway/e2e stacks that don't outlive a single run.
+dexdo_logrotate_enabled: true
+# Image providing `logrotate` + busybox `crond` + bash.
+dexdo_logrotate_image: docker.gosh.sh/logrotate:3.13.0
+# Rotate a log file once it reaches this size; keep this many rotated copies.
+dexdo_log_rotate_size: 2G
+dexdo_log_rotate_amount: 10
+# BusyBox crontab "minute hour" fields for the rotation run (the remaining
+# day/month/weekday fields are wildcarded). "*/5 *" -> every 5 minutes, so a
+# fast-growing log can't overshoot the size cap by much between checks.
+dexdo_log_rotate_spec: "*/5 *"
 
 # --- Secrets (resolved from the env vault) ----------------------------------
 dexdo_kek_hex: "{{ vault_dexdo_kek_hex }}"

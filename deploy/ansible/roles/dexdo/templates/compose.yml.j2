@@ -71,7 +71,7 @@ services:
 {% endif %}
     volumes:
       - ./config:/app/config:ro
-      - ./logs/api:/app/logs
+      - {{ dexdo_logs_dir }}/api:/app/logs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:{{ dexdo_api_port }}/readiness"]
@@ -100,5 +100,17 @@ services:
       LOG_DIR: /app/logs
     volumes:
       - ./config:/app/config:ro
-      - ./logs/indexer:/app/logs
+      - {{ dexdo_logs_dir }}/indexer:/app/logs
     restart: unless-stopped
+{% if dexdo_logrotate_enabled %}
+
+  logrotate:
+    image: {{ dexdo_logrotate_image }}
+    restart: unless-stopped
+    volumes:
+      - {{ dexdo_logs_dir }}:/logsdir
+      - ./logrotate.sh:/logrotate.sh:ro
+    command: ["/bin/bash", "/logrotate.sh"]
+    init: true
+    network_mode: "none"
+{% endif %}
