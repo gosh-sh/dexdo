@@ -1025,30 +1025,23 @@ steps:
   assert_deploy_dexdo:
     when:
       - status: [success, failure]
+    # The four LANE TAILS, and nothing else. A dependency list of individual
+    # steps looks equivalent and is not: `sdk_book_segments` sits third of six
+    # in lane 1, so naming it lets this step start while `resting_orders`,
+    # `price_above_par` and `cancelled_event` are still writing to the chain.
+    # The api-e2e step below then deploys and trades beside them — and every
+    # market deploy sends an external `deployOracle` to the one shared
+    # RootOracle, where the loser of a timestamp race is rejected outright
+    # (exit_code 52, replay protection).
+    #
+    # Depending on a tail waits for its whole lane, because each step in a lane
+    # already depends on the one before it. So these four say what the earlier
+    # list only happened to mean while the timings held.
     depends_on:
-      # The two newest lane tails are named here where the older ones are not,
-      # and deliberately: the api-e2e step below now runs four tests at a time,
-      # so anything still writing to the chain while it runs is another pair of
-      # external messages racing the same root singletons. Waiting for these
-      # costs a few minutes of overlap and buys back a class of failure that
-      # took three pipelines to identify the first time.
-      - sdk_losing_claim
+      - sdk_cancelled_event
       - sdk_key_rotation
-      - sdk_bounce_deploy
-      - sdk_book_segments
-      - sdk_mm_cycle
-      - sdk_coupon_debt
-      - sdk_forfeit_close
-      - sdk_oracle_quorum
-      - sdk_multi_market
-      - sdk_usdc_market
-      - sdk_order_refusals
-      - sdk_market_clock
-      - sdk_exit_gates
-      - sdk_oracle_admin
-      - sdk_impostor_calls
-      - sdk_replay
-      - sdk_event_rejects
+      - sdk_losing_claim
+      - sdk_usdc_release
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }

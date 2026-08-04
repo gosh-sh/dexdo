@@ -64,16 +64,28 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 #     the SAME note. A note serialises its own operations through `_busy` and
 #     rejects a repeated message body outright, so two of these at once would
 #     have one of them silently dropped;
-#   * the trader-path binaries read and write the shared test database.
+#   * the trader-path binaries read and write the shared test database;
+#   * everything that deploys a market — and `e2e_inference_range`, which
+#     deploys an oracle of its own — sends an external `deployOracle` to the
+#     ONE `RootOracle` the whole stand shares. An external message carries a
+#     `timestamp` the contract compares against the last it accepted, so two
+#     arriving out of order leave the older one rejected with exit_code 52,
+#     "Replay protection exception". They do not have to collide inside a
+#     millisecond; arriving in the wrong order is enough.
 #
-# Everything outside this group holds a note nobody else does and never touches
-# the database, so it needs no help. Note that the group only constrains this
-# suite — it is the reason `--test-threads` above 1 is safe here at all.
+# That last one is why `e2e_inference_range` is here despite holding a note
+# nobody else touches and never opening the database: what it shares is the
+# singleton, not the note.
+#
+# Everything outside this group holds a note nobody else does, touches no
+# database and deploys no oracle, so it needs no help. The group only
+# constrains this suite — it is the reason `--test-threads` above 1 is safe
+# here at all.
 [[profile.ci-e2e.overrides]]
 filter = '''
     binary(e2e_inference) | binary(e2e_inference_clob) | binary(e2e_register_account)
   | binary(e2e_batch_orders) | binary(e2e_buy_full_set) | binary(e2e_cancel_batch_orders)
-  | binary(e2e_cancel_order) | binary(e2e_order)
+  | binary(e2e_cancel_order) | binary(e2e_order) | binary(e2e_inference_range)
 '''
 test-group = 'serial-e2e-shared'
 
