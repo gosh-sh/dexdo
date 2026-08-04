@@ -260,13 +260,19 @@ case you're in:
   at the end of whichever lane is shortest; the lane comment in
   `.woodpecker/e2e.yml` says how they were balanced and from what.
 
-  Nothing outside those filters is selected by any job. The older
-  chain-touching modules — `pn_basic`, `pmp`, `oracle`, `discovery`, `flows`,
-  `history`, `multitoken` — are named by no filter anywhere and so run nowhere;
-  they are `#[ignore]`d, which is what keeps an unfiltered local run from
-  driving them against a live public network (shellnet, the default in
+  Nothing outside those filters is selected by any job. What is left of the
+  older chain-touching modules — nine tests across `discovery`, `history`,
+  `oracle`, `flows` and `multitoken` — is named by no filter anywhere and so
+  runs nowhere; they are `#[ignore]`d, which is what keeps an unfiltered local
+  run from driving them against a live public network (shellnet, the default in
   `common::context::network_endpoint`) and spending test tokens. A green
   unfiltered run therefore says nothing about them.
+
+  They are a **named gap, not coverage**: SDK read-side (note and oracle
+  discovery, event history and pagination), the recovery flow, and cross-token
+  isolation. All nine need notes deployed at run time — a zerostate-baked note
+  never emitted `PrivateNoteDeployed`, so discovery cannot see it — which is why
+  they cannot simply be moved onto the stand pool like the rest.
 
   Extending real coverage means extending those filters, not `pr-tests.yml`. A
   test that runs in neither place is documentation, not a gate — say so in the

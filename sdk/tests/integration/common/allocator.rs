@@ -1438,8 +1438,10 @@ mod tests {
     ///   the twenty-fifth, and is the only scenario that deploys five markets
     ///   from one note: four of them are refused and hand everything back, so
     ///   the note is where it started until the fifth, which is the one that
-    ///   comes up. Two of the twenty-five are gone before any of those steps
-    ///   starts.
+    ///   comes up. `losing_claim` takes the twenty-sixth and `key_rotation`
+    ///   the twenty-seventh — both only deploy a market for others to act in,
+    ///   and both leave their creator holding the initial stakes. Two of the
+    ///   twenty-seven are gone before any of those steps starts.
     /// - `Trd` 29: `proof_money` takes two and returns both, and
     ///   `usdc_release` borrows one and returns it — none of that costs
     ///   anything. `resting_orders`, `market_orders`, `matching_ladder`,
@@ -1465,7 +1467,14 @@ mod tests {
     ///   ends holding currency it did not start with, so neither comes back.
     ///   `impostor_calls` takes one: the note whose stake, order and money a
     ///   stranger tries to move on its behalf. `replay` takes one more, whose
-    ///   single signed order is posted three times.
+    ///   single signed order is posted three times. `losing_claim` takes two,
+    ///   one per side of the market — the winner and the one whose claim is
+    ///   supposed to pay nothing — and both end holding a spent stake record.
+    ///   `key_rotation` takes the thirty-second, and is the only note in the
+    ///   suite whose OWNER KEY changes: it is handed back to its original key
+    ///   before the scenario ends, because the pool holds that key and no
+    ///   other, and a run that dies in between drops the lease unreleased,
+    ///   which quarantines the note rather than returning it unusable.
     /// - `Usdc` 4: `usdc_release`'s source note, and three more for
     ///   `usdc_market` — a creator, a maker and a taker, all of which have to
     ///   hold the currency the market is denominated in, because a market's
@@ -1493,7 +1502,7 @@ mod tests {
     /// concurrency figure would have said two `Dep` notes suffice, and the
     /// step that found out otherwise would have been a pipeline run.
     const SCENARIOS_RENT: &[(PnProfile, usize)] =
-        &[(PnProfile::Dep, 25), (PnProfile::Trd, 29), (PnProfile::Usdc, 4)];
+        &[(PnProfile::Dep, 27), (PnProfile::Trd, 32), (PnProfile::Usdc, 4)];
 
     /// The spec the e2e pipeline bakes the stand's note pool from.
     const STAND_NOTES_SPEC: &str = include_str!("../../../../tests/e2e/dex_test_notes.spec.json");

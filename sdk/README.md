@@ -571,6 +571,8 @@ not a section.**
 | `impostor_calls` | `impostor_calls::the_protocols_own_vocabulary_is_not_available_to_strangers_local` | Seven of the protocol's own internal calls made from outside — each at the moment the genuine article would have gone through, so the sender check is the only thing left to refuse them. |
 | `replay` | `replay::one_signed_instruction_is_carried_out_once_local` | The same signed message posted three times, which no ordinary SDK call can do because each builds a fresh one. |
 | `event_rejects` | `event_rejects::a_market_its_oracle_refuses_unwinds_and_leaves_no_confirmation_behind_local` | Four ways a market is refused by the oracle it named, and the two places the fee ends up depending on which refused it. |
+| `losing_claim` | `losing_claim::a_claim_on_the_losing_outcome_pays_nothing_and_clears_its_record_local` | The only claim in the suite made from a losing position: it pays nothing, which is only readable together with the record it clears, and next to the winning claim that is the same call. |
+| `key_rotation` | `key_rotation::a_rotated_key_takes_over_and_the_old_one_stops_working_local` | `changeOwner` and what the retired key may do afterwards, tried where the new key's identical call succeeds — plus a second stake into the same market, which accumulates rather than replacing. |
 
 Every one of them takes the same shape as the runs above:
 

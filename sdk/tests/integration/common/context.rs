@@ -29,6 +29,7 @@ pub const ECC_SHELL_DEPOSIT: u64 = 100_000_000_000; // 100 ECC shell (Nominal::N
 pub const PMP_DEPOSIT: u64 = 1_000_000_000_000; // 1000 NACKL (Nominal::N1000) — enough for initial stakes + regular stake
 pub const DEPLOYER_SEED_AMOUNT: u128 = 100_000_000_000; // 100 NACKL per outcome
 pub const STAKE_AMOUNT: u128 = 200_000_000;
+#[allow(dead_code)]
 pub const STAKE_OUTCOME: u32 = 0;
 pub const ORACLE_FEE: u128 = 100;
 /// 1 SHELL, the fixed network fee a `PrivateNote` attaches to `deployPMP` on
@@ -42,6 +43,7 @@ pub const NETWORK_FEE_AMOUNT: u128 = 1_000_000_000;
 // seconds after this client-side `now`, so an exact 60 races the gate (ERR
 // 129). The derived stake window is 10% of the period, so the value also has to
 // leave room for the staking step.
+#[allow(dead_code)]
 pub const STAKE_PERIOD: u64 = 180;
 pub const STAKE_PERIOD_LONG: u64 = 300; // 5 min — stake window = 30 sec for multi-step tests
 pub const CURRENCY_ID_SHELL: u32 = 2;

@@ -324,6 +324,18 @@ elif [ "$SUITE" = rejects ]; then
   # outlive its own deadline, and that runs out under two other phases.
   FILTER='test(=event_rejects::a_market_its_oracle_refuses_unwinds_and_leaves_no_confirmation_behind_local)'
   THREADS=1
+elif [ "$SUITE" = losing ]; then
+  # The only claim in the suite made from a losing position. Both sides of one
+  # market claim, seconds apart, because a payout of zero and a message that
+  # never arrived are the same reading on their own.
+  FILTER='test(=losing_claim::a_claim_on_the_losing_outcome_pays_nothing_and_clears_its_record_local)'
+  THREADS=1
+elif [ "$SUITE" = rotation ]; then
+  # The only scenario that changes a note's owner key. It hands the key back
+  # before it ends — the pool holds the original and no other — so it needs a
+  # staking window long enough for five acknowledged operations on one note.
+  FILTER='test(=key_rotation::a_rotated_key_takes_over_and_the_old_one_stops_working_local)'
+  THREADS=1
 elif [ "$SUITE" = release ]; then
   # No bootstrap: this joins the generation the proof run opened, which is
   # what lets it lease notes that scenario already returned. It takes no

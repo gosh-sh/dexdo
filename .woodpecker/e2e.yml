@@ -972,10 +972,68 @@ steps:
         ACKI_DIR='$ACKI_DIR'
         bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
 
+  # Lane 3's tail. ~300s: it waits out a staking window and a result window,
+  # the same shape as `forfeit_close` next door in lane 2.
+  sdk_losing_claim:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_bounce_recovery
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=losing
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # Lane 2's tail. ~250s: it never freezes its market, so it pays for the
+  # market coming up and for five operations on one note, and nothing else.
+  sdk_key_rotation:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_bounce_deploy
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=rotation
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
   assert_deploy_dexdo:
     when:
       - status: [success, failure]
     depends_on:
+      # The two newest lane tails are named here where the older ones are not,
+      # and deliberately: the api-e2e step below now runs four tests at a time,
+      # so anything still writing to the chain while it runs is another pair of
+      # external messages racing the same root singletons. Waiting for these
+      # costs a few minutes of overlap and buys back a class of failure that
+      # took three pipelines to identify the first time.
+      - sdk_losing_claim
+      - sdk_key_rotation
       - sdk_bounce_deploy
       - sdk_book_segments
       - sdk_mm_cycle
@@ -1072,6 +1130,8 @@ steps:
       - sdk_shutdown_orders
       - sdk_price_above_par
       - sdk_bounce_recovery
+      - sdk_losing_claim
+      - sdk_key_rotation
       - sdk_cancelled_event
       - sdk_bounce_deploy
       - sdk_book_segments
@@ -1132,6 +1192,8 @@ steps:
       - sdk_shutdown_orders
       - sdk_price_above_par
       - sdk_bounce_recovery
+      - sdk_losing_claim
+      - sdk_key_rotation
       - sdk_cancelled_event
       - sdk_bounce_deploy
       - sdk_book_segments

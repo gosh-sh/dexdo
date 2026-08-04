@@ -496,6 +496,7 @@ pub async fn deploy_pmp_in_currency(
     pmp_address
 }
 
+#[allow(dead_code)]
 pub struct PmpSetup {
     pub pn_address: String,
     pub pn_keys: KeyPair,
