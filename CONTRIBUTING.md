@@ -215,6 +215,12 @@ case you're in:
 - **New crate in the root workspace** → it's covered the moment it's in `members`
   in the root [`Cargo.toml`](Cargo.toml) (see *Adding a service*). No new crate,
   no coverage.
+> **The woodpecker e2e pipeline only runs on a labelled PR.** Its `when:` clause
+> requires the PR to carry the **`local-net`** label, and the `event: manual`
+> arm was removed with it — so a PR without that label produces no e2e pipeline
+> at all, which reads as nothing rather than as red. Restarting an existing
+> pipeline still works: a restart replays the original `pull_request` event.
+
 - **A `#[ignore]`d e2e (chain) test** → the gated job runs **only `dodex-api`**
   (`cargo nextest run -p dodex-api --run-ignored only`). Put the test in
   `services/api/tests/` as `e2e_*`, or it never runs. If it needs new
@@ -227,11 +233,22 @@ case you're in:
   next free index) and bump the `PN-API` count in
   [`tests/e2e/dex_test_notes.spec.json`](tests/e2e/dex_test_notes.spec.json) and
   `API_NOTES_FOR_ONE_EACH` in `services/api/tests/pn_pool_split.rs` to match —
-  a unit test fails if they disagree. A test that shares a note with another
-  must also be added to the `serial-e2e-shared` group in
-  [`.config/nextest.toml`](.config/nextest.toml), as must anything touching the
-  test database: the woodpecker e2e step runs this suite four at a time, and
-  that group is the whole of what keeps sharers apart.
+  a unit test fails if they disagree. The woodpecker e2e step runs this suite
+  four at a time, and the `serial-e2e-shared` group in
+  [`.config/nextest.toml`](.config/nextest.toml) is the whole of what keeps
+  concurrent tests off each other. A test belongs in that group if ANY of three
+  holds — and the third is the one that is easy to miss, because the test can
+  look entirely self-contained:
+
+  1. it shares a pool note with another test;
+  2. it reads or writes the test database;
+  3. **it deploys an oracle.** `deployOracle` is an external message to the one
+     `RootOracle` the whole stand shares, and an external message carries a
+     `timestamp` the contract compares against the last it accepted. Two
+     arriving out of order leave the older one rejected with exit_code 52,
+     "Replay protection exception" — they need not collide inside a
+     millisecond. Every market-deploying test qualifies, and so does anything
+     that brings up an oracle of its own.
 - **A test in `tools/`** → **no CI job runs these today** — `--workspace` excludes
   it and nothing else references that workspace from any workflow. Add a CI step
   that runs it from that workspace's directory, the same way `sdk-harness-tests`
