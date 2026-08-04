@@ -15,6 +15,8 @@ use sqlx::PgPool;
 struct DepthBody {
     #[serde(rename = "inferenceOrderBookAddress")]
     orderbook_address: String,
+    #[serde(rename = "contractVersion")]
+    contract_version: Option<String>,
     #[serde(rename = "lastUpdateId")]
     last_update_id: String,
     bids: Vec<[String; 2]>,
@@ -48,6 +50,12 @@ async fn seed_market(pool: &PgPool, ob: &str) {
     .execute(pool)
     .await
     .expect("seed market");
+    // The depth response echoes the book's contract version from `version`.
+    sqlx::query("update inference_markets set version='4.0.30' where orderbook_address=$1")
+        .bind(ob)
+        .execute(pool)
+        .await
+        .expect("set contract version");
 }
 
 async fn seed_order(
@@ -94,6 +102,7 @@ async fn happy_path_returns_scaled_depth() {
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body: DepthBody = resp.take_json().await.expect("depth body");
     assert_eq!(body.orderbook_address, ob);
+    assert_eq!(body.contract_version.as_deref(), Some("4.0.30"));
     assert_eq!(body.last_update_id, "co-03"); // max chain order across all touches
                                               // Bids best-first (descending), scaled by price_precision 9.
     assert_eq!(
@@ -187,6 +196,7 @@ async fn empty_book_returns_200_empty_lists() {
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body: DepthBody = resp.take_json().await.expect("depth body");
     assert_eq!(body.orderbook_address, ob);
+    assert_eq!(body.contract_version.as_deref(), Some("4.0.30")); // set on the market, book empty
     assert_eq!(body.last_update_id, "");
     assert!(body.bids.is_empty());
     assert!(body.asks.is_empty());

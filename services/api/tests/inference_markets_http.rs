@@ -22,14 +22,15 @@ async fn purge(pool: &PgPool, ob: &str) {
 async fn seed(pool: &PgPool, ob: &str, model_ref: Option<&str>, reference_price: Option<&str>) {
     sqlx::query(
         r#"insert into inference_markets
-               (orderbook_address, model_hash, model_ref, producer, model_name, version,
-                platform_fee_bps, quote_token_type, price_precision, quantity_precision,
+               (orderbook_address, model_hash, model_ref, producer, model_name, model_version,
+                version, platform_fee_bps, quote_token_type, price_precision, quantity_precision,
                 tick_size, step_size, min_notional, reference_price,
                 created_at_chain, last_reconciled_at)
            values ($1, null, $2,
                    case when $2 is null then null else 'qwen' end,
                    case when $2 is null then null else 'qwen2.5-32b' end,
                    case when $2 is null then null else 'instruct' end,
+                   case when $2 is null then null else '4.0.30' end,
                    250, 2, 9, 0, '0.000000001', '1', '0.000000001', $3::numeric,
                    to_timestamp(1700000000), now())
            on conflict (orderbook_address) do nothing"#,
@@ -60,6 +61,10 @@ async fn happy_path_lists_inference_market() {
     assert_eq!(m["inferenceOrderBookAddress"], ob);
     assert_eq!(m["model"]["ref"], "qwen--qwen2.5-32b--instruct");
     assert_eq!(m["model"]["producer"], "qwen");
+    // model.version is the AI model version; contractVersion is the deployed
+    // contract version — surfaced from distinct columns.
+    assert_eq!(m["model"]["version"], "instruct");
+    assert_eq!(m["contractVersion"], "4.0.30");
     assert_eq!(m["status"], "TRADING");
     assert_eq!(m["quoteAsset"], "SHELL");
     assert_eq!(m["takerCommission"], "0.025");
@@ -94,6 +99,7 @@ async fn ref_falls_back_to_model_hash() {
     assert_eq!(m["model"]["ref"], "9943");
     assert!(m["model"]["producer"].is_null());
     assert!(m["referencePrice"].is_null());
+    assert!(m["contractVersion"].is_null()); // version column unset -> null
 
     purge(&pool, ob).await;
 }

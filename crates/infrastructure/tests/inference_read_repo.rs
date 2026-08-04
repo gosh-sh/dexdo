@@ -126,6 +126,9 @@ async fn one_market_renders_fees_identity_and_refprice() {
     assert_eq!(m.model.name.as_deref(), Some("qwen2.5-32b"));
     // Model version, NOT the contract version "4.0.14" set above.
     assert_eq!(m.model.version.as_deref(), Some("instruct"));
+    // `contractVersion` renders from the `version` column — the contract version,
+    // not the model version — proving the two are surfaced independently.
+    assert_eq!(m.contract_version.as_deref(), Some("4.0.14"));
     assert_eq!(m.quote_asset, "SHELL");
     assert_eq!(m.taker_commission, "0.025"); // 250 bps
     assert_eq!(m.maker_commission, "-0.02"); // -REBATE_MAX_BPS
@@ -161,6 +164,7 @@ async fn ref_falls_back_to_model_hash_when_model_ref_null() {
     assert_eq!(m.model.model_ref, "9942"); // falls back to model_hash
     assert!(m.model.producer.is_none());
     assert!(m.reference_price.is_none()); // dry book
+    assert!(m.contract_version.is_none()); // version column unset -> null
 
     purge(&pool, ob).await;
 }
@@ -423,6 +427,12 @@ async fn depth_aggregates_scales_and_reports_last_update_id() {
     let ob = "0:inf_repo_depth";
     purge(&pool, ob).await;
     seed_market(&pool, ob, Some("r"), None, None, None, None, Some(1)).await;
+    // The depth response echoes the book's contract version from `version`.
+    sqlx::query("update inference_markets set version='4.0.30' where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
     // price_precision 9 -> raw "1000000000" => "1.000000000"; quantity_precision 0 -> raw passes through.
     seed_order(&pool, ob, 1, true, "1000000000", "5", "co-01").await;
     seed_order(&pool, ob, 2, true, "990000000", "3", "co-02").await;
@@ -432,6 +442,7 @@ async fn depth_aggregates_scales_and_reports_last_update_id() {
     let snap = repo.get_inference_depth(ob, 100).await.expect("depth");
 
     assert_eq!(snap.orderbook_address, ob);
+    assert_eq!(snap.contract_version.as_deref(), Some("4.0.30"));
     assert_eq!(snap.last_update_id, "co-03"); // max chain order
     assert_eq!(
         snap.bids,
@@ -460,6 +471,7 @@ async fn depth_empty_book_is_ok_with_blank_last_update_id() {
     assert!(snap.bids.is_empty());
     assert!(snap.asks.is_empty());
     assert_eq!(snap.last_update_id, "");
+    assert!(snap.contract_version.is_none()); // version column unset -> null
 
     purge(&pool, ob).await;
 }

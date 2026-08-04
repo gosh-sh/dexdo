@@ -298,6 +298,11 @@ impl InferenceMarketStatus {
 pub struct InferenceMarket {
     pub orderbook_address: String,
     pub model: InferenceModel,
+    /// Version of the deployed order-book contract (`inference_markets.version`,
+    /// the book's `getVersion()` getter — e.g. `"4.0.30"`). Distinct from
+    /// `model.version`, which is the AI model's own version. `None` when the
+    /// contract version is not yet known on chain.
+    pub contract_version: Option<String>,
     pub status: InferenceMarketStatus,
     pub quote_asset: String,
     pub maker_commission: String,
@@ -322,6 +327,11 @@ pub struct InferenceMarketsPage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceDepthSnapshot {
     pub orderbook_address: String,
+    /// Version of the deployed order-book contract for this book
+    /// (`inference_markets.version`). Same value as the market listing's
+    /// `contract_version` for this `orderbook_address`. `None` when the contract
+    /// version is not yet known on chain.
+    pub contract_version: Option<String>,
     /// Opaque lex-comparable chain-order cursor (max `inference_orders.last_chain_order`
     /// for this book). Empty string when no order event has landed yet.
     pub last_update_id: String,

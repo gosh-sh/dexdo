@@ -7204,6 +7204,7 @@ mod inference_usecase_tests {
         ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
             Ok(InferenceDepthSnapshot {
                 orderbook_address: orderbook_address.to_string(),
+                contract_version: None,
                 last_update_id: limit.to_string(),
                 bids: vec![],
                 asks: vec![],
