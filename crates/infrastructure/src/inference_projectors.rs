@@ -53,13 +53,18 @@ pub async fn project_inference_event(
         "InferenceOrderPlaced" => apply_inference_order_placed(tx, event, node).await,
         "InferenceSubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
         "InferenceOrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
+        "InferenceOrderExpired" => apply_inference_order_expired(tx, event, node).await,
         "InferenceFilled" => apply_inference_filled(tx, event, node).await,
         // Observability-only. `InferenceOrderCancelRejected` fires from `_doCancel`
         // when the cancel matched no resting order or came from a foreign owner —
         // by construction the book did not change, so there is no row to touch.
+        // `InferenceOrderRejected` carries no `orderId` — the placement was refused
+        // before anything rested, so there is no row to key on, same as
+        // `InferenceOrderCancelRejected`.
         "InferenceExecuted"
         | "InferenceRefunded"
         | "InferenceOrderCancelRejected"
+        | "InferenceOrderRejected"
         | "InferenceOrderBookDeployed" => Ok(ProjectionOutcome::Applied),
         _ => Ok(ProjectionOutcome::Unknown),
     }
@@ -532,6 +537,54 @@ pub async fn repair_expired_inference_orphan(
         ),
     }
     Ok(outcome)
+}
+
+/// The book removed a resting order because its deadline passed. Terminal, and
+/// shaped like the event-cancel below: the CTE locks the row so RETURNING tells
+/// present from absent.
+///
+/// `takes_expiry` decides who wins when the row is already terminal. A provisional
+/// sweep-cancel (`swept_at` NOT NULL) yields — the sweep only ever guessed CANCELLED
+/// because the order had vanished from the book, which is exactly what expiry does,
+/// so the event corrects it and clears `swept_at`. A FILLED row or a real event-cancel
+/// (`swept_at` NULL) stands: the order left the book before it could age out.
+async fn apply_inference_order_expired(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let ob = node.src.as_deref().context("OrderExpired: src missing")?;
+    let order_id = uint_field_to_decimal(&event.value, "orderId")?;
+    let chain_order = node_chain_order(node, "InferenceOrderExpired")?;
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    let prior: Option<(String,)> = sqlx::query_as(
+        r#"with prior as (
+               select status,
+                      (status = 'OPEN'
+                       or (status = 'CANCELLED' and swept_at is not null)) as takes_expiry
+                 from inference_orders
+                where orderbook_address = $1 and order_id = $2::numeric for update)
+           update inference_orders o
+              set status = case when prior.takes_expiry then 'EXPIRED' else prior.status end,
+                  swept_at = case when prior.takes_expiry then null else o.swept_at end,
+                  last_chain_order = case when prior.takes_expiry
+                                          then greatest(o.last_chain_order, $3)
+                                          else o.last_chain_order end,
+                  chain_updated_at = case when prior.takes_expiry
+                                          then greatest(o.chain_updated_at, to_timestamp($4::double precision))
+                                          else o.chain_updated_at end,
+                  updated_at = now()
+             from prior
+            where o.orderbook_address = $1 and o.order_id = $2::numeric
+            returning prior.status"#,
+    )
+    .bind(ob).bind(&order_id).bind(&chain_order).bind(chain_seconds)
+    .fetch_optional(&mut **tx).await.context("inference OrderExpired update")?;
+
+    match prior {
+        None => Ok(ProjectionOutcome::Deferred), // parent OrderPlaced not seen yet
+        Some(_) => Ok(ProjectionOutcome::Applied),
+    }
 }
 
 async fn apply_inference_order_cancelled(

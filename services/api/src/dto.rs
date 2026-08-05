@@ -214,6 +214,7 @@ pub(crate) enum InferenceOrderStatus {
     Live,
     Filled,
     Cancelled,
+    Expired,
 }
 
 #[cfg(test)]
@@ -261,6 +262,27 @@ mod wire_value_tests {
         ] {
             assert_eq!(wire(OrderStatus::from(d)), d.as_str());
         }
+    }
+
+    // This enum only shapes the OpenAPI parameter, so nothing forces it to track the
+    // parser and serializer in the application crate. Without this check the spec can
+    // advertise a status vocabulary the server neither accepts nor emits.
+    #[test]
+    fn inference_order_status_lists_every_public_domain_status() {
+        let documented: Vec<String> = [
+            InferenceOrderStatus::Live,
+            InferenceOrderStatus::Filled,
+            InferenceOrderStatus::Cancelled,
+            InferenceOrderStatus::Expired,
+        ]
+        .into_iter()
+        .map(wire)
+        .collect();
+        let served: Vec<String> = dodex_application::InferenceOrderStatus::ALL
+            .iter()
+            .map(|s| s.as_public().to_string())
+            .collect();
+        assert_eq!(documented, served);
     }
 
     #[test]
