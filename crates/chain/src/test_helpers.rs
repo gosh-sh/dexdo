@@ -19,7 +19,6 @@ use dodex_contracts::airegistry::inference_order_book::ParamsOfOrderId as IobPar
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetBestBidAsk;
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetOrder as IobOrder;
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetStats as IobStats;
-use dodex_contracts::airegistry::inference_order_book::ResultOfGetSubscription as IobSubscription;
 use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
 use dodex_contracts::airegistry::token_contract::ParamsOfWithdrawShell;
 use dodex_contracts::airegistry::token_contract::ResultOfGetConfig as TcConfig;
@@ -45,9 +44,7 @@ use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
 use dodex_contracts::dex::private_note::ParamsOfFundDeployShell;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
-use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceSubscription;
 use dodex_contracts::dex::private_note::ParamsOfPostSellOffer;
-use dodex_contracts::dex::private_note::ParamsOfPostSellerBond;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
 use dodex_contracts::dex::private_note::ParamsOfStreamDeal;
 use dodex_contracts::dex::private_note::PrivateNote;
@@ -327,20 +324,6 @@ impl Dex {
             .map_err(Into::into)
     }
 
-    /// Post the seller mirror bond from the note. The TC accepts the bond from
-    /// its `_sellerNote` and nothing else, so this is the only funding path.
-    pub async fn post_seller_bond(
-        &self,
-        pn_address: &str,
-        params: ParamsOfPostSellerBond,
-        signer: Signer,
-    ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
-            .post_seller_bond(params, signer)
-            .await
-            .map_err(Into::into)
-    }
-
     pub async fn place_inference_buy(
         &self,
         pn_address: &str,
@@ -377,18 +360,6 @@ impl Dex {
             .map_err(Into::into)
     }
 
-    pub async fn place_inference_subscription(
-        &self,
-        pn_address: &str,
-        params: ParamsOfPlaceInferenceSubscription,
-        signer: Signer,
-    ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
-            .place_inference_subscription(params, signer)
-            .await
-            .map_err(Into::into)
-    }
-
     /// Buyer note stops the stream cleanly (`PrivateNote.streamStop`).
     pub async fn stream_stop(
         &self,
@@ -411,20 +382,6 @@ impl Dex {
     ) -> ChainResult<ResultOfSendMessage> {
         PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .stream_dispute(params, signer)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Buyer note reclaims a probe tick on seller no-show
-    /// (`PrivateNote.streamReclaim`).
-    pub async fn stream_reclaim(
-        &self,
-        pn_address: &str,
-        params: ParamsOfStreamDeal,
-        signer: Signer,
-    ) -> ChainResult<ResultOfSendMessage> {
-        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
-            .stream_reclaim(params, signer)
             .await
             .map_err(Into::into)
     }
@@ -513,31 +470,20 @@ impl Dex {
             .map_err(Into::into)
     }
 
-    pub async fn inference_get_subscription(
-        &self,
-        order_book_address: &str,
-        order_id: u128,
-    ) -> ChainResult<IobSubscription> {
-        InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
-            .get_subscription(IobParamsOfOrderId { order_id })
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Roll a subscription onto whatever cycle the clock says it is on
-    /// (`InferenceOrderBook.pokeSubscription`).
+    /// Drop a resting order whose deadline has passed
+    /// (`InferenceOrderBook.expireOrder`).
     ///
-    /// Permissionless by design — the book checks that the id names a live
-    /// subscription and nothing about who is asking — so this takes no signer
-    /// and sends the external message unsigned, which is the weakest caller
-    /// the contract can be asked to accept.
-    pub async fn inference_poke_subscription(
+    /// Permissionless by design — the book checks that the id names an expired
+    /// order and nothing about who is asking — so this takes no signer and sends
+    /// the external message unsigned, which is the weakest caller the contract
+    /// can be asked to accept.
+    pub async fn inference_expire_order(
         &self,
         order_book_address: &str,
         order_id: u128,
     ) -> ChainResult<ResultOfSendMessage> {
         InferenceOrderBook::new(self.ctx.clone(), dex_contract_params(order_book_address))
-            .poke_subscription(IobParamsOfOrderId { order_id }, Signer::None)
+            .expire_order(IobParamsOfOrderId { order_id }, Signer::None)
             .await
             .map_err(Into::into)
     }
@@ -565,30 +511,6 @@ impl Dex {
     ) -> ChainResult<ResultOfSendMessage> {
         TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
             .open(params, signer)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Seller advances one tick (`TokenContract.advance`).
-    pub async fn token_contract_advance(
-        &self,
-        token_contract_address: &str,
-        signer: Signer,
-    ) -> ChainResult<ResultOfSendMessage> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
-            .advance(signer)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Seller posts the mirror bond (`TokenContract.fundSellerBond`).
-    pub async fn token_contract_fund_seller_bond(
-        &self,
-        token_contract_address: &str,
-        signer: Signer,
-    ) -> ChainResult<ResultOfSendMessage> {
-        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
-            .fund_seller_bond(signer)
             .await
             .map_err(Into::into)
     }

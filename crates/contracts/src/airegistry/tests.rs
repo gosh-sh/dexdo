@@ -184,24 +184,24 @@ fn token_contract_params_match_abi() {
         abi_input_names(TOKEN_CONTRACT_ABI, "open")
     );
     assert_eq!(
-        serialized_keys(&ParamsOfWithdrawShell { amount: 1, recipient: SAMPLE_ADDRESS.into() }),
+        serialized_keys(&ParamsOfWithdrawShell { amount: 1 }),
         abi_input_names(TOKEN_CONTRACT_ABI, "withdrawShell")
     );
     assert_eq!(
         serialized_keys(&ParamsOfFundFromOrderBook {
+            paid: 1,
             buyer_note: SAMPLE_ADDRESS.into(),
             buyer_pubkey: "1".into(),
+            deal_flags: 0,
         }),
         abi_input_names(TOKEN_CONTRACT_ABI, "fundFromOrderBook")
     );
-    // `fund` is argument-less (the buyer is bound beforehand via
-    // `authorizeDirectFund`, the deposit rides on the message value), so it has
-    // no `Params` struct. Pin the emptiness: if the contract grows inputs again,
-    // `TokenContract::fund` needs a struct and this fails instead of silently
-    // sending `{}`.
+    // `close` is argument-less now that the payout address is derived rather
+    // than passed. Pin the emptiness: if it grows inputs again, `close` needs a
+    // Params struct and this fails instead of silently sending `{}`.
     assert!(
-        abi_input_names(TOKEN_CONTRACT_ABI, "fund").is_empty(),
-        "TokenContract.fund gained inputs — give it a Params struct"
+        abi_input_names(TOKEN_CONTRACT_ABI, "close").is_empty(),
+        "TokenContract.close gained inputs — give it a Params struct"
     );
 }
 
@@ -264,7 +264,6 @@ fn inference_order_book_params_match_abi() {
     use super::inference_order_book::ParamsOfGetOrder;
     use super::inference_order_book::ParamsOfPlaceBuyOrder;
     use super::inference_order_book::ParamsOfPlaceSellOffer;
-    use super::inference_order_book::ParamsOfPlaceSubscription;
 
     assert_eq!(
         serialized_keys(&ParamsOfPlaceSellOffer {
@@ -274,28 +273,22 @@ fn inference_order_book_params_match_abi() {
             seller_pubkey: "1".into(),
             nonce: 1,
             owner_note: SAMPLE_ADDRESS.into(),
+            deadline: 1,
         }),
         abi_input_names(INFERENCE_ORDER_BOOK_ABI, "placeSellOffer")
     );
     assert_eq!(
         serialized_keys(&ParamsOfPlaceBuyOrder {
+            client_order_id: 1,
+            escrow: 1,
             max_price_per_tick: 1,
             ticks: 1,
             flags: 0,
             deadline: 0,
             buyer_pubkey: "1".into(),
+            deposit_hash: "1".into(),
         }),
         abi_input_names(INFERENCE_ORDER_BOOK_ABI, "placeBuyOrder")
-    );
-    assert_eq!(
-        serialized_keys(&ParamsOfPlaceSubscription {
-            max_price_per_tick: 1,
-            ticks: 1,
-            flags: 0,
-            auto_renew: true,
-            buyer_pubkey: "1".into(),
-        }),
-        abi_input_names(INFERENCE_ORDER_BOOK_ABI, "placeSubscription")
     );
     // The getter keys on `id`, not `orderId`.
     assert_eq!(
@@ -311,7 +304,6 @@ fn inference_order_book_results_decode_abi_shape() {
     use super::inference_order_book::ResultOfGetParams;
     use super::inference_order_book::ResultOfGetQueueSize;
     use super::inference_order_book::ResultOfGetStats;
-    use super::inference_order_book::ResultOfGetSubscription;
 
     let order: ResultOfGetOrder =
         serde_json::from_value(sample_output_json(INFERENCE_ORDER_BOOK_ABI, "getOrder")).unwrap();
@@ -328,13 +320,6 @@ fn inference_order_book_results_decode_abi_shape() {
         serde_json::from_value(sample_output_json(INFERENCE_ORDER_BOOK_ABI, "getQueueSize"))
             .unwrap();
     assert_eq!(queue.size, 1);
-
-    let sub: ResultOfGetSubscription =
-        serde_json::from_value(sample_output_json(INFERENCE_ORDER_BOOK_ABI, "getSubscription"))
-            .unwrap();
-    assert!(sub.exists);
-    assert_eq!(sub.cur_cycle, 1);
-    assert_eq!(sub.cycle_budget, 1);
 
     let bba: ResultOfGetBestBidAsk =
         serde_json::from_value(sample_output_json(INFERENCE_ORDER_BOOK_ABI, "getBestBidAsk"))
@@ -370,7 +355,6 @@ fn event_ids_match_modifiers() {
     assert_eq!(Tc::StreamStopped as u128, 723);
     assert_eq!(Tc::StreamDisputed as u128, 724);
     assert_eq!(Tc::DisputeResolved as u128, 725);
-    assert_eq!(Tc::StreamReclaimed as u128, 726);
     assert_eq!(Tc::SellerBondFunded as u128, 727);
     assert_eq!(Tc::ProbeAccepted as u128, 728);
     assert_eq!(Tc::ProbeBurned as u128, 729);
@@ -380,7 +364,6 @@ fn event_ids_match_modifiers() {
     assert_eq!(Iob::Refunded as u128, 1002);
     assert_eq!(Iob::Filled as u128, 1003);
     assert_eq!(Iob::Executed as u128, 1004);
-    assert_eq!(Iob::SubscriptionPlaced as u128, 1005);
     // 1006/1007 are the retired forfeit ids — reserved in modifiers.sol, no
     // matching ABI event, so deliberately absent from the enum.
     assert_eq!(Iob::InferenceOrderBookDeployed as u128, 1008);
@@ -431,7 +414,6 @@ fn event_payloads_decode_abi_shape() {
     assert_eq!(filled.seller_tc, SAMPLE_ADDRESS);
     decodes!(iob::ExecutedData, INFERENCE_ORDER_BOOK_ABI, "InferenceExecuted");
     decodes!(iob::RefundedData, INFERENCE_ORDER_BOOK_ABI, "InferenceRefunded");
-    decodes!(iob::SubscriptionPlacedData, INFERENCE_ORDER_BOOK_ABI, "InferenceSubscriptionPlaced");
     decodes!(iob::OrderBookDeployedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderBookDeployed");
     decodes!(
         iob::OrderCancelRejectedData,
@@ -448,7 +430,6 @@ fn event_payloads_decode_abi_shape() {
     decodes!(tc::TickFinalizedData, TOKEN_CONTRACT_ABI, "TickFinalized");
     decodes!(tc::StreamStoppedData, TOKEN_CONTRACT_ABI, "StreamStopped");
     decodes!(tc::DisputeResolvedData, TOKEN_CONTRACT_ABI, "DisputeResolved");
-    decodes!(tc::StreamReclaimedData, TOKEN_CONTRACT_ABI, "StreamReclaimed");
     decodes!(tc::ShellWithdrawnData, TOKEN_CONTRACT_ABI, "ShellWithdrawn");
     decodes!(tc::ContractDeployedData, TOKEN_CONTRACT_ABI, "ContractDeployed");
 

@@ -467,22 +467,12 @@ pub struct ParamsOfPostSellOffer {
     pub flags: u8,
     /// Deal nonce the `TokenContract` address is derived from.
     pub nonce: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-/// Parameters for `PrivateNote.postSellerBond`.
-///
-/// The seller mirror of the buyer's escrow: the note ships SHELL to its own
-/// canonical `TokenContract` for `nonce`, which is the ONLY sender the TC's
-/// `fundSellerBond` accepts. There is no wallet-funded path — the note is the
-/// seller's identity, and the bond returns to it on close.
-pub struct ParamsOfPostSellerBond {
-    /// Deal nonce the `TokenContract` address is derived from.
-    pub nonce: u64,
-    /// SHELL to attach. Must be at least the TC's `2 * pricePerTick`; the TC
-    /// keeps exactly that and refunds the excess to this note.
-    pub amount: u128,
+    /// Offer lifetime in seconds, turned into an absolute deadline by the note.
+    ///
+    /// Mandatory and bounded: `ttl == 0` or `ttl > MAX_SELL_TTL` (3600 s) reverts
+    /// with `ERR_SELL_DEADLINE_TOO_LONG`. `0` is NOT good-till-cancel here — a
+    /// SELL offer has no such value, unlike the BUY deadline it looks like.
+    pub ttl: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -522,27 +512,6 @@ pub struct ParamsOfPlaceInferenceBuy {
     pub flags: u8,
     /// Time-in-force deadline (`0` = good-till-cancel).
     pub deadline: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-/// Parameters for `PrivateNote.placeInferenceSubscription`.
-pub struct ParamsOfPlaceInferenceSubscription {
-    /// `uint256` model hash, decimal/hex string — identifies the book.
-    pub model_hash: String,
-    pub max_price_per_tick: u128,
-    /// Must be `>= 2`, and the escrow has to fund two ticks in EVERY cycle:
-    /// the book rejects a subscription whose `escrow / SUB_CYCLES` cannot buy
-    /// a probe plus one stream tick at `max_price_per_tick`.
-    pub ticks: u128,
-    /// A standing multi-cycle bid takes only the TEE-requirement bit: the
-    /// taker bits (`IOC`/`FOK`/`MARKET`) and `POST_ONLY` have no meaning for
-    /// it and the book rejects them, so 0 is the ordinary value.
-    pub flags: u8,
-    pub escrow: u128,
-    /// Client hint only — renewal is a re-place (§8.2). The book stores it and
-    /// hands it back through `getSubscription`; nothing on chain acts on it.
-    pub auto_renew: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1247,30 +1216,6 @@ impl PrivateNote {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// # Post the seller mirror bond into the deal TokenContract
-    ///
-    /// Original contract method: `postSellerBond`
-    ///
-    /// Indirect and `bounce:false`: the note derives its canonical
-    /// `TokenContract` for `nonce` and calls `fundSellerBond` on it with the
-    /// SHELL attached. A TC that refuses (already open, already bonded, amount
-    /// below `2 * pricePerTick`) leaves no trace here — read `getSellerBond` to
-    /// confirm the bond registered.
-    ///
-    /// Should be signed with PrivateNote owner keys.
-    pub async fn post_seller_bond(
-        &self,
-        params: ParamsOfPostSellerBond,
-        signer: Signer,
-    ) -> KitResult<ResultOfSendMessage> {
-        let call_set = CallSet {
-            function_name: "postSellerBond".to_string(),
-            header: None,
-            input: Some(json!(params)),
-        };
-        self.send_message(Some(call_set), None, signer).await
-    }
-
     /// # Place a BUY order with SHELL escrow
     ///
     /// Original contract method: `placeInferenceBuy`
@@ -1283,24 +1228,6 @@ impl PrivateNote {
     ) -> KitResult<ResultOfSendMessage> {
         let call_set = CallSet {
             function_name: "placeInferenceBuy".to_string(),
-            header: None,
-            input: Some(json!(params)),
-        };
-        self.send_message(Some(call_set), None, signer).await
-    }
-
-    /// # Place a subscription (semantic order)
-    ///
-    /// Original contract method: `placeInferenceSubscription`
-    ///
-    /// Should be signed with PrivateNote owner keys.
-    pub async fn place_inference_subscription(
-        &self,
-        params: ParamsOfPlaceInferenceSubscription,
-        signer: Signer,
-    ) -> KitResult<ResultOfSendMessage> {
-        let call_set = CallSet {
-            function_name: "placeInferenceSubscription".to_string(),
             header: None,
             input: Some(json!(params)),
         };
@@ -1373,24 +1300,6 @@ impl PrivateNote {
     ) -> KitResult<ResultOfSendMessage> {
         let call_set = CallSet {
             function_name: "streamDispute".to_string(),
-            header: None,
-            input: Some(json!(params)),
-        };
-        self.send_message(Some(call_set), None, signer).await
-    }
-
-    /// # Buyer note reclaims a probe tick after the stream timeout (no-show)
-    ///
-    /// Original contract method: `streamReclaim`
-    ///
-    /// Should be signed with PrivateNote owner keys.
-    pub async fn stream_reclaim(
-        &self,
-        params: ParamsOfStreamDeal,
-        signer: Signer,
-    ) -> KitResult<ResultOfSendMessage> {
-        let call_set = CallSet {
-            function_name: "streamReclaim".to_string(),
             header: None,
             input: Some(json!(params)),
         };
@@ -1561,7 +1470,7 @@ mod inference_abi_tests {
             abi_input_names("getInferenceOrderBookAddress")
         );
         assert_eq!(
-            keys(&ParamsOfPostSellOffer { flags: 0, nonce: 0 }),
+            keys(&ParamsOfPostSellOffer { flags: 0, nonce: 0, ttl: 1 }),
             abi_input_names("postSellOffer")
         );
         assert_eq!(
@@ -1576,17 +1485,6 @@ mod inference_abi_tests {
             abi_input_names("placeInferenceBuy")
         );
         assert_eq!(
-            keys(&ParamsOfPlaceInferenceSubscription {
-                model_hash: "1".into(),
-                max_price_per_tick: 1,
-                ticks: 1,
-                flags: 0,
-                escrow: 1,
-                auto_renew: true,
-            }),
-            abi_input_names("placeInferenceSubscription")
-        );
-        assert_eq!(
             keys(&ParamsOfCancelInferenceOrder { model_hash: "1".into(), order_id: 1 }),
             abi_input_names("cancelInferenceOrder")
         );
@@ -1598,10 +1496,6 @@ mod inference_abi_tests {
             keys(&ParamsOfFundDeployShell { nonce: 1, root_model_shell: 1, tc_shell: 1 }),
             abi_input_names("fundDeployShell")
         );
-        assert_eq!(
-            keys(&ParamsOfPostSellerBond { nonce: 1, amount: 1 }),
-            abi_input_names("postSellerBond")
-        );
     }
 
     #[test]
@@ -1609,10 +1503,6 @@ mod inference_abi_tests {
         assert_eq!(
             keys(&ParamsOfStreamDeal { token_contract: "0:1".into() }),
             abi_input_names("streamStop")
-        );
-        assert_eq!(
-            keys(&ParamsOfStreamDeal { token_contract: "0:1".into() }),
-            abi_input_names("streamReclaim")
         );
         assert_eq!(
             keys(&ParamsOfStreamDeal { token_contract: "0:1".into() }),

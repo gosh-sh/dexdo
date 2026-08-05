@@ -89,39 +89,47 @@ pub struct ParamsOfPlaceSellOffer {
     /// The seller's note, recorded as the offer's owner so a fill can settle
     /// back to it.
     pub owner_note: String,
+    /// Absolute expiry, unix seconds. A SELL offer is not good-till-cancel: the
+    /// book removes it once this passes and reports `InferenceOrderExpired`.
+    ///
+    /// When the note posts the offer it supplies a *ttl* instead, and
+    /// `PrivateNote.postSellOffer` rejects `ttl == 0` or `ttl > MAX_SELL_TTL`
+    /// (3600 s) with `ERR_SELL_DEADLINE_TOO_LONG`. `0` does not mean
+    /// good-till-cancel on that path — the sell side has no such value.
+    pub deadline: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Parameters for `InferenceOrderBook.placeBuyOrder`.
 pub struct ParamsOfPlaceBuyOrder {
+    /// Caller-assigned id echoed back on the note-side mirrors, so a rejection
+    /// can be tied to the placement that caused it.
+    pub client_order_id: u64,
+    /// SHELL the note commits up front. The book requires it to cover
+    /// `ticks * maxPricePerTick` for a subscription order.
+    pub escrow: u128,
     pub max_price_per_tick: u128,
     pub ticks: u128,
+    /// A subscription is expressed through the flag mask rather than a separate
+    /// entry point. `FLAG_SUBSCRIPTION` requires `FLAG_AON`, forbids
+    /// `FLAG_MARKET`, and constrains `ticks` to a whole number of weeks:
+    /// `ticks % SUB_WEEKS == 0` and `ticks <= SUB_WEEKS * SUB_TICKS_PER_WEEK`.
+    /// Violations revert with `ERR_INVALID_PARAMS` / `ERR_BAD_PARAM`.
     pub flags: u8,
-    /// Time-in-force deadline (`0` = good-till-cancel).
+    /// Time-in-force deadline (`0` = good-till-cancel). Unlike a SELL offer, a
+    /// BUY may legitimately rest forever.
     pub deadline: u64,
     /// `uint256`, decimal or hex string.
     pub buyer_pubkey: String,
+    /// `uint256`, decimal or hex string — binds the order to the funding note.
+    pub deposit_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Parameters for `InferenceOrderBook.placeSubscription`.
-pub struct ParamsOfPlaceSubscription {
-    pub max_price_per_tick: u128,
-    pub ticks: u128,
-    /// Same flag mask a limit buy takes (`IOC`/`FOK`/`MARKET`/`POST_ONLY`); a
-    /// subscription rests as a standing bid, so 0 is the ordinary value.
-    pub flags: u8,
-    pub auto_renew: bool,
-    /// `uint256`, decimal or hex string.
-    pub buyer_pubkey: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-/// Parameters for the order-id-keyed methods `cancelOrder`, `pokeSubscription`
-/// and the `getOrder` / `getSubscription` getters.
+/// Parameters for the order-id-keyed methods `cancelOrder`, `expireOrder` and
+/// the `getOrder` getter.
 pub struct ParamsOfOrderId {
     pub order_id: u128,
 }
@@ -211,22 +219,6 @@ pub struct ResultOfGetQueueSize {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-/// Result of `InferenceOrderBook.getSubscription`.
-pub struct ResultOfGetSubscription {
-    pub exists: bool,
-    #[serde(deserialize_with = "deserialize_u64")]
-    pub period_start: u64,
-    #[serde(deserialize_with = "deserialize_u8")]
-    pub cur_cycle: u8,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub cycle_budget: u128,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub cycle_spent: u128,
-    pub auto_renew: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 /// Result of `InferenceOrderBook.getParams`.
 pub struct ResultOfGetParams {
     /// `uint256` represented as returned by ABI.
@@ -294,30 +286,16 @@ impl InferenceOrderBook {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// Original contract method: `placeSubscription` (weekly semantic order,
-    /// spec §8).
-    pub async fn place_subscription(
-        &self,
-        params: ParamsOfPlaceSubscription,
-        signer: Signer,
-    ) -> KitResult<ResultOfSendMessage> {
-        let call_set = CallSet {
-            function_name: "placeSubscription".to_string(),
-            header: None,
-            input: Some(json!(params)),
-        };
-        self.send_message(Some(call_set), None, signer).await
-    }
-
-    /// Original contract method: `pokeSubscription`. Rolls a subscription onto
-    /// its next cycle / forfeits the unspent budget of the closing cycle.
-    pub async fn poke_subscription(
+    /// Original contract method: `expireOrder`. Removes a resting order whose
+    /// deadline has passed; permissionless, since it only enforces what the
+    /// order already committed to. The book reports `InferenceOrderExpired`.
+    pub async fn expire_order(
         &self,
         params: ParamsOfOrderId,
         signer: Signer,
     ) -> KitResult<ResultOfSendMessage> {
         let call_set = CallSet {
-            function_name: "pokeSubscription".to_string(),
+            function_name: "expireOrder".to_string(),
             header: None,
             input: Some(json!(params)),
         };
@@ -387,18 +365,6 @@ impl InferenceOrderBook {
     /// Original contract method: `getQueueSize`.
     pub async fn get_queue_size(&self) -> KitResult<ResultOfGetQueueSize> {
         self.call_get_method::<ResultOfGetQueueSize>("getQueueSize").await
-    }
-
-    /// Original contract method: `getSubscription`.
-    pub async fn get_subscription(
-        &self,
-        params: ParamsOfOrderId,
-    ) -> KitResult<ResultOfGetSubscription> {
-        self.call_get_method_with::<ResultOfGetSubscription, ParamsOfOrderId>(
-            "getSubscription",
-            params,
-        )
-        .await
     }
 
     /// Original contract method: `getParams`.
