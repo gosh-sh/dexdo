@@ -15,10 +15,16 @@
 //! never used, when an emit is re-pointed at a neighbouring id, or when a new
 //! event appears that nothing downstream knows about.
 //!
-//! Two such drifts are already visible in the table below, and neither is a
-//! typo: `PRIVATENOTE_SPLIT_CONFIRMED` carries `FullSetStakeConfirmed` rather
-//! than anything named Split, and the like-named `PRIVATENOTE_FULLSET_STAKE_*`
-//! constants carry nothing at all.
+//! Two such drifts are visible in the table below, and neither is a typo.
+//! `PRIVATENOTE_SPLIT_CONFIRMED` carries `FullSetStakeConfirmed` rather than
+//! anything named Split — the like-named `PRIVATENOTE_FULLSET_STAKE_*`
+//! constants that carried nothing were deleted in the v4.0.33 sync, leaving the
+//! misnamed live one behind. And `PRIVATENOTE_INFERENCE_REMOVED` carries two
+//! events, which the scheme does not allow at all: `InferenceOrderRejectedMirror`
+//! shares it until that event moves to its own id `1102`. Until then
+//! `emitted_events_match_their_emit_sites` fails, deliberately — the one-id-one-
+//! payload rule is what `dst` routing rests on, so it is pinned rather than
+//! loosened to accommodate the overlap.
 //!
 //! ## What is checked, and what is only recorded
 //!
@@ -78,7 +84,11 @@ enum Owner {
     /// Emitted by the contracts, claimed by no unit of the matrix. The reason
     /// says why, so the gap is a decision on record rather than an oversight.
     Unclaimed(&'static str),
-    /// Declared and emitted nowhere, so there is no payload to own.
+    /// Declared and emitted nowhere, so there is no payload to own. Unused
+    /// since v4.0.33 removed the last such constant, and kept rather than
+    /// deleted: `reserved_means_nothing_emits_it` is written in terms of it and
+    /// pins that the set is empty, so the next dead id has a category waiting.
+    #[allow(dead_code)]
     Reserved,
 }
 
@@ -108,7 +118,6 @@ const MANIFEST: &[Event] = &[
         emits: Some("RootPN.NullifierDeployed"),
         owner: Owner::Unit("B26"),
     },
-    Event { konst: "ROOTPN_ORACLE_DEPLOYED", id: 103, emits: None, owner: Owner::Reserved },
     Event {
         konst: "ROOTPN_TOKENS_WITHDRAWN",
         id: 154,
@@ -127,6 +136,14 @@ const MANIFEST: &[Event] = &[
         emits: Some("RootPN.ProtocolFeeWithdrawn"),
         owner: Owner::Unit("B3"),
     },
+    Event {
+        konst: "ROOTPN_DEAL_WRITE_OFF",
+        id: 170,
+        // Protocol-level accounting for an inference deal that ended owing more
+        // than it could pay; reported by the root rather than by the deal.
+        emits: Some("RootPN.DealWriteOffReported"),
+        owner: Owner::Unit("B21"),
+    },
     // ── Oracle / OracleEventList ──────────────────────────────────────────
     Event {
         konst: "ORACLE_DEPLOYED",
@@ -135,7 +152,6 @@ const MANIFEST: &[Event] = &[
         emits: Some("Oracle.OracleEventListDeployed"),
         owner: Owner::Unit("B28"),
     },
-    Event { konst: "ORACLE_EVENT_LIST_DEPLOYED", id: 105, emits: None, owner: Owner::Reserved },
     Event {
         konst: "ORACLE_EVENT_CONFIRMED",
         id: 106,
@@ -194,20 +210,6 @@ const MANIFEST: &[Event] = &[
         emits: Some("PrivateNote.StakeCancelled"),
         owner: Owner::Unit("B4"),
     },
-    Event {
-        konst: "PRIVATENOTE_FULLSET_STAKE_CONFIRMED",
-        id: 116,
-        // Declared as if live, and dead: `FullSetStakeConfirmed` is emitted to
-        // PRIVATENOTE_SPLIT_CONFIRMED (138) instead.
-        emits: None,
-        owner: Owner::Reserved,
-    },
-    Event {
-        konst: "PRIVATENOTE_FULLSET_STAKE_CANCELLED",
-        id: 117,
-        emits: None,
-        owner: Owner::Reserved,
-    },
     // ── PMP ───────────────────────────────────────────────────────────────
     Event {
         konst: "PMP_STAKE_ACCEPTED",
@@ -243,7 +245,6 @@ const MANIFEST: &[Event] = &[
         emits: Some("PMP.NetworkFeeBurned"),
         owner: Owner::Unit("B6"),
     },
-    Event { konst: "PMP_STAKE_DEADLINE_SET", id: 123, emits: None, owner: Owner::Reserved },
     Event {
         konst: "PMP_SET_TIMINGS",
         id: 124,
@@ -251,27 +252,24 @@ const MANIFEST: &[Event] = &[
         owner: Owner::Unit("B12"),
     },
     Event {
-        konst: "PMP_NUM_OUTCOMES_SET",
-        id: 125,
-        // `_numOutcomes` is derived from `outcomeNames`; PMP.sol says outright
-        // that it does not emit this.
-        emits: None,
-        owner: Owner::Reserved,
-    },
-    Event {
         konst: "PMP_EVENT_CANCELLED",
         id: 126,
         emits: Some("PMP.EventCancelled"),
         owner: Owner::Unit("B4"),
     },
-    Event { konst: "PMP_ORACLE_CONFIRMED", id: 127, emits: None, owner: Owner::Reserved },
-    Event { konst: "PMP_ALL_ORACLES_CONFIRMED", id: 128, emits: None, owner: Owner::Reserved },
-    Event { konst: "PMP_INITIALIZED", id: 129, emits: None, owner: Owner::Reserved },
     Event {
         konst: "PMP_REJECTED_BY_ORACLE",
         id: 132,
         emits: Some("PMP.PMPRejected"),
         owner: Owner::Unit("B19"),
+    },
+    Event {
+        konst: "PMP_STAKE_FORFEITED",
+        id: 167,
+        // The pool's side of a forfeit: the stake is written off against the
+        // wallet, with the debt and coupon legs itemised alongside it.
+        emits: Some("PMP.StakeForfeited"),
+        owner: Owner::Unit("B15"),
     },
     // ── OracleEventList, continued ────────────────────────────────────────
     Event {
@@ -279,14 +277,6 @@ const MANIFEST: &[Event] = &[
         id: 133,
         emits: Some("OracleEventList.EventAdded"),
         owner: Owner::Unit("B19"),
-    },
-    Event {
-        konst: "ORACLE_EVENT_PUBLISHED",
-        id: 134,
-        // `Oracle.EventPublished` is declared in Oracle.sol and emitted
-        // nowhere, so this id has nothing to route.
-        emits: None,
-        owner: Owner::Reserved,
     },
     Event {
         konst: "ORACLE_RANGE_EVENT_ADDED",
@@ -358,7 +348,6 @@ const MANIFEST: &[Event] = &[
         emits: Some("OrderBook.OrderCancelled"),
         owner: Owner::Unit("B1"),
     },
-    Event { konst: "OB_EPOCH_SETTLED", id: 145, emits: None, owner: Owner::Reserved },
     Event {
         konst: "OB_ORDER_FILLED",
         id: 146,
@@ -441,6 +430,54 @@ const MANIFEST: &[Event] = &[
             "PN-T01: the receiving half of a transfer needs two live notes and taints both, and \
              the live pn_basic suite already covers the happy path — B6 covers only the bounce",
         ),
+    },
+    // ── inference: the note's own ledger and mirrors ──────────────────────
+    Event {
+        konst: "PRIVATENOTE_DEAL_CREDITED",
+        id: 163,
+        // Settlement paid back into the note by a deal TokenContract.
+        emits: Some("PrivateNote.DealCredited"),
+        owner: Owner::Unit("B21"),
+    },
+    Event {
+        konst: "PRIVATENOTE_BOOK_CREDITED",
+        id: 164,
+        // The same, from the book: escrow the note gets back when an order
+        // leaves without being filled.
+        emits: Some("PrivateNote.BookCredited"),
+        owner: Owner::Unit("B21"),
+    },
+    Event {
+        konst: "PRIVATENOTE_INFERENCE_REMOVED",
+        id: 165,
+        // `InferenceOrderRejectedMirror` is emitted here too, which breaks the
+        // one-id-one-payload rule this manifest and every `dst` consumer rely
+        // on. It moves to its own id 1102; until that lands,
+        // `emitted_events_match_their_emit_sites` fails on this row and that
+        // failure is the reminder.
+        emits: Some("PrivateNote.InferenceOrderRemoved"),
+        owner: Owner::Unit("B22"),
+    },
+    Event {
+        konst: "PRIVATENOTE_INFERENCE_DEAL_CLOSED",
+        id: 166,
+        emits: Some("PrivateNote.InferenceDealClosed"),
+        owner: Owner::Unit("B21"),
+    },
+    Event {
+        konst: "PRIVATENOTE_STAKE_FORFEITED",
+        id: 168,
+        // The note's acknowledgement of the pool-side forfeit on 167.
+        emits: Some("PrivateNote.StakeForfeitConfirmed"),
+        owner: Owner::Unit("B15"),
+    },
+    Event {
+        konst: "PRIVATENOTE_STAKE_DROPPED",
+        id: 169,
+        // The note dropping the stake from its own books, itemised per leg —
+        // the payload dodex-rewards reads out of `raw_events`.
+        emits: Some("PrivateNote.StakeDroppedLocally"),
+        owner: Owner::Unit("B15"),
     },
 ];
 
@@ -647,11 +684,19 @@ fn reserved_means_nothing_emits_it() {
             if emitted.contains(e.konst) { "emit" } else { "never emit" },
         );
     }
-    // The classification is only worth having while it still separates
-    // something: an all-live or all-reserved manifest means the parser stopped
-    // reading emits rather than that the contracts changed that much.
+    // Every row is live: the v4.0.33 sync deleted the last of the declared-but-
+    // never-emitted constants. Pinned as equality rather than relaxed into a
+    // range, so a reserved id coming back is a decision someone makes here
+    // instead of a quiet return to a state this file used to tolerate. The
+    // "parser stopped reading emits" case this used to guard against is caught
+    // by the loop above, which fails on the first live row it can no longer see.
     let live = MANIFEST.iter().filter(|e| e.emits.is_some()).count();
-    assert!(live > 0 && live < MANIFEST.len(), "{live} of {} ids live", MANIFEST.len());
+    assert_eq!(
+        live,
+        MANIFEST.len(),
+        "an id is declared but never emitted again; give it an `Owner::Reserved` row saying why \
+         it is dead, and check no consumer still routes on it"
+    );
 }
 
 #[test]
