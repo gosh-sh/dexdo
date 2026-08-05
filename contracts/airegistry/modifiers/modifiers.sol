@@ -14,26 +14,49 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     // Platform fee: 2.5% (spec §5.1 PLATFORM_FEE_BPS), buyer-side, BY-FACT (on
     // delivered ticks), net-of-rebate burned (§5.4). NOT charged upfront.
     uint16 constant PLATFORM_FEE_BPS = 250;       // 2.5%
-    // Seller rebate (§5.3, positive anti-scam): rate = min(REBATE_MAX_BPS,
-    // REBATE_SLOPE_BPS * n) bps; paid only on clean (non-disputed) close;
-    // REBATE_MAX_BPS strictly < PLATFORM_FEE_BPS so net burn > 0 always.
+    // Seller rebate (§5.3): rate = min(REBATE_MAX_BPS, REBATE_SLOPE_BPS * n) bps, paid only on a
+    // clean (never-disputed) close. REBATE_MAX_BPS is strictly below PLATFORM_FEE_BPS, so the net
+    // burn stays positive however many ticks a deal delivers.
     uint16 constant REBATE_MAX_BPS   = 200;       // 2.0% cap
     uint16 constant REBATE_SLOPE_BPS = 4;         // bps per tick (cap at 50 ticks)
-    // Streaming-deal timing (spec §9.1). The advance window is PER-DEAL, scaled by
-    // tick price so an idle stream drains at most ~0.1 SHELL/min (slope), capped:
-    //   W = clamp(pricePerTick * STREAM_WINDOW_SECS_PER_SHELL / SHELL_UNIT,
-    //             SETTLE_WINDOW, STREAM_WINDOW_MAX)
-    // computed once in the TokenContract ctor (-> _settleWindow); the reclaim
-    // window is W + grace (-> _streamTimeout). The probe phase uses a fixed short
-    // PROBE_WINDOW (a scammed buyer should stop()+burn, not wait a long W).
-    uint64  constant SETTLE_WINDOW   = 180;        // dynamic advance-window FLOOR (s)
-    uint64  constant PROBE_WINDOW    = 180;        // fixed probe-phase advance window (s)
-    uint64  constant STREAM_WINDOW_MAX = 3600;     // W_MAX hard cap (1h)
-    uint64  constant STREAM_WINDOW_SECS_PER_SHELL = 600;  // slope = 0.1 SHELL/min
-    uint128 constant SHELL_UNIT      = 1_000_000_000;     // minimal units per 1 SHELL
-    uint64  constant STREAM_TIMEOUT_GRACE = 300;   // reclaim = advance W + grace (s)
-    uint64  constant DISPUTE_WINDOW  = 600;        // dispute -> split timeout (s)
+    // Probe phase (spec §3.1.2): the buyer's window to try the service before anything can be
+    // claimed. Deliberately short — a buyer who finds a dead endpoint should stop and burn, not
+    // wait out a long silence.
+    uint64  constant PROBE_WINDOW    = 180;        // probe acceptance window (s)
+    uint64  constant DISPUTE_WINDOW  = 600;        // dispute -> resolution timeout (s)
     uint64  constant MATCH_OPEN_TIMEOUT = 600;     // funded-but-unopened cleanup (no-show, §2.1)
+
+    // ── Subscription / consumption accounting ───────────────────────────────────────────────
+    uint64  constant SUB_WEEK_LEN = 604_800;       // one subscription week (s)
+    // A subscription is ALWAYS one month — four weekly settlement periods. The term is not a
+    // parameter: a single fixed length means the order carries no duration to validate, both
+    // sides of a match agree on the term by construction, and there is exactly one shape of
+    // subscription on the book instead of one per week count.
+    uint8   constant SUB_WEEKS    = 4;             // one month, in weekly periods
+
+    // Physical floor on generation: the fastest model in existence produces TICK_SIZE (1M) tokens
+    // in ~58.8 s, so ONE TICK PER MINUTE is the ceiling nothing can beat. A claim of `d` ticks is
+    // rejected unless `d * MIN_SECONDS_PER_TICK <= elapsed` — the seller cannot assert more output
+    // than any hardware could have produced in the time that passed. Waiting longer widens THIS
+    // bound and nothing else: a claim is also capped at `MAX_CLAIM_DELTA` — one tick per call,
+    // whatever the elapsed time — so silence never buys the right to assert a batch. At these
+    // values the per-call cap is the binding one, and a caller written against the elapsed-time
+    // bound alone will have its claim rejected. Revisit if a materially faster model ships.
+    uint64  constant MIN_SECONDS_PER_TICK = 60;    // (s per tick)
+    // Promotion window for the newest claim. Two claims may stay pending at once (the seller may
+    // run up to two ticks ahead), so the wait is two tick-times: after it, an unchallenged claim
+    // becomes final even though no further claim arrived. Without this the LAST claim of a deal
+    // could never be promoted — there is no successor to promote it — and would be unpayable.
+    uint64  constant CLAIM_PROMOTE_WINDOW = 2 * MIN_SECONDS_PER_TICK;   // 120 s
+    // Floor on the gap between two claims. It may sit BELOW the promotion window: each claim
+    // carries its own timestamp and is promoted on its own window, so a fast claim rate never
+    // shortens the contest time of the claim before it. That keeps the claimable rate at the
+    // physical ceiling — one tick per minute — instead of halving it to fit the window.
+    uint64  constant MIN_CLAIM_INTERVAL = MIN_SECONDS_PER_TICK;         // 60 s
+    // Ticks one week can physically deliver at that rate cap. A subscription may not buy more
+    // volume than its own term could ever produce, so the whole-term ceiling is SUB_WEEKS of these
+    // — derived from the cap rather than written down, so the two can never drift apart.
+    uint128 constant SUB_TICKS_PER_WEEK = uint128(SUB_WEEK_LEN / MIN_SECONDS_PER_TICK);   // 10 080
 
     // Forwarded value for child -> parent registration messages.
     varuint16 constant REGISTER_FORWARD_VALUE = 5 vmshell;
@@ -43,14 +66,8 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant RootRegisteredEmit          = 700;
     uint128 constant TokenContractRegisteredEmit = 702;
     uint128 constant ContractDeployedEmit        = 703;
-    uint128 constant TokensPurchasedEmit         = 705;
-    uint128 constant TokensConsumedEmit          = 706;
-    uint128 constant FeeBurnedEmit               = 707;
-    uint128 constant TokensReplenishedEmit       = 708;
     uint128 constant ContractDestroyedEmit       = 709;
     uint128 constant ShellWithdrawnEmit          = 710;
-    uint128 constant ReservationCancelledEmit    = 712;
-    uint128 constant AvailableReducedEmit        = 714;
     // Streaming deal (spec §3-4)
     uint128 constant StreamFundedEmit            = 720;
     uint128 constant StreamOpenedEmit            = 721;
@@ -58,9 +75,8 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant StreamStoppedEmit           = 723;
     uint128 constant StreamDisputedEmit          = 724;
     uint128 constant DisputeResolvedEmit         = 725;
-    uint128 constant StreamReclaimedEmit         = 726;
     // Probe / seller bond (spec §3.1.2 / §4.2)
-    uint128 constant SellerBondFundedEmit   = 727;
+    uint128 constant SellerBondFundedEmit        = 727;
     uint128 constant ProbeAcceptedEmit           = 728;
     uint128 constant ProbeBurnedEmit             = 729;
     // InferenceOrderBook (spec §2 + §8) — dedicated 1000+ range (separate from registry/streaming/oracle 700s)
@@ -69,15 +85,14 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant BuyUnmatchedEmit            = 1002;
     uint128 constant MatchedEmit                 = 1003;
     uint128 constant ExecutedEmit                = 1004;
-    uint128 constant StreamClosedEmit            = 735;
     // (736-738 were InferenceOracle — folded into InferenceOrderBook's
     //  daily-VWAP/weekly-median reference price; standalone oracle removed.)
     // InferenceOrderBook §8 — continue the 1000+ range
-    uint128 constant SubscriptionPlacedEmit      = 1005;
-    uint128 constant CycleForfeitedEmit          = 1006;
-    uint128 constant ForfeitClaimedEmit          = 1007;
+    // (1005-1007 were the weekly-cycle subscription events; a subscription is an ordinary order
+    //  now, so it reports through the same OfferPlaced / Matched / OrderCancelled events.)
     uint128 constant InferenceOBDeployedEmit     = 1008;
     uint128 constant OfferCancelRejectedEmit     = 1009;
+    uint128 constant OrderExpiredEmit            = 1010;
 
     modifier accept() {
         tvm.accept();

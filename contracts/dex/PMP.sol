@@ -13,7 +13,7 @@ import "./libraries/DexLib.sol";
 contract PMP is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.30";
+    string constant version = "4.0.33";
 
     /// @notice PMP name (static, unique identifier)
     string _name;
@@ -52,9 +52,15 @@ contract PMP is Modifiers {
     /// @dev Structure: outcome => betType => forfeitedAmount
     mapping(uint32 => mapping(uint8 => uint128)) _forfeited;
 
-    /// @notice Stake counts separated by bet type
-    /// @dev Structure: outcome => betType => stakeCount
-    mapping(uint32 => mapping(uint8 => uint128)) _typedOutcomeCounts;
+    /// @notice The CREATOR's own forfeited clean mass, per outcome — the part of `_forfeited` that
+    ///         came from the deployer rather than from anyone else. Needed because freeze-time
+    ///         normalization trims the pool at the creator's expense, so it may only reduce the
+    ///         creator's share of the forfeited figure. Reducing the aggregate blindly would eat
+    ///         other stakers' forfeits, and `_poolsEqualForfeited` would then never be reachable:
+    ///         the market could not close and its custody could not be released.
+    /// @dev Structure: outcome => forfeitedAmount
+    mapping(uint32 => uint128) _creatorForfeitedClean;
+
 
     /// @notice Total coupon pool across all outcomes
     /// @dev Used to enforce COUPON_POOL_LIMIT_PERCENT
@@ -259,6 +265,12 @@ contract PMP is Modifiers {
     /// @param betType 0 - clean bet, 1 - debt bet, 2 - coupon bet
     event StakeAccepted(address indexed note, uint32 outcomeId, uint128 amount, uint8 betType);
 
+    /// @notice A holder abandoned a stake: the amounts given up, per outcome.
+    /// @dev    The only place in this system where an owner deliberately and irreversibly loses
+    ///         money. Carries the amounts rather than just the fact — an event saying "something
+    ///         was forfeited" is barely better than the silence it replaces.
+    event StakeForfeited(address wallet, uint128[] stakeAmount, uint128[] debtAmount, uint128[] couponsAmount);
+
     /// @notice Emitted when the event is fully approved by oracle(s).
     /// @dev This event is emitted only when all required oracle confirmations are collected.
     /// @param oracleEventList Address of the oracle event list that triggered the last required confirmation.
@@ -288,10 +300,6 @@ contract PMP is Modifiers {
     /// @param resultEnd Result acceptance end timestamp.
     event TimingsSet(uint64 stakeStart, uint64 stakeEnd, uint64 resultStart, uint64 resultEnd);
 
-    /// @notice Emitted when number of outcomes is set.
-    /// @dev The contract currently derives `_numOutcomes` from `outcomeNames` and does not emit this event.
-    /// @param numOutcomes Number of available outcomes.
-    event NumOutcomesSet(uint32 numOutcomes);
 
     /// @notice Emitted when the event is cancelled by oracle governance.
     event EventCancelled();
@@ -677,6 +685,20 @@ contract PMP is Modifiers {
         
         address wallet = DexLib.computePrivateNoteAddress(_privateNoteCode, depositIdentifierHash);
         require(msg.sender == wallet, ERR_INVALID_SENDER);
+        // The creator's share of a clean pool is either LIVE or FORFEITED, never both, and the
+        // freeze keeps it that way. Normalization refunds the pool's leftover to him and shrinks
+        // his forfeited figure by the same amount — a sound attribution only while the two cannot
+        // overlap. Were they to overlap, the refund would be paid out of live mass while the cut
+        // still came off forfeited mass, leaving `_forfeited` short of what the pool actually
+        // holds; both close gates read that figure against a pool (`_poolsEqualForfeited` per
+        // outcome, `_forfeitedWinMass` for the winner), and the shortfall survives every later
+        // forfeit, so the gates would never be reachable again and the custody would stay locked.
+        // Giving a clean stake up in an outcome therefore closes that outcome to him until the
+        // freeze. Other stakers are unaffected: only the creator's forfeits move this figure, and
+        // only clean mass reaches the normalization at all.
+        require(betType != BET_TYPE_CLEAN
+                || wallet != _deployer
+                || _creatorForfeitedClean[outcomeId] == 0, ERR_NOT_ALLOWED);
 
         tvm.accept();
         ensureBalance();
@@ -881,6 +903,26 @@ contract PMP is Modifiers {
             if (remainder > 0) {
                 _typedOutcomePools[k][BET_TYPE_CLEAN] = cleanPool - remainder;
                 refundTotal += remainder;
+                // The remainder comes off the creator's OWN share of this pool, so only his share
+                // of the forfeited figure may shrink with it — and only if he forfeited at all.
+                //
+                // When he did, that share sits in `_forfeited` instead of a stake record, and a
+                // figure left at its pre-normalization size would claim more mass than the pool
+                // still holds; both close gates read this map against a pool
+                // (`_poolsEqualForfeited` per outcome, `_forfeitedWinMass` for the winner), so a
+                // stale entry lets a LIVE stake be counted as forfeited and swept on close.
+                //
+                // When he did not, the figure belongs to other stakers entirely and must not move.
+                // Reducing it then would under-count forfeited mass, `_poolsEqualForfeited` would
+                // never be reachable, and the market would sit unclosable with its custody frozen
+                // — the opposite failure, and the more expensive one to unwind.
+                uint128 mine = _creatorForfeitedClean[k];
+                uint128 cut  = remainder < mine ? remainder : mine;
+                if (cut > 0) {
+                    _creatorForfeitedClean[k] = mine - cut;
+                    uint128 f = _forfeited[k][BET_TYPE_CLEAN];
+                    _forfeited[k][BET_TYPE_CLEAN] = f > cut ? f - cut : 0;
+                }
             }
             _frozenCleanPools[k] = _typedOutcomePools[k][BET_TYPE_CLEAN];
         }
@@ -965,12 +1007,15 @@ contract PMP is Modifiers {
         emit PoolsFrozen{dest: addrExtern}(_baseTotalPool);
     }
 
-    /// @notice Splits collateral into proportional outcome tokens across all outcomes.
-    /// @dev Per spec: δ_k = floor(F × M_k / T) where M_k = frozen clean pool,
-    ///      T = baseTotalPool. Pool update: _totalPool += F (full collateral).
-    ///      Tokens minted: _cleanPools[k] += δ_k.
-    ///      Remainder F - Σδ_k stays in pool as surplus (benefits existing stakers).
-    ///
+    /// @notice Splits collateral into a whole number of full sets — `u_k` clean
+    ///         outcome-k tokens per basket, `Q = Σ u_k` collateral per basket.
+    /// @dev Quantized, not proportional: `t = floor(F / Q)` baskets are minted,
+    ///      `F_use = t·Q` enters the pool and `amounts[k] = t·u_k` is credited to
+    ///      the caller. The sub-basket tail `F - F_use` never enters the pool:
+    ///      `onSplitAccepted` carries `F_use` back, and the note returns the
+    ///      difference from the amount it had staged to its free balance. `u_k`
+    ///      and `Q` are fixed at freeze from the normalized clean pools, which is
+    ///      what makes every basket exact and leaves nothing to round.
     /// @param collateral Amount of collateral to split (F).
     /// @param depositIdentifierHash Caller's PrivateNote deposit ID.
     function splitFullSet(
@@ -1609,11 +1654,27 @@ contract PMP is Modifiers {
         uint32 nMax = uint32(stakeAmount.length);
         if (uint32(debtAmount.length) > nMax) nMax = uint32(debtAmount.length);
         if (uint32(couponsAmount.length) > nMax) nMax = uint32(couponsAmount.length);
+        bool byCreator = (wallet == _deployer);
         for (uint32 i = 0; i < nMax; i++) {
-            if (i < uint32(stakeAmount.length))   _forfeited[i][BET_TYPE_CLEAN]  += stakeAmount[i];
+            if (i < uint32(stakeAmount.length)) {
+                _forfeited[i][BET_TYPE_CLEAN] += stakeAmount[i];
+                if (byCreator) { _creatorForfeitedClean[i] += stakeAmount[i]; }
+            }
             if (i < uint32(debtAmount.length))    _forfeited[i][BET_TYPE_DEBT]   += debtAmount[i];
             if (i < uint32(couponsAmount.length)) _forfeited[i][BET_TYPE_COUPON] += couponsAmount[i];
         }
+
+        // THE ONE PLACE A HOLDER WALKS AWAY FROM MONEY ON PURPOSE, and until now it was invisible
+        // from outside — this contract emits thirteen events elsewhere and none here. Compare with
+        // a cancellation, which is announced by the book AND mirrored by the note, with the id, the
+        // outcome, the side and the amount returned. A forfeit is the more consequential of the two
+        // and was quieter than nothing.
+        //
+        // Emitted HERE because this is the authoritative record: the amounts are in hand and the
+        // abandoned mass is accounted into `_forfeited` on the lines above. The note mirrors it in
+        // `onForfeitAccepted`, where the forfeit becomes final on the owner's side.
+        emit StakeForfeited{dest: address.makeAddrExtern(PMP_STAKE_FORFEITED, bitCntAddress)}(
+            wallet, stakeAmount, debtAmount, couponsAmount);
 
         // Ack first so PN clears `_busy` / deletes its local stake before any
         // selfdestruct flushes this tx's outbound messages.
@@ -1886,9 +1947,6 @@ contract PMP is Modifiers {
         return _orderBookAddress;
     }
 
-    /// @notice Callback from the OrderBook emitted as part of its final
-    ///         self-destruct message (flag 161 — carries balance, deletes
-    ///         source). Flips the gate that `claim()` checks.
     /// @notice Deployer PN acknowledges receipt and application of the
     ///         normalization refund. Clears `_normRefundPending`, re-enabling
     ///         `splitFullSet` / `mergeFullSet`. Auto-called at the tail of
@@ -1902,6 +1960,9 @@ contract PMP is Modifiers {
         _normRefundPending = false;
     }
 
+    /// @notice Callback from the OrderBook emitted as part of its final
+    ///         self-destruct message (flag 161 — carries balance, deletes
+    ///         source). Flips the gate that `claim()` checks.
     function onOrderBookShutdownComplete() public {
         require(msg.sender == _orderBookAddress, ERR_INVALID_SENDER);
         tvm.accept();

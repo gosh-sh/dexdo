@@ -24,12 +24,17 @@ import "./InferenceOrderBook.sol";
 contract ModelRegistry {
 
     /// @notice Contract semantic version (kept in lockstep with the airegistry stack).
-    string constant version = "4.0.30";
+    string constant version = "4.0.33";
 
     // ── pinned InferenceOrderBook code (cascade-updated on version bump) ──
-    /// @dev InferenceOrderBook 4.0.20 (tickSize=1M) code hash + depth. One model ⇒ one book.
-    uint256 constant IOB_CODE_HASH  = 0xf32d28ead150ba0832456d5f51f51d0e666463100baf27134e083e5fc5159649;
-    uint16  constant IOB_CODE_DEPTH = 36;
+    /// @dev InferenceOrderBook code hash + depth, cascade-updated with every rebuild. NO
+    ///      GENERATION NUMBER HERE ON PURPOSE: this comment carried "4.0.32" while the value
+    ///      beneath it was already 4.0.33, because the cascade rewrites the literal and cannot
+    ///      rewrite prose. A version in a comment beside a generated constant is a second copy
+    ///      of a fact that has one owner, and it goes stale the first time the owner moves.
+    ///      The book's only static is the model hash, so one model ⇒ one book.
+    uint256 constant IOB_CODE_HASH  = 0xde57553b07069dfb78661359b7b652c7a34831c97244e331ade51fa4cf9ce176;
+    uint16  constant IOB_CODE_DEPTH = 31;
 
     /// @notice Self-top-up floor (mirrors the airegistry stack).
     uint64 constant MIN_BALANCE = 100 vmshell;
@@ -58,9 +63,17 @@ contract ModelRegistry {
     ///         production scale (~8558+ entries).
     uint32 _count;
 
+    /// @notice Key allowed to mutate the set and upgrade the code. Held in storage rather than
+    ///         read from `tvm.pubkey()` so an upgrade can hand the registry to a different key:
+    ///         `tvm.pubkey()` belongs to the stateInit and a code swap cannot change it, which
+    ///         would otherwise pin ownership to whoever deployed the account. Seeded from
+    ///         `tvm.pubkey()` at construction and by an upgrade that carries no new key, so the
+    ///         deploy-time owner stays the owner unless one is explicitly supplied.
+    uint256 _ownerPubkey;
+
     /// @dev Only the owner key may mutate. `accept` so the owner pays gas.
     modifier onlyOwner() {
-        require(msg.pubkey() == tvm.pubkey(), ERR_NOT_OWNER);
+        require(msg.pubkey() == _ownerPubkey, ERR_NOT_OWNER);
         tvm.accept();
         _;
     }
@@ -68,6 +81,7 @@ contract ModelRegistry {
     constructor() {
         require(tvm.pubkey() != 0, ERR_NO_PUBKEY);
         tvm.accept();
+        _ownerPubkey = tvm.pubkey();
     }
 
     /// @dev Keep the account funded for its own gas/outgoing messages.
@@ -138,17 +152,55 @@ contract ModelRegistry {
     ///         a clean slate on upgrade.
     function updateCode(TvmCell newcode) public onlyOwner {
         ensureBalance();
+        // Carry the current owner across explicitly: `onCodeUpgrade` resets storage, and an
+        // empty cell there means "no owner supplied" and falls back to the stateInit key.
+        TvmCell migration = abi.encode(_ownerPubkey);
         tvm.commit();
         tvm.setcode(newcode);
         tvm.setCurrentCode(newcode);
-        onCodeUpgrade();
+        onCodeUpgrade(migration);
     }
 
-    /// @dev Runs once, right after the code swap. Wipes all registered models
-    ///     (single source of truth is re-seeded fresh after an upgrade).
+    /// @dev Runs once, right after the code swap, and wipes the whole model set — the single
+    ///     source of truth is re-seeded fresh afterwards.
+    ///
+    ///     The `TvmCell` parameter serves two purposes. It makes this entry point match the one
+    ///     every other root exposes, so a caller that swaps the code and then invokes
+    ///     `onCodeUpgrade(TvmCell)` — the zerostate premine stub does exactly that — resolves
+    ///     the same function id and lands here; without the parameter that call resolves to no
+    ///     function at all. And when the cell is non-empty it carries the pubkey to install as
+    ///     the new owner, which is the only way to re-key the registry: ownership lives in
+    ///     `_ownerPubkey` precisely because the stateInit key cannot be reassigned.
+    ///
+    ///     An empty cell keeps the current owner, so `updateCode` above stays a pure code swap.
+    ///     Decode the cell BEFORE resetting storage and read nothing else from the old state:
+    ///     the previous code may have had a different variable layout — the premine stub has no
+    ///     `_ownerPubkey` at all — so the incoming cell is the only trustworthy input here.
+    function onCodeUpgrade(TvmCell cell) private {
+        tvm.accept();
+        uint256 incomingOwner = cell.toSlice().empty() ? 0 : abi.decode(cell, uint256);
+        tvm.resetStorage();
+        // No key supplied: fall back to the account's stateInit key, which is the owner a
+        // freshly constructed registry would have.
+        _ownerPubkey = incomingOwner == 0 ? tvm.pubkey() : incomingOwner;
+        require(_ownerPubkey != 0, ERR_NO_PUBKEY);
+    }
+
+    /// @dev Entry point for an upgrade issued by code that calls the NO-ARGUMENT form. The
+    ///     function id is derived from the signature and the call is emitted by the OLD code
+    ///     but executed in the new one, so both forms have to exist here for an upgrade to be
+    ///     accepted from either kind of predecessor: the premine stub calls
+    ///     `onCodeUpgrade(TvmCell)`, while the generation that declared `onCodeUpgrade()`
+    ///     calls this one. No cell means no owner was supplied, so ownership falls back to the
+    ///     account's stateInit key — which is exactly who owns that earlier generation.
     function onCodeUpgrade() private {
-        delete _models;
-        _count = 0;
+        TvmBuilder empty;
+        onCodeUpgrade(empty.toCell());
+    }
+
+    /// @notice Key currently allowed to mutate the set and upgrade the code.
+    function owner() external view returns (uint256) {
+        return _ownerPubkey;
     }
 
     // ── getters ───────────────────────────────────────────────

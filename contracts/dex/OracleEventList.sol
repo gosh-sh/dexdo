@@ -16,7 +16,7 @@ interface IInferenceOB {
 contract OracleEventList is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.30";
+    string constant version = "4.0.33";
 
     // ── Range events (numeric outcomes): the price is resolved on-chain from an
     // InferenceOrderBook's weekly median, mapped to a numeric range = outcome.
@@ -195,6 +195,10 @@ contract OracleEventList is Modifiers {
         ensureBalance();
         uint32 n = uint32(bounds.length);
         require(n >= 1 && n < 19, ERR_INVALID_PARAMS);               // ≥1 bound → ≥2 outcomes; < 19 bounds → < 20 outcomes, caps the loop BEFORE it runs
+        // The first bound must be above zero. Outcome 0 wins on `price < bounds[0]`, and no
+        // uint256 price is below zero — so a zero first bound would create an outcome that can be
+        // staked on and can never win, whatever the oracle reports.
+        require(bounds[0] > 0, ERR_INVALID_PARAMS);
         for (uint32 i = 1; i < n; i++) {
             require(bounds[i] > bounds[i - 1], ERR_INVALID_PARAMS);  // strictly increasing
         }
@@ -286,7 +290,7 @@ contract OracleEventList is Modifiers {
     ///         OB weekly median async; the mapping + PMP resolve happen in
     ///         onWeeklyMedian.
     function resolveRange(uint256 eventId, uint256 oracleListHash, uint32 tokenType)
-        external onlyOwnerPubkey(_oraclePubkey) accept
+        external view onlyOwnerPubkey(_oraclePubkey) accept
     {
         require(_rangeData[eventId].exists, ERR_NOT_RANGE_EVENT);
         require(_events.exists(eventId), ERR_NOT_RANGE_EVENT);
@@ -302,7 +306,7 @@ contract OracleEventList is Modifiers {
     ///         submitResolve — this OEL is the single trust-addr oracle, so a
     ///         quorum-of-1 resolves immediately. PMP is unchanged.
     function onWeeklyMedian(uint256 eventId, uint256 oracleListHash, uint32 tokenType, uint256 price)
-        public senderIs(_rangeData[eventId].ob) accept
+        public view senderIs(_rangeData[eventId].ob) accept
     {
         ensureBalance();
         uint32 outcomeId = _priceToOutcome(eventId, price);

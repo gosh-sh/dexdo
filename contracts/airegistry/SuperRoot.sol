@@ -20,7 +20,7 @@ import "./RootModel.sol";
 ///         via their `_superRootAddress` static, which is mixed into the
 ///         derivation here.
 contract SuperRoot is AiRegistryModifiers {
-    string constant version = "4.0.30";
+    string constant version = "4.0.33";
 
     /// @notice Canonical code hash of the child RootModel. The constructor
     ///         rejects any caller-supplied code whose `tvm.hash` does not
@@ -33,7 +33,7 @@ contract SuperRoot is AiRegistryModifiers {
     ///         the value returned by `tvm.decodeStateInit(tvc).code` then
     ///         `tvm.hash`. It is the same as the `code_hash` field
     ///         printed by `tvm-cli decode stateinit --tvc <file>`.
-    uint256 constant ROOT_MODEL_CODE_HASH = 0x88eab99d8b9f0d194a6400c04f1978465e4c59c8abe7df929145affbb9422f5a;
+    uint256 constant ROOT_MODEL_CODE_HASH = 0xae9dbb9ef7ae2a56f68e2ea87d812567d98dd81b2ecfc00cf5ec8af1f64ef797;
 
     event RootRegistered(address rootAddress);
 
@@ -42,6 +42,12 @@ contract SuperRoot is AiRegistryModifiers {
 
     constructor(uint256 pubkey, TvmCell rootModelCode) accept {
         require(tvm.hash(rootModelCode) == ROOT_MODEL_CODE_HASH, ERR_BAD_CODE_HASH);
+        // The third door into the same field, guarded like the other two. `onlyOwnerPubkey(0)`
+        // admits every unsigned message, so a zero key here would hand `updateCode` and `setPubkey`
+        // to anyone. External deploy through this constructor is a supported path — the contract
+        // header says so and the history has such deploys — so "we bring it up from a stub" does
+        // not make the entrance unreachable.
+        require(pubkey != 0, ERR_NOT_OWNER);
         _ownerPubkey = pubkey;
         _rootModelCode = rootModelCode;
     }
@@ -57,6 +63,11 @@ contract SuperRoot is AiRegistryModifiers {
 
     function setPubkey(uint256 pubkey) public onlyOwnerPubkey(_ownerPubkey) accept {
         ensureBalance();
+        // Same guard as on the upgrade path, and for the same reason: `onlyOwnerPubkey(0)` admits
+        // every unsigned message, so rotating the key to zero would hand `updateCode` and this
+        // very setter to anyone. Rotation is the other door into the field and needs the check
+        // just as much as `onCodeUpgrade` does.
+        require(pubkey != 0, ERR_NOT_OWNER);
         _ownerPubkey = pubkey;
     }
 
@@ -89,6 +100,10 @@ contract SuperRoot is AiRegistryModifiers {
         tvm.resetStorage();
         (uint256 pubkey, TvmCell oldRootModelCode, TvmCell newRootModelCode)
             = abi.decode(cell, (uint256, TvmCell, TvmCell));
+        // A zero key makes `onlyOwnerPubkey` admit every unsigned message, so `updateCode` would
+        // no longer be owner-gated. Checked here rather than in the constructor: an account
+        // upgraded from a stub never runs one.
+        require(pubkey != 0, ERR_NOT_OWNER);
         _ownerPubkey = pubkey;
         _rootModelCode = newRootModelCode.toSlice().empty() ? oldRootModelCode : newRootModelCode;
         require(tvm.hash(_rootModelCode) == ROOT_MODEL_CODE_HASH, ERR_BAD_CODE_HASH);
@@ -115,7 +130,7 @@ contract SuperRoot is AiRegistryModifiers {
     // Registration entry points (called by child contracts)
     // ========================================================
 
-    function registerRoot(uint256 ownerPubkey) public {
+    function registerRoot(uint256 ownerPubkey) public view {
         ensureBalance();
         address expected = _calculateRootModelAddress(ownerPubkey);
         require(msg.sender == expected, ERR_INVALID_SENDER);

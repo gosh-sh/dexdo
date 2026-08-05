@@ -190,7 +190,7 @@ library DexLib {
     // No code salt: the book binds to the note family via NOTE_CODE_HASH pinned
     // in the InferenceOrderBook code itself, and the deploy is gated in its ctor
     // (deployer must be a genuine note). The address is just (book code + §8
-    // statics): same (model, tick) ⇒ same address ⇒ one book.
+    // statics), and the static set is the model alone ⇒ one book per model.
 
     /// @notice InferenceOrderBook StateInit: book code + the §8 static set
     ///         (model). One book per model.
@@ -371,23 +371,11 @@ library DexLib {
         return address.makeAddrStd(0, abi.stateInitHash(codeHash, tvm.hash(dataCell), codeDepth, dataCell.depth()));
     }
 
-    /// @notice Computes deterministic OrderBook address from salted code hash/depth.
-    /// @param saltedCodeHash Salted OrderBook code hash.
-    /// @param saltedCodeDepth Salted OrderBook code depth.
-    /// @param eventId Event identifier.
-    /// @param oracleListHash Oracle list hash.
-    /// @param tokenType Token type.
-    /// @return OrderBook deterministic address.
-    function computeOrderBookAddressFromHash(
-        uint256 saltedCodeHash, uint16 saltedCodeDepth,
-        uint256 eventId, uint256 oracleListHash, uint32 tokenType
-    ) public returns (address) {
-        TvmCell dummyCode;
-        TvmCell si = abi.encodeStateInit({
-            contr: OrderBook, code: dummyCode,
-            varInit: { _eventId: eventId, _oracleListHash: oracleListHash, _tokenType: tokenType }
-        });
-        TvmCell dataCell = _extractDataCell(si);
-        return address.makeAddrStd(0, abi.stateInitHash(saltedCodeHash, tvm.hash(dataCell), saltedCodeDepth, dataCell.depth()));
-    }
+    // `computeOrderBookAddressFromHash(saltedCodeHash, saltedCodeDepth, eventId, oracleListHash,
+    // tokenType)` stood here with no caller anywhere — not in the contracts, not in the tests, not
+    // in the Rust mirrors. An unused ADDRESS DERIVATION is worse company than an unused constant:
+    // every guard in this system is "re-derive the counterparty and compare", so a spare derivation
+    // sitting in the shared library reads like one of them, and the next person to need a book
+    // address has two functions to choose between with nothing to say which is the live one. The
+    // salted variant that IS used is `computeOrderBookAddress` above.
 }
