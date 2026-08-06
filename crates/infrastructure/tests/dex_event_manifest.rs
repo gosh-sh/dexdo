@@ -15,16 +15,19 @@
 //! never used, when an emit is re-pointed at a neighbouring id, or when a new
 //! event appears that nothing downstream knows about.
 //!
-//! Two such drifts are visible in the table below, and neither is a typo.
+//! One such drift is visible in the table below, and it is not a typo.
 //! `PRIVATENOTE_SPLIT_CONFIRMED` carries `FullSetStakeConfirmed` rather than
 //! anything named Split — the like-named `PRIVATENOTE_FULLSET_STAKE_*`
 //! constants that carried nothing were deleted in the v4.0.33 sync, leaving the
-//! misnamed live one behind. And `PRIVATENOTE_INFERENCE_REMOVED` carries two
-//! events, which the scheme does not allow at all: `InferenceOrderRejectedMirror`
-//! shares it until that event moves to its own id `1102`. Until then
-//! `emitted_events_match_their_emit_sites` fails, deliberately — the one-id-one-
-//! payload rule is what `dst` routing rests on, so it is pinned rather than
-//! loosened to accommodate the overlap.
+//! misnamed live one behind.
+//!
+//! A second one was worse and is now gone: `PRIVATENOTE_INFERENCE_REMOVED`
+//! carried two events, which the scheme does not allow at all, and
+//! `emitted_events_match_their_emit_sites` was left failing on it deliberately
+//! rather than loosened to accommodate the overlap. That failure is what the
+//! v4.0.34 sync answered, by giving `InferenceOrderRejectedMirror` the id 1102
+//! of its own. Pinning the rule and letting the test stay red is why the fix
+//! arrived at all — the one-id-one-payload rule is what `dst` routing rests on.
 //!
 //! ## What is checked, and what is only recorded
 //!
@@ -196,6 +199,16 @@ const MANIFEST: &[Event] = &[
         konst: "PRIVATENOTE_INFERENCE_FILLED",
         id: 1101,
         emits: Some("PrivateNote.InferenceFilledConfirmed"),
+        owner: Owner::Unit("B21"),
+    },
+    Event {
+        konst: "PRIVATENOTE_INFERENCE_REJECTED",
+        id: 1102,
+        // The note's side of a refused placement: the book returns the money
+        // with a reason, the note credits it back and says so. `B21` reaches it
+        // through the expired-deadline branch, which is the one refusal an e2e
+        // can provoke without a second party.
+        emits: Some("PrivateNote.InferenceOrderRejectedMirror"),
         owner: Owner::Unit("B21"),
     },
     Event {
@@ -450,11 +463,11 @@ const MANIFEST: &[Event] = &[
     Event {
         konst: "PRIVATENOTE_INFERENCE_REMOVED",
         id: 165,
-        // `InferenceOrderRejectedMirror` is emitted here too, which breaks the
-        // one-id-one-payload rule this manifest and every `dst` consumer rely
-        // on. It moves to its own id 1102; until that lands,
-        // `emitted_events_match_their_emit_sites` fails on this row and that
-        // failure is the reminder.
+        // This row carried `InferenceOrderRejectedMirror` as well for one
+        // release, which is the overlap the module header describes. The two
+        // bodies were not even the same shape — `(address, uint128)` against
+        // `(address, uint64, uint8, uint128)` — so a consumer filtering on this
+        // `dst` read one as the other and got rubbish. The mirror has 1102 now.
         emits: Some("PrivateNote.InferenceOrderRemoved"),
         owner: Owner::Unit("B22"),
     },
