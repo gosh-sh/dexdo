@@ -65,24 +65,42 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
-      # Self-provision a fresh throwaway deployer note per run, minted from the
+      # Self-provision fresh throwaway deployer notes per run, minted from the
       # public shellnet giver (`mint_pn_pool` → `<out>.seed_notes.json`, the exact
-      # format TestPnPool::load() reads). Replaces the old S3 fetch: the suite
-      # shares one note (TestPnPool::first()), and once a run drains + withdraws
-      # it (the hasWithdrawn latch) that note is dead for deployPMP
-      # (ERR_INVALID_STATE), so any long-lived hosted note goes stale. A fresh
-      # note per run sidesteps cross-run poisoning and needs no secret. NACKL
-      # because markets deploy in NACKL; the note also gets SHELL gas, which
-      # covers the inference escrow. It is drained in the teardown step below.
-      - name: Mint fresh e2e seed note
+      # format TestPnPool::load() reads). Replaces the old S3 fetch: once a run
+      # drains + withdraws a note (the hasWithdrawn latch) that note is dead for
+      # deployPMP (ERR_INVALID_STATE), so any long-lived hosted note goes stale.
+      # Fresh notes per run sidestep cross-run poisoning and need no secret.
+      # They are drained in the teardown step below.
+      # TWO NOTES, AND THE CURRENCY IS NOT INTERCHANGEABLE. The trader path
+      # deploys NACKL markets and stakes out of `_balance[NACKL]`; an inference
+      # buy is paid out of `_balance[CURRENCIES_ID_SHELL]`. Only the constructor
+      # writes that ledger (`_balance[tokenType] = value`), so the deposit
+      # currency at deploy time decides which of the two a note can do — for
+      # good. Topping a NACKL note up with SHELL does not help: the gas voucher
+      # credits PHYSICAL ECC on the account, and the escrow stopped coming from
+      # there. Each pool is single-currency by construction (the minter refuses
+      # to append a different token type), so they are minted separately and the
+      # two seed_notes arrays concatenated; `--profile` is what tells the loader
+      # which rows belong to which suite.
+      - name: Mint fresh e2e seed notes
         working-directory: sdk
         run: |
           cargo run --release --bin mint_pn_pool -- \
-            --count 1 --nominal N10000 --token-type nackl \
+            --count 1 --nominal N10000 --token-type nackl --profile PN-API \
             --endpoint https://shellnet.ackinacki.org \
-            --output "$RUNNER_TEMP/pn_pool.json"
-          cp "$RUNNER_TEMP/pn_pool.seed_notes.json" "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
-          test -s "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
+            --output "$RUNNER_TEMP/pn_pool_api.json"
+          cargo run --release --bin mint_pn_pool -- \
+            --count 1 --nominal N10000 --token-type shell --profile PN-INF \
+            --endpoint https://shellnet.ackinacki.org \
+            --output "$RUNNER_TEMP/pn_pool_inf.json"
+          jq -s 'add' \
+            "$RUNNER_TEMP/pn_pool_api.seed_notes.json" \
+            "$RUNNER_TEMP/pn_pool_inf.seed_notes.json" \
+            > "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
+          test "$(jq 'length' "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json")" = 2
+          jq -r '.[] | "minted \(.profile) tokenType=\(.tokenType) \(.pn_address)"' \
+            "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
 
       # Single-threaded on purpose: the PN-per-slot pool removes the per-PN
       # `_busy` contention, but every deploy still hits the shellnet-global
@@ -103,17 +121,23 @@ jobs:
       # the run — and the note ends in the hasWithdrawn state, unusable. Runs even
       # if the suite failed; best-effort (the next run mints a fresh note anyway),
       # so a drain failure never fails the job.
-      - name: Drain e2e seed note (teardown)
+      - name: Drain e2e seed notes (teardown)
         if: always()
         working-directory: sdk
         run: |
           seed="$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
           [ -s "$seed" ] || { echo "no seed note to drain — skip"; exit 0; }
-          jq '{pn_address: .[0].pn_address, owner_public_key_hex: .[0].pn_pubkey_hex, owner_secret_key_hex: .[0].pn_seckey_hex}' \
-            "$seed" > "$RUNNER_TEMP/pn_state.json"
-          dest="0:$(openssl rand -hex 32)"
-          echo "draining seed note to random dest $dest"
-          cargo run --release --bin dexdo -- withdraw \
-            --pn-state-file "$RUNNER_TEMP/pn_state.json" \
-            --dest "$dest" \
-            --endpoint shellnet.ackinacki.org || echo "teardown withdraw failed (non-fatal)"
+          # Every row, not just the first: the file holds one note per profile
+          # and each one's key is in the clear. Draining only row 0 would leave
+          # the other spendable by anyone who read the log.
+          for i in $(jq -r 'to_entries[].key' "$seed"); do
+            jq --argjson i "$i" \
+              '{pn_address: .[$i].pn_address, owner_public_key_hex: .[$i].pn_pubkey_hex, owner_secret_key_hex: .[$i].pn_seckey_hex}' \
+              "$seed" > "$RUNNER_TEMP/pn_state.json"
+            dest="0:$(openssl rand -hex 32)"
+            echo "draining seed note $i ($(jq -r ".[$i].profile // \"<unprofiled>\"" "$seed")) to random dest $dest"
+            cargo run --release --bin dexdo -- withdraw \
+              --pn-state-file "$RUNNER_TEMP/pn_state.json" \
+              --dest "$dest" \
+              --endpoint shellnet.ackinacki.org || echo "teardown withdraw failed for note $i (non-fatal)"
+          done

@@ -118,7 +118,7 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
         .with_env_filter("info,ackinacki_kit=debug")
         .try_init();
 
-    let pool = TestPnPool::load();
+    let pool = TestPnPool::load_inference();
     let seller = pool.notes[18 % pool.notes.len()].clone();
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex::from_endpoints");
     let suffix = unique_suffix();

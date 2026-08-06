@@ -13,8 +13,10 @@
 mod common;
 
 use common::test_pns::api_owned_indices;
+use common::test_pns::owned_indices;
 use common::test_pns::TestPnPool;
 use common::test_pns::API_PROFILE;
+use common::test_pns::INFERENCE_PROFILE;
 
 /// One seed row, with an optional profile — the shape the zerostate
 /// generator writes.
@@ -137,4 +139,58 @@ fn a_profiled_pool_with_no_note_for_this_suite_fails_loudly() {
         .unwrap_or_default();
     assert!(msg.contains(API_PROFILE), "the message must name the label looked for: {msg}");
     assert!(msg.contains("PN-DEP"), "and what the pool holds instead: {msg}");
+}
+
+#[test]
+fn an_unprofiled_pool_holds_no_inference_note() {
+    // The trap this guards. An unprofiled pool is the historical
+    // single-currency NACKL one, and the trader path is right to take it
+    // whole — but handing the same rows to an inference test would look like
+    // a working fixture and fail on chain minutes later with ERR_LOW_VALUE,
+    // because `_balance[CURRENCIES_ID_SHELL]` is zero on a NACKL note and
+    // nothing but the constructor ever fills it.
+    let profiles = vec![None; 10];
+    assert_eq!(owned_indices(&profiles, API_PROFILE), (0..10).collect::<Vec<_>>());
+    assert!(
+        owned_indices(&profiles, INFERENCE_PROFILE).is_empty(),
+        "an unprofiled pool must not pass for a SHELL pool"
+    );
+}
+
+#[test]
+fn the_two_profiles_divide_a_mixed_pool() {
+    // The shape CI writes: one NACKL note and one SHELL note concatenated
+    // into a single file, told apart only by their label.
+    let profiles = vec![Some(API_PROFILE), Some(INFERENCE_PROFILE)];
+    assert_eq!(owned_indices(&profiles, API_PROFILE), vec![0]);
+    assert_eq!(owned_indices(&profiles, INFERENCE_PROFILE), vec![1]);
+}
+
+#[test]
+fn loading_a_mixed_pool_gives_each_suite_its_own_note() {
+    let path = write_pool("mixed", &[Some(API_PROFILE), Some(INFERENCE_PROFILE)]);
+
+    let api = TestPnPool::load_path(&path);
+    assert_eq!(api.notes.len(), 1);
+    assert_eq!(index_of(&api.first().address), 0);
+
+    let inf = TestPnPool::load_path_profile(&path, INFERENCE_PROFILE);
+    assert_eq!(inf.notes.len(), 1);
+    assert_eq!(index_of(&inf.first().address), 1);
+}
+
+#[test]
+fn asking_for_inference_notes_a_pool_lacks_says_how_to_mint_them() {
+    // A stale local fixture is the likely way to meet this, and the fix is
+    // not guessable from "no notes found".
+    let path = write_pool("api-only", &[Some(API_PROFILE)]);
+    let err = std::panic::catch_unwind(|| TestPnPool::load_path_profile(&path, INFERENCE_PROFILE))
+        .unwrap_err();
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(msg.contains(INFERENCE_PROFILE), "the message must name the label: {msg}");
+    assert!(msg.contains("--token-type shell"), "and how to produce it: {msg}");
 }

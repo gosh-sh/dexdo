@@ -71,7 +71,7 @@ async fn inference_offer_matches_buy_and_funds_token_contract() {
         .with_env_filter("info,ackinacki_kit=debug")
         .try_init();
 
-    let pool = TestPnPool::load();
+    let pool = TestPnPool::load_inference();
     // Test isolation: own note per binary (shared notes leak stream/dispute locks).
     let note = pool.notes[6 % pool.notes.len()].clone();
     let keys = KeyPair {

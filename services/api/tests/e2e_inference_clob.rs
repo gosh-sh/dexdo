@@ -54,7 +54,7 @@ const ERR_NO_LIQUIDITY: u32 = 334;
 
 fn note_and_signer() -> (common::test_pns::TestPn, KeyPair) {
     let note = {
-        let p = TestPnPool::load();
+        let p = TestPnPool::load_inference();
         p.notes[9 % p.notes.len()].clone()
     };
     let keys = KeyPair {

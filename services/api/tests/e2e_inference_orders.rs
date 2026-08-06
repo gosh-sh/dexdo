@@ -117,7 +117,7 @@ async fn a_book_cancels_the_order_it_was_asked_to_and_never_takes_an_expired_one
         .with_env_filter("info,ackinacki_kit=debug")
         .try_init();
 
-    let pool = TestPnPool::load();
+    let pool = TestPnPool::load_inference();
     // Own note per binary, like every other inference test here.
     let note = pool.notes[12 % pool.notes.len()].clone();
     let keys = KeyPair {

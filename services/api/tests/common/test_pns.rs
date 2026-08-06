@@ -29,24 +29,46 @@ struct SeedNote {
     profile: Option<String>,
 }
 
-/// The label marking a note this suite owns in a spec-baked pool. Groups
-/// carrying any other label belong to the sdk e2e harness, which reads the
-/// same file (`sdk/tests/integration/common/allocator.rs`).
+/// The label marking a note the trader-path tests own. Groups carrying any
+/// other label belong to the sdk e2e harness, which reads the same file
+/// (`sdk/tests/integration/common/allocator.rs`), or to another profile here.
 pub const API_PROFILE: &str = "PN-API";
 
-/// Which rows of the pool this suite may use, given each row's declared
-/// profile.
+/// The label marking a note the inference tests own.
 ///
-/// A pool of identical notes (`DEX_TEST_NOTES_CNT`) declares nothing, and
-/// the two suites divide it by position: the sdk harness confines itself to
-/// the last few entries and this suite indexes the whole file. Once the pool
-/// is baked from a spec, position means nothing — groups differ in token
-/// type, balance and ECC seeding — so ownership follows the label instead.
-pub fn api_owned_indices(profiles: &[Option<&str>]) -> Vec<usize> {
+/// These need a SHELL note, not a NACKL one, and the difference is not a
+/// matter of topping one up. An inference buy is paid out of the note's own
+/// ledger — `require(_balance[CURRENCIES_ID_SHELL] >= escrow)` in
+/// `PrivateNote.placeInferenceBuy` — and the only thing that ever writes that
+/// ledger from nothing is the constructor, `_balance[tokenType] = value`. So
+/// the deposit currency at deploy time decides, for good, whether a note can
+/// trade inference at all. Physical ECC SHELL sitting on the account does not
+/// count: the escrow used to leave the account and stopped doing so.
+pub const INFERENCE_PROFILE: &str = "PN-INF";
+
+/// Which rows of the pool a suite may use, given each row's declared profile.
+///
+/// A pool of identical notes (`DEX_TEST_NOTES_CNT`) declares nothing, and the
+/// two suites divide it by position: the sdk harness confines itself to the
+/// last few entries and this suite indexes the whole file. Once the pool is
+/// baked from a spec, position means nothing — groups differ in token type,
+/// balance and ECC seeding — so ownership follows the label instead.
+///
+/// Only [`API_PROFILE`] falls back to "all rows" on an unlabelled pool. Such a
+/// pool is the historical single-currency NACKL one, which is what the trader
+/// path wants and is precisely what an inference test must never be handed
+/// silently — it would deploy, place, and fail on chain with `ERR_LOW_VALUE`
+/// several minutes later, naming nothing.
+pub fn owned_indices(profiles: &[Option<&str>], want: &str) -> Vec<usize> {
     if profiles.iter().all(Option::is_none) {
-        return (0..profiles.len()).collect();
+        return if want == API_PROFILE { (0..profiles.len()).collect() } else { Vec::new() };
     }
-    profiles.iter().enumerate().filter(|(_, p)| **p == Some(API_PROFILE)).map(|(i, _)| i).collect()
+    profiles.iter().enumerate().filter(|(_, p)| **p == Some(want)).map(|(i, _)| i).collect()
+}
+
+/// [`owned_indices`] for the trader-path profile.
+pub fn api_owned_indices(profiles: &[Option<&str>]) -> Vec<usize> {
+    owned_indices(profiles, API_PROFILE)
 }
 
 #[derive(Debug)]
@@ -75,17 +97,32 @@ impl TestPnPool {
     /// CI drops the file it fetches from S3. Panics with a clear message
     /// if it is missing or malformed; no e2e test can run without it.
     pub fn load() -> Self {
+        Self::load_profile(API_PROFILE)
+    }
+
+    /// The pool of SHELL notes the inference tests own. See
+    /// [`INFERENCE_PROFILE`] for why these cannot be the same notes.
+    pub fn load_inference() -> Self {
+        Self::load_profile(INFERENCE_PROFILE)
+    }
+
+    fn load_profile(want: &str) -> Self {
         let path = std::env::var("E2E_SEED_NOTES").unwrap_or_else(|_| {
             format!("{}/../../tests/fixtures/seed_notes.json", env!("CARGO_MANIFEST_DIR"))
         });
-        Self::load_path(std::path::Path::new(&path))
+        Self::load_path_profile(std::path::Path::new(&path), want)
+    }
+
+    /// [`TestPnPool::load`] against an explicit path.
+    pub fn load_path(path: &std::path::Path) -> Self {
+        Self::load_path_profile(path, API_PROFILE)
     }
 
     /// [`TestPnPool::load`] against an explicit path, holding only the notes
-    /// this suite owns (see [`api_owned_indices`]) in file order. Split out
-    /// so the ownership rule is testable without the env var every e2e test
-    /// depends on.
-    pub fn load_path(path: &std::path::Path) -> Self {
+    /// `want` owns (see [`owned_indices`]) in file order. Split out so the
+    /// ownership rule is testable without the env var every e2e test depends
+    /// on.
+    pub fn load_path_profile(path: &std::path::Path, want: &str) -> Self {
         let path = path.display();
         let raw = std::fs::read_to_string(path.to_string())
             .unwrap_or_else(|err| panic!("read e2e seed notes at {path}: {err}"));
@@ -93,7 +130,7 @@ impl TestPnPool {
             .unwrap_or_else(|err| panic!("parse e2e seed notes {path}: {err}"));
 
         let profiles: Vec<Option<&str>> = rows.iter().map(|r| r.profile.as_deref()).collect();
-        let owned = api_owned_indices(&profiles);
+        let owned = owned_indices(&profiles, want);
         if owned.is_empty() {
             // Returning an empty pool would surface much later as a modulo by
             // zero inside whichever test indexed it first, naming nothing.
@@ -102,8 +139,10 @@ impl TestPnPool {
             census.sort_unstable();
             census.dedup();
             panic!(
-                "e2e seed notes {path} hold no `{API_PROFILE}` note — this suite owns none of \
-                 the {} row(s), which carry: {}",
+                "e2e seed notes {path} hold no `{want}` note — this suite owns none of the {} \
+                 row(s), which carry: {}. A pool that declares no profile at all is the \
+                 historical single-currency NACKL one and cannot serve `{INFERENCE_PROFILE}`: \
+                 mint those notes with `--token-type shell --profile {INFERENCE_PROFILE}`",
                 rows.len(),
                 census.join(", ")
             );

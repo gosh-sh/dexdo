@@ -63,7 +63,7 @@ async fn inference_order_book_buy_then_cancel_against_shellnet() {
         .with_env_filter("info,ackinacki_kit=debug")
         .try_init();
 
-    let pool = TestPnPool::load();
+    let pool = TestPnPool::load_inference();
     // Test isolation: own note per binary (shared notes leak stream/dispute locks).
     let note = pool.notes[9 % pool.notes.len()].clone();
     let keys = KeyPair {
