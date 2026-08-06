@@ -89,11 +89,14 @@ jobs:
       # RootOracle (deployOracle) and OracleEventList (addEvent), which
       # serialise on-chain — parallel deploys race to exit_code 52/101.
       # `--run-ignored only` runs exactly the `#[ignore]`-marked e2e tests.
-      # e2e_inference_dispute is excluded: its window-gated settlement waits out
-      # a settle_window (~660s) plus probe acceptance, ~15min wall-clock — too
-      # long for CI. Run it locally on demand: drop the `-E` filter.
+      # No `-E` filter: there is nothing left to exclude. A
+      # `not binary(e2e_inference_dispute)` used to sit here to skip a suite that
+      # waited out a ~1200s acceptance window, and it outlived the suite — a
+      # `binary()` predicate matching nothing is an error in nextest, not a
+      # no-op, so the step died on the filter before running a single test.
+      # Anything excluded here must name a binary that exists.
       - name: cargo nextest run (e2e, single-threaded)
-        run: cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast -E 'not binary(e2e_inference_dispute)'
+        run: cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast
 
       # Teardown: drain the throwaway note to a random (uninit) address so the
       # plaintext key surfaced in the mint step / fixture controls no funds after

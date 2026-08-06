@@ -94,16 +94,16 @@ through `dodex_chain::Dex` (no DB, no HTTP — there are no inference handlers):
 | --- | --- |
 | `e2e_inference` | Note deploys the book, places a resting BUY with SHELL escrow, cancels it. |
 | `e2e_inference_match` | External `TokenContract` deploy + a SELL offer crossed by a BUY ⇒ the match funds the `TokenContract` (handover). |
-| `e2e_inference_clob` | Three flows: a partial fill (2-tick offer crossed by a 4-tick limit buy, 2 ticks rest) + `getBestBidAsk`/`getWeeklyMedianPrice`; a subscription (`placeInferenceSubscription` + `getSubscription`); and a match's `Filled` event confirmed by its routing id. |
-| `e2e_inference_stream` | Full deal lifecycle: match → seller bond → `open` → wait the 180s probe window → `advance` (probe accepted) → `streamStop`. Slow (~4 min). |
-| `e2e_inference_settlement` | The same lifecycle stopped **immediately** after the probe: the streaming tick's acceptance window is still open, so the seller must not be paid for it. Slow (~4 min). |
-| `e2e_inference_twosided` | Buyer and seller are **different notes** — every other test here is a self-trade. Funds a two-tick deal and drains it: two `advance`s, `finalizedOwed` = 2P, no prepaid tick, no buffer, no deposit. Slow (~15 min: a 180s probe window then a 600s streaming one). |
+| `e2e_inference_clob` | Two flows: a partial fill (2-tick offer crossed by a 4-tick limit buy, 2 ticks rest) + `getBestBidAsk`/`getWeeklyMedianPrice`, and a match's `Filled` event confirmed by its routing id. |
 | `e2e_inference_orders` | The book as an order book, with no deal at all: two bids, a single `cancelInferenceOrder` by id that takes only its own, and a buy whose deadline has already passed — refused before `tvm.accept()`, so `nextOrderId` never moves. Fast (~35 s). |
-| `e2e_inference_range` | A numeric **range** market end to end: a closed deal gives the book a median, `addRangeEvent` binds bounds to that book, `confirmEvent` sets the market's clock by itself, and `resolveRange` turns the price into an outcome. Slow (~9 min). |
-| `e2e_inference_subscription` | A §8 subscription as real liquidity: a seller's offer crosses the standing bid and the deal names the subscription's owner as its buyer, the per-cycle spend moves, and `pokeSubscription` leaves a live subscription alone both before and after the fill. The cycle roll itself is a week away and out of reach. Fast (~3 min). |
-| `e2e_inference_recovery` | The two ways out of a deal the seller abandoned: `streamCleanup` on one never opened (deposit refunded, bond back to the seller's note, deal destroyed) and `streamReclaim` on one opened and left (buyer pays nothing for the probe, bond credited inside the deal). Includes the refusal that separates them — cleanup declines an opened deal of the same age. Slow (~20 min: a 600s and a 900s window in parallel). |
 | `e2e_inference_funding` | `fundDeployShell`: a note pays its own canonical `TokenContract` address, and the deal contract then deploys onto it with no giver in the run. Also pins the two things the call must not do — reach the RootModel, which it no longer has a leg for, and send anything at all when asked for `0`. Fast (~2 min). |
-| `e2e_inference_dispute` | The dispute branch. Excluded from CI on its own merits — it waits a ~1200s acceptance window (~25 min). |
+
+The streaming-deal suites — `e2e_inference_stream`, `e2e_inference_settlement`,
+`e2e_inference_twosided`, `e2e_inference_range`, `e2e_inference_subscription`,
+`e2e_inference_recovery` and `e2e_inference_dispute` — were removed with the
+contract calls they drove when v4.0.33 dropped those calls. What remains above
+is the whole of the inference e2e coverage; the deal lifecycle past a match is
+not exercised end to end.
 
 They share the seed-note pool (`tests/fixtures/seed_notes.json` /
 `E2E_SEED_NOTES`) like the other e2e tests; the note must additionally hold
@@ -113,21 +113,14 @@ SHELL for escrow, and the giver must be reachable (shellnet only). Run:
 cargo test -p dodex-api --test e2e_inference -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_match -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_clob -- --ignored --nocapture
-cargo test -p dodex-api --test e2e_inference_stream -- --ignored --nocapture
-cargo test -p dodex-api --test e2e_inference_settlement -- --ignored --nocapture
-cargo test -p dodex-api --test e2e_inference_twosided -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_orders -- --ignored --nocapture
-cargo test -p dodex-api --test e2e_inference_range -- --ignored --nocapture
-cargo test -p dodex-api --test e2e_inference_subscription -- --ignored --nocapture
-cargo test -p dodex-api --test e2e_inference_recovery -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_funding -- --ignored --nocapture
 ```
 
-Everything above except `e2e_inference_dispute` runs in the e2e pipeline's
-`e2e_tests` step. Three of them declare a longer per-binary timeout in
-[`.config/nextest.toml`](../../.config/nextest.toml): the `ci-e2e` profile
-terminates a test after 600 s, and `twosided`, `range` and `recovery` wait
-on-chain windows that are longer than that by contract, not by accident.
+All of them run in the e2e pipeline's `e2e_tests` step, which excludes nothing:
+`--run-ignored only` is the whole selection. A `binary()` predicate that matches
+no binary is an error in nextest rather than an empty exclusion, so a filter
+naming a suite that has since been deleted fails the step before any test runs.
 
 Most of these deploy their `TokenContract` off the shared shellnet giver
 because it is the cheap route. It is not the route the contracts are designed
