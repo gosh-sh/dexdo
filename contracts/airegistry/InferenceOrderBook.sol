@@ -12,7 +12,9 @@ import "../dex/PrivateNote.sol";
 import "./TokenContract.sol";
 // Sell-offer guard (cont.): the RootModel type gives the stateInit data layout so we can
 // recompute the seller's RootModel address (the TC's `_rootModelAddress`) from its pinned
-// CODE HASH + the canonical SuperRoot — see `_rootModelAddr` / `_tokenContractAddr`.
+// CODE HASH + the canonical SuperRoot — see `DexLib.computeRootModelAddressFromHash` and
+// the note's `_tokenContractAddr`. (The note's own `_rootModelAddr` wrapper is gone: the
+// super root deploys RootModels now, so a note has no reason to derive that address.)
 import "./RootModel.sol";
 
 /// @notice Handover: the matched seller's `token_contract` receives the deal's
@@ -68,12 +70,12 @@ interface IPrivateNote {
 ///         quote/base + collateral, event-resolution shutdown, and PN callbacks
 ///         (inference order entry is fire-and-forget; the note tracks via getters).
 contract InferenceOrderBook is AiRegistryModifiers {
-    string constant version = "4.0.33";
+    string constant version = "4.0.34";
 
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x8d10cd0ee194f82ceaae61477a0340fe77841c502b66c6471983d54a3b2da95b;
+    uint256 constant NOTE_CODE_HASH  = 0x751ef2d873275b6ae8eedcf78a00e9e4641237926080d559e4f66c7e2c8ac059;
     uint16  constant NOTE_CODE_DEPTH = 20;
 
     // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
@@ -81,15 +83,15 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
     // contract that forwards SHELL on a fill, so the check must live HERE, not only in
     // the note: placeSellOffer is public and a direct call would bypass a note check).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x2ce1a6cc403318144727ed7a9bce7551083622598b80afeee86e00c67f5ebedd;
-    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 18;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xea588cae509818b5e4f157387280f675f739e25f818a80fc459dae5d0cb84272;
+    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 17;
 
     // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
     // (its `_rootModelAddress` static is the seller's RootModel, NOT address(0)). To verify a
     // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
     // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
     // Re-pin whenever airegistry/RootModel is recompiled.
-    uint256 constant ROOT_MODEL_CODE_HASH  = 0xae9dbb9ef7ae2a56f68e2ea87d812567d98dd81b2ecfc00cf5ec8af1f64ef797;
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0x92616db7c229a336456c96edbc783705e0e03fe5f811f3615060d67199e7a3cc;
     uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
 
     // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its
@@ -1348,7 +1350,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 ITokenContractDeal(e.tokenContract).onSellClosed{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}();
             }
             if (firstRun) {
-                emit InferenceOrderRejected{dest: address.makeAddrExtern(OfferCancelRejectedEmit, bitCntAddress)}(
+                emit InferenceOrderRejected{dest: address.makeAddrExtern(OrderRejectedEmit, bitCntAddress)}(
                     PLACE_REJ_EXPIRED, e.owner, e.tokenContract, refund);
                 // Money and reason in one message, named by the number the note itself chose.
                 _rejectToNote(e.owner, e.clientOrderId, PLACE_REJ_EXPIRED, refund);
@@ -1399,7 +1401,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                     // the `_offerPosted` latch) so it stays usable.
                     ITokenContractDeal(e.tokenContract).onSellClosed{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}();
                 }
-                emit InferenceOrderRejected{dest: address.makeAddrExtern(OfferCancelRejectedEmit, bitCntAddress)}(
+                emit InferenceOrderRejected{dest: address.makeAddrExtern(OrderRejectedEmit, bitCntAddress)}(
                     PLACE_REJ_POST_ONLY, e.owner, e.tokenContract, back);
                 // Money and reason together, named by the note's own number.
                 _rejectToNote(e.owner, e.clientOrderId, PLACE_REJ_POST_ONLY, back);
@@ -1412,7 +1414,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 else if (!e.isBuy && e.tokenContract != address(0)) {
                     ITokenContractDeal(e.tokenContract).onSellClosed{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}();  // free the TC's offer latch
                 }
-                emit InferenceOrderRejected{dest: address.makeAddrExtern(OfferCancelRejectedEmit, bitCntAddress)}(
+                emit InferenceOrderRejected{dest: address.makeAddrExtern(OrderRejectedEmit, bitCntAddress)}(
                     PLACE_REJ_FOK, e.owner, e.tokenContract, back);
                 // Money and reason together, named by the note's own number.
                 _rejectToNote(e.owner, e.clientOrderId, PLACE_REJ_FOK, back);
@@ -1540,11 +1542,23 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///        never rests as GTC; an already-past deadline is not a hard error — the queued-deadline
     ///        recheck in `_doPlaceHead` drops it with `onSellClosed`.
     function placeSellOffer(uint128 pricePerTick, uint128 maxTicks, uint8 flags, uint256 sellerPubkey, uint64 nonce, address ownerNote, uint64 deadline) public {
-        ensureBalance();
-        // Auth BEFORE accept: a non-canonical sender is rejected without charging the
-        // contract. A real TC always passes this, so a genuine offer never reverts here.
-        require(msg.sender == _tokenContractAddr(sellerPubkey, nonce), ERR_BAD_TOKEN_CONTRACT);
+        // ACCEPT FIRST, and only in the two entries the deal calls. Everything before
+        // `tvm.accept()` is charged to the INCOMING message, so whatever ran ahead of it set the
+        // floor on what a caller had to attach. Measured rather than assumed, and the answer was
+        // not the one expected: `ensureBalance()` costs more than deriving an address, and below
+        // the floor a call did not fail its guard — it ran out of gas before reaching one.
+        //
+        // THIS ALSO PUTS ACCEPT ABOVE THE SENDER GUARD, which is a change and not a saving:
+        // an unauthorised call used to be turned away before `accept` and cost this contract
+        // nothing. It now pays the compute for any message that arrives, including one it is
+        // about to reject.
         tvm.accept();
+        ensureBalance();
+        // Auth. This used to sit above `accept` and the comment here used to say so — that a
+        // non-canonical sender was turned away without charging the contract. That is no longer
+        // true and the sentence had to go with the line: the guard is unchanged, but it now runs
+        // on this contract's gas. A real TC always passes it, so a genuine offer never reverts.
+        require(msg.sender == _tokenContractAddr(sellerPubkey, nonce), ERR_BAD_TOKEN_CONTRACT);
         // Param / capacity checks AFTER accept: the TC latched `_offerPosted` optimistically
         // and forwarded bounce:false. On ANY non-resting outcome, notify the TC (onSellClosed
         // frees the latch) and return rather than revert, so the TC stays usable (re-list /
@@ -1714,9 +1728,14 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         bind), so no other account can inject reference-price volume. The TC forwards
     ///         bounce:false, so a stale/foreign caller is accept-then-noop, never a revert.
     function reportFinalized(uint256 sellerPubkey, uint64 nonce, uint128 pricePerTick, uint128 cumulativeFinalized) public {
+        // ACCEPT FIRST, and only in the two entries the deal calls. Everything before
+        // `tvm.accept()` is charged to the INCOMING message, so whatever ran ahead of it set the
+        // floor on what a caller had to attach. Measured rather than assumed, and the answer was
+        // not the one expected: `ensureBalance()` costs more than deriving an address, and below
+        // the floor a call did not fail its guard — it ran out of gas before reaching one.
+        tvm.accept();
         ensureBalance();
         if (msg.sender != _tokenContractAddr(sellerPubkey, nonce)) { return; }
-        tvm.accept();
         uint128 seen = _finalizedSeen[msg.sender];
         if (cumulativeFinalized <= seen) { return; }          // monotonic: never below the high-water mark
         _finalizedSeen[msg.sender] = cumulativeFinalized;

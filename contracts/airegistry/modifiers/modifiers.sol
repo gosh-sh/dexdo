@@ -79,6 +79,14 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant SellerBondFundedEmit        = 727;
     uint128 constant ProbeAcceptedEmit           = 728;
     uint128 constant ProbeBurnedEmit             = 729;
+    /// @notice External event id for `TokenContract.TicksClaimed`.
+    /// @dev    It used to share `TickFinalizedEmit` (722) with `TickFinalized`, and this is the
+    ///         quietest of the three collisions: both bodies are `(uint128, uint128)`, so a
+    ///         positional decode SUCCEEDS and hands back two plausible numbers that mean different
+    ///         things — `TicksClaimed(trusted, claimed)` counts ticks, `TickFinalized(finalizedOwed,
+    ///         deposit)` counts money. The other two collisions break loudly; this one only ever
+    ///         produced a wrong figure in somebody's report.
+    uint128 constant TicksClaimedEmit            = 730;
     // InferenceOrderBook (spec §2 + §8) — dedicated 1000+ range (separate from registry/streaming/oracle 700s)
     uint128 constant OfferPlacedEmit             = 1000;
     uint128 constant OfferCancelledEmit          = 1001;
@@ -93,6 +101,12 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     uint128 constant InferenceOBDeployedEmit     = 1008;
     uint128 constant OfferCancelRejectedEmit     = 1009;
     uint128 constant OrderExpiredEmit            = 1010;
+    /// @notice External event id for `InferenceOrderBook.InferenceOrderRejected`.
+    /// @dev    It shared `OfferCancelRejectedEmit` (1009) with `InferenceOrderCancelRejected`.
+    ///         Two refusals, but of different things and with different bodies —
+    ///         `(uint8, address, address, uint128)` against `(uint128, uint8, address)`. 1009 stays
+    ///         with the cancel rejection, whose name it matches; the placement rejection gets 1011.
+    uint128 constant OrderRejectedEmit           = 1011;
 
     modifier accept() {
         tvm.accept();

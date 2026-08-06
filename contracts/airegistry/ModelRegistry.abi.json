@@ -93,6 +93,15 @@
 				{"name":"codeHash","type":"uint256"},
 				{"name":"codeDepth","type":"uint16"}
 			]
+		},
+		{
+			"name": "getVersion",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"string"},
+				{"name":"value1","type":"string"}
+			]
 		}
 	],
 	"events": [

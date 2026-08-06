@@ -29,7 +29,7 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.33";
+    string constant version = "4.0.34";
 
     /// @notice Max lifetime (seconds) of a resting SELL offer (spec §2.1.1). A SELL commits NO
     ///         collateral at offer time (the seller bond is funded only after a match), so an ask
@@ -730,7 +730,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         uint128 credit = refunded < committed ? refunded : committed;
         if (credit > 0) { _balance[CURRENCIES_ID_SHELL] += credit; }
         delete _pendingInf[clientOrderId];
-        emit InferenceOrderRejectedMirror{dest: address.makeAddrExtern(PRIVATENOTE_INFERENCE_REMOVED, bitCntAddress)}(
+        emit InferenceOrderRejectedMirror{dest: address.makeAddrExtern(PRIVATENOTE_INFERENCE_REJECTED, bitCntAddress)}(
             msg.sender, clientOrderId, reason, credit);
     }
 
@@ -961,13 +961,6 @@ contract PrivateNote is Modifiers, ReplayProtection {
         IInferenceDeal(tokenContract).cleanupUnopened{value: 1 vmshell, flag: 1, bounce: true}();
     }
 
-    /// @notice Deterministic RootModel address for `ownerPubkey` from the RootPN-baked code hash/depth
-    ///         + the canonical SuperRoot. Delegates to DexLib so the note and RootPN derive identically.
-    function _rootModelAddr(uint256 ownerPubkey) private view returns (address) {
-        return DexLib.computeRootModelAddressFromHash(
-            _rootModelCodeHash, _rootModelCodeDepth, address.makeAddrStd(0, SUPER_ROOT_ADDR), ownerPubkey);
-    }
-
     /// @notice Deterministic per-deal TokenContract address from the RootPN-baked code hash/depth + the
     ///         seller's statics (sellerPubkey, real RootModel, nonce). Single source of truth in DexLib
     ///         (shared with the IOB's placeSellOffer check) — the ONLY address the note-funded helpers ever pay.
@@ -1133,15 +1126,24 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///         `fund_deploy_address`): flag 16 carries the ECC[2] to an UNINIT cross-dapp address so the
     ///         seller-signed deploy then lands + activates (flag 1 funds the balance but the cross-dapp
     ///         deploy would not activate). `bounce:false` is REQUIRED (uninit target). amount 0 = skip.
-    function fundDeployShell(uint64 nonce, uint128 rootModelShell, uint128 tcShell)
+    /// @dev    ONE LEG NOW, NOT TWO. The `rootModelShell` leg is gone with the reason it existed:
+    ///         a RootModel used to be deployed by its owner as an external message, so somebody had
+    ///         to put native gas at that address first, and the note was the somebody. The super
+    ///         root deploys it now, with an internal `new`, and an internal deploy carries its own
+    ///         value — there is nothing left to pre-fund.
+    ///
+    ///         That change also revived dead code. Deployed externally, a RootModel landed in a dapp
+    ///         of its own with no configuration, and `gosh.mintshellq` draws on a dapp's
+    ///         configuration — so `RootModel.ensureBalance()` could never do anything, exactly as
+    ///         written out for `TokenContract`. Deployed by the super root it lands in the super
+    ///         root's dapp, and the same untouched line starts working.
+    ///
+    ///         `_rootModelAddr` went with it — deriving that address was the only thing this note
+    ///         ever needed it for.
+    function fundDeployShell(uint64 nonce, uint128 tcShell)
         public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
     {
         ensureBalance();
-        if (rootModelShell > 0) {
-            mapping(uint32 => varuint32) rmEcc;
-            rmEcc[CURRENCIES_ID_SHELL] = varuint32(rootModelShell);
-            _rootModelAddr(_ephemeralPubkey).transfer({value: 1 vmshell, bounce: false, flag: 16, currencies: rmEcc});
-        }
         if (tcShell > 0) {
             mapping(uint32 => varuint32) tcEcc;
             tcEcc[CURRENCIES_ID_SHELL] = varuint32(tcShell);

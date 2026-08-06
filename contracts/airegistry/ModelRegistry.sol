@@ -24,7 +24,7 @@ import "./InferenceOrderBook.sol";
 contract ModelRegistry {
 
     /// @notice Contract semantic version (kept in lockstep with the airegistry stack).
-    string constant version = "4.0.33";
+    string constant version = "4.0.34";
 
     // ── pinned InferenceOrderBook code (cascade-updated on version bump) ──
     /// @dev InferenceOrderBook code hash + depth, cascade-updated with every rebuild. NO
@@ -33,7 +33,7 @@ contract ModelRegistry {
     ///      rewrite prose. A version in a comment beside a generated constant is a second copy
     ///      of a fact that has one owner, and it goes stale the first time the owner moves.
     ///      The book's only static is the model hash, so one model ⇒ one book.
-    uint256 constant IOB_CODE_HASH  = 0xde57553b07069dfb78661359b7b652c7a34831c97244e331ade51fa4cf9ce176;
+    uint256 constant IOB_CODE_HASH  = 0x71465c8b500d0f5627373c1dde3add7a314a548e0bc8bc17c20f13e5c795f923;
     uint16  constant IOB_CODE_DEPTH = 31;
 
     /// @notice Self-top-up floor (mirrors the airegistry stack).
@@ -230,5 +230,13 @@ contract ModelRegistry {
     /// @notice The pinned book code hash + depth used for derivation.
     function inferenceOrderBookCode() external pure returns (uint256 codeHash, uint16 codeDepth) {
         return (IOB_CODE_HASH, IOB_CODE_DEPTH);
+    }
+
+    /// @notice Contract version, in the same shape the four sibling contracts expose it.
+    /// @dev    This registry was the only one of the five airegistry contracts without it: the
+    ///         `version` constant was declared and read by nothing, so the registry's version was
+    ///         the one thing in the stack that could not be checked against a running chain.
+    function getVersion() external pure returns (string, string) {
+        return (version, "ModelRegistry");
     }
 }

@@ -48,6 +48,14 @@ abstract contract Modifiers is Errors {
     uint128 constant PRIVATENOTE_INFERENCE_PLACED = 1100;
     /// @notice External event id for `PrivateNote.InferenceFilledConfirmed` (owner-facing mirror carrying the deal TC).
     uint128 constant PRIVATENOTE_INFERENCE_FILLED = 1101;
+    /// @notice External event id for `PrivateNote.InferenceOrderRejectedMirror` (owner-facing mirror of a refusal).
+    /// @dev    It had none. When the rejection mirror was added (task Q) the `emit` line was copied
+    ///         from `InferenceOrderRemoved` and brought that event's destination with it, so two
+    ///         different events left on 165. A consumer filtering by `dst` then received both, and
+    ///         the two bodies do not even have the same shape — `(address, uint128)` against
+    ///         `(address, uint64, uint8, uint128)` — so reading one as the other yields rubbish.
+    ///         1102 continues 1100/1101; the inference family sits in the 1100s deliberately.
+    uint128 constant PRIVATENOTE_INFERENCE_REJECTED = 1102;
     /// @notice External event id for `PrivateNote.ClaimAccepted`.
     uint128 constant PRIVATENOTE_CLAIM_ACCEPTED = 114;
     /// @notice External event id for `PrivateNote.StakeCancelled`.

@@ -13,7 +13,7 @@ import "../airegistry/TokenContract.sol";
 contract RootPN is Modifiers {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.33";
+    string constant version = "4.0.34";
 
     // RootModel/TokenContract code hashes. Baked into every PrivateNote at deploy
     // (`deployPrivateNote`) so the note derives the canonical RootModel / deal TC
@@ -21,9 +21,9 @@ contract RootPN is Modifiers {
     // note pairs these with is its own constant — RootPN never derives an address
     // itself. RootPN is not pinned by anyone, so pinning these here is cycle-free
     // (cascade-updated together with the note's baked copies).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0x2ce1a6cc403318144727ed7a9bce7551083622598b80afeee86e00c67f5ebedd;
-    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 18;
-    uint256 constant ROOT_MODEL_CODE_HASH      = 0xae9dbb9ef7ae2a56f68e2ea87d812567d98dd81b2ecfc00cf5ec8af1f64ef797;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xea588cae509818b5e4f157387280f675f739e25f818a80fc459dae5d0cb84272;
+    uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 17;
+    uint256 constant ROOT_MODEL_CODE_HASH      = 0x92616db7c229a336456c96edbc783705e0e03fe5f811f3615060d67199e7a3cc;
     uint16  constant ROOT_MODEL_CODE_DEPTH     = 8;
 
     /// @notice Stored code of PrivateNote contract
@@ -757,10 +757,24 @@ contract RootPN is Modifiers {
     ///         Losing this message degrades SAFELY: no report, no accounting, and the pool stays
     ///         over-collateralised — which is precisely today's state. That is why it is a plain
     ///         one-way call and not something that retries.
+    /// @dev    ACCEPT BEFORE THE GUARD, and the order of these two lines is the whole point.
+    ///         Modifiers run in the order written, so a guard above `accept` is charged to the
+    ///         INCOMING message — and this guard is not a comparison, it is `_canonicalDeal`, a
+    ///         full address derivation. That is why this entry's floor was measured at 10 000 000
+    ///         while the deal sends exactly 10 000 000: no margin at all, and one byte of extra
+    ///         work ahead of `accept` would have turned the call into `-14` rather than into a
+    ///         refusal with a code. Nothing would have reported it: the deal sends this one-way,
+    ///         `bounce: false`, and a lost write-off leaves the root's books permanently off.
+    ///
+    ///         The cost of the swap is that the root now runs the derivation on its own gas for
+    ///         any message that arrives, including one it will reject. That is affordable here and
+    ///         not elsewhere: this root mints its own gas (`ensureBalance` -> `gosh.mintshellq`,
+    ///         :180) because it lives in a configured dapp. A deal cannot — its dapp is its own and
+    ///         has no configuration, which is why `TokenContract` carries no such call.
     function reportDealWriteOff(uint256 sellerPubkey, uint64 nonce, uint128 amount)
         public
-        senderIs(_canonicalDeal(sellerPubkey, nonce))
         accept
+        senderIs(_canonicalDeal(sellerPubkey, nonce))
     {
         ensureBalance();
         _writtenOff[CURRENCIES_ID_SHELL] += amount;
@@ -788,10 +802,21 @@ contract RootPN is Modifiers {
     /// @param oracleListHash Oracle set hash the book was bound to.
     /// @param tokenType Token type of the collected fee.
     /// @param amount Amount collected.
+    /// @dev    ACCEPT BEFORE THE GUARD, for the same reason as `reportDealWriteOff` above and with
+    ///         a heavier guard: this one derives the book's address from THREE code cells — the
+    ///         note's, the PMP's and the book's own — plus the event id, the oracle-set hash and
+    ///         the token type. Above `accept` all of that was billed to the caller.
+    ///
+    ///         Unlike the write-off, this entry was never close to its floor: `OrderBook` sends
+    ///         `0.1 vmshell` here (`OrderBook.sol:1502`), ten times what a deal attaches anywhere.
+    ///         So the swap buys headroom that was not in danger — worth doing because the failure
+    ///         it guards against is the same silent one. The book calls this once, on its way to
+    ///         shutting down; a call that ran out of gas would take the protocol fee with it and
+    ///         say nothing.
     function collectProtocolFee(uint256 eventId, uint256 oracleListHash, uint32 tokenType, uint128 amount)
         public
-        senderIs(DexLib.computeOrderBookAddressFromPmpCode(_privateNoteCode, _pmpCode, _orderBookCode, eventId, oracleListHash, tokenType))
         accept
+        senderIs(DexLib.computeOrderBookAddressFromPmpCode(_privateNoteCode, _pmpCode, _orderBookCode, eventId, oracleListHash, tokenType))
     {
         ensureBalance();
         _protocolFees[tokenType] += amount;

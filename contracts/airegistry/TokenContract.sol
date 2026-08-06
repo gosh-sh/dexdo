@@ -65,7 +65,7 @@ import "./InferenceOrderBook.sol";
 ///                             `releaseDispute()` / `resolveDisputeTimeout()`.
 ///         5. `withdrawShell`/`destroy` — seller pulls finalized SHELL (§3.5).
 contract TokenContract is AiRegistryModifiers {
-    string constant version = "4.0.33";
+    string constant version = "4.0.34";
 
     // `SUPER_ROOT_ADDR` used to live here. Its ONLY use was as the fixed sink for
     // `cleanupUnopened`'s residual-native sweep — a permissionless call, so the leftover gas went to
@@ -83,7 +83,7 @@ contract TokenContract is AiRegistryModifiers {
     // book hash is authoritative — the TC needs no RootPN round-trip. The note does
     // NOT pin the TC code (RootPN bakes it into the note at deploy), so this pin is
     // one-way (TC->note) and the build stays cycle-free. Re-pin when PrivateNote is rebuilt.
-    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0x8d10cd0ee194f82ceaae61477a0340fe77841c502b66c6471983d54a3b2da95b;
+    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0x751ef2d873275b6ae8eedcf78a00e9e4641237926080d559e4f66c7e2c8ac059;
     uint16  constant PRIVATE_NOTE_CODE_DEPTH = 20;
 
     // Native value attached to THIS contract's cross-dapp messages (register / stream-lock /
@@ -301,6 +301,21 @@ contract TokenContract is AiRegistryModifiers {
         _pricePerTick = pricePerTick;
         _maxTicks     = maxTicks;
         _sellerNote   = sellerNote;
+        // AN ADDRESS FIELD THAT IS ONLY EVER READ MUST STILL BE WRITTEN ONCE (#941). A declared and
+        // unassigned `address` is `addr_none`, and `addr_none` is not `address(0)`: the first has a
+        // one-element representation, the second is `addr_std(0, 0)` with four. `.value` compiles to
+        // PARSEMSGADDR and then takes the FOURTH element, so reading `.value` on an untouched field
+        // is an out-of-range access — `exit_code 5`, not a false, and no `require` in sight.
+        //
+        // `_buyer` is written in exactly one place, `_recordFunding`, so it holds a real address
+        // only once a deal has been funded. Every close ends in `_die`, and `_die` opens with
+        // `if (_buyer.value != 0)`. A deal nobody ever bought therefore could not be closed by any
+        // path at all — the seller's bond stayed inside a contract that refused to die.
+        //
+        // This assignment is the whole fix: it makes the field `addr_std(0, 0)`, whose `.value` is a
+        // readable zero, so the guard answers false and the close proceeds. `_sellerNote` never had
+        // the problem because the constructor above always sets it.
+        _buyer        = address(0);
 
 
         address selfExtern = address.makeAddrExtern(ContractDeployedEmit, bitCntAddress);
@@ -555,7 +570,12 @@ contract TokenContract is AiRegistryModifiers {
         // volume to report and a book to report it to.
         if (_ticksFinalized == 0 || _iobHash == 0) { return; }
         address orderBook = DexLib.computeInferenceOrderBookAddressFromHash(_iobHash, _iobDepth, _modelHash);
-        InferenceOrderBook(orderBook).reportFinalized{value: 1 vmshell, flag: 1, bounce: false}(
+        // 0.01, LIKE EVERY OTHER OUTGOING CALL THIS CONTRACT MAKES. The 1 vmshell that stood here was
+        // a hundred times the rest of them together and nothing derived it. Measured floors, on a
+        // local chain: this entry ran out of gas below 0.02 while the book still did its own
+        // `ensureBalance()` before accepting. Moving that accept ahead is what makes 0.01 enough,
+        // so the two changes belong together — this figure alone would break the call.
+        InferenceOrderBook(orderBook).reportFinalized{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(
             _sellerPubkey, _nonce, _pricePerTick, _ticksFinalized);
     }
 
@@ -713,7 +733,9 @@ contract TokenContract is AiRegistryModifiers {
         if (_offerPosted || _funded) { return; }  // already resting / one-shot funded → no re-post
         _offerPosted = true;
         address orderBook = DexLib.computeInferenceOrderBookAddressFromHash(_iobHash, _iobDepth, _modelHash);
-        InferenceOrderBook(orderBook).placeSellOffer{value: 1 vmshell, flag: 1, bounce: false}(
+        // 0.01. This one measured a floor of 0.01 even before the book's accept moved, so the margin
+        // here comes from the change rather than from the figure.
+        InferenceOrderBook(orderBook).placeSellOffer{value: DAPP_MSG_VALUE, flag: 1, bounce: false}(
             _pricePerTick, _maxTicks, flags, _sellerPubkey, _nonce, _sellerNote, deadline);
     }
 
@@ -1040,7 +1062,7 @@ contract TokenContract is AiRegistryModifiers {
         _prevClaimTime = _lastClaimTime;
         _tokensPend2   = cumulativeTokens;
         _lastClaimTime = uint64(block.timestamp);
-        emit TicksClaimed{dest: address.makeAddrExtern(TickFinalizedEmit, bitCntAddress)}(_tokensFinal, _tokensPend2);
+        emit TicksClaimed{dest: address.makeAddrExtern(TicksClaimedEmit, bitCntAddress)}(_tokensFinal, _tokensPend2);
     }
 
     /// @notice Advance the claim pipeline by one step. The older pending claim becomes final —

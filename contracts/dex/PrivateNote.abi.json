@@ -220,7 +220,6 @@
 			"name": "fundDeployShell",
 			"inputs": [
 				{"name":"nonce","type":"uint64"},
-				{"name":"rootModelShell","type":"uint128"},
 				{"name":"tcShell","type":"uint128"}
 			],
 			"outputs": [

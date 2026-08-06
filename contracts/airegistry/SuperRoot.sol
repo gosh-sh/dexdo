@@ -20,7 +20,7 @@ import "./RootModel.sol";
 ///         via their `_superRootAddress` static, which is mixed into the
 ///         derivation here.
 contract SuperRoot is AiRegistryModifiers {
-    string constant version = "4.0.33";
+    string constant version = "4.0.34";
 
     /// @notice Canonical code hash of the child RootModel. The constructor
     ///         rejects any caller-supplied code whose `tvm.hash` does not
@@ -33,7 +33,29 @@ contract SuperRoot is AiRegistryModifiers {
     ///         the value returned by `tvm.decodeStateInit(tvc).code` then
     ///         `tvm.hash`. It is the same as the `code_hash` field
     ///         printed by `tvm-cli decode stateinit --tvc <file>`.
-    uint256 constant ROOT_MODEL_CODE_HASH = 0xae9dbb9ef7ae2a56f68e2ea87d812567d98dd81b2ecfc00cf5ec8af1f64ef797;
+    uint256 constant ROOT_MODEL_CODE_HASH = 0x92616db7c229a336456c96edbc783705e0e03fe5f811f3615060d67199e7a3cc;
+
+    /// @notice Native value carried by the deploy message that creates a RootModel.
+    /// @dev    A STARTING FIGURE, NOT A MEASUREMENT — and it is marked as such until a run
+    ///         says otherwise. The child accepts on its constructor's first line, so most of
+    ///         what it does is billed to itself; what this has to cover is delivery and the
+    ///         part before that accept.
+    ///
+    ///         5 vmshell, and generous on purpose: BOTH ends of this message mint their own gas.
+    ///         This contract does, and the child does too now that an internal `new` puts it in
+    ///         this contract's configured dapp — under the old external deploy it landed in a
+    ///         dapp with no configuration and its `ensureBalance` was dead code. So the figure
+    ///         is not rationing anything scarce.
+    ///
+    ///         A REPEATED call credits this amount to whoever already occupies the address —
+    ///         measured, not assumed, and recorded in `test_superroot_deploys_root`. That was
+    ///         once treated as a leak worth a `mapping(uint256 => bool)` guard, and the guard
+    ///         was removed again on the arithmetic: both ends of this message mint their own
+    ///         gas from their dapp's configuration, so a repeat makes one free-gas contract
+    ///         print for another and nothing is lost. The map's cost was not free — a record
+    ///         per model owner, forever, in a contract at a fixed address, plus a migration
+    ///         through `resetStorage` that would silently drop it and reopen the entry anyway.
+    varuint16 constant ROOT_MODEL_DEPLOY_VALUE = 5 vmshell;
 
     event RootRegistered(address rootAddress);
 
@@ -130,14 +152,61 @@ contract SuperRoot is AiRegistryModifiers {
     // Registration entry points (called by child contracts)
     // ========================================================
 
-    function registerRoot(uint256 ownerPubkey) public view {
-        ensureBalance();
-        address expected = _calculateRootModelAddress(ownerPubkey);
-        require(msg.sender == expected, ERR_INVALID_SENDER);
+    /// @notice Deploy the RootModel for `ownerPubkey`. Anyone may call this.
+    /// @dev    WHY THE SUPER ROOT DEPLOYS IT, AND WHY THAT FIXES MORE THAN IT LOOKS. A RootModel
+    ///         used to be deployed by its owner as an external signed message, which put it in a
+    ///         dapp of its own with no configuration. `gosh.mintshellq` draws on a dapp's
+    ///         configuration, so `RootModel.ensureBalance()` was dead code from the day it was
+    ///         written — the same trap already written out at length in `TokenContract.sol`. An
+    ///         internal `new` from here puts the root in THIS contract's dapp, which is configured,
+    ///         and the identical untouched line starts working.
+    ///
+    ///         OPEN ON PURPOSE. The address is derived from `ownerPubkey` alone, so a caller cannot
+    ///         aim the deploy anywhere except that key's canonical address, and cannot choose what
+    ///         is deployed there — the code comes from `_rootModelCode`, pinned and re-checked on
+    ///         every upgrade. There is nothing to gate: the worst a stranger can do is pay to bring
+    ///         somebody's root into existence at the address it was always going to have.
+    ///
+    ///         CALLING IT TWICE IS A NO-OP, and that matters more than the first call. An open
+    ///         entry will be called again — by a retry, a race, or somebody idly poking it. A
+    ///         `new` at an address that already holds an active account does not overwrite it and
+    ///         does not revert this transaction; the deploy message simply fails to instantiate at
+    ///         the far end. `bounce: false` so that failure does not come back as a bounce this
+    ///         contract would have to handle. The `RootModelDeployed` event therefore reports an
+    ///         ATTEMPT at an address, not proof of a fresh contract — the chain is what says which.
+    /// @dev    NOTHING COMES FROM THE CALLER EXCEPT A PUBLIC KEY, and that is what makes an open
+    ///         entry safe here rather than a matter of trust. Two earlier shapes of this took a
+    ///         `TvmCell tokenContractCode`: first from the caller — which let anyone burn this
+    ///         contract's value on a cell the CHILD would reject, after the `bounce: false`
+    ///         message had already gone — then from storage behind an owner-only setter. Both
+    ///         were answering a question that does not exist: `RootModel` validates that cell
+    ///         against its own pinned hash and then THROWS IT AWAY. It derives deal addresses
+    ///         from the pin, never from the cell. The check only ever proved the deployer held
+    ///         a correct copy, which mattered while a human deployed it and means nothing now.
+    /// @dev    `view` although it deploys: `new` writes nothing in THIS contract's storage, it
+    ///         emits a message, and the compiler classifies it accordingly. The function it
+    ///         replaces, `registerRoot`, carried the same modifier for the same reason.
+    function deployRootModel(uint256 ownerPubkey) public view {
         tvm.accept();
+        ensureBalance();
+        address target = _calculateRootModelAddress(ownerPubkey);
+        new RootModel{
+            stateInit: abi.encodeStateInit({
+                code: _rootModelCode,
+                contr: RootModel,
+                pubkey: ownerPubkey,
+                varInit: {
+                    _ownerPubkey: ownerPubkey,
+                    _superRootAddress: address(this)
+                }
+            }),
+            value: ROOT_MODEL_DEPLOY_VALUE,
+            flag: 1,
+            bounce: false
+        }();
 
         address regExtern = address.makeAddrExtern(RootRegisteredEmit, bitCntAddress);
-        emit RootRegistered{dest: regExtern}(expected);
+        emit RootRegistered{dest: regExtern}(target);
     }
 
     // ========================================================
