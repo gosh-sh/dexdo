@@ -74,20 +74,20 @@ pub async fn make_voucher_proof(
     //    submit with `ERR_INVALID_ZKPROOF (137)` because the proof was built
     //    against that other voucher's commitment.
     //
-    //    A non-SHELL nominal must arrive with its own SHELL gas leg or
-    //    `generateVoucher` reverts before emitting anything, and the wait below
+    //    The ECC shape is the contract's rule, not this harness's, so it comes
+    //    from the same helper the production flows use. Get it wrong and
+    //    `generateVoucher` reverts before emitting anything — the wait below
     //    then burns its whole timeout against a chain busy emitting other
-    //    people's vouchers. Built by the same helper the production flows use —
-    //    the shape is the contract's rule, not this harness's.
+    //    people's vouchers.
     let t_send = std::time::Instant::now();
-    let ecc = voucher_ecc::generate_voucher_ecc(voucher_token_type, voucher_value);
+    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee);
     let giver = GiverV3::new_default(context.clone());
     giver
         .send_currency_with_body(
             ParamsOfSendCurrencyWithBody {
                 dest: root_pn.address().to_string(),
                 value: 2_000_000_000,
-                ecc,
+                ecc: plan.ecc,
                 flag: 1,
                 body: voucher_body.body,
             },
@@ -125,7 +125,8 @@ pub async fn make_voucher_proof(
         event,
         sk_u_hex,
         sk_u_commit_hex,
-        voucher_value,
+        // The nominal the contract emitted, which is not always the sum sent.
+        plan.nominal,
         voucher_token_type,
         ephemeral_pubkey_hex,
         None,

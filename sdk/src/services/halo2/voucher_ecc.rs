@@ -47,30 +47,53 @@ pub const CURRENCIES_ID_SHELL: u32 = 2;
 /// crosses and converts.
 pub const GAS_DEPOSIT: u64 = 250_000_000_000;
 
-/// The ECC map for a `generateVoucher` carrying `voucher_value` of
+/// What to send for a voucher, and what the contract will emit for it.
+pub struct VoucherSend {
+    /// The ECC map to attach to the `generateVoucher` message.
+    pub ecc: HashMap<u32, u64>,
+    /// The nominal `VoucherGenerated` will carry.
+    ///
+    /// This — not the sum sent — is what a caller passes onward as `value`:
+    /// `RootPN.deployPrivateNote` binds the two with
+    /// `require(_u64ToFr(value) == voucherNominalFr)`, and the proof commits to
+    /// the figure in the event.
+    pub nominal: u64,
+}
+
+/// Plan a `generateVoucher` for a note that should end up holding `nominal` of
 /// `voucher_token_type`.
 ///
-/// A non-SHELL nominal gets the mandatory SHELL gas leg beside it. A SHELL
-/// nominal is already the one currency the contract accepts alone, and cannot
-/// take a second leg of the same currency, so it is returned as-is.
+/// `nominal` is what the NOTE receives, not what the wallet pays. The gas is
+/// charged on top in every deposit shape, so the wallet always spends
+/// `nominal + GAS_DEPOSIT` on a deposit and `nominal` on a gas voucher —
+/// regardless of currency. Which of the contract's shapes carries that is a
+/// detail of how the two amounts can be expressed in one currency map:
 ///
-/// ## What the contract will emit as the nominal
+/// - a non-SHELL nominal cannot share a map key with its gas, so the gas rides
+///   as a second leg and the contract deducts nothing;
+/// - a SHELL nominal has nowhere else to put the gas — one currency, one key —
+///   so it is added to the single leg and the contract subtracts it back out;
+/// - a gas voucher (`is_fee`) IS the gas, and charging gas for buying gas would
+///   be circular, so nothing is added and nothing is deducted.
 ///
-/// Two legs: the full `voucher_value`. One leg with `isFee`: the full
-/// `voucher_value`. One leg without `isFee`: `voucher_value - GAS_DEPOSIT`, the
-/// only shape where the two differ — and `RootPN.deployPrivateNote` binds the
-/// `value` a caller passes to the nominal committed in the proof
-/// (`require(_u64ToFr(value) == voucherNominalFr)`), so a caller taking that
-/// path must send `voucher_value` and then claim the reduced figure. No caller
-/// does: every deposit in this repo is non-SHELL, and every SHELL voucher is a
-/// gas voucher with `isFee`.
-pub fn generate_voucher_ecc(voucher_token_type: u32, voucher_value: u64) -> HashMap<u32, u64> {
+/// The `nominal` returned is equal to the argument in all three. That equality
+/// is the point: it is what lets a caller pass one figure to
+/// `deployPrivateNote` without knowing which shape was used.
+pub fn plan_voucher(voucher_token_type: u32, nominal: u64, is_fee: bool) -> VoucherSend {
     let mut ecc = HashMap::new();
-    ecc.insert(voucher_token_type, voucher_value);
     if voucher_token_type != CURRENCIES_ID_SHELL {
+        ecc.insert(voucher_token_type, nominal);
         ecc.insert(CURRENCIES_ID_SHELL, GAS_DEPOSIT);
+    } else if is_fee {
+        ecc.insert(CURRENCIES_ID_SHELL, nominal);
+    } else {
+        // `require(voucherNominal >= GAS_DEPOSIT)` then `voucherNominal -=
+        // GAS_DEPOSIT`. Sending the bare nominal would deploy a note short by
+        // 250 SHELL and, because the reduced figure is not an allowed nominal,
+        // would be refused before it got that far.
+        ecc.insert(CURRENCIES_ID_SHELL, nominal.saturating_add(GAS_DEPOSIT));
     }
-    ecc
+    VoucherSend { ecc, nominal }
 }
 
 #[cfg(test)]
@@ -80,43 +103,80 @@ mod tests {
     const NACKL: u32 = 1;
     const USDC: u32 = 3;
 
+    const N10000: u64 = 10_000_000_000_000;
+
     #[test]
     fn a_non_shell_nominal_brings_its_own_gas_leg() {
-        let ecc = generate_voucher_ecc(NACKL, 10_000_000_000_000);
-        assert_eq!(ecc.len(), 2, "a NACKL deposit alone is ERR_BAD_GAS_MIX: {ecc:?}");
-        assert_eq!(ecc.get(&NACKL), Some(&10_000_000_000_000), "the nominal arrives in full");
+        let plan = plan_voucher(NACKL, N10000, false);
+        assert_eq!(plan.ecc.len(), 2, "a NACKL deposit alone is ERR_BAD_GAS_MIX: {:?}", plan.ecc);
+        assert_eq!(plan.ecc.get(&NACKL), Some(&N10000), "the nominal arrives in full");
         assert_eq!(
-            ecc.get(&CURRENCIES_ID_SHELL),
+            plan.ecc.get(&CURRENCIES_ID_SHELL),
             Some(&GAS_DEPOSIT),
             "the SHELL leg is an equality in the contract, so it is neither padded nor trimmed"
         );
+        assert_eq!(plan.nominal, N10000, "two legs: the contract deducts nothing");
     }
 
     #[test]
     fn every_non_shell_currency_gets_the_leg_not_just_nackl() {
         // The rule is "not SHELL", not "is NACKL" — USDC deposits take the same
         // path and would fail the same way.
-        let ecc = generate_voucher_ecc(USDC, 5_000_000);
-        assert_eq!(ecc.get(&USDC), Some(&5_000_000));
-        assert_eq!(ecc.get(&CURRENCIES_ID_SHELL), Some(&GAS_DEPOSIT));
+        let plan = plan_voucher(USDC, 5_000_000, false);
+        assert_eq!(plan.ecc.get(&USDC), Some(&5_000_000));
+        assert_eq!(plan.ecc.get(&CURRENCIES_ID_SHELL), Some(&GAS_DEPOSIT));
+        assert_eq!(plan.nominal, 5_000_000);
     }
 
     #[test]
-    fn a_shell_nominal_stays_a_single_leg() {
-        // Two legs of one currency cannot exist in the map, and SHELL alone is
-        // a shape the contract accepts. This is the gas-voucher path.
-        let ecc = generate_voucher_ecc(CURRENCIES_ID_SHELL, 300_000_000_000);
-        assert_eq!(ecc.len(), 1, "a second SHELL leg is not expressible: {ecc:?}");
-        assert_eq!(ecc.get(&CURRENCIES_ID_SHELL), Some(&300_000_000_000));
+    fn a_shell_deposit_pays_its_gas_inside_the_single_leg() {
+        // One currency, one map key: the gas cannot ride beside it, so it is
+        // added on and the contract takes it back out. Sending the bare nominal
+        // is the bug this shape exists to prevent — the note would come up 250
+        // SHELL short, and the reduced figure is not an allowed nominal.
+        let plan = plan_voucher(CURRENCIES_ID_SHELL, N10000, false);
+        assert_eq!(plan.ecc.len(), 1, "a second SHELL leg is not expressible: {:?}", plan.ecc);
+        assert_eq!(plan.ecc.get(&CURRENCIES_ID_SHELL), Some(&(N10000 + GAS_DEPOSIT)));
+        assert_eq!(plan.nominal, N10000, "what the note receives, after the contract's deduction");
     }
 
     #[test]
-    fn the_gas_leg_never_overwrites_the_nominal() {
-        // Guards the ordering inside the builder: inserting the gas leg after
-        // the nominal must not clobber it when a future caller passes a SHELL
-        // nominal through the non-SHELL branch by mistake.
-        let ecc = generate_voucher_ecc(CURRENCIES_ID_SHELL, GAS_DEPOSIT + 1);
-        assert_eq!(ecc.get(&CURRENCIES_ID_SHELL), Some(&(GAS_DEPOSIT + 1)));
+    fn a_gas_voucher_pays_no_gas() {
+        // Charging gas for buying gas would be circular, so `isFee` neither adds
+        // nor deducts. This is the path every SHELL voucher in the repo takes.
+        let plan = plan_voucher(CURRENCIES_ID_SHELL, 100_000_000_000, true);
+        assert_eq!(plan.ecc.get(&CURRENCIES_ID_SHELL), Some(&100_000_000_000));
+        assert_eq!(plan.nominal, 100_000_000_000);
+    }
+
+    #[test]
+    fn the_note_receives_the_asked_for_nominal_in_every_shape() {
+        // The invariant callers depend on: whatever the shape, the figure handed
+        // to `deployPrivateNote` as `value` is the one that was asked for, and
+        // `require(_u64ToFr(value) == voucherNominalFr)` holds.
+        for (token, is_fee) in [
+            (NACKL, false),
+            (USDC, false),
+            (CURRENCIES_ID_SHELL, false),
+            (CURRENCIES_ID_SHELL, true),
+        ] {
+            assert_eq!(
+                plan_voucher(token, N10000, is_fee).nominal,
+                N10000,
+                "token={token} is_fee={is_fee}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deposit_always_costs_the_nominal_plus_the_gas() {
+        // Same total out of the wallet either way — the currency only decides
+        // which leg carries it. A wallet budgeted for one shape is budgeted for
+        // the other.
+        let nackl: u64 = plan_voucher(NACKL, N10000, false).ecc.values().sum();
+        let shell: u64 = plan_voucher(CURRENCIES_ID_SHELL, N10000, false).ecc.values().sum();
+        assert_eq!(nackl, N10000 + GAS_DEPOSIT);
+        assert_eq!(shell, N10000 + GAS_DEPOSIT);
     }
 
     /// The decimal value of `<ty> <name> = …;` in `src`.

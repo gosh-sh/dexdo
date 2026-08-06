@@ -38,12 +38,12 @@ wallet.generate_voucher(ParamsOfGenerateVoucher {
 Allowed nominals: 100, 1000, 10000 (base × token decimals).
 One PN = one token type. For multi-currency, deploy separate PNs.
 
-Unless `token_type` is SHELL, the wallet must also hold 250 SHELL beyond the
-nominal. Every non-gas deposit pays that as the gas the new PrivateNote runs on,
-and it travels with the deposit as a second ECC leg: `RootPN.generateVoucher`
-rejects a non-SHELL nominal that arrives on its own. The amount is fixed — the
-contract compares it for equality, so sending more fails just as sending less
-does. A wallet funded with only the deposit currency cannot deploy a PN.
+A deposit costs the nominal plus 250 SHELL, whatever `token_type` is. The extra
+250 is the gas the new PrivateNote runs on, and every non-gas deposit pays it.
+Only the way it travels differs: a non-SHELL nominal carries it as a second ECC
+leg, while a SHELL nominal has nowhere else to put it and sends one larger leg
+that the contract then reduces. Either way the PrivateNote comes up holding
+exactly the nominal, and a wallet funded for only the nominal cannot deploy one.
 
 ### Step 2: ZK proof + deploy
 

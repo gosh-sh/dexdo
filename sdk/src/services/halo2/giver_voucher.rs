@@ -78,16 +78,17 @@ pub async fn mint_voucher_via_giver(
     .await;
 
     // 3. Fire the Giver-funded ECC + body message that triggers
-    //    `RootPN.generateVoucher`. A non-SHELL nominal must arrive with its own
-    //    SHELL gas leg or the call reverts before emitting — see `voucher_ecc`.
-    let ecc = voucher_ecc::generate_voucher_ecc(voucher_token_type, voucher_value);
+    //    `RootPN.generateVoucher`. The shape depends on the currency and on
+    //    `is_fee`, and only `voucher_ecc` knows which — including whether the
+    //    contract will deduct the gas from what is sent.
+    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee);
     let giver = GiverV3::new_default(context.clone());
     giver
         .send_currency_with_body(
             ParamsOfSendCurrencyWithBody {
                 dest: root_pn.address().to_string(),
                 value: 2_000_000_000,
-                ecc,
+                ecc: plan.ecc,
                 flag: 1,
                 body: voucher_body.body,
             },
@@ -114,7 +115,8 @@ pub async fn mint_voucher_via_giver(
         event,
         sk_u_hex,
         sk_u_commit_hex,
-        voucher_value,
+        // The nominal the contract emitted, which is not always the sum sent.
+        plan.nominal,
         voucher_token_type,
         recipient_ephemeral_pubkey_hex,
         None,
