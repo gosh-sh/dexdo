@@ -101,6 +101,14 @@ pub const SWEEP_MUST_BE_EMPTY_OR_ZERO: &[&str] = &[
     "_openOrderCount",
     "_openOrdersByEvent",
     "_clientOrderIds",
+    // Inference-side equivalents of the order-book bookkeeping above. All three
+    // are gates on withdrawal — `withdrawTokens` requires each to be `.empty()`
+    // — and the contract `delete`s its keys as orders settle, so anything left
+    // behind means the note still owes work. Their maps hold bools, which
+    // `is_empty_or_zero` never accepts, so a residual key is Dirty on any value.
+    "_restingInf",
+    "_pendingInf",
+    "_liveDeals",
 ];
 
 /// Boolean-typed storage fields that must be exactly `false`. Split out from
@@ -791,7 +799,7 @@ mod tests {
                 assert!(fields.contains(&"_stakes".to_string()));
                 assert!(fields.contains(&"_hasWithdrawn".to_string()));
             }
-            _ => panic!("должен быть Dirty"),
+            _ => panic!("expected Dirty"),
         }
     }
 
@@ -933,7 +941,7 @@ mod tests {
                 assert!(fields.contains(&"_busy".to_string()));
                 assert!(fields.contains(&"_hasWithdrawn".to_string()));
             }
-            _ => panic!("отсутствующее обязательное поле обязано давать Dirty"),
+            _ => panic!("a required field that is absent must read as Dirty"),
         }
     }
 
@@ -948,8 +956,8 @@ mod tests {
     /// passing as clean.
     #[test]
     fn sweep_lists_cover_private_note_abi_fields() {
-        // Closed against the ground-truth ABI on this branch: 48 fields =
-        // 21 must-be-empty-or-zero + 4 must-be-false + 23 allowed. This ABI
+        // Closed against the ground-truth ABI on this branch: 53 fields =
+        // 24 must-be-empty-or-zero + 4 must-be-false + 25 allowed. This ABI
         // has no `_timestamp` field; instead it carries `messages` /
         // `lastMessage` — gosh replay-protection state that mutates during
         // operations but does not block reuse.
@@ -977,12 +985,19 @@ mod tests {
             "_couponsTokenType",
             "_lastHash", // hash of the last external message (replay guard); survives operations
             "_opNonce",  // monotonic count of all operations ever run; nonzero on a reused note
+            // Monotonic like `_opNonce`: `++_nextClientOrderId` on every inference
+            // placement and never reset, so a reused note carries it forward.
+            "_nextClientOrderId",
+            // Timestamp of the last `touchDeal`, kept only to rate-limit the next
+            // one (`DEAL_TOUCH_INTERVAL`). Nonzero on any note that ever held a
+            // deal, and it gates nothing about reuse.
+            "_lastDealTouch",
         ];
         let abi_fields: Vec<String> = private_note_abi_types().into_keys().collect();
         for f in SWEEP_MUST_BE_EMPTY_OR_ZERO.iter().chain(SWEEP_MUST_BE_FALSE) {
             assert!(
                 abi_fields.contains(&f.to_string()),
-                "поле {f} из sweep-списка отсутствует в ABI — обновить список"
+                "sweep-list field {f} is not in the ABI — update the list"
             );
         }
         for f in &abi_fields {
@@ -991,7 +1006,7 @@ mod tests {
                 || ALLOWED_NON_SWEEP.contains(&f.as_str());
             assert!(
                 known,
-                "НОВОЕ stateful-поле ABI {f} не классифицировано sweep'ом — молчаливая дыра запрещена"
+                "new stateful ABI field {f} is unclassified — classify it rather than leave a silent hole"
             );
         }
     }
@@ -1021,10 +1036,13 @@ mod tests {
         let l2 = a.rent(PnProfile::Trd, "t").unwrap();
         let l3 = a.rent(PnProfile::Trd, "t").unwrap();
         for l in [&l1, &l2, &l3] {
-            let idx = index_of(&l.note.address); // адреса fake-сида кодируют индекс
-            assert!(idx >= 7, "голова (0..6) зарезервирована за api-e2e");
+            let idx = index_of(&l.note.address); // fake-seed addresses encode the index
+            assert!(idx >= 7, "the head (0..6) is reserved for the api-e2e suite");
         }
-        assert!(a.rent(PnProfile::Trd, "t").is_err(), "хвост исчерпан — 4-й rent обязан упасть");
+        assert!(
+            a.rent(PnProfile::Trd, "t").is_err(),
+            "the tail is exhausted — a 4th rent must fail"
+        );
     }
 
     #[test]
