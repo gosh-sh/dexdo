@@ -32,19 +32,28 @@
 //
 // ## What it is NOT allowed to do
 //
-// The call takes no address. Both targets are derived inside the note from its
-// own key (`_ephemeralPubkey`), plus the nonce for the deal contract — so SHELL
-// sent this way can only ever reach that note's own canonical RootModel and
-// `TokenContract`, and never an address a caller picked. The test pins that by
-// deriving both addresses independently, from the canonical SuperRoot and from
-// the deploy message itself, and checking the money arrived exactly there.
+// The call takes no address. The target is derived inside the note from its own
+// key (`_ephemeralPubkey`) plus the nonce — so SHELL sent this way can only ever
+// reach that note's own canonical `TokenContract`, and never an address a caller
+// picked. The test pins that by deriving the address independently, from the
+// deploy message itself, and checking the money arrived exactly there.
 //
-// The two targets are funded in two calls, one each, rather than one call
-// funding both. That is not caution about the amounts — it is the only way to
-// say anything about the OTHER half of each call: `amount 0 = skip`, which the
-// contract documents and which nothing had checked. Each call therefore carries
-// its own negative, and the negative is answered by the same field moving under
-// the other call.
+// ## The RootModel is watched, and must never move
+//
+// There used to be a second leg. `fundDeployShell(nonce, rootModelShell, tcShell)`
+// also pre-funded the note's canonical RootModel, because a RootModel was then
+// deployed by its owner as an external message and something had to put native
+// gas at that address first. The super root deploys it now with an internal
+// `new`, which carries its own value, so the leg and its parameter are gone.
+//
+// The RootModel address is still derived here and still checked — the claim has
+// simply inverted. It used to be "a `rootModelShell` of 0 skips the leg"; it is
+// now "there is no leg, so this call cannot reach that address under any
+// argument". Watching an address a call is supposed to have no route to is the
+// cheap way to notice the route coming back.
+//
+// `amount 0 = skip` is still contract-documented behaviour on the leg that
+// remains, and it still gets its own negative below rather than being assumed.
 //
 //   cargo test -p dodex-api --test e2e_inference_funding -- --ignored --nocapture
 //
@@ -70,17 +79,16 @@ use dodex_contracts::dex::private_note::ParamsOfFundDeployShell;
 const POLL_TICK: Duration = Duration::from_secs(2);
 const POLL_TICKS: u32 = 45; // 90s budget per wait.
 
-/// What each target is funded with. One amount for both, and it is the amount
-/// the giver-funded route sends: a deploy target has to arrive at a balance that
-/// can actually carry a constructor, and this is the only figure known to.
+/// What the deal address is funded with. It is the amount the giver-funded
+/// route sends: a deploy target has to arrive at a balance that can actually
+/// carry a constructor, and this is the only figure known to.
 ///
-/// A smaller, "nominal" amount is not a cheaper way to say the same thing. A
-/// first cut of this test sent the RootModel 3 SHELL to keep the two targets
-/// distinguishable by amount; the account came into existence and its balance
+/// A smaller, "nominal" amount is not a cheaper way to say the same thing. An
+/// earlier cut of this test sent a second target 3 SHELL to keep the two
+/// distinguishable by amount; that account came into existence and its balance
 /// came out at zero, which says a credit that small does not survive the trip.
-/// Telling the targets apart is done by funding them in separate calls instead
-/// — which costs one more call and, unlike an amount, cannot be confused by
-/// anything.
+/// An amount is a bad way to tell sends apart — a figure that arrives as zero
+/// is indistinguishable from one that never left.
 const TARGET_SHELL: u128 = 200_000_000_000;
 
 /// Deal terms. Nothing trades here; they exist because the constructor demands
@@ -120,13 +128,14 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
 
     let mut failures: Vec<String> = Vec::new();
 
-    // ── 1. where the note's money is supposed to go ───────────────────────
+    // ── 1. where the note's money is supposed to go, and where it is not ──
     //
-    // Both addresses are worked out here, from outside the note: the RootModel
-    // from the canonical SuperRoot, the deal contract from the deploy message
-    // itself. The note derives the same two internally and is never told
-    // either, so an agreement between the two derivations is the only thing
-    // that says the SHELL went where it was meant to.
+    // Both addresses are worked out here, from outside the note: the deal
+    // contract from the deploy message itself, the RootModel from the canonical
+    // SuperRoot. The note derives the deal address internally and is never told
+    // it, so an agreement between the two derivations is the only thing that
+    // says the SHELL went where it was meant to. The RootModel is derived for
+    // the opposite reason — it is the address this call must never reach.
     let pubkey = format!("0x{}", seller.owner_public_key_hex.trim_start_matches("0x"));
     let root_model = canonical_root_model_address(dex.context(), &pubkey)
         .await
@@ -177,13 +186,12 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
 
     // ── 2. the deal address, and only the deal address ────────────────────
     //
-    // `tcShell` alone: the RootModel share is zero, which the contract
-    // documents as "skip". So this call both funds one target exactly and says
-    // the other branch does nothing — and because the two targets are funded by
-    // separate calls, neither can be mistaken for the other.
+    // The call has one leg and this exercises it. What makes the run say
+    // something beyond "a balance went up" is the address it is NOT allowed to
+    // touch, read either side of the same call.
     dex.fund_deploy_shell(
         &seller.address,
-        ParamsOfFundDeployShell { nonce, root_model_shell: 0, tc_shell: TARGET_SHELL },
+        ParamsOfFundDeployShell { nonce, tc_shell: TARGET_SHELL },
         signer_of(&seller),
     )
     .await
@@ -221,13 +229,13 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
             tc_after.native.saturating_sub(tc_before.native)
         ));
     }
-    // Zero means skip, and skip means nothing at all — not a message carrying
-    // nothing, which would leave the account existing and empty.
+    // The note has no route to its RootModel through this call any more. An
+    // account that so much as comes into existence here means the leg is back.
     if rm_untouched.native != root_model_before.native
         || rm_untouched.acc_type != root_model_before.acc_type
     {
         failures.push(format!(
-            "a rootModelShell of 0 still touched the RootModel: {} ({}) → {} ({})",
+            "fundDeployShell reached the RootModel, which it has no leg for: {} ({}) → {} ({})",
             root_model_before.native,
             root_model_before.acc_type,
             rm_untouched.native,
@@ -244,54 +252,42 @@ async fn a_note_funds_and_deploys_its_own_deal_contract_without_a_wallet() {
         assert!(failures.is_empty(), "e2e_funding failures: {failures:#?}");
     }
 
-    // ── 3. and now the other target, on its own ───────────────────────────
+    // ── 3. and the same call asked to send nothing ────────────────────────
     //
-    // The mirror of the call above: this one skips the deal and funds the
-    // per-key RootModel. Nothing is deployed there — what is being said is only
-    // that the note reaches its OWN RootModel address, the one derived from its
-    // key and no caller's input.
+    // `amount 0 = skip` is what the contract documents, and "skip" has to mean
+    // no message at all — not a message carrying nothing, which would still cost
+    // the note and, at a fresh address, would leave an account existing and
+    // empty. There is no second leg to answer this one with any more, so it is
+    // asked directly: run the call with nothing in it and require that both the
+    // target and the note's ledger are exactly where the funding call left them.
     dex.fund_deploy_shell(
         &seller.address,
-        ParamsOfFundDeployShell { nonce, root_model_shell: TARGET_SHELL, tc_shell: 0 },
+        ParamsOfFundDeployShell { nonce, tc_shell: 0 },
         signer_of(&seller),
     )
     .await
-    .expect("fundDeployShell(rootModel) accepted");
+    .expect("fundDeployShell(0) accepted");
 
-    let rm_funded = poll_until("the RootModel address to be funded", || async {
-        native_of(&dex, &root_model).await >= root_model_before.native + TARGET_SHELL
-    })
-    .await;
-    let root_model_after = dex.self_rooted_account_shell(&root_model).await.expect("rm after");
-    let tc_unchanged = dex.self_rooted_account_shell(&tc).await.expect("deal after rm");
+    // A skipped send has no arrival to wait for, so there is no polling here —
+    // the read is one settle-tick after the call, and the claim is that nothing
+    // changed. Sleeping is what makes a later arrival a failure rather than a
+    // miss.
+    tokio::time::sleep(POLL_TICK).await;
+    let tc_unchanged = dex.self_rooted_account_shell(&tc).await.expect("deal after zero call");
     let note_after = dex.dex_account_shell(&seller.address).await.expect("note after").shell;
     eprintln!(
-        "[e2e_funding] after rm: note={note_after} root_model=(+{} native, {}) deal=({} native, {})",
-        root_model_after.native.saturating_sub(root_model_before.native),
-        root_model_after.acc_type,
-        tc_unchanged.native,
-        tc_unchanged.acc_type
+        "[e2e_funding] after zero call: note={note_after} deal=({} native, {})",
+        tc_unchanged.native, tc_unchanged.acc_type
     );
-    if !rm_funded || root_model_after.native - root_model_before.native != TARGET_SHELL {
-        failures.push(format!(
-            "the RootModel went {} → {} native for a send of {TARGET_SHELL}. The note is debited \
-             either way (checked below), so a zero here says the money went to an address this \
-             test did not derive — the note builds its target from the RootPN-baked RootModel code \
-             hash, and `SuperRoot.getRootModelAddress` is a second opinion, not the same one",
-            root_model_before.native, root_model_after.native
-        ));
-    }
     if tc_unchanged.native != tc_after.native {
         failures.push(format!(
             "a tcShell of 0 still moved the deal address: {} → {} native",
             tc_after.native, tc_unchanged.native
         ));
     }
-    if note_after_tc - note_after != TARGET_SHELL {
-        failures.push(format!(
-            "the note paid {} for the second one-target funding of {TARGET_SHELL}",
-            note_after_tc.saturating_sub(note_after)
-        ));
+    if note_after != note_after_tc {
+        failures
+            .push(format!("a tcShell of 0 still debited the note: {note_after_tc} → {note_after}"));
     }
     if !failures.is_empty() {
         assert!(failures.is_empty(), "e2e_funding failures: {failures:#?}");

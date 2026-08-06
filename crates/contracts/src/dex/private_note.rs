@@ -479,17 +479,21 @@ pub struct ParamsOfPostSellOffer {
 #[serde(rename_all = "camelCase")]
 /// Parameters for `PrivateNote.fundDeployShell`.
 ///
-/// Pre-funds the seller's cross-dApp deploy targets so no external operational
-/// wallet is needed. Both targets are DERIVED from this note's own key (plus
-/// `nonce` for the deal contract) — the call takes no address, so SHELL sent
-/// this way can only ever reach the note's own canonical RootModel and
-/// `TokenContract`.
+/// Pre-funds the seller's cross-dApp deploy target so no external operational
+/// wallet is needed. The target is DERIVED from this note's own key plus
+/// `nonce` — the call takes no address, so SHELL sent this way can only ever
+/// reach the note's own canonical `TokenContract`.
+///
+/// ONE LEG, NOT TWO. A `rootModelShell` leg used to sit beside `tcShell`,
+/// because a RootModel was deployed by its owner as an external message and
+/// something had to put native gas at that address first. The super root
+/// deploys it now with an internal `new`, which carries its own value, so there
+/// is nothing left to pre-fund and the parameter is gone from the ABI. A caller
+/// that still wants a RootModel on chain calls `SuperRoot::deploy_root_model`,
+/// not this.
 pub struct ParamsOfFundDeployShell {
-    /// Deal nonce the `TokenContract` address is derived from. Only used for
-    /// the `TokenContract` target; the RootModel is per-key.
+    /// Deal nonce the `TokenContract` address is derived from.
     pub nonce: u64,
-    /// SHELL for the canonical RootModel of this note's key. `0` skips it.
-    pub root_model_shell: u128,
     /// SHELL for the canonical `TokenContract` of `(this note's key, nonce)`.
     /// `0` skips it.
     pub tc_shell: u128,
@@ -1330,14 +1334,14 @@ impl PrivateNote {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// # Pre-fund the note's own cross-dApp deploy targets with SHELL
+    /// # Pre-fund the note's own cross-dApp deploy target with SHELL
     ///
     /// Original contract method: `fundDeployShell`
     ///
-    /// The deploy of a RootModel or a deal `TokenContract` is a cross-dApp
-    /// message, which only activates if the target address already holds
-    /// SHELL. This ships it there from the note itself, so a seller needs no
-    /// external operational wallet to get a deal contract on chain.
+    /// The deploy of a deal `TokenContract` is a cross-dApp message, which only
+    /// activates if the target address already holds SHELL. This ships it there
+    /// from the note itself, so a seller needs no external operational wallet
+    /// to get a deal contract on chain.
     ///
     /// Should be signed with PrivateNote owner keys.
     pub async fn fund_deploy_shell(
@@ -1493,7 +1497,7 @@ mod inference_abi_tests {
             abi_input_names("cancelAllInferenceOrders")
         );
         assert_eq!(
-            keys(&ParamsOfFundDeployShell { nonce: 1, root_model_shell: 1, tc_shell: 1 }),
+            keys(&ParamsOfFundDeployShell { nonce: 1, tc_shell: 1 }),
             abi_input_names("fundDeployShell")
         );
     }
