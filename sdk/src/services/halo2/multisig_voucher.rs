@@ -7,11 +7,13 @@
 //!
 //! Caller pre-conditions: the multisig wallet is already deployed and
 //! funded with (a) enough native vmshell to cover the queued message's
-//! `value`, and (b) enough of `voucher_token_type` ECC currency to cover
-//! `voucher_value`. The caller passes the multisig's address and the
-//! custodian keypair allowed to sign `submitTransaction`.
+//! `value`, (b) enough of `voucher_token_type` ECC currency to cover
+//! `voucher_value`, and (c) for any `voucher_token_type` other than SHELL, a
+//! further `GAS_DEPOSIT` of SHELL — `RootPN.generateVoucher` refuses a non-SHELL
+//! nominal that arrives without its gas leg (see [`super::voucher_ecc`]). The
+//! caller passes the multisig's address and the custodian keypair allowed to
+//! sign `submitTransaction`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +37,7 @@ use crate::services::halo2::live::Halo2Proof;
 use crate::services::halo2::paths::Halo2Paths;
 use crate::services::halo2::paths::Halo2PathsError;
 use crate::services::halo2::sk_commit::compute_sk_u_commit_hex;
+use crate::services::halo2::voucher_ecc;
 use crate::services::halo2::voucher_event;
 use crate::services::proof;
 
@@ -86,8 +89,13 @@ pub async fn mint_voucher_via_multisig(
     // 3. Drive the multisig's submitTransaction. With reqConfirms=1 the
     //    queued transaction executes in the same block, dispatching the
     //    encoded body to RootPN.
-    let mut ecc = HashMap::new();
-    ecc.insert(voucher_token_type, voucher_value);
+    //
+    //    A non-SHELL nominal must arrive with its own SHELL gas leg or
+    //    `generateVoucher` reverts before emitting — see `voucher_ecc`. Here the
+    //    wallet is the user's own, so that leg is spent from their balance like
+    //    the nominal rather than conjured by a giver: a wallet holding only the
+    //    deposit currency cannot mint.
+    let ecc = voucher_ecc::generate_voucher_ecc(voucher_token_type, voucher_value);
     // A user-deployed multisig lives under its OWN dApp (dapp_id = its bare
     // account id), unlike the System-dApp DEX contracts above. Build its
     // handle with that dapp_id so >= 1.0.0 gateway lookups resolve it.

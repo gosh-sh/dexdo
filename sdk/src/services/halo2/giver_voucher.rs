@@ -8,7 +8,6 @@
 //! offline tooling such as the `mint_pn_pool` binary that pre-deploys a
 //! pool of PrivateNotes for the orderbook / parallel-test scenarios.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +29,7 @@ use crate::services::halo2::live::Halo2Proof;
 use crate::services::halo2::paths::Halo2Paths;
 use crate::services::halo2::paths::Halo2PathsError;
 use crate::services::halo2::sk_commit::compute_sk_u_commit_hex;
+use crate::services::halo2::voucher_ecc;
 use crate::services::halo2::voucher_event;
 use crate::services::proof;
 
@@ -78,9 +78,9 @@ pub async fn mint_voucher_via_giver(
     .await;
 
     // 3. Fire the Giver-funded ECC + body message that triggers
-    //    `RootPN.generateVoucher`.
-    let mut ecc = HashMap::new();
-    ecc.insert(voucher_token_type, voucher_value);
+    //    `RootPN.generateVoucher`. A non-SHELL nominal must arrive with its own
+    //    SHELL gas leg or the call reverts before emitting — see `voucher_ecc`.
+    let ecc = voucher_ecc::generate_voucher_ecc(voucher_token_type, voucher_value);
     let giver = GiverV3::new_default(context.clone());
     giver
         .send_currency_with_body(

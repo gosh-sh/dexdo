@@ -3,7 +3,6 @@
 //! and proves the resulting `RootPN.VoucherGenerated` event via the
 //! production `dodex_sdk::halo2::live::prove_voucher_for_event` Stage B.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +19,7 @@ use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
 use dodex_sdk::halo2::live::prove_voucher_for_event;
 use dodex_sdk::halo2::sk_commit::compute_sk_u_commit_hex;
+use dodex_sdk::halo2::voucher_ecc;
 use dodex_sdk::halo2::voucher_event;
 use dodex_sdk::halo2::Halo2Paths;
 use dodex_sdk::proof;
@@ -73,9 +73,14 @@ pub async fn make_voucher_proof(
     //    another concurrent test's voucher event by accident, then fail later at
     //    submit with `ERR_INVALID_ZKPROOF (137)` because the proof was built
     //    against that other voucher's commitment.
+    //
+    //    A non-SHELL nominal must arrive with its own SHELL gas leg or
+    //    `generateVoucher` reverts before emitting anything, and the wait below
+    //    then burns its whole timeout against a chain busy emitting other
+    //    people's vouchers. Built by the same helper the production flows use —
+    //    the shape is the contract's rule, not this harness's.
     let t_send = std::time::Instant::now();
-    let mut ecc = HashMap::new();
-    ecc.insert(voucher_token_type, voucher_value);
+    let ecc = voucher_ecc::generate_voucher_ecc(voucher_token_type, voucher_value);
     let giver = GiverV3::new_default(context.clone());
     giver
         .send_currency_with_body(

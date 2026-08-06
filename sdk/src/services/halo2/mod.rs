@@ -8,6 +8,8 @@
 //!   prover, plus history-window math (`target_height_for_layer`).
 //! - `sk_commit` — `skUCommit = poseidon([sk_u, 0])` reproduction of the
 //!   stand-alone `sk-commit-tool`.
+//! - `voucher_ecc` — the ECC currency map `RootPN.generateVoucher` accepts,
+//!   shared by the giver and multisig flows.
 //! - `voucher_event` — GraphQL helpers to capture `RootPN.VoucherGenerated`
 //!   ext-out messages and wait on chain height.
 //! - `live` — high-level pipeline: send `RootPN.generateVoucher` via Giver →
@@ -20,6 +22,7 @@ pub mod multisig_voucher;
 pub mod paths;
 pub mod proof;
 pub mod sk_commit;
+pub mod voucher_ecc;
 pub mod voucher_event;
 
 pub use paths::Halo2Paths;

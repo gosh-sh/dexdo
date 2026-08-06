@@ -44,7 +44,11 @@
 //!   + the `Multisig` ABI/TVC).
 //! - Multisig funded with: (a) enough native vmshell to cover queued
 //!   message gas, (b) enough of `--token-type` ECC currency to cover
-//!   `--nominal` deposit, (c) ~0.1 SHELL ECC for the gas voucher.
+//!   `--nominal` deposit, (c) SHELL ECC for the gas voucher, and (d) unless
+//!   `--token-type` IS shell, a further `GAS_DEPOSIT` (250 SHELL) of SHELL ECC
+//!   that rides along with the deposit voucher — `RootPN.generateVoucher`
+//!   refuses a non-SHELL nominal arriving without its gas leg. A wallet holding
+//!   only the deposit currency cannot onboard.
 //!
 //! Output file holds a secret — keep it private.
 
