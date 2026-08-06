@@ -75,8 +75,8 @@ pub struct ParamsOfSetPubkey {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Parameters for `SuperRoot.registerRoot`.
-pub struct ParamsOfRegisterRoot {
+/// Parameters for `SuperRoot.deployRootModel`.
+pub struct ParamsOfDeployRootModel {
     /// `uint256`, decimal or hex string.
     pub owner_pubkey: String,
 }
@@ -140,16 +140,29 @@ impl SuperRoot {
         self.send_message(Some(call_set), None, signer).await
     }
 
-    /// # Deploy + register a RootModel for an owner pubkey
+    /// # Deploy a RootModel for an owner pubkey
     ///
-    /// Original contract method: `registerRoot`
-    pub async fn register_root(
+    /// Original contract method: `deployRootModel`
+    ///
+    /// THE SUPER ROOT PERFORMS THE DEPLOY; this is not a registration call. It
+    /// was one — a RootModel used to be deployed by its owner as an external
+    /// message and then announce itself here, and this wrapper was named for
+    /// that announcement. The direction is now the other way round: an internal
+    /// `new` from the super root, so the child lands in the super root's dapp,
+    /// where its `ensureBalance()` can actually draw on a configured dapp.
+    ///
+    /// A consequence worth knowing before reaching for an external deploy
+    /// instead: `RootModel`'s constructor requires `msg.sender` to be the super
+    /// root, so there is no longer any other way to create one. Deploying onto
+    /// an already-occupied address leaves the existing code untouched and only
+    /// donates the value, so a squatted address cannot be reclaimed.
+    pub async fn deploy_root_model(
         &self,
-        params: ParamsOfRegisterRoot,
+        params: ParamsOfDeployRootModel,
         signer: Signer,
     ) -> KitResult<ResultOfSendMessage> {
         let call_set = CallSet {
-            function_name: "registerRoot".to_string(),
+            function_name: "deployRootModel".to_string(),
             header: None,
             input: Some(json!(params)),
         };

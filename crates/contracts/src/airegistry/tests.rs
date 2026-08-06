@@ -111,6 +111,7 @@ fn sample_event_json(abi: &str, event: &str) -> Value {
 
 #[test]
 fn super_root_params_match_abi() {
+    use super::super_root::ParamsOfDeployRootModel;
     use super::super_root::ParamsOfGetRootModelAddress;
     use super::super_root::ParamsOfSetPubkey;
 
@@ -121,6 +122,10 @@ fn super_root_params_match_abi() {
     assert_eq!(
         serialized_keys(&ParamsOfGetRootModelAddress { owner_pubkey: "1".into() }),
         abi_input_names(SUPER_ROOT_ABI, "getRootModelAddress")
+    );
+    assert_eq!(
+        serialized_keys(&ParamsOfDeployRootModel { owner_pubkey: "1".into() }),
+        abi_input_names(SUPER_ROOT_ABI, "deployRootModel")
     );
 }
 
