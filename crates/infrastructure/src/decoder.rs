@@ -260,14 +260,20 @@ mod tests {
             assert!(decoder.contracts.contains_key(kind), "missing contract {kind}");
         }
 
-        // 57 DEX unique ids + 9 InferenceOrderBook ids + 13 TokenContract ids = 79
+        // 57 DEX unique ids + 9 InferenceOrderBook ids + 15 TokenContract ids = 81
         // distinct ids. (The InferenceOrderBook events carry an `Inference` prefix, so
         // none collides with the DEX OrderBook events.) The DEX side gained seven
         // PrivateNote events (DealCredited, BookCredited, InferenceOrderRemoved,
         // InferenceOrderRejectedMirror, InferenceDealClosed, StakeForfeitConfirmed,
         // StakeDroppedLocally) and RootPN.DealWriteOffReported, and lost
-        // Oracle.EventPublished and PMP.NumOutcomesSet.
-        assert_eq!(decoder.known_events(), 79, "unexpected total event id count");
+        // Oracle.EventPublished and PMP.NumOutcomesSet. TokenContract gained
+        // BuyerBondFunded and EndpointSet in v4.0.35.
+        //
+        // `PrivateNote.InferenceOrderRemoved` also changed shape there, which moves its
+        // id without changing the count — a signature id is a hash of the name AND the
+        // input types, so a reshaped event is a different id, not an extra one. Nothing
+        // decodes the old id any more; rows carrying it stay undecoded.
+        assert_eq!(decoder.known_events(), 81, "unexpected total event id count");
 
         // sample lookups — find entries for PMP
         let pmp_event_ids: Vec<_> = decoder
@@ -288,8 +294,8 @@ mod tests {
     fn registers_inference_orderbook_and_counts_unique_ids() {
         let decoder = Decoder::new().unwrap();
         assert!(decoder.contracts.contains_key("InferenceOrderBook"), "inference abi missing");
-        // 57 DEX + 9 inference + 13 TokenContract = 79.
-        assert_eq!(decoder.unique_event_ids(), 79, "unexpected unique event-id count");
+        // 57 DEX + 9 inference + 15 TokenContract = 81.
+        assert_eq!(decoder.unique_event_ids(), 81, "unexpected unique event-id count");
     }
 
     #[test]

@@ -186,12 +186,12 @@ pub async fn wait_sell_offer_rested(
         // The TC accepted `postFromNote` and forwarded to the book, but no order
         // rests: the book never answered, or it refused and `onSellClosed` has
         // not landed yet.
-        Ok(o) if o.offer_posted => format!("offerPosted=true closing={}", o.closing),
+        Ok(o) if o.offer_posted => "offerPosted=true".to_string(),
         // Either `postFromNote` never took effect — its canonical-note guard
         // (`_sellerNote` vs the PN code hash pinned in the TC) rejects a note
         // built from different PrivateNote code — or the book refused the terms
         // and `onSellClosed` already cleared the latch.
-        Ok(o) => format!("offerPosted=false closing={}", o.closing),
+        Ok(_) => "offerPosted=false".to_string(),
         // The note addressed a TC that is not the one deployed here.
         Err(err) => format!("getOffer unreadable: {err:?}"),
     };

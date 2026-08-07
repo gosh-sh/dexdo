@@ -59,19 +59,15 @@ struct Event {
 /// fixed. Pinned as a set: closing one is an edit here, opening a new one is a
 /// test failure.
 ///
-/// `ContractDeployedEmit` is the one entry, and it is the worst-shaped of the
-/// collisions this file exists because of. `RootModel.ContractDeployed` and
-/// `TokenContract.ContractDeployed` share the id, the NAME, and the body
-/// `(address self)`. The others could at least be told apart by decoding the
-/// body and reading the event name out of it — the SDK enums do exactly that.
-/// Here that does not work either: nothing in the message distinguishes the two.
-/// A consumer on 703 learns only that something was deployed, and must ask the
-/// chain what now lives at the address to find out what.
-///
-/// Both `RootModelEvent` and `TokenContractEvent` map 703 to their own
-/// `ContractDeployed`, so each SDK enum is right about its own contract and
-/// neither can be right about a stream carrying both.
-const KNOWN_SHARED: &[&str] = &["ContractDeployedEmit"];
+/// Empty, and it earned its way there. `ContractDeployedEmit` (703) used to
+/// carry both `RootModel.ContractDeployed` and `TokenContract.ContractDeployed`
+/// — the worst-shaped of the collisions this file exists because of, since the
+/// two share the id, the NAME and the body `(address self)`, leaving nothing in
+/// the message to tell them apart. It was recorded here as debt rather than
+/// quietly tolerated, and v4.0.35 moved the deal's announcement to
+/// `DealDeployedEmit` (732). The ratchet below is what turns that fix into a
+/// required edit instead of a stale exception nobody revisits.
+const KNOWN_SHARED: &[&str] = &[];
 
 /// Every external event id `contracts/airegistry` declares, in declaration
 /// order.
@@ -86,8 +82,9 @@ const MANIFEST: &[Event] = &[
     Event {
         konst: "ContractDeployedEmit",
         id: 703,
-        // Two contracts, one id, one name, one body shape. See `KNOWN_SHARED`.
-        emits: &["RootModel.ContractDeployed", "TokenContract.ContractDeployed"],
+        // The deal's identically-named, identically-shaped announcement shared
+        // this id until it moved to `DealDeployedEmit`.
+        emits: &["RootModel.ContractDeployed"],
     },
     // ── the deal contract's own lifecycle ────────────────────────────────
     Event { konst: "ContractDestroyedEmit", id: 709, emits: &["TokenContract.ContractDestroyed"] },
@@ -105,6 +102,13 @@ const MANIFEST: &[Event] = &[
     // Ticks: what the seller has produced. Shared 722 with the money above
     // until it was given an id of its own.
     Event { konst: "TicksClaimedEmit", id: 730, emits: &["TokenContract.TicksClaimed"] },
+    // The buyer's endpoint, as ciphertext only the two parties can read.
+    Event { konst: "EndpointSetEmit", id: 731, emits: &["TokenContract.EndpointSet"] },
+    // The deal announcing itself. Named for the deal rather than reusing
+    // `ContractDeployedEmit`, which now belongs to the RootModel alone.
+    Event { konst: "DealDeployedEmit", id: 732, emits: &["TokenContract.ContractDeployed"] },
+    // The counterpart of `SellerBondFundedEmit`: v4.0.35 made the bond two-sided.
+    Event { konst: "BuyerBondFundedEmit", id: 733, emits: &["TokenContract.BuyerBondFunded"] },
     // ── InferenceOrderBook ───────────────────────────────────────────────
     Event {
         konst: "OfferPlacedEmit",

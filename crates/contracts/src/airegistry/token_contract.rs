@@ -113,7 +113,6 @@ pub struct ParamsOfWithdrawShell {
 /// again by `onSellClosed` when the book refuses to rest it.
 pub struct ResultOfGetOffer {
     pub offer_posted: bool,
-    pub closing: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,16 +134,11 @@ pub struct ResultOfGetState {
     /// carried by `TicksClaimed`.
     #[serde(deserialize_with = "deserialize_u128")]
     pub tokens_final: u128,
-    /// A claim displaced by a newer one before it was trusted or contested.
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub tokens_superseded: u128,
     /// Claimed but not yet trusted — the `claimed` figure on `TicksClaimed`.
     #[serde(deserialize_with = "deserialize_u128")]
     pub tokens_pending: u128,
     #[serde(deserialize_with = "deserialize_u64")]
     pub probe_time: u64,
-    #[serde(deserialize_with = "deserialize_u64")]
-    pub prev_claim_time: u64,
     /// Claims are rate-limited: `MIN_CLAIM_INTERVAL` (60 s) must elapse since
     /// this, or `claimTokens` reverts with `ERR_SETTLE_WINDOW_OPEN`.
     #[serde(deserialize_with = "deserialize_u64")]

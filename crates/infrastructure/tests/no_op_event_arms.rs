@@ -140,3 +140,36 @@ async fn inference_order_rejected_resolves_to_a_handler() {
          is no row to key on — but it still needs an arm to avoid being dropped silently"
     );
 }
+
+// Same reasoning on the deal side. `token_contract_projectors` seeds a deal
+// skeleton for ANY event before dispatching, so these do write — what is pinned
+// is that they reach a handler at all rather than falling through to `Unknown`.
+//
+// v4.0.35 added both, and neither carries deal-level state: `BuyerBondFunded` is
+// the counterpart of `SellerBondFunded` now that the bond is two-sided, and
+// `EndpointSet` is ciphertext only the two parties can read. That makes them the
+// easiest kind of event to forget — nothing downstream misses them until someone
+// asks why a deal's history has a hole in it.
+#[tokio::test]
+async fn the_deal_side_no_ops_resolve_to_a_handler() {
+    let Some(pool) = setup().await else { return };
+
+    for event_type in ["TokenContract.BuyerBondFunded", "TokenContract.EndpointSet"] {
+        let mut tx = pool.begin().await.expect("begin");
+        let outcome = projectors::project_event(
+            &mut tx,
+            &event(event_type),
+            &node(&format!("no_op_{event_type}"), Some("0:t_deal_no_op")),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{event_type} must project, got error: {err}"));
+        drop(tx);
+
+        assert_eq!(
+            outcome,
+            ProjectionOutcome::Applied,
+            "{event_type} fell through to Unknown: the row would be marked processed on first \
+             sight and never retried, so adding a handler later needs an explicit backfill"
+        );
+    }
+}

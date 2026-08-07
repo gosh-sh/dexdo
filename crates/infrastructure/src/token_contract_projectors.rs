@@ -47,7 +47,12 @@ pub async fn project_token_contract_event(
         "ProbeBurned" => apply_terminal_close(tx, node, "PROBE_BURNED").await,
         // Seller bond / probe accept / withdrawal carry no deal-level state the
         // SETTLEMENT read-model needs; the skeleton seed already recorded the deal.
-        "SellerBondFunded" | "ProbeAccepted" | "ShellWithdrawn" => Ok(ProjectionOutcome::Applied),
+        // `BuyerBondFunded` is the counterpart of `SellerBondFunded` — v4.0.35 made
+        // the bond two-sided — and belongs here for the same reason. `EndpointSet`
+        // carries the buyer's endpoint as ciphertext only the two parties can read, so
+        // there is nothing in it a read model could serve.
+        "SellerBondFunded" | "BuyerBondFunded" | "ProbeAccepted" | "ShellWithdrawn"
+        | "EndpointSet" => Ok(ProjectionOutcome::Applied),
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }
