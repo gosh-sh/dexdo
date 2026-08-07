@@ -361,6 +361,51 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
       security:
       - {}
+  /api/v1/inference/trades:
+    get:
+      tags:
+      - inference-market-data
+      summary: Recent inference trades
+      description: |-
+        `limit` clamps rather than rejects, following this file's other handlers — unlike
+
+        `/api/v1/prediction/trades`, whose contract refuses an out-of-range limit with -1102.
+      operationId: get_inference_trades
+      parameters:
+      - name: inferenceOrderBookAddress
+        in: query
+        description: The model's order-book address.
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Number of trades, newest first. Default 20, max 1000; out-of-range values clamp.
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          maximum: 1000.0
+          minimum: 1.0
+      responses:
+        '200':
+          description: Response with json format data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InferenceTradeDto'
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+      security:
+      - {}
   /api/v1/oracles:
     get:
       tags:
@@ -1608,6 +1653,47 @@ components:
         serverTime:
           type: integer
           format: int64
+    InferenceTradeDto:
+      type: object
+      description: |-
+        One public trade in the `GET /api/v1/inference/trades` tape. The endpoint returns a
+        bare JSON array of these, newest first — no envelope, so unlike `/inference/depth`
+        and `/inference/markets` the tape carries no `contractVersion`. A client that needs
+        the book's contract generation reads it from `/api/v1/inference/markets`.
+      required:
+      - tradeId
+      - price
+      - qty
+      - quoteQty
+      - time
+      - isBuyerMaker
+      properties:
+        isBuyerMaker:
+          type: boolean
+          description: |-
+            `true` when the resting (maker) side was the buy order and the taker sold
+            (downtick); `false` when the taker bought.
+        price:
+          type: string
+          description: Clearing price per tick, scaled by the book's price precision.
+        qty:
+          type: string
+          description: Matched tick count, scaled by the book's quantity precision.
+        quoteQty:
+          type: string
+          description: |-
+            Quote-asset notional (`price × qty`), scaled by the quote asset's on-chain
+            `decimals`. This is the notional, not what the buyer paid: the book charges
+            `price + tickFee(price)` per tick and reports that separately.
+        time:
+          type: integer
+          format: int64
+          description: Unix milliseconds. On-chain match time.
+        tradeId:
+          type: string
+          description: |-
+            Opaque, lex-comparable id for the match — the chain order of the
+            `InferenceFilled` event that recorded it. Shared by both sides of the match.
     MarketBalancesResponse:
       type: object
       required:

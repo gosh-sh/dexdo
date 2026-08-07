@@ -398,7 +398,7 @@ Indices:
 
 ### `inference_trades`
 
-Append-only public trade tape intended to back a forthcoming `GET /api/v1/inference/trades`.
+Append-only public trade tape backing `GET /api/v1/inference/trades` (see [read-api.md](read-api.md#apiv1inferencetrades)).
 One row per maker↔taker match, written by the `InferenceOrderBook.InferenceFilled` projector.
 Unlike [`trades`](#trades) on the prediction side there is no taker-side gate: the inference
 book emits **one** `InferenceFilled` per match (carrying both `makerId` and `takerId`), so the

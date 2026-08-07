@@ -29,6 +29,7 @@
     - [Inference Markets](#inference-markets)
     - [Inference Depth](#inference-depth)
     - [Inference Orders](#inference-orders)
+    - [Inference Trades](#inference-trades)
   - [Account Endpoints](#account-endpoints)
     - [Account Balance](#account-balance)
     - [Market Outcome Balances](#market-outcome-balances)
@@ -224,6 +225,7 @@ envelope field failed or why a credential was rejected.
 | List inference markets (tradable models) | `GET` | `/api/v1/inference/markets` | `NONE` |
 | Fetch inference order book (depth) | `GET` | `/api/v1/inference/depth` | `NONE` |
 | List inference orders | `GET` | `/api/v1/inference/orders` | `NONE` |
+| Fetch recent inference trades | `GET` | `/api/v1/inference/trades` | `NONE` |
 | Register a trading account from a PrivateNote | `POST` | `/api/v1/accounts` | `NONE` |
 | Fetch account collateral balance | `GET` | `/api/v1/account` | `USER_DATA` |
 | Fetch outcome balances for one market | `GET` | `/api/v1/account/balances` | `USER_DATA` |
@@ -819,7 +821,7 @@ Response fields:
 
 Market data for the **private-inference market**: tradable AI models and the prediction markets settled from their prices. The unit of trade is an **inference tick** — one unit of model generation — priced **per tick in `SHELL`**. Each model has exactly one order book; there is no `symbol` dimension (unlike prediction-market depth, which is per outcome).
 
-All three endpoints are public (`NONE`), read-only, and eventually consistent — a just-placed order or a fresh reference price may briefly lag the chain.
+All four endpoints are public (`NONE`), read-only, and eventually consistent — a just-placed order or a fresh reference price may briefly lag the chain.
 
 ### Inference Markets
 
@@ -1051,6 +1053,77 @@ Notes:
 - `ticks` is the **resting remainder**; `ticksInitial` is the placed size. `InferenceOrderPlaced.ticks` on chain is the initial size, so the same field name carries different numbers in the event and in this response. The `ticks` name follows [`/api/v1/inference/depth`](#inference-depth), which already publishes `[pricePerTick, ticks]` for the ticks resting at a level — a client comparing an order against a depth level finds one name for one quantity.
 - `deadline` is a **decimal string** while `createdAt`, `updatedAt`, and `serverTime` are JSON numbers, though all four are unix seconds. `deadline` is a chain `uint64` reproduced verbatim, and can exceed both `i64` and JSON's exact-integer range; the other three are database timestamps. This follows the repo-wide rule that chain-native unsigned integers (`price`, `ticks`, `lastUpdateId`) serialize as strings.
 - `note` and `tokenContract` cannot be combined: `-1130`, HTTP 400. Both are present, so nothing is missing — the combination is what cannot be served, because no index pins both and the pair would scan one filter's whole history. This is a different relation from [`/api/v1/prediction/orders`](#orders), where `predictionMarketAddress` and `symbol` must be given together or not at all, and a half-specified pair is `-1102`.
+
+### Inference Trades
+
+```http
+GET /api/v1/inference/trades
+```
+
+Security: `NONE`
+
+Fetch the most recent public trades on one model's order book. A trade is a
+single maker↔taker match produced by the `InferenceOrderBook.InferenceFilled`
+event — the public, account-agnostic view of the book's fills. No
+authentication is required and no owner information is returned; the
+endpoint exposes only price, size, direction, and time. Mirrors
+[`/api/v1/prediction/trades`](#prediction-trades), keyed by the order-book
+address (no `symbol` — one book per model, as with
+[Inference Depth](#inference-depth) and [Inference Orders](#inference-orders)).
+
+Query parameters:
+
+| Name | Type | Mandatory | Description |
+| --- | --- | --- | --- |
+| `inferenceOrderBookAddress` | STRING | YES | The model's order-book address from [`/api/v1/inference/markets`](#inference-markets). |
+| `limit` | INT | NO | Number of trades to return, newest first. Default: `20`. Max: `1000`. **Out-of-range values clamp** into `[1, 1000]` rather than being rejected — unlike [`/api/v1/prediction/trades`](#prediction-trades), whose contract refuses an out-of-range `limit` with `-1102`. |
+
+Response:
+
+```json
+[
+  {
+    "tradeId": "76a23086a0067000000000000000000000000000000000000000000000000000000000000000000000c",
+    "price": "2.000000000",
+    "qty": "3",
+    "quoteQty": "6.000000000",
+    "time": 1710000008980,
+    "isBuyerMaker": true
+  }
+]
+```
+
+The response is a bare JSON array, newest trade first, ordered by the same
+server-internal chain-order key used by
+[`GET /api/v1/inference/orders`](#inference-orders) (descending). An empty
+array (`[]`) means no trade has matched on this book yet — never `null`,
+never an object wrapping an empty field.
+
+Trade fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `tradeId` | STRING | Opaque, lex-comparable id for one maker↔taker match — the chain order of the `InferenceFilled` event that recorded it. Shared by both sides of the match. Treat it as an opaque token; do not parse it. |
+| `price` | DECIMAL | Clearing price per tick, scaled by the book's price precision. |
+| `qty` | DECIMAL | Matched tick count, scaled by the book's quantity precision. |
+| `quoteQty` | DECIMAL | Quote-asset notional of the match (`price × qty`), scaled by the quote asset's on-chain `decimals`. This is the notional, **not** what the buyer paid: the book charges `price + tickFee(price)` per tick, and that fee is reported separately as `InferenceExecuted.cost`, not folded into `quoteQty` here. |
+| `time` | LONG | On-chain match time in Unix milliseconds. |
+| `isBuyerMaker` | BOOLEAN | `true` when the resting (maker) side was the buy order and the taker was selling (downtick); `false` when the taker was buying (uptick). Matches Binance `isBuyerMaker` semantics. |
+
+Three deliberate absences a client would otherwise misread as bugs:
+
+1. **No `contractVersion`.** Unlike [`/api/v1/inference/markets`](#inference-markets) and [`/api/v1/inference/depth`](#inference-depth), this response is a flat array with no envelope to carry book metadata. A client that needs the book's contract generation reads it from `/api/v1/inference/markets?inferenceOrderBookAddress=…`.
+2. **No pagination beyond `limit`.** There is no `cursor` and no `hasMore`: the endpoint serves at most the `limit` (ceiling `1000`) newest matches and nothing older. A client that needs deeper trade history has no cursor to page through — none exists.
+3. **`limit` clamps, it does not reject** — see the query-parameter table above. This is a deliberate divergence from `/api/v1/prediction/trades`.
+
+Errors:
+
+| Condition | Code | HTTP |
+| --- | --- | --- |
+| `inferenceOrderBookAddress` missing or blank | `-1102` | 400 |
+| `limit` present but not an integer | `-1130` | 400 |
+| `inferenceOrderBookAddress` not found, or its book has not been reconciled yet | `-1121` | 404 |
+| Trade data is temporarily inconsistent | `-1500` | 503 |
 
 ## Account Endpoints
 

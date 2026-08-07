@@ -22,7 +22,7 @@ Implementation-facing requirements for the HTTP layer that serves the market-dat
 
 **Depth** — the `/api/v1/prediction/depth` response for one market outcome: sorted bid and ask price levels plus `lastUpdateId`. It is built from `live_orders`, not by querying the OrderBook contract during the HTTP request.
 
-**Trade tape** — the `/api/v1/prediction/trades` response for one market outcome: a newest-first list of maker↔taker matches built from the append-only `trades` table, not by querying the OrderBook contract during the HTTP request.
+**Trade tape** — a bare, newest-first list of maker↔taker matches built from an append-only table, never by querying the chain contract during the HTTP request. Two instances share this contract: `/api/v1/prediction/trades` (per market outcome, from the `trades` table) and `/api/v1/inference/trades` (per model order book, from the `inference_trades` table).
 
 **DTO** — Data Transfer Object. In this document it means the API response object after the backend has assembled it from database rows, but before it is serialized to JSON and sent to the client.
 
@@ -619,6 +619,102 @@ Arm 1 (`tc_unknown`) logs at `error!` on **every** request that observes it, eva
 | `orderbookAddress` unknown / not yet reconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
 | Fail-closed gate refusal — unresolved live-SELL `tokenContract`, unprojected events for the book, or a stale/behind-head capture cursor, under a query naming `tokenContract` and admitting LIVE SELLs; see [§ Fail-closed gate](#fail-closed-gate) | `MarketInconsistent` | — | 503 |
 | Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+## `/api/v1/inference/trades`
+
+Returns the most recent public trades on one model's order book: a newest-first tape of maker↔taker matches, each carrying price, size, quote notional, direction, and chain time — the inference analogue of [`/api/v1/prediction/trades`](#apiv1predictiontrades). Because an `InferenceOrderBook` is one book per model (no outcome dimension), it is keyed by `inferenceOrderBookAddress` alone, matching [`/api/v1/inference/depth`](#apiv1inferencedepth) and [`/api/v1/inference/orders`](#apiv1inferenceorders). The endpoint never queries the contract at request time — every trade shown is the projection of an indexed `InferenceOrderBook.InferenceFilled` event into the append-only [`inference_trades`](data-schema.md#inference_trades) read-model (write side in [indexer.md §Projection — inference order events](indexer.md#projection--inference-order-events)). Public (`NONE`).
+
+### Resolution
+
+Resolve `inferenceOrderBookAddress` to `(price_precision, quantity_precision, quote_decimals)` via [`inference_markets`](data-schema.md#inference_markets) ⨝ [`ref_tokens`](data-schema.md#ref_tokens) — the quote-asset `decimals` feeds `quoteQty` scaling. `version` is deliberately **not** selected here: the tape is a bare array with nowhere to carry the book's contract generation (see [§ Deliberate absences](#deliberate-absences)). The book must already be reconciled (`last_reconciled_at IS NOT NULL`); otherwise `InvalidMarketOrSymbol` → 404 — an unknown address and a not-yet-reconciled one collapse to the same client-visible miss, matching [`/api/v1/inference/depth`](#apiv1inferencedepth).
+
+### Empty-tape contract
+
+A reconciled book with no matched trades yet returns a bare empty array `[]`, not an error — the steady state for a book that has opened but not yet traded, and the inference analogue of [`/api/v1/prediction/trades`](#apiv1predictiontrades)'s empty-tape contract. No read-side gate guards this: an empty `inference_trades` table for the book simply reads `[]`.
+
+### Query
+
+After resolution, one SQL produces the page:
+
+```sql
+SELECT trade_id,
+       price::text AS price,
+       qty::text AS qty,
+       is_buyer_maker,
+       (extract(epoch FROM chain_time) * 1000000)::bigint AS chain_time_us
+  FROM inference_trades
+ WHERE orderbook_address = $1
+   AND chain_time IS NOT NULL
+ ORDER BY trade_id DESC
+ LIMIT $limit;
+```
+
+`inference_trades_tape_idx` (`(orderbook_address, trade_id DESC)`) serves this as an index range scan. `trade_id` is the `InferenceFilled` event's chain order (globally unique, lexicographically monotonic), so `ORDER BY trade_id DESC` already yields true chain order with no Rust-side re-sort — the same property the prediction tape relies on. `chain_time IS NOT NULL` drops the rare row the gateway delivered without a parseable time, matching both the prediction tape and [`/api/v1/inference/orders`](#apiv1inferenceorders).
+
+There is no pagination cursor: the public contract exposes only `limit` (see [api-spec §Inference Trades](../api-spec.md#inference-trades)), so the endpoint is a bounded newest-first window over the most recent matches, not a keyset walk. There is no way to page past `limit` (max `1000`) into older history.
+
+### Field projection
+
+`inference_trades` holds the raw chain integers the contract emitted; the API decodes each field at render (public shapes in [api-spec §Inference Trades](../api-spec.md#inference-trades)):
+
+| Response field | Source | Rendering |
+| --- | --- | --- |
+| `tradeId` | `trade_id` | Verbatim. Opaque lex-comparable token — the `InferenceFilled` event's chain order. |
+| `price` | `price` | Rendered at `price_precision` via `scale_uint_to_decimal` — a pure decimal-point insertion, no division. |
+| `qty` | `qty` | Rendered at `quantity_precision` (`0` — ticks are whole units) the same way. |
+| `quoteQty` | `price`, `qty` | Quote-asset notional, `price × qty` (plain `BigUint` multiplication, no division), then rendered at the quote asset's `decimals`. |
+| `time` | `chain_time` | Extracted to microseconds and truncated to Unix milliseconds — same convention as the prediction tape and `/api/v1/inference/orders`. |
+| `isBuyerMaker` | `is_buyer_maker` | Verbatim. `true` ⇒ the resting (maker) side was the buy order and the taker sold (downtick). |
+
+Unlike the prediction tape, there is no `FULL_PERCENT` division and no `descale_pow10` grid-consistency check: an inference price is already quoted in quote-asset base units per tick at exactly `price_precision` — there is no separate on-chain basis-point grid coarser than the display grid to descale from, so `scale_uint_to_decimal` (insert the decimal point, no rounding, no dropped-digit validation) is the whole transform. `quoteQty` is a plain `price × qty` product for the same reason: the contract does not divide by a percent-scale constant to derive the inference notional, so there is no integer-division floor to reproduce. This is the notional, not what the buyer paid — the book charges `price + tickFee(price)` per tick and reports that separately as `InferenceExecuted.cost`, which this endpoint does not surface.
+
+### Page-size protocol
+
+- `limit` defaults to `20` when omitted or blank (`optional_typed_query` collapses a present-but-blank `limit=` to "absent", same as depth and orders).
+- Valid range is `[1, 1000]`, enforced by **clamping**, not rejecting: `limit.clamp(1, 1000)` at the HTTP boundary in `services/api/src/inference.rs`. This follows this file's other inference handlers (`/inference/markets`, `/inference/depth`) rather than `/api/v1/prediction/trades`, whose contract rejects an out-of-range `limit` with `-1102`. A present-but-non-numeric `limit` (e.g. `limit=abc`) is still `-1130` / 400 — clamping only applies once the value has parsed.
+
+### Invariants
+
+1. Rows are returned strictly newest-first by `trade_id` (DESC), a total chain order; no duplication or skipping across `limit` boundaries.
+2. Each row is one `InferenceFilled` event = one match; unlike the prediction tape's taker-side gate, the inference book emits exactly one `InferenceFilled` per match (carrying both leg ids), so there is no maker/taker double-counting risk to guard against on the write side.
+3. `quoteQty` equals `price × qty` exactly — no rounding, since the derivation is a plain product.
+
+### Error mapping
+
+| Condition | `DomainError` | API code | HTTP |
+| --- | --- | --- | --- |
+| `inferenceOrderBookAddress` missing or blank | `MissingParameter` | `-1102` | 400 |
+| `limit` present but non-numeric | `InvalidParameter` | `-1130` | 400 |
+| `inferenceOrderBookAddress` unknown, or its book is unreconciled | `InvalidMarketOrSymbol` | `-1121` | 404 |
+| Reconciled book with an undecodable raw `price` / `qty`, or a NULL/out-of-range precision or quote-decimals column | `MarketInconsistent` | `-1500` | 503 |
+| Unexpected (DB / decode / etc.) | `Unexpected` | `-1000` | 500 |
+
+An out-of-range `limit` is never an error here (see [§ Page-size protocol](#page-size-protocol-2)) — the row above that reads `-1102` on the prediction tape has no inference counterpart.
+
+### Write side
+
+The read path depends on one write-side projection (detail in [indexer.md §Projection — inference order events](indexer.md#projection--inference-order-events)):
+
+- **`inference_trades` table + `inference_trades_tape_idx`** — an append-only table ([`data-schema.md`](data-schema.md#inference_trades)). The `InferenceOrderBook.InferenceFilled` projector inserts exactly one row per event, keyed on `trade_id` — the event's chain order; a replayed insert conflicts on it and only coalesces a NULL `chain_time` (first-write-wins), so reprojection from `raw_events` is idempotent.
+
+### Eventual consistency
+
+A just-matched trade briefly lags the fill that produced it: the row appears once `InferenceFilled` is projected (seconds, or after deferred-replay if the fill edge arrived before its parent order event). Same indexer-backlog window the other inference endpoints expose. The endpoint reads only the indexed `inference_trades` table — it never reaches chain at request time.
+
+### Deliberate absences
+
+Two fields a client accustomed to the sibling inference endpoints might expect are intentionally missing, and both are documented in prose in [api-spec §Inference Trades](../api-spec.md#inference-trades) so their absence does not read as a bug:
+
+- **`contractVersion`** — present on [`/api/v1/inference/markets`](#apiv1inferencemarkets) and on [`/api/v1/inference/depth`](#apiv1inferencedepth) (which passes `inference_markets.version` through verbatim, per [depth's resolution note](#resolution-2)), absent here. The tape's response is a bare JSON array with no envelope to hold book metadata in, so `version` is not even selected in this endpoint's own [§ Resolution](#resolution-3) query. A client that needs the book's contract generation reads it from `/api/v1/inference/markets?inferenceOrderBookAddress=…`.
+- **A pagination cursor** — the endpoint serves at most `limit` (ceiling `1000`) of the newest matches and nothing older; there is no `cursor` / `hasMore` to walk further back, unlike the paginated inference-markets and inference-orders listings.
+
+### Test coverage
+
+Three suites, the DB-backed ones gated on `TEST_DATABASE_URL`:
+
+- `crates/infrastructure/tests/inference_trades_repo.rs` (repo) — resolution (unknown / unreconciled book → `InvalidMarketOrSymbol`; corrupt precision / quote-decimals / raw `price`/`qty` → `MarketInconsistent`); per-book scoping; DESC-by-`trade_id` order and the `LIMIT` cut; empty tape → `[]`; `price` / `qty` / `quoteQty` scaling (plain product, no `FULL_PERCENT`); `isBuyerMaker` passthrough; a `chain_time IS NULL` row excluded before `LIMIT`.
+- `crates/infrastructure/tests/inference_projectors.rs` — the `InferenceFilled` projector writes exactly one `inference_trades` row per event; `trade_id` equals the event's chain order; replay is idempotent (`ON CONFLICT`).
+- `services/api/tests/inference_trades_http.rs` — happy path returns a bare JSON array newest-first through the production router; the error shapes (`-1102` missing/blank address, `-1130` non-numeric limit, `-1121` unknown book); out-of-range `limit` clamps rather than erroring (`0` clamps up to `1`, an oversized value clamps down to the max); a present-but-blank `limit=` falls back to the default.
 
 ## `/api/v1/prediction/orders`
 

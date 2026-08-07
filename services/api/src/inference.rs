@@ -7,6 +7,8 @@ use dodex_application::GetInferenceDepthUseCase;
 use dodex_application::GetInferenceMarketsUseCase;
 use dodex_application::GetInferenceOrdersInput;
 use dodex_application::GetInferenceOrdersUseCase;
+use dodex_application::GetInferenceTradesQuery;
+use dodex_application::GetInferenceTradesUseCase;
 use dodex_application::InferenceMarketsFilter;
 use dodex_application::InferenceMarketsListing;
 use dodex_application::InferenceMarketsRequest;
@@ -14,6 +16,7 @@ use dodex_application::InferenceMarketsSort;
 use dodex_domain::DomainError;
 use dodex_domain::InferenceMarket;
 use dodex_domain::InferenceMarketStatus;
+use dodex_domain::Trade;
 use salvo::prelude::*;
 use salvo::writing::Json;
 use salvo_oapi::endpoint;
@@ -32,6 +35,8 @@ use crate::AppState;
 
 const INFERENCE_DEFAULT_LIMIT: u16 = 50;
 const INFERENCE_MAX_LIMIT: u16 = 200;
+const INFERENCE_TRADES_DEFAULT_LIMIT: u16 = 20;
+const INFERENCE_TRADES_MAX_LIMIT: u16 = 1000;
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -424,4 +429,84 @@ pub(crate) async fn get_inference_orders(
             })
             .collect(),
     }))
+}
+
+/// One public trade in the `GET /api/v1/inference/trades` tape. The endpoint returns a
+/// bare JSON array of these, newest first — no envelope, so unlike `/inference/depth`
+/// and `/inference/markets` the tape carries no `contractVersion`. A client that needs
+/// the book's contract generation reads it from `/api/v1/inference/markets`.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct InferenceTradeDto {
+    /// Opaque, lex-comparable id for the match — the chain order of the
+    /// `InferenceFilled` event that recorded it. Shared by both sides of the match.
+    trade_id: String,
+    /// Clearing price per tick, scaled by the book's price precision.
+    price: String,
+    /// Matched tick count, scaled by the book's quantity precision.
+    qty: String,
+    /// Quote-asset notional (`price × qty`), scaled by the quote asset's on-chain
+    /// `decimals`. This is the notional, not what the buyer paid: the book charges
+    /// `price + tickFee(price)` per tick and reports that separately.
+    quote_qty: String,
+    /// Unix milliseconds. On-chain match time.
+    time: i64,
+    /// `true` when the resting (maker) side was the buy order and the taker sold
+    /// (downtick); `false` when the taker bought.
+    is_buyer_maker: bool,
+}
+
+fn inference_trade_to_dto(t: Trade) -> InferenceTradeDto {
+    InferenceTradeDto {
+        trade_id: t.trade_id,
+        price: t.price,
+        qty: t.qty,
+        quote_qty: t.quote_qty,
+        time: t.time,
+        is_buyer_maker: t.is_buyer_maker,
+    }
+}
+
+/// Most recent public trades on one model's book.
+///
+/// `limit` clamps rather than rejects, following this file's other handlers — unlike
+/// `/api/v1/prediction/trades`, whose contract refuses an out-of-range limit with -1102.
+#[endpoint(
+    tags("inference-market-data"),
+    summary = "Recent inference trades",
+    parameters(
+        ("inferenceOrderBookAddress" = String, Query, description = "The model's order-book address."),
+        ("limit" = Option<i64>, Query, minimum = 1, maximum = 1000, description = "Number of trades, newest first. Default 20, max 1000; out-of-range values clamp."),
+    ),
+    security(()),
+)]
+pub(crate) async fn get_inference_trades(
+    req: &mut Request,
+    depot: &mut Depot,
+) -> Result<Json<Vec<InferenceTradeDto>>, ApiError> {
+    let state = depot
+        .obtain::<AppState>()
+        .map_err(|err| {
+            error!(?err, "missing AppState in depot");
+            ApiError::from(DomainError::Unexpected)
+        })?
+        .clone();
+    let inference_repo = state.inference_repo.clone().ok_or_else(|| {
+        error!("inference_repo not wired in AppState");
+        ApiError::from(DomainError::Unexpected)
+    })?;
+
+    let address = non_empty_query(req, "inferenceOrderBookAddress")
+        .ok_or(ApiError::from(DomainError::MissingParameter))?;
+    let limit = optional_typed_query::<i64>(req, "limit")?
+        .map(|v| v.clamp(1, INFERENCE_TRADES_MAX_LIMIT as i64) as u16)
+        .unwrap_or(INFERENCE_TRADES_DEFAULT_LIMIT);
+
+    let use_case = GetInferenceTradesUseCase::new(inference_repo);
+    let tape = use_case
+        .execute(GetInferenceTradesQuery { orderbook_address: address, limit })
+        .await
+        .map_err(|err| map_domain_or_unexpected(err, "get_inference_trades"))?;
+
+    Ok(Json(tape.into_iter().map(inference_trade_to_dto).collect()))
 }
