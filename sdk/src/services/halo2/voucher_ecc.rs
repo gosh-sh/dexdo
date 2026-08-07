@@ -38,6 +38,8 @@
 
 use std::collections::HashMap;
 
+use crate::services::halo2::paths::Halo2PathsError;
+
 /// `CURRENCIES_ID_SHELL` in `contracts/dex/modifiers/modifiers.sol`.
 pub const CURRENCIES_ID_SHELL: u32 = 2;
 
@@ -48,6 +50,7 @@ pub const CURRENCIES_ID_SHELL: u32 = 2;
 pub const GAS_DEPOSIT: u64 = 250_000_000_000;
 
 /// What to send for a voucher, and what the contract will emit for it.
+#[derive(Debug)]
 pub struct VoucherSend {
     /// The ECC map to attach to the `generateVoucher` message.
     pub ecc: HashMap<u32, u64>,
@@ -79,7 +82,11 @@ pub struct VoucherSend {
 /// The `nominal` returned is equal to the argument in all three. That equality
 /// is the point: it is what lets a caller pass one figure to
 /// `deployPrivateNote` without knowing which shape was used.
-pub fn plan_voucher(voucher_token_type: u32, nominal: u64, is_fee: bool) -> VoucherSend {
+pub fn plan_voucher(
+    voucher_token_type: u32,
+    nominal: u64,
+    is_fee: bool,
+) -> Result<VoucherSend, Halo2PathsError> {
     let mut ecc = HashMap::new();
     if voucher_token_type != CURRENCIES_ID_SHELL {
         ecc.insert(voucher_token_type, nominal);
@@ -91,9 +98,16 @@ pub fn plan_voucher(voucher_token_type: u32, nominal: u64, is_fee: bool) -> Vouc
         // GAS_DEPOSIT`. Sending the bare nominal would deploy a note short by
         // 250 SHELL and, because the reduced figure is not an allowed nominal,
         // would be refused before it got that far.
-        ecc.insert(CURRENCIES_ID_SHELL, nominal.saturating_add(GAS_DEPOSIT));
+        //
+        // Checked, not saturating: a clamped sum is neither the nominal nor the
+        // nominal plus gas, and the contract would subtract the gas from it and
+        // deploy against whatever was left.
+        let with_gas = nominal
+            .checked_add(GAS_DEPOSIT)
+            .ok_or(Halo2PathsError::VoucherGasOverflow { nominal, gas: GAS_DEPOSIT })?;
+        ecc.insert(CURRENCIES_ID_SHELL, with_gas);
     }
-    VoucherSend { ecc, nominal }
+    Ok(VoucherSend { ecc, nominal })
 }
 
 #[cfg(test)]
@@ -107,7 +121,7 @@ mod tests {
 
     #[test]
     fn a_non_shell_nominal_brings_its_own_gas_leg() {
-        let plan = plan_voucher(NACKL, N10000, false);
+        let plan = plan_voucher(NACKL, N10000, false).unwrap();
         assert_eq!(plan.ecc.len(), 2, "a NACKL deposit alone is ERR_BAD_GAS_MIX: {:?}", plan.ecc);
         assert_eq!(plan.ecc.get(&NACKL), Some(&N10000), "the nominal arrives in full");
         assert_eq!(
@@ -122,7 +136,7 @@ mod tests {
     fn every_non_shell_currency_gets_the_leg_not_just_nackl() {
         // The rule is "not SHELL", not "is NACKL" — USDC deposits take the same
         // path and would fail the same way.
-        let plan = plan_voucher(USDC, 5_000_000, false);
+        let plan = plan_voucher(USDC, 5_000_000, false).unwrap();
         assert_eq!(plan.ecc.get(&USDC), Some(&5_000_000));
         assert_eq!(plan.ecc.get(&CURRENCIES_ID_SHELL), Some(&GAS_DEPOSIT));
         assert_eq!(plan.nominal, 5_000_000);
@@ -134,7 +148,7 @@ mod tests {
         // added on and the contract takes it back out. Sending the bare nominal
         // is the bug this shape exists to prevent — the note would come up 250
         // SHELL short, and the reduced figure is not an allowed nominal.
-        let plan = plan_voucher(CURRENCIES_ID_SHELL, N10000, false);
+        let plan = plan_voucher(CURRENCIES_ID_SHELL, N10000, false).unwrap();
         assert_eq!(plan.ecc.len(), 1, "a second SHELL leg is not expressible: {:?}", plan.ecc);
         assert_eq!(plan.ecc.get(&CURRENCIES_ID_SHELL), Some(&(N10000 + GAS_DEPOSIT)));
         assert_eq!(plan.nominal, N10000, "what the note receives, after the contract's deduction");
@@ -144,9 +158,32 @@ mod tests {
     fn a_gas_voucher_pays_no_gas() {
         // Charging gas for buying gas would be circular, so `isFee` neither adds
         // nor deducts. This is the path every SHELL voucher in the repo takes.
-        let plan = plan_voucher(CURRENCIES_ID_SHELL, 100_000_000_000, true);
+        let plan = plan_voucher(CURRENCIES_ID_SHELL, 100_000_000_000, true).unwrap();
         assert_eq!(plan.ecc.get(&CURRENCIES_ID_SHELL), Some(&100_000_000_000));
         assert_eq!(plan.nominal, 100_000_000_000);
+    }
+
+    #[test]
+    fn a_nominal_that_cannot_carry_its_gas_is_refused_rather_than_clamped() {
+        // Only the single-leg SHELL deposit adds the two together, so it is the
+        // only shape that can overflow. Saturating would be the worst outcome:
+        // a sum that is neither the nominal nor the nominal plus gas, which the
+        // contract would then subtract the gas from and deploy against.
+        let err = plan_voucher(CURRENCIES_ID_SHELL, u64::MAX, false);
+        assert!(matches!(err, Err(Halo2PathsError::VoucherGasOverflow { .. })), "{err:?}");
+
+        // The largest nominal that still fits must go through untouched — an
+        // off-by-one here would refuse a legitimate deposit.
+        let edge = plan_voucher(CURRENCIES_ID_SHELL, u64::MAX - GAS_DEPOSIT, false).unwrap();
+        assert_eq!(edge.ecc.get(&CURRENCIES_ID_SHELL), Some(&u64::MAX));
+        assert_eq!(edge.nominal, u64::MAX - GAS_DEPOSIT);
+    }
+
+    #[test]
+    fn the_other_shapes_cannot_overflow_at_all() {
+        // They never add, so `u64::MAX` is an ordinary nominal for them.
+        assert!(plan_voucher(NACKL, u64::MAX, false).is_ok());
+        assert!(plan_voucher(CURRENCIES_ID_SHELL, u64::MAX, true).is_ok());
     }
 
     #[test]
@@ -161,7 +198,7 @@ mod tests {
             (CURRENCIES_ID_SHELL, true),
         ] {
             assert_eq!(
-                plan_voucher(token, N10000, is_fee).nominal,
+                plan_voucher(token, N10000, is_fee).unwrap().nominal,
                 N10000,
                 "token={token} is_fee={is_fee}"
             );
@@ -173,8 +210,9 @@ mod tests {
         // Same total out of the wallet either way — the currency only decides
         // which leg carries it. A wallet budgeted for one shape is budgeted for
         // the other.
-        let nackl: u64 = plan_voucher(NACKL, N10000, false).ecc.values().sum();
-        let shell: u64 = plan_voucher(CURRENCIES_ID_SHELL, N10000, false).ecc.values().sum();
+        let nackl: u64 = plan_voucher(NACKL, N10000, false).unwrap().ecc.values().sum();
+        let shell: u64 =
+            plan_voucher(CURRENCIES_ID_SHELL, N10000, false).unwrap().ecc.values().sum();
         assert_eq!(nackl, N10000 + GAS_DEPOSIT);
         assert_eq!(shell, N10000 + GAS_DEPOSIT);
     }

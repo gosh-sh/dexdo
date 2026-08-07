@@ -134,14 +134,40 @@ impl Default for Halo2Paths {
 
 #[derive(Debug)]
 pub enum Halo2PathsError {
-    SrsNotFound { path: PathBuf },
-    ProverCacheDirNotWritable { path: PathBuf, source: std::io::Error },
-    FixtureDirNotWritable { path: PathBuf, source: std::io::Error },
+    /// A voucher nominal so large that adding the contract's gas deposit
+    /// overflows `u64`.
+    ///
+    /// Unreachable with any real nominal — `ALLOWED_NOMINALS` tops out around
+    /// 1e13 — and it is checked anyway because the alternative is worse than a
+    /// wrong answer. Saturating here would send a number that is neither the
+    /// nominal nor the nominal plus gas, and the contract would take it apart
+    /// as though it were.
+    ///
+    /// (The enum has outgrown its name: it is the error type of the whole
+    /// voucher pipeline, not only of `Halo2Paths`.)
+    VoucherGasOverflow {
+        nominal: u64,
+        gas: u64,
+    },
+    SrsNotFound {
+        path: PathBuf,
+    },
+    ProverCacheDirNotWritable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    FixtureDirNotWritable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for Halo2PathsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::VoucherGasOverflow { nominal, gas } => {
+                write!(f, "voucher nominal {nominal} plus gas deposit {gas} overflows u64")
+            }
             Self::SrsNotFound { path } => {
                 write!(f, "SRS file not found at {}", path.display())
             }
@@ -158,7 +184,7 @@ impl std::fmt::Display for Halo2PathsError {
 impl std::error::Error for Halo2PathsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::SrsNotFound { .. } => None,
+            Self::VoucherGasOverflow { .. } | Self::SrsNotFound { .. } => None,
             Self::ProverCacheDirNotWritable { source, .. }
             | Self::FixtureDirNotWritable { source, .. } => Some(source),
         }

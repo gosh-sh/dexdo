@@ -80,7 +80,8 @@ pub async fn make_voucher_proof(
     //    then burns its whole timeout against a chain busy emitting other
     //    people's vouchers.
     let t_send = std::time::Instant::now();
-    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee);
+    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee)
+        .expect("voucher nominals in this harness are far below the overflow bound");
     let giver = GiverV3::new_default(context.clone());
     giver
         .send_currency_with_body(

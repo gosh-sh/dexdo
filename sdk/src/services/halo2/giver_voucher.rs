@@ -81,7 +81,7 @@ pub async fn mint_voucher_via_giver(
     //    `RootPN.generateVoucher`. The shape depends on the currency and on
     //    `is_fee`, and only `voucher_ecc` knows which — including whether the
     //    contract will deduct the gas from what is sent.
-    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee);
+    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee)?;
     let giver = GiverV3::new_default(context.clone());
     giver
         .send_currency_with_body(

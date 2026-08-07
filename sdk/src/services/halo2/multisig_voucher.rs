@@ -94,7 +94,7 @@ pub async fn mint_voucher_via_multisig(
     //    `voucher_ecc`. Here the wallet is the user's own, so a deposit costs
     //    them `nominal + GAS_DEPOSIT` whichever shape carries it: a wallet
     //    funded for exactly the nominal cannot mint.
-    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee);
+    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee)?;
     // A user-deployed multisig lives under its OWN dApp (dapp_id = its bare
     // account id), unlike the System-dApp DEX contracts above. Build its
     // handle with that dapp_id so >= 1.0.0 gateway lookups resolve it.
