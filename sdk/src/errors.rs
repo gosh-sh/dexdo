@@ -248,9 +248,60 @@ fn extract_exit_code(err: &ClientError) -> Option<u32> {
     data.node_error?.extensions?.details?.exit_code
 }
 
+/// The contract's `exit_code` for a failed call, when the error carries one.
+///
+/// `None` for a failure that never reached the compute phase — a transport
+/// error, or a kit-level refusal — which is a different thing from a contract
+/// that ran and rejected, and callers deciding whether to retry must not
+/// conflate them.
+pub fn kit_exit_code(err: &KitError) -> Option<u32> {
+    extract_exit_code(err.tvm_error.as_ref()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kit_exit_code_reads_the_contracts_code() {
+        // What a retry decision turns on. `sendEccShellToPrivateNote` rejecting
+        // a stale history root arrives exactly like this.
+        let kit = KitError {
+            module: KitModule::Account,
+            code: KitErrorCode::None,
+            message: "Send message".into(),
+            tvm_error: Some(ClientError::new(
+                621,
+                "Failed to execute the message. Error occurred during the compute phase.",
+                serde_json::json!({
+                    "node_error": { "extensions": { "details": { "exit_code": 403 } } }
+                }),
+            )),
+        };
+        assert_eq!(kit_exit_code(&kit), Some(403));
+    }
+
+    #[test]
+    fn kit_exit_code_is_none_when_the_call_never_reached_the_contract() {
+        // A transport or kit-level failure must not be mistaken for a contract
+        // that ran and rejected: retrying the first is pointless, and retrying
+        // it as though it were the second hides the real fault.
+        let kit = KitError {
+            module: KitModule::Account,
+            code: KitErrorCode::UnknownEvent,
+            message: "no node".into(),
+            tvm_error: None,
+        };
+        assert_eq!(kit_exit_code(&kit), None);
+
+        let no_details = KitError {
+            module: KitModule::Account,
+            code: KitErrorCode::None,
+            message: "Send message".into(),
+            tvm_error: Some(ClientError::new(414, "test", serde_json::json!({}))),
+        };
+        assert_eq!(kit_exit_code(&no_details), None);
+    }
 
     #[test]
     fn kit_error_with_tvm_preserves_raw_value() {
