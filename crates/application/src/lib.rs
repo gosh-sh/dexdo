@@ -766,6 +766,15 @@ pub trait InferenceReadRepository: Send + Sync {
         &self,
         query: &InferenceOrdersQuery,
     ) -> Result<InferenceOrdersPage, anyhow::Error>;
+
+    /// Newest-first public trade tape for one book. Unknown / unreconciled address →
+    /// `InvalidMarketOrSymbol`; undecodable raw price/qty → `MarketInconsistent`.
+    /// `limit` arrives already clamped at the HTTP boundary, like `get_inference_depth`.
+    async fn list_inference_trades(
+        &self,
+        orderbook_address: &str,
+        limit: u16,
+    ) -> Result<Vec<Trade>, anyhow::Error>;
 }
 
 #[async_trait]
@@ -790,6 +799,14 @@ impl<T: ?Sized + InferenceReadRepository> InferenceReadRepository for Arc<T> {
         query: &InferenceOrdersQuery,
     ) -> Result<InferenceOrdersPage, anyhow::Error> {
         (**self).list_inference_orders(query).await
+    }
+
+    async fn list_inference_trades(
+        &self,
+        orderbook_address: &str,
+        limit: u16,
+    ) -> Result<Vec<Trade>, anyhow::Error> {
+        (**self).list_inference_trades(orderbook_address, limit).await
     }
 }
 
@@ -1221,6 +1238,37 @@ where
         query: GetInferenceDepthQuery,
     ) -> Result<InferenceDepthSnapshot, anyhow::Error> {
         self.repo.get_inference_depth(&query.orderbook_address, query.limit).await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GetInferenceTradesQuery {
+    pub orderbook_address: String,
+    pub limit: u16,
+}
+
+pub struct GetInferenceTradesUseCase<R> {
+    repo: R,
+}
+
+impl<R> GetInferenceTradesUseCase<R> {
+    pub fn new(repo: R) -> Self {
+        Self { repo }
+    }
+}
+
+impl<R> GetInferenceTradesUseCase<R>
+where
+    R: InferenceReadRepository,
+{
+    /// `limit` is clamped at the HTTP boundary (inference convention), so there is no
+    /// bounds check here — unlike `GetTradesUseCase`, whose prediction contract rejects
+    /// out-of-range limits with `-1102`.
+    pub async fn execute(
+        &self,
+        query: GetInferenceTradesQuery,
+    ) -> Result<Vec<Trade>, anyhow::Error> {
+        self.repo.list_inference_trades(&query.orderbook_address, query.limit).await
     }
 }
 
@@ -7169,6 +7217,8 @@ mod inference_usecase_tests {
     use super::GetInferenceMarketsUseCase;
     use super::GetInferenceOrdersInput;
     use super::GetInferenceOrdersUseCase;
+    use super::GetInferenceTradesQuery;
+    use super::GetInferenceTradesUseCase;
     use super::InferenceMarketsRequest;
     use super::InferenceOrderStatus;
     use super::InferenceOrderStatusSet;
@@ -7177,6 +7227,7 @@ mod inference_usecase_tests {
     use super::InferenceOrdersQuery;
     use super::InferenceReadRepository;
     use super::OrdersLimit;
+    use super::Trade;
     use super::MAX_CURSOR_LEN;
     use super::ORDERS_DEFAULT_LIMIT;
     use super::ORDERS_MAX_LIMIT;
@@ -7184,6 +7235,8 @@ mod inference_usecase_tests {
     #[derive(Clone, Default)]
     struct StubInferenceRepo {
         last_query: Arc<Mutex<Option<InferenceOrdersQuery>>>,
+        trades_response: Arc<Mutex<Vec<Trade>>>,
+        trades_calls: Arc<Mutex<Vec<(String, u16)>>>,
     }
 
     impl StubInferenceRepo {
@@ -7233,6 +7286,15 @@ mod inference_usecase_tests {
                 last_update_id: "0".into(),
             })
         }
+
+        async fn list_inference_trades(
+            &self,
+            orderbook_address: &str,
+            limit: u16,
+        ) -> Result<Vec<Trade>, anyhow::Error> {
+            self.trades_calls.lock().unwrap().push((orderbook_address.to_string(), limit));
+            Ok(self.trades_response.lock().unwrap().clone())
+        }
     }
 
     #[tokio::test]
@@ -7254,6 +7316,29 @@ mod inference_usecase_tests {
             .unwrap();
         assert_eq!(snap.orderbook_address, "0:ob");
         assert_eq!(snap.last_update_id, "7");
+    }
+
+    #[tokio::test]
+    async fn get_inference_trades_forwards_book_and_limit() {
+        let canned = vec![dodex_domain::Trade {
+            trade_id: "co-09".into(),
+            price: "1.000000000".into(),
+            qty: "4".into(),
+            quote_qty: "4.000000000".into(),
+            time: 1_700_000_000_000,
+            is_buyer_maker: true,
+        }];
+        let repo = StubInferenceRepo::default();
+        *repo.trades_response.lock().unwrap() = canned.clone();
+        let use_case = GetInferenceTradesUseCase::new(repo.clone());
+
+        let tape = use_case
+            .execute(GetInferenceTradesQuery { orderbook_address: "0:tape_uc".into(), limit: 7 })
+            .await
+            .expect("tape must be served");
+
+        assert_eq!(tape, canned);
+        assert_eq!(*repo.trades_calls.lock().unwrap(), vec![("0:tape_uc".to_string(), 7_u16)]);
     }
 
     #[test]

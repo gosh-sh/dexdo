@@ -23,6 +23,7 @@ use dodex_domain::InferenceMarketStatus;
 use dodex_domain::InferenceMarketsPage;
 use dodex_domain::InferenceModel;
 use dodex_domain::PriceLevel;
+use dodex_domain::Trade;
 use dodex_domain::INFERENCE_MAKER_REBATE_CAP_BPS;
 use num_bigint::BigUint;
 use tracing::debug;
@@ -182,6 +183,14 @@ impl InferenceReadRepository for PostgresReadModelRepository {
         query: &InferenceOrdersQuery,
     ) -> Result<InferenceOrdersPage, anyhow::Error> {
         list_inference_orders_impl(self, query).await
+    }
+
+    async fn list_inference_trades(
+        &self,
+        orderbook_address: &str,
+        limit: u16,
+    ) -> Result<Vec<Trade>, anyhow::Error> {
+        list_inference_trades_impl(self, orderbook_address, limit).await
     }
 }
 
@@ -362,6 +371,112 @@ async fn get_inference_depth_impl(
         bids,
         asks,
     })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct InferenceTradeRow {
+    trade_id: String,
+    // Raw contract integers as text: price in quote-asset base units per tick, qty in
+    // whole ticks. Decoded to the display grid below.
+    price: String,
+    qty: String,
+    is_buyer_maker: bool,
+    // Microseconds since the epoch. Non-Option: the query's `chain_time IS NOT NULL`
+    // predicate is what keeps sqlx from decoding NULL into an i64.
+    chain_time_us: i64,
+}
+
+/// Newest-first trade tape for one book.
+///
+/// Simpler than the prediction tape by construction: an inference price is already quoted
+/// in quote-asset base units per tick, so there is no basis-point grid to descale and the
+/// notional is a plain `price * qty` — no `FULL_PERCENT` division, and no rounding ulp to
+/// drift from the chain figure. Note this is the NOTIONAL: the buyer actually pays
+/// `price + tickFee(price)` per tick, which the book reports separately as
+/// `InferenceExecuted.cost`.
+async fn list_inference_trades_impl(
+    repo: &PostgresReadModelRepository,
+    orderbook_address: &str,
+    limit: u16,
+) -> Result<Vec<Trade>, anyhow::Error> {
+    // Resolution mirrors `get_inference_depth_impl`, plus the quote asset's `decimals`
+    // (joined from ref_tokens) which scales `quoteQty`. `version` is deliberately NOT
+    // selected: the tape is a bare array with nowhere to carry the book's contract
+    // generation — a client that needs it reads /api/v1/inference/markets. The visibility
+    // gate is the same: an unknown book and a never-reconciled one collapse to one
+    // client-visible miss.
+    let resolved: Option<(Option<i32>, Option<i32>, Option<i32>)> = sqlx::query_as(
+        "select m.price_precision, m.quantity_precision, rt.decimals \
+           from inference_markets m \
+           left join ref_tokens rt on rt.token_type = m.quote_token_type \
+          where m.orderbook_address = $1 and m.last_reconciled_at is not null",
+    )
+    .bind(orderbook_address)
+    .fetch_optional(repo.pool())
+    .await
+    .context("resolve inference market for trades")?;
+    let Some((price_precision, quantity_precision, decimals)) = resolved else {
+        return Err(anyhow!(DomainError::InvalidMarketOrSymbol));
+    };
+    let price_scale = inference_scale(price_precision, orderbook_address, "price_precision")?;
+    let quantity_scale =
+        inference_scale(quantity_precision, orderbook_address, "quantity_precision")?;
+    // A reconciled book always carries a quote_token_type that resolves in ref_tokens; a
+    // NULL here is read-model corruption, and `inference_scale` reports it as such.
+    let quote_scale = inference_scale(decimals, orderbook_address, "quote_decimals")?;
+
+    // `trade_id` is the lex-monotonic chain order of the match event, so ORDER BY DESC is
+    // already true newest-first with no Rust-side re-sort; `inference_trades_tape_idx`
+    // serves it as a range scan. `chain_time IS NOT NULL` drops the rare row the gateway
+    // delivered without a parseable time, matching the prediction tape.
+    let rows: Vec<InferenceTradeRow> = sqlx::query_as(
+        r#"select trade_id,
+                  price::text as price,
+                  qty::text as qty,
+                  is_buyer_maker,
+                  (extract(epoch from chain_time) * 1000000)::bigint as chain_time_us
+             from inference_trades
+            where orderbook_address = $1
+              and chain_time is not null
+            order by trade_id desc
+            limit $2"#,
+    )
+    .bind(orderbook_address)
+    .bind(i64::from(limit.max(1)))
+    .fetch_all(repo.pool())
+    .await
+    .context("read inference trade tape")?;
+
+    let mut trades = Vec::with_capacity(rows.len());
+    for row in rows {
+        let parse_uint = |raw: &str, axis: &str| {
+            BigUint::parse_bytes(raw.as_bytes(), 10).ok_or_else(|| {
+                warn!(
+                    orderbook = %orderbook_address,
+                    trade_id = %row.trade_id,
+                    axis,
+                    raw,
+                    "inference_trades raw value is not a non-negative integer",
+                );
+                anyhow!(DomainError::MarketInconsistent)
+            })
+        };
+        let price_uint = parse_uint(&row.price, "price")?;
+        let qty_uint = parse_uint(&row.qty, "qty")?;
+        let notional = &price_uint * &qty_uint;
+
+        trades.push(Trade {
+            trade_id: row.trade_id,
+            price: scale_uint_to_decimal(&row.price, price_scale),
+            qty: scale_uint_to_decimal(&row.qty, quantity_scale),
+            quote_qty: scale_uint_to_decimal(&notional.to_str_radix(10), quote_scale),
+            // Microseconds -> Unix milliseconds, the same truncation the prediction tape
+            // and /api/v1/inference/orders use.
+            time: row.chain_time_us / 1_000,
+            is_buyer_maker: row.is_buyer_maker,
+        });
+    }
+    Ok(trades)
 }
 
 /// One row of the snapshot statement.

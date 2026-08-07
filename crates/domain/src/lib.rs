@@ -371,7 +371,9 @@ pub fn bps_to_decimal_string(bps: i32) -> String {
 /// at the quote asset's `decimals`); `time` is Unix milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trade {
-    /// Opaque, lex-comparable id for the match (the taker event's chain order).
+    /// Opaque, lex-comparable id for the match: the chain order of the event that
+    /// recorded it (the taker-side `OrderFilled` on prediction books, the single
+    /// `InferenceFilled` on inference books).
     pub trade_id: String,
     pub price: String,
     pub qty: String,
