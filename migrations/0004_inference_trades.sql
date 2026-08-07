@@ -1,3 +1,5 @@
+-- 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
+--
 -- Append-only public trade tape behind GET /api/v1/inference/trades. One row per
 -- maker<->taker match, written by the InferenceOrderBook.InferenceFilled projector.
 -- Unlike the prediction `trades` tape there is no taker-side gate: the inference book

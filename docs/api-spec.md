@@ -1110,7 +1110,7 @@ Trade fields:
 | `time` | LONG | On-chain match time in Unix milliseconds. |
 | `isBuyerMaker` | BOOLEAN | `true` when the resting (maker) side was the buy order and the taker was selling (downtick); `false` when the taker was buying (uptick). Matches Binance `isBuyerMaker` semantics. |
 
-Three deliberate absences a client would otherwise misread as bugs:
+Three deliberate departures from what a client might expect, each easy to misread as a bug:
 
 1. **No `contractVersion`.** Unlike [`/api/v1/inference/markets`](#inference-markets) and [`/api/v1/inference/depth`](#inference-depth), this response is a flat array with no envelope to carry book metadata. A client that needs the book's contract generation reads it from `/api/v1/inference/markets?inferenceOrderBookAddress=…`.
 2. **No pagination beyond `limit`.** There is no `cursor` and no `hasMore`: the endpoint serves at most the `limit` (ceiling `1000`) newest matches and nothing older. A client that needs deeper trade history has no cursor to page through — none exists.

@@ -642,6 +642,13 @@ async fn expired_filled_orphan_decrements_present_leg() {
         .execute(&pool)
         .await
         .unwrap();
+    // The dead-letter repair below mints a global-PK inference_trades row keyed on the
+    // raw event's chain order — clean it up like the other tables so a re-run starts fresh.
+    sqlx::query("delete from inference_trades where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Seed a resting BUY maker (id 700) with 10 ticks of depth via the real placement projector.
     let mut tx = pool.begin().await.unwrap();
@@ -698,6 +705,11 @@ async fn expired_filled_orphan_decrements_present_leg() {
         .await
         .unwrap();
     sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_trades where orderbook_address=$1")
         .bind(ob)
         .execute(&pool)
         .await
@@ -783,7 +795,7 @@ async fn buy_maker_fills_across_deals_to_filled_at_zero() {
     // Read via the pool only AFTER commit — a separate pooled connection cannot see uncommitted rows.
     assert_eq!(status_rem(&pool, ob, 10).await, ("OPEN".into(), "4".into())); // committed partial
     let mut tx = pool.begin().await.unwrap();
-    project(&mut tx,&ev("InferenceFilled",serde_json::json!({"makerId":"10","takerId":"12","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-5")).await;
+    project(&mut tx,&ev("InferenceFilled",serde_json::json!({"makerId":"10","takerId":"12","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-fillacross-5")).await; // trade_id unique repo-wide
     tx.commit().await.unwrap();
     assert_eq!(status_rem(&pool, ob, 10).await, ("FILLED".into(), "0".into()));
 }
@@ -897,7 +909,8 @@ async fn filled_after_real_cancel_is_terminal_no_override() {
         ("CANCELLED".into(), "10".into()),
         "real cancel stays terminal, remainder preserved"
     );
-    // FULL no-op: the late Filled (co-3) must not advance the terminal row's chain order.
+    // FULL no-op: a late Filled arriving after the real cancel must not advance the
+    // terminal row's chain order.
     let lco: String = sqlx::query_scalar(
         "select last_chain_order from inference_orders where orderbook_address=$1 and order_id=40",
     )
@@ -972,6 +985,11 @@ async fn orphan_repair_filled_links_deal() {
     let Some(pool) = setup().await else { return };
     let ob = "0:t_orphan_link_ob";
     let tc = "0:tc_orphan_link";
+    sqlx::query("delete from inference_trades where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("delete from inference_deals where token_contract_address=$1")
         .bind(tc)
         .execute(&pool)
@@ -1002,7 +1020,9 @@ async fn orphan_repair_filled_links_deal() {
         serde_json::json!({
         "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}),
     );
-    repair_expired_inference_orphan(&mut tx, &filled, &node(ob, "co-2")).await.unwrap();
+    // Applied via the orphan path mints a global-PK inference_trades row — chain order
+    // unique repo-wide.
+    repair_expired_inference_orphan(&mut tx, &filled, &node(ob, "co-orphanlink-2")).await.unwrap();
     tx.commit().await.unwrap();
 
     let (orderbook, seller, buyer): (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
@@ -1011,6 +1031,16 @@ async fn orphan_repair_filled_links_deal() {
     assert_eq!(orderbook.as_deref(), Some(ob));
     assert_eq!(seller.as_deref(), Some("0:seller"), "seller resolved from present SELL leg");
     assert_eq!(buyer.as_deref(), Some("0:buyer"));
+
+    // The present leg is the MAKER (the SELL), so resolve_is_buyer_maker takes the maker
+    // branch: isBuyerMaker follows the maker's own side directly.
+    let rows = tape_rows(&pool, ob).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "maker leg present resolves a direction; the match lands on the tape"
+    );
+    assert!(!rows[0].3, "maker leg is the SELL => taker bought");
 }
 
 #[tokio::test]
@@ -1053,6 +1083,68 @@ async fn orphan_repair_filled_no_leg_still_links() {
         "buyer recorded from the event even with no legs"
     );
     assert!(seller.is_none(), "seller unresolved when the SELL leg was dropped");
+
+    // Neither leg is present, so resolve_is_buyer_maker has no side to read from either
+    // end of the match: the direction is unrecoverable and the row is omitted entirely,
+    // rather than landing on the public tape with a guessed side.
+    assert!(tape_rows(&pool, ob).await.is_empty(), "no tape row when neither leg is present");
+}
+
+#[tokio::test]
+async fn orphan_repair_filled_taker_only_resolves_from_taker_side() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_orphan_takeronly_ob";
+    let tc = "0:tc_orphan_takeronly";
+    sqlx::query("delete from inference_trades where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    // Only the BUY taker leg present (the counterparty SELL maker's OrderPlaced was
+    // dropped) — the mirror of orphan_repair_filled_links_deal, which leaves the MAKER
+    // leg present instead. With no maker row to read is_buy from, resolve_is_buyer_maker
+    // falls back to inverting the taker's own side.
+    let buy = ev(
+        "InferenceOrderPlaced",
+        serde_json::json!({
+        "orderId":"2","isBuy":true,"price":"100","ticks":"10","note":"0:buyer","tokenContract":ZERO_ADDRESS,"deadline":"0"}),
+    );
+    project_inference_event(&mut tx, &buy, &node(ob, "co-1")).await.unwrap();
+    // Expired Filled orphan: taker(2) present, maker(1) dropped.
+    let filled = ev(
+        "InferenceFilled",
+        serde_json::json!({
+        "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}),
+    );
+    // Applied via the orphan path mints a global-PK inference_trades row — chain order
+    // unique repo-wide.
+    repair_expired_inference_orphan(&mut tx, &filled, &node(ob, "co-orphantaker-2")).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let rows = tape_rows(&pool, ob).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "taker leg present still resolves a direction; the match lands on the tape"
+    );
+    assert!(!rows[0].3, "taker is the BUY => isBuyerMaker is the inverse, false");
 }
 
 // ---- token_contract / deadline persistence ----

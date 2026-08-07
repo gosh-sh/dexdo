@@ -534,6 +534,10 @@ async fn apply_inference_filled(
     apply_filled_decrement(tx, &f, &locked).await?;
     link_deal_from_filled(tx, &f).await?;
     // Both legs are present on this path (checked above), so the direction always resolves.
+    // The append is not gated on what apply_filled_decrement did to the order rows: a
+    // FULL no-op there (terminal maker, real-cancel override) still leaves a genuine
+    // on-chain match, so the tape mirrors the InferenceFilled event one-to-one — same
+    // reasoning as the prediction tape's unconditional trades insert.
     if let Some(is_buyer_maker) = resolve_is_buyer_maker(&f, &locked) {
         append_inference_trade(tx, &f, is_buyer_maker).await?;
     }

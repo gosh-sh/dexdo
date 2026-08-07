@@ -425,13 +425,19 @@ async fn token_contract_event_seeds_skeleton_then_filled_enriches() {
     let ob = "0:ob_seed_filled_test";
 
     // Clean slate: cascade-delete inference_deals (also removes inference_ticks),
-    // and delete inference_orders / inference_markets for the orderbook.
+    // and delete inference_orders / inference_markets for the orderbook. The Filled
+    // step below also mints a global-PK inference_trades row, so clear that too.
     sqlx::query("delete from inference_deals where token_contract_address=$1")
         .bind(tc)
         .execute(&pool)
         .await
         .unwrap();
     sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_trades where orderbook_address=$1")
         .bind(ob)
         .execute(&pool)
         .await
