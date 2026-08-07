@@ -761,7 +761,9 @@ async fn filled_closes_sell_offer_and_zeroes_buy_taker() {
         "InferenceFilled",
         serde_json::json!({"makerId":"1","takerId":"2","ticks":"10","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}),
     );
-    assert_eq!(project(&mut tx, &f, &node(ob, "co-3")).await, ProjectionOutcome::Applied);
+    // Applied Filled mints a global-PK inference_trades row keyed on this chain order —
+    // must stay unique repo-wide, not just within this test.
+    assert_eq!(project(&mut tx, &f, &node(ob, "co-fillboth-3")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();
     assert_eq!(status_rem(&pool, ob, 1).await, ("FILLED".into(), "0".into())); // SELL one-deal
     assert_eq!(status_rem(&pool, ob, 2).await, ("FILLED".into(), "0".into())); // BUY taker zeroed
@@ -776,7 +778,7 @@ async fn buy_maker_fills_across_deals_to_filled_at_zero() {
     place(&pool, &mut tx, ob, "10", true, "10", "co-1").await; // BUY maker
     place(&pool, &mut tx, ob, "11", false, "6", "co-2").await; // SELL taker A
     place(&pool, &mut tx, ob, "12", false, "4", "co-3").await; // SELL taker B
-    project(&mut tx,&ev("InferenceFilled",serde_json::json!({"makerId":"10","takerId":"11","ticks":"6","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-4")).await;
+    project(&mut tx,&ev("InferenceFilled",serde_json::json!({"makerId":"10","takerId":"11","ticks":"6","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"})),&node(ob,"co-fillacross-4")).await; // trade_id unique repo-wide
     tx.commit().await.unwrap();
     // Read via the pool only AFTER commit — a separate pooled connection cannot see uncommitted rows.
     assert_eq!(status_rem(&pool, ob, 10).await, ("OPEN".into(), "4".into())); // committed partial
@@ -807,7 +809,8 @@ async fn filled_defers_zero_writes_when_one_side_absent_then_applies_once() {
     // taker arrives, replay applies exactly once.
     let mut tx = pool.begin().await.unwrap();
     place(&pool, &mut tx, ob, "21", true, "5", "co-3").await;
-    assert_eq!(project(&mut tx, &f, &node(ob, "co-4")).await, ProjectionOutcome::Applied);
+    // Applied Filled mints a global-PK inference_trades row — chain order unique repo-wide.
+    assert_eq!(project(&mut tx, &f, &node(ob, "co-filldefer-4")).await, ProjectionOutcome::Applied);
     tx.commit().await.unwrap();
     assert_eq!(status_rem(&pool, ob, 20).await, ("FILLED".into(), "0".into()));
     assert_eq!(status_rem(&pool, ob, 21).await, ("FILLED".into(), "0".into()));
@@ -831,7 +834,11 @@ async fn filled_overrides_provisional_sweep_cancel_and_resets_discovery_cursor()
         "InferenceFilled",
         serde_json::json!({"makerId":"30","takerId":"31","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}),
     );
-    assert_eq!(project(&mut tx, &f, &node(ob, "co-3")).await, ProjectionOutcome::Applied);
+    // Applied Filled mints a global-PK inference_trades row — chain order unique repo-wide.
+    assert_eq!(
+        project(&mut tx, &f, &node(ob, "co-filloverride-3")).await,
+        ProjectionOutcome::Applied
+    );
     tx.commit().await.unwrap();
     // Override: maker reopened OPEN with remaining 6, swept_at cleared.
     let (status, rem): (String, String) = status_rem(&pool, ob, 30).await;
@@ -882,7 +889,8 @@ async fn filled_after_real_cancel_is_terminal_no_override() {
         "InferenceFilled",
         serde_json::json!({"makerId":"40","takerId":"41","ticks":"4","clearingPrice":"1","sellerTC":"0:s","buyerNote":"0:b"}),
     );
-    project(&mut tx, &f, &node(ob, "co-3")).await;
+    // Applied Filled mints a global-PK inference_trades row — chain order unique repo-wide.
+    project(&mut tx, &f, &node(ob, "co-fillrealcancel-3")).await;
     tx.commit().await.unwrap();
     assert_eq!(
         status_rem(&pool, ob, 40).await,
@@ -944,7 +952,11 @@ async fn filled_links_deal_to_orderbook_seller_buyer() {
         serde_json::json!({
         "makerId":"1","takerId":"2","ticks":"10","clearingPrice":"100","sellerTC":tc,"buyerNote":"0:buyer"}),
     );
-    assert_eq!(project(&mut tx, &filled, &node(ob, "co-3")).await, ProjectionOutcome::Applied);
+    // Applied Filled mints a global-PK inference_trades row — chain order unique repo-wide.
+    assert_eq!(
+        project(&mut tx, &filled, &node(ob, "co-deallink-3")).await,
+        ProjectionOutcome::Applied
+    );
     tx.commit().await.unwrap();
 
     let (orderbook, seller, buyer): (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
