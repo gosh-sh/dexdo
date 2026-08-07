@@ -24,7 +24,7 @@ import "./InferenceOrderBook.sol";
 contract ModelRegistry {
 
     /// @notice Contract semantic version (kept in lockstep with the airegistry stack).
-    string constant version = "4.0.34";
+    string constant version = "4.0.35";
 
     // ── pinned InferenceOrderBook code (cascade-updated on version bump) ──
     /// @dev InferenceOrderBook code hash + depth, cascade-updated with every rebuild. NO
@@ -33,7 +33,7 @@ contract ModelRegistry {
     ///      rewrite prose. A version in a comment beside a generated constant is a second copy
     ///      of a fact that has one owner, and it goes stale the first time the owner moves.
     ///      The book's only static is the model hash, so one model ⇒ one book.
-    uint256 constant IOB_CODE_HASH  = 0x71465c8b500d0f5627373c1dde3add7a314a548e0bc8bc17c20f13e5c795f923;
+    uint256 constant IOB_CODE_HASH  = 0x2fa52109d6f38fc3640f35febcb73300a9f96a7a3558bb4ae6b4e00374420016;
     uint16  constant IOB_CODE_DEPTH = 31;
 
     /// @notice Self-top-up floor (mirrors the airegistry stack).
@@ -56,7 +56,11 @@ contract ModelRegistry {
     uint16 constant MODEL_NAME_MAX = 127;
 
     /// @notice nameHash => registered.  nameHash = tvm.hash(bytes(name)).
-    mapping(uint256 => bool) _models;
+    // Value is the NAME, not a flag. A hash cannot be read back into the string it came from, so
+    // a `bool` map could only ever answer "is this name registered?" for a name you already had to
+    // guess. With the name stored, the registry can be read: `modelNameOf` returns what it was
+    // seeded with. Costs ~31 bytes a row against ~1 bit — see `modelNameOf`.
+    mapping(uint256 => string) _models;
 
     /// @notice Live cardinality of `_models`, maintained incrementally on every insert/remove so
     ///         `count()` is O(1). A full-map scan would blow the get-method gas budget at the
@@ -122,7 +126,8 @@ contract ModelRegistry {
         if (!canonicalName.empty()) {
             require(canonicalName.byteLength() <= MODEL_NAME_MAX, ERR_NAME_TOO_LONG);
             uint256 k = _key(canonicalName);
-            if (!_models[k]) { _models[k] = true; _count++; }   // count only NEW keys → incremental
+            if (_models[k].empty()) { _count++; }   // count only NEW keys → incremental
+            _models[k] = canonicalName;
         }
     }
 
@@ -135,7 +140,8 @@ contract ModelRegistry {
             // an over-long name would alias another entry's order book (see MODEL_NAME_MAX).
             if (!names[i].empty() && names[i].byteLength() <= MODEL_NAME_MAX) {
                 uint256 k = _key(names[i]);
-                if (!_models[k]) { _models[k] = true; _count++; }
+                if (_models[k].empty()) { _count++; }
+                _models[k] = names[i];
             }
         }
     }
@@ -144,7 +150,7 @@ contract ModelRegistry {
     function removeModel(string canonicalName) public onlyOwner {
         ensureBalance();
         uint256 k = _key(canonicalName);
-        if (_models[k]) { delete _models[k]; _count--; }
+        if (!_models[k].empty()) { delete _models[k]; _count--; }
     }
 
     /// @notice Upgrade this contract's code in place (owner-gated). The fixed
@@ -208,13 +214,31 @@ contract ModelRegistry {
     /// @notice Order book address of a REGISTERED model (reverts `ERR_NOT_MODEL`
     ///         if the name is not registered). Derived on the fly — no cache.
     function orderBookOf(string canonicalName) public view returns (address) {
-        require(_models[_key(canonicalName)], ERR_NOT_MODEL);
+        require(!_models[_key(canonicalName)].empty(), ERR_NOT_MODEL);
         return _orderBook(sha256(canonicalName));
+    }
+
+    /// @notice The name this registry holds under `key`, or empty if none. `key` is what `_key`
+    ///         produces — `tvm.hash(bytes(name))` — NOT the model hash.
+    /// @dev    THE TWO HASHES ARE DIFFERENT AND THE DIFFERENCE IS INVISIBLE. The map is keyed by
+    ///         `tvm.hash`; the ORDER BOOK is addressed by `sha256(name)`. This getter first took a
+    ///         `modelHash` and looked it up directly, which found nothing for every name ever
+    ///         seeded — and found it QUIETLY, returning an empty string exactly as it would for a
+    ///         name that is genuinely absent. `has` and `orderBookOf` went on working because they
+    ///         call `_key` themselves, so nothing else showed the fault.
+    function modelNameOf(uint256 key) external view returns (string) {
+        return _models[key];
+    }
+
+    /// @notice The key `modelNameOf` wants for a given name — so a caller never has to know which
+    ///         of the two hashes this map uses.
+    function keyOf(string canonicalName) external pure returns (uint256) {
+        return _key(canonicalName);
     }
 
     /// @notice Whether a name is registered.
     function has(string canonicalName) external view returns (bool) {
-        return _models[_key(canonicalName)];
+        return !_models[_key(canonicalName)].empty();
     }
 
     /// @notice sha256(canonicalName) — the on-chain authoritative model id.

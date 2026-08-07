@@ -20,7 +20,10 @@ interface IInferenceDeal {
     function dispute() external;
     function cleanupUnopened() external;
     /// @notice Gas (attached ECC[2], flag 17) plus `amount` as a private-balance figure.
-    function fundDeal(uint128 amount) external;
+    function fundDeal(uint128 amount, optional(bytes) endpointCipher) external;
+    /// @dev Added beside `fundDeal`, not as a second interface for the same contract: two
+    ///      names for one deal would let the two drift and give `abi.functionId` two answers.
+    function fundBuyerBond(uint128 amount) external;
     /// @notice Sender check and nothing else — the answer is whether it bounces.
     function touchDeal() external;
 }
@@ -29,7 +32,7 @@ interface IInferenceDeal {
 contract PrivateNote is Modifiers, ReplayProtection {
 
     /// @notice Contract semantic version.
-    string constant version = "4.0.34";
+    string constant version = "4.0.35";
 
     /// @notice Max lifetime (seconds) of a resting SELL offer (spec §2.1.1). A SELL commits NO
     ///         collateral at offer time (the seller bond is funded only after a match), so an ask
@@ -527,7 +530,15 @@ contract PrivateNote is Modifiers, ReplayProtection {
     /// @dev    Cancel, expiry and fill are indistinguishable here on purpose — the book's one
     ///         removal point sends the same message for all three, and the note only needs to
     ///         know the order is no longer resting.
-    event InferenceOrderRemoved(address book, uint128 orderId);
+    // Mirrors InferenceOrderBook's removal causes; only REMOVED_REJECTED is acted on here, the
+    // rest are carried to the owner untouched.
+    uint8 constant REMOVED_FILLED    = 1;
+    uint8 constant REMOVED_CANCELLED = 2;
+    uint8 constant REMOVED_EXPIRED   = 3;
+    uint8 constant REMOVED_DUST      = 4;
+    uint8 constant REMOVED_REJECTED  = 5;
+
+    event InferenceOrderRemoved(address book, uint128 orderId, uint8 cause, uint128 refunded);
     /// @notice A request refused by the book without ever becoming an order (task Q, outcome 3).
     /// @dev    Carries the CLIENT number, because that is the only name this outcome has: no order
     ///         id was ever assigned. `refunded` is what actually landed on the balance, not what the
@@ -666,7 +677,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///         Authenticated BEFORE `tvm.accept()`, like the other two mirrors: this is an entry
     ///         point anyone can address, and accepting first would let a stranger spend the note's
     ///         gas.
-    function onInferenceOrderRemoved(uint256 modelHash, uint128 orderId) public {
+    function onInferenceOrderRemoved(uint256 modelHash, uint128 orderId, uint8 cause, uint128 refunded) public {
         require(msg.sender == DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash), ERR_INVALID_SENDER);
         tvm.accept();
         ensureBalance();
@@ -674,9 +685,14 @@ contract PrivateNote is Modifiers, ReplayProtection {
         // note never recorded, must not revert — the book sends this from inside a match walk,
         // and a revert would bounce into a book that has already moved on.
         uint256 k = tvm.hash(abi.encode(msg.sender, orderId));
-        delete _restingInf[k];
+        // A REFUSED CANCEL REMOVES NOTHING, and the record must survive it. The book sends this
+        // same entry point when it declines a cancel — order not found, or not this owner — and
+        // dropping the resting record there would lose an order that is still live in the book.
+        if (cause != REMOVED_REJECTED) { delete _restingInf[k]; }
+        // The cause and the amount travel together: an owner who sees only "gone" cannot tell a
+        // cancel he asked for from an expiry he did not, and cannot reconcile what came back.
         emit InferenceOrderRemoved{dest: address.makeAddrExtern(PRIVATENOTE_INFERENCE_REMOVED, bitCntAddress)}(
-            msg.sender, orderId);
+            msg.sender, orderId, cause, refunded);
     }
 
     /// @dev Authenticated before `tvm.accept()` — see `onInferencePlaced`.
@@ -707,6 +723,37 @@ contract PrivateNote is Modifiers, ReplayProtection {
         }
         emit InferenceFilledConfirmed{dest: address.makeAddrExtern(PRIVATENOTE_INFERENCE_FILLED, bitCntAddress)}(
             msg.sender, tokenContract, orderId, ticks, clearingPrice, isBuy);
+
+        // THE BUYER'S BOND, POSTED FROM HERE AND NOWHERE ELSE. This mirror is the first moment the
+        // amount can even be computed: it is `2 * clearingPrice`, and the clearing price does not
+        // exist until this fill happened. It is also the first moment this note knows the deal's
+        // address. So the bond is sent automatically, on the fill, with no client involvement —
+        // there is no step for an operator to forget, and no window in which the deal waits for a
+        // human.
+        //
+        // BUY SIDE ONLY. The book sends this same mirror to BOTH notes; the seller's copy carries
+        // `isBuy == false` and his bond went in with `fundDeal` long before. Without this test the
+        // seller would post a second bond into his own deal on every fill.
+        //
+        // `value: 0.05 vmshell, flag: 17` — the native part is GAS, not the bond. A deal is
+        // self-rooted, so native never crosses into its dapp and it pays for its own transactions
+        // out of its own balance; until now that balance came only from the seller, who was
+        // therefore paying for the calls his counterparty makes. The MONEY travels as `amount`, a
+        // figure on the call, exactly as in `fundDeal` — so nothing here can be confused with the
+        // native that was burned crossing the boundary.
+        //
+        // `bounce: true`, like `fundDeal`: if the deal refuses the bond, the figure must come home
+        // rather than be recorded as spent against a deal that never took it.
+        if (isBuy) {
+            uint128 bond = uint128(2 * clearingPrice);
+            if (_balance[CURRENCIES_ID_SHELL] >= bond) {
+                _balance[CURRENCIES_ID_SHELL] -= bond;
+                mapping(uint32 => varuint32) ecc;
+                IInferenceDeal(tokenContract).fundBuyerBond{
+                    value: 0.05 vmshell, flag: 17, bounce: true, currencies: ecc
+                }(bond);
+            }
+        }
     }
 
     /// @notice OUTCOME 3 OF 4 — the book refused the request outright and gave the money back.
@@ -921,6 +968,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
     {
         ensureBalance();
         address orderBook = DexLib.computeInferenceOrderBookAddress(_inferenceOrderBookCode, modelHash);
+        // No figure moves here: a bounce returns the value and there is nothing to correct.
         InferenceOrderBook(orderBook).cancelAllOrders{value: 1 vmshell, flag: 1, bounce: true}();
     }
 
@@ -930,6 +978,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         ensureBalance();
         // bounce:true — `tokenContract` is supplied by the caller, so a wrong address would
         // otherwise make this a silent no-op.
+        // No figure moves here: a bounce returns the value and there is nothing to correct.
         IInferenceDeal(tokenContract).stop{value: 1 vmshell, flag: 1, bounce: true}();
     }
 
@@ -942,6 +991,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         ensureBalance();
         // bounce:true — same caller-supplied address, and here a silent no-op costs the buyer his
         // contest window: he would believe the dispute was filed while it never arrived.
+        // No figure moves here: a bounce returns the value and there is nothing to correct.
         IInferenceDeal(tokenContract).dispute{value: 1 vmshell, flag: 1, bounce: true}();
     }
 
@@ -958,6 +1008,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///         gas is swept to the canonical SuperRoot — no caller-chosen payout.
     function streamCleanup(address tokenContract) public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg {
         ensureBalance();
+        // No figure moves here: a bounce returns the value and there is nothing to correct.
         IInferenceDeal(tokenContract).cleanupUnopened{value: 1 vmshell, flag: 1, bounce: true}();
     }
 
@@ -997,7 +1048,11 @@ contract PrivateNote is Modifiers, ReplayProtection {
     ///         plus `nonce`, never supplied by the caller, so neither gas nor money can be aimed at
     ///         an address the seller did not earn — a mistyped nonce addresses an account that does
     ///         not exist and the message bounces rather than settling somewhere unrecoverable.
-    function fundDeal(uint64 nonce, uint128 gasShell, uint128 amount)
+    /// @param endpointCipher OPTIONAL, carried straight through to the deal. The note is the deal's
+    ///        only permitted sender for this call, so this is the one road the endpoint can travel
+    ///        without the seller keeping an operational wallet. Nothing here reads it: an opaque
+    ///        blob addressed to the buyer, forwarded unchanged.
+    function fundDeal(uint64 nonce, uint128 gasShell, uint128 amount, optional(bytes) endpointCipher)
         public onlyOwnerPubkey(_ephemeralPubkey) accept saveMsg
     {
         ensureBalance();
@@ -1011,7 +1066,7 @@ contract PrivateNote is Modifiers, ReplayProtection {
         if (gasShell > 0) { ecc[CURRENCIES_ID_SHELL] = varuint32(gasShell); }
 
         IInferenceDeal(_tokenContractAddr(_ephemeralPubkey, nonce))
-            .fundDeal{value: 1 vmshell, flag: 17, bounce: true, currencies: ecc}(amount);
+            .fundDeal{value: 1 vmshell, flag: 17, bounce: true, currencies: ecc}(amount, endpointCipher);
     }
 
     /// @notice A deal pays this note back (generation 4.0.33) — the receiving half of the pair.
@@ -2081,6 +2136,15 @@ contract PrivateNote is Modifiers, ReplayProtection {
             return;
         }
         if (bouncedFn == abi.functionId(IInferenceDeal.fundDeal)) {
+            uint128 amount = body.load(uint128);
+            _balance[CURRENCIES_ID_SHELL] += amount;
+            return;
+        }
+        // Same shape, same reason: the buyer's bond leaves as a FIGURE (`_balance` is decremented
+        // before the send), and a bounce returns the attached value but not the record. Without
+        // this the note would stay short by `2 * clearing` on every refused bond — and the send is
+        // automatic on each buy fill, so a refusal is an ordinary path, not an edge.
+        if (bouncedFn == abi.functionId(IInferenceDeal.fundBuyerBond)) {
             uint128 amount = body.load(uint128);
             _balance[CURRENCIES_ID_SHELL] += amount;
             return;

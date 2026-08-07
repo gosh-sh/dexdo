@@ -48,7 +48,7 @@ interface IPrivateNote {
     ///         had cleared its pending record and the credit had not yet arrived.
     function onInferenceRejected(uint256 modelHash, uint64 clientOrderId, uint8 reason, uint128 refunded) external;
     /// @dev Sent from the book's ONE removal point, so cancel, expiry and fill all reach it.
-    function onInferenceOrderRemoved(uint256 modelHash, uint128 orderId) external;
+    function onInferenceOrderRemoved(uint256 modelHash, uint128 orderId, uint8 cause, uint128 refunded) external;
 }
 
 /// @title InferenceOrderBook (spec §2 + §8) — full price→time CLOB with a queued,
@@ -70,12 +70,12 @@ interface IPrivateNote {
 ///         quote/base + collateral, event-resolution shutdown, and PN callbacks
 ///         (inference order entry is fire-and-forget; the note tracks via getters).
 contract InferenceOrderBook is AiRegistryModifiers {
-    string constant version = "4.0.34";
+    string constant version = "4.0.35";
 
     // ⚠ Re-pin whenever dex/PrivateNote is recompiled (note↔OB layout coupling:
     //   the note bakes this book's state layout via `new InferenceOrderBook`, so any
     //   OB layout change forces a note rebuild → new note hash → re-pin → OB rebuild).
-    uint256 constant NOTE_CODE_HASH  = 0x751ef2d873275b6ae8eedcf78a00e9e4641237926080d559e4f66c7e2c8ac059;
+    uint256 constant NOTE_CODE_HASH  = 0x57e85fa67cc90284b907ea7e9d8c6d35830c02d14bd04d4be6ec884b5748ca0c;
     uint16  constant NOTE_CODE_DEPTH = 20;
 
     // Canonical inference TokenContract (deal contract) code. placeSellOffer verifies
@@ -83,7 +83,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // statics — else a fill would route the BUYER's SHELL to a fake (the IOB is the
     // contract that forwards SHELL on a fill, so the check must live HERE, not only in
     // the note: placeSellOffer is public and a direct call would bypass a note check).
-    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xea588cae509818b5e4f157387280f675f739e25f818a80fc459dae5d0cb84272;
+    uint256 constant TOKEN_CONTRACT_CODE_HASH  = 0xa67e1ae0a748f902b248a035eabbcfc6393b3154fed7d7002e0defae8b6d685d;
     uint16  constant TOKEN_CONTRACT_CODE_DEPTH = 17;
 
     // Canonical RootModel code. The seller's per-deal TokenContract is bound to its RootModel
@@ -91,7 +91,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     // TokenContract the IOB first recomputes the seller's RootModel address from this pinned code
     // hash + the canonical SuperRoot, then derives the TC address from it (see _tokenContractAddr).
     // Re-pin whenever airegistry/RootModel is recompiled.
-    uint256 constant ROOT_MODEL_CODE_HASH  = 0x92616db7c229a336456c96edbc783705e0e03fe5f811f3615060d67199e7a3cc;
+    uint256 constant ROOT_MODEL_CODE_HASH  = 0x287831837ad23d5216956ccca347c65eecb31b56eb95e7ce0fe3bbf9f2edcff4;
     uint16  constant ROOT_MODEL_CODE_DEPTH = 8;
 
     // Canonical AI SuperRoot account id (workchain 0). Every RootModel registers under it via its
@@ -205,6 +205,15 @@ contract InferenceOrderBook is AiRegistryModifiers {
     uint64  constant MATCH_TX_BUDGET     = 1000 vmshell;
 
     // Queue (circular).
+    // Why an order left the book. The note mirrors this to its owner, who otherwise sees one
+    // undifferentiated "gone" for five different endings and cannot tell a cancel he asked for
+    // from an expiry he did not, nor learn what came back.
+    uint8 constant REMOVED_FILLED    = 1;   // consumed by a match
+    uint8 constant REMOVED_CANCELLED = 2;   // the owner asked
+    uint8 constant REMOVED_EXPIRED   = 3;   // the deadline passed
+    uint8 constant REMOVED_DUST      = 4;   // below the tradeable minimum, refunded in full
+    uint8 constant REMOVED_REJECTED  = 5;   // a cancel was refused; NOTHING was removed
+
     uint8 constant QENTRY_PLACE      = 1;
     uint8 constant QENTRY_CANCEL     = 2;
     uint8 constant QENTRY_CANCEL_ALL = 3;
@@ -681,7 +690,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
             _modelHash, o.tokenContract, orderId, o.clientOrderId, o.isBuy, o.price, o.amount);
     }
 
-    function _removeFromBook(uint128 orderId) private {
+    function _removeFromBook(uint128 orderId, uint8 cause, uint128 refunded) private {
         Order o = _orders[orderId];
         // Idempotency guard: a removed/empty slot has amount 0. Prevents a double
         // _removeFromBook from underflowing _orderCount below (see OrderBook).
@@ -713,7 +722,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         // mirror that never arrives leaves the guard silent rather than broken.
         IPrivateNote(o.note).onInferenceOrderRemoved{
             value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false
-        }(_modelHash, orderId);
+        }(_modelHash, orderId, cause, refunded);
 
         delete _orders[orderId];
         _orderCount--;
@@ -1066,7 +1075,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
                     // left by a partial fill): refund the owner IN FULL and remove it. Removing —
                     // rather than skipping — keeps the scan bounded and stops dust from
                     // accumulating in the book.
-                    _refundAndRemove(cur);
+                    _refundAndRemove(cur, REMOVED_DUST);
                     cur = nextOrd;
                     continue;
                 }
@@ -1089,11 +1098,11 @@ contract InferenceOrderBook is AiRegistryModifiers {
                 // SELL offer = one-deal slot → consumed on match (taker BUY), even
                 // on partial. BUY maker (taker SELL) is reduced (spans deals).
                 if (takerIsBuy) {
-                    _removeFromBook(cur);                       // maker SELL: no buyer escrow to return
+                    _removeFromBook(cur, REMOVED_FILLED, 0);    // maker SELL: no buyer escrow to return
                 } else if (mk.amount == trade) {
                     // Fully-filled maker BUY: the residual escrow (over-fund + clearing-remainder)
                     // returns to the buyer.
-                    _refundAndRemove(cur);
+                    _refundAndRemove(cur, REMOVED_FILLED);
                 } else {
                     _orders[cur].amount = mk.amount - trade;
                 }
@@ -1118,10 +1127,11 @@ contract InferenceOrderBook is AiRegistryModifiers {
         return deadline != 0 && block.timestamp >= deadline;
     }
 
-    function _refundAndRemove(uint128 orderId) private {
+    function _refundAndRemove(uint128 orderId, uint8 cause) private {
         Order o = _orders[orderId];
         uint128 refund = o.escrow;
-        _removeFromBook(orderId);
+        // The note is told the SAME figure this function is about to pay out, from the same read.
+        _removeFromBook(orderId, cause, refund);
         if (refund > 0) { _payShell(o.note, refund); emit InferenceRefunded{dest: address.makeAddrExtern(BuyUnmatchedEmit, bitCntAddress)}(orderId, o.note, refund); }
     }
 
@@ -1132,7 +1142,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     ///         expiry entry point (match sweep + `_doExpire`).
     function _removeExpiredBid(uint128 orderId) private {
         address note = _orders[orderId].note;
-        _refundAndRemove(orderId);
+        _refundAndRemove(orderId, REMOVED_EXPIRED);
         emit InferenceOrderExpired{dest: address.makeAddrExtern(OrderExpiredEmit, bitCntAddress)}(orderId, true, note, address(0));
     }
 
@@ -1143,7 +1153,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
     function _removeExpiredSell(uint128 orderId) private {
         Order o = _orders[orderId];
         address tc = o.tokenContract;
-        _removeFromBook(orderId);
+        _removeFromBook(orderId, REMOVED_EXPIRED, 0);   // an ask holds no escrow
         if (tc != address(0)) {
             ITokenContractDeal(tc).onSellClosed{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}();
         }
@@ -1469,12 +1479,12 @@ contract InferenceOrderBook is AiRegistryModifiers {
         // one, and that belief is exactly what has to go.
         if (o.amount == 0 && o.note == address(0)) {
             emit InferenceOrderCancelRejected{dest: address.makeAddrExtern(OfferCancelRejectedEmit, bitCntAddress)}(orderId, CANCEL_REJ_NOT_FOUND, owner);
-            IPrivateNote(owner).onInferenceOrderRemoved{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(_modelHash, orderId);
+            IPrivateNote(owner).onInferenceOrderRemoved{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(_modelHash, orderId, REMOVED_REJECTED, 0);
             return;
         }
         if (o.note != owner) {
             emit InferenceOrderCancelRejected{dest: address.makeAddrExtern(OfferCancelRejectedEmit, bitCntAddress)}(orderId, CANCEL_REJ_NOT_OWNER, owner);
-            IPrivateNote(owner).onInferenceOrderRemoved{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(_modelHash, orderId);
+            IPrivateNote(owner).onInferenceOrderRemoved{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(_modelHash, orderId, REMOVED_REJECTED, 0);
             return;
         }
         // Limit or subscription: the full remaining escrow returns to the buyer on cancel
@@ -1485,7 +1495,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
         // BEFORE `_removeFromBook` deletes the order.
         bool    freeTc = !o.isBuy && o.tokenContract != address(0);
         address tc     = o.tokenContract;
-        _removeFromBook(orderId);
+        _removeFromBook(orderId, REMOVED_CANCELLED, refund);
         emit InferenceOrderCancelled{dest: address.makeAddrExtern(OfferCancelledEmit, bitCntAddress)}(orderId, refund, owner);
         _payShell(owner, refund);
         if (freeTc) { ITokenContractDeal(tc).onSellClosed{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(); }
@@ -1500,7 +1510,7 @@ contract InferenceOrderBook is AiRegistryModifiers {
             uint128 refund = o.escrow;
             bool    freeTc = !o.isBuy && o.tokenContract != address(0);
             address tc     = o.tokenContract;
-            _removeFromBook(cur);
+            _removeFromBook(cur, REMOVED_CANCELLED, refund);
             emit InferenceOrderCancelled{dest: address.makeAddrExtern(OfferCancelledEmit, bitCntAddress)}(cur, refund, owner);
             if (refund > 0) { _payShell(owner, refund); }
             if (freeTc) { ITokenContractDeal(tc).onSellClosed{value: REGISTER_FORWARD_VALUE, flag: 1, bounce: false}(); }

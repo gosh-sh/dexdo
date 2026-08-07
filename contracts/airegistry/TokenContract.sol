@@ -65,7 +65,7 @@ import "./InferenceOrderBook.sol";
 ///                             `releaseDispute()` / `resolveDisputeTimeout()`.
 ///         5. `withdrawShell`/`destroy` — seller pulls finalized SHELL (§3.5).
 contract TokenContract is AiRegistryModifiers {
-    string constant version = "4.0.34";
+    string constant version = "4.0.35";
 
     // `SUPER_ROOT_ADDR` used to live here. Its ONLY use was as the fixed sink for
     // `cleanupUnopened`'s residual-native sweep — a permissionless call, so the leftover gas went to
@@ -83,7 +83,7 @@ contract TokenContract is AiRegistryModifiers {
     // book hash is authoritative — the TC needs no RootPN round-trip. The note does
     // NOT pin the TC code (RootPN bakes it into the note at deploy), so this pin is
     // one-way (TC->note) and the build stays cycle-free. Re-pin when PrivateNote is rebuilt.
-    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0x751ef2d873275b6ae8eedcf78a00e9e4641237926080d559e4f66c7e2c8ac059;
+    uint256 constant PRIVATE_NOTE_CODE_HASH  = 0x57e85fa67cc90284b907ea7e9d8c6d35830c02d14bd04d4be6ec884b5748ca0c;
     uint16  constant PRIVATE_NOTE_CODE_DEPTH = 20;
 
     // Native value attached to THIS contract's cross-dapp messages (register / stream-lock /
@@ -103,7 +103,12 @@ contract TokenContract is AiRegistryModifiers {
     event ContractDeployed(address self);
     event StreamFunded(address buyer, uint128 deposit);
     event SellerBondFunded(uint128 amount);
+    event BuyerBondFunded(uint128 amount);
     event StreamOpened(address buyer, uint128 pricePerTick);
+    /// @notice The endpoint ciphertext was written. Carries the ciphertext itself, so a buyer who
+    ///         hears it does not have to come back for `getEndpointCipher()` — the value is public
+    ///         either way, encrypted to his key, so putting it in the event reveals nothing new.
+    event EndpointSet(bytes endpointCipher);
     event TickFinalized(uint128 finalizedOwed, uint128 deposit);
     event TicksClaimed(uint128 trusted, uint128 claimed);
     event StreamStopped(address buyer, uint128 toSeller, uint128 refundToBuyer);
@@ -138,14 +143,6 @@ contract TokenContract is AiRegistryModifiers {
     // the IOB `_sellTcInUse` map; now the TC itself is the single source). Cleared
     // on cancel (`onSellClosed`) so the seller can re-list on the same live TC.
     bool    _offerPosted;
-    // Seller wind-down intent (`close`): when a live offer must be cancelled first,
-    // the note's cancel fires `onSellClosed`, which then self-destructs (the offer
-    // is provably off the book by then, so no resting offer outlives the TC).
-    //
-    // INTENT ONLY — there is no payee to remember. `_closePayout` used to sit beside this flag
-    // holding the address the seller named; every exit now ends at `_sellerNote`, a static, so the
-    // field had nothing left to say.
-    bool    _closing;
 
     // Immutable deal config (constructor).
     string  _modelName;
@@ -192,6 +189,11 @@ contract TokenContract is AiRegistryModifiers {
     uint64  _probeTime;       // when the probe was frozen (its acceptance window)
 
     bool    _sellerBondFunded; // seller posted the mirror bond (SELLER_BOND = 2P)
+    // Buyer posted his own `2P`. SEPARATE FROM `_funded`, and the separation is the point: the
+    // escrow arrives from the BOOK at the match, the bond arrives from the buyer's NOTE afterwards,
+    // and only then is `open()` allowed. The bond cannot ride the escrow because its size is
+    // `2 * clearing` and the clearing price does not exist until the match has happened.
+    bool    _buyerBondFunded;
     uint128 _sellerBond;       // SHELL held as the seller's mirror collateral (up to 2P), §4.2
 
     /// @notice The buyer's own `2P`, held OUTSIDE the escrow — a subscription only. It is what `D`
@@ -259,16 +261,21 @@ contract TokenContract is AiRegistryModifiers {
     // claim is CONTESTED and is what a dispute is fought over. A claim becomes trusted once its own
     // CLAIM_PROMOTE_WINDOW has passed with no complaint — measured per claim, from the moment it
     // landed, so the seller cannot shorten anyone's contest time by claiming faster.
-    // Three-deep claim pipeline, all CUMULATIVE TOKEN counts (not ticks: remainders must survive,
+    // Two-deep claim pipeline, both CUMULATIVE TOKEN counts (not ticks: remainders must survive,
     // so 56 then 33 is 89 and nothing is lost to rounding).
     //   _tokensFinal  — promoted, irrevocably the seller's, the only figure money is computed from
-    //   _tokensPend1  — older pending claim, landed at `_prevClaimTime`
-    //   _tokensPend2  — newest pending claim, landed at `_lastClaimTime`
+    //   _tokensPend   — the one pending claim, landed at `_lastClaimTime`
+    //
+    // ONE PENDING SLOT, AND THAT IS THE POINT RATHER THAN A SAVING. It used to be two, which let
+    // the seller stand two ticks ahead of what was trusted; a dispute was then about a quantity he
+    // could grow by claiming quickly, and "file two claims and go quiet" was a shape the contract
+    // permitted. With `CLAIM_PROMOTE_WINDOW == MIN_CLAIM_INTERVAL`, the next claim may not arrive
+    // before the current one has matured, so at most ONE tick is ever unsettled. The old scheme
+    // needed a defensive check that the constants still added up; this one does not need the check
+    // because there is nothing left to add up.
     uint128 _tokensFinal;
-    uint128 _tokensPend1;
-    uint128 _tokensPend2;
-    uint64  _lastClaimTime;   // when _tokensPend2 landed: min-interval, rate cap, its own window
-    uint64  _prevClaimTime;   // when _tokensPend1 landed: its own promotion window
+    uint128 _tokensPend;
+    uint64  _lastClaimTime;   // when _tokensPend landed: min-interval, rate cap, its own window
 
     constructor(
         string  modelName,
@@ -318,10 +325,29 @@ contract TokenContract is AiRegistryModifiers {
         _buyer        = address(0);
 
 
-        address selfExtern = address.makeAddrExtern(ContractDeployedEmit, bitCntAddress);
+        // ITS OWN ADDRESS, not the one `RootModel` announces its birth on. Both contracts emit an
+        // event called `ContractDeployed` with the same body — `(address self)` — and both used to
+        // send it to `ContractDeployedEmit`. That is the quiet kind of collision: the decode
+        // SUCCEEDS on either message and yields a plausible address, so a listener waiting for a
+        // deal to appear is handed root models as well and cannot tell them apart except by the
+        // message's `src`. A deal and a registry root are not the same event and no longer share a
+        // channel; the deal's belongs with the deal's other events, not in the registry's range.
+        address selfExtern = address.makeAddrExtern(DealDeployedEmit, bitCntAddress);
         emit ContractDeployed{dest: selfExtern}(address(this));
 
-        IRootModelRegistry(_rootModelAddress).registerTokenContract{value: DAPP_MSG_VALUE, flag: 1}(_sellerPubkey, _nonce);
+        // `bounce: false`, STATED rather than left to the default. This was the deal's only
+        // bounceable send — the flag was simply absent, which means TRUE — while the other seven
+        // outgoing calls all say `false` explicitly and the contract carries no `onBounce` at all.
+        // So a refused registration produced a bounce nobody handled: the value came back, no
+        // state was corrected, and the deal went on believing it was registered.
+        //
+        // Saying `false` does NOT make that silence go away — it makes it uniform and deliberate.
+        // The one condition that can refuse this call is a `TOKEN_CONTRACT_CODE_HASH` in the root
+        // that disagrees with the deal's real code, i.e. a pin the cascade did not update; the
+        // deal cannot learn about it either way, since there was never a handler to tell.
+        IRootModelRegistry(_rootModelAddress).registerTokenContract{
+            value: DAPP_MSG_VALUE, flag: 1, bounce: false
+        }(_sellerPubkey, _nonce);
         // NOTE: the InferenceOrderBook hash is delivered later by the seller's
         // canonical PrivateNote (`postFromNote`), so a TC nobody confirmed never activates.
     }
@@ -599,7 +625,6 @@ contract TokenContract is AiRegistryModifiers {
         _tokensPerWeek = subWeeks == 0 ? tokens : tokens / uint128(subWeeks);
         _fundedTokens  = tokens;
         _lastClaimTime = uint64(block.timestamp);
-        _prevClaimTime = _lastClaimTime;
     }
 
     function _recordFunding(address buyer, uint256 buyerPubkey, uint128 paid) private {
@@ -690,6 +715,16 @@ contract TokenContract is AiRegistryModifiers {
             return;
         }
         _buyerBond = bond;
+        // ONE FLAG, TWO SOURCES. `open()` asks a single question — is the buyer's bond in? — and
+        // the two deal types answer it from different places. A SUBSCRIPTION's bond arrives inside
+        // this very transfer, carved out above, so it is already in by the time this call returns
+        // and there is no second message to wait for. An ORDINARY deal's arrives later, from the
+        // buyer's note, and sets the same flag in `fundBuyerBond`.
+        //
+        // Written here rather than as a second condition in `open()` on purpose: a check that says
+        // "either the buyer's bond is funded OR this is a subscription" would pass a subscription
+        // whose carve-out silently produced nothing, which is the case worth catching.
+        if (bond > 0) { _buyerBondFunded = true; }
         _recordFunding(buyerNote, buyerPubkey, paid - bond);
         // The funded volume in ticks: the escrow is fee-inclusive, so divide by the same unit the
         // bound above used. Exact by construction — the book funds whole ticks.
@@ -755,25 +790,18 @@ contract TokenContract is AiRegistryModifiers {
         }
         tvm.accept();
         if (_funded) { return; }        // a fill won the race → deal is live, keep the TC
-        _offerPosted = false;           // offer is off the book → re-list-able
-        if (_closing) {
-            // Seller flagged wind-down (`close`): the offer is now provably off the
-            // book (the IOB removed it before this callback), so self-destruct is
-            // safe — no resting offer can outlive the TC. The bond goes back the same
-            // canonical way as on every other exit: it can be posted before a match,
-            // so an unfunded deal is not automatically an uncollateralised one.
-            _returnBond();
-            // The residual figure goes where the destruct sends the residual native: to
-            // `_sellerNote`. Under currency `selfdestruct` carried the deal's remaining ECC along
-            // for free, so writing the send out by hand is what keeps the behaviour identical
-            // rather than merely reasonable. `_balance` should be zero here — `_returnBond` just
-            // paid out the only earmark an unfunded deal can hold — and a non-zero one is
-            // arithmetic remainder, not dust nobody should look at.
-            if (_balance > 0) { _payShell(_sellerNote, _balance); }
-            // Residual native gas goes exactly where it always went. Only the MONEY needed writing out,
-            // because a figure cannot ride a destruct the way ECC could.
-            _die(_sellerNote);
-        }
+        // Offer is off the book → re-list-able. AND THAT IS ALL THIS DOES NOW.
+        //
+        // It used to also destroy the deal, when `close()` had flagged wind-down beforehand: the
+        // cancel landing here was the second half of a two-step close. That step is gone with the
+        // flag — `close()` now refuses while an offer rests, so the seller cancels FIRST and calls
+        // `close()` afterwards, and the destruct happens where he asked for it rather than as a
+        // side effect of a callback from the book.
+        //
+        // The deal therefore SURVIVES a cancel, which is the same thing it already did for every
+        // cancel that was not a wind-down. One behaviour instead of two, decided by the seller's
+        // own call instead of by a flag he set earlier and could not see.
+        _offerPosted = false;
     }
 
     /// @notice Return the posted seller bond to the note that posted it. The bond is collateral,
@@ -789,25 +817,34 @@ contract TokenContract is AiRegistryModifiers {
         _payShell(_sellerNote, bondBack);
     }
 
-    /// @notice Seller wind-down of an UNFUNDED deal (no buyer yet). If a sell offer
-    ///         is still resting, flags intent (`_closing`) and remembers the payout:
-    ///         the note then cancels the offer (`cancelInferenceOrder`) and the
-    ///         resulting `onSellClosed` self-destructs — the offer is provably off
-    ///         the book by then, so no resting offer outlives the TC. If no offer
-    ///         rests, self-destructs immediately. A FUNDED deal has the buyer's SHELL
-    ///         inside and must close via `stop`/`withdrawShell`.
+    /// @notice Seller wind-down of an UNFUNDED deal (no buyer yet). REFUSED while a sell offer is
+    ///         still resting: cancel the offer first, then close. A FUNDED deal has the buyer's
+    ///         SHELL inside and must close via `stop`/`withdrawShell`.
+    ///
+    ///         It used to accept in that state and merely flag intent, leaving the note to cancel
+    ///         the offer and the resulting `onSellClosed` to self-destruct. Nothing obliged the
+    ///         second step, and nothing reported that it was owed: the call SUCCEEDED, the ask
+    ///         stayed in the book and stayed EXECUTABLE, and a seller who believed he had wound
+    ///         down could still be handed a live deal. The two-step was the design; the silence
+    ///         about step two was the defect.
+    ///
+    ///         Refusing costs the seller nothing he was not already going to spend — he had to
+    ///         cancel the offer either way — and it makes this door agree with `destroy()`, which
+    ///         has always refused on the same state with this same error. Two wind-down entries
+    ///         behaving oppositely on one condition is what produced the false success.
+    ///
+    ///         What it does NOT do is prevent a fill: the ask is live until the cancel lands,
+    ///         whichever order the seller works in. This only stops him from being told otherwise.
     /// @dev THE PAYEE IS NOT AN ARGUMENT. It is `_sellerNote`, a static of this deal, and that is
     ///      the whole point: an address the caller names is an address nobody validated, and it was
     ///      the reason this contract carried a bounce handler, a `purpose` earmark and a stored
     ///      `_closePayout`. All three are gone with it. Model: `resolveDisputeTimeout`.
     function close() public onlyOwnerPubkey(_sellerPubkey) accept {
         require(!_funded, ERR_ALREADY_FUNDED);   // unfunded ⟹ not opened, not disputed
-        if (_offerPosted) {
-            // Intent only. There is no payee to remember any more — the deferred close will end at
-            // `_sellerNote` exactly as this one would.
-            _closing = true;
-            return;
-        }
+        // Same condition and same code as `destroy()`. `_offerPosted` tracks the REAL offer state:
+        // it is cleared by `onSellClosed`, which the book sends on every way an ask leaves it —
+        // cancel, expiry, and rejection before resting — so this refusal cannot outlast the offer.
+        require(!_offerPosted, ERR_OFFER_LIVE);
         // Return the bond through the canonical path before the sweep. A bond CAN exist here: it
         // is postable from the moment the deal is constructed, since `2P` is known from the
         // constructor and bonding before offering is the stronger order. Leaving it to
@@ -844,7 +881,12 @@ contract TokenContract is AiRegistryModifiers {
     ///         it one, which is why there is one funding door and not one per purpose.
     /// @param amount The bond, as a figure, already subtracted from the note's
     ///        `_balance[CURRENCIES_ID_SHELL]`.
-    function fundDeal(uint128 amount) public {
+    /// @param endpointCipher OPTIONAL, and it does exactly one thing: writes the endpoint and says
+    ///        so. It does NOT open the deal. The seller's note is the only sender here, so the
+    ///        endpoint can travel with the bond and the seller never needs an operational wallet to
+    ///        put it on chain — but starting the stream stays `open()`'s job alone, because opening
+    ///        also freezes the probe tick out of an escrow that does not exist until the match.
+    function fundDeal(uint128 amount, optional(bytes) endpointCipher) public {
         require(msg.sender == _sellerNote, ERR_INVALID_SENDER);
         require(!_opened, ERR_ALREADY_OPEN);
         require(!_sellerBondFunded, ERR_BOND_ALREADY_FUNDED);
@@ -873,6 +915,55 @@ contract TokenContract is AiRegistryModifiers {
         if (excess > 0) { _payShell(msg.sender, excess); }
 
         emit SellerBondFunded{dest: address.makeAddrExtern(SellerBondFundedEmit, bitCntAddress)}(need);
+
+        // Written AFTER the bond is on the books, so the two never disagree about what happened:
+        // the bond is the reason this call exists and the endpoint rides along with it.
+        if (endpointCipher.hasValue()) {
+            _endpointCipher = endpointCipher.get();
+            emit EndpointSet{dest: address.makeAddrExtern(EndpointSetEmit, bitCntAddress)}(_endpointCipher);
+        }
+    }
+
+    /// @notice The BUYER's mirror of `fundDeal`: his note posts his own `2P` bond. Symmetric with
+    ///         the seller's by construction — same size, same "excess comes back", same one-shot
+    ///         latch — and the order the two arrive in does not matter, because `open()` waits for
+    ///         both rather than for a sequence.
+    ///
+    /// @dev    WHY THE BUYER CANNOT SEND IT WITH THE ESCROW. The bond is `2 * clearing`, and the
+    ///         clearing price is not known until the match: the buyer states a LIMIT, the book
+    ///         fills at or below it, and only then is there a figure to take twice. The seller has
+    ///         no such problem — he names his own price, so his bond is sizeable from the moment
+    ///         the deal exists. Hence one bond before the match and one after it, which looks
+    ///         asymmetric and is the only arrangement that can be symmetric in the amount.
+    ///
+    ///         The native value attached under flag 17 is NOT this figure and is not returned by
+    ///         it: it becomes the deal's own gas. A deal is SELF-ROOTED — native does not cross
+    ///         into its dapp, so it pays for every transaction out of its own balance, and until
+    ///         now that balance came only from the seller. The buyer was having his calls paid for
+    ///         by the counterparty. The money that matters here travels as `amount`, a figure on
+    ///         the call, exactly as it does in `fundDeal`.
+    function fundBuyerBond(uint128 amount) public {
+        // The buyer of record, not "whoever claims to be": `_buyer` is written by
+        // `fundFromOrderBook` from what the book handed over, and nothing else writes it.
+        require(msg.sender == _buyer, ERR_INVALID_SENDER);
+        require(!_opened, ERR_ALREADY_OPEN);
+        require(!_buyerBondFunded, ERR_BOND_ALREADY_FUNDED);
+        require(amount > 0, ERR_NO_SHELL);
+        _balance += amount;
+        uint128 need = _bondAmount();
+        require(amount >= need, ERR_INSUFFICIENT_DEPOSIT);
+        tvm.accept();
+
+        _buyerBond = need;
+        _buyerBondFunded = true;
+
+        // Excess back to the sender, as on the seller's side. The note sends `2 * clearing` and the
+        // deal computes `2 * _pricePerTick` from its own state; the two agree, but the deal trusts
+        // its own figure and returns the difference rather than keeping whatever arrived.
+        uint128 excess = amount - need;
+        if (excess > 0) { _payShell(msg.sender, excess); }
+
+        emit BuyerBondFunded{dest: address.makeAddrExtern(BuyerBondFundedEmit, bitCntAddress)}(need);
     }
 
     // ========================================================
@@ -887,10 +978,29 @@ contract TokenContract is AiRegistryModifiers {
     function open(bytes endpointCipher) public onlyOwnerPubkey(_sellerPubkey) accept {
         require(_funded, ERR_NOT_FUNDED);
         require(!_opened, ERR_ALREADY_OPEN);
+        // BOTH bonds, and the order they arrived in does not matter. The seller's can be posted
+        // from the moment the deal exists; the buyer's cannot exist before the match priced it. So
+        // this waits for a pair, not for a sequence.
         require(_sellerBondFunded, ERR_BOND_NOT_FUNDED);
+        require(_buyerBondFunded, ERR_BOND_NOT_FUNDED);
         require(_deposit >= _pricePerTick, ERR_INSUFFICIENT_DEPOSIT);
 
-        _endpointCipher = endpointCipher;
+        // AN EMPTY ARGUMENT NO LONGER WIPES WHAT IS THERE. Until `fundDeal` learned to carry the
+        // endpoint, this line was the only writer and an empty `open` merely left the field as
+        // empty as it already was — nothing could be lost because nothing could have arrived
+        // first. Now something can: a seller who sent the endpoint with his bond and then opened
+        // with an empty argument would erase it here, start the probe clock, and leave the buyer
+        // with nothing to connect to and a tick of his own bond to lose over it. Assigning only a
+        // non-empty value refuses no call that works today; it just stops one from destroying the
+        // value the other path put there.
+        if (!endpointCipher.empty()) {
+            _endpointCipher = endpointCipher;
+        }
+        // Announced from BOTH places that write the field, not only from the new one. A buyer who
+        // learned to listen for this would otherwise hear it on a deal whose seller sent the
+        // endpoint with the bond and hear nothing on a deal whose seller sent it at the open —
+        // the same fact, reported or not depending on which call the seller happened to use.
+        emit EndpointSet{dest: address.makeAddrExtern(EndpointSetEmit, bitCntAddress)}(_endpointCipher);
 
         // Freeze the probe tick out of the escrow: held by the contract, owed to nobody yet.
         _probeTick     = _pricePerTick;
@@ -900,7 +1010,6 @@ contract TokenContract is AiRegistryModifiers {
 
         // Claim anchors start at the open; they only begin to matter once the probe is accepted.
         _lastClaimTime = uint64(block.timestamp);
-        _prevClaimTime = _lastClaimTime;
         _opened        = true;
         _everOpened    = true;   // permanent latch: scopes cleanupUnopened to the never-opened case
 
@@ -949,12 +1058,10 @@ contract TokenContract is AiRegistryModifiers {
         // two and be refused, so he would have to spend a whole interval claiming a tick that was
         // already paid for.
         _tokensFinal     = TICK_SIZE;
-        _tokensPend1     = TICK_SIZE;
-        _tokensPend2     = TICK_SIZE;
+        _tokensPend      = TICK_SIZE;
         _weekBaseTokens  = 0;            // week one counts the probe against its own quota
         _ticksFinalized  = 1;
         _lastClaimTime   = uint64(block.timestamp);
-        _prevClaimTime   = _lastClaimTime;
 
         emit ProbeAccepted{dest: address.makeAddrExtern(ProbeAcceptedEmit, bitCntAddress)}(
             _buyer, _pricePerTick, 0);
@@ -989,12 +1096,12 @@ contract TokenContract is AiRegistryModifiers {
         // `_ticksFinalized`, which is what `_reportFinalized` publishes to the book as authoritative
         // served volume. Stating the ceiling as the recorded cumulative ends all four at the source.
         //
-        // Deliberately `_tokensPend2` and not zero: a repeat of the same figure must stay the no-op
-        // it already is (`claimTokens` returns early on `cumulativeTokens == _tokensPend2`, before
+        // Deliberately `_tokensPend` and not zero: a repeat of the same figure must stay the no-op
+        // it already is (`claimTokens` returns early on `cumulativeTokens == _tokensPend`, before
         // `_lastClaimTime` is touched), while anything HIGHER is refused. A zero ceiling would turn
         // that harmless repeat into a revert and change a settled behaviour this fix has no business
         // touching.
-        if (_weekIndex >= _subWeeks) { return _tokensPend2; }
+        if (_weekIndex >= _subWeeks) { return _tokensPend; }
         // One quota per week, measured from what the PREVIOUS weeks already consumed rather than
         // from the start of the term. A cumulative ceiling would let an unused week roll forward
         // and be spent on top of the next one's allowance; the quota is reserved capacity for its
@@ -1005,11 +1112,15 @@ contract TokenContract is AiRegistryModifiers {
 
     /// @notice Seller claims the CUMULATIVE consumption of this deal, in ticks.
     ///
-    ///         Two accumulators, one promotion rule: the claim that lands here promotes the
-    ///         PREVIOUS one to trusted — but only because nobody complained about it, since an
-    ///         open dispute blocks this path entirely. So the newest claim always stays contestable
-    ///         until another claim supersedes it, and a seller who stops claiming freezes his own
-    ///         last figure in the contested state.
+    ///         Two accumulators, one promotion rule: a claim becomes trusted by outliving its own
+    ///         CLAIM_PROMOTE_WINDOW without a complaint, and by nothing else. A claim landing here
+    ///         promotes the previous one only in the sense that it cannot arrive until that window
+    ///         has already closed — the arrival is not what earns the trust, the silence is.
+    ///
+    ///         A seller who stops claiming therefore does NOT freeze his last figure in the
+    ///         contested state: it matures on its own clock, and `finalize` lets anyone make that
+    ///         official. This is what makes the LAST claim of a deal payable, since no successor
+    ///         is ever coming for it.
     ///
     ///         Three independent bounds, each answering a different question:
     ///           - `MIN_CLAIM_INTERVAL` (60 s) — HOW OFTEN a claim may be made;
@@ -1025,11 +1136,11 @@ contract TokenContract is AiRegistryModifiers {
         // Nothing is claimable until the trial tick has been accepted: the buyer's first minutes
         // buy him a look at the service, not an obligation.
         require(_probeAccepted, ERR_NOT_OPEN);
-        require(cumulativeTokens >= _tokensPend2, ERR_BAD_PARAM);      // cumulative, never decreasing
+        require(cumulativeTokens >= _tokensPend, ERR_BAD_PARAM);      // cumulative, never decreasing
         // Re-sending the figure already on record changes nothing and must LEAVE nothing changed —
         // decided HERE, before the weekly books are touched below. A retry that happens to land
         // after a boundary would otherwise settle a week on its way to doing nothing.
-        if (cumulativeTokens == _tokensPend2) { return; }
+        if (cumulativeTokens == _tokensPend) { return; }
         // Bring the weekly books up to the CLOCK before measuring the ceiling against them.
         // `_claimCap` reads `_weekBaseTokens`, and that snapshot only moves when weeks are charged
         // — which `settleWeek` does permissionlessly but not automatically. Between a boundary and
@@ -1043,52 +1154,50 @@ contract TokenContract is AiRegistryModifiers {
 
         uint64 elapsed = uint64(block.timestamp) - _lastClaimTime;
         require(elapsed >= MIN_CLAIM_INTERVAL, ERR_SETTLE_WINDOW_OPEN);
-        uint128 delta = cumulativeTokens - _tokensPend2;
+        uint128 delta = cumulativeTokens - _tokensPend;
         require(delta <= MAX_CLAIM_DELTA, ERR_BAD_PARAM);
         // Physical ceiling: TICK_SIZE tokens need at least MIN_SECONDS_PER_TICK seconds.
         require(uint256(delta) * uint256(MIN_SECONDS_PER_TICK) <= uint256(elapsed) * uint256(TICK_SIZE), ERR_BAD_PARAM);
 
-        // Promote whatever has served its own window, then take the new claim. Two pending slots
-        // are enough because two intervals of at least MIN_CLAIM_INTERVAL add up to at least
-        // CLAIM_PROMOTE_WINDOW, so the slot is always free by the time a third claim needs it.
+        // Promote what has served its window, then take the new claim. ONE pending slot is enough
+        // because `MIN_CLAIM_INTERVAL` (required above) and `CLAIM_PROMOTE_WINDOW` (checked inside
+        // `_promoteDue`) are the same number, and both comparisons are `>=` against the same
+        // `_lastClaimTime` — so they are literally the same condition. A claim entitled to arrive
+        // at all arrives no earlier than the moment the previous one matured, and the promotion on
+        // the next line therefore always frees the slot this one is about to take.
         //
-        // That is a relationship between three constants, and constants get retuned. Rather than
-        // leave it as an assumption in a comment, check it: after promoting, the older slot must
-        // hold what the newer one held, which is exactly what "the slot was released" means. If
-        // the constants were ever loosened, this refuses the claim instead of overwriting a claim
-        // that has neither been trusted nor contested.
+        // That is a relationship between two constants, and constants get retuned. Rather than
+        // leave it as an assumption in a comment, check it: after promoting, the pending slot must
+        // hold exactly what is now trusted, which is what "the slot was released" means. If the
+        // window were ever raised above the interval, this refuses the claim instead of
+        // overwriting one that has neither been trusted nor contested — the overwrite would be
+        // silent, and it would erase the buyer's unexpired right to contest it.
         _promoteDue();
-        require(_tokensPend1 == _tokensPend2, ERR_SETTLE_WINDOW_OPEN);
-        _prevClaimTime = _lastClaimTime;
-        _tokensPend2   = cumulativeTokens;
+        require(_tokensPend == _tokensFinal, ERR_SETTLE_WINDOW_OPEN);
+        _tokensPend    = cumulativeTokens;
         _lastClaimTime = uint64(block.timestamp);
-        emit TicksClaimed{dest: address.makeAddrExtern(TicksClaimedEmit, bitCntAddress)}(_tokensFinal, _tokensPend2);
+        emit TicksClaimed{dest: address.makeAddrExtern(TicksClaimedEmit, bitCntAddress)}(_tokensFinal, _tokensPend);
     }
 
-    /// @notice Advance the claim pipeline by one step. The older pending claim becomes final —
-    ///         nobody contested it, since an open dispute blocks every path that calls this.
+    /// @notice The pending claim becomes final — nobody contested it, since an open dispute blocks
+    ///         every path that calls this.
+    /// @dev    `_lastClaimTime` is deliberately LEFT ALONE. It dates the claim now held in
+    ///         `_tokensPend`, and after promotion that claim is still the one the slot holds — it
+    ///         has merely also become trusted. Moving the clock here would re-open a window on a
+    ///         figure nobody may contest any more, and `claimTokens` reads the same field to
+    ///         enforce the minimum interval, so a nudge would hand the seller a free early claim.
     function _promote() private {
-        if (_tokensPend1 > _tokensFinal) { _tokensFinal = _tokensPend1; }
-        // The slot's landing time moves WITH its value. `_prevClaimTime` describes when the claim
-        // now held in `_tokensPend1` was filed, so leaving it behind dates the incoming claim by
-        // the outgoing one's clock — and the next promotion then reads a window that expired for a
-        // claim which only just arrived. `claimTokens` rewrites the field on the following line,
-        // which hid this; the permissionless `finalize` does not, so two calls a second apart
-        // could make a fresh claim trusted and close the deal over the buyer's live window.
-        _tokensPend1   = _tokensPend2;
-        _prevClaimTime = _lastClaimTime;
+        if (_tokensPend > _tokensFinal) { _tokensFinal = _tokensPend; }
     }
 
-    /// @notice Promote every claim that has served its own CLAIM_PROMOTE_WINDOW without a
-    ///         complaint, and nothing else. Each pending claim is judged against ITS OWN landing
-    ///         time, so the buyer always gets the full window on every claim regardless of how
-    ///         fast the seller claims — the guarantee is a property of the claim, not of the gap
-    ///         between claims.
+    /// @notice Promote the pending claim if it has served its CLAIM_PROMOTE_WINDOW without a
+    ///         complaint, and nothing else. It is judged against ITS OWN landing time, so the buyer
+    ///         gets the full window on every claim regardless of how fast the seller claims — the
+    ///         guarantee is a property of the claim, not of the gap between claims.
     ///
     ///         Every terminal path promotes through here, so closing a deal never advances the
     ///         pipeline further than simply waiting would have.
     function _promoteDue() private {
-        if (block.timestamp >= _prevClaimTime + CLAIM_PROMOTE_WINDOW) { _promote(); }
         if (block.timestamp >= _lastClaimTime + CLAIM_PROMOTE_WINDOW) { _promote(); }
     }
 
@@ -1099,14 +1208,11 @@ contract TokenContract is AiRegistryModifiers {
     function finalize() public {
         require(_opened && !_disputed, ERR_NOT_OPEN);
         // Permissionless and pays its own way from the contract balance, so it must move the
-        // trusted figure: there has to be a claim that is both unpromoted AND past its own window.
-        // Checking the two slots separately matters — the older one can be due while the newer one
-        // is still inside its window, and vice versa once the older has already been promoted.
-        bool prevDue = _tokensPend1 > _tokensFinal
-                    && block.timestamp >= _prevClaimTime + CLAIM_PROMOTE_WINDOW;
-        bool lastDue = _tokensPend2 > _tokensPend1
-                    && block.timestamp >= _lastClaimTime + CLAIM_PROMOTE_WINDOW;
-        require(prevDue || lastDue, ERR_SETTLE_WINDOW_OPEN);
+        // trusted figure: there has to be a claim that is both unpromoted AND past its window.
+        // Both halves are required — a call that only satisfies one of them would burn the
+        // contract's gas to change nothing, which anybody could repeat at the deal's expense.
+        require(_tokensPend > _tokensFinal
+                && block.timestamp >= _lastClaimTime + CLAIM_PROMOTE_WINDOW, ERR_SETTLE_WINDOW_OPEN);
         tvm.accept();
         _promoteDue();
         if (!_isSubscription() && _tokensFinal >= _fundedTokens) { _payFinalAndClose(); }
@@ -1186,7 +1292,7 @@ contract TokenContract is AiRegistryModifiers {
             _tokensPaid     = target_;
             _weekIndex     += 1;
             // A new week starts from what has been consumed so far, so its allowance is its own.
-            _weekBaseTokens = _tokensFinal > _tokensPend2 ? _tokensFinal : _tokensPend2;
+            _weekBaseTokens = _tokensFinal > _tokensPend ? _tokensFinal : _tokensPend;
         }
     }
 
@@ -1393,6 +1499,25 @@ contract TokenContract is AiRegistryModifiers {
     ///         future, never the week already under way.
     ///         The contested tail (claimed but still inside its promotion window) is NOT paid on
     ///         this path — the buyer walking away is precisely the statement that it is disputed.
+    /// @notice Scheme E penalty: taken from the bonds and BURNED, never handed to the counterparty.
+    ///
+    /// @dev    THE BURN IS THE POINT, NOT A SIMPLIFICATION. Giving the forfeit to the other side
+    ///         would give that side an INTEREST IN THE OUTCOME: a seller would profit from the
+    ///         buyer stopping, a buyer from the seller conceding. Destroying it leaves each party
+    ///         paying only for its own act and gaining nothing from the other's loss. "Give it to
+    ///         the injured party, that is fairer" will sound reasonable to whoever reads this next;
+    ///         it is precisely what turns a penalty into a prize.
+    ///
+    ///         Clamped to what each holds; burned in one call, since `_burnShell` also reports the
+    ///         write-off to the root's ledger.
+    function _forfeitBonds(uint128 fromBuyer, uint128 fromSeller) private {
+        uint128 b = fromBuyer  <= _buyerBond  ? fromBuyer  : _buyerBond;
+        uint128 s = fromSeller <= _sellerBond ? fromSeller : _sellerBond;
+        _buyerBond  -= b;
+        _sellerBond -= s;
+        _burnShell(b + s);
+    }
+
     function stop() public {
         require(_opened, ERR_NOT_OPEN);
         require(msg.sender == _buyer, ERR_NOT_BUYER);
@@ -1426,6 +1551,13 @@ contract TokenContract is AiRegistryModifiers {
         }
 
         _promoteDue();
+        // Scheme E (ordinary): leaving early does not shed the pending tick — the buyer pays it
+        // and the seller is paid it. Plus one tick of his own bond, burned. Total `N·P + P`.
+        // Before this, walking out inside the window cost the buyer nothing (#979).
+        if (!_isSubscription()) {
+            if (_tokensPend > _tokensFinal) { _tokensFinal = _tokensPend; }
+            _forfeitBonds(_pricePerTick, 0);
+        }
         _chargeWeeksThrough(_weeksStarted());   // the week in progress is owed in full
         _payFinalAndClose();
     }
@@ -1451,6 +1583,19 @@ contract TokenContract is AiRegistryModifiers {
             _burnShell(bondBurn);
         }
         _promoteDue();
+        // Scheme E (ordinary), and deliberately not the buyer's mirror: he LOSES the pending tick
+        // rather than being paid it — quitting never pays better than delivering. `_promoteDue` ran
+        // first, so only the still-contestable one is dropped. Plus one tick of his bond, burned.
+        // `_probeAccepted` GATES THIS, and the gate is the whole correction. The branch above
+        // already prices a walk-out during the trial at one tick; adding scheme E's forfeit on top
+        // took the seller's entire 2P for leaving at the earliest possible moment — the cheapest
+        // exit priced as the dearest. Scheme E describes the running stream (N−1 trusted, one
+        // pending); before acceptance there is no pending claim to lose and the trial rule stands
+        // on its own.
+        if (_probeAccepted && !_isSubscription()) {
+            _tokensPend = _tokensFinal;
+            _forfeitBonds(0, _pricePerTick);
+        }
         _chargeWeeksThrough(_weeksElapsed());   // only the weeks he saw through to the end
         _payFinalAndClose();
     }
@@ -1546,7 +1691,7 @@ contract TokenContract is AiRegistryModifiers {
     ///         ordinary deal uses throughout, having no weeks at all.
     function _claimedUnpaidValue() private view returns (uint128) {
         uint128 base = (_isSubscription() && _weekIndex > 0) ? _weekBaseTokens : _tokensPaid;
-        uint128 tokens = _tokensPend2 > base ? _tokensPend2 - base : 0;
+        uint128 tokens = _tokensPend > base ? _tokensPend - base : 0;
         (uint128 pay, uint128 fee) = _valueOf(tokens);
         return pay + fee;
     }
@@ -1560,30 +1705,25 @@ contract TokenContract is AiRegistryModifiers {
     ///         he consumed and let the bounded stake stand in for the bill. A dispute reaches the
     ///         claim it was raised against and no further back.
     function _voidClaims() private {
-        // This is `_promoteDue` evaluated at the instant the dispute was raised: each pending slot
-        // is judged against ITS OWN landing time, and whatever had already outlived
-        // CLAIM_PROMOTE_WINDOW by then is the seller's. A claim earns trust by surviving its
-        // window, not by being superseded — those two part company for a full MIN_CLAIM_INTERVAL,
-        // since a claim is superseded 60 s after it lands and matures only at 120 s.
+        // This is `_promoteDue` evaluated at the instant the dispute was raised: the pending claim
+        // is judged against ITS OWN landing time, and it is the seller's if it had already outlived
+        // CLAIM_PROMOTE_WINDOW by then. A claim earns trust by surviving its window and by nothing
+        // else — being replaced by a later claim is no longer even a distinct event, since the
+        // replacement cannot arrive until the window has closed.
         //
-        // The newest slot is judged the same way and for the same reason. `finalize` is
-        // permissionless, so a matured claim is one anybody could already have promoted; whether
-        // someone bothered to spend the gas is not something the buyer gets to dispute away.
+        // `finalize` is permissionless, so a matured claim is one anybody could already have
+        // promoted; whether someone bothered to spend the gas is not something the buyer gets to
+        // dispute away.
         //
         // Measured against `_disputeTime`, not `block.timestamp`: a resolution arrives at least
         // DISPUTE_WINDOW after the dispute opened, so by then every window has expired and a
         // present-time check would pass unconditionally. The dispute freezes the picture at the
         // moment it was raised.
-        if (_tokensPend1 > _tokensFinal
-            && _prevClaimTime + CLAIM_PROMOTE_WINDOW <= _disputeTime) {
-            _tokensFinal = _tokensPend1;
-        }
-        if (_tokensPend2 > _tokensFinal
+        if (_tokensPend > _tokensFinal
             && _lastClaimTime + CLAIM_PROMOTE_WINDOW <= _disputeTime) {
-            _tokensFinal = _tokensPend2;
+            _tokensFinal = _tokensPend;
         }
-        _tokensPend1 = _tokensFinal;
-        _tokensPend2 = _tokensFinal;
+        _tokensPend = _tokensFinal;
     }
 
     /// @notice Seller agrees. He collects nothing for the disputed period — neither the claims nor
@@ -1616,10 +1756,15 @@ contract TokenContract is AiRegistryModifiers {
         _chargeWeeksThrough(_weeksElapsedAt(_disputeTime));
         // Measured HERE, before `_voidClaims` collapses the pipeline it reads — but taken inside
         // the terminal, after the seller has been paid for what his claims prove.
-        uint128 d = _disputeStake();
+        // Scheme E (ordinary): one tick from EACH side, pending dropped by `_voidClaims`.
+        // Scheme E (ordinary): the pending tick is DROPPED — not charged to the buyer, not credited
+        // to the seller — and its escrow refunds with the rest. One tick from EACH bond.
+        // A subscription keeps its own `D`, taken from the buyer alone, as before.
+        bool sub = _isSubscription();
         _voidClaims();
         _disputed = false;
-        _settleTrustedAndClose(d, false);
+        if (sub) { _settleTrustedAndClose(_disputeStake(), 0); }
+        else     { _settleTrustedAndClose(_pricePerTick, _pricePerTick); }
     }
 
     /// @notice Permissionless after `DISPUTE_WINDOW` with nobody agreeing. Everything claimed is
@@ -1639,10 +1784,27 @@ contract TokenContract is AiRegistryModifiers {
         // difference between one week and the whole remaining term.
         _chargeWeeksThrough(_weeksElapsedAt(_disputeTime));
         // As on the concession branch: measured before `_voidClaims`, applied after the payout.
-        uint128 d = _disputeStake();
+        if (_isSubscription()) {
+            uint128 d = _disputeStake();
+            _voidClaims();
+            _disputed = false;
+            _settleTrustedAndClose(d, d);
+            return;
+        }
+        // Scheme E (ordinary): NOBODY AGREED, so the pending tick is PAID and DESTROYED — the
+        // buyer's escrow loses it, the seller does not gain it. Measured before `_voidClaims` drops
+        // the record. Two ticks from EACH bond, so refusing costs strictly more than conceding.
+        uint128 burnPend = 0;
+        if (_tokensPend > _tokensFinal) {
+            (uint128 pp, uint128 pf) = _valueOf(_tokensPend - _tokensFinal);
+            burnPend = pp + pf;
+        }
         _voidClaims();
         _disputed = false;
-        _settleTrustedAndClose(d, true);
+        if (burnPend > _deposit) { burnPend = _deposit; }
+        _deposit -= burnPend;
+        _burnShell(burnPend);
+        _settleTrustedAndClose(2 * _pricePerTick, 2 * _pricePerTick);
     }
 
     /// @notice Shared terminal: credit whatever is trusted but unpaid, THEN take the stake, then
@@ -1656,13 +1818,11 @@ contract TokenContract is AiRegistryModifiers {
     ///      stake first did exactly that once the escrow ran thin — on the last week of a term
     ///      there is no future escrow left, so the stake came straight out of proven earnings.
     ///
-    /// @param stake  `D` as measured before `_voidClaims` reshaped the pipeline, re-clamped here
-    ///               against what is actually left once the seller has been paid.
-    /// @param timedOut  true on the no-agreement branch: the stake burns from BOTH sides rather
+    /// @param sellerStake  what the SELLER forfeits: zero when he conceded, non-zero when nobody
     ///               than from the buyer alone. The unearned part of the disputed week burns on
     ///               either branch, so this flag decides only whether the seller's bond pays too —
     ///               which is what leaves agreeing his cheaper move and keeps the timeout rare.
-    function _settleTrustedAndClose(uint128 stake, bool timedOut) private {
+    function _settleTrustedAndClose(uint128 buyerStake, uint128 sellerStake) private {
         _releaseProbe();
         // Idempotent: the resolvers charge the completed weeks before taking the stake, so this is
         // a no-op on that path. It stays as the single place a settlement guarantees the finished
@@ -1696,20 +1856,16 @@ contract TokenContract is AiRegistryModifiers {
         _recordDelivered();
         if (_tokensFinal > _tokensPaid) { _tokensPaid = _tokensFinal; }
 
-        // THE STAKE, taken only now. On a subscription it comes out of the buyer's posted bond,
-        // which the payout above cannot have touched, so it is the same `D` whatever week the
-        // dispute fell in. On an ordinary deal it comes from the escrow and is re-clamped against
-        // what survived that payout: the figure was measured before `_voidClaims` reshaped the
-        // pipeline, and the escrow has shrunk since.
-        uint128 staked = _isSubscription() ? _buyerBond : _deposit;
-        uint128 d = stake > staked ? staked : stake;
-        if (_isSubscription()) { _buyerBond -= d; } else { _deposit -= d; }
-        if (timedOut) {
-            if (d > _sellerBond) { d = _sellerBond; }
-            _sellerBond -= d;
-            _burnShell(2 * d);
-        } else {
-            _burnShell(d);
+        // THE FORFEITS, taken only after the payout above — the seller is paid for what his
+        // matured claims prove before anything is taken from either side. Each side's amount is
+        // stated by the CALLER: `timedOut` used to mean "the seller pays too", and a conceding
+        // seller had to be passed `true` to get a symmetric forfeit — a flag lying about its branch.
+        uint128 db = buyerStake > _buyerBond ? _buyerBond : buyerStake;
+        uint128 ds = sellerStake > _sellerBond ? _sellerBond : sellerStake;
+        _buyerBond  -= db;
+        _sellerBond -= ds;
+        {
+            _burnShell(db + ds);
         }
 
         // WHAT IS LEFT. Take-or-pay does not extend to the week a dispute was raised in: it is a
@@ -1758,7 +1914,7 @@ contract TokenContract is AiRegistryModifiers {
         _opened = false;
         _settleFees(false);     // a dispute ever opened → no rebate (§5.3)
         if (refund > 0) { _payShell(_buyer, refund); }
-        emit DisputeResolved{dest: address.makeAddrExtern(DisputeResolvedEmit, bitCntAddress)}(_finalizedOwed, refund, !timedOut);
+        emit DisputeResolved{dest: address.makeAddrExtern(DisputeResolvedEmit, bitCntAddress)}(_finalizedOwed, refund, sellerStake == 0);
         // Pay what the resolution earned him and end. A resolved dispute is as terminal as an
         // ordinary close, and leaving the seller to come and collect would keep BOTH notes holding
         // a live deal — including the buyer's, who is the one who opened the dispute.
@@ -1788,7 +1944,7 @@ contract TokenContract is AiRegistryModifiers {
         _releaseBuyerBond();        // never opened → no dispute was possible; the bond refunds whole
         uint128 refund = _deposit;
         uint128 bondBack = _sellerBond;
-        _deposit = 0; _sellerBond = 0; _funded = false; _sellerBondFunded = false;
+        _deposit = 0; _sellerBond = 0; _funded = false; _sellerBondFunded = false; _buyerBondFunded = false;
 
         _payShell(_buyer, refund);
         _payShell(_sellerNote, bondBack);   // return the seller's bond (no-show, not slashed)
@@ -1898,25 +2054,25 @@ contract TokenContract is AiRegistryModifiers {
     // Getters
     // ========================================================
 
-    /// @notice `tokensSuperseded` is the middle stage of the claim pipeline: a claim that a later
-    ///         one has already replaced, and so is due to become trusted. It is reported separately
-    ///         from `tokensPending` (the newest, still-contestable claim) because only the newest
-    ///         one is what a dispute is about.
+    /// @notice `tokensPending` is the single contestable claim, `lastClaimTime` is when it landed,
+    ///         and the buyer needs both: the window he has to act inside runs from the second and
+    ///         closes CLAIM_PROMOTE_WINDOW later.
     ///
-    ///         Each pending claim has its OWN window, so both landing times are reported:
-    ///         `prevClaimTime` for the superseded one, `lastClaimTime` for the newest. Without the
-    ///         first, a buyer cannot work out when the superseded claim stops being contestable —
-    ///         and he is the one who has to act inside that window.
+    /// @dev    `tokensSuperseded` and `prevClaimTime` ARE GONE, not renamed and not filled with a
+    ///         stand-in. They described the middle stage of a three-deep pipeline that no longer
+    ///         exists; returning `tokensFinal` under the old name would keep every caller compiling
+    ///         while telling them a claim is superseded when nothing can be. A reader that breaks
+    ///         is told the truth once; a reader that keeps working is told a falsehood forever.
     function getState() external view returns (
         bool funded, bool opened, bool probeAccepted, bool disputed,
         uint128 deposit, uint128 probeTick, uint128 finalizedOwed,
-        uint128 tokensFinal, uint128 tokensSuperseded, uint128 tokensPending,
-        uint64 probeTime, uint64 prevClaimTime, uint64 lastClaimTime,
+        uint128 tokensFinal, uint128 tokensPending,
+        uint64 probeTime, uint64 lastClaimTime,
         uint64 disputeTime, uint64 fundedTime
     ) {
         return (_funded, _opened, _probeAccepted, _disputed, _deposit, _probeTick, _finalizedOwed,
-                _tokensFinal, _tokensPend1, _tokensPend2,
-                _probeTime, _prevClaimTime, _lastClaimTime, _disputeTime, _fundedTime);
+                _tokensFinal, _tokensPend,
+                _probeTime, _lastClaimTime, _disputeTime, _fundedTime);
     }
 
     /// @notice Subscription shape: `subWeeks == 0` is an ordinary deal (whole volume, no clock).
@@ -1938,12 +2094,17 @@ contract TokenContract is AiRegistryModifiers {
                 _periodStart, _weekBaseTokens);
     }
 
-    /// @notice Offer state: `offerPosted` = the TC has a live resting sell offer on
-    ///         the order book right now; `closing` = a seller wind-down is in progress
-    ///         (the offer is being cancelled before self-destruct). Lets a client read
-    ///         whether this TC is actively selling.
-    function getOffer() external view returns (bool offerPosted, bool closing) {
-        return (_offerPosted, _closing);
+    /// @notice Offer state: `offerPosted` = the TC has a live resting sell offer on the order book
+    ///         right now. Lets a client read whether this TC is actively selling.
+    ///
+    /// @dev    `closing` IS GONE from this tuple, and deliberately not replaced by a constant
+    ///         `false` under the same name. It reported a wind-down-in-progress, a state that no
+    ///         longer exists: `close()` refuses while an offer rests instead of remembering an
+    ///         intention. Leaving the name in place would keep every caller compiling while
+    ///         telling them, forever, that no wind-down is pending — which would be true by
+    ///         accident and unfalsifiable. A reader that breaks is told the truth once.
+    function getOffer() external view returns (bool offerPosted) {
+        return _offerPosted;
     }
 
     /// @notice Seller bond state (spec §4.2): whether the seller posted the mirror

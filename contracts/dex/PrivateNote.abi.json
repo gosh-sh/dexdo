@@ -74,7 +74,9 @@
 			"name": "onInferenceOrderRemoved",
 			"inputs": [
 				{"name":"modelHash","type":"uint256"},
-				{"name":"orderId","type":"uint128"}
+				{"name":"orderId","type":"uint128"},
+				{"name":"cause","type":"uint8"},
+				{"name":"refunded","type":"uint128"}
 			],
 			"outputs": [
 			]
@@ -192,7 +194,8 @@
 			"inputs": [
 				{"name":"nonce","type":"uint64"},
 				{"name":"gasShell","type":"uint128"},
-				{"name":"amount","type":"uint128"}
+				{"name":"amount","type":"uint128"},
+				{"name":"endpointCipher","type":"optional(bytes)"}
 			],
 			"outputs": [
 			]
@@ -901,7 +904,9 @@
 			"name": "InferenceOrderRemoved",
 			"inputs": [
 				{"name":"book","type":"address"},
-				{"name":"orderId","type":"uint128"}
+				{"name":"orderId","type":"uint128"},
+				{"name":"cause","type":"uint8"},
+				{"name":"refunded","type":"uint128"}
 			],
 			"outputs": [
 			]

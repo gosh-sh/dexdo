@@ -23,7 +23,6 @@ abstract contract Errors {
     uint16 constant ERR_ALREADY_INITIALIZED = 107;
 
     /// @notice User already claimed winnings
-    uint16 constant ERR_ALREADY_CLAIMED = 108;
 
     /// @notice Wallet or stake not yet initialized/confirmed
     uint16 constant ERR_NOT_INITIALIZED = 114;
@@ -73,7 +72,6 @@ abstract contract Errors {
 
 
     /// @notice Wrong hash for oracle members
-    uint16 constant ERR_WRONG_HASH = 136;
 
     /// @notice Invalid zero-knowledge proof
     uint16 constant ERR_INVALID_ZKPROOF = 137;
@@ -199,7 +197,6 @@ abstract contract Errors {
     /// @notice `placeSellOffer` caller is not the canonical TokenContract for
     ///         `(sellerPubkey, nonce)` derived from the pinned code + the seller's
     ///         key, so only a canonical TC can post an offer.
-    uint16 constant ERR_BAD_TOKEN_CONTRACT = 406;
 
     /// @notice A deposit arrived with a currency mix `generateVoucher` cannot take gas from.
     /// @dev    Either more than two currencies, or two of which neither is SHELL, or two whose

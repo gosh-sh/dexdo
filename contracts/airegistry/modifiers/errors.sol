@@ -5,7 +5,6 @@ abstract contract AiRegistryErrors {
     uint16 constant ERR_INVALID_SENDER        = 302;
     uint16 constant ERR_ZERO_AMOUNT           = 303;
     uint16 constant ERR_ALREADY_REGISTERED    = 304;
-    uint16 constant ERR_NOT_INITIALIZED       = 305;
     uint16 constant ERR_INSUFFICIENT_TOKENS   = 306;
     uint16 constant ERR_NO_SHELL              = 311;
     uint16 constant ERR_BAD_PARAM             = 313;

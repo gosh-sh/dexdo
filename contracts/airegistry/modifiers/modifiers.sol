@@ -43,15 +43,22 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     // values the per-call cap is the binding one, and a caller written against the elapsed-time
     // bound alone will have its claim rejected. Revisit if a materially faster model ships.
     uint64  constant MIN_SECONDS_PER_TICK = 60;    // (s per tick)
-    // Promotion window for the newest claim. Two claims may stay pending at once (the seller may
-    // run up to two ticks ahead), so the wait is two tick-times: after it, an unchallenged claim
-    // becomes final even though no further claim arrived. Without this the LAST claim of a deal
-    // could never be promoted — there is no successor to promote it — and would be unpayable.
-    uint64  constant CLAIM_PROMOTE_WINDOW = 2 * MIN_SECONDS_PER_TICK;   // 120 s
-    // Floor on the gap between two claims. It may sit BELOW the promotion window: each claim
-    // carries its own timestamp and is promoted on its own window, so a fast claim rate never
-    // shortens the contest time of the claim before it. That keeps the claimable rate at the
-    // physical ceiling — one tick per minute — instead of halving it to fit the window.
+    // Promotion window for the pending claim. EXACTLY ONE claim may be pending, so the wait is one
+    // tick-time: after it, an unchallenged claim becomes final even though no further claim
+    // arrived. Without this the LAST claim of a deal could never be promoted — there is no
+    // successor to promote it — and would be unpayable.
+    //
+    // Equal to `MIN_CLAIM_INTERVAL` on purpose, and the equality is what makes ONE pending slot
+    // enough: a claim cannot arrive sooner than the interval, and by then the window on the
+    // previous one has closed, so the slot the newcomer needs is always free. The seller therefore
+    // runs at most ONE tick ahead of what is trusted, and the amount a dispute can be about is a
+    // single tick rather than a quantity the seller can grow by claiming quickly.
+    uint64  constant CLAIM_PROMOTE_WINDOW = MIN_SECONDS_PER_TICK;       // 60 s
+    // Floor on the gap between two claims, and the partner of the window above: the claim carries
+    // its own timestamp and is promoted on its own window, so the buyer's contest time is a full
+    // window on every claim regardless of how fast the seller claims. Equal to the window, which
+    // keeps the claimable rate at the physical ceiling — one tick per minute — while leaving the
+    // single pending slot free whenever the next claim is entitled to arrive.
     uint64  constant MIN_CLAIM_INTERVAL = MIN_SECONDS_PER_TICK;         // 60 s
     // Ticks one week can physically deliver at that rate cap. A subscription may not buy more
     // volume than its own term could ever produce, so the whole-term ceiling is SUB_WEEKS of these
@@ -87,6 +94,30 @@ abstract contract AiRegistryModifiers is AiRegistryErrors {
     ///         deposit)` counts money. The other two collisions break loudly; this one only ever
     ///         produced a wrong figure in somebody's report.
     uint128 constant TicksClaimedEmit            = 730;
+    /// @notice External event id for `TokenContract.EndpointSet` — the endpoint ciphertext CHANGED.
+    /// @dev    Its own id, not a seat borrowed from `StreamOpenedEmit`. The endpoint is now written
+    ///         from two places (`open`, and `fundDeal` when the seller sends it with the bond), and
+    ///         only one of them opens the stream — so a buyer subscribed to the opening would hear
+    ///         nothing about the other. A shared id would have been worse than silence: the two
+    ///         bodies differ, so the decode would fail on whichever arrived unexpected, and a
+    ///         listener cannot tell a failed decode from an event that was never sent.
+    uint128 constant EndpointSetEmit              = 731;
+    /// @notice External event id for `TokenContract.ContractDeployed` — a DEAL was born.
+    /// @dev    It shared `ContractDeployedEmit` (703) with `RootModel.ContractDeployed` until now,
+    ///         and the two events are identical in name and in body, so nothing ever failed: a
+    ///         listener waiting for deals decoded root-model births just as successfully and
+    ///         counted them as deals. Silent by construction — the only thing separating them was
+    ///         the message's `src`, which a subscriber filtering by address never looks at.
+    ///         A deal's birth now sits with the deal's other events (720+) instead of in the
+    ///         registry's range, which is where it belonged from the start.
+    uint128 constant DealDeployedEmit             = 732;
+    /// @notice External event id for `TokenContract.BuyerBondFunded` — the buyer posted his `2P`.
+    /// @dev    Its own id rather than a seat beside `SellerBondFundedEmit` (727). The two events
+    ///         carry the same body — one `uint128` — so a shared address would decode cleanly on
+    ///         either and a listener counting seller bonds would count buyer bonds as well. That is
+    ///         the quiet collision class, and it is the reason this range is audited by
+    ///         `verify_event_addresses.py` rather than by eye.
+    uint128 constant BuyerBondFundedEmit          = 733;
     // InferenceOrderBook (spec §2 + §8) — dedicated 1000+ range (separate from registry/streaming/oracle 700s)
     uint128 constant OfferPlacedEmit             = 1000;
     uint128 constant OfferCancelledEmit          = 1001;
