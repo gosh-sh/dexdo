@@ -728,6 +728,11 @@ async fn place(
     project(tx, &e, &node(ob, co)).await;
 }
 async fn clean(pool: &sqlx::PgPool, ob: &str) {
+    sqlx::query("delete from inference_trades where orderbook_address=$1")
+        .bind(ob)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query("delete from inference_orders where orderbook_address=$1")
         .bind(ob)
         .execute(pool)
@@ -1300,4 +1305,111 @@ async fn replay_preserves_repaired_token_contract_and_deadline() {
     .unwrap();
     assert_eq!(tc.as_deref(), Some("0:repaired"));
     assert_eq!(dl.as_deref(), Some("1760009999"));
+}
+
+// ---- inference_trades tape ----
+
+/// `InferenceFilled` fixture. Named `filled_ev` because the bare `filled` reads as one of
+/// this file's `filled_*` test fns.
+fn filled_ev(maker_id: &str, taker_id: &str, ticks: &str, clearing: &str) -> DecodedEvent {
+    ev(
+        "InferenceFilled",
+        serde_json::json!({
+            "makerId": maker_id, "takerId": taker_id, "ticks": ticks,
+            "clearingPrice": clearing,
+            "sellerTC": "0:s", "buyerNote": "0:b", "sellerNote": "0:sn",
+        }),
+    )
+}
+
+async fn tape_rows(pool: &sqlx::PgPool, ob: &str) -> Vec<(String, String, String, bool)> {
+    sqlx::query_as(
+        "select trade_id, price::text, qty::text, is_buyer_maker
+           from inference_trades where orderbook_address = $1 order by trade_id",
+    )
+    .bind(ob)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn filled_writes_one_tape_row_keyed_by_chain_order() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_tape_write";
+    clean(&pool, ob).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    // Resting BUY (maker) crossed by an incoming SELL (taker) => buyer IS the maker.
+    place(&pool, &mut tx, ob, "1", true, "10", "tapew-1").await;
+    place(&pool, &mut tx, ob, "2", false, "4", "tapew-2").await;
+    let outcome =
+        project(&mut tx, &filled_ev("1", "2", "4", "1000000000"), &node(ob, "tapew-3")).await;
+    assert_eq!(outcome, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+
+    let rows = tape_rows(&pool, ob).await;
+    assert_eq!(rows.len(), 1, "one Filled = exactly one tape row");
+    assert_eq!(rows[0].0, "tapew-3", "trade_id is the Filled event's chain order");
+    assert_eq!(rows[0].1, "1000000000", "price is the event's clearingPrice, raw");
+    assert_eq!(rows[0].2, "4");
+    assert!(rows[0].3, "maker leg is the BUY => isBuyerMaker");
+
+    clean(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn filled_tape_row_takes_maker_side_when_maker_sells() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_tape_maker_sells";
+    clean(&pool, ob).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    place(&pool, &mut tx, ob, "1", false, "10", "tapems-1").await;
+    place(&pool, &mut tx, ob, "2", true, "3", "tapems-2").await;
+    project(&mut tx, &filled_ev("1", "2", "3", "1000000000"), &node(ob, "tapems-3")).await;
+    tx.commit().await.unwrap();
+
+    let rows = tape_rows(&pool, ob).await;
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].3, "maker leg is the SELL => taker bought");
+
+    clean(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn filled_tape_replay_is_idempotent() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_tape_replay";
+    clean(&pool, ob).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    place(&pool, &mut tx, ob, "1", true, "10", "taperp-1").await;
+    place(&pool, &mut tx, ob, "2", false, "4", "taperp-2").await;
+    project(&mut tx, &filled_ev("1", "2", "4", "1000000000"), &node(ob, "taperp-3")).await;
+    project(&mut tx, &filled_ev("1", "2", "4", "1000000000"), &node(ob, "taperp-3")).await;
+    tx.commit().await.unwrap();
+
+    assert_eq!(tape_rows(&pool, ob).await.len(), 1, "replay must not duplicate the tape row");
+
+    clean(&pool, ob).await;
+}
+
+#[tokio::test]
+async fn deferred_filled_writes_no_tape_row() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_tape_deferred";
+    clean(&pool, ob).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    // Only the maker leg exists: the Filled defers with ZERO writes, tape included.
+    place(&pool, &mut tx, ob, "1", true, "10", "tapedf-1").await;
+    let outcome =
+        project(&mut tx, &filled_ev("1", "2", "4", "1000000000"), &node(ob, "tapedf-3")).await;
+    assert_eq!(outcome, ProjectionOutcome::Deferred);
+    tx.commit().await.unwrap();
+
+    assert!(tape_rows(&pool, ob).await.is_empty());
+
+    clean(&pool, ob).await;
 }

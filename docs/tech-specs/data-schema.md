@@ -10,7 +10,7 @@ Tables fall into five buckets:
 | Indexer infrastructure | `raw_events`, `indexer_cursors` | Indexer ingestion path. |
 | Read-model — discovery | `oracles`, `oracle_event_lists`, `oracle_events` | Indexer projectors + OracleEventList reconciler. |
 | Read-model — markets | `markets`, `market_outcomes`, `live_orders`, `order_book_snapshots` | Indexer projectors + market reconciler. |
-| Read-model — inference markets | `inference_markets`, `inference_orders` | Indexer projectors + inference reconciler. |
+| Read-model — inference markets | `inference_markets`, `inference_orders`, `inference_trades` | Indexer projectors + inference reconciler. |
 | Read-model — inference deals | `inference_deals`, `inference_ticks` | Inference SETTLEMENT projector (writer). Intended to back the forthcoming rewards service (reader). |
 | Authentication and credentials | `accounts`, `api_keys` | Operator-provisioned; read on every signed request by the auth middleware. |
 
@@ -395,6 +395,39 @@ Indices:
 | `inference_orders_live_sell_tc_null_idx` (partial: `status = 'OPEN' AND is_buy = false AND token_contract IS NULL`) | `(orderbook_address)`. Backs the read path's fail-closed probe for a resting SELL whose TokenContract is unknown. Empty whenever every live SELL has one, so the `EXISTS` is O(1). |
 | `inference_orders_book_side_status_idx` | `(orderbook_address, is_buy, status, order_id DESC)`. Serves side-only, status-only, side+status and unfiltered listings: the query plan pins `is_buy` and `status` in every branch, so one composite covers all four shapes. |
 | `inference_orders_book_chain_order_idx` | `(orderbook_address, last_chain_order DESC)`. `max(last_chain_order)` per book is the `lastUpdateId` watermark for the depth and the orders endpoints; rows are never deleted, so without this index it scans a book's whole history on every request. |
+
+### `inference_trades`
+
+Append-only public trade tape intended to back a forthcoming `GET /api/v1/inference/trades`.
+One row per maker↔taker match, written by the `InferenceOrderBook.InferenceFilled` projector.
+Unlike [`trades`](#trades) on the prediction side there is no taker-side gate: the inference
+book emits **one** `InferenceFilled` per match (carrying both `makerId` and `takerId`), so the
+event itself is already one-per-match — every `InferenceFilled` that both legs resolve for
+writes exactly one row. There is also no outcome dimension: an `InferenceOrderBook` is one book
+per model, so the tape is keyed by `orderbook_address` alone. Write-side derivation in
+[indexer.md](indexer.md#projection--inference-order-events).
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `trade_id` | `text` PK | The `InferenceFilled` event's chain-order key (`msg_chain_order` from the gateway, copied from [`raw_events.chain_order`](#raw_events)). Globally unique per match and lex-sortable — the sole sort key and identity for the tape (DESC). |
+| `orderbook_address` | `text` NOT NULL | InferenceOrderBook contract address. No outcome column — one book per model. |
+| `price` | `numeric(78,0)` NOT NULL | Match (clearing) price from `InferenceFilled.clearingPrice` — raw quote-asset (SHELL) base units per tick. Unlike the prediction tape's `price` this is **not** basis points. |
+| `qty` | `numeric(78,0)` NOT NULL | Matched tick count from `InferenceFilled.ticks`, raw. |
+| `is_buyer_maker` | `boolean` NOT NULL | Trade direction. **Not carried by the event** — `InferenceFilled` has no `isBuyerMaker` field. Resolved at projection time from the MAKER leg's `is_buy` in [`inference_orders`](#inference_orders) (the resting side locked by `makerId`); when that leg is absent (orphan repair with a missing counterparty), the inverse of the taker leg's `is_buy` is used instead — a match has exactly one buyer and one seller. |
+| `chain_time` | `timestamptz` | On-chain block time of the `InferenceFilled` event ([`raw_events.created_at_chain`](#raw_events)). NULL when the gateway omitted `created_at`; such rows are filtered out of the read query, matching `inference_orders` / the prediction tape. |
+| `created_at` | `timestamptz` | Bookkeeping (indexer ingestion wall-clock). |
+
+Index: `inference_trades_tape_idx` — `(orderbook_address, trade_id DESC)`. Backs the newest-first
+per-book read (`ORDER BY trade_id DESC LIMIT $limit`) as an index range scan. The table is
+insert-only; a replayed insert conflicts on `trade_id` and only coalesces a NULL `chain_time`
+(first-write-wins, guarded by every other column matching the recorded row — a divergent
+conflict is skipped and `error!`-logged rather than silently overwritten), so reprojection from
+`raw_events` is idempotent.
+
+Recovery notes for on-call:
+
+- **Row hidden by `chain_time IS NULL`** (gateway delivered the fill without `created_at`): fix the row directly — `UPDATE inference_trades SET chain_time = to_timestamp(...) WHERE trade_id = ...`, sourcing the timestamp from the repaired `raw_events.created_at_chain`. As with [`trades`](#trades), do not clear the event's `processed_at` to force a replay while the order rows are still live — the surrounding `InferenceFilled` projection is not replay-idempotent on `inference_orders.amount_remaining`.
+- **Missing tape row for a known match**: check whether `resolve_is_buyer_maker` had a leg to read — a row is only omitted when *neither* the maker nor the taker leg exists in `inference_orders` at projection time (both `InferenceOrderPlaced` events dropped at capture, the orphan-repair no-leg case logged at `warn!`).
 
 ## Read-model — inference deals
 

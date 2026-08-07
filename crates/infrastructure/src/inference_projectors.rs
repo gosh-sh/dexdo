@@ -8,6 +8,7 @@
 use anyhow::Context;
 use sqlx::Postgres;
 use sqlx::Transaction;
+use tracing::error;
 use tracing::warn;
 
 use crate::decoder::DecodedEvent;
@@ -245,6 +246,9 @@ async fn apply_inference_subscription_placed(
 struct LockedOrder {
     order_id: String,
     is_sweep_cancel: bool,
+    /// The leg's side. `isBuyerMaker` is not carried by `InferenceFilled`, so the tape
+    /// takes it from whichever leg is locked here.
+    is_buy: bool,
 }
 
 /// Parsed `Filled` event fields, shared by the normal projector and the
@@ -254,6 +258,7 @@ struct FilledFields {
     maker_id: String,
     taker_id: String,
     ticks: String,
+    clearing_price: String,
     chain_order: String,
     chain_seconds: Option<f64>,
     /// `[maker_id, taker_id]` — the row ids the decrement touches.
@@ -269,6 +274,7 @@ impl FilledFields {
         let maker_id = uint_field_to_decimal(&event.value, "makerId")?;
         let taker_id = uint_field_to_decimal(&event.value, "takerId")?;
         let ticks = uint_field_to_decimal(&event.value, "ticks")?;
+        let clearing_price = uint_field_to_decimal(&event.value, "clearingPrice")?;
         let chain_order = node_chain_order(node, "InferenceFilled")?;
         let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
         let seller_tc = field_str(&event.value, "sellerTC").ok().map(str::to_string);
@@ -279,6 +285,7 @@ impl FilledFields {
             maker_id,
             taker_id,
             ticks,
+            clearing_price,
             chain_order,
             chain_seconds,
             ids,
@@ -296,7 +303,7 @@ async fn lock_filled_rows(
     ids: &[String],
 ) -> anyhow::Result<Vec<LockedOrder>> {
     sqlx::query_as(
-        r#"select order_id::text as order_id, (swept_at is not null) as is_sweep_cancel
+        r#"select order_id::text as order_id, (swept_at is not null) as is_sweep_cancel, is_buy
              from inference_orders
             where orderbook_address = $1 and order_id = any($2::numeric[])
             for update"#,
@@ -444,6 +451,72 @@ async fn link_deal_from_filled(
     Ok(())
 }
 
+/// `isBuyerMaker` for the tape. `InferenceFilled` does not carry it, so it is read off the
+/// locked rows: the MAKER leg's own side when that leg is present, otherwise the inverse of
+/// the taker's (a match has exactly one buyer and one seller). `None` only when neither leg
+/// is in the read model — the orphan-repair case where both `InferenceOrderPlaced` events
+/// were dropped at capture, and the direction is unrecoverable.
+fn resolve_is_buyer_maker(f: &FilledFields, locked: &[LockedOrder]) -> Option<bool> {
+    if let Some(maker) = locked.iter().find(|r| r.order_id == f.maker_id) {
+        return Some(maker.is_buy);
+    }
+    locked.iter().find(|r| r.order_id == f.taker_id).map(|taker| !taker.is_buy)
+}
+
+/// Append the match to the public tape. Idempotent under reprojection: a replay conflicts on
+/// `trade_id` and only coalesces a NULL `chain_time` (first write wins). The `where` clause
+/// makes that coalesce conditional on every immutable column matching, so a divergent
+/// conflict (drifted payload, or a gateway bug duplicating msg_chain_order) is skipped and
+/// error!-logged instead of silently overwriting — mirroring the prediction tape write in
+/// `projectors::apply_order_filled`.
+async fn append_inference_trade(
+    tx: &mut Transaction<'_, Postgres>,
+    f: &FilledFields,
+    is_buyer_maker: bool,
+) -> anyhow::Result<()> {
+    if f.chain_seconds.is_none() {
+        // error!, not warn!: the public trade stays invisible until an operator repairs the
+        // row. A stale chain_updated_at heals itself on the next event; this does not.
+        error!(
+            orderbook_address = %f.ob,
+            trade_id = %f.chain_order,
+            "InferenceFilled has no parseable chain time; the tape row lands with NULL chain_time, hidden from /api/v1/inference/trades until repaired (data-schema.md#inference_trades)",
+        );
+    }
+    let result = sqlx::query(
+        r#"insert into inference_trades
+               (trade_id, orderbook_address, price, qty, is_buyer_maker, chain_time)
+           values ($1, $2, $3::numeric, $4::numeric, $5,
+                   to_timestamp($6::double precision))
+           on conflict (trade_id) do update
+               set chain_time = coalesce(inference_trades.chain_time, excluded.chain_time)
+             where inference_trades.orderbook_address = excluded.orderbook_address
+               and inference_trades.price = excluded.price
+               and inference_trades.qty = excluded.qty
+               and inference_trades.is_buyer_maker = excluded.is_buyer_maker"#,
+    )
+    .bind(&f.chain_order)
+    .bind(&f.ob)
+    .bind(&f.clearing_price)
+    .bind(&f.ticks)
+    .bind(is_buyer_maker)
+    .bind(f.chain_seconds)
+    .execute(&mut **tx)
+    .await
+    .context("append inference trade")?;
+    if result.rows_affected() == 0 {
+        error!(
+            orderbook_address = %f.ob,
+            trade_id = %f.chain_order,
+            clearing_price = %f.clearing_price,
+            ticks = %f.ticks,
+            is_buyer_maker,
+            "InferenceFilled conflicts with an existing tape row but diverges on an immutable column (book/price/qty/side); first write kept, replay ignored",
+        );
+    }
+    Ok(())
+}
+
 async fn apply_inference_filled(
     tx: &mut Transaction<'_, Postgres>,
     event: &DecodedEvent,
@@ -460,6 +533,10 @@ async fn apply_inference_filled(
     }
     apply_filled_decrement(tx, &f, &locked).await?;
     link_deal_from_filled(tx, &f).await?;
+    // Both legs are present on this path (checked above), so the direction always resolves.
+    if let Some(is_buyer_maker) = resolve_is_buyer_maker(&f, &locked) {
+        append_inference_trade(tx, &f, is_buyer_maker).await?;
+    }
     Ok(ProjectionOutcome::Applied)
 }
 
@@ -508,6 +585,17 @@ pub async fn repair_expired_inference_orphan(
                 apply_filled_decrement(tx, &f, &locked).await?;
                 ExpiredOrphanOutcome::FilledDepthRepaired { legs: locked.len() }
             };
+            // Record the match even though a leg is missing: the direction is recoverable
+            // from whichever leg IS present. With neither leg present it is not, so the
+            // match stays off the tape rather than landing with a guessed side.
+            match resolve_is_buyer_maker(&f, &locked) {
+                Some(is_buyer_maker) => append_inference_trade(tx, &f, is_buyer_maker).await?,
+                None => warn!(
+                    orderbook_address = %f.ob,
+                    trade_id = %f.chain_order,
+                    "inference Filled orphan past cutoff: neither leg present, trade direction unrecoverable; match omitted from the public tape",
+                ),
+            }
             // The Filled carries sellerTC + buyerNote; record the deal link even on
             // the orphan path (orderbook + buyer are leg-independent; seller resolves
             // from the SELL leg when present) — the normal deferred path never reruns.

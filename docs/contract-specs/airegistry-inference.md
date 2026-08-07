@@ -39,7 +39,7 @@ write-side SDK support stays behind the `test-helpers` feature flag and out of
 the production binary. Indexer projectors for `InferenceOrderBook.*` and
 `TokenContract.*` events are active; see
 [docs/tech-specs/indexer.md](../tech-specs/indexer.md) for the
-read-model they build (`inference_orders`, `inference_deals`, `inference_ticks`).
+read-model they build (`inference_orders`, `inference_trades`, `inference_deals`, `inference_ticks`).
 
 ## Event ids
 
