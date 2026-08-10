@@ -57,8 +57,22 @@ jobs:
 
       # `--no-deps` skips crates.io deps (we don't control their
       # warnings); `--all-targets` covers tests + examples + bins.
+      #
+      # `double_must_use` is allowed because it fires on code no one here
+      # writes: `#[async_trait]` expands each trait method to a `#[must_use]`
+      # function returning `Pin<Box<dyn Future>>`, which is itself already
+      # `must_use`, and clippy reports the redundancy against the macro's
+      # output. Clippy normally suppresses lints originating in an external
+      # macro; this one slips through, so the only place to silence it is
+      # here — the offending attribute exists solely in the expansion, and
+      # there is no source line to annotate. Every `#[async_trait]` trait in
+      # the workspace trips it, so `-D warnings` fails the whole job.
+      #
+      # Drop this flag once the upstream lint stops firing on macro
+      # expansions: remove it, run the command below, and if it is clean the
+      # workaround has outlived its cause.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
+        run: cargo clippy --workspace --all-targets --no-deps -- -D warnings -A clippy::double_must_use
 
   tests:
     name: tests (Postgres + nextest)
