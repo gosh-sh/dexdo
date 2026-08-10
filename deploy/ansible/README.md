@@ -37,7 +37,39 @@ roles/dexdo/
     compose.yml.j2                image-based compose (pulls from registry) -> <deploy_dir>/compose.yml
     api.yaml.j2                   rendered to <deploy_dir>/config/api.<env>.yaml
     indexer.yaml.j2               rendered to <deploy_dir>/config/indexer.<env>.yaml
+    logrotate.j2                  rotation script for the logrotate sidecar -> <deploy_dir>/logrotate.sh
 ```
+
+## Logging
+
+The api + indexer write their logs to files under `dexdo_logs_dir/<service>/`
+(bind-mounted to `/app/logs`). That dir defaults to `<deploy_dir>/logs`; point it
+at a separate disk/mount per env to keep logs off the system disk or surviving a
+redeploy. The services themselves
+rotate **daily** (`<service>.log.<date>` + `<service>.noise.log.<date>`
+via the `dodex-logging` crate, pruned to `LOG_MAX_FILES` days), so rotation is
+handled out of the box.
+
+Daily rotation bounds age but not size. If you also need a **size** cap, the
+role ships an **optional `logrotate` sidecar** (off by default —
+`dexdo_logrotate_enabled`) that rotates the dated files by size with
+`copytruncate` (mandatory, since the services keep the files open), driven by
+busybox cron, in place; the app keeps appending to the current day's file.
+
+Knobs (in `roles/dexdo/defaults/main.yml`, overridable per env):
+
+- `dexdo_logs_dir` (default `<deploy_dir>/logs`) — host dir the logs are written
+  to; point it at a data mount to keep logs off the system disk.
+- `dexdo_logrotate_enabled` (default `false`) — the app already rotates daily;
+  turn on only when you also want a size cap on top.
+- `dexdo_logrotate_image` — image providing `logrotate` + `crond` + bash.
+- `dexdo_log_rotate_size` (default `2G`) / `dexdo_log_rotate_amount`
+  (default `10`) — rotate at this size, keep this many compressed copies.
+- `dexdo_log_rotate_spec` (default `"*/5 *"`) — cron "minute hour" for the run
+  (every 5 minutes).
+
+For the app-side `LOG_DIR` / `LOG_MAX_FILES` knobs see
+[docs/deployment.md](../../docs/deployment.md#logs).
 
 ## Environments
 

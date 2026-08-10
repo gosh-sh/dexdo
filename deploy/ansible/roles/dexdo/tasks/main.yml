@@ -17,8 +17,19 @@
   loop:
     - "{{ dexdo_deploy_dir }}"
     - "{{ dexdo_deploy_dir }}/config"
-    - "{{ dexdo_deploy_dir }}/logs/api"
-    - "{{ dexdo_deploy_dir }}/logs/indexer"
+
+# Logs live outside the deploy dir (see dexdo_logs_dir) so they can sit on their
+# own mount and survive a redeploy — one per-service subdir, bind-mounted to
+# /app/logs in each container.
+- name: Ensure log directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ dexdo_logs_dir }}"
+    - "{{ dexdo_logs_dir }}/api"
+    - "{{ dexdo_logs_dir }}/indexer"
 
 - name: Render api config
   ansible.builtin.template:
@@ -58,6 +69,17 @@
     dest: "{{ dexdo_deploy_dir }}/compose.yml"
     mode: "0644"
 
+# Rotation script for the logrotate sidecar (bind-mounted into it by the compose
+# file). Bind-mounts don't trigger a container recreate, so a script-only change
+# is applied by the explicit restart below rather than by `compose up`.
+- name: Render logrotate script (for the logrotate sidecar)
+  ansible.builtin.template:
+    src: logrotate.j2
+    dest: "{{ dexdo_deploy_dir }}/logrotate.sh"
+    mode: "0755"
+  when: dexdo_logrotate_enabled | bool
+  register: dexdo_logrotate_script
+
 # Pulls the SHA-pinned images from the registry and (re)creates containers.
 # `--pull always` picks up a new tag; config-only changes are applied by the
 # "Restart dexdo stack" handler (bind-mounted YAML does not trigger a recreate).
@@ -67,3 +89,13 @@
     chdir: "{{ dexdo_deploy_dir }}"
   register: dexdo_compose_up
   changed_when: "'Started' in dexdo_compose_up.stderr or 'Recreated' in dexdo_compose_up.stderr or 'Created' in dexdo_compose_up.stderr or 'Pulled' in dexdo_compose_up.stderr"
+
+# `compose up` above recreates the sidecar only when the compose file changed;
+# a change to logrotate.sh alone (bind-mounted) needs an explicit restart so the
+# running container re-reads it.
+- name: Restart logrotate sidecar when its script changed
+  ansible.builtin.command:
+    cmd: docker compose restart logrotate
+    chdir: "{{ dexdo_deploy_dir }}"
+  when: dexdo_logrotate_enabled | bool and dexdo_logrotate_script is changed
+  changed_when: true
