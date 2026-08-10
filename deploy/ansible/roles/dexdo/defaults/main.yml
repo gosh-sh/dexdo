@@ -76,10 +76,11 @@ dexdo_db_host: postgres
 dexdo_db_port: 5432
 # Password is a secret -> the env vault (vault_dexdo_db_password).
 dexdo_db_password: "{{ vault_dexdo_db_password }}"
-# Connection string shared by api + indexer. The password is URL-encoded so
-# special characters are safe inside the URL; the postgres service env gets the
-# raw value.
+# Base connection string. The password is URL-encoded so special characters are
+# safe inside the URL; the bundled postgres service env gets the raw value.
 dexdo_database_url: "postgresql://{{ dexdo_db_user }}:{{ dexdo_db_password | urlencode }}@{{ dexdo_db_host }}:{{ dexdo_db_port }}/{{ dexdo_db_name }}"
+dexdo_api_database_url: "{{ dexdo_database_url }}"
+dexdo_indexer_database_url: "{{ dexdo_database_url }}"
 
 # --- OpenTelemetry / OTLP metrics (indexer) ---------------------------------
 # Endpoint of your OTLP collector (gRPC). Empty -> the indexer collects no

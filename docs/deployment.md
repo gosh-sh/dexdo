@@ -462,7 +462,9 @@ metrics.) Set it in your Compose override next to `APP_CONFIG`:
 ```
 
 The indexer refreshes its DB-derived metric caches every 15s and the OTLP reader
-pushes every 30s, under `service.name=dodex-indexer`. To see them in Grafana,
+pushes every 30s, under `service.name=dodex-indexer` — set `OTEL_SERVICE_NAME`
+(or a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`) to label an environment
+differently, e.g. `dodex-indexer-stage`. To see them in Grafana,
 route the OTLP stream into Prometheus (an OpenTelemetry Collector with a
 `prometheus` / `prometheusremotewrite` exporter) and point Grafana at that
 Prometheus. The full metric catalog — what each gauge and counter measures — is

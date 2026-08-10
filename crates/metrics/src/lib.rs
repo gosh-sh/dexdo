@@ -20,7 +20,9 @@ use opentelemetry::metrics::Meter;
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::metrics::ObservableCounter;
 use opentelemetry::metrics::ObservableGauge;
+use opentelemetry::Key;
 use opentelemetry::KeyValue;
+use opentelemetry::Value;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::PeriodicReader;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
@@ -34,6 +36,12 @@ pub const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const OTLP_READER_INTERVAL: Duration = Duration::from_secs(30);
 const OTLP_READER_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVICE_NAME: &str = "dodex-indexer";
+/// What the SDK's resource detector reports when the environment configured no
+/// name at all (neither `OTEL_SERVICE_NAME` nor a `service.name` in
+/// `OTEL_RESOURCE_ATTRIBUTES`). Matched as a prefix because the specification
+/// also allows an `unknown_service:<process>` form.
+const SDK_UNKNOWN_SERVICE: &str = "unknown_service";
+const SERVICE_NAME_KEY: &str = "service.name";
 
 /// Owns the meter provider (held for the process lifetime) and the indexer
 /// metric handles.
@@ -490,12 +498,26 @@ fn metrics_endpoint() -> Option<String> {
     )
 }
 
-/// Builds the OTLP resource. The explicit `service.name` is merged on the
-/// right so it wins over the SDK default's `unknown_service` — `Resource::merge`
-/// gives precedence to its argument — while still inheriting the SDK-detected
-/// attributes carried by `Resource::default()`.
+/// Picks the exported `service.name` from what the SDK detected: a name the
+/// environment configured wins, and ours only fills in the gap the detector
+/// signals with `unknown_service`. Taking the detected value rather than the
+/// raw env keeps the precedence rules (`OTEL_SERVICE_NAME` over a `service.name`
+/// in `OTEL_RESOURCE_ATTRIBUTES`) in one place — the SDK's.
+fn select_service_name(detected: Option<Value>) -> String {
+    match detected {
+        Some(name) if !name.as_str().starts_with(SDK_UNKNOWN_SERVICE) => name.as_str().into_owned(),
+        _ => SERVICE_NAME.to_string(),
+    }
+}
+
+/// Builds the OTLP resource. The chosen `service.name` is merged on the right so
+/// it wins over the detected one — `Resource::merge` gives precedence to its
+/// argument — while still inheriting the other SDK-detected attributes carried
+/// by `Resource::default()`.
 fn build_resource() -> Resource {
-    Resource::default().merge(&Resource::new(vec![KeyValue::new("service.name", SERVICE_NAME)]))
+    let detected = Resource::default();
+    let name = select_service_name(detected.get(Key::from_static_str(SERVICE_NAME_KEY)));
+    detected.merge(&Resource::new(vec![KeyValue::new(SERVICE_NAME_KEY, name)]))
 }
 
 /// Initialise OTLP metrics. Returns `None` when no OTLP endpoint env var is
@@ -577,11 +599,35 @@ mod tests {
     }
 
     #[test]
-    fn resource_carries_our_service_name() {
-        let resource = super::build_resource();
+    fn env_configured_service_name_wins_over_ours() {
         assert_eq!(
-            resource.get(opentelemetry::Key::from_static_str("service.name")),
-            Some(opentelemetry::Value::from(super::SERVICE_NAME))
+            super::select_service_name(Some(opentelemetry::Value::from("dodex-indexer-stage"))),
+            "dodex-indexer-stage"
+        );
+    }
+
+    #[test]
+    fn our_service_name_fills_in_when_env_configured_none() {
+        assert_eq!(super::select_service_name(None), super::SERVICE_NAME);
+        assert_eq!(
+            super::select_service_name(Some(opentelemetry::Value::from("unknown_service"))),
+            super::SERVICE_NAME
+        );
+        assert_eq!(
+            super::select_service_name(Some(opentelemetry::Value::from("unknown_service:indexer"))),
+            super::SERVICE_NAME
+        );
+    }
+
+    #[test]
+    fn resource_carries_the_chosen_service_name() {
+        let resource = super::build_resource();
+        let name = resource
+            .get(opentelemetry::Key::from_static_str("service.name"))
+            .expect("the SDK detector always sets service.name");
+        assert!(
+            !name.as_str().starts_with(super::SDK_UNKNOWN_SERVICE),
+            "exported the SDK placeholder instead of a real name: {name:?}"
         );
     }
 

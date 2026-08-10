@@ -2,7 +2,7 @@
 
 when:
   - event: push
-    branch: dev
+    branch: [dev, main]
 
 # Wait for the image build; deploy pulls the image it produced (by commit SHA).
 depends_on:
@@ -45,4 +45,9 @@ steps:
     commands:
       - cp -ar .ssh ~/.ssh
       - echo "$ANSIBLE_VAULT_PASSWORD" > /tmp/vault-pass && chmod 600 /tmp/vault-pass
-      - ansible-playbook deploy-dexdo.yml -i $CI_WORKSPACE/.inventory/ansible/inventory/dexdo/stage/hosts.yml --vault-password-file /tmp/vault-pass -e dexdo_image_tag=$CI_COMMIT_SHA
+      - |
+        if [ "$CI_COMMIT_BRANCH" = "main" ]; then ENV=prod; else ENV=stage; fi
+        ansible-playbook deploy-dexdo.yml \
+          -i "$CI_WORKSPACE/.inventory/ansible/inventory/dexdo/$ENV/hosts.yml" \
+          --vault-password-file /tmp/vault-pass \
+          -e dexdo_image_tag=$CI_COMMIT_SHA
