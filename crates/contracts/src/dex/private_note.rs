@@ -243,6 +243,18 @@ pub struct ParamsOfInitTransfer {
     pub dest_deposit_hash: String,
     pub token_type: u32,
     pub amount: u128,
+    /// Physical ECC of `token_type` to travel with the record, added by the
+    /// v4.0.33 sync. Before it, the transfer moved the `_balance` figure and
+    /// left the currency backing it behind — a note could hand its whole
+    /// balance away and keep the coins.
+    ///
+    /// NAMED, not "whatever is in the pocket", because the owner decides how
+    /// much; `0` is legal and reproduces the old record-only transfer. It is
+    /// checked against `address(this).currencies[token_type]`, which is the
+    /// PHYSICAL balance and not the `_balance` ledger the `amount` above is
+    /// taken from — the two can differ, so passing `amount` here is not
+    /// automatically safe.
+    pub ecc_amount: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1538,5 +1550,36 @@ mod inference_abi_tests {
         ] {
             assert!(!names.contains(func), "{func} is back in the ABI but has no wrapper");
         }
+    }
+
+    #[test]
+    fn transfer_params_match_abi() {
+        // `eccAmount` was added to `initTransfer` by the v4.0.33 sync and the
+        // struct kept its three fields. Nothing caught it: the call NAME was
+        // still in the ABI, so `wrapper_calls_exist_in_abi` stayed green, and
+        // this file's params tests covered only the inference calls. The
+        // serialized input then reached the encoder a field short, which reads
+        // as `null` rather than as absent:
+        //
+        //   tvm_code=306 … Wrong data format in `eccAmount` parameter: null
+        //
+        // — a runtime failure on the first e2e transfer, not a compile error.
+        assert_eq!(
+            keys(&ParamsOfInitTransfer {
+                dest_deposit_hash: "1".into(),
+                token_type: 1,
+                amount: 1,
+                ecc_amount: 0,
+            }),
+            abi_input_names("initTransfer")
+        );
+        assert_eq!(
+            keys(&ParamsOfOfferTransfer {
+                token_type: 1,
+                amount: 1,
+                sender_deposit_hash: "1".into(),
+            }),
+            abi_input_names("offerTransfer")
+        );
     }
 }

@@ -275,6 +275,11 @@ async fn try_every_exit(
                 dest_deposit_hash: sink.note.dih_dec.clone(),
                 token_type: TOKEN_TYPE_NACKL,
                 amount: TRANSFER_AMOUNT,
+                // Immaterial here: this call is one of the six that must be
+                // REFUSED, and the gate that refuses it (`_openOrderCount`)
+                // is checked long before `eccAmount` is looked at. Zero keeps
+                // the refusal the only reason it does nothing.
+                ecc_amount: 0,
             },
             keys.clone(),
         )

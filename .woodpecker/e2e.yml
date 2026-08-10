@@ -37,10 +37,28 @@ variables:
   # the risk is real, not theoretical -- move the pin to a `dev` commit once
   # this work lands there.
   #
-  # This pin is one commit ahead of the last: its only content is the e2e
-  # runner's `--test-threads`, raised from 1 to 4. Nothing else differs, so it
-  # bakes the same zerostate from the same contracts as the pin before it.
-  - &acki_sha "91d7d5d0e2809dfa83c3c87689cc315ed7527238"
+  # This pin is two commits ahead of the last, and BOTH are inert for the
+  # zerostate this pipeline bakes:
+  #
+  # - `test(dexdo): drop the nextest filter naming a deleted suite` is the one
+  #   that matters. `e2e-on-host.sh` carried `-E 'not
+  #   binary(e2e_inference_dispute)'` for a suite the v4.0.33 sync deleted, and
+  #   a `binary()` predicate matching nothing is an error in nextest rather
+  #   than an empty match — so `e2e_tests` died on the filter in about a second
+  #   having run nothing. The same stale filter was removed from
+  #   `.github/workflows/e2e-shellnet.yml` in the v4.0.35 sync; this side runs
+  #   a script that lives in acki-nacki, so it needed its own fix and its own
+  #   pin bump.
+  # - `feat(contracts): v4.0.34` touches ONLY `contracts/{dex,airegistry}` and
+  #   the three `*_compiled` directories under them. Every one of those paths
+  #   is `rm -rf`ed and rewritten from THIS dodex checkout by
+  #   `tests/e2e/stage_contracts.sh` before the generator runs, so the pinned
+  #   commit's own contract version is irrelevant — v4.0.34 here does not put a
+  #   4.0.34 stand under a 4.0.35 dodex. Do not read this as "the versions may
+  #   drift freely": it holds because stage_contracts.sh replaces those exact
+  #   directories, and a contract added outside its two allowlists would be
+  #   taken from the pin instead.
+  - &acki_sha "e210d4019916b766a4bdb45b5b14d6daf8e09484"
   - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:1ee9cec484f27659e4b4d0e2182ca79485929b23c659bd772e58786f9bb1d2c7"
   - &node_img "docker.gosh.sh/ackinacki-node@sha256:00af55c1fb597d89f8afb469a43eb21c991c9db911ff7a6161ad934218fc4a03"
   - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:a45e15d363cb6f4ef4aca5bdc82d7fe225cca2b6dea97c1838ffbf7208dea962"

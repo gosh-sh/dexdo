@@ -65,6 +65,11 @@ async fn test_get_notes_history_via_dex() {
             dest_deposit_hash: pn2_dih,
             token_type: TOKEN_TYPE_NACKL,
             amount: transfer_amount,
+            // This scenario reads the history events a transfer emits —
+            // `TransferInitiated` on the sender, `TransferReceived` on the
+            // receiver — and both are emitted for a record-only transfer.
+            // Zero therefore keeps what is asserted below unchanged.
+            ecc_amount: 0,
         },
         Signer::Keys { keys: pn1_keys },
     )

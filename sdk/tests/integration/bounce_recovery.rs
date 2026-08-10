@@ -105,6 +105,15 @@ async fn a_bounced_operation_gives_the_money_back_and_unlocks_the_note_local() {
             dest_deposit_hash: ABSENT_NOTE_DIH.to_string(),
             token_type: TOKEN_TYPE_NACKL,
             amount: STAKE_AMOUNT,
+            // The record alone, which is what this scenario has always sent.
+            // Coins in the message would come back on their own — currency
+            // bounces without help — so `onBounce` restoring `_balance` is
+            // exactly what is under test either way, and a non-zero figure
+            // adds a precondition the phase above does not establish: the
+            // note is asserted to hold `STAKE_AMOUNT` in the `_balance`
+            // LEDGER, while `eccAmount` is checked against the PHYSICAL
+            // `currencies[NACKL]`.
+            ecc_amount: 0,
         },
         Signer::Keys { keys: note.note.keys.clone() },
     )
