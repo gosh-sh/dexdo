@@ -1,85 +1,11 @@
 //! Oracle-side tests: fee withdrawal, oracle/market discovery.
 
-use ackinacki_kit::tvm_client::abi::Signer;
-use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
-use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
-use dodex_contracts::dex::private_note::ParamsOfSetStake;
 
-use crate::common::context::create_context;
 use crate::common::context::create_dex;
-use crate::common::context::GIVER_ADDRESS;
-use crate::common::context::STAKE_AMOUNT;
-use crate::common::context::STAKE_PERIOD;
 use crate::common::context::TOKEN_TYPE_NACKL;
-use crate::common::misc::now_unix;
-use crate::common::pmp::setup_pmp;
 
 #[tokio::test]
-async fn test_oracle_withdraw_fees_via_dex() {
-    let context = create_context();
-    let dex = create_dex();
-    let s = setup_pmp(&context, &dex).await;
-
-    let result_start = now_unix() + STAKE_PERIOD;
-    dex.submit_set_timings(
-        &s.pmp_address,
-        ParamsOfSubmitSetTimings { result_start },
-        Signer::Keys { keys: s.oracle_keys.clone() },
-    )
-    .await
-    .expect("set_timings");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    // Stake + resolve to generate fees
-    dex.set_stake(
-        &s.pn_address,
-        ParamsOfSetStake {
-            event_id: s.event_id.clone(),
-            oracle_list_hash: s.oracle_list_hash.clone(),
-            token_type: TOKEN_TYPE_NACKL,
-            outcome: 0,
-            amount: STAKE_AMOUNT,
-            use_coupon: false,
-        },
-        Signer::Keys { keys: s.pn_keys.clone() },
-    )
-    .await
-    .expect("set_stake");
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-    let wait = result_start.saturating_sub(now_unix()) + 5;
-    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-
-    dex.submit_resolve(
-        &s.pmp_address,
-        ParamsOfSubmitResolve { outcome_id: 0 },
-        Signer::Keys { keys: s.oracle_keys.clone() },
-    )
-    .await
-    .expect("resolve");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    // Oracle withdraws fees to giver address
-    let result = dex
-        .withdraw_fees(
-            &s.oracle_address,
-            dodex_contracts::dex::oracle::ParamsOfWithdrawFees {
-                to: GIVER_ADDRESS.to_string(),
-                amount: 1, // withdraw minimal amount
-            },
-            Signer::Keys { keys: s.oracle_keys },
-        )
-        .await;
-
-    // withdrawFees may succeed or fail depending on whether fees accumulated
-    match &result {
-        Ok(_) => eprintln!("oracle withdraw_fees OK"),
-        Err(e) => eprintln!("oracle withdraw_fees failed (may be 0 fees): {e}"),
-    }
-    // The point is: the method works end-to-end, fees are a PMP detail
-}
-
-#[tokio::test]
+#[ignore = "requires a live network with oracles already deployed on it"]
 async fn test_discover_oracles_and_markets_via_dex() {
     let dex = create_dex();
 

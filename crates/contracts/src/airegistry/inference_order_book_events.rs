@@ -27,7 +27,6 @@ pub enum InferenceOrderBookEvent {
     Refunded = 1002,
     Filled = 1003,
     Executed = 1004,
-    SubscriptionPlaced = 1005,
     // 1006 (CycleForfeitedEmit) and 1007 (ForfeitClaimedEmit) remain reserved in
     // `modifiers.sol`, but the contract no longer declares or emits the matching
     // events, so there is nothing to decode into.
@@ -54,7 +53,6 @@ impl TryFrom<String> for InferenceOrderBookEvent {
             1002 => Ok(InferenceOrderBookEvent::Refunded),
             1003 => Ok(InferenceOrderBookEvent::Filled),
             1004 => Ok(InferenceOrderBookEvent::Executed),
-            1005 => Ok(InferenceOrderBookEvent::SubscriptionPlaced),
             1008 => Ok(InferenceOrderBookEvent::InferenceOrderBookDeployed),
             1009 => Ok(InferenceOrderBookEvent::OrderCancelRejected),
             _ => Err(KitError::new(
@@ -105,11 +103,6 @@ pub enum DecodedInferenceOrderBookEvent {
         kind: InferenceOrderBookEvent,
         data: ExecutedData,
     },
-    SubscriptionPlaced {
-        event: Event,
-        kind: InferenceOrderBookEvent,
-        data: SubscriptionPlacedData,
-    },
     InferenceOrderBookDeployed {
         event: Event,
         kind: InferenceOrderBookEvent,
@@ -149,14 +142,6 @@ impl FromEvent for DecodedInferenceOrderBookEvent {
             InferenceOrderBookEvent::Executed => {
                 let data = decode_or_err::<ExecutedData>(event, contract)?;
                 Ok(DecodedInferenceOrderBookEvent::Executed { event: event.clone(), kind, data })
-            }
-            InferenceOrderBookEvent::SubscriptionPlaced => {
-                let data = decode_or_err::<SubscriptionPlacedData>(event, contract)?;
-                Ok(DecodedInferenceOrderBookEvent::SubscriptionPlaced {
-                    event: event.clone(),
-                    kind,
-                    data,
-                })
             }
             InferenceOrderBookEvent::InferenceOrderBookDeployed => {
                 let data = decode_or_err::<OrderBookDeployedData>(event, contract)?;
@@ -277,25 +262,6 @@ pub struct ExecutedData {
     pub clearing_price: String,
     #[serde(deserialize_with = "deserialize_u128")]
     pub cost: u128,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-/// Payload of `InferenceOrderBookEvent::SubscriptionPlaced`.
-pub struct SubscriptionPlacedData {
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub order_id: u128,
-    pub buyer_note: String,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub max_price: u128,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub ticks: u128,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub cycle_budget: u128,
-    pub auto_renew: bool,
-    /// Flag mask the subscription was placed with; see [`OrderPlacedData::flags`].
-    #[serde(deserialize_with = "deserialize_u8")]
-    pub flags: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]

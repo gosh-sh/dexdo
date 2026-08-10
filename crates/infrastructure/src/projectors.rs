@@ -78,6 +78,27 @@ pub async fn project_event(
         // in `config::IGNORABLE_EVENT_TYPES` (so `ignored_event_types` may shed
         // them) and neither is metric-critical — keep the two in sync.
         "PMP.StakeAccepted" | "PMP.MergeProcessed" => Ok(ProjectionOutcome::Applied),
+        // Carry nothing the read model serves, but still need an arm: without one
+        // they project as `Unknown`, get marked processed on first sight, and are
+        // never retried — so a handler added later needs an explicit backfill.
+        //
+        // Deliberately NOT in `IGNORABLE_EVENT_TYPES`. That list is permission for
+        // `ignored_event_types` to drop a type at ingest, before the `raw_events`
+        // insert; dodex-rewards reads the stake-forfeit payloads straight out of
+        // `raw_events`, so granting that permission would cut it off from them.
+        //
+        // The note-side inference mirrors follow `InferenceOrderPlacedConfirmed` /
+        // `InferenceFilledConfirmed`: the book is the authority on an order, the
+        // note's copy exists for its owner.
+        "PMP.StakeForfeited"
+        | "PrivateNote.StakeForfeitConfirmed"
+        | "PrivateNote.StakeDroppedLocally"
+        | "PrivateNote.DealCredited"
+        | "PrivateNote.BookCredited"
+        | "PrivateNote.InferenceOrderRemoved"
+        | "PrivateNote.InferenceOrderRejectedMirror"
+        | "PrivateNote.InferenceDealClosed"
+        | "RootPN.DealWriteOffReported" => Ok(ProjectionOutcome::Applied),
         et if et.starts_with("TokenContract.") => {
             crate::token_contract_projectors::project_token_contract_event(tx, event, node)
                 .await

@@ -5,6 +5,7 @@
 // so we depend on the low-level crates instead of pulling the full tvm_client
 // graph (network layer, async runtime hooks, FIFT-style get_methods, etc.).
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -151,6 +152,138 @@ pub fn decode_account_fields(contract: &Contract, account_boc_base64: &str) -> R
         .map_err(|err| anyhow!("detokenize storage fields: {err}"))
 }
 
+/// Physical balance of an account: native grams plus the extra-currency
+/// dictionary (`CurrencyCollection.other`). Currency id 2 is SHELL, which
+/// pays for gas.
+#[derive(Debug)]
+pub struct AccountEcc {
+    pub grams: u128,
+    pub ecc: BTreeMap<u32, u128>,
+}
+
+/// Decode the physical balance (grams + ECC dictionary) that the blockchain
+/// holds for an account, straight from its BOC. This is the counterpart to
+/// [`decode_account_fields`], which reads the contract's logical storage
+/// cell and cannot see the account's physical balance at all.
+///
+/// An `AccountNone` BOC (not yet deployed, or self-destructed) decodes to a
+/// zero balance rather than an error. This is deliberately asymmetric with
+/// `decode_account_fields`, which does error on `AccountNone`: that function
+/// reads *storage*, and a nonexistent account has no storage cell to parse —
+/// there is genuinely nothing there. A *balance*, in contrast, is always
+/// well-defined: an account holding no state holds no money, so its balance
+/// is zero rather than absent. Callers computing a conservation delta across
+/// a scenario need this — a contract that lived and later self-destructed
+/// must still contribute a well-defined (zero) balance to the snapshot,
+/// not abort the check.
+pub fn decode_account_ecc(account_boc_base64: &str) -> Result<AccountEcc> {
+    let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
+    let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;
+    let Some(cc) = account.balance() else {
+        return Ok(AccountEcc { grams: 0, ecc: BTreeMap::new() });
+    };
+
+    let mut ecc = BTreeMap::new();
+    let mut overflow: Option<u32> = None;
+    cc.other
+        .iterate_with_keys(|k: u32, v| {
+            // VarUInteger32::value() returns &BigInt (only Grams exposes as_u128()).
+            // u128::try_from(&BigInt) is num-bigint's own TryFrom impl, reachable
+            // without naming the type. An amount that doesn't fit u128 means the
+            // account data is corrupt, so we stop iterating and report it below
+            // rather than truncate the value.
+            match u128::try_from(v.value()) {
+                Ok(amount) => {
+                    ecc.insert(k, amount);
+                    Ok(true)
+                }
+                Err(_) => {
+                    overflow = Some(k);
+                    Ok(false)
+                }
+            }
+        })
+        .map_err(|err| anyhow!("iterate ecc dict: {err}"))?;
+    if let Some(k) = overflow {
+        return Err(anyhow!("ECC[{k}] overflows u128"));
+    }
+
+    Ok(AccountEcc { grams: cc.grams.as_u128(), ecc })
+}
+
+/// Whether the BOC holds no account at all (`AccountNone`).
+///
+/// A contract that lived and then self-destructed does not necessarily stop
+/// answering: the gateway may still return a BOC, and that BOC decodes to
+/// `AccountNone`. So "the fetch returned something" is not the same question as
+/// "the contract exists", and a caller that needs the second one — a test
+/// barrier waiting for a self-destruct, a snapshot deciding whether an account
+/// contributes a balance — cannot answer it from the fetch alone.
+///
+/// This exists so such callers can decide existence *structurally* rather than
+/// by matching the error text of [`decode_account_fields`], which rejects
+/// `AccountNone` but says so only in prose.
+pub fn account_boc_is_none(account_boc_base64: &str) -> Result<bool> {
+    let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
+    let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;
+    Ok(account.is_none())
+}
+
+/// Repr-hash of the code cell an account is actually running, as lower-case
+/// 64-character hex with no `0x` prefix — the same shape `tvm-cli decode
+/// stateinit` prints, so the two are directly comparable.
+///
+/// This is the *deployed* side of a bytecode-provenance check: the reference
+/// side comes from a build-time manifest, and the two must be produced by
+/// separate paths for the comparison to prove anything. An account with no
+/// code (`AccountNone`, or an uninitialised account) is an error rather than
+/// a placeholder value: a stand where the contract is simply missing must
+/// fail the check loudly, not compare equal to something.
+pub fn deployed_code_hash(account_boc_base64: &str) -> Result<String> {
+    let bytes = BASE64_STANDARD.decode(account_boc_base64).context("decode account boc base64")?;
+    let account = Account::construct_from_bytes(&bytes).context("parse account boc")?;
+    let code = account.get_code().ok_or_else(|| anyhow!("account has no code cell"))?;
+    Ok(code.repr_hash().as_hex_string())
+}
+
+/// Structure of a single-root cell BOC: how many data bits its root holds and
+/// the repr-hash of each of its references, in order.
+#[derive(Debug)]
+pub struct CellShape {
+    pub data_bits: usize,
+    pub refs: Vec<String>,
+}
+
+/// Decode a single-root cell BOC and report its [`CellShape`].
+///
+/// Exists so callers without a direct `tvm_types` dependency can assert on a
+/// cell's *structure* rather than only on its hash. Hash equality tells you
+/// two cells are the same; it cannot tell you that a cell you just built has
+/// the layout you intended — and a wrapper cell built with the wrong layout
+/// hashes to something perfectly self-consistent and perfectly wrong.
+pub fn boc_cell_shape(boc_base64: &str) -> Result<CellShape> {
+    let bytes = BASE64_STANDARD.decode(boc_base64).context("decode cell boc base64")?;
+    let cell =
+        tvm_types::read_single_root_boc(&bytes).map_err(|err| anyhow!("parse boc: {err}"))?;
+    let refs = (0..cell.references_count())
+        .map(|i| {
+            cell.reference(i)
+                .map(|r| r.repr_hash().as_hex_string())
+                .map_err(|err| anyhow!("read reference {i}: {err}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(CellShape { data_bits: cell.bit_length(), refs })
+}
+
+/// JSON wrapper over [`decode_account_fields`] for callers that only have the
+/// ABI as a JSON string rather than a `tvm_abi::Contract` — e.g. across a
+/// crate boundary that doesn't take a direct dependency on `tvm_abi`.
+pub fn decode_account_fields_json(abi_json: &str, account_boc_base64: &str) -> Result<Value> {
+    let contract = Contract::load(std::io::Cursor::new(abi_json))
+        .context("load abi json for account fields")?;
+    decode_account_fields(&contract, account_boc_base64)
+}
+
 fn call_tvm_msg(account: &mut Account, msg: &Message) -> Result<Vec<Message>> {
     let config = BlockchainConfig::default();
 
@@ -273,6 +406,158 @@ mod tests {
         let err = run_getter(&contract, "not_a_boc", "getDetails", &json!({})).unwrap_err();
         let msg = format!("{:#}", err);
         assert!(msg.contains("decode") || msg.contains("base64") || msg.contains("parse"));
+    }
+
+    #[test]
+    fn decode_account_ecc_reads_grams_and_ecc_dict() {
+        use tvm_block::CurrencyCollection;
+        use tvm_block::ExtraCurrencyCollection;
+        use tvm_block::MsgAddressInt;
+        use tvm_block::StateInit;
+        use tvm_types::base64_encode;
+
+        let mut other = ExtraCurrencyCollection::default();
+        other.set(&2u32, &1_000_000_000u128.into()).unwrap(); // ECC[2] = 1 SHELL
+        let cc = CurrencyCollection { grams: 5_000u64.into(), other };
+        let addr: MsgAddressInt =
+            "0:2222222222222222222222222222222222222222222222222222222222222222".parse().unwrap();
+        let account =
+            Account::active_by_init_code_hash(addr, cc, 0, StateInit::default(), false).unwrap();
+        let boc = base64_encode(account.write_to_bytes().unwrap());
+
+        let got = decode_account_ecc(&boc).unwrap();
+
+        assert_eq!(got.grams, 5_000);
+        assert_eq!(got.ecc.get(&2), Some(&1_000_000_000));
+    }
+
+    #[test]
+    fn decode_account_ecc_rejects_amount_overflowing_u128() {
+        use tvm_block::CurrencyCollection;
+        use tvm_block::ExtraCurrencyCollection;
+        use tvm_block::MsgAddressInt;
+        use tvm_block::StateInit;
+        use tvm_block::VarUInteger32;
+        use tvm_types::base64_encode;
+
+        let mut other = ExtraCurrencyCollection::default();
+        // 2^128 — one past u128::MAX, still well inside VarUInteger32's 256-bit range.
+        other.set(&2u32, &VarUInteger32::from_two_u128(1, 0).unwrap()).unwrap();
+        let cc = CurrencyCollection { grams: 5_000u64.into(), other };
+        let addr: MsgAddressInt =
+            "0:3333333333333333333333333333333333333333333333333333333333333333".parse().unwrap();
+        let account =
+            Account::active_by_init_code_hash(addr, cc, 0, StateInit::default(), false).unwrap();
+        let boc = base64_encode(account.write_to_bytes().unwrap());
+
+        let err = decode_account_ecc(&boc).unwrap_err();
+
+        // The error must name the offending currency id (2 here), not just
+        // say "overflow" — a future refactor that drops the id should fail
+        // this test.
+        let msg = err.to_string();
+        assert!(msg.contains("overflow"), "unexpected error: {msg}");
+        assert!(msg.contains("ECC[2]"), "error does not name the offending currency id: {msg}");
+    }
+
+    #[test]
+    fn decode_account_ecc_reads_zero_for_account_none() {
+        use tvm_types::base64_encode;
+
+        // Not-yet-deployed (or self-destructed) accounts serialize as
+        // AccountNone — no `stuff` at all. This must decode to a zero
+        // balance, not an error: the account holds no state, so it holds
+        // no money.
+        let account = Account::default();
+        let boc = base64_encode(account.write_to_bytes().unwrap());
+
+        let got = decode_account_ecc(&boc).unwrap();
+
+        assert_eq!(got.grams, 0);
+        assert!(got.ecc.is_empty());
+    }
+
+    #[test]
+    fn account_boc_is_none_separates_a_dead_account_from_a_live_one() {
+        use tvm_block::CurrencyCollection;
+        use tvm_block::MsgAddressInt;
+        use tvm_block::StateInit;
+        use tvm_types::base64_encode;
+
+        // Self-destructed (or never deployed): the gateway can still hand back
+        // a BOC, and it carries no account.
+        let dead = base64_encode(Account::default().write_to_bytes().unwrap());
+        assert!(account_boc_is_none(&dead).unwrap());
+
+        // A funded, active account is not "none" — this is the half that keeps
+        // a barrier from declaring a live contract gone.
+        let addr: MsgAddressInt =
+            "0:4444444444444444444444444444444444444444444444444444444444444444".parse().unwrap();
+        let live = Account::active_by_init_code_hash(
+            addr,
+            CurrencyCollection::with_grams(5_000),
+            0,
+            StateInit::default(),
+            false,
+        )
+        .unwrap();
+        let live = base64_encode(live.write_to_bytes().unwrap());
+        assert!(!account_boc_is_none(&live).unwrap());
+    }
+
+    #[test]
+    fn deployed_code_hash_reads_the_state_init_code_cell() {
+        use tvm_block::CurrencyCollection;
+        use tvm_block::MsgAddressInt;
+        use tvm_block::StateInit;
+        use tvm_types::base64_encode;
+        use tvm_types::BuilderData;
+
+        let code =
+            BuilderData::with_raw(vec![0xde, 0xad, 0xbe, 0xef], 32).unwrap().into_cell().unwrap();
+        let addr: MsgAddressInt =
+            "0:5555555555555555555555555555555555555555555555555555555555555555".parse().unwrap();
+        let account = Account::active_by_init_code_hash(
+            addr,
+            CurrencyCollection::with_grams(5_000),
+            0,
+            StateInit { code: Some(code.clone()), ..Default::default() },
+            false,
+        )
+        .unwrap();
+        let boc = base64_encode(account.write_to_bytes().unwrap());
+
+        assert_eq!(deployed_code_hash(&boc).unwrap(), code.repr_hash().as_hex_string());
+    }
+
+    #[test]
+    fn deployed_code_hash_rejects_an_account_with_no_code() {
+        use tvm_types::base64_encode;
+
+        // AccountNone: nothing deployed, so there is no code cell to hash.
+        // This must be an error rather than some placeholder hash — a
+        // provenance check that silently compared a placeholder would pass
+        // against a stand where the contract is simply missing.
+        let boc = base64_encode(Account::default().write_to_bytes().unwrap());
+        assert!(deployed_code_hash(&boc).is_err());
+    }
+
+    #[test]
+    fn boc_cell_shape_reports_data_bits_and_reference_hashes() {
+        use tvm_types::base64_encode;
+        use tvm_types::write_boc;
+        use tvm_types::BuilderData;
+
+        let child = BuilderData::with_raw(vec![0xaa], 8).unwrap().into_cell().unwrap();
+        let mut parent = BuilderData::new();
+        parent.checked_append_reference(child.clone()).unwrap();
+        let parent = parent.into_cell().unwrap();
+        let boc = base64_encode(write_boc(&parent).unwrap());
+
+        let shape = boc_cell_shape(&boc).unwrap();
+
+        assert_eq!(shape.data_bits, 0);
+        assert_eq!(shape.refs, vec![child.repr_hash().as_hex_string()]);
     }
 
     #[test]

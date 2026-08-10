@@ -28,7 +28,6 @@ pub enum TokenContractEvent {
     StreamStopped = 723,
     StreamDisputed = 724,
     DisputeResolved = 725,
-    StreamReclaimed = 726,
     SellerBondFunded = 727,
     ProbeAccepted = 728,
     ProbeBurned = 729,
@@ -58,7 +57,6 @@ impl TryFrom<String> for TokenContractEvent {
             723 => Ok(TokenContractEvent::StreamStopped),
             724 => Ok(TokenContractEvent::StreamDisputed),
             725 => Ok(TokenContractEvent::DisputeResolved),
-            726 => Ok(TokenContractEvent::StreamReclaimed),
             727 => Ok(TokenContractEvent::SellerBondFunded),
             728 => Ok(TokenContractEvent::ProbeAccepted),
             729 => Ok(TokenContractEvent::ProbeBurned),
@@ -95,7 +93,6 @@ pub enum DecodedTokenContractEvent {
     StreamStopped { event: Event, kind: TokenContractEvent, data: StreamStoppedData },
     StreamDisputed { event: Event, kind: TokenContractEvent, data: StreamDisputedData },
     DisputeResolved { event: Event, kind: TokenContractEvent, data: DisputeResolvedData },
-    StreamReclaimed { event: Event, kind: TokenContractEvent, data: StreamReclaimedData },
     ShellWithdrawn { event: Event, kind: TokenContractEvent, data: ShellWithdrawnData },
     ContractDestroyed { event: Event, kind: TokenContractEvent, data: ContractDestroyedData },
 }
@@ -143,10 +140,6 @@ impl FromEvent for DecodedTokenContractEvent {
             TokenContractEvent::DisputeResolved => {
                 let data = decode_or_err::<DisputeResolvedData>(event, contract)?;
                 Ok(DecodedTokenContractEvent::DisputeResolved { event: event.clone(), kind, data })
-            }
-            TokenContractEvent::StreamReclaimed => {
-                let data = decode_or_err::<StreamReclaimedData>(event, contract)?;
-                Ok(DecodedTokenContractEvent::StreamReclaimed { event: event.clone(), kind, data })
             }
             TokenContractEvent::ShellWithdrawn => {
                 let data = decode_or_err::<ShellWithdrawnData>(event, contract)?;
@@ -275,15 +268,6 @@ pub struct DisputeResolvedData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub refund_to_buyer: u128,
     pub released: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-/// Payload of `TokenContractEvent::StreamReclaimed`.
-pub struct StreamReclaimedData {
-    pub buyer: String,
-    #[serde(deserialize_with = "deserialize_u128")]
-    pub refund_to_buyer: u128,
 }
 
 #[derive(Debug, Clone, Deserialize)]

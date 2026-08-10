@@ -23,6 +23,7 @@ use crate::common::context::ECC_SHELL_DEPOSIT;
 use crate::common::context::PMP_DEPOSIT;
 use crate::common::context::TOKEN_TYPE_NACKL;
 use crate::common::keys::gen_keys;
+use crate::common::misc::send_past_replay_guard;
 use crate::common::misc::wait_active;
 use crate::common::voucher::make_voucher_proof;
 
@@ -41,24 +42,23 @@ pub async fn deploy_pn(
     let dih_dec = proof::hex_u256_to_dec(&zk.deposit_identifier_hash_hex);
     let epk_dec = proof::pubkey_to_dec(&keys.public);
 
-    dex.deploy_private_note(
-        ParamsOfDeployPrivateNote {
-            zkproof: zk.proof,
-            deposit_identifier_hash: dih_dec.clone(),
-            final_layer_historical_hash_root: proof::hex_u256_to_dec(
-                &zk.final_layer_historical_hash_root_hex,
-            ),
-            voucher_nominal_fr: proof::hex_u256_to_dec(&zk.voucher_nominal_fr_hex),
-            token_type_fr: proof::hex_u256_to_dec(&zk.token_type_fr_hex),
-            ephemeral_pubkey: epk_dec,
-            value: zk.voucher_value,
-            token_type: zk.voucher_token_type,
-            layer_number: zk.layer_number,
-        },
-        signer,
-    )
-    .await
-    .expect("deploy_private_note");
+    let deploy = ParamsOfDeployPrivateNote {
+        zkproof: zk.proof,
+        deposit_identifier_hash: dih_dec.clone(),
+        final_layer_historical_hash_root: proof::hex_u256_to_dec(
+            &zk.final_layer_historical_hash_root_hex,
+        ),
+        voucher_nominal_fr: proof::hex_u256_to_dec(&zk.voucher_nominal_fr_hex),
+        token_type_fr: proof::hex_u256_to_dec(&zk.token_type_fr_hex),
+        ephemeral_pubkey: epk_dec,
+        value: zk.voucher_value,
+        token_type: zk.voucher_token_type,
+        layer_number: zk.layer_number,
+    };
+    send_past_replay_guard("deploy_private_note", || {
+        dex.deploy_private_note(deploy.clone(), signer.clone())
+    })
+    .await;
 
     let pn_address = dex
         .get_private_note_address(ParamsOfGetPrivateNoteAddress {
@@ -88,24 +88,23 @@ pub async fn deploy_pn_with_keys(
     let dih_dec = proof::hex_u256_to_dec(&zk.deposit_identifier_hash_hex);
     let epk_dec = proof::pubkey_to_dec(&keys.public);
 
-    dex.deploy_private_note(
-        ParamsOfDeployPrivateNote {
-            zkproof: zk.proof,
-            deposit_identifier_hash: dih_dec.clone(),
-            final_layer_historical_hash_root: proof::hex_u256_to_dec(
-                &zk.final_layer_historical_hash_root_hex,
-            ),
-            voucher_nominal_fr: proof::hex_u256_to_dec(&zk.voucher_nominal_fr_hex),
-            token_type_fr: proof::hex_u256_to_dec(&zk.token_type_fr_hex),
-            ephemeral_pubkey: epk_dec,
-            value: zk.voucher_value,
-            token_type: zk.voucher_token_type,
-            layer_number: zk.layer_number,
-        },
-        signer,
-    )
-    .await
-    .expect("deploy_pn_with_keys");
+    let deploy = ParamsOfDeployPrivateNote {
+        zkproof: zk.proof,
+        deposit_identifier_hash: dih_dec.clone(),
+        final_layer_historical_hash_root: proof::hex_u256_to_dec(
+            &zk.final_layer_historical_hash_root_hex,
+        ),
+        voucher_nominal_fr: proof::hex_u256_to_dec(&zk.voucher_nominal_fr_hex),
+        token_type_fr: proof::hex_u256_to_dec(&zk.token_type_fr_hex),
+        ephemeral_pubkey: epk_dec,
+        value: zk.voucher_value,
+        token_type: zk.voucher_token_type,
+        layer_number: zk.layer_number,
+    };
+    send_past_replay_guard("deploy_pn_with_keys", || {
+        dex.deploy_private_note(deploy.clone(), signer.clone())
+    })
+    .await;
 
     let pn_address = dex
         .get_private_note_address(ParamsOfGetPrivateNoteAddress {
@@ -186,6 +185,16 @@ pub async fn deploy_funded_pn(
 pub async fn ensure_root_pn_funded(context: &Arc<ClientContext>) {
     let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
     wait_active(&root_pn, "RootPN").await;
+    // The threshold below is advisory, and the top-up behind it is allowed to do
+    // nothing. `RootOracle`'s native balance on a from-scratch stand reads
+    // NEGATIVE (-9.95e10 in #226) and no giver credit brings it to a positive
+    // 120e9 — yet every scenario that has ever run has deployed against it
+    // fine, because the contract tops ITSELF up: `ensureBalance()` mints its
+    // own `MIN_BALANCE` through `gosh.mintshellq` on entry.
+    //
+    // So the kit's helper returning `Ok` on a credit that never landed is
+    // correct here, not a bug to fix. Making it strict (#226) turned a benign
+    // no-op into a hard failure in all twenty-five scenarios at once.
     top_up_native_with_giver_if_below(
         context.clone(),
         &root_pn,

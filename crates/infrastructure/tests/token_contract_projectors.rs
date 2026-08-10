@@ -166,6 +166,55 @@ async fn tick_finalized_counts_each_tick_once_under_replay() {
     assert_eq!(rows, 2);
 }
 
+// Between weekly boundaries `TickFinalized` says nothing, so a deal can run for
+// days with no sign it is moving. `TicksClaimed` is that sign: the seller's
+// cumulative claim against what has actually been trusted. Both figures are
+// cumulative on chain (`claimTokens` requires the new value to be >= the stored
+// one), so the projector keeps the high-water mark and an out-of-order replay
+// cannot walk them backwards.
+#[tokio::test]
+async fn ticks_claimed_tracks_progress_and_never_goes_backwards() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_claimed";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev("TicksClaimed", serde_json::json!({"trusted":"5","claimed":"12"})),
+        &node(tc, "co-1"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &ev("TicksClaimed", serde_json::json!({"trusted":"12","claimed":"20"})),
+        &node(tc, "co-2"),
+    )
+    .await;
+    // A late replay of the earlier claim must not undo the later one.
+    project(
+        &mut tx,
+        &ev("TicksClaimed", serde_json::json!({"trusted":"5","claimed":"12"})),
+        &node(tc, "co-1"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (trusted, claimed): (String, String) = sqlx::query_as(
+        "select trusted_ticks::text, claimed_ticks::text from inference_deals \
+         where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((trusted.as_str(), claimed.as_str()), ("12", "20"));
+}
+
 #[tokio::test]
 async fn stream_stopped_marks_clean_settlement() {
     let Some(pool) = setup().await else { return };

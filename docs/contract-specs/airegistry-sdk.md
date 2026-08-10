@@ -29,7 +29,7 @@ derived from an owner pubkey.
 | Method | Contract method | Params / Result | Description |
 | --- | --- | --- | --- |
 | `set_pubkey` | `setPubkey` | `ParamsOfSetPubkey { pubkey }` | Rotate the owner pubkey. Sign with the current owner key. |
-| `register_root` | `registerRoot` | `ParamsOfRegisterRoot { owner_pubkey }` | Deploy + register a `RootModel` for an owner pubkey. |
+| `deploy_root_model` | `deployRootModel` | `ParamsOfDeployRootModel { owner_pubkey }` | Deploy a `RootModel` for an owner pubkey. The super root performs the deploy with an internal `new`; `RootModel`'s constructor requires the super root as sender, so this is the only way to create one. |
 | `get_root_model_address` | `getRootModelAddress` | `ParamsOfGetRootModelAddress { owner_pubkey }` → `ResultOfGetAddress { address }` | Deterministic `RootModel` address for an owner pubkey. |
 | `get_owner_pubkey` | `getOwnerPubkey` | → `ResultOfGetOwnerPubkey { owner_pubkey }` | The configured owner pubkey. |
 | `get_version` | `getVersion` | → `ResultOfGetVersion { version, name }` | Contract version + name. |
@@ -156,6 +156,12 @@ or clear.
 | `get_pending_place_buy_lock` / `get_pending_place_buy_token_type` | getters | Inspect a pending buy in flight. |
 | `get_inference_order_book_address` | `getInferenceOrderBookAddress` | Deterministic book address for a `modelHash`. |
 
+The four lock callbacks all take `ParamsOfStreamLock { seller_pubkey, nonce }`:
+the deal is named by the pair its address is derived from, not by the address
+itself. The note recomputes the canonical `TokenContract` from that pair and
+requires `msg.sender` to equal it, so a foreign caller cannot lock the note by
+naming someone else's deal.
+
 ---
 
 ## 3. `Dex` facade — `crates/chain/src/test_helpers.rs`
@@ -184,7 +190,7 @@ inference e2e tests drive.
 
 ---
 
-A full deal walks: seller `register_root` → `register_token_contract` →
+A full deal walks: seller `deploy_root_model` → `register_token_contract` →
 `post_sell_offer`; buyer `place_inference_buy` → match funds the `TokenContract`;
 seller `token_contract_open` → `advance` per tick; buyer `stream_stop` (or
 `stream_dispute` / `stream_reclaim`). The settlement read-model built from the

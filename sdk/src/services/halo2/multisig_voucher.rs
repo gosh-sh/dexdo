@@ -7,11 +7,13 @@
 //!
 //! Caller pre-conditions: the multisig wallet is already deployed and
 //! funded with (a) enough native vmshell to cover the queued message's
-//! `value`, and (b) enough of `voucher_token_type` ECC currency to cover
-//! `voucher_value`. The caller passes the multisig's address and the
-//! custodian keypair allowed to sign `submitTransaction`.
+//! `value`, and (b) for a deposit, `voucher_value` of `voucher_token_type`
+//! PLUS `GAS_DEPOSIT` of SHELL — every non-gas deposit pays that gas, and only
+//! the leg carrying it depends on the currency (see [`super::voucher_ecc`]). A
+//! wallet funded for exactly the nominal cannot mint. The caller passes the
+//! multisig's address and the custodian keypair allowed to sign
+//! `submitTransaction`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +37,7 @@ use crate::services::halo2::live::Halo2Proof;
 use crate::services::halo2::paths::Halo2Paths;
 use crate::services::halo2::paths::Halo2PathsError;
 use crate::services::halo2::sk_commit::compute_sk_u_commit_hex;
+use crate::services::halo2::voucher_ecc;
 use crate::services::halo2::voucher_event;
 use crate::services::proof;
 
@@ -86,8 +89,12 @@ pub async fn mint_voucher_via_multisig(
     // 3. Drive the multisig's submitTransaction. With reqConfirms=1 the
     //    queued transaction executes in the same block, dispatching the
     //    encoded body to RootPN.
-    let mut ecc = HashMap::new();
-    ecc.insert(voucher_token_type, voucher_value);
+    //
+    //    The ECC shape depends on the currency and on `is_fee` — see
+    //    `voucher_ecc`. Here the wallet is the user's own, so a deposit costs
+    //    them `nominal + GAS_DEPOSIT` whichever shape carries it: a wallet
+    //    funded for exactly the nominal cannot mint.
+    let plan = voucher_ecc::plan_voucher(voucher_token_type, voucher_value, is_fee)?;
     // A user-deployed multisig lives under its OWN dApp (dapp_id = its bare
     // account id), unlike the System-dApp DEX contracts above. Build its
     // handle with that dapp_id so >= 1.0.0 gateway lookups resolve it.
@@ -101,7 +108,7 @@ pub async fn mint_voucher_via_multisig(
             ParamsOfSubmitTransaction {
                 dest: root_pn.address().to_string(),
                 value: SUBMIT_NATIVE_VALUE,
-                cc: ecc,
+                cc: plan.ecc,
                 bounce: true,
                 flag: 1,
                 payload: voucher_body.body,
@@ -131,7 +138,8 @@ pub async fn mint_voucher_via_multisig(
         event,
         sk_u_hex,
         sk_u_commit_hex,
-        voucher_value,
+        // The nominal the contract emitted, which is not always the sum sent.
+        plan.nominal,
         voucher_token_type,
         recipient_ephemeral_pubkey_hex,
         None,

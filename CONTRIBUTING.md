@@ -39,6 +39,13 @@ There are two, and both hold libraries other code imports:
   the `Dex` facade, DTOs, and the halo2 voucher/proof pipeline that **tools, WASM
   builds, and external integrators** import to drive the chain. Its zk/halo2 graph
   is heavy, so it is its **own workspace**, excluded from the root resolve.
+  Its `tests/integration` e2e harness also takes a `dev-dependency` on
+  [`crates/infrastructure`](crates/infrastructure) (chain-account BOC/ECC/storage
+  decoding). This is dev-only and confined to the test harness — distinct from
+  `sdk/`'s existing production dependency on
+  [`crates/contracts`](crates/contracts) (the on-chain ABI/wrapper layer), which
+  predates this edge and is the only `crates/*` dependency shipped in the
+  library itself.
 
 So the first cut is *backend or client/write-side?* — then, within the backend,
 the layering decides the crate. Decision order, stop at the first match:
@@ -186,6 +193,14 @@ the **openapi-drift** job fails otherwise:
 cargo run -p dodex-api --bin gen-openapi -- --out docs/openapi.yaml
 ```
 
+The **sdk-harness-tests** job gates the hermetic part of the `sdk/` workspace —
+no network needed, and no filter, because everything in there that needs a chain
+is `#[ignore]`d:
+
+```sh
+cargo nextest run --manifest-path sdk/Cargo.toml
+```
+
 `sdk/` and `tools/` are separate workspaces — build and test them from their own
 directory (`cargo build` / `cargo test` inside `sdk/`, inside `tools/`).
 
@@ -200,19 +215,85 @@ case you're in:
 - **New crate in the root workspace** → it's covered the moment it's in `members`
   in the root [`Cargo.toml`](Cargo.toml) (see *Adding a service*). No new crate,
   no coverage.
+> **The woodpecker e2e pipeline only runs on a labelled PR.** Its `when:` clause
+> requires the PR to carry the **`local-net`** label, and the `event: manual`
+> arm was removed with it — so a PR without that label produces no e2e pipeline
+> at all, which reads as nothing rather than as red. Restarting an existing
+> pipeline still works: a restart replays the original `pull_request` event.
+
 - **A `#[ignore]`d e2e (chain) test** → the gated job runs **only `dodex-api`**
-  (`cargo nextest run -p dodex-api --run-ignored only --test-threads 1`). Put the
-  test in `services/api/tests/` as `e2e_*`, or it never runs. If it needs new
+  (`cargo nextest run -p dodex-api --run-ignored only`). Put the test in
+  `services/api/tests/` as `e2e_*`, or it never runs. If it needs new
   fixtures/secrets (e.g. seed notes), wire them into
-  [`.github/workflows/e2e-shellnet.yml`](.github/workflows/e2e-shellnet.yml). New
-  on-chain flows are single-threaded and spend test tokens — keep them `#[ignore]`d
-  so they stay out of the fast PR job.
-- **Any test in a separate workspace (`sdk/`, `tools/`)** → **no CI job runs these
-  today** — `--workspace` excludes them, and `sdk/`'s only tests are the live,
-  `#[ignore]`d Shellnet integration suite. If you add a test there that *should*
-  gate PRs (hermetic, no network — e.g. an HTTP-boundary-mocked test), you must add
-  a CI step that runs it from that workspace's directory. A test that doesn't run
-  in CI is documentation, not a gate — say so in the PR if you leave it manual.
+  [`.github/workflows/e2e-shellnet.yml`](.github/workflows/e2e-shellnet.yml).
+  These spend test tokens — keep them `#[ignore]`d so they stay out of the fast
+  PR job.
+
+  Give the test **its own note** out of the pool (`pool.notes[k]`, with `k` the
+  next free index) and bump the `PN-API` count in
+  [`tests/e2e/dex_test_notes.spec.json`](tests/e2e/dex_test_notes.spec.json) and
+  `API_NOTES_FOR_ONE_EACH` in `services/api/tests/pn_pool_split.rs` to match —
+  a unit test fails if they disagree. The woodpecker e2e step runs this suite
+  four at a time, and the `serial-e2e-shared` group in
+  [`.config/nextest.toml`](.config/nextest.toml) is the whole of what keeps
+  concurrent tests off each other. A test belongs in that group if ANY of three
+  holds — and the third is the one that is easy to miss, because the test can
+  look entirely self-contained:
+
+  1. it shares a pool note with another test;
+  2. it reads or writes the test database;
+  3. **it deploys an oracle.** `deployOracle` is an external message to the one
+     `RootOracle` the whole stand shares, and an external message carries a
+     `timestamp` the contract compares against the last it accepted. Two
+     arriving out of order leave the older one rejected with exit_code 52,
+     "Replay protection exception" — they need not collide inside a
+     millisecond. Every market-deploying test qualifies, and so does anything
+     that brings up an oracle of its own.
+- **A test in `tools/`** → **no CI job runs these today** — `--workspace` excludes
+  it and nothing else references that workspace from any workflow. Add a CI step
+  that runs it from that workspace's directory, the same way `sdk-harness-tests`
+  does for `sdk/` below.
+- **A hermetic test in `sdk/`** (the `dodex-sdk` lib, the `dodex-e2e-harness`
+  crate, or the integration binary's `common/` helpers) → **nothing to wire.**
+  The `sdk-harness-tests` job in
+  [`.github/workflows/pr-tests.yml`](.github/workflows/pr-tests.yml) runs the
+  whole workspace unfiltered, so a hermetic test is gated by having been
+  written. Just do not leave a chain-touching one un-`#[ignore]`d: it would join
+  that job and drive a live network from a PR.
+- **A live-network test in `sdk/`** (the integration binary's chain-touching
+  scenarios) → **not run by `pr-tests.yml`,** and covered by
+  [`.woodpecker/e2e.yml`](.woodpecker/e2e.yml) only if a fixed filter in
+  [`tests/e2e/sdk-proof-on-host.sh`](tests/e2e/sdk-proof-on-host.sh) names it.
+  Each `SUITE=` branch there is one exact test name and one pipeline step; the
+  step runs `--run-ignored only` against a from-scratch network. **Adding a
+  scenario means adding all three:** the `mod` line in
+  `sdk/tests/integration/main.rs`, a `SUITE=` branch with its `test(=…)`
+  filter, and a step in `.woodpecker/e2e.yml`. Miss the last two and the
+  scenario compiles, passes locally, and is never run by anything.
+
+  The steps run as four parallel lanes rooted at `sdk_proof` (which goes first
+  and alone — it is the only scenario holding `b0.lock` exclusively, and the
+  only one that bootstraps the ledger generation the rest join). Put a new step
+  at the end of whichever lane is shortest; the lane comment in
+  `.woodpecker/e2e.yml` says how they were balanced and from what.
+
+  Nothing outside those filters is selected by any job. What is left of the
+  older chain-touching modules — nine tests across `discovery`, `history`,
+  `oracle`, `flows` and `multitoken` — is named by no filter anywhere and so
+  runs nowhere; they are `#[ignore]`d, which is what keeps an unfiltered local
+  run from driving them against a live public network (shellnet, the default in
+  `common::context::network_endpoint`) and spending test tokens. A green
+  unfiltered run therefore says nothing about them.
+
+  They are a **named gap, not coverage**: SDK read-side (note and oracle
+  discovery, event history and pagination), the recovery flow, and cross-token
+  isolation. All nine need notes deployed at run time — a zerostate-baked note
+  never emitted `PrivateNoteDeployed`, so discovery cannot see it — which is why
+  they cannot simply be moved onto the stand pool like the rest.
+
+  Extending real coverage means extending those filters, not `pr-tests.yml`. A
+  test that runs in neither place is documentation, not a gate — say so in the
+  PR if you leave it manual.
 
 ## Documentation
 

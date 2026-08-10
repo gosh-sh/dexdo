@@ -196,15 +196,22 @@ impl InferenceOrdersCursor {
 /// the fill projector moves a row to `FILLED` as soon as its remainder reaches zero, so an
 /// `OPEN` row is always still resting). Every row falls under exactly one value, which is
 /// what lets the default all-statuses query claim to be exhaustive.
+///
+/// `Expired` is a terminal state distinct from `Cancelled`: the book dropped the order
+/// once its deadline passed, rather than anyone asking for it back. It is set only by
+/// `InferenceOrderExpired` — a row whose `deadline` already lies in the past stays `Live`
+/// until that event lands, so the read model never claims an order left the book earlier
+/// than the chain says it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferenceOrderStatus {
     Live,
     Filled,
     Cancelled,
+    Expired,
 }
 
 impl InferenceOrderStatus {
-    pub const ALL: [Self; 3] = [Self::Live, Self::Filled, Self::Cancelled];
+    pub const ALL: [Self; 4] = [Self::Live, Self::Filled, Self::Cancelled, Self::Expired];
 
     /// The `inference_orders.status` value this maps to.
     pub fn db_status(self) -> &'static str {
@@ -212,6 +219,7 @@ impl InferenceOrderStatus {
             Self::Live => "OPEN",
             Self::Filled => "FILLED",
             Self::Cancelled => "CANCELLED",
+            Self::Expired => "EXPIRED",
         }
     }
 
@@ -225,6 +233,7 @@ impl InferenceOrderStatus {
             "OPEN" => Ok(Self::Live),
             "FILLED" => Ok(Self::Filled),
             "CANCELLED" => Ok(Self::Cancelled),
+            "EXPIRED" => Ok(Self::Expired),
             _ => Err(DomainError::MarketInconsistent),
         }
     }
@@ -234,6 +243,7 @@ impl InferenceOrderStatus {
             Self::Live => "LIVE",
             Self::Filled => "FILLED",
             Self::Cancelled => "CANCELLED",
+            Self::Expired => "EXPIRED",
         }
     }
 
@@ -253,6 +263,7 @@ impl InferenceOrderStatus {
                 "LIVE" => Self::Live,
                 "FILLED" => Self::Filled,
                 "CANCELLED" => Self::Cancelled,
+                "EXPIRED" => Self::Expired,
                 _ => return Err(DomainError::InvalidParameter),
             };
             if !out.contains(&parsed) {
@@ -7342,6 +7353,19 @@ mod inference_usecase_tests {
         assert!(matches!(InferenceOrderStatusSet::new(vec![]), Err(DomainError::MissingParameter)));
     }
 
+    // The projector writes EXPIRED when the book reports InferenceOrderExpired. The
+    // read path reads `from_db_status` fail-closed, so without a variant every expired
+    // row would surface as MarketInconsistent instead of an order.
+    #[test]
+    fn expired_rows_are_readable_and_filterable() {
+        let parsed =
+            InferenceOrderStatus::from_db_status("EXPIRED").expect("EXPIRED must be readable");
+        assert_eq!(parsed.as_public(), "EXPIRED");
+        assert_eq!(parsed.db_status(), "EXPIRED");
+        // Clients can select it like any other terminal status.
+        assert!(InferenceOrderStatus::from_csv("EXPIRED").is_ok());
+    }
+
     #[tokio::test]
     async fn get_inference_orders_rejects_note_with_token_contract() {
         let use_case = GetInferenceOrdersUseCase::new(StubInferenceRepo::default());
@@ -7408,7 +7432,9 @@ mod inference_usecase_tests {
             .await
             .unwrap();
         let seen = repo.last_query();
-        assert_eq!(seen.statuses.as_slice().len(), 3);
+        // The default is every status, so this tracks the vocabulary rather than a
+        // count that has to be edited each time a terminal state is added.
+        assert_eq!(seen.statuses.as_slice().len(), InferenceOrderStatus::ALL.len());
         assert_eq!(seen.limit.get(), ORDERS_DEFAULT_LIMIT);
     }
 }

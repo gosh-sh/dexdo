@@ -10,13 +10,61 @@ depends_on:
 
 variables:
   - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
-  - &acki_branch "test/dex-4.0.30"
-  - &allbin_image "docker.gosh.sh/ackinacki-all-bin:01ef664282679576fc46d882655fc6e0927767f9"
+  # acki-nacki test/dex-4.0.30 head, carrying the RootPN._deployedValues
+  # booking, the sold-0.80.0 build of RootPN, the profiled test-note fixture
+  # (DEX_TEST_NOTES_SPEC, which gen_zerostate below feeds the group list this
+  # stand's pool is baked from), and the stand fixes this pipeline needs to
+  # run at all: the
+  # block-producer API is advertised and published on the host interface (a
+  # client outside the docker network cannot follow a redirect to
+  # `nodeN:8600`), and each node waits for its gossip seeds' DNS before
+  # `node-helper config` resolves them, which otherwise kills whichever nodes
+  # lose that race at boot. All four digests below were read off the registry
+  # for this SHA and each image's own org.opencontainers.image.revision label
+  # confirms it built from it.
+  #
+  # allbin_img's digest is load-bearing beyond running the network:
+  # copy_helpers takes zerostate-helper out of this image, and the booking fix
+  # needs that binary's `call-internal` subcommand (tvm-debugger cannot drive
+  # the call -- privateNoteDeployed emits an ext-out event and the debugger
+  # discards the resulting state). Verified present in this exact digest. An
+  # older all-bin fails the generator rather than the preflight.
+  #
+  # The digests are immutable, but ACKI_SHA is a commit on a TEST branch:
+  # acki_clone fetches it by SHA, so a force-push that makes it unreachable
+  # breaks the clone step while the images keep working. That branch was
+  # already rewritten once (the commits this pin replaced no longer exist), so
+  # the risk is real, not theoretical -- move the pin to a `dev` commit once
+  # this work lands there.
+  #
+  # This pin is one commit ahead of the last: its only content is the e2e
+  # runner's `--test-threads`, raised from 1 to 4. Nothing else differs, so it
+  # bakes the same zerostate from the same contracts as the pin before it.
+  - &acki_sha "91d7d5d0e2809dfa83c3c87689cc315ed7527238"
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:1ee9cec484f27659e4b4d0e2182ca79485929b23c659bd772e58786f9bb1d2c7"
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:00af55c1fb597d89f8afb469a43eb21c991c9db911ff7a6161ad934218fc4a03"
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:a45e15d363cb6f4ef4aca5bdc82d7fe225cca2b6dea97c1838ffbf7208dea962"
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:536daa6b37a70f3170274ad5bcd906c4ed367d041e9d216c63a61cd6f53e997a"
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
-  - &sold_version "gosh_0.79.4-rc"
-  - &dex_test_notes_cnt "10"
+  # Compiler per CONTRACT, not per directory. RootPN and exchange/USDCBridge
+  # are 0.80.0; the other twelve DEX/airegistry contracts and
+  # exchange/DepositVoucher are 0.81.0. This pipeline compiles only the
+  # thirteen that stage_contracts.sh stages, so it needs both compilers --
+  # never one for the whole tree.
+  - &sold_version "gosh_0.81.0"
+  - &sold_sha256 "79b43aab6ae2fdc35c1cb3b486453aa2cf4f2718c58b69ccefab1122c704853c"
+  # RootPN.sol is compiled with 0.80.0 permanently, not because that is what
+  # produced the current committed bytes. Anything else silently breaks the v1
+  # ext-out header the voucher prover reads.
+  - &sold_old_version "gosh_0.80.0"
+  - &sold_old_sha256 "389cf0ede80fc3acb5f904f950808383504ec3341cdc6b9132e850298db0c246"
+  # The note pool the stand is baked with, as groups rather than a count.
+  # Relative to $CI_WORKSPACE; the generator takes either a path or the JSON
+  # itself. Both suites that read the resulting pool own their notes by label,
+  # so the order of the groups here decides only which deposit_hash each gets.
+  - &dex_test_notes_spec "tests/e2e/dex_test_notes.spec.json"
   - &inventory_branch "main"
   - &e2e_inventory ".inventory/ansible/inventory/dexdo/e2e/dexdo-infra.yml"
   - &acki_dir_on_host "/opt/acki-nacki"
@@ -28,11 +76,12 @@ steps:
     environment:
       GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
       ACKI_REPO: { from_secret: acki_repo_url }
-      ACKI_BRANCH: *acki_branch
+      ACKI_SHA: *acki_sha
     commands:
       - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
       - rm -rf .acki-nacki
-      - git clone --depth 1 --branch "$ACKI_BRANCH" "$ACKI_REPO" .acki-nacki
+      - git clone "$ACKI_REPO" .acki-nacki
+      - git -C .acki-nacki fetch --depth 1 origin "$ACKI_SHA" && git -C .acki-nacki checkout -f FETCH_HEAD
       - rm -f ~/.netrc
 
   copy_static_shell:
@@ -46,7 +95,7 @@ steps:
   copy_helpers:
     depends_on:
       - copy_static_shell
-    image: *allbin_image
+    image: *allbin_img
     directory: .acki-nacki
     entrypoint:
       - ./sh
@@ -61,7 +110,15 @@ steps:
     environment:
       TVM_VER: *tvm_cli_version
       SOLD_VER: *sold_version
-      DEX_TEST_NOTES_CNT: *dex_test_notes_cnt
+      SOLD_SHA256: *sold_sha256
+      SOLD_OLD_VER: *sold_old_version
+      SOLD_OLD_SHA256: *sold_old_sha256
+      DEX_TEST_NOTES_SPEC: *dex_test_notes_spec
+      ACKI_SHA: *acki_sha
+      DEXDO_NODE_IMG: *node_img
+      DEXDO_GQL_IMG: *gql_img
+      DEXDO_BM_IMG: *bm_img
+      DEXDO_ALLBIN_IMG: *allbin_img
     commands:
       - rm -f sh mkdir cp
       - apt-get update -qq && apt-get install -yqq --no-install-recommends make curl ca-certificates >/dev/null
@@ -73,13 +130,51 @@ steps:
       # exact versions acki-nacki CI pins so glibc/ABI match this runner.
       - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-cli-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
       - curl -sSL "https://github.com/tvmlabs/tvm-sdk/releases/download/$TVM_VER/tvm-debugger-$${TVM_VER#v}-x86_64.tar.gz" | tar xz -C contracts/compiler
-      - curl -sSL "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz" | tar xz -C contracts/compiler
+      # sold is verified before use, like sold_old below: an unverified
+      # compiler decides the bytecode every downstream hash in this pipeline
+      # is taken over, so it is the last thing that should be fetched on trust.
+      - curl -fsSL -o /tmp/sold.tar.gz "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_VER/sold_$${SOLD_VER}_linux_x86_64.tar.gz"
+      - echo "$SOLD_SHA256  /tmp/sold.tar.gz" | sha256sum -c -
+      - tar xz -f /tmp/sold.tar.gz -C contracts/compiler
       - chmod +x contracts/compiler/*
+      # sold_old — compiler 0.80.0, the version RootPN.sol must be compiled
+      # with (the voucher prover parses RootPN's ext-out event and only this
+      # compiler emits the v1 header layout it can read). Named `sold_old`
+      # after the variable cascade_pins.py expects, not after any claim about
+      # its version ordering: 0.80.0 is in fact the LOWER of the two, and the
+      # other twelve contracts compile with 0.81.0. Unpacks to a temp
+      # directory, never straight into contracts/compiler: that directory
+      # already holds the `sold` those twelve need.
+      - curl -fsSL -o /tmp/sold_old.tar.gz "https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/download/$SOLD_OLD_VER/sold_$${SOLD_OLD_VER}_linux_x86_64.tar.gz"
+      - echo "$SOLD_OLD_SHA256  /tmp/sold_old.tar.gz" | sha256sum -c -
+      - mkdir -p /tmp/sold_old_x && tar xz -f /tmp/sold_old.tar.gz -C /tmp/sold_old_x
+      - mv /tmp/sold_old_x/sold contracts/compiler/sold_old
+      # Both compilers also ship inside the pinned checkout
+      # (contracts/compiler/sold{,_old}) as of acki-nacki bcc4667a0, so these
+      # downloads are strictly optional. They stay because a sha256-verified
+      # release asset is checkable on its own terms, while bytes in a checkout
+      # are only as pinned as the commit that carries them.
+      - test -x contracts/compiler/sold_old && test -x contracts/compiler/sold
       - export PATH="$CI_WORKSPACE/.acki-nacki/contracts/compiler:$PATH"
-      # = `make generate_zerostate` minus the cargo helper build (helpers staged above)
+      # Stages contracts/{dex,airegistry} fresh from this dodex checkout into the
+      # generator's versioned paths and writes the provenance manifest from those
+      # staged artifacts, before `make compile_contracts` builds the giver/test
+      # contracts as before and the generator bakes everything into the
+      # zerostate.
+      - export BUILD_DIR="$CI_WORKSPACE/.acki-nacki" DODEX_DIR="$CI_WORKSPACE"
+      - bash "$CI_WORKSPACE/tests/e2e/stage_contracts.sh"
       - make compile_contracts
-      - DEX_TEST_NOTES_CNT="$DEX_TEST_NOTES_CNT" python3 contracts/scripts/generate_zerostate.py
-      - test -f config/zerostate && test -f config/block_manager1_signing.keys.json && test -f docker/.env
+      # DISABLE_BLACKLIST skips deploying the blacklist indexer
+      # (generate_zerostate.py:682) and is what acki-nacki's own ci_test targets
+      # pass. Nothing in the DEX contracts or in these suites touches that
+      # contract, and skipping it takes a noticeable slice off generation.
+      #
+      # The generator tests the variable's PRESENCE, not its value
+      # (`os.getenv(...) is not None`), so `DISABLE_BLACKLIST=0` would disable
+      # the blacklist just as thoroughly. To re-enable it, remove the
+      # assignment — do not set it to a falsy value.
+      - DEX_TEST_NOTES_SPEC="$CI_WORKSPACE/$DEX_TEST_NOTES_SPEC" DISABLE_BLACKLIST=true python3 contracts/scripts/generate_zerostate.py
+      - test -f config/zerostate && test -f config/block_manager1_signing.keys.json && test -f docker/.env && test -f config/dex_contracts_manifest.json
 
   inventory_clone:
     image: *ansible_image
@@ -116,10 +211,51 @@ steps:
       - ansible-playbook install-rust-python.yaml -i "$CI_WORKSPACE/$INV"
       - ansible-playbook dexdo-e2e-prepare.yml -i "$CI_WORKSPACE/$INV"
 
-  net_up:
+  # Host-wide pipeline lease (tests/e2e/host-lease.sh): more than one pipeline
+  # can reach the shared e2e host, but `up.sh` tears down and recreates the
+  # whole stand as its first act, so only one pipeline may hold it at a time.
+  # This is distinct from ledger.lock/b0.lock, which arbitrate processes within
+  # a single run. Always piped from this checkout, never run off host B's own
+  # disk -- see the script's header for why.
+  #
+  # Acquired after prepare_host runs unleased: dexdo-e2e-prepare.yml only
+  # installs build-essential and adds the CI user to the docker group, both
+  # idempotent, and it never touches the stand directory or anything a live
+  # run reads, so two pipelines running it concurrently cannot corrupt each
+  # other. Acquiring any earlier would hold the lease across a step that
+  # doesn't need its protection.
+  lease_acquire:
     depends_on:
       - prepare_host
       - gen_zerostate
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- acquire $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
+
+  assert_net_up:
+    depends_on:
+      - lease_acquire
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
+
+  net_up:
+    depends_on:
+      - assert_net_up
     image: *ansible_image
     directory: .acki-nacki/ansible
     environment:
@@ -127,10 +263,19 @@ steps:
       ACKI_DIR: *acki_dir_on_host
       GITHUB_TOKEN: { from_secret: GITHUB_TOKEN }
       ACKI_REPO: { from_secret: acki_repo_url }
-      ACKI_BRANCH: *acki_branch
+      ACKI_BRANCH: *acki_sha
       NODE_IMAGE_TAG: *node_image_tag
+      NODE_IMG: *node_img
+      GQL_IMG: *gql_img
+      BM_IMG: *bm_img
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      # NODE_IMG/GQL_IMG/BM_IMG travel as -e args below: the playbook forwards
+      # dexdo_*_image into up.sh's process environment for the compose
+      # invocation, and process environment overrides docker/.env's
+      # interpolation, so pinning through .env instead would be silently
+      # ignored. dexdo_net_image_tag stays as the fallback tag for anything
+      # compose starts that these three pins don't cover.
       - >
         ansible-playbook dexdo-e2e-up.yml
         -i "$CI_WORKSPACE/$INV"
@@ -139,10 +284,780 @@ steps:
         -e env_src="$CI_WORKSPACE/.acki-nacki/docker/.env"
         -e endpoint_host_dest="$CI_WORKSPACE/acki_net_host"
         -e dexdo_net_image_tag="$NODE_IMAGE_TAG"
+        -e dexdo_node_image="$NODE_IMG"
+        -e dexdo_gql_image="$GQL_IMG"
+        -e dexdo_bm_image="$BM_IMG"
 
-  deploy_dexdo:
+  # SDK proof/acceptance run on host B itself, not the CI runner: the tvm
+  # client follows the block-producer redirect straight to nodeN:8600, which
+  # only resolves off host B's own docker bridge. Both steps sync
+  # dodex@$CI_COMMIT_SHA on the host and assert the lease internally
+  # (tests/e2e/sdk-proof-on-host.sh) rather than through a preceding
+  # mini-step.
+  #
+  # They run before deploy_dexdo and that order is load-bearing: the proof
+  # scenario's preflight asserts a pristine zerostate (RootPN's deploy book
+  # equals the seed pool's sum), and deploy_dexdo seeds accounts, which puts
+  # the book permanently above it. Moving these steps after or alongside
+  # deploy_dexdo would fail them for a reason unrelated to the code they test.
+  #
+  # Both are blocking. They were not, until each had completed a green run
+  # against a real stand — the condition that made a failure here at least as
+  # likely to be the step's own immaturity as a defect in the code. Both have
+  # now done so, so a failure is a defect and must stop the pipeline: an
+  # ignored failure keeps its step's state visible but leaves the pipeline
+  # green, which is precisely how a regression in the harness would go
+  # unnoticed.
+  #
+  # ── the SDK scenarios run in four lanes ──────────────────────────────────
+  #
+  # `sdk_proof` runs alone, ahead of everything, for two reasons that happen to
+  # coincide: it is the only scenario that takes `b0.lock` EXCLUSIVELY (it is
+  # the conservation run and needs a chain nobody else is moving), and it is the
+  # only one that bootstraps the ledger generation every other step joins
+  # (`E2E_RUN_ID`). Every other scenario takes the lock SHARED, which is the
+  # harness saying it was built to run beside its peers.
+  #
+  # After it the 24 remaining scenarios fan out into four chains. They were a
+  # single 91-minute chain until 2026-08-02, which put the pipeline 3 minutes
+  # under the repo's 120-minute cap before wave 6 added anything — #203 then
+  # went over and was cancelled mid-run, which skips teardown and strands the
+  # host lease. Almost all of that 91 minutes is a scenario ASLEEP waiting out a
+  # staking window, a result window or a drain, so the lanes overlap the waiting
+  # rather than the work: the longest lane is ~21 minutes.
+  #
+  # The lanes are balanced by the per-step durations pipeline #202 measured, not
+  # by scenario count. Re-balance them from a real run rather than by eye if a
+  # scenario's cost changes — the numbers are in the pipeline API, and the
+  # per-step overhead is 8 seconds, so a step's duration IS its test's duration.
+  #
+  # Two placements are deliberate rather than incidental:
+  #   * `usdc_market` and `usdc_release` share a lane. They are the only
+  #     consumers of the `PN-USDC` group, which the stand spec bakes 4 of, and
+  #     between them they want exactly 4 — in different lanes they could hold
+  #     them at the same moment and one would fail to rent.
+  #   * `parallel_acceptance` sits in a lane rather than beside `proof`: it
+  #     spawns two processes of its own, so it is already the widest single
+  #     step, and it is cheap enough (29s) to sit anywhere.
+  #
+  # Note-pool sizing needs no change: `SCENARIOS_RENT` counts what the suite
+  # spends per GENERATION, not what it holds at once, and a quarantined note
+  # never returns within one. Peak concurrency rises from 1 scenario to 4; total
+  # consumption is what it always was.
+  #
+  # The known hazard, written down because it is easy to misread when it bites:
+  # the root singletons (`RootOracle`, `RootPN`) are addressed by every
+  # scenario, with EXTERNAL messages. An external message carries a `timestamp`
+  # header, and the contract compares it against the last stamp it accepted —
+  # so two lanes deploying against the same singleton do not have to collide
+  # inside a millisecond for one to lose. Arriving out of order is enough, and
+  # the older stamp is thrown out with exit_code 52, which the TVM Solidity
+  # runtime defines as "Replay protection exception".
+  #
+  # It bit in #223: `exit_gates` died on `deployOracle` four seconds in.
+  # `common::misc::send_past_replay_guard` now re-sends on exactly that code —
+  # safe because 52 is raised BEFORE `tvm.accept()`, so the rejected message was
+  # never applied and the retry is a first attempt, not a second.
+  #
+  # Do not read the RootOracle top-up line above such a failure as the cause.
+  # #223 printed one that had not moved the balance, which was true and
+  # unrelated — and the "fix" for it broke all twenty-five scenarios in #226.
+  # That top-up is ALLOWED to do nothing: `RootOracle`'s native balance on a
+  # from-scratch stand reads negative, no giver credit brings it positive, and
+  # every scenario deploys against it anyway because the contract mints its own
+  # gas in `ensureBalance()`. The threshold it is compared against is advisory.
+  sdk_proof:
     depends_on:
       - net_up
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=proof
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # Depends on sdk_proof: the two share the host lease and the stand, and
+  # running them concurrently would have them rent notes from the same pool at
+  # the same time.
+  # From here on every step declares `status: [success, failure]`. The chain of
+  # `depends_on` is what orders these steps on the one host they share; it is
+  # not a statement that each needs the previous to have passed. Without the
+  # clause a single failing scenario skips every later one, so a run reports
+  # the first broken thing and says nothing about the other nine -- four
+  # consecutive pipelines cost an hour each to surface one failure at a time.
+  # The stand is still up and the lease still held, so they may as well run.
+  #
+  # `sdk_proof` deliberately keeps no clause of its own: it is the step that
+  # opens the ledger generation the others lease their notes from. If it fails
+  # they will fail too, but quickly and with a legible allocator error rather
+  # than by being invisible.
+  sdk_parallel_acceptance:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_replay
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=acceptance
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # The USDC release path, in its own step because it is the one scenario
+  # whose whole point is a token type nothing else on this stand touches.
+  # Last of the three: it leases a note the proof run returns, and it
+  # quarantines the pool's only PN-USDC note for the rest of the generation.
+  sdk_usdc_release:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_parallel_acceptance
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=release
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # The resting/cancel pair, last of the SDK steps: it is the only scenario
+  # that both needs a market of its own and spends the notes it takes, so
+  # anything after it would find the pool empty.
+  sdk_resting_orders:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_book_segments
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=orders
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # Market-order semantics, last of the SDK steps for the same reason the
+  # orders suite was before it: it spends the notes it takes.
+  sdk_market_orders:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_forfeit_close
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=market
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # Matching priority: which resting order a taker eats first. Last of the
+  # SDK steps, for the same note-spending reason as the two before it.
+  sdk_matching_ladder:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_usdc_market
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=ladder
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # Orders still resting when the market closes: the drain has to refund
+  # them. Last of the SDK steps and the slowest, since it idles until
+  # `resultStart` before there is anything to look at.
+  sdk_shutdown_orders:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_mm_cycle
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=shutdown
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # A trade above par: prices have no upper bound, and the arithmetic that
+  # breaks above one is the arithmetic nothing else exercises.
+  sdk_price_above_par:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_resting_orders
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=abovepar
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # Bounce recovery: a note that paid something that was not there. No
+  # market and one note, so it is the cheapest step on the stand.
+  sdk_bounce_recovery:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_oracle_admin
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=bounce
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_cancelled_event:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_price_above_par
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=cancelled
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_bounce_deploy:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_event_rejects
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=bouncedeploy
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_book_segments:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_shutdown_orders
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=segments
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_mm_cycle:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_proof
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=mm
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_coupon_debt:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_proof
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=coupon
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_forfeit_close:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_coupon_debt
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=forfeit
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_oracle_quorum:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_proof
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=quorum
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_multi_market:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_proof
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=markets
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_usdc_market:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_multi_market
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=usdcmarket
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_order_refusals:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_market_clock
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=refusals
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_market_clock:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_oracle_quorum
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=clock
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_exit_gates:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_order_refusals
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=gates
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_oracle_admin:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_exit_gates
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=oracleadmin
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_impostor_calls:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_matching_ladder
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=impostor
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_replay:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_impostor_calls
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=replay
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  sdk_event_rejects:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_market_orders
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=rejects
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # Lane 3's tail. ~300s: it waits out a staking window and a result window,
+  # the same shape as `forfeit_close` next door in lane 2.
+  sdk_losing_claim:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_bounce_recovery
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=losing
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  # Lane 2's tail. ~250s: it never freezes its market, so it pays for the
+  # market coming up and for five operations on one note, and nothing else.
+  sdk_key_rotation:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - sdk_bounce_deploy
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+      ACKI_DIR: *acki_dir_on_host
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes
+        "$E2E_CI_USER@$E2E_HOST"
+        "DEXDO_SHA='$CI_COMMIT_SHA'
+        E2E_RUN_ID='$CI_PIPELINE_NUMBER'
+        PIPELINE_ID='$CI_PIPELINE_NUMBER'
+        SUITE=rotation
+        ACKI_DIR='$ACKI_DIR'
+        bash -s" < $CI_WORKSPACE/tests/e2e/sdk-proof-on-host.sh
+
+  assert_deploy_dexdo:
+    when:
+      - status: [success, failure]
+    # The four LANE TAILS, and nothing else. A dependency list of individual
+    # steps looks equivalent and is not: `sdk_book_segments` sits third of six
+    # in lane 1, so naming it lets this step start while `resting_orders`,
+    # `price_above_par` and `cancelled_event` are still writing to the chain.
+    # The api-e2e step below then deploys and trades beside them — and every
+    # market deploy sends an external `deployOracle` to the one shared
+    # RootOracle, where the loser of a timestamp race is rejected outright
+    # (exit_code 52, replay protection).
+    #
+    # Depending on a tail waits for its whole lane, because each step in a lane
+    # already depends on the one before it. So these four say what the earlier
+    # list only happened to mean while the timings held.
+    depends_on:
+      - sdk_cancelled_event
+      - sdk_key_rotation
+      - sdk_losing_claim
+      - sdk_usdc_release
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
+
+  deploy_dexdo:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - assert_deploy_dexdo
     image: *ansible_image
     directory: deploy/ansible
     environment:
@@ -158,9 +1073,27 @@ steps:
         -e dexdo_seed_notes_src="$CI_WORKSPACE/$SEED_NOTES_WS"
         -e dexdo_logrotate_enabled=false
 
-  e2e_tests:
+  assert_e2e_tests:
+    when:
+      - status: [success, failure]
     depends_on:
       - deploy_dexdo
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
+    commands:
+      - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
+
+  e2e_tests:
+    when:
+      - status: [success, failure]
+    depends_on:
+      - assert_e2e_tests
     image: *ansible_image
     environment:
       E2E_HOST: { from_secret: e2e_host }
@@ -182,6 +1115,33 @@ steps:
   dump_logs:
     depends_on:
       - e2e_tests
+      - sdk_proof
+      - sdk_parallel_acceptance
+      - sdk_usdc_release
+      - sdk_resting_orders
+      - sdk_market_orders
+      - sdk_matching_ladder
+      - sdk_shutdown_orders
+      - sdk_price_above_par
+      - sdk_bounce_recovery
+      - sdk_losing_claim
+      - sdk_key_rotation
+      - sdk_cancelled_event
+      - sdk_bounce_deploy
+      - sdk_book_segments
+      - sdk_mm_cycle
+      - sdk_coupon_debt
+      - sdk_forfeit_close
+      - sdk_oracle_quorum
+      - sdk_multi_market
+      - sdk_usdc_market
+      - sdk_order_refusals
+      - sdk_market_clock
+      - sdk_exit_gates
+      - sdk_oracle_admin
+      - sdk_impostor_calls
+      - sdk_replay
+      - sdk_event_rejects
     image: *ansible_image
     when:
       - status: [ failure ]
@@ -191,6 +1151,10 @@ steps:
       ACKI_DIR: *acki_dir_on_host
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
       - >
         ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$E2E_CI_USER@$E2E_HOST"
         "set +e;
@@ -213,6 +1177,33 @@ steps:
     depends_on:
       - e2e_tests
       - dump_logs
+      - sdk_proof
+      - sdk_parallel_acceptance
+      - sdk_usdc_release
+      - sdk_resting_orders
+      - sdk_market_orders
+      - sdk_matching_ladder
+      - sdk_shutdown_orders
+      - sdk_price_above_par
+      - sdk_bounce_recovery
+      - sdk_losing_claim
+      - sdk_key_rotation
+      - sdk_cancelled_event
+      - sdk_bounce_deploy
+      - sdk_book_segments
+      - sdk_mm_cycle
+      - sdk_coupon_debt
+      - sdk_forfeit_close
+      - sdk_oracle_quorum
+      - sdk_multi_market
+      - sdk_usdc_market
+      - sdk_order_refusals
+      - sdk_market_clock
+      - sdk_exit_gates
+      - sdk_oracle_admin
+      - sdk_impostor_calls
+      - sdk_replay
+      - sdk_event_rejects
     image: *ansible_image
     directory: .acki-nacki/ansible
     when:
@@ -220,6 +1211,20 @@ steps:
     environment:
       INV: *e2e_inventory
       ACKI_DIR: *acki_dir_on_host
+      E2E_HOST: { from_secret: e2e_host }
+      E2E_CI_USER: { from_secret: e2e_ci_user }
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh
+      # Owner check before touching anything: if this pipeline's lease expired
+      # and another one took it over, `assert` exits non-zero here and the
+      # teardown below never runs -- tearing down a network this pipeline no
+      # longer owns would take out whoever legitimately holds it now.
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- assert $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh
       - ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e acki_dir="$ACKI_DIR" -e full_cleanup=true
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        "$E2E_CI_USER@$E2E_HOST"
+        "bash -s -- release $CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/host-lease.sh

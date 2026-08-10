@@ -1,0 +1,405 @@
+//! File-backed ledger shared by every process in one e2e run.
+//!
+//! One JSON file (`ledger.json`) tracks pre-baked-account leases and a
+//! rendezvous mailbox for the run; a stable sidecar (`ledger.lock`) is the
+//! only thing ever flocked. `ledger.json` itself is replaced by tmp+rename
+//! under that lock on every transaction, so a lock held across a rename
+//! would protect nothing — the sidecar never moves, only the data file does.
+//!
+//! Every write goes through a single generation check: the file's `run_id`
+//! must match the caller's. A process from a stale generation gets
+//! `LedgerError::StaleRun` before anything is read into its closure or
+//! written back, so a leftover process from a previous CI run can never
+//! mutate state belonging to the run that superseded it. Only
+//! [`Ledger::bootstrap`] may start a new generation.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
+
+use fd_lock::RwLock as FileLock;
+use serde::Deserialize;
+use serde::Serialize;
+
+/// Handle to the ledger for one run. Cheap to construct — [`Ledger::open`]
+/// does not touch the filesystem; every real access happens inside
+/// [`Ledger::with_txn`].
+pub struct Ledger {
+    path: PathBuf,
+    lock_path: PathBuf,
+    run_id: String,
+}
+
+/// Errors from ledger operations.
+#[derive(Debug)]
+pub enum LedgerError {
+    /// The ledger belongs to a different generation than this `Ledger`
+    /// handle. Returned before any read is applied or any write happens.
+    StaleRun {
+        ledger: String,
+        mine: String,
+    },
+    Io(io::Error),
+    /// The ledger file could not be parsed as `LedgerFile` JSON.
+    Corrupt(String),
+    /// A poll-based wait (`rendezvous`/`wait_entry`) exceeded its deadline
+    /// without finding the expected entry. Distinct from `Corrupt` so
+    /// callers can tell "the peer never showed up" (fail this one test)
+    /// from "the ledger file itself is unreadable" (abort the run) without
+    /// matching on message text.
+    Timeout {
+        what: String,
+    },
+}
+
+impl fmt::Display for LedgerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LedgerError::StaleRun { ledger, mine } => write!(
+                f,
+                "stale run: ledger is generation {ledger}, this process is generation {mine}"
+            ),
+            LedgerError::Io(e) => write!(f, "ledger io error: {e}"),
+            LedgerError::Corrupt(msg) => write!(f, "ledger corrupt: {msg}"),
+            LedgerError::Timeout { what } => write!(f, "ledger timeout: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for LedgerError {}
+
+impl From<io::Error> for LedgerError {
+    fn from(e: io::Error) -> Self {
+        LedgerError::Io(e)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LedgerFile {
+    pub run_id: String,
+    /// sha256 of the manifest the bootstrapper deployed against.
+    /// Provenance metadata only — never compared or enforced.
+    pub manifest_hash: Option<String>,
+    pub next_nonce: u64,
+    /// Pre-baked account address -> current state.
+    pub notes: BTreeMap<String, NoteState>,
+    /// Rendezvous/result mailbox, keyed by slot or by an explicit key
+    /// (see [`Ledger::rendezvous`], [`Ledger::wait_entry`], [`Ledger::put_entry`]).
+    pub rendezvous: BTreeMap<String, RendezvousMark>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum NoteState {
+    /// The account is available for lease. `balances` records the logical
+    /// remaining balance per token type as observed when it was released —
+    /// drift from what a test actually left behind is recorded here, not
+    /// quarantined.
+    Free { ecc_shell_remaining: Option<u128>, balances: BTreeMap<u32, u128> },
+    /// Held by a running test process.
+    Leased { pid: u32, test: String },
+    /// Removed from the free pool; will not be leased again this generation.
+    Quarantined { reason: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RendezvousMark {
+    pub run_id: String,
+    pub pid: u32,
+    pub test: String,
+}
+
+impl Ledger {
+    /// One-sided generation reset: creates or overwrites `ledger.json` with
+    /// an empty ledger stamped with `run_id`. Only the bootstrapper calls
+    /// this; every other process only ever opens an existing generation.
+    pub fn bootstrap(
+        dir: &Path,
+        run_id: &str,
+        manifest_hash: Option<&str>,
+    ) -> Result<(), LedgerError> {
+        let lock_path = dir.join("ledger.lock");
+        let mut fl = FileLock::new(open_rw(&lock_path)?);
+        let _guard = fl.write()?;
+        let fresh = LedgerFile {
+            run_id: run_id.to_string(),
+            manifest_hash: manifest_hash.map(str::to_string),
+            next_nonce: 1,
+            notes: BTreeMap::new(),
+            rendezvous: BTreeMap::new(),
+        };
+        write_atomic(&dir.join("ledger.json"), &fresh)?;
+        Ok(())
+    }
+
+    /// Opens a handle for an existing generation. Does not touch the
+    /// filesystem; the generation check happens on first [`Ledger::with_txn`].
+    pub fn open(dir: &Path, run_id: &str) -> Ledger {
+        Ledger {
+            path: dir.join("ledger.json"),
+            lock_path: dir.join("ledger.lock"),
+            run_id: run_id.to_string(),
+        }
+    }
+
+    /// Runs `f` under an exclusive lock on `ledger.lock`: flock, read
+    /// `ledger.json`, verify `run_id` (mismatch is `StaleRun` and nothing
+    /// is written), apply `f`, write the result back via tmp+rename, unlock.
+    pub fn with_txn<T>(&self, f: impl FnOnce(&mut LedgerFile) -> T) -> Result<T, LedgerError> {
+        let mut fl = FileLock::new(open_rw(&self.lock_path)?);
+        let _guard = fl.write()?;
+        let mut lf: LedgerFile = read_json(&self.path)?;
+        if lf.run_id != self.run_id {
+            return Err(LedgerError::StaleRun { ledger: lf.run_id, mine: self.run_id.clone() });
+        }
+        let out = f(&mut lf);
+        write_atomic(&self.path, &lf)?;
+        Ok(out)
+    }
+
+    /// Runs `f` under a shared lock on `ledger.lock`: flock (shared), read
+    /// `ledger.json`, verify `run_id` (mismatch is `StaleRun`), return `f`'s
+    /// result. Never writes — for polling loops that only need to look, so
+    /// they don't pay for a serialize + tmp-write + rename on every tick
+    /// and don't queue behind each other or behind a genuine writer.
+    fn with_read_txn<T>(&self, f: impl FnOnce(&LedgerFile) -> T) -> Result<T, LedgerError> {
+        let fl = FileLock::new(open_rw(&self.lock_path)?);
+        let _guard = fl.read()?;
+        let lf: LedgerFile = read_json(&self.path)?;
+        if lf.run_id != self.run_id {
+            return Err(LedgerError::StaleRun { ledger: lf.run_id, mine: self.run_id.clone() });
+        }
+        Ok(f(&lf))
+    }
+
+    /// Allocates and returns the next unique nonce for this generation.
+    pub fn next_nonce(&self) -> Result<u64, LedgerError> {
+        self.with_txn(|f| {
+            let n = f.next_nonce;
+            f.next_nonce += 1;
+            n
+        })
+    }
+
+    /// Marks `me` present at `slot` and blocks until `peer` shows up at the
+    /// same slot (or `timeout` elapses). Used to synchronize two test
+    /// processes that both need to be running before either proceeds.
+    pub fn rendezvous(
+        &self,
+        slot: &str,
+        me: &str,
+        peer: &str,
+        timeout: Duration,
+    ) -> Result<RendezvousMark, LedgerError> {
+        self.with_txn(|f| {
+            f.rendezvous.insert(
+                format!("{slot}/{me}"),
+                RendezvousMark {
+                    run_id: self.run_id.clone(),
+                    pid: std::process::id(),
+                    test: me.to_string(),
+                },
+            );
+        })?;
+
+        let peer_key = format!("{slot}/{peer}");
+        let deadline = Instant::now() + timeout;
+        loop {
+            let found = self.with_read_txn(|f| f.rendezvous.get(&peer_key).cloned())?;
+            if let Some(mark) = found {
+                if mark.run_id != self.run_id {
+                    return Err(LedgerError::StaleRun {
+                        ledger: mark.run_id,
+                        mine: self.run_id.clone(),
+                    });
+                }
+                return Ok(mark);
+            }
+            if Instant::now() >= deadline {
+                return Err(LedgerError::Timeout {
+                    what: format!("rendezvous on {slot}: peer {peer} absent"),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Read-only wait for an arbitrary mailbox entry: polls for `key` until
+    /// it appears (checked against this generation) or `timeout` elapses.
+    /// Never writes — used to read back a peer's result without touching the
+    /// key the peer is waiting on.
+    pub fn wait_entry(&self, key: &str, timeout: Duration) -> Result<RendezvousMark, LedgerError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let found = self.with_read_txn(|f| f.rendezvous.get(key).cloned())?;
+            if let Some(mark) = found {
+                if mark.run_id != self.run_id {
+                    return Err(LedgerError::StaleRun {
+                        ledger: mark.run_id,
+                        mine: self.run_id.clone(),
+                    });
+                }
+                return Ok(mark);
+            }
+            if Instant::now() >= deadline {
+                return Err(LedgerError::Timeout { what: format!("wait_entry on {key}: absent") });
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Write-only: records `payload` as a result at exactly `key`, with no
+    /// slot/caller composition — the caller passes the full key. A second
+    /// `put_entry` to the same key silently overwrites it; there is no
+    /// built-in collision protection. Avoiding a collision with a key a peer
+    /// is polling on via [`Ledger::wait_entry`] is a naming convention for
+    /// callers, not a guarantee this function enforces.
+    pub fn put_entry(&self, key: &str, payload: &str) -> Result<(), LedgerError> {
+        self.with_txn(|f| {
+            f.rendezvous.insert(
+                key.to_string(),
+                RendezvousMark {
+                    run_id: self.run_id.clone(),
+                    pid: std::process::id(),
+                    test: payload.to_string(),
+                },
+            );
+        })
+    }
+}
+
+/// Opens `ledger.lock` — the flock sidecar, never the ledger data itself,
+/// which is only ever replaced wholesale by [`write_atomic`].
+///
+/// `truncate(false)` is stated rather than left to the default: the file is
+/// opened while other processes may already hold or be waiting on a lock over
+/// it, and truncating it out from under them is a change to shared state made
+/// for no reason — nothing here ever writes a byte through this handle.
+fn open_rw(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new().create(true).write(true).truncate(false).open(path)
+}
+
+fn read_json(path: &Path) -> Result<LedgerFile, LedgerError> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|e| LedgerError::Corrupt(e.to_string()))
+}
+
+/// Serializes `value` to `path.with_extension("json.tmp")` (same directory
+/// as `path`, so the following rename is atomic) and renames it onto `path`.
+fn write_atomic(path: &Path, value: &LedgerFile) -> Result<(), LedgerError> {
+    let tmp_path = path.with_extension("json.tmp");
+    let bytes =
+        serde_json::to_vec_pretty(value).map_err(|e| LedgerError::Corrupt(e.to_string()))?;
+    fs::write(&tmp_path, bytes)?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn bootstrap_then_txn_roundtrip() {
+        let d = TempDir::new().unwrap();
+        Ledger::bootstrap(d.path(), "run-1", Some("mh")).unwrap();
+        let led = Ledger::open(d.path(), "run-1");
+        let n1 = led.next_nonce().unwrap();
+        let n2 = led.next_nonce().unwrap();
+        assert!(n2 > n1);
+    }
+
+    #[test]
+    fn stale_run_reads_nothing_writes_nothing() {
+        let d = TempDir::new().unwrap();
+        Ledger::bootstrap(d.path(), "run-2", None).unwrap();
+        // помечаем ноту, затем процесс "старого запуска" пытается писать
+        let led2 = Ledger::open(d.path(), "run-2");
+        led2.with_txn(|f| {
+            f.notes.insert("0:aa".into(), NoteState::Leased { pid: 1, test: "t".into() });
+        })
+        .unwrap();
+
+        let ledger_json = d.path().join("ledger.json");
+        let before = fs::read(&ledger_json).unwrap();
+
+        let stale = Ledger::open(d.path(), "run-1"); // старый RUN_ID
+        let err = stale
+            .with_txn(|f| {
+                f.notes.clear();
+            })
+            .unwrap_err();
+        assert!(matches!(err, LedgerError::StaleRun { .. }));
+
+        // ledger.json is byte-identical: the stale write never reached
+        // write_atomic, so this isn't just "the content still round-trips
+        // the same" — the file itself was never touched.
+        let after = fs::read(&ledger_json).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn bootstrap_resets_generation_one_sided() {
+        let d = TempDir::new().unwrap();
+        Ledger::bootstrap(d.path(), "run-1", None).unwrap();
+        Ledger::open(d.path(), "run-1")
+            .with_txn(|f| {
+                f.notes.insert("0:aa".into(), NoteState::Quarantined { reason: "x".into() });
+            })
+            .unwrap();
+        Ledger::bootstrap(d.path(), "run-2", None).unwrap(); // новое поколение
+        Ledger::open(d.path(), "run-2")
+            .with_txn(|f| assert!(f.notes.is_empty(), "старые записи не переживают поколение"))
+            .unwrap();
+    }
+
+    #[test]
+    fn rendezvous_stale_mark_is_not_a_peer() {
+        let d = TempDir::new().unwrap();
+        Ledger::bootstrap(d.path(), "run-2", None).unwrap();
+        // метка чужого поколения, вписанная вручную (симулируем выжившего)
+        Ledger::open(d.path(), "run-2")
+            .with_txn(|f| {
+                // ключ = "{slot}/{peer}" — ровно тот, что читает реализация
+                f.rendezvous.insert(
+                    "pair/peer".into(),
+                    RendezvousMark { run_id: "run-1".into(), pid: 9, test: "peer".into() },
+                );
+            })
+            .unwrap();
+        let led = Ledger::open(d.path(), "run-2");
+        let err = led.rendezvous("pair", "me", "peer", Duration::from_millis(300)).unwrap_err();
+        // строго StaleRun — таймаут означал бы, что ветка не упражнялась
+        assert!(matches!(err, LedgerError::StaleRun { .. }));
+    }
+
+    #[test]
+    fn next_nonce_is_unique_under_concurrent_threads() {
+        let d = TempDir::new().unwrap();
+        Ledger::bootstrap(d.path(), "run-1", None).unwrap();
+        let led = std::sync::Arc::new(Ledger::open(d.path(), "run-1"));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let led = std::sync::Arc::clone(&led);
+                std::thread::spawn(move || {
+                    (0..50).map(|_| led.next_nonce().unwrap()).collect::<Vec<u64>>()
+                })
+            })
+            .collect();
+
+        let seen: std::collections::HashSet<u64> =
+            handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            seen.len(),
+            8 * 50,
+            "next_nonce handed out a duplicate across concurrent threads"
+        );
+    }
+}

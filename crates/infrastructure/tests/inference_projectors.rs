@@ -233,6 +233,118 @@ async fn order_cancelled_is_terminal_and_defers_when_absent() {
     assert_eq!((status.as_str(), swept_null), ("CANCELLED", true));
 }
 
+// The chain decides expiry, not the reader: a resting order whose deadline has
+// passed keeps its OPEN status until InferenceOrderExpired arrives, and only then
+// becomes EXPIRED. Nothing derives the status from `deadline` vs wall-clock.
+#[tokio::test]
+async fn order_expired_is_terminal_and_defers_when_absent() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_expire_ob";
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Expiry with no prior placement => Deferred (zero writes), same as a cancel.
+    let mut tx = pool.begin().await.unwrap();
+    let x = ev(
+        "InferenceOrderExpired",
+        serde_json::json!({"orderId":"3","isBuy":true,"note":"0:n","tokenContract":ZERO_ADDRESS}),
+    );
+    assert_eq!(project(&mut tx, &x, &node(ob, "xo-1")).await, ProjectionOutcome::Deferred);
+    tx.commit().await.unwrap();
+    let n: i64 = sqlx::query_scalar(
+        "select count(*) from inference_orders where orderbook_address=$1 and order_id=3",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 0);
+    // A placed order stays OPEN while its deadline sits in the past ...
+    let mut tx = pool.begin().await.unwrap();
+    project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":"3","isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"1700000000"})),&node(ob,"xo-2")).await;
+    tx.commit().await.unwrap();
+    let status: String = sqlx::query_scalar(
+        "select status from inference_orders where orderbook_address=$1 and order_id=3",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "OPEN", "a past deadline alone must not change the status");
+    // ... and only the event makes it EXPIRED, leaving swept_at untouched.
+    let mut tx = pool.begin().await.unwrap();
+    assert_eq!(project(&mut tx, &x, &node(ob, "xo-3")).await, ProjectionOutcome::Applied);
+    tx.commit().await.unwrap();
+    let (status, swept_null): (String, bool) = sqlx::query_as(
+        "select status, swept_at is null from inference_orders where orderbook_address=$1 and order_id=3").bind(ob).fetch_one(&pool).await.unwrap();
+    assert_eq!((status.as_str(), swept_null), ("EXPIRED", true));
+}
+
+// The common ordering, not an edge case: an order expires, the sweep notices it is
+// gone from the book and provisionally marks it CANCELLED, and only then does the
+// authoritative InferenceOrderExpired arrive. The event must win, or every expiry
+// that the sweep outruns is recorded under the wrong terminal status. A real
+// event-cancel (swept_at NULL) stays CANCELLED — the order was gone before it aged out.
+#[tokio::test]
+async fn expired_overrides_provisional_sweep_cancel_but_not_a_real_cancel() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_expire_override";
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    for id in ["40", "41"] {
+        project(&mut tx,&ev("InferenceOrderPlaced",serde_json::json!({"orderId":id,"isBuy":true,"price":"1","ticks":"5","note":"0:n","tokenContract":ZERO_ADDRESS,"deadline":"1700000000"})),&node(ob,&format!("eo-{id}"))).await;
+    }
+    tx.commit().await.unwrap();
+    // 40: provisional sweep-cancel (swept_at set). 41: real event-cancel (swept_at NULL).
+    sqlx::query("update inference_orders set status='CANCELLED', swept_at=now() where orderbook_address=$1 and order_id=40").bind(ob).execute(&pool).await.unwrap();
+    sqlx::query("update inference_orders set status='CANCELLED', swept_at=null where orderbook_address=$1 and order_id=41").bind(ob).execute(&pool).await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    for id in ["40", "41"] {
+        let x = ev(
+            "InferenceOrderExpired",
+            serde_json::json!({"orderId":id,"isBuy":true,"note":"0:n","tokenContract":ZERO_ADDRESS}),
+        );
+        assert_eq!(
+            project(&mut tx, &x, &node(ob, &format!("ex-{id}"))).await,
+            ProjectionOutcome::Applied
+        );
+    }
+    tx.commit().await.unwrap();
+
+    let (swept_status, swept_null): (String, bool) = sqlx::query_as(
+        "select status, swept_at is null from inference_orders where orderbook_address=$1 and order_id=40").bind(ob).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        (swept_status.as_str(), swept_null),
+        ("EXPIRED", true),
+        "a provisional sweep-cancel must yield to the authoritative expiry"
+    );
+    let real_status: String = sqlx::query_scalar(
+        "select status from inference_orders where orderbook_address=$1 and order_id=41",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(real_status, "CANCELLED", "a real event-cancel stays terminal");
+}
+
 #[tokio::test]
 async fn observability_event_seeds_market_only() {
     let Some(pool) = setup().await else { return };

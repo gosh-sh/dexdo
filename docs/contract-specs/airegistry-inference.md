@@ -94,8 +94,16 @@ through `dodex_chain::Dex` (no DB, no HTTP — there are no inference handlers):
 | --- | --- |
 | `e2e_inference` | Note deploys the book, places a resting BUY with SHELL escrow, cancels it. |
 | `e2e_inference_match` | External `TokenContract` deploy + a SELL offer crossed by a BUY ⇒ the match funds the `TokenContract` (handover). |
-| `e2e_inference_clob` | Three flows: a partial fill (2-tick offer crossed by a 4-tick limit buy, 2 ticks rest) + `getBestBidAsk`/`getWeeklyMedianPrice`; a subscription (`placeInferenceSubscription` + `getSubscription`); and a match's `Filled` event confirmed by its routing id. |
-| `e2e_inference_stream` | Full deal lifecycle: match → seller bond → `open` → wait the 180s settle window → `advance` (probe accepted) → `streamStop`. Slow (~4 min). |
+| `e2e_inference_clob` | Two flows: a partial fill (2-tick offer crossed by a 4-tick limit buy, 2 ticks rest) + `getBestBidAsk`/`getWeeklyMedianPrice`, and a match's `Filled` event confirmed by its routing id. |
+| `e2e_inference_orders` | The book as an order book, with no deal at all: two bids, a single `cancelInferenceOrder` by id that takes only its own, and a buy whose deadline has already passed — refused before `tvm.accept()`, so `nextOrderId` never moves. Fast (~35 s). |
+| `e2e_inference_funding` | `fundDeployShell`: a note pays its own canonical `TokenContract` address, and the deal contract then deploys onto it with no giver in the run. Also pins the two things the call must not do — reach the RootModel, which it no longer has a leg for, and send anything at all when asked for `0`. Fast (~2 min). |
+
+The streaming-deal suites — `e2e_inference_stream`, `e2e_inference_settlement`,
+`e2e_inference_twosided`, `e2e_inference_range`, `e2e_inference_subscription`,
+`e2e_inference_recovery` and `e2e_inference_dispute` — were removed with the
+contract calls they drove when v4.0.33 dropped those calls. What remains above
+is the whole of the inference e2e coverage; the deal lifecycle past a match is
+not exercised end to end.
 
 They share the seed-note pool (`tests/fixtures/seed_notes.json` /
 `E2E_SEED_NOTES`) like the other e2e tests; the note must additionally hold
@@ -105,8 +113,27 @@ SHELL for escrow, and the giver must be reachable (shellnet only). Run:
 cargo test -p dodex-api --test e2e_inference -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_match -- --ignored --nocapture
 cargo test -p dodex-api --test e2e_inference_clob -- --ignored --nocapture
-cargo test -p dodex-api --test e2e_inference_stream -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_orders -- --ignored --nocapture
+cargo test -p dodex-api --test e2e_inference_funding -- --ignored --nocapture
 ```
+
+All of them run in the e2e pipeline's `e2e_tests` step, which excludes nothing:
+`--run-ignored only` is the whole selection. A `binary()` predicate that matches
+no binary is an error in nextest rather than an empty exclusion, so a filter
+naming a suite that has since been deleted fails the step before any test runs.
+
+Most of these deploy their `TokenContract` off the shared shellnet giver
+because it is the cheap route. It is not the route the contracts are designed
+around — a seller in production has only a note — so the note-funded path is
+covered on its own by `e2e_inference_funding`.
+
+**A deal only publishes its price when it closes.** `_recordTrade` is reachable
+only from `reportFinalized`, which the `TokenContract` calls from `_settleFees`
+— on the close, never on a match or an `advance`. A match that is later
+refunded served nothing, so counting it would let anyone move the reference
+price with orders they never honour. Anything that needs
+`getWeeklyMedianPrice` (the range cycle, above) therefore has to run a deal to
+a genuine close first.
 
 The `e2e_inference_clob` Filled check asserts the event by its routing id, not
 its decoded payload. Typed body decode of these ext-out events returns tvm

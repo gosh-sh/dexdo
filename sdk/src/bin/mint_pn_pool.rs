@@ -50,6 +50,7 @@ use dodex_contracts::dex::root_pn::ParamsOfGetPrivateNoteAddress;
 use dodex_contracts::dex::root_pn::ParamsOfSendEccShellToPrivateNote;
 use dodex_contracts::dex::root_pn::RootPn;
 use dodex_sdk::dex_contract_params;
+use dodex_sdk::errors::kit_exit_code;
 use dodex_sdk::halo2::giver_voucher::mint_voucher_via_giver;
 use dodex_sdk::halo2::Halo2Paths;
 use dodex_sdk::maybe_acquire;
@@ -110,6 +111,27 @@ impl TokenTypeArg {
 }
 /// Native vmshell top-up per PN — fuels the PN's internal-message
 /// execution (separate from SHELL ECC gas).
+/// `ERR_INVALID_HISTORY_PROOF` in `contracts/dex/modifiers/errors.sol`.
+///
+/// The proof commits to a layer hash the node keeps for a bounded window, and
+/// `gosh.check_layer_hash` rejects it once that hash has aged out. Between
+/// fixing the root (the wait for the target height) and submitting, this
+/// pipeline spends ~20s exporting the witness and ~45s proving; shellnet
+/// produces roughly three blocks a second, so the submission lands one to two
+/// layers behind the root every time. Whether that is still inside the window
+/// is decided by where in the layer the target fell — which is to say, by luck.
+/// Measured on one run: 68s of lag succeeded and 67s failed, back to back.
+const ERR_INVALID_HISTORY_PROOF: u32 = 403;
+
+/// How many times to re-mint and resubmit when the chain rejects the proof's
+/// history root.
+///
+/// A fresh voucher, not just a fresh proof — the two are minted together here,
+/// and the voucher is giver-funded, so the retry costs test currency rather
+/// than anything real. It costs about two minutes, which is the price of not
+/// losing a whole e2e run to a race the tool can simply run again.
+const HISTORY_PROOF_ATTEMPTS: usize = 3;
+
 const NATIVE_GAS_TOPUP_RAW: u64 = 20_000_000_000;
 /// RootPN minimum native balance + top-up amount before we start minting
 /// vouchers in bulk. Mirrors `dodex_sdk/tests/integration/common/pn.rs`.
@@ -164,6 +186,10 @@ struct Args {
     endpoint: String,
     nominal: NominalArg,
     token_type: TokenTypeArg,
+    /// Group label stamped onto every seed_notes row this run writes, so a
+    /// consumer can pick its own notes out of a pool holding several
+    /// currencies. `None` leaves the field off entirely.
+    profile: Option<String>,
     /// `https://{endpoint}` form for halo2 stage A (witness export).
     network_url: String,
     /// Cap on outbound TVM requests per second. `None` disables pacing.
@@ -179,6 +205,7 @@ impl Args {
         let mut endpoint = "shellnet.ackinacki.org".to_string();
         let mut nominal = NominalArg::N10000;
         let mut token_type = TokenTypeArg::Nackl;
+        let mut profile: Option<String> = None;
         let mut max_rps: Option<u32> = Some(3);
 
         let mut argv = std::env::args().skip(1);
@@ -196,6 +223,9 @@ impl Args {
                 }
                 "--endpoint" | "-e" => {
                     endpoint = argv.next().ok_or("--endpoint requires a value")?;
+                }
+                "--profile" => {
+                    profile = Some(argv.next().ok_or("--profile requires a value")?);
                 }
                 "--nominal" => {
                     let v = argv.next().ok_or("--nominal requires a value")?;
@@ -221,18 +251,21 @@ impl Args {
             format!("https://{endpoint}")
         };
 
-        Ok(Args { count, output, endpoint, nominal, token_type, network_url, max_rps })
+        Ok(Args { count, output, endpoint, nominal, token_type, profile, network_url, max_rps })
     }
 }
 
 fn usage() -> String {
     "usage: mint_pn_pool [--count N] [--output path] [--endpoint host] \
-         [--nominal N100|N1000|N10000] [--token-type nackl|shell|usdc] [--max-rps N]\n\n  \
+         [--nominal N100|N1000|N10000] [--token-type nackl|shell|usdc] [--profile LABEL] \
+         [--max-rps N]\n\n  \
          --count       number of PrivateNotes to deploy (default 5)\n  \
          --output      JSON output path (default ./pn_pool.json)\n  \
          --endpoint    network host (default shellnet.ackinacki.org)\n  \
          --nominal     PN deposit nominal (default N10000)\n  \
          --token-type  deposit currency (default nackl)\n  \
+         --profile     group label written to each seed_notes row, so a consumer can\n                \
+                       pick the notes it owns out of a pool holding several currencies\n  \
          --max-rps     cap outbound TVM requests/sec (default 3; 0 disables)\n\n  \
          Also writes <output>.seed_notes.json (api seeder / e2e format) beside the pool."
         .to_string()
@@ -244,6 +277,9 @@ struct Pool {
     created_at_unix: u64,
     nominal: String,
     token_type: u32,
+    /// Group label stamped onto every seed_notes row (see `--profile`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
     raw_value_per_pn: u64,
     ecc_shell_deposit_per_pn: u64,
     notes: Vec<PoolNote>,
@@ -279,6 +315,10 @@ struct SeedNote {
     #[serde(rename = "tokenType")]
     token_type: u32,
     value: u64,
+    /// Omitted entirely when unset, so a single-currency pool serialises to
+    /// exactly the bytes it did before profiles existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
 }
 
 fn pool_to_seed_notes(pool: &Pool) -> Vec<SeedNote> {
@@ -293,6 +333,7 @@ fn pool_to_seed_notes(pool: &Pool) -> Vec<SeedNote> {
                 .to_str_radix(16),
             token_type: pool.token_type,
             value: pool.raw_value_per_pn,
+            profile: pool.profile.clone(),
         })
         .collect()
 }
@@ -349,6 +390,7 @@ fn load_or_init_pool(path: &Path, args: &Args) -> Result<Pool, String> {
             created_at_unix: now_unix(),
             nominal: args.nominal.label().to_string(),
             token_type: want_tt,
+            profile: args.profile.clone(),
             raw_value_per_pn: args.nominal.raw_value(args.token_type),
             ecc_shell_deposit_per_pn: ECC_SHELL_DEPOSIT_RAW,
             notes: Vec::with_capacity(args.count),
@@ -453,46 +495,63 @@ async fn deploy_one_pn(
 ) -> Result<PoolNote, String> {
     let root_pn = RootPn::new(context.clone(), dex_contract_params(RootPn::DEFAULT_ADDRESS));
 
-    // 1. Halo2 deposit voucher in the chosen currency.
-    eprintln!("    halo2 {} deposit voucher (this is the slow step)…", token_type.label());
-    maybe_acquire(rl).await;
-    let deposit_zk = mint_voucher_via_giver(
-        context.clone(),
-        network_url.to_string(),
-        &keys.public,
-        token_type.id(),
-        nominal_raw,
-        false,
-        paths,
-    )
-    .await
-    .map_err(|e| format!("mint_voucher_via_giver (deposit): {e:?}"))?;
-
-    let dih_dec = proof::hex_u256_to_dec(&deposit_zk.deposit_identifier_hash_hex);
-    let epk_dec = proof::pubkey_to_dec(&keys.public);
-
-    // 2. Deploy PN against the deposit proof.
-    eprintln!("    RootPN.deployPrivateNote…");
-    maybe_acquire(rl).await;
-    root_pn
-        .deploy_private_note(
-            ParamsOfDeployPrivateNote {
-                zkproof: deposit_zk.proof,
-                deposit_identifier_hash: dih_dec.clone(),
-                final_layer_historical_hash_root: proof::hex_u256_to_dec(
-                    &deposit_zk.final_layer_historical_hash_root_hex,
-                ),
-                voucher_nominal_fr: proof::hex_u256_to_dec(&deposit_zk.voucher_nominal_fr_hex),
-                token_type_fr: proof::hex_u256_to_dec(&deposit_zk.token_type_fr_hex),
-                ephemeral_pubkey: epk_dec,
-                value: deposit_zk.voucher_value,
-                token_type: deposit_zk.voucher_token_type,
-                layer_number: deposit_zk.layer_number,
-            },
-            Signer::Keys { keys: keys.clone() },
+    // 1+2. Halo2 deposit voucher, then deploy the PN against it. One unit,
+    //      because a stale history root can only be answered by going back for
+    //      a new proof — see `ERR_INVALID_HISTORY_PROOF`.
+    let mut dih_dec = String::new();
+    for attempt in 1..=HISTORY_PROOF_ATTEMPTS {
+        eprintln!("    halo2 {} deposit voucher (this is the slow step)…", token_type.label());
+        maybe_acquire(rl).await;
+        let deposit_zk = mint_voucher_via_giver(
+            context.clone(),
+            network_url.to_string(),
+            &keys.public,
+            token_type.id(),
+            nominal_raw,
+            false,
+            paths,
         )
         .await
-        .map_err(|e| format!("deploy_private_note: {e:?}"))?;
+        .map_err(|e| format!("mint_voucher_via_giver (deposit): {e:?}"))?;
+
+        dih_dec = proof::hex_u256_to_dec(&deposit_zk.deposit_identifier_hash_hex);
+        let epk_dec = proof::pubkey_to_dec(&keys.public);
+
+        eprintln!("    RootPN.deployPrivateNote…");
+        maybe_acquire(rl).await;
+        match root_pn
+            .deploy_private_note(
+                ParamsOfDeployPrivateNote {
+                    zkproof: deposit_zk.proof,
+                    deposit_identifier_hash: dih_dec.clone(),
+                    final_layer_historical_hash_root: proof::hex_u256_to_dec(
+                        &deposit_zk.final_layer_historical_hash_root_hex,
+                    ),
+                    voucher_nominal_fr: proof::hex_u256_to_dec(&deposit_zk.voucher_nominal_fr_hex),
+                    token_type_fr: proof::hex_u256_to_dec(&deposit_zk.token_type_fr_hex),
+                    ephemeral_pubkey: epk_dec,
+                    value: deposit_zk.voucher_value,
+                    token_type: deposit_zk.voucher_token_type,
+                    layer_number: deposit_zk.layer_number,
+                },
+                Signer::Keys { keys: keys.clone() },
+            )
+            .await
+        {
+            Ok(_) => break,
+            Err(e)
+                if kit_exit_code(&e) == Some(ERR_INVALID_HISTORY_PROOF)
+                    && attempt < HISTORY_PROOF_ATTEMPTS =>
+            {
+                eprintln!(
+                    "    deployPrivateNote: history root aged out (exit_code {ERR_INVALID_HISTORY_PROOF}); re-minting, attempt {}/{HISTORY_PROOF_ATTEMPTS}",
+                    attempt + 1
+                );
+                continue;
+            }
+            Err(e) => return Err(format!("deploy_private_note: {e:?}")),
+        }
+    }
 
     maybe_acquire(rl).await;
     let pn_address = root_pn
@@ -525,42 +584,58 @@ async fn deploy_one_pn(
     };
 
     // 3. Halo2 SHELL gas voucher (sequentially, NOT in parallel — see header
-    //    comment).
-    eprintln!("    halo2 SHELL gas voucher…");
-    maybe_acquire(rl).await;
-    let gas_zk = mint_voucher_via_giver(
-        context.clone(),
-        network_url.to_string(),
-        &keys.public,
-        CURRENCY_ID_SHELL,
-        ECC_SHELL_DEPOSIT_RAW,
-        true,
-        paths,
-    )
-    .await
-    .map_err(|e| format!("mint_voucher_via_giver (gas): {e:?}"))?;
-
-    eprintln!("    RootPN.sendEccShellToPrivateNote…");
-    maybe_acquire(rl).await;
-    root_pn
-        .send_ecc_shell_to_private_note(
-            ParamsOfSendEccShellToPrivateNote {
-                proof: gas_zk.proof,
-                nullifier_hash: proof::hex_u256_to_dec(&gas_zk.deposit_identifier_hash_hex),
-                deposit_identifier_hash: dih_dec.clone(),
-                final_layer_historical_hash_root: proof::hex_u256_to_dec(
-                    &gas_zk.final_layer_historical_hash_root_hex,
-                ),
-                voucher_nominal_fr: proof::hex_u256_to_dec(&gas_zk.voucher_nominal_fr_hex),
-                token_type_fr: proof::hex_u256_to_dec(&gas_zk.token_type_fr_hex),
-                value: gas_zk.voucher_value,
-                layer_number: gas_zk.layer_number,
-                recipient_ephemeral_pubkey: proof::pubkey_to_dec(&keys.public),
-            },
-            Signer::Keys { keys: keys.clone() },
+    //    comment), then fund the PN with it. Retried as one unit for the same
+    //    reason as the deposit above.
+    for attempt in 1..=HISTORY_PROOF_ATTEMPTS {
+        eprintln!("    halo2 SHELL gas voucher…");
+        maybe_acquire(rl).await;
+        let gas_zk = mint_voucher_via_giver(
+            context.clone(),
+            network_url.to_string(),
+            &keys.public,
+            CURRENCY_ID_SHELL,
+            ECC_SHELL_DEPOSIT_RAW,
+            true,
+            paths,
         )
         .await
-        .map_err(|e| format!("send_ecc_shell_to_private_note: {e:?}"))?;
+        .map_err(|e| format!("mint_voucher_via_giver (gas): {e:?}"))?;
+
+        eprintln!("    RootPN.sendEccShellToPrivateNote…");
+        maybe_acquire(rl).await;
+        match root_pn
+            .send_ecc_shell_to_private_note(
+                ParamsOfSendEccShellToPrivateNote {
+                    proof: gas_zk.proof,
+                    nullifier_hash: proof::hex_u256_to_dec(&gas_zk.deposit_identifier_hash_hex),
+                    deposit_identifier_hash: dih_dec.clone(),
+                    final_layer_historical_hash_root: proof::hex_u256_to_dec(
+                        &gas_zk.final_layer_historical_hash_root_hex,
+                    ),
+                    voucher_nominal_fr: proof::hex_u256_to_dec(&gas_zk.voucher_nominal_fr_hex),
+                    token_type_fr: proof::hex_u256_to_dec(&gas_zk.token_type_fr_hex),
+                    value: gas_zk.voucher_value,
+                    layer_number: gas_zk.layer_number,
+                    recipient_ephemeral_pubkey: proof::pubkey_to_dec(&keys.public),
+                },
+                Signer::Keys { keys: keys.clone() },
+            )
+            .await
+        {
+            Ok(_) => break,
+            Err(e)
+                if kit_exit_code(&e) == Some(ERR_INVALID_HISTORY_PROOF)
+                    && attempt < HISTORY_PROOF_ATTEMPTS =>
+            {
+                eprintln!(
+                    "    sendEccShellToPrivateNote: history root aged out (exit_code {ERR_INVALID_HISTORY_PROOF}); re-minting, attempt {}/{HISTORY_PROOF_ATTEMPTS}",
+                    attempt + 1
+                );
+                continue;
+            }
+            Err(e) => return Err(format!("send_ecc_shell_to_private_note: {e:?}")),
+        }
+    }
     note.shell_funded = true;
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;

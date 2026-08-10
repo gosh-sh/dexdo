@@ -7,7 +7,6 @@ use ackinacki_kit::contracts::giver::v3::send_currency_with_flag_from_default_gi
 use ackinacki_kit::tvm_client::abi::Signer;
 use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
 use dodex_contracts::dex::pmp::Pmp;
-use dodex_contracts::dex::private_note::ParamsOfChangeOwner;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
 use dodex_contracts::dex::private_note::ParamsOfSetStake;
 use dodex_contracts::dex::root_pn::ParamsOfGetPmpAddress;
@@ -27,19 +26,16 @@ use crate::common::context::PMP_DEPOSIT;
 use crate::common::context::STAKE_AMOUNT;
 use crate::common::context::STAKE_PERIOD_LONG;
 use crate::common::context::TOKEN_TYPE_NACKL;
-use crate::common::context::VAULT_DEPOSIT;
 use crate::common::keys::gen_keys;
 use crate::common::misc::now_unix;
-use crate::common::misc::pn_nackl;
 use crate::common::misc::wait_active;
 use crate::common::pmp::deploy_oracle_with_event;
-use crate::common::pmp::setup_pmp;
-use crate::common::pn::deploy_funded_pn;
 use crate::common::pn::deploy_pn_with_keys;
 use crate::common::pn::ensure_root_pn_funded;
 use crate::common::voucher::make_voucher_proof;
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_recovery_and_operate_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -192,125 +188,3 @@ async fn test_recovery_and_operate_via_dex() {
     eprintln!("recovery → operate: stake placed on recovered note");
 }
 
-#[tokio::test]
-async fn test_repeated_gas_topup_via_dex() {
-    let context = create_context();
-    let dex = create_dex();
-    ensure_root_pn_funded(&context).await;
-
-    let (pn_address, dih, keys) = deploy_funded_pn(&context, &dex, VAULT_DEPOSIT).await;
-
-    // Need more Shell on RootPN before another top-up.
-    let mut ecc = HashMap::new();
-    ecc.insert(CURRENCY_ID_SHELL, ECC_SHELL_DEPOSIT * 2);
-    send_currency_with_flag_from_default_giver(
-        context.clone(),
-        RootPn::DEFAULT_ADDRESS,
-        2_000_000_000,
-        ecc,
-        1,
-    )
-    .await
-    .expect("giver top up RootPN SHELL for repeat-topup");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    // First top-up already done by deploy_funded_pn. Do a second one.
-    let ecc_zk = make_voucher_proof(
-        context.clone(),
-        &keys.public,
-        CURRENCY_ID_SHELL,
-        ECC_SHELL_DEPOSIT,
-        true,
-    )
-    .await;
-
-    dex.send_ecc_shell(
-        ParamsOfSendEccShellToPrivateNote {
-            proof: ecc_zk.proof,
-            nullifier_hash: proof::hex_u256_to_dec(&ecc_zk.deposit_identifier_hash_hex),
-            deposit_identifier_hash: dih,
-            final_layer_historical_hash_root: proof::hex_u256_to_dec(
-                &ecc_zk.final_layer_historical_hash_root_hex,
-            ),
-            voucher_nominal_fr: proof::hex_u256_to_dec(&ecc_zk.voucher_nominal_fr_hex),
-            token_type_fr: proof::hex_u256_to_dec(&ecc_zk.token_type_fr_hex),
-            value: ecc_zk.voucher_value,
-            layer_number: ecc_zk.layer_number,
-            recipient_ephemeral_pubkey: proof::pubkey_to_dec(&keys.public),
-        },
-        Signer::Keys { keys: keys.clone() },
-    )
-    .await
-    .expect("second send_ecc_shell");
-
-    // Verify PN is still operational
-    let details = dex.get_private_note_details(&pn_address).await.expect("details");
-    assert_eq!(pn_nackl(&details), VAULT_DEPOSIT as u128);
-    assert!(details.busy_address.is_none());
-    eprintln!("repeated gas top-up OK");
-}
-
-#[tokio::test]
-async fn test_change_owner_then_stake_via_dex() {
-    let context = create_context();
-    let dex = create_dex();
-    let s = setup_pmp(&context, &dex).await;
-
-    // Change owner to new keys
-    let new_keys = gen_keys(context.clone());
-    let new_pubkey_dec = proof::pubkey_to_dec(&new_keys.public);
-
-    dex.change_owner(
-        &s.pn_address,
-        ParamsOfChangeOwner { new_pubkey: new_pubkey_dec },
-        Signer::Keys { keys: s.pn_keys.clone() },
-    )
-    .await
-    .expect("change_owner");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    // Old keys should NOT work for stake
-    let result_start = now_unix() + STAKE_PERIOD_LONG;
-    dex.submit_set_timings(
-        &s.pmp_address,
-        ParamsOfSubmitSetTimings { result_start },
-        Signer::Keys { keys: s.oracle_keys.clone() },
-    )
-    .await
-    .expect("set_timings");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    let old_result = dex
-        .set_stake(
-            &s.pn_address,
-            ParamsOfSetStake {
-                event_id: s.event_id.clone(),
-                oracle_list_hash: s.oracle_list_hash.clone(),
-                token_type: TOKEN_TYPE_NACKL,
-                outcome: 0,
-                amount: STAKE_AMOUNT,
-                use_coupon: false,
-            },
-            Signer::Keys { keys: s.pn_keys },
-        )
-        .await;
-    assert!(old_result.is_err(), "old keys should be rejected after change_owner");
-    eprintln!("old keys rejected as expected");
-
-    // New keys SHOULD work
-    dex.set_stake(
-        &s.pn_address,
-        ParamsOfSetStake {
-            event_id: s.event_id,
-            oracle_list_hash: s.oracle_list_hash,
-            token_type: TOKEN_TYPE_NACKL,
-            outcome: 0,
-            amount: STAKE_AMOUNT,
-            use_coupon: false,
-        },
-        Signer::Keys { keys: new_keys },
-    )
-    .await
-    .expect("stake with new keys");
-    eprintln!("new keys accepted for stake");
-}

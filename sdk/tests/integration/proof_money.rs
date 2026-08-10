@@ -1,0 +1,735 @@
+//! Proof-money: one prediction market through its whole life — deploy, stake,
+//! freeze, split, trade, resolve, claim, self-destruct — asserting after
+//! **every** phase that money was neither created nor destroyed, exactly, per
+//! currency.
+//!
+//! This is the scenario the rest of the harness exists to serve, and it is the
+//! executable specification of how the pieces fit: the ledger and its
+//! `b0.lock` protocol, the note allocator, the provenance preflight, the
+//! two-phase PMP setup, and the B0 conservation detector.
+//!
+//! # What it needs
+//!
+//! A local, from-scratch stand (freshly generated zerostate), addressed
+//! entirely through the environment:
+//!
+//! - `E2E_NETWORK_ENDPOINT` — the stand's URL, scheme included.
+//! - `E2E_SEED_NOTES` — the pre-baked `PrivateNote` pool. Its directory also
+//!   holds the shared ledger and the `b0.lock` sidecar.
+//! - `E2E_RUN_ID` — the ledger generation this run belongs to.
+//! - `E2E_MANIFEST` / `DEXDO_SHA` — the build-time contract manifest and the
+//!   commit it must belong to, both read by the preflight.
+//!
+//! `#[ignore]`, because none of that exists on a developer's machine by
+//! default; the CI step that owns a stand selects this test by name and runs
+//! it with `--run-ignored only`.
+//!
+//! # How to read the sequence
+//!
+//! Every phase is *action → barrier → snapshot → assertion*, and all four
+//! steps are load-bearing:
+//!
+//! - The **assertion** is against the previous phase's snapshot, with
+//!   [`ExternalDelta::none()`] throughout. Every account money can reach here
+//!   — the three notes, the market, its order book, RootPN — is inside the
+//!   tracked set, so nothing legitimately crosses its boundary and any
+//!   non-zero delta is a real leak. A phase without an assertion is a phase a
+//!   leak can hide in.
+//! - The **barrier** comes first because the chain is asynchronous: a getter
+//!   answers from committed state while the messages that finish the operation
+//!   are still in flight, and money in flight has left the sender without
+//!   reaching the recipient. A snapshot taken inside that window compares
+//!   against a state that has not settled.
+//! - Baselines an exact barrier compares against are read **before** the
+//!   action that moves them. Read afterwards they describe the outcome, and
+//!   the comparison degenerates into a tautology.
+//! - Every phase additionally **asserts its own effect** — the pool grew by the
+//!   stakes, the notes hold the tokens they split, the traded amount changed
+//!   hands. This is not belt-and-braces on top of conservation, it is what
+//!   makes conservation mean anything: sending an operation is
+//!   fire-and-forget, and one rejected by a `require` before `tvm.accept()`
+//!   leaves no trace at the sender at all. A phase that silently did nothing
+//!   moves no money, so its barrier finds nothing pending and its
+//!   conservation assertion passes **vacuously** — and so does every phase
+//!   after it, since the later ones do not depend on the earlier one's money
+//!   having moved. Without an effect assertion this scenario can report
+//!   success having proved nothing.
+//!
+//! The phases are ordered by the contracts, not by taste: staking only works
+//! between `stakeStart` and `stakeEnd`, `splitFullSet` only after the market
+//! freezes and only before `resultStart`, `claim` only after the order book
+//! has finished draining. Each dependency is called out at the step that
+//! relies on it.
+
+use std::collections::BTreeMap;
+
+use ackinacki_kit::tvm_client::abi::Signer;
+use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
+use dodex_contracts::dex::private_note::ParamsOfStakeKey;
+use dodex_contracts::dex::root_pn::RootPn;
+use dodex_sdk::Dex;
+
+use crate::common::allocator;
+use crate::common::allocator::LeasedPn;
+use crate::common::allocator::PnProfile;
+use crate::common::chain_reader;
+use crate::common::chain_reader::ChainReader;
+use crate::common::context::CURRENCY_ID_SHELL;
+use crate::common::context::NETWORK_FEE_AMOUNT;
+use crate::common::context::ORACLE_FEE;
+use crate::common::context::STAKE_AMOUNT;
+use crate::common::context::TOKEN_TYPE_NACKL;
+use crate::common::invariant;
+use crate::common::invariant::ExpectedPhysDelta;
+use crate::common::invariant::ExternalDelta;
+use crate::common::invariant::ObState;
+use crate::common::invariant::Phase;
+use crate::common::invariant::PmpState;
+use crate::common::invariant::TrackedContracts;
+use crate::common::invariant::TrackedOb;
+use crate::common::invariant::TrackedPmp;
+use crate::common::locks;
+use crate::common::market::at;
+use crate::common::market::oracle_signer;
+use crate::common::market::outcome_tokens;
+use crate::common::market::place_limit;
+use crate::common::market::pmp_freeze_now;
+use crate::common::market::set_timings_and_approve;
+use crate::common::market::split_full_set;
+use crate::common::market::stake;
+use crate::common::market::wait_order_book;
+use crate::common::market::wait_order_book_done;
+use crate::common::market::wait_owner_order;
+use crate::common::market::wait_resolved;
+use crate::common::misc::now_unix;
+use crate::common::misc::wait_not_busy;
+use crate::common::misc::wait_until;
+use crate::common::pmp;
+use crate::common::pmp::OracleEventCtx;
+use crate::common::preflight;
+
+/// Distance from `setTimings` to `resultStart`. `PMP._computeStakeEnd` makes
+/// the staking window 10% of it, so 300 buys a ~30 s window to place both
+/// stakes in and ~270 s afterwards for freeze, split and the trade — every one
+/// of which has to land before `resultStart` closes the market to further
+/// pool changes.
+const STAKE_PERIOD_PROOF: u64 = 300;
+
+/// The staking window is short enough that a slow stand could push the second
+/// stake past `stakeEnd`, where it fails for a reason that has nothing to do
+/// with conservation. Asserting the remaining budget right after the stakes
+/// turns that into a clear diagnosis instead of a puzzling revert later.
+///
+/// It reports *only* a slow stand. A stake that was rejected on its merits is
+/// caught by the pool-growth assertion after the barrier — which is why
+/// [`wait_not_busy`] must not burn a large budget before getting here, or a
+/// rejected stake would trip this assertion first and blame the stand.
+const STAKE_MARGIN_SECS: u64 = 8;
+
+/// SHELL as a *token type* (the key of a note's `_balance` map), which is a
+/// different namespace from [`CURRENCY_ID_SHELL`], the ECC currency id the
+/// physical view reads — the two happen to share the number 2. Conservation is
+/// checked for it as well as for NACKL: this market moves only NACKL, so
+/// SHELL is the control currency, and a movement there is as much a defect as
+/// a NACKL imbalance.
+const TOKEN_TYPE_SHELL: u32 = dodex_sdk::proof::TokenType::Shell as u32;
+
+/// Collateral each trader splits into outcome tokens. With the deployer's two
+/// 100-NACKL initial stakes, freeze normalisation leaves both clean pools at
+/// 100 NACKL, so the split basket is `Q = 2` and 100 NACKL yields 50 of each
+/// outcome token — several times the order size below.
+const SPLIT_COLLATERAL: u128 = 100_000_000_000;
+
+/// 30 NACKL of outcome tokens at 0.5 → 15 NACKL notional, above the contracts'
+/// `MIN_ORDER_NOTIONAL_NACKL` of 10 and well inside what a split produces.
+const ORDER_AMOUNT: u128 = 30_000_000_000;
+const ORDER_PRICE_BPS: &str = "5000";
+
+/// The outcome the oracle resolves to, and the one the buyer stakes on.
+const WINNING_OUTCOME: u32 = 0;
+const LOSING_OUTCOME: u32 = 1;
+
+#[tokio::test]
+#[ignore = "requires a from-scratch local stand: E2E_NETWORK_ENDPOINT, E2E_SEED_NOTES, E2E_RUN_ID, E2E_MANIFEST"]
+async fn proof_money_lifecycle_local() {
+    let run_id = std::env::var("E2E_RUN_ID").expect("E2E_RUN_ID must be set by the bootstrapper");
+    let ledger_dir = allocator::seed_dir().expect("seed notes directory");
+
+    // One guard for the whole scenario, acquired once and held to the end.
+    // Conservation is a statement about global state, so no other process may
+    // land a transfer inside the measurement window. Every helper below takes
+    // the guard by reference and never locks itself: a second acquisition of
+    // the same file either self-deadlocks or silently downgrades this
+    // exclusive hold to a shared one.
+    let b0 = locks::ChainLockGuard::b0_exclusive(&ledger_dir).expect("acquire b0.lock exclusively");
+
+    let r = chain_reader::ChainReader::new();
+
+    // First, before anything touches the chain. The preflight asserts how the
+    // stand was *generated* — code hashes against the manifest, and RootPN's
+    // deploy book against the seed pool — and those equalities stop holding
+    // the moment this scenario mints its first note-side movement.
+    preflight::run_preflight(&r).await.expect("preflight: broken zerostate or provenance");
+
+    let alloc = allocator::Allocator::new(&run_id).expect("open the note allocator");
+    let deployer = alloc.rent(PnProfile::Dep, "proof").expect("rent the deployer note");
+    let buyer = alloc.rent(PnProfile::Trd, "proof").expect("rent the buyer note");
+    let seller = alloc.rent(PnProfile::Trd, "proof").expect("rent the seller note");
+
+    // The reader's own clients, not a second pair: every write below and the
+    // read that verifies it then travel over one connection set, so a
+    // conservation failure can never be an artifact of two clients pointed at
+    // different endpoints or observing different committed states.
+    let ctx = &r.ctx;
+    let dex = &r.dex;
+
+    // Phase one of the market setup: publish the oracle event. Its fee is paid
+    // by the oracle, outside the measured window on purpose — see below.
+    let nonce = alloc.next_nonce().expect("allocate an oracle-name nonce");
+    let ev = pmp::prepare_oracle_event(ctx, dex, &b0, nonce).await;
+
+    // The boundary of the money check. Everything money can reach in this
+    // scenario is named here; the PMP and the order book join the set as they
+    // are created, which a snapshot reads as zero until then.
+    let mut tracked = TrackedContracts {
+        root_pn: RootPn::DEFAULT_ADDRESS.to_string(),
+        pns: vec![
+            deployer.note.address.clone(),
+            buyer.note.address.clone(),
+            seller.note.address.clone(),
+        ],
+        pmps: Vec::new(),
+        order_books: Vec::new(),
+        oracles: vec![ev.oracle_address.clone()],
+        oels: vec![ev.el_address.clone()],
+        token_types: vec![TOKEN_TYPE_NACKL, TOKEN_TYPE_SHELL],
+    };
+
+    // Taken between the two setup phases, which is the whole reason the setup
+    // is split in two: the PMP deployment fee then falls inside the measured
+    // window, while the event-publish fee that precedes it does not.
+    let sum0 = invariant::snapshot(&r, &tracked).await.expect("baseline sum snapshot");
+    let phys0 = invariant::phys_snapshot(&r, &tracked).await.expect("baseline physical snapshot");
+
+    // The manifest pins the code of contracts the zerostate placed; these two
+    // were created by this run, so their provenance is checked here rather
+    // than in the preflight.
+    preflight::assert_raw_code(&r, &ev.oracle_address, "Oracle").await.expect("Oracle code");
+    preflight::assert_raw_code(&r, &ev.el_address, "OracleEventList")
+        .await
+        .expect("OracleEventList code");
+
+    // ---------------------------------------------------------------- deploy
+    // Phase two: the deployer note deploys the market and funds it with two
+    // initial stakes.
+    let pmp_addr = pmp::deploy_pmp_with_deployer(ctx, dex, &deployer, &ev, &b0).await;
+    tracked.pmps.push(TrackedPmp {
+        addr: pmp_addr.clone(),
+        token_type: TOKEN_TYPE_NACKL,
+        state: PmpState::Live,
+    });
+
+    // The oracle fee and the network fee travel as physical SHELL and never
+    // touch a logical balance, so the sum view is blind to them being lost.
+    // This barrier polls the exact recipients until each holds exactly what it
+    // is owed — the approve branch sends the fee and the approval as separate
+    // messages, so the note can already be idle while the fee is still moving.
+    invariant::await_quiescence(
+        &r,
+        &tracked,
+        Phase::AfterDeploy {
+            oracle: &ev.oracle_address,
+            oel: &ev.el_address,
+            pmp: &pmp_addr,
+            oracle_fee: ORACLE_FEE,
+            network_fee: NETWORK_FEE_AMOUNT,
+        },
+    )
+    .await
+    .expect("deploy quiescence");
+
+    let phys1 =
+        invariant::phys_snapshot(&r, &tracked).await.expect("physical snapshot after deploy");
+    invariant::assert_phys_delta(&phys0, &phys1, &expected_deploy_delta(&deployer, &ev, &pmp_addr));
+    preflight::assert_salted_code(&r, &pmp_addr, "PMP.tvc", "PrivateNote.tvc")
+        .await
+        .expect("PMP code is the shipped image salted with PrivateNote");
+
+    // `acceptStake` rejects everything until the oracle sets the timings, so
+    // this has to precede the staking window it defines. It moves no money of
+    // its own, which is why it shares the deploy phase's assertion; the
+    // approval poll is its acknowledgement.
+    let requested_result_start = now_unix() + STAKE_PERIOD_PROOF;
+    set_timings_and_approve(dex, &pmp_addr, &ev, requested_result_start).await;
+
+    let s1 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after deploy");
+    invariant::assert_conserved(&sum0, &s1, &ExternalDelta::none());
+
+    // ----------------------------------------------------------------- stake
+    // Both deadlines are read from the contract rather than recomputed here.
+    // `stakeEnd` is derived by integer division from the timings the chain
+    // actually recorded, and a second copy of that arithmetic would drift and
+    // make the margin assertion below lie; `resultStart` is what the resolve
+    // and split gates compare a block timestamp against. One read, so the two
+    // describe the same state.
+    let details = dex.get_pmp_details(&pmp_addr).await.expect("pmp details after approval");
+    let stake_end = details.stake_end;
+    let result_start = details.result_start;
+    // Baseline for the stake phase's effect assertion — the pool as it stands
+    // with only the deployer's initial stakes in it, read before either trader
+    // stakes.
+    let total_pool_before = details.total_pool;
+    let key = ParamsOfStakeKey {
+        event_id: details.event_id.clone(),
+        oracle_list_hash: details.oracle_list_hash.clone(),
+        token_type: TOKEN_TYPE_NACKL,
+    };
+
+    // Concurrent, because the window is ~30 s and two sequential
+    // acknowledged stakes can eat most of it.
+    tokio::join!(
+        stake(dex, &buyer, &key, WINNING_OUTCOME),
+        stake(dex, &seller, &key, LOSING_OUTCOME),
+    );
+    assert!(
+        now_unix() + STAKE_MARGIN_SECS < stake_end,
+        "staking budget exhausted: {}s left of the window, less than the {STAKE_MARGIN_SECS}s \
+         margin — the stand is too slow for a {STAKE_PERIOD_PROOF}s market",
+        stake_end.saturating_sub(now_unix()),
+    );
+    let expected_pool = total_pool_before + 2 * STAKE_AMOUNT;
+    invariant::await_quiescence(&r, &tracked, Phase::AfterStake { pmp: &pmp_addr, expected_pool })
+        .await
+        .expect("stake quiescence");
+
+    // The effect, asserted before the money check, because the money check
+    // cannot see its absence: a `setStake` rejected before `tvm.accept()` —
+    // outside the window, below the minimum, market not approved — moves
+    // nothing, leaves no trace at the note, and would sail through both the
+    // barrier and `assert_conserved` while the rest of the scenario ran
+    // against a market nobody staked into.
+    let total_pool_after = dex.get_pmp_details(&pmp_addr).await.expect("pmp details").total_pool;
+    assert_eq!(
+        total_pool_after, expected_pool,
+        "the market's pool did not grow by the two stakes ({total_pool_before} -> \
+         {total_pool_after}) — at least one `setStake` never took effect"
+    );
+
+    // A stake moves collateral from a note into the market. Both are inside
+    // the tracked set, so this still has to come out exactly even.
+    let s2 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after stake");
+    invariant::assert_conserved(&s1, &s2, &ExternalDelta::none());
+
+    // ---------------------------------------------------------------- freeze
+    // The market does not freeze itself when the staking window closes:
+    // `freezeNow` is a public entry that anyone may call, and it is what
+    // normalises the pools and deploys the order book.
+    wait_until(stake_end).await;
+    pmp_freeze_now(ctx, dex, &pmp_addr).await;
+    let ob_addr = wait_order_book(ctx, dex, &pmp_addr).await;
+    tracked.order_books.push(TrackedOb {
+        addr: ob_addr.clone(),
+        token_type: TOKEN_TYPE_NACKL,
+        state: ObState::Live,
+    });
+    preflight::assert_order_book_salted_code(&r, &ob_addr)
+        .await
+        .expect("OrderBook code is the shipped image salted for this PMP");
+
+    // Normalisation refunds each pool's remainder to the deployer's note and
+    // blocks split/merge until that note acknowledges it. Without this barrier
+    // the split below reverts with `ERR_NORM_REFUND_PENDING` — the scenario
+    // breaks, not just its money check.
+    invariant::await_quiescence(&r, &tracked, Phase::AfterFreeze { pmp: &pmp_addr })
+        .await
+        .expect("freeze quiescence");
+
+    let s3 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after freeze");
+    invariant::assert_conserved(&s2, &s3, &ExternalDelta::none());
+
+    // ----------------------------------------------------------------- split
+    // Collateral in, a full set of outcome tokens out. The traders need the
+    // tokens before they can put either side of a trade on the book.
+    //
+    // `splitFullSet` requires `now < resultStart`, and once that has passed it
+    // reverts before `tvm.accept()` — invisibly, from the sender's side. The
+    // check is here rather than left to the effect assertion below so the
+    // failure names the deadline the scenario missed instead of a downstream
+    // symptom.
+    assert!(
+        now_unix() < result_start,
+        "the split window has already closed (now {} >= resultStart {result_start}) — the phases \
+         before this one spent the market's whole trading life",
+        now_unix()
+    );
+
+    let buyer_before_split = outcome_tokens(dex, &buyer).await;
+    let seller_before_split = outcome_tokens(dex, &seller).await;
+
+    // A split is quantised: the market mints whole baskets of `Q` collateral
+    // each and hands the rest straight back. Splitting an exact multiple would
+    // leave nothing to hand back and make "the remainder was refunded"
+    // unfalsifiable, so the amount is deliberately half a basket over one.
+    let basket = invariant::pmp_split_merge_q(&r, &pmp_addr).await.expect("read the split basket");
+    assert!(
+        basket > 1,
+        "the market's split basket is {basket}, too small to leave a remainder — this phase \
+         cannot tell a refund from a whole-amount charge"
+    );
+    let baskets = SPLIT_COLLATERAL / basket;
+    assert!(baskets > 0, "{SPLIT_COLLATERAL} does not cover one basket of {basket}");
+    let split_used = baskets * basket;
+    let split_refund = basket / 2;
+    let split_sent = split_used + split_refund;
+
+    let buyer_bal_before_split = pn_balance(&r, &buyer.note.address).await;
+    let seller_bal_before_split = pn_balance(&r, &seller.note.address).await;
+
+    split_full_set(dex, &buyer, &key, split_sent).await;
+    split_full_set(dex, &seller, &key, split_sent).await;
+    invariant::await_quiescence(&r, &tracked, Phase::AfterSplit).await.expect("split quiescence");
+
+    // What each of them is actually out: the whole baskets, and not the
+    // half-basket they sent on top. Conservation alone would not catch a
+    // remainder kept by the market — it would still be inside the tracked set,
+    // just on the wrong side of it.
+    for (role, note, before) in [
+        ("buyer", &buyer, buyer_bal_before_split),
+        ("seller", &seller, seller_bal_before_split),
+    ] {
+        let after = pn_balance(&r, &note.note.address).await;
+        assert_eq!(
+            after,
+            before - split_used,
+            "the {role} sent {split_sent} into a split of {baskets} baskets of {basket} and is \
+             out {}, not the {split_used} those baskets cost — the {split_refund} over was not \
+             returned",
+            before - after
+        );
+    }
+
+    // The effect: each trader now holds tokens of *both* outcomes. A rejected
+    // split leaves the holdings untouched, and the conservation check below
+    // would pass on a phase where nothing happened.
+    let buyer_after_split = outcome_tokens(dex, &buyer).await;
+    let seller_after_split = outcome_tokens(dex, &seller).await;
+    assert_split_minted("buyer", &buyer.note.address, &buyer_before_split, &buyer_after_split);
+    assert_split_minted("seller", &seller.note.address, &seller_before_split, &seller_after_split);
+
+    let s4 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after split");
+    invariant::assert_conserved(&s3, &s4, &ExternalDelta::none());
+
+    // ----------------------------------------------------------------- trade
+    // A resting sell crossed by a buy at the same price. The fee the taker
+    // pays splits into a rebate for the maker and a protocol fee the book
+    // accrues until it drains — both inside the tracked set.
+    let coid_base = u128::from(alloc.next_nonce().expect("allocate client order ids"));
+    place_and_match(dex, &buyer, &seller, &key, &ob_addr, coid_base).await;
+
+    // Both orders filled completely, so nothing is left resting; the barrier
+    // states that number rather than skipping the check on the phase that
+    // says the most about the book.
+    invariant::await_quiescence(&r, &tracked, Phase::AfterTrade { expected_open_orders: 0 })
+        .await
+        .expect("trade quiescence");
+
+    // The effect, and the only positive proof that a trade happened: the two
+    // "the order is gone from the book" waits are equally satisfied by an
+    // order the book never accepted, and `expected_open_orders: 0` is equally
+    // satisfied by nothing having been placed at all. The token movement is
+    // not — it is exactly the traded amount, from the seller to the buyer.
+    // Both baselines were read after the split barrier, before the orders.
+    let buyer_traded = outcome_tokens(dex, &buyer).await;
+    let seller_traded = outcome_tokens(dex, &seller).await;
+    assert_eq!(
+        at(&buyer_traded, WINNING_OUTCOME),
+        at(&buyer_after_split, WINNING_OUTCOME) + ORDER_AMOUNT,
+        "the buyer did not receive the traded outcome tokens ({} -> {})",
+        at(&buyer_after_split, WINNING_OUTCOME),
+        at(&buyer_traded, WINNING_OUTCOME)
+    );
+    // Stated as an addition on the seller's side rather than a subtraction on
+    // the book's, so a failure reports the real numbers instead of panicking
+    // inside the assertion's own arithmetic.
+    assert_eq!(
+        at(&seller_after_split, WINNING_OUTCOME),
+        at(&seller_traded, WINNING_OUTCOME) + ORDER_AMOUNT,
+        "the seller did not give up the traded outcome tokens ({} -> {})",
+        at(&seller_after_split, WINNING_OUTCOME),
+        at(&seller_traded, WINNING_OUTCOME)
+    );
+
+    let s5 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after trade");
+    invariant::assert_conserved(&s4, &s5, &ExternalDelta::none());
+
+    // --------------------------------------------------------------- resolve
+    // Baselines first: the resolve barrier asserts exact equalities, and each
+    // of these is about to be moved by the very action it measures. Read after
+    // the fact they would describe the outcome and prove nothing.
+    let deployer_bal_before = pn_balance(&r, &deployer.note.address).await;
+    let rootpn_fee_before = root_pn_protocol_fee(&r).await;
+    // Read before the drain forwards it to RootPN and zeroes the book's own
+    // counter.
+    let expected_protocol_fee = ob_total_protocol_fees(dex, &ob_addr).await;
+
+    // The book this drain is about to run against is empty, and saying so is
+    // what makes it the empty-book case rather than an unexamined one: the
+    // trade above consumed both of its orders, and `shutdown_orders` is the
+    // scenario that closes a book with orders still on it. A drain that only
+    // worked when there was something to cancel would pass there and fail
+    // here, silently, because nothing else distinguishes the two.
+    assert_eq!(
+        dex.get_order_book_details(&ob_addr).await.expect("order book details").order_count,
+        0,
+        "the book still holds orders going into the drain; this scenario is the one that closes \
+         an empty one"
+    );
+
+    wait_until(result_start).await;
+    dex.submit_resolve(
+        &pmp_addr,
+        ParamsOfSubmitResolve { outcome_id: WINNING_OUTCOME },
+        oracle_signer(&ev),
+    )
+    .await
+    .expect("submit_resolve");
+    wait_resolved(dex, &pmp_addr, WINNING_OUTCOME).await;
+    // Resolving triggers the order book's shutdown; the drain cancels and
+    // refunds whatever rests, hands its protocol fees to RootPN, and destroys
+    // the book in the same message that reports completion. `claim` is gated
+    // on that report.
+    wait_order_book_done(dex, &pmp_addr).await;
+    // The report and the book's own death are the same message, so the flag
+    // being set means the account is gone. Read rather than assumed: a book
+    // that reported completion and stayed alive would keep answering for
+    // protocol fees RootPN has already been credited with, and the tracked sum
+    // below would count them twice.
+    assert!(
+        r.account_absent(&ob_addr).await.expect("read the order book account"),
+        "the order book reported its shutdown complete but its account is still there"
+    );
+    // Declared drained only now, and only because the report has arrived: a
+    // snapshot or barrier would otherwise keep reading an account that no
+    // longer exists, and counting fees RootPN has already been credited with.
+    mark_ob_drained(&mut tracked, &ob_addr);
+
+    // The creator fee is computed by `resolve` from the live pools, so unlike
+    // the baselines above it can only be read afterwards.
+    let creator_fee = read_creator_fee(dex, &pmp_addr).await;
+    invariant::await_quiescence(
+        &r,
+        &tracked,
+        Phase::AfterResolve {
+            pmp: &pmp_addr,
+            deployer: &deployer.note.address,
+            deployer_balance_before: deployer_bal_before,
+            creator_fee,
+            root_pn_fee_before: rootpn_fee_before,
+            expected_protocol_fee,
+        },
+    )
+    .await
+    .expect("resolve quiescence");
+
+    let s6 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after resolve");
+    invariant::assert_conserved(&s5, &s6, &ExternalDelta::none());
+
+    // ---------------------------------------------------------------- claims
+    // All three winners, the deployer included. Its initial stakes are part of
+    // the winning mass, and the market only closes once that mass has been
+    // claimed down to what forfeiters left behind — skip this claim and the
+    // PMP never self-destructs and the barrier below times out.
+    claim(dex, &buyer, &key).await;
+    claim(dex, &seller, &key).await;
+    claim(dex, &deployer, &key).await;
+
+    // The PMP's account can be gone while its residual transfer is still in
+    // flight, so "the market disappeared" proves nothing on its own. This
+    // barrier waits for the money: it re-snapshots with the market declared
+    // dead and holds until conservation against `s6` closes exactly.
+    invariant::await_quiescence(
+        &r,
+        &tracked,
+        Phase::AfterClaims { pmp: &pmp_addr, residual_to: &deployer.note.address, baseline: &s6 },
+    )
+    .await
+    .expect("claims quiescence");
+
+    // Only now, with the account confirmed gone and its residual confirmed
+    // delivered. Declaring it earlier would drop the market out of the tracked
+    // sum while it still held money, and conservation would "pass".
+    mark_pmp_self_destructed(&mut tracked, &pmp_addr, &deployer.note.address);
+
+    let s7 = invariant::snapshot(&r, &tracked).await.expect("sum snapshot after claims");
+    invariant::assert_conserved(&s6, &s7, &ExternalDelta::none());
+
+    // Hand the notes back only after the assertions have run: a release
+    // rewrites the note's ledger entry, and a note that fails its sweep is
+    // quarantined rather than silently reused.
+    buyer.release_clean(&r).await.expect("release the buyer note");
+    seller.release_clean(&r).await.expect("release the seller note");
+    deployer.release_clean(&r).await.expect("release the deployer note");
+}
+
+// ---------------------------------------------------------------------------
+// Tracked-set transitions
+// ---------------------------------------------------------------------------
+
+/// Declare `ob`'s protocol fees forwarded to RootPN and its account gone.
+/// Called only once the book has reported its shutdown complete — see the call
+/// site for why the ordering matters.
+fn mark_ob_drained(tracked: &mut TrackedContracts, ob: &str) {
+    let entry = tracked
+        .order_books
+        .iter_mut()
+        .find(|o| o.addr == ob)
+        .unwrap_or_else(|| panic!("order book {ob} is not in the tracked set"));
+    entry.state = ObState::Drained;
+}
+
+/// Declare `pmp` self-destructed, with its residual delivered to
+/// `residual_to`. The recipient has to be tracked as well, or the money really
+/// does leave the observed set.
+fn mark_pmp_self_destructed(tracked: &mut TrackedContracts, pmp: &str, residual_to: &str) {
+    let entry = tracked
+        .pmps
+        .iter_mut()
+        .find(|p| p.addr == pmp)
+        .unwrap_or_else(|| panic!("PMP {pmp} is not in the tracked set"));
+    entry.state = PmpState::SelfDestructed { residual_to: residual_to.to_string() };
+}
+
+/// What the deploy moves physically: the deployer note pays the oracle fee and
+/// the network fee in ECC SHELL, the oracle receives the first, the market
+/// receives the second, and the event list is left untouched. Stated as a
+/// closed set so it sums to zero — an expectation that does not is rejected as
+/// a bug in the test rather than compared account by account.
+fn expected_deploy_delta(
+    deployer: &LeasedPn,
+    ev: &OracleEventCtx,
+    pmp_addr: &str,
+) -> ExpectedPhysDelta {
+    BTreeMap::from([
+        (
+            (deployer.note.address.clone(), CURRENCY_ID_SHELL),
+            -signed(ORACLE_FEE + NETWORK_FEE_AMOUNT),
+        ),
+        ((ev.oracle_address.clone(), CURRENCY_ID_SHELL), signed(ORACLE_FEE)),
+        ((ev.el_address.clone(), CURRENCY_ID_SHELL), 0),
+        ((pmp_addr.to_string(), CURRENCY_ID_SHELL), signed(NETWORK_FEE_AMOUNT)),
+    ])
+}
+
+fn signed(v: u128) -> i128 {
+    i128::try_from(v).unwrap_or_else(|_| panic!("amount {v} does not fit in i128"))
+}
+
+// ---------------------------------------------------------------------------
+// Chain operations
+// ---------------------------------------------------------------------------
+
+/// One trade: the seller rests a limit sell, the buyer crosses it at the same
+/// price. The maker has to be on the book before the taker arrives, or the buy
+/// rests instead of matching and the trade never happens.
+///
+/// `coid_base` comes from the ledger's nonce counter rather than the clock:
+/// client order ids are unique per note only while the order is live, and a
+/// nonce cannot collide with a concurrent run the way a same-second timestamp
+/// can.
+async fn place_and_match(
+    dex: &Dex,
+    buyer: &LeasedPn,
+    seller: &LeasedPn,
+    key: &ParamsOfStakeKey,
+    ob_addr: &str,
+    coid_base: u128,
+) {
+    let sell_coid = coid_base;
+    let buy_coid = coid_base + 1;
+
+    place_limit(dex, seller, key, WINNING_OUTCOME, false, ORDER_PRICE_BPS, ORDER_AMOUNT, sell_coid)
+        .await;
+    wait_owner_order(dex, ob_addr, &seller.note.dih_dec, sell_coid, true).await;
+
+    place_limit(dex, buyer, key, WINNING_OUTCOME, true, ORDER_PRICE_BPS, ORDER_AMOUNT, buy_coid)
+        .await;
+    // Gone from the owner index on both sides is what proves a fill rather
+    // than two orders resting past each other.
+    wait_owner_order(dex, ob_addr, &seller.note.dih_dec, sell_coid, false).await;
+    wait_owner_order(dex, ob_addr, &buyer.note.dih_dec, buy_coid, false).await;
+}
+
+/// Claim the note's winnings. Accepted only once the order book has finished
+/// draining, and it is what decays the market's winning pool toward the
+/// threshold at which it closes itself.
+async fn claim(dex: &Dex, note: &LeasedPn, key: &ParamsOfStakeKey) {
+    dex.claim(&note.note.address, key.clone(), Signer::Keys { keys: note.note.keys.clone() })
+        .await
+        .expect("claim");
+    wait_not_busy(dex, &note.note.address, "claim").await;
+}
+
+// ---------------------------------------------------------------------------
+// Waiting
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Baseline readers
+// ---------------------------------------------------------------------------
+
+/// The market's creator fee, which `resolve` computes from the live pools.
+async fn read_creator_fee(dex: &Dex, pmp_addr: &str) -> u128 {
+    dex.get_pmp_details(pmp_addr).await.expect("pmp details").creator_fee
+}
+
+/// A note's free NACKL balance, read through the same function the resolve
+/// barrier reads it with — one implementation of "the note's balance", so the
+/// baseline and the equality asserted against it cannot drift apart.
+async fn pn_balance(r: &ChainReader, pn_address: &str) -> u128 {
+    invariant::pn_balance_opt(r, pn_address, TOKEN_TYPE_NACKL)
+        .await
+        .expect("read note balance")
+        .expect("the note must exist on chain to baseline its balance")
+}
+
+/// RootPN's accrued NACKL protocol fee, where the order book's fees land once
+/// it drains. Same function the resolve barrier uses, for the same reason as
+/// [`pn_balance`].
+async fn root_pn_protocol_fee(r: &ChainReader) -> u128 {
+    invariant::protocol_fee(r, RootPn::DEFAULT_ADDRESS, TOKEN_TYPE_NACKL)
+        .await
+        .expect("read RootPN protocol fee")
+}
+
+/// Fees the order book has taken and not yet handed over. Meaningful only
+/// before the drain, which forwards them and zeroes the counter.
+async fn ob_total_protocol_fees(dex: &Dex, ob_addr: &str) -> u128 {
+    dex.get_order_book_details(ob_addr).await.expect("order book details").total_protocol_fees
+}
+
+/// A note's outcome-token holdings for this scenario's market, indexed by
+/// outcome id. Empty when the note holds no stake record yet.
+///
+/// `_stakes` is keyed by a hash of the market identity that the client cannot
+/// cheaply recompute, so this leans on the scenario's own precondition: each
+/// rented note takes part in exactly one market, hence at most one record.
+/// More than one means the note came out of the pool already staked somewhere
+/// else, and picking a record would be a coin flip — so it fails instead of
+/// guessing.
+/// A split mints tokens of *every* outcome, so both have to grow. The exact
+/// amounts are the contract's own basket arithmetic (`t = collateral / Q`,
+/// `t * u_k` per outcome, with the remainder refunded), which this test
+/// deliberately does not recompute — restating that formula here would assert
+/// the implementation against itself, while the exact money is already covered
+/// by the conservation check.
+fn assert_split_minted(role: &str, addr: &str, before: &[u128], after: &[u128]) {
+    for outcome in [WINNING_OUTCOME, LOSING_OUTCOME] {
+        assert!(
+            at(after, outcome) > at(before, outcome),
+            "{role} note {addr} holds no more outcome-{outcome} tokens than before the split \
+             ({} -> {}) — `splitFullSet` never took effect",
+            at(before, outcome),
+            at(after, outcome)
+        );
+    }
+}

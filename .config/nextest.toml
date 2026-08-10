@@ -44,6 +44,7 @@ test-group = 'serial-inference-reconciler'
 serial-reprojection = { max-threads = 1 }
 serial-capture-cursor = { max-threads = 1 }
 serial-inference-reconciler = { max-threads = 1 }
+serial-e2e-shared = { max-threads = 1 }
 
 # Profile for the Woodpecker e2e run (.woodpecker/e2e.yml) against a live
 # ephemeral network. The chain client has no per-call timeout, so if the network
@@ -52,3 +53,44 @@ serial-inference-reconciler = { max-threads = 1 }
 # of hanging for hours. Inherits the default profile's overrides + test-groups.
 [profile.ci-e2e]
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# Most of this suite is bounded by on-chain windows it sleeps through, not by
+# anything it competes for: every test picks its own note out of the pool and
+# builds its own market, so run in parallel they mostly wait side by side
+# instead of one after another. The exceptions are collected here and pinned to
+# one at a time:
+#
+#   * `e2e_inference`, `e2e_inference_clob` and `e2e_register_account` all take
+#     the SAME note. A note serialises its own operations through `_busy` and
+#     rejects a repeated message body outright, so two of these at once would
+#     have one of them silently dropped;
+#   * the trader-path binaries read and write the shared test database;
+#   * everything that deploys a market sends an external `deployOracle` to the
+#     ONE `RootOracle` the whole stand shares. An external message carries a
+#     `timestamp` the contract compares against the last it accepted, so two
+#     arriving out of order leave the older one rejected with exit_code 52,
+#     "Replay protection exception". They do not have to collide inside a
+#     millisecond; arriving in the wrong order is enough.
+#
+# Everything outside this group holds a note nobody else does, touches no
+# database and deploys no oracle, so it needs no help. The group only
+# constrains this suite — it is the reason `--test-threads` above 1 is safe
+# here at all.
+[[profile.ci-e2e.overrides]]
+filter = '''
+    binary(e2e_inference) | binary(e2e_inference_clob) | binary(e2e_register_account)
+  | binary(e2e_batch_orders) | binary(e2e_buy_full_set) | binary(e2e_cancel_batch_orders)
+  | binary(e2e_cancel_order) | binary(e2e_order)
+'''
+test-group = 'serial-e2e-shared'
+
+
+
+
+# The sdk-e2e profile (used by the sdk workspace's proof/acceptance suites)
+# lives in sdk/.config/nextest.toml, not here: sdk/ is a separate Cargo
+# workspace with its own root, and nextest auto-discovers config relative to
+# the workspace being run, not the invoking directory. Loading this file's
+# `[[profile.default.overrides]]` against the sdk workspace is a hard error —
+# they name binaries (`reprojection`, `inference_orders_repo`, etc.) that only
+# exist in this (root) workspace.

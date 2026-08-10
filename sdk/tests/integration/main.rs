@@ -13,16 +13,90 @@
 //! - `flows` — multi-step user flows (recovery, gas top-up,
 //!   change-owner+stake).
 //! - `multitoken` — one PN per token type (NACKL/SHELL/USDC).
+//! - `proof_money` — one market's whole lifecycle against a from-scratch local
+//!   stand, with an exact per-currency conservation assertion after every
+//!   phase.
+//! - `impostor_calls` — the protocol's own internal vocabulary spoken by a
+//!   stranger: six calls a market's parts make to each other, every one of
+//!   them reachable from outside and every one of them guarded.
+//! - `ledger_race` — hermetic multiprocess contention on the shared ledger:
+//!   real OS processes rent/release/quarantine the same note pool
+//!   concurrently, and a worker from a superseded generation gets
+//!   `StaleRun`. No chain, not `#[ignore]`d — runs on every PR.
+//! - `book_segments` — orders that would cross kept apart by epoch and by
+//!   outcome, and the rules `placeBatch` enforces on the two lists it takes.
+//! - `coupon_debt` — the free coupon a broke note can mint, the debt it comes
+//!   with, and both of them across three markets.
+//! - `event_rejects` — the four ways a market is refused by the oracle it
+//!   named, and the two places the fee ends up depending on which of them
+//!   refused it.
+//! - `exit_gates` — the six ways out of a market, all barred while any order
+//!   of the note's is still resting, and the two basket sizes a market
+//!   refuses outright.
+//! - `forfeit_close` — a market that resolves to outcome 1 rather than 0, and
+//!   the three stakes walked away from instead of claimed, the last of which
+//!   closes it.
+//! - `market_clock` — the other side of every deadline a market has: a stake
+//!   after the window, an order after the book closed, a claim before the
+//!   resolve and one after it has already been paid.
+//! - `mm_cycle` — a maker's whole sequence: quote both sides in one batch,
+//!   get taken on part of it, cancel by name and then wholesale, merge the
+//!   inventory back, and settle.
+//! - `multi_market` — one note staking and quoting in two markets at once:
+//!   the order ids that collide, the locks that must not, and the claim gate
+//!   that counts one market's orders rather than the note's.
+//! - `oracle_admin` — an oracle's own housekeeping: lists beyond the first,
+//!   events published and retracted, and the owner check on each of them.
+//! - `oracle_quorum` — a market answering to three oracles: what one vote
+//!   cannot do, what a repeated one does not add, and what a changed one
+//!   moves.
+//! - `order_refusals` — every order that must not be placed, sorted by which
+//!   of the two layers refuses it: the note, which never dispatches it, or
+//!   the book, which sends it back.
+//! - `parallel_setup` — two market setups against a live chain, run as a
+//!   pair, proving each side takes a different note, derives a different
+//!   nonce, and lands on a different market address.
+//!
+//! - `replay` — the same signed message sent again, which no ordinary SDK
+//!   call can do because each builds a fresh one.
+//! - `usdc_market` — a whole market denominated in a six-decimal token, and
+//!   the fill so small the taker fee floors to nothing inside it.
 //!
 //! Each `mod` declaration here pulls in `tests/integration/<name>.rs` (or
 //! `tests/integration/<name>/mod.rs` for the multi-file `common` module).
 
+mod book_segments;
+mod bounce_deploy;
+mod bounce_recovery;
+mod cancelled_event;
 mod common;
+mod coupon_debt;
 mod discovery;
+mod event_rejects;
+mod exit_gates;
 mod flows;
+mod forfeit_close;
 mod history;
+mod impostor_calls;
+mod key_rotation;
+mod ledger_race;
+mod losing_claim;
+mod market_clock;
+mod market_orders;
+mod matching_ladder;
+mod mm_cycle;
+mod multi_market;
 mod multitoken;
 mod oracle;
+mod oracle_admin;
+mod oracle_quorum;
 mod order_book;
-mod pmp;
-mod pn_basic;
+mod order_refusals;
+mod parallel_setup;
+mod price_above_par;
+mod proof_money;
+mod replay;
+mod resting_orders;
+mod shutdown_orders;
+mod usdc_market;
+mod usdc_release;

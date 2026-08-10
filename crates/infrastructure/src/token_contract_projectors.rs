@@ -38,6 +38,7 @@ pub async fn project_token_contract_event(
         "StreamFunded" => apply_stream_funded(tx, event, node).await,
         "StreamOpened" => apply_stream_opened(tx, event, node).await,
         "TickFinalized" => apply_tick_finalized(tx, event, node).await,
+        "TicksClaimed" => apply_ticks_claimed(tx, event, node).await,
         "StreamStopped" => apply_close(tx, node, "STOPPED", true).await,
         "DisputeResolved" => apply_close(tx, node, "DISPUTE_RESOLVED", false).await,
         "StreamReclaimed" => apply_close(tx, node, "RECLAIMED", false).await,
@@ -46,7 +47,12 @@ pub async fn project_token_contract_event(
         "ProbeBurned" => apply_terminal_close(tx, node, "PROBE_BURNED").await,
         // Seller bond / probe accept / withdrawal carry no deal-level state the
         // SETTLEMENT read-model needs; the skeleton seed already recorded the deal.
-        "SellerBondFunded" | "ProbeAccepted" | "ShellWithdrawn" => Ok(ProjectionOutcome::Applied),
+        // `BuyerBondFunded` is the counterpart of `SellerBondFunded` — v4.0.35 made
+        // the bond two-sided — and belongs here for the same reason. `EndpointSet`
+        // carries the buyer's endpoint as ciphertext only the two parties can read, so
+        // there is nothing in it a read model could serve.
+        "SellerBondFunded" | "BuyerBondFunded" | "ProbeAccepted" | "ShellWithdrawn"
+        | "EndpointSet" => Ok(ProjectionOutcome::Applied),
         _ => Ok(ProjectionOutcome::Unknown),
     }
 }
@@ -119,6 +125,44 @@ async fn apply_stream_opened(
     .execute(&mut **tx)
     .await
     .context("apply StreamOpened")?;
+    Ok(ProjectionOutcome::Applied)
+}
+
+/// The seller's running claim against the deal, reported by `claimTokens`.
+///
+/// Distinct from [`apply_tick_finalized`], which records the settled figure at a
+/// weekly boundary: this is the position between boundaries, and a subscription
+/// week is long enough that a deal would otherwise look motionless for days.
+///
+/// `greatest` rather than a plain assignment: both figures are cumulative on
+/// chain, so a replayed or out-of-order event must not walk them back. That also
+/// makes the write idempotent without a per-event key of its own.
+async fn apply_ticks_claimed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let tc = node.src.as_deref().context("TicksClaimed: src missing")?;
+    let trusted = uint_field_to_decimal(&event.value, "trusted")?;
+    let claimed = uint_field_to_decimal(&event.value, "claimed")?;
+    let chain_order = node_chain_order(node, "TicksClaimed")?;
+
+    sqlx::query(
+        r#"update inference_deals
+              set trusted_ticks = greatest(coalesce(trusted_ticks, 0), $2::numeric),
+                  claimed_ticks = greatest(coalesce(claimed_ticks, 0), $3::numeric),
+                  last_chain_order = greatest(last_chain_order, $4),
+                  updated_at = now()
+            where token_contract_address = $1"#,
+    )
+    .bind(tc)
+    .bind(&trusted)
+    .bind(&claimed)
+    .bind(&chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("inference TicksClaimed update")?;
+
     Ok(ProjectionOutcome::Applied)
 }
 

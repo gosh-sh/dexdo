@@ -186,12 +186,12 @@ pub async fn wait_sell_offer_rested(
         // The TC accepted `postFromNote` and forwarded to the book, but no order
         // rests: the book never answered, or it refused and `onSellClosed` has
         // not landed yet.
-        Ok(o) if o.offer_posted => format!("offerPosted=true closing={}", o.closing),
+        Ok(o) if o.offer_posted => "offerPosted=true".to_string(),
         // Either `postFromNote` never took effect — its canonical-note guard
         // (`_sellerNote` vs the PN code hash pinned in the TC) rejects a note
         // built from different PrivateNote code — or the book refused the terms
         // and `onSellClosed` already cleared the latch.
-        Ok(o) => format!("offerPosted=false closing={}", o.closing),
+        Ok(_) => "offerPosted=false".to_string(),
         // The note addressed a TC that is not the one deployed here.
         Err(err) => format!("getOffer unreadable: {err:?}"),
     };
@@ -213,7 +213,7 @@ pub struct TokenDeal {
 /// canonical SuperRoot getter. This is the value the book pins as the deal
 /// contract's `_rootModelAddress` when it recomputes
 /// `_tokenContractAddr(sellerPubkey, nonce)`, so the TC must be deployed here.
-async fn canonical_root_model_address(
+pub async fn canonical_root_model_address(
     ctx: Arc<ClientContext>,
     seller_pubkey: &str,
 ) -> anyhow::Result<String> {
@@ -226,7 +226,21 @@ async fn canonical_root_model_address(
         .map_err(|e| anyhow!("getRootModelAddress({seller_pubkey}): {e:?}"))
 }
 
-/// Deploy a standalone `TokenContract` and return its address.
+/// A `TokenContract` deploy worked out but not yet sent: the address it will
+/// land on, and the two halves of the message that puts it there.
+///
+/// The address is derivable before anything is on chain, which is the whole
+/// point — a cross-dApp deploy only activates on an address that ALREADY holds
+/// SHELL, so whoever is paying has to know where to send it first.
+pub struct TokenContractDeploy {
+    pub address: String,
+    deploy_set: DeploySet,
+    ctor: CallSet,
+    keys: KeyPair,
+}
+
+/// Work out where a `TokenContract` for `(seller pubkey, nonce)` will land and
+/// what deploys it, without sending anything.
 ///
 /// `seller_pubkey_hex` is the seller note's owner pubkey (hex, with or without
 /// `0x`); it becomes the `_sellerPubkey` static so the note's key can sign the
@@ -234,14 +248,14 @@ async fn canonical_root_model_address(
 /// canonical SuperRoot (not a placeholder): the book's `placeSellOffer` recomputes
 /// the TC address from `(sellerPubkey, nonce)` pinned to that RootModel, so the
 /// deployed TC must sit at the matching address or the offer reverts.
-pub async fn deploy_token_contract(
+pub async fn plan_token_contract(
     ctx: Arc<ClientContext>,
     seller_pubkey_hex: &str,
     seller_note_addr: &str,
     nonce: u64,
     deal: TokenDeal,
     deploy_keys: KeyPair,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<TokenContractDeploy> {
     let pubkey = format!("0x{}", seller_pubkey_hex.trim_start_matches("0x"));
     let abi = Abi::Json(TOKEN_CONTRACT_ABI.to_string());
     let root_model_addr = canonical_root_model_address(ctx.clone(), &pubkey).await?;
@@ -277,8 +291,8 @@ pub async fn deploy_token_contract(
         })),
     };
 
-    // 1. Derive the deterministic deploy address (address: None) so we can fund
-    //    it before the constructor runs.
+    // Derive the deterministic deploy address (address: None) so whoever pays
+    // for the account can fund it before the constructor runs.
     let encoded = encode_message(
         ctx.clone(),
         ParamsOfEncodeMessage {
@@ -293,20 +307,70 @@ pub async fn deploy_token_contract(
     )
     .await
     .map_err(|e| anyhow!("encode TokenContract deploy: {e:?}"))?;
-    let address = encoded.address;
 
-    // 2-3. Create + fund the address under its own dApp (self-rooted). Native
-    //    value would not cross the dApp boundary, so the giver credit goes as
-    //    ECC SHELL with flag 16 (lands as native gas). Shellnet's giver can drop
-    //    a message under load (BM ~3 RPS), so re-send until the account exists.
-    let tc = TokenContract::new(ctx.clone(), self_rooted_contract_params(address.clone()));
+    Ok(TokenContractDeploy { address: encoded.address, deploy_set, ctor, keys: deploy_keys })
+}
+
+impl TokenContractDeploy {
+    /// Send the constructor to an address that is already funded, and wait for
+    /// the account to come alive.
+    ///
+    /// Nothing here pays for the account: the caller has already put SHELL on
+    /// the address by whatever route it chose. If none arrived, the deploy
+    /// message has nothing to activate and this reports the wait that failed.
+    pub async fn send(self, ctx: Arc<ClientContext>) -> anyhow::Result<String> {
+        let tc = TokenContract::new(ctx, self_rooted_contract_params(self.address.clone()));
+        tc.send_message(Some(self.ctor), Some(self.deploy_set), Signer::Keys { keys: self.keys })
+            .await
+            .map_err(|e| anyhow!("deploy TokenContract {}: {e:?}", self.address))?;
+        tc.wait_account(ParamsOfWaitAccount {
+            status: AccountStatus::Active,
+            attempts: Some(40),
+            attempts_timeout: Some(2_000),
+        })
+        .await
+        .map_err(|e| anyhow!("wait TokenContract {} active: {e:?}", self.address))?;
+        Ok(self.address)
+    }
+}
+
+/// Deploy a standalone `TokenContract` off the shared giver and return its
+/// address.
+///
+/// This is the ordinary route for a test that just needs a deal contract to
+/// exist. The note-funded route the contracts are actually designed around —
+/// `PrivateNote.fundDeployShell` — is exercised on its own in
+/// `e2e_inference_funding`.
+pub async fn deploy_token_contract(
+    ctx: Arc<ClientContext>,
+    seller_pubkey_hex: &str,
+    seller_note_addr: &str,
+    nonce: u64,
+    deal: TokenDeal,
+    deploy_keys: KeyPair,
+) -> anyhow::Result<String> {
+    let plan = plan_token_contract(
+        ctx.clone(),
+        seller_pubkey_hex,
+        seller_note_addr,
+        nonce,
+        deal,
+        deploy_keys,
+    )
+    .await?;
+
+    // Create + fund the address under its own dApp (self-rooted). Native value
+    // would not cross the dApp boundary, so the giver credit goes as ECC SHELL
+    // with flag 16 (lands as native gas). Shellnet's giver can drop a message
+    // under load (BM ~3 RPS), so re-send until the account exists.
+    let tc = TokenContract::new(ctx.clone(), self_rooted_contract_params(plan.address.clone()));
     let mut landed = false;
     for attempt in 1..=3 {
         let mut ecc = HashMap::new();
         ecc.insert(SHELL_CURRENCY_ID, CREATION_SHELL);
-        send_currency_with_flag_from_default_giver(ctx.clone(), &address, 0, ecc, 16)
+        send_currency_with_flag_from_default_giver(ctx.clone(), &plan.address, 0, ecc, 16)
             .await
-            .map_err(|e| anyhow!("giver fund TokenContract {address}: {e:?}"))?;
+            .map_err(|e| anyhow!("giver fund TokenContract {}: {e:?}", plan.address))?;
         match tc
             .wait_account(ParamsOfWaitAccount {
                 status: AccountStatus::Uninit,
@@ -327,24 +391,10 @@ pub async fn deploy_token_contract(
         }
     }
     if !landed {
-        return Err(anyhow!("giver credit never landed on {address} after retries"));
+        return Err(anyhow!("giver credit never landed on {} after retries", plan.address));
     }
 
-    // 4. Deploy the constructor (same precomputed address + deploy_set).
-    tc.send_message(Some(ctor), Some(deploy_set), Signer::Keys { keys: deploy_keys })
-        .await
-        .map_err(|e| anyhow!("deploy TokenContract {address}: {e:?}"))?;
-
-    // 5. Wait until it is Active before a sell offer references it.
-    tc.wait_account(ParamsOfWaitAccount {
-        status: AccountStatus::Active,
-        attempts: Some(40),
-        attempts_timeout: Some(2_000),
-    })
-    .await
-    .map_err(|e| anyhow!("wait TokenContract {address} active: {e:?}"))?;
-
-    Ok(address)
+    plan.send(ctx).await
 }
 
 /// Fetch the routing ids of the external events an `InferenceOrderBook` emitted.

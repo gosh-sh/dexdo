@@ -30,6 +30,7 @@ use crate::common::pn::ensure_root_pn_funded;
 use crate::common::voucher::make_voucher_proof;
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_aggregated_balance_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -118,6 +119,7 @@ async fn test_aggregated_balance_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_discover_my_notes_via_dex() {
     let context = create_context();
     let dex = create_dex();
@@ -183,6 +185,7 @@ async fn test_discover_my_notes_via_dex() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live network and a funded giver: mints its own notes from vouchers instead of renting from the stand pool"]
 async fn test_discover_10_notes_some_withdrawn() {
     let context = create_context();
     let dex = create_dex();

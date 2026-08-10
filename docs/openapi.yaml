@@ -317,7 +317,7 @@ paths:
           - 'null'
       - name: status
         in: query
-        description: 'Comma-separated: LIVE, FILLED, CANCELLED. Default: all. LIVE means currently resting.'
+        description: 'Comma-separated: LIVE, FILLED, CANCELLED, EXPIRED. Default: all. LIVE means currently resting; EXPIRED means the book dropped it once its deadline passed.'
         required: false
         schema:
           type:
@@ -1580,6 +1580,7 @@ components:
       - LIVE
       - FILLED
       - CANCELLED
+      - EXPIRED
     InferenceOrdersResponse:
       type: object
       required:
