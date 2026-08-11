@@ -70,18 +70,51 @@ const STAND_NOTES_SPEC: &str = include_str!("../../../tests/e2e/dex_test_notes.s
 /// trusting the arithmetic.
 const API_NOTES_FOR_ONE_EACH: u64 = 19;
 
+/// The same arithmetic for the SHELL pool, whose highest index is also 18
+/// (`e2e_inference_match` 6, `e2e_inference` and `e2e_inference_clob` 9,
+/// `e2e_inference_orders` 12, `e2e_inference_funding` 18 — the 9 is shared on
+/// purpose, those two binaries sit in `serial-e2e-shared` for it).
+const INFERENCE_NOTES_FOR_ONE_EACH: u64 = 19;
+
+/// The token type these notes must be deposited in. `CURRENCIES_ID_SHELL` in
+/// `contracts/dex/modifiers/modifiers.sol`, and not a detail the count can make
+/// up for: an inference buy is paid straight out of
+/// `_balance[CURRENCIES_ID_SHELL]` (`PrivateNote.sol`,
+/// `require(_balance[CURRENCIES_ID_SHELL] >= escrow, ERR_LOW_VALUE)`), only the
+/// constructor ever writes that ledger from nothing, so a group baked in NACKL
+/// would deploy nineteen notes that can never place a single buy.
+const SHELL_TOKEN_TYPE: u64 = 2;
+
+/// Both pools, not just the api one.
+///
+/// The `PN-API` half of this has been pinned since the spec existed; the
+/// `PN-INF` half was the hole. The spec shipped five groups and none of them
+/// was `PN-INF`, this test looked only at `API_PROFILE`, and so `cargo test`
+/// was green while all six inference binaries died at load — "hold no `PN-INF`
+/// note … this suite owns none of the 83 row(s)" — the first time the stand
+/// actually ran them. A profile this suite loads and nobody pins is a stand
+/// failure waiting for whatever unrelated thing was masking it to be fixed.
 #[test]
 fn the_stand_spec_gives_every_test_here_a_note_of_its_own() {
     let groups: Vec<serde_json::Value> = serde_json::from_str(STAND_NOTES_SPEC).unwrap();
-    let declared = groups
-        .iter()
-        .find(|g| g["profile"] == API_PROFILE)
-        .map(|g| g["count"].as_u64().unwrap())
-        .unwrap_or(0);
-    assert!(
-        declared >= API_NOTES_FOR_ONE_EACH,
-        "the stand spec declares {declared} `{API_PROFILE}` note(s); \
-         {API_NOTES_FOR_ONE_EACH} keep one per test"
+    let group = |profile: &str| groups.iter().find(|g| g["profile"] == profile);
+
+    for (profile, needed) in
+        [(API_PROFILE, API_NOTES_FOR_ONE_EACH), (INFERENCE_PROFILE, INFERENCE_NOTES_FOR_ONE_EACH)]
+    {
+        let declared = group(profile).map(|g| g["count"].as_u64().unwrap()).unwrap_or(0);
+        assert!(
+            declared >= needed,
+            "the stand spec declares {declared} `{profile}` note(s); {needed} keep one per test"
+        );
+    }
+
+    let token_type = group(INFERENCE_PROFILE).and_then(|g| g["tokenType"].as_u64());
+    assert_eq!(
+        token_type,
+        Some(SHELL_TOKEN_TYPE),
+        "the stand spec bakes `{INFERENCE_PROFILE}` in token type {token_type:?}, not SHELL \
+         ({SHELL_TOKEN_TYPE}) — the count alone does not make those notes usable"
     );
 }
 

@@ -3,5 +3,6 @@
   {"profile": "PN-DEP",   "count": 27, "tokenType": 1, "value": 1000000000000},
   {"profile": "PN-TRD",   "count": 32, "tokenType": 1, "value": 1000000000000},
   {"profile": "PN-SHELL", "count": 1,  "tokenType": 2, "value": 1000000000000},
-  {"profile": "PN-USDC",  "count": 4,  "tokenType": 3, "value": 1000000000}
+  {"profile": "PN-USDC",  "count": 4,  "tokenType": 3, "value": 1000000000},
+  {"profile": "PN-INF",   "count": 19, "tokenType": 2, "value": 1000000000000}
 ]

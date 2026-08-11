@@ -35,10 +35,19 @@ decided by the file itself:
 - **Rows carry a `profile`** — the pool was baked from a
   `DEX_TEST_NOTES_SPEC`, whose groups differ in token type, balance and ECC
   seeding. Position then means nothing and `E2E_SDK_TAIL_COUNT` is ignored:
-  each suite takes the rows labelled for it and nothing else. `PN-API` is the
-  api-e2e suite's label; `PN-DEP`, `PN-TRD`, `PN-CONS`, `PN-CPN`, `PN-SHELL`,
-  `PN-USDC`, `PN-INF` and `PN-ROT` are the sdk harness's roles, which it also
-  matches against what a scenario asks for.
+  each suite takes the rows labelled for it and nothing else. `PN-API` and
+  `PN-INF` are the api-e2e suite's labels; `PN-DEP`, `PN-TRD`, `PN-CONS`,
+  `PN-CPN`, `PN-SHELL`, `PN-USDC` and `PN-ROT` are the sdk harness's roles,
+  which it also matches against what a scenario asks for.
+
+`PN-INF` is the one label both sides recognise, so it is worth being explicit
+about who owns it. The api-e2e inference binaries rent it
+(`TestPnPool::load_inference()`); the sdk harness knows the name
+(`PnProfile::Inf`) but no scenario of its own asks for it, so nothing there
+takes those rows today. That is what keeps the split holding — not the labels
+being disjoint. A future sdk scenario that rents `Inf` would be sharing a pool
+with the api suite, which indexes its rows by position and consults no ledger,
+so either give it a label of its own or size the group for both.
 
 A suite that finds no note of its own in a profiled pool fails at load with
 the pool's label census, rather than running against notes baked for someone
