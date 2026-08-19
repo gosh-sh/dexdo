@@ -148,9 +148,9 @@ async fn main() -> anyhow::Result<()> {
         // the oldest retained event and re-ingest the whole window. Harmless
         // (`raw_events` dedups on `msg_id`) but never intended, so say so rather
         // than let it read as an ordinary cold start.
-        Some(_) => warn!(
-            "stored capture cursor is empty; restarting from the earliest retained event"
-        ),
+        Some(_) => {
+            warn!("stored capture cursor is empty; restarting from the earliest retained event")
+        }
         // Logged distinctly: rendering "no cursor" as `cursor=""` reads like a
         // stored position and hides that this is the cold-start path, which
         // starts from the oldest event the gateway still retains.
@@ -343,9 +343,8 @@ fn apply_ingest_filters(
     // shellnet both report it null on every edge), and it is not rendered by the
     // deploy templates, so it fails open and silently keeps everything.
     let before = edges.len();
-    edges.retain(|edge| {
-        edge.node.dst.as_deref().is_some_and(|dst| scoped_event_dsts.contains(dst))
-    });
+    edges
+        .retain(|edge| edge.node.dst.as_deref().is_some_and(|dst| scoped_event_dsts.contains(dst)));
     stats.out_of_scope += (before - edges.len()) as u64;
 
     // Scope to the DEXDO dapp: drop foreign chain traffic before decode.
@@ -388,14 +387,13 @@ async fn drain_events(
         let edges_seen = page.edges.len();
         stats.edges += edges_seen;
 
-        let (retained, filter_stats) =
-            apply_ingest_filters(
-                page.edges,
-                scoped_event_dsts,
-                dapp_id,
-                ignored_src,
-                ignored_event_dsts,
-            );
+        let (retained, filter_stats) = apply_ingest_filters(
+            page.edges,
+            scoped_event_dsts,
+            dapp_id,
+            ignored_src,
+            ignored_event_dsts,
+        );
         page.edges = retained;
         stats.ignored += filter_stats.ignored;
         stats.out_of_scope += filter_stats.out_of_scope;

@@ -138,8 +138,8 @@ impl GraphqlClient {
             bail!("graphql returned http {status}: {}", truncate_for_log(&body));
         }
 
-        let response: GraphqlResponse<EventsData> = serde_json::from_str(&body)
-            .with_context(|| {
+        let response: GraphqlResponse<EventsData> =
+            serde_json::from_str(&body).with_context(|| {
                 format!("graphql response is not valid json: {}", truncate_for_log(&body))
             })?;
 
