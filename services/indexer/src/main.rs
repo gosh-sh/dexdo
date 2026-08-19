@@ -208,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
                         edges = stats.edges,
                         ignored = stats.ignored,
                         out_of_scope = stats.out_of_scope,
+                        dst_missing = stats.dst_missing,
                         foreign_skipped = stats.foreign_skipped,
                         inserted = stats.inserted,
                         skipped = stats.skipped,
@@ -218,6 +219,15 @@ async fn main() -> anyhow::Result<()> {
                         cursor = cursor.as_deref().unwrap_or(""),
                         "capture tick"
                     );
+                    if stats.dst_missing > 0 {
+                        warn!(
+                            dst_missing = stats.dst_missing,
+                            edges = stats.edges,
+                            "graphql edges arrived with no `dst` and could not be scoped; if this \
+                             is nonzero the gateway has stopped reporting the field and our own \
+                             events are being dropped"
+                        );
+                    }
                     if let Some(drop_rate) =
                         foreign_drop_warning(stats.edges, stats.foreign_skipped)
                     {
@@ -254,6 +264,7 @@ struct DrainStats {
     edges: usize,
     ignored: u64,
     out_of_scope: u64,
+    dst_missing: u64,
     foreign_skipped: u64,
     inserted: u64,
     skipped: u64,
@@ -267,6 +278,7 @@ struct DrainStats {
 struct FilterStats {
     ignored: u64,
     out_of_scope: u64,
+    dst_missing: u64,
     foreign_skipped: u64,
     type_ignored: u64,
 }
@@ -343,9 +355,20 @@ fn apply_ingest_filters(
     // shellnet both report it null on every edge), and it is not rendered by the
     // deploy templates, so it fails open and silently keeps everything.
     let before = edges.len();
-    edges
-        .retain(|edge| edge.node.dst.as_deref().is_some_and(|dst| scoped_event_dsts.contains(dst)));
+    let mut dst_missing = 0u64;
+    edges.retain(|edge| match edge.node.dst.as_deref() {
+        Some(dst) => scoped_event_dsts.contains(dst),
+        // Counted apart from ordinary foreign traffic. An external event without a
+        // `dst` should not exist, and if the gateway ever stops reporting the field
+        // — exactly what it already does with `src_dapp_id` — this filter would
+        // silently drop 100% of our own events. Losing them loudly is the point.
+        None => {
+            dst_missing += 1;
+            false
+        }
+    });
     stats.out_of_scope += (before - edges.len()) as u64;
+    stats.dst_missing += dst_missing;
 
     // Scope to the DEXDO dapp: drop foreign chain traffic before decode.
     // Inert when no dapp_id is configured.
@@ -397,6 +420,7 @@ async fn drain_events(
         page.edges = retained;
         stats.ignored += filter_stats.ignored;
         stats.out_of_scope += filter_stats.out_of_scope;
+        stats.dst_missing += filter_stats.dst_missing;
         stats.foreign_skipped += filter_stats.foreign_skipped;
         stats.type_ignored += filter_stats.type_ignored;
 
@@ -553,7 +577,10 @@ mod tests {
 
         assert_eq!(retained.len(), 1, "only the event our ABI declares survives");
         assert_eq!(retained[0].node.dst.as_deref(), Some(placed.as_str()));
-        // A missing dst is dropped too: every event we emit carries one.
+        // A missing dst is dropped too — every event we emit carries one — but it
+        // is counted apart so a gateway that stops reporting the field is loud
+        // rather than indistinguishable from ordinary foreign traffic.
         assert_eq!(stats.out_of_scope, 2);
+        assert_eq!(stats.dst_missing, 1);
     }
 }
