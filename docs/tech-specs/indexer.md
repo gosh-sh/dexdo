@@ -50,17 +50,31 @@ flowchart LR
 
 ## Ingestion
 
-The indexer follows a GraphQL message-edge stream. Every edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema. Two pre-decode filters can drop edges before they reach the decoder; both are outside the rebuild boundary by design (see [Pre-decode filters](#pre-decode-filters) below).
+The indexer follows a GraphQL message-edge stream. Every in-scope edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema. Three pre-decode filters can drop edges before they reach the decoder; all are outside the rebuild boundary by design (see [Pre-decode filters](#pre-decode-filters) below).
 
 ### Pre-decode filters
 
-Two filters run against the raw message edge — before any ABI decode — and drop matching edges entirely. The page cursor still advances past every dropped edge, so the indexer makes forward progress without storing or projecting them. Dropped edges do not produce a `raw_events` row and are outside the recovery boundary (they cannot be reprojected or rebuilt from `raw_events`).
+Three filters run against the raw message edge — before any ABI decode — and drop matching edges entirely. The page cursor still advances past every dropped edge, so the indexer makes forward progress without storing or projecting them. Dropped edges do not produce a `raw_events` row and are outside the recovery boundary (they cannot be reprojected or rebuilt from `raw_events`).
+
+Only the first **selects**; the other two subtract. That asymmetry is the point — on a shared chain a set of deny-lists cannot bound what is ingested.
+
+#### Ingest scope: emitted-event `dst` (not configurable)
+
+Capture keeps an edge only when its `dst` is the routing destination of an event our own contracts emit — `makeAddrExtern(EVENT_ID, 256)` for one of the ids in `config::SCOPED_EVENT_IDS` (84: 57 under `contracts/dex`, 27 under `contracts/airegistry`). Everything else is dropped before decode and counted as `out_of_scope`. `dst` is a 1:1 discriminator of event type readable from the message header, so this costs no decode. An edge with **no** `dst` is dropped too: every event we emit is routed to one.
+
+This filter is unconditional and has no config key, deliberately. It is the only thing bounding what the indexer stores, and the failure it prevents is silent: without it, an indexer on mainnet writes every external event any contract emits — measured at ~800/s, essentially none of it ours — into `raw_events` with a NULL `event_type`, where the projection loop can never drain it and the rows accumulate in `indexer_projection_backlog` forever.
+
+The id list is pinned by `crates/infrastructure/tests/ingest_scope.rs`, which re-derives it from the `makeAddrExtern` call sites under `contracts/**` on every run. It cannot be derived from the ABI bundle: the ABI carries the event's *signature-hash* id, which is a different number from the EVENT_ID constant that forms the `dst`.
+
+The list is load-bearing in both directions. An id missing from it drops one of our own events at ingest, and that loss is **not** recoverable by reprojection — `raw_events` never received the row and the gateway's event window is finite (~39h on mainnet, see [Cold start](#cold-start)). A stale id admits foreign traffic under an id we no longer emit. The pinning test fails on either.
 
 #### Scope filter: `indexer.dapp_id`
 
 `indexer.dapp_id` (optional string; omit or leave unset to disable) scopes ingestion to one DEXDO application. When set, only edges whose `src_dapp_id` matches the configured value are kept; edges with no `src_dapp_id` field are also kept (so a gateway that omits the field does not silently drop everything); edges with a mismatching `src_dapp_id` are dropped before decode. When unset (the local default), the filter is inert and every edge is processed. Each per-tick log line includes a `foreign_skipped` count of edges dropped by this filter, and any nonzero `foreign_skipped` emits a `warn!` with the tick drop rate because a correctly scoped single-dapp deployment should see effectively no foreign traffic.
 
 Setting `dapp_id` to an empty string is rejected at startup by `IndexerConfig::validate` (it would otherwise deserialize to `Some("")` and treat every edge with a real `src_dapp_id` as foreign); omit the key to disable scoping.
+
+**This filter is not the ingest-scope guarantee, and never was.** It is defence in depth on top of [Ingest scope](#ingest-scope-emitted-event-dst-not-configurable), for the case where a foreign contract emits an event whose `dst` collides with one of ours (matching is by `dst` alone and is not namespaced by contract or dapp). On its own it cannot bound ingestion, for two independent reasons: no gateway observed to date populates `src_dapp_id` — mainnet and shellnet both report it null on every edge — and the filter deliberately keeps null edges, so it fails open; and it is not rendered by `deploy/ansible/roles/dexdo/templates/indexer.yaml.j2`, so no deployed environment can set it today. Treat a nonzero `foreign_skipped` as informative rather than as evidence that scoping is working.
 
 #### No-op filter: `indexer.ignored_event_types`
 
@@ -80,11 +94,12 @@ Intended use: shed confirmed observability-only floods (e.g. `OrderBook.Queued`,
 
 ### Ingestion sequence per edge
 
-1. If `indexer.dapp_id` is set and the edge's `src_dapp_id` does not match (and is not absent), drop the edge. The page cursor still advances (step 4). `foreign_skipped` is incremented.
-2. If the edge's `dst` matches a configured `indexer.ignored_event_types` entry, drop the edge. The page cursor still advances (step 4). `type_ignored` is incremented.
-3. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). The decoder is **route-aware**: when an event id is ambiguous it resolves `event_type` by the message's `dst` address (the external `makeAddrExtern(EVENT_ID, 256)` in the message header) rather than a flat event-name scan. No loaded ABI currently collides — the `InferenceOrderBook` events carry an `Inference` prefix, so `InferenceOrderBook.InferenceOrderCancelled` no longer shares an event id with `OrderBook.OrderCancelled`, and every event resolves directly by its unique id. The decoder still does **not** assume event ids are globally unique: its id index tolerates collisions (one id may map to several `(contract, event)` entries), and any colliding pair would be disambiguated by a small `dst` route table. The two `OrderCancelled` dsts are pinned in that table defensively; each route records the event's expected id, so a decoded body whose own id does not match its route is left undecoded with a warning rather than mis-attributed. On success, store the decoded JSON payload alongside `event_type`.
-4. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches.
-5. After the page commits, persist the resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). The cursor tracks capture progress, not projection; a restart resumes capture from it while the projection loop independently drains whatever rows remain `processed_at NULL`.
+1. If the edge's `dst` is not one of the emitted-event destinations in `config::SCOPED_EVENT_IDS` — including when the edge carries no `dst` at all — drop the edge. The page cursor still advances (step 5). `out_of_scope` is incremented.
+2. If `indexer.dapp_id` is set and the edge's `src_dapp_id` does not match (and is not absent), drop the edge. The page cursor still advances (step 5). `foreign_skipped` is incremented.
+3. If the edge's `dst` matches a configured `indexer.ignored_event_types` entry, drop the edge. The page cursor still advances (step 5). `type_ignored` is incremented.
+4. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). The decoder is **route-aware**: when an event id is ambiguous it resolves `event_type` by the message's `dst` address (the external `makeAddrExtern(EVENT_ID, 256)` in the message header) rather than a flat event-name scan. No loaded ABI currently collides — the `InferenceOrderBook` events carry an `Inference` prefix, so `InferenceOrderBook.InferenceOrderCancelled` no longer shares an event id with `OrderBook.OrderCancelled`, and every event resolves directly by its unique id. The decoder still does **not** assume event ids are globally unique: its id index tolerates collisions (one id may map to several `(contract, event)` entries), and any colliding pair would be disambiguated by a small `dst` route table. The two `OrderCancelled` dsts are pinned in that table defensively; each route records the event's expected id, so a decoded body whose own id does not match its route is left undecoded with a warning rather than mis-attributed. On success, store the decoded JSON payload alongside `event_type`.
+5. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches.
+6. After the page commits, persist the resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). The cursor tracks capture progress, not projection; a restart resumes capture from it while the projection loop independently drains whatever rows remain `processed_at NULL`.
 
 ### Cold start
 

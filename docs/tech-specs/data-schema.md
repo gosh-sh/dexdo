@@ -47,7 +47,7 @@ Seeded values: `(1, NACKL, 9, ...)`, `(2, SHELL, 9, ...)`, `(3, USDC, 6, ...)`. 
 
 ### `raw_events`
 
-The append-only event log. Every message edge the indexer pulls from the GraphQL stream lands here, decoded or not, before any projector runs. It is the recovery boundary for the read-model: reprojection replays decoded but unprojected rows here, and downstream tables can always be rebuilt from this one plus a clean schema.
+The append-only event log. Every **in-scope** message edge the indexer pulls from the GraphQL stream lands here, decoded or not, before any projector runs. In-scope means the edge's `dst` is the routing destination of an event our own contracts emit; foreign chain traffic is dropped before decode and never reaches this table — see [Ingest scope](indexer.md#ingest-scope-emitted-event-dst-not-configurable). It is the recovery boundary for the read-model: reprojection replays decoded but unprojected rows here, and downstream tables can always be rebuilt from this one plus a clean schema.
 
 | Column | Type | Notes |
 | --- | --- | --- |

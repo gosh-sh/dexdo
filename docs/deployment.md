@@ -262,6 +262,11 @@ indexer only:
   Edges with no `src_dapp_id` are kept. Omit the key (or leave it commented) to
   disable scoping. An empty string is rejected at startup — it would otherwise
   deserialize to `Some("")` and drop every edge with a real `src_dapp_id`.
+  Leaving it unset does **not** widen what the indexer stores: ingestion is
+  scoped unconditionally by emitted-event `dst`, and this key only adds
+  defence in depth against a foreign contract emitting a colliding id. No
+  gateway observed to date populates `src_dapp_id`, so in practice the key is
+  inert — see [indexer.md](tech-specs/indexer.md#ingest-scope-emitted-event-dst-not-configurable).
 - `indexer.ignored_event_types` may list only known droppable no-op types
   (`OrderBook.Queued` / `FullyFilled` / `Rejected` / `CallbackBounced` and
   `PMP.StakeAccepted` / `PMP.MergeProcessed`). Each

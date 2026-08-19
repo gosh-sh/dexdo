@@ -489,6 +489,40 @@ pub fn event_type_dst(event_id: u32) -> String {
     format!(":{event_id:064x}")
 }
 
+/// Every EVENT_ID our contracts actually emit an external event to — the union of
+/// the `makeAddrExtern(<CONST>, bitCntAddress)` destinations under `contracts/dex`
+/// (57) and `contracts/airegistry` (27). This is the indexer's **ingest scope**:
+/// capture keeps an edge only when its `dst` is one of these, so foreign chain
+/// traffic never reaches decode or `raw_events`.
+///
+/// A scope filter is not optional on a shared chain. Every other ingest filter is a
+/// deny-list, so without this one an indexer on mainnet stores every external event
+/// any contract emits — measured at ~800/s, essentially none of it ours — each as a
+/// `raw_events` row with a NULL `event_type` that the projection loop can never
+/// drain. `indexer.dapp_id` was meant to serve this purpose and cannot: no gateway
+/// populates `src_dapp_id` (mainnet and shellnet both report it null on every edge)
+/// and the filter deliberately keeps null, so it fails open.
+///
+/// Ids, not names, because routing depends on the id alone — see
+/// `docs/contract-specs/dex-events-routing.md`. Declared here rather than derived
+/// from the ABI bundle because the ABI carries the *signature-hash* event id, which
+/// is a different number from the EVENT_ID constant that forms the `dst`.
+/// `tests/ingest_scope.rs` re-derives this set from the contract sources on every
+/// run, so a new or renumbered event fails there instead of being silently dropped.
+pub const SCOPED_EVENT_IDS: [u32; 84] = [
+    101, 102, 104, 106, 107, 111, 112, 113, 114, 115, 118, 119, 120, 121, 122, 124, 126, 132,
+    133, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 146, 147, 148, 149, 150, 151, 152,
+    153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170,
+    700, 702, 703, 709, 710, 720, 721, 722, 723, 724, 725, 727, 728, 729, 730, 731, 732, 733,
+    1000, 1001, 1002, 1003, 1004, 1008, 1009, 1010, 1011, 1100, 1101, 1102,
+];
+
+/// The `dst` set the capture loop scopes ingest to, derived from
+/// [`SCOPED_EVENT_IDS`]. Built once at startup and matched per edge.
+pub fn scoped_event_dsts() -> HashSet<String> {
+    SCOPED_EVENT_IDS.iter().copied().map(event_type_dst).collect()
+}
+
 /// The set of external `dst` strings to drop before decode, derived from the
 /// configured `ignored_event_types`. A name not in [`IGNORABLE_EVENT_IDS`] is
 /// skipped — it cannot occur, because `validate` restricts the config to

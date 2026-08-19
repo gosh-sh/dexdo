@@ -46,7 +46,14 @@ async fn main() -> anyhow::Result<()> {
     database::run_migrations(&pool).await?;
     let repo = IndexerRepository::new(pool.clone());
     let decoder = Decoder::new()?;
-    info!(known_events = decoder.known_events(), "abi decoder initialized");
+    // Ingest scope: the `dst` of every event our contracts emit. Static for the
+    // process, so it is built once and matched per edge before decode.
+    let scoped_event_dsts = dodex_infrastructure::config::scoped_event_dsts();
+    info!(
+        known_events = decoder.known_events(),
+        scoped_dsts = scoped_event_dsts.len(),
+        "abi decoder initialized"
+    );
 
     // Spawn the market reconciler as an independent task. It keeps its own
     // GraphQL client and Decoder instance, so config-reload that swaps the
@@ -181,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
                 &repo,
                 &decoder,
                 cfg.graphql.page_size,
+                &scoped_event_dsts,
                 dapp_id,
                 &ignored,
                 &ignored_event_dsts,
@@ -192,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
                     info!(
                         edges = stats.edges,
                         ignored = stats.ignored,
+                        out_of_scope = stats.out_of_scope,
                         foreign_skipped = stats.foreign_skipped,
                         inserted = stats.inserted,
                         skipped = stats.skipped,
@@ -237,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
 struct DrainStats {
     edges: usize,
     ignored: u64,
+    out_of_scope: u64,
     foreign_skipped: u64,
     inserted: u64,
     skipped: u64,
@@ -249,6 +259,7 @@ struct DrainStats {
 #[derive(Debug, Default)]
 struct FilterStats {
     ignored: u64,
+    out_of_scope: u64,
     foreign_skipped: u64,
     type_ignored: u64,
 }
@@ -291,6 +302,7 @@ fn ignored_type_drop_warning(_edges: usize, _dropped: u64) -> Option<f64> {
 
 fn apply_ingest_filters(
     mut edges: Vec<EventEdge>,
+    scoped_event_dsts: &HashSet<String>,
     dapp_id: Option<&str>,
     ignored_src: &HashSet<&str>,
     ignored_event_dsts: &HashSet<String>,
@@ -308,6 +320,26 @@ fn apply_ingest_filters(
         });
         stats.ignored += (before - edges.len()) as u64;
     }
+
+    // Scope ingest to events our own ABIs declare, matched by `dst` before decode.
+    // This is the only filter that *selects* rather than subtracts: everything else
+    // here is a deny-list, so without it every external event on the chain — 800/s
+    // on mainnet, essentially none of it ours — is decoded, stored in `raw_events`
+    // with a NULL `event_type`, and left pending forever in the projection queue.
+    //
+    // `dst` is a 1:1 discriminator of event type readable from the message header,
+    // so this costs no decode. An edge with no `dst` is dropped: every event we emit
+    // is routed to `makeAddrExtern(EVENT_ID, 256)`, so a missing `dst` cannot be ours.
+    //
+    // Not conditional on config. The `dapp_id` scope filter below was meant to serve
+    // this purpose and never has — no gateway populates `src_dapp_id` (mainnet and
+    // shellnet both report it null on every edge), and it is not rendered by the
+    // deploy templates, so it fails open and silently keeps everything.
+    let before = edges.len();
+    edges.retain(|edge| {
+        edge.node.dst.as_deref().is_some_and(|dst| scoped_event_dsts.contains(dst))
+    });
+    stats.out_of_scope += (before - edges.len()) as u64;
 
     // Scope to the DEXDO dapp: drop foreign chain traffic before decode.
     // Inert when no dapp_id is configured.
@@ -335,6 +367,7 @@ async fn drain_events(
     repo: &IndexerRepository,
     decoder: &Decoder,
     page_size: u32,
+    scoped_event_dsts: &HashSet<String>,
     dapp_id: Option<&str>,
     ignored_src: &HashSet<&str>,
     ignored_event_dsts: &HashSet<String>,
@@ -349,9 +382,16 @@ async fn drain_events(
         stats.edges += edges_seen;
 
         let (retained, filter_stats) =
-            apply_ingest_filters(page.edges, dapp_id, ignored_src, ignored_event_dsts);
+            apply_ingest_filters(
+                page.edges,
+                scoped_event_dsts,
+                dapp_id,
+                ignored_src,
+                ignored_event_dsts,
+            );
         page.edges = retained;
         stats.ignored += filter_stats.ignored;
+        stats.out_of_scope += filter_stats.out_of_scope;
         stats.foreign_skipped += filter_stats.foreign_skipped;
         stats.type_ignored += filter_stats.type_ignored;
 
@@ -466,12 +506,43 @@ mod tests {
             edge_with_all(Some("own"), None, Some(&placed)),
         ];
 
+        // Both dsts are real DEXDO event ids, so the scope filter passes them all
+        // through and each drop below is attributable to the filter under test.
+        let known: HashSet<String> = [queued.clone(), placed.clone()].into_iter().collect();
+
         let (retained, stats) =
-            apply_ingest_filters(edges, Some("dexdo"), &ignored_src, &ignored_event_dsts);
+            apply_ingest_filters(edges, &known, Some("dexdo"), &ignored_src, &ignored_event_dsts);
 
         assert_eq!(retained.len(), 2);
         assert_eq!(stats.ignored, 1);
+        assert_eq!(stats.out_of_scope, 0);
         assert_eq!(stats.foreign_skipped, 1);
         assert_eq!(stats.type_ignored, 1);
+    }
+
+    #[test]
+    fn apply_ingest_filters_keeps_only_dsts_our_abis_declare() {
+        use std::collections::HashSet;
+
+        // 143 is OrderBook.OrderPlaced; 5 is an id no DEXDO contract emits — it is
+        // one of the ids actually observed on mainnet, where such traffic outnumbers
+        // ours by orders of magnitude.
+        let placed = dodex_infrastructure::config::event_type_dst(143);
+        let foreign = dodex_infrastructure::config::event_type_dst(5);
+        let known: HashSet<String> = [placed.clone()].into_iter().collect();
+
+        let edges = vec![
+            edge_with_all(Some("own"), None, Some(&placed)),
+            edge_with_all(Some("someone-else"), None, Some(&foreign)),
+            edge_with_all(Some("someone-else"), None, None),
+        ];
+
+        let (retained, stats) =
+            apply_ingest_filters(edges, &known, None, &HashSet::new(), &HashSet::new());
+
+        assert_eq!(retained.len(), 1, "only the event our ABI declares survives");
+        assert_eq!(retained[0].node.dst.as_deref(), Some(placed.as_str()));
+        // A missing dst is dropped too: every event we emit carries one.
+        assert_eq!(stats.out_of_scope, 2);
     }
 }

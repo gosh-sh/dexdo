@@ -129,7 +129,7 @@ Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override a
 Notable indexer config keys under `indexer:`:
 
 - `ignored_addresses` — source addresses dropped before `raw_events` insert and projection.
-- `dapp_id` — scopes ingestion to the DEXDO dapp; foreign events dropped before decode. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#scope-filter-indexerdapp_id).
+- `dapp_id` — optional defence-in-depth scope on `src_dapp_id`. Ingestion is scoped unconditionally by emitted-event `dst` instead; see [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#ingest-scope-emitted-event-dst-not-configurable).
 - `ignored_event_types` — event types dropped before decode, matched by `dst`. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#no-op-filter-indexerignored_event_types).
 - `inference_reconciliation_interval_ms` — how often the inference reconciler discovery queue (Queue A) runs. Default `15000`.
 - `inference_reference_price_refresh_ms` — minimum age before a book's weekly-median reference price is re-fetched. Default `3600000`.
