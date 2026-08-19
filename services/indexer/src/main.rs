@@ -142,8 +142,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut cursor = repo.load_cursor(STREAM_NAME).await?;
-    match cursor.as_deref().filter(|c| !c.is_empty()) {
-        Some(c) => info!(cursor = c, "indexer resumed from cursor"),
+    match cursor.as_deref() {
+        Some(c) if !c.is_empty() => info!(cursor = c, "indexer resumed from cursor"),
+        // A stored empty cursor is not a resume point — capture will restart from
+        // the oldest retained event and re-ingest the whole window. Harmless
+        // (`raw_events` dedups on `msg_id`) but never intended, so say so rather
+        // than let it read as an ordinary cold start.
+        Some(_) => warn!(
+            "stored capture cursor is empty; restarting from the earliest retained event"
+        ),
         // Logged distinctly: rendering "no cursor" as `cursor=""` reads like a
         // stored position and hides that this is the cold-start path, which
         // starts from the oldest event the gateway still retains.
@@ -404,10 +411,16 @@ async fn drain_events(
         stats.decoded += persisted.decoded;
         stats.undecoded += persisted.undecoded;
 
-        if let Some(end) = page.page_info.end_cursor.clone() {
-            *cursor = Some(end);
-        } else if !page.edges.is_empty() {
-            warn!("graphql page has edges but missing endCursor; cursor not advanced");
+        // An empty `endCursor` is refused rather than stored: it is not a position
+        // the gateway can resume from, so persisting it would silently restart the
+        // next tick at the oldest retained event and re-ingest the whole window.
+        match page.page_info.end_cursor.as_deref() {
+            Some(end) if !end.is_empty() => *cursor = Some(end.to_string()),
+            Some(_) => warn!("graphql page returned an empty endCursor; cursor not advanced"),
+            None if !page.edges.is_empty() => {
+                warn!("graphql page has edges but missing endCursor; cursor not advanced")
+            }
+            None => {}
         }
 
         if !page.page_info.has_next_page {

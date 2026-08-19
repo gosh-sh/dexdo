@@ -53,7 +53,9 @@ const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
 /// Since the cursor is a `msg_chain_order` — lex-sortable and length-prefixed,
 /// so always ordered above `"0"` — this sentinel asks for the same range
 /// `after: null` means (everything the gateway still retains) while staying on
-/// the fast path.
+/// the fast path. That a cursor below every `chain_order` is accepted as a plain
+/// lower bound is observed behaviour, not a documented guarantee: verified
+/// against mainnet and shellnet, and worth re-checking on a gateway upgrade.
 ///
 /// Without it a fresh deployment deadlocks: no cursor -> `after: null` -> the
 /// page fails -> no cursor is ever persisted, so the read-model stays empty
@@ -67,6 +69,19 @@ fn after_or_earliest(after: Option<&str>) -> &str {
     match after {
         Some(cursor) if !cursor.is_empty() => cursor,
         _ => EARLIEST_CURSOR,
+    }
+}
+
+/// How much of a gateway body to carry into an error message. Enough for the
+/// `{"error":"..."}` and `{"errors":[...]}` shapes gateways actually return,
+/// short enough that a stray HTML page or a large payload cannot flood the log.
+const MAX_LOGGED_BODY: usize = 512;
+
+fn truncate_for_log(body: &str) -> String {
+    let body = body.trim();
+    match body.char_indices().nth(MAX_LOGGED_BODY) {
+        Some((cut, _)) => format!("{}… ({} bytes total)", &body[..cut], body.len()),
+        None => body.to_string(),
     }
 }
 
@@ -103,18 +118,30 @@ impl GraphqlClient {
             "variables": { "first": first, "after": after_or_earliest(after) },
         });
 
-        let response: GraphqlResponse<EventsData> = self
+        let http_response = self
             .http
             .post(&self.endpoint)
             .json(&payload)
             .send()
             .await
-            .context("graphql request failed")?
-            .error_for_status()
-            .context("graphql returned http error")?
-            .json()
-            .await
-            .context("graphql response is not valid json")?;
+            .context("graphql request failed")?;
+
+        // Read the body before judging the status. `error_for_status` reports the
+        // status and URL only, and gateways put the reason in the body — a
+        // restricted endpoint answers 403 with
+        // `{"error":"GraphQL field is outside the Dexdo read surface"}`, which that
+        // path would discard, leaving an operator with a bare status code.
+        let status = http_response.status();
+        let body = http_response.text().await.context("read graphql response body")?;
+
+        if !status.is_success() {
+            bail!("graphql returned http {status}: {}", truncate_for_log(&body));
+        }
+
+        let response: GraphqlResponse<EventsData> = serde_json::from_str(&body)
+            .with_context(|| {
+                format!("graphql response is not valid json: {}", truncate_for_log(&body))
+            })?;
 
         if let Some(errors) = response.errors
             && !errors.is_empty()
