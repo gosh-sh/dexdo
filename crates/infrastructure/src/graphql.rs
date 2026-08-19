@@ -43,6 +43,33 @@ const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
   }
 }"#;
 
+/// `after` value sent when the indexer has no saved cursor yet.
+///
+/// `blockchain.events(after: null)` is a legal query, but the >= 1.2.0 gateway
+/// cannot answer it on a chain the size of mainnet: it replies
+/// `{"data":{"blockchain":null},"errors":[{"extensions":{"code":"TIMEOUT"}}]}`
+/// after ~2s (its own server-side limit), deterministically. An empty string
+/// behaves identically. A cursor-bounded page, by contrast, returns in ~0.1s.
+/// Since the cursor is a `msg_chain_order` — lex-sortable and length-prefixed,
+/// so always ordered above `"0"` — this sentinel asks for the same range
+/// `after: null` means (everything the gateway still retains) while staying on
+/// the fast path.
+///
+/// Without it a fresh deployment deadlocks: no cursor -> `after: null` -> the
+/// page fails -> no cursor is ever persisted, so the read-model stays empty
+/// indefinitely rather than degrading.
+const EARLIEST_CURSOR: &str = "0";
+
+/// Resolves the `after` argument, substituting [`EARLIEST_CURSOR`] for both
+/// "no saved cursor" and a stored empty string (which the gateway rejects the
+/// same way as `null`).
+fn after_or_earliest(after: Option<&str>) -> &str {
+    match after {
+        Some(cursor) if !cursor.is_empty() => cursor,
+        _ => EARLIEST_CURSOR,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GraphqlClient {
     http: Client,
@@ -73,7 +100,7 @@ impl GraphqlClient {
     ) -> anyhow::Result<EventsPage> {
         let payload = json!({
             "query": EVENTS_QUERY,
-            "variables": { "first": first, "after": after },
+            "variables": { "first": first, "after": after_or_earliest(after) },
         });
 
         let response: GraphqlResponse<EventsData> = self
@@ -96,7 +123,8 @@ impl GraphqlClient {
         }
 
         let data = response.data.context("graphql response missing data")?;
-        Ok(data.blockchain.events)
+        let blockchain = data.blockchain.context("graphql response missing blockchain")?;
+        Ok(blockchain.events)
     }
 
     /// Fetches the account state BOC (base64) for off-chain getter execution.
@@ -170,7 +198,12 @@ pub struct GraphqlError {
 
 #[derive(Debug, Deserialize)]
 struct EventsData {
-    blockchain: Blockchain,
+    /// Null whenever the gateway fails the `blockchain` resolver — it then
+    /// carries the reason in `errors`. This must stay optional: as a required
+    /// field, serde fails the whole response with a type error and the real
+    /// message is lost before the `errors` check can report it.
+    #[serde(default)]
+    blockchain: Option<Blockchain>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,7 +291,7 @@ mod tests {
         });
 
         let parsed: GraphqlResponse<EventsData> = serde_json::from_value(raw).unwrap();
-        let page = parsed.data.unwrap().blockchain.events;
+        let page = parsed.data.unwrap().blockchain.unwrap().events;
         assert_eq!(page.edges.len(), 1);
         assert_eq!(page.edges[0].node.msg_id, "msg-1");
         assert_eq!(page.edges[0].cursor, "cursor-1");
@@ -292,7 +325,7 @@ mod tests {
         });
 
         let parsed: GraphqlResponse<EventsData> = serde_json::from_value(raw).unwrap();
-        let page = parsed.data.unwrap().blockchain.events;
+        let page = parsed.data.unwrap().blockchain.unwrap().events;
         assert!(page.edges[0].node.src.is_none());
         assert!(page.page_info.end_cursor.is_none());
         assert!(page.page_info.has_next_page);
@@ -309,5 +342,32 @@ mod tests {
         let errors = parsed.errors.unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "oops");
+    }
+
+    #[test]
+    fn surfaces_gateway_error_when_blockchain_is_null() {
+        // The exact shape the gateway returns when a resolver fails: the
+        // failed branch is nulled and the reason moves to `errors`. With
+        // `blockchain` required, serde rejected the whole body with "invalid
+        // type: null, expected struct Blockchain" before the `errors` check
+        // could run, so the real cause never reached the log.
+        let raw = serde_json::json!({
+            "data": { "blockchain": null },
+            "errors": [{ "message": "Request timeout", "path": ["blockchain", "events"] }]
+        });
+
+        let parsed: GraphqlResponse<EventsData> = serde_json::from_value(raw).unwrap();
+        assert!(parsed.data.unwrap().blockchain.is_none());
+        assert_eq!(parsed.errors.unwrap()[0].message, "Request timeout");
+    }
+
+    #[test]
+    fn cold_start_asks_for_the_earliest_cursor_not_null() {
+        // Both ways the indexer can express "no saved position" must reach
+        // the gateway as the sentinel; either one sent verbatim wedges a
+        // fresh deployment on the resolver's slow path.
+        assert_eq!(after_or_earliest(None), EARLIEST_CURSOR);
+        assert_eq!(after_or_earliest(Some("")), EARLIEST_CURSOR);
+        assert_eq!(after_or_earliest(Some("76a83e6cf006700")), "76a83e6cf006700");
     }
 }

@@ -77,7 +77,7 @@ Indices:
 
 ### `indexer_cursors`
 
-Resume-points per ingestion stream. The indexer's main fetch loop persists the cursor after every page so a restart does not reprocess the full history.
+Resume-points per ingestion stream. The indexer's main fetch loop persists the cursor after every page so a restart does not reprocess the full history. When no row exists for a stream, capture bootstraps from the oldest event the gateway still retains rather than from a null cursor — see [Cold start](indexer.md#cold-start).
 
 | Column | Type | Notes |
 | --- | --- | --- |

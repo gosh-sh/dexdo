@@ -86,6 +86,14 @@ Intended use: shed confirmed observability-only floods (e.g. `OrderBook.Queued`,
 4. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches.
 5. After the page commits, persist the resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). The cursor tracks capture progress, not projection; a restart resumes capture from it while the projection loop independently drains whatever rows remain `processed_at NULL`.
 
+### Cold start
+
+With no [`indexer_cursors`](data-schema.md#indexer_cursors) row — a fresh deployment, or a database restored without one — capture has no resume point. It does **not** ask for `after: null`. That is a legal query, but the gateway cannot answer it on a chain the size of mainnet: it fails the `blockchain` resolver with a `TIMEOUT` extension after ~2s (its own server-side limit) on every attempt, while any cursor-bounded page returns in ~0.1s. A stored empty-string cursor is rejected the same way. Capture sends the sentinel `after: "0"` instead (`EARLIEST_CURSOR`, `crates/infrastructure/src/graphql.rs`): cursors are `msg_chain_order` values — lex-sortable and always ordered above `"0"` — so the sentinel names the same range `after: null` means while staying on the fast path. This path logs distinctly (`indexer cold start; capturing from the earliest retained event`) rather than rendering the absent cursor as `cursor=""`, which reads like a stored position.
+
+The sentinel is load-bearing, not a tidiness fix. Sent verbatim, `after: null` deadlocks the deployment: the page fails, so no cursor is persisted, so the next tick asks the same unanswerable question. The read-model stays empty indefinitely instead of degrading, and every page failure is retried forever at the polling interval.
+
+A cold start recovers only what the gateway still holds. The `events` index keeps a bounded window (~39h on mainnet as measured 2026-08-19), so events older than that window are unreachable through `events` at any cursor; replaying them requires an archive node.
+
 ### Noise log
 
 When `LOG_DIR` is set, the projector's "no handler for event type" warnings are split by novelty. The projection loop is the sole emitter of these warnings (the capture path no longer projects). The **first** time the process sees a given unhandled `event_type`, the warning is emitted at the normal target, so it reaches stdout and the main `<service>.log` — this is the operator's signal that a deployed contract emits an event the indexer does not yet handle. Every **later** repeat of that same type is written to `<service>.noise.log` (a separate daily-rotating file in `LOG_DIR`, like the main log) via the `dodex::event_noise` tracing target, configured by the `dodex-logging` crate (`EVENT_NOISE_TARGET`), so a steady flood does not drown the main log. When `LOG_DIR` is not set, all of these warnings appear on stdout alongside the rest of the log output.

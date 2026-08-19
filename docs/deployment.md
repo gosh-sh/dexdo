@@ -316,13 +316,21 @@ curl -s http://localhost:8080/readiness
 # a real read path — exercises Postgres
 curl -s 'http://localhost:8080/api/v1/prediction/markets?limit=5' | jq
 
-# indexer is making progress (look for the resumed-from-cursor line and
-# steadily advancing event ingestion)
+# indexer is making progress (on a fresh database the startup line reads
+# "indexer cold start"; on a restart it names the cursor it resumed from —
+# either way, look for "capture tick" lines with a steadily advancing cursor)
 docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f indexer
 ```
 
 Until the indexer has ingested chain events into the read-model, market-data
 endpoints return empty results — that is expected on a cold database.
+
+It stops being expected if it persists. `capture tick` lines appearing with an
+advancing cursor is the signal that ingestion works; a log carrying only
+repeated `graphql fetch / persist failed` errors means capture never landed a
+page, and no amount of waiting will fill the read-model. The error text names
+the gateway's own reason — check it before assuming the deployment is merely
+slow to catch up.
 
 ## Operations
 

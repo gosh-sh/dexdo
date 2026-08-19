@@ -135,7 +135,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut cursor = repo.load_cursor(STREAM_NAME).await?;
-    info!(cursor = cursor.as_deref().unwrap_or(""), "indexer resumed from cursor");
+    match cursor.as_deref().filter(|c| !c.is_empty()) {
+        Some(c) => info!(cursor = c, "indexer resumed from cursor"),
+        // Logged distinctly: rendering "no cursor" as `cursor=""` reads like a
+        // stored position and hides that this is the cold-start path, which
+        // starts from the oldest event the gateway still retains.
+        None => info!("indexer cold start; capturing from the earliest retained event"),
+    }
 
     let mut current_endpoint = String::new();
     let mut current_timeout_ms: u64 = 0;
