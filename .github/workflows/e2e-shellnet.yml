@@ -37,7 +37,7 @@ jobs:
       # Same shape as the PR `tests` job — local read-model the e2e helpers
       # upsert the deployed market into.
       TEST_DATABASE_URL: postgres://dodex:dodex@localhost:5432/dodex_test
-      E2E_NETWORK_ENDPOINT: http://94.156.178.12
+      E2E_NETWORK_ENDPOINT: https://shellnet.ackinacki.org
     services:
       postgres:
         image: postgres:16-alpine
