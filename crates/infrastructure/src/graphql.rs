@@ -15,14 +15,15 @@ use anyhow::bail;
 use anyhow::Context;
 use dodex_chain::DEX_DAPP_ID;
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
 
-const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
+const DAPP_EVENTS_QUERY: &str = r#"query Events($src_dapp_id: String!, $first: Int!, $after: String) {
   blockchain {
-    events(first: $first, after: $after) {
+    events(src_dapp_id: $src_dapp_id, first: $first, after: $after) {
       edges {
         cursor
         node {
@@ -38,6 +39,31 @@ const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
       pageInfo {
         endCursor
         hasNextPage
+      }
+    }
+  }
+}"#;
+
+const ACCOUNT_EVENTS_QUERY: &str = r#"query AccountEvents($account_id: String!, $dapp_id: String!, $first: Int!, $after: String) {
+  blockchain {
+    account(account_id: $account_id, dapp_id: $dapp_id) {
+      events(first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            msg_id
+            msg_chain_order
+            src
+            src_dapp_id
+            dst
+            body
+            created_at
+          }
+        }
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
       }
     }
   }
@@ -89,6 +115,7 @@ fn truncate_for_log(body: &str) -> String {
 pub struct GraphqlClient {
     http: Client,
     endpoint: String,
+    bearer_token: Option<String>,
     // Lazily-built tvm_client context for account-state reads. Account
     // BOCs are NOT fetched over GraphQL: the >= 1.0.0 gateway's
     // `account(){info{boc}}` sub-resolver hangs server-side, while the
@@ -105,26 +132,69 @@ impl GraphqlClient {
             .user_agent(concat!("dodex-indexer/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("build http client")?;
-        Ok(Self { http, endpoint: endpoint.into(), tvm_ctx: Arc::new(OnceLock::new()) })
+        Ok(Self {
+            http,
+            endpoint: endpoint.into(),
+            bearer_token: None,
+            tvm_ctx: Arc::new(OnceLock::new()),
+        })
     }
 
-    pub async fn fetch_events(
+    pub fn with_bearer_token(mut self, bearer_token: Option<String>) -> Self {
+        self.bearer_token = bearer_token.filter(|token| !token.is_empty());
+        self
+    }
+
+    pub async fn fetch_dapp_events(
         &self,
+        src_dapp_id: &str,
         first: u32,
         after: Option<&str>,
     ) -> anyhow::Result<EventsPage> {
         let payload = json!({
-            "query": EVENTS_QUERY,
-            "variables": { "first": first, "after": after_or_earliest(after) },
+            "query": DAPP_EVENTS_QUERY,
+            "variables": {
+                "src_dapp_id": src_dapp_id,
+                "first": first,
+                "after": after_or_earliest(after),
+            },
         });
 
-        let http_response = self
-            .http
-            .post(&self.endpoint)
-            .json(&payload)
-            .send()
-            .await
-            .context("graphql request failed")?;
+        let data: EventsData = self.execute(&payload).await?;
+        let blockchain = data.blockchain.context("graphql response missing blockchain")?;
+        blockchain.events.context("graphql response missing blockchain.events")
+    }
+
+    pub async fn fetch_account_events(
+        &self,
+        account_id: &str,
+        dapp_id: &str,
+        first: u32,
+        after: Option<&str>,
+    ) -> anyhow::Result<EventsPage> {
+        let payload = json!({
+            "query": ACCOUNT_EVENTS_QUERY,
+            "variables": {
+                "account_id": account_id,
+                "dapp_id": dapp_id,
+                "first": first,
+                "after": after_or_earliest(after),
+            },
+        });
+
+        let data: AccountEventsData = self.execute(&payload).await?;
+        let blockchain = data.blockchain.context("graphql response missing blockchain")?;
+        let account = blockchain.account.context("graphql response missing blockchain.account")?;
+        account.events.context("graphql response missing blockchain.account.events")
+    }
+
+    async fn execute<T: DeserializeOwned>(&self, payload: &Value) -> anyhow::Result<T> {
+        let mut request = self.http.post(&self.endpoint).json(payload);
+        if let Some(token) = self.bearer_token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+
+        let http_response = request.send().await.context("graphql request failed")?;
 
         // Read the body before judging the status. `error_for_status` reports the
         // status and URL only, and gateways put the reason in the body — a
@@ -138,10 +208,9 @@ impl GraphqlClient {
             bail!("graphql returned http {status}: {}", truncate_for_log(&body));
         }
 
-        let response: GraphqlResponse<EventsData> =
-            serde_json::from_str(&body).with_context(|| {
-                format!("graphql response is not valid json: {}", truncate_for_log(&body))
-            })?;
+        let response: GraphqlResponse<T> = serde_json::from_str(&body).with_context(|| {
+            format!("graphql response is not valid json: {}", truncate_for_log(&body))
+        })?;
 
         if let Some(errors) = response.errors
             && !errors.is_empty()
@@ -149,9 +218,7 @@ impl GraphqlClient {
             bail!("graphql errors: {errors:?}");
         }
 
-        let data = response.data.context("graphql response missing data")?;
-        let blockchain = data.blockchain.context("graphql response missing blockchain")?;
-        Ok(blockchain.events)
+        response.data.context("graphql response missing data")
     }
 
     /// Fetches the account state BOC (base64) for off-chain getter execution.
@@ -235,7 +302,26 @@ struct EventsData {
 
 #[derive(Debug, Deserialize)]
 struct Blockchain {
-    events: EventsPage,
+    #[serde(default)]
+    events: Option<EventsPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountEventsData {
+    #[serde(default)]
+    blockchain: Option<AccountEventsBlockchain>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountEventsBlockchain {
+    #[serde(default)]
+    account: Option<AccountEventsAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountEventsAccount {
+    #[serde(default)]
+    events: Option<EventsPage>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -318,7 +404,7 @@ mod tests {
         });
 
         let parsed: GraphqlResponse<EventsData> = serde_json::from_value(raw).unwrap();
-        let page = parsed.data.unwrap().blockchain.unwrap().events;
+        let page = parsed.data.unwrap().blockchain.unwrap().events.unwrap();
         assert_eq!(page.edges.len(), 1);
         assert_eq!(page.edges[0].node.msg_id, "msg-1");
         assert_eq!(page.edges[0].cursor, "cursor-1");
@@ -352,7 +438,7 @@ mod tests {
         });
 
         let parsed: GraphqlResponse<EventsData> = serde_json::from_value(raw).unwrap();
-        let page = parsed.data.unwrap().blockchain.unwrap().events;
+        let page = parsed.data.unwrap().blockchain.unwrap().events.unwrap();
         assert!(page.edges[0].node.src.is_none());
         assert!(page.page_info.end_cursor.is_none());
         assert!(page.page_info.has_next_page);

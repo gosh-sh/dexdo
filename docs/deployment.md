@@ -36,9 +36,9 @@ that provisions the host, renders the config, and brings the stack up — see
                  └──────────────────────────────┘
 ```
 
-- **`indexer`** polls the Acki Nacki GraphQL `blockchain_events` stream, decodes
-  DEX events, and writes the Postgres read-model. It applies SQL migrations on
-  startup. It has no HTTP port — it is a background worker.
+- **`indexer`** polls the Acki Nacki GraphQL DEX-dApp and RootPN event streams,
+  decodes DEX events, and writes the Postgres read-model. It applies SQL
+  migrations on startup. It has no HTTP port — it is a background worker.
 - **`api`** serves the public REST API on `:8080` from the Postgres read-model,
   reads PrivateNote BOCs on demand from GraphQL (for `/api/v1/account` and
   `/account/balances`), and send external messages to the blockchain gateway for the
@@ -48,8 +48,9 @@ Both services read GraphQL; only the `api` writes to the chain gateway.
 
 > **GraphQL must be Acki Nacki–compatible.** The "GraphQL endpoint" is an Acki
 > Nacki node's GraphQL API (the Block Manager). The indexer queries the standard
-> `blockchain_events` stream and reads account BOCs — it is **not** a generic
-> GraphQL server you can swap for an arbitrary schema.
+> `blockchain.events(src_dapp_id: ...)` and `blockchain.account(...).events`
+> fields and reads account BOCs — it is **not** a generic GraphQL server you can
+> swap for an arbitrary schema.
 
 ## Prerequisites
 
@@ -211,6 +212,7 @@ database:
 
 graphql:
   endpoint: https://shellnet.ackinacki.org/graphql   # your Acki Nacki GraphQL
+  # bearer_token: "<gateway-token>"                  # protected endpoints only
   page_size: 100
   request_timeout_ms: 10000
 
@@ -220,7 +222,6 @@ indexer:
   reconciliation_interval_ms: 60000
   reprojection_batch_size: 500
   oracle_event_list_reconciliation_interval_ms: 60000
-  dapp_id: "<dexdo-dapp-id>"   # scopes ingestion to this dapp; omit to disable
   ignored_addresses:
     - "0:1111111111111111111111111111111111111111111111111111111111111111"
   ignored_event_types:
@@ -244,6 +245,9 @@ Shared (both services):
 - `database.url` non-empty, `max_connections > 0`,
   `max_connections >= min_connections`, and pool/timeout values `> 0`.
 - `graphql.endpoint` non-empty and `graphql.request_timeout_ms > 0`.
+- `graphql.bearer_token` is optional. For Ansible deployments, set
+  `vault_dexdo_graphql_bearer_token`; the role omits the YAML key when the vault
+  value is empty and never places the token in the endpoint URL.
 
 api only:
 
@@ -257,16 +261,10 @@ api only:
 
 indexer only:
 
-- `indexer.dapp_id` (optional): when set, scopes ingestion to the DEXDO dapp
-  whose `src_dapp_id` matches — foreign chain events are dropped before decode.
-  Edges with no `src_dapp_id` are kept. Omit the key (or leave it commented) to
-  disable scoping. An empty string is rejected at startup — it would otherwise
-  deserialize to `Some("")` and drop every edge with a real `src_dapp_id`.
-  Leaving it unset does **not** widen what the indexer stores: ingestion is
-  scoped unconditionally by emitted-event `dst`, and this key only adds
-  defence in depth against a foreign contract emitting a colliding id. No
-  gateway observed to date populates `src_dapp_id`, so in practice the key is
-  inert — see [indexer.md](tech-specs/indexer.md#ingest-scope-emitted-event-dst-not-configurable).
+- Event capture has no configurable dApp selector. It always queries
+  `blockchain.events(src_dapp_id = dodex_chain::DEX_DAPP_ID)` and separately
+  reads the legacy `RootPN` account stream, then applies the local emitted-event
+  `dst` allow-list before decode. See [indexer.md](tech-specs/indexer.md#server-side-capture-scope).
 - `indexer.ignored_event_types` may list only known droppable no-op types
   (`OrderBook.Queued` / `FullyFilled` / `Rejected` / `CallbackBounced` and
   `PMP.StakeAccepted` / `PMP.MergeProcessed`). Each
@@ -528,4 +526,4 @@ New migrations in `migrations/` apply automatically on the next start.
 | `database.url must not be empty` / connection refused | Wrong or unreachable `database.url`; for Supabase, verify the pooler host/port and that the password is percent-encoded. |
 | Permission denied on `public` (Supabase) | The grant block in Step 2 was not run for the pooler role. |
 | api `/readiness` is `ok` but `/markets` is empty | Normal on a cold DB — wait for the indexer to ingest events; check indexer logs for progress and GraphQL connectivity. |
-| Indexer cannot reach GraphQL | `graphql.endpoint` wrong/unreachable, or it is not an Acki Nacki–compatible endpoint exposing the `blockchain_events` stream. |
+| Indexer cannot reach GraphQL | `graphql.endpoint` wrong/unreachable, protected without the configured bearer token, or not exposing `blockchain.events(src_dapp_id: ...)` and `blockchain.account(...).events`. |

@@ -298,6 +298,90 @@ async fn persist_page_with_null_cursor_preserves_prior_cursor() {
 }
 
 #[tokio::test]
+async fn aggregate_barrier_can_replace_a_prior_cursor_with_null() {
+    let Some(pool) = setup().await else { return };
+    let stream = "capture_aggregate_replace_test_stream";
+    let repo = IndexerRepository::new(pool.clone()).with_capture_stream(stream);
+
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("purge cursor");
+
+    repo.set_capture_barrier(Some("old-global-cursor"), true).await.expect("seed barrier");
+    repo.set_capture_barrier(None, false).await.expect("clear barrier");
+
+    assert_eq!(repo.load_cursor(stream).await.expect("load barrier"), None);
+    assert!(!repo.at_head(stream).await.expect("load at_head"));
+}
+
+#[tokio::test]
+async fn first_dual_stream_start_invalidates_the_old_global_cursor() {
+    let Some(pool) = setup().await else { return };
+    let aggregate = "capture_initialize_aggregate_test_stream";
+    let source_a = "capture_initialize_source_a";
+    let source_b = "capture_initialize_source_b";
+    let repo = IndexerRepository::new(pool.clone()).with_capture_stream(aggregate);
+
+    for stream in [aggregate, source_a, source_b] {
+        sqlx::query("delete from indexer_cursors where stream_name = $1")
+            .bind(stream)
+            .execute(&pool)
+            .await
+            .expect("purge cursor");
+    }
+    repo.set_capture_barrier(Some("old-global-cursor"), true).await.expect("seed aggregate");
+    sqlx::query(
+        "insert into indexer_cursors (stream_name, cursor, at_head) values ($1, 'source-a', true)",
+    )
+    .bind(source_a)
+    .execute(&pool)
+    .await
+    .expect("seed one source");
+
+    repo.initialize_capture_barrier(&[source_a, source_b]).await.expect("initialize barrier");
+
+    assert_eq!(repo.load_cursor(aggregate).await.expect("load aggregate"), None);
+    assert!(!repo.at_head(aggregate).await.expect("load at_head"));
+}
+
+#[tokio::test]
+async fn dual_stream_restart_preserves_barrier_but_closes_at_head() {
+    let Some(pool) = setup().await else { return };
+    let aggregate = "capture_restart_aggregate_test_stream";
+    let source_a = "capture_restart_source_a";
+    let source_b = "capture_restart_source_b";
+    let repo = IndexerRepository::new(pool.clone()).with_capture_stream(aggregate);
+
+    for stream in [aggregate, source_a, source_b] {
+        sqlx::query("delete from indexer_cursors where stream_name = $1")
+            .bind(stream)
+            .execute(&pool)
+            .await
+            .expect("purge cursor");
+    }
+    repo.set_capture_barrier(Some("synchronized-cursor"), true).await.expect("seed aggregate");
+    for stream in [source_a, source_b] {
+        sqlx::query(
+            "insert into indexer_cursors (stream_name, cursor, at_head) values ($1, 'source', true)",
+        )
+        .bind(stream)
+        .execute(&pool)
+        .await
+        .expect("seed source");
+    }
+
+    repo.initialize_capture_barrier(&[source_a, source_b]).await.expect("initialize barrier");
+
+    assert_eq!(
+        repo.load_cursor(aggregate).await.expect("load aggregate").as_deref(),
+        Some("synchronized-cursor")
+    );
+    assert!(!repo.at_head(aggregate).await.expect("load at_head"));
+}
+
+#[tokio::test]
 async fn persist_page_handles_mixed_decodable_and_undecodable_edges() {
     // One page with a decodable edge (ORDER_PLACED_BODY) and an undecodable
     // edge (body None). Asserts the counts and per-row DB state are correct —

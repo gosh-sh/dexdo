@@ -129,12 +129,15 @@ Local defaults: `config/api.local.yaml`, `config/indexer.local.yaml`. Override a
 Notable indexer config keys under `indexer:`:
 
 - `ignored_addresses` — source addresses dropped before `raw_events` insert and projection.
-- `dapp_id` — optional defence-in-depth scope on `src_dapp_id`. Ingestion is scoped unconditionally by emitted-event `dst` instead; see [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#ingest-scope-emitted-event-dst-not-configurable).
 - `ignored_event_types` — event types dropped before decode, matched by `dst`. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#no-op-filter-indexerignored_event_types).
 - `inference_reconciliation_interval_ms` — how often the inference reconciler discovery queue (Queue A) runs. Default `15000`.
 - `inference_reference_price_refresh_ms` — minimum age before a book's weekly-median reference price is re-fetched. Default `3600000`.
 - `inference_sweep_interval_ms` — minimum age before a book's phantom-order sweep cycle re-runs. Default `30000`.
 - `inference_orphan_cutoff_ms` — dead-letter window for inference orphan events in the projection loop. Default `1800000`. See [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#inference-reconciler).
+
+The indexer's `graphql:` section accepts optional `bearer_token` for protected
+gateways. Event capture itself is fixed to the DEX `src_dapp_id` plus the legacy
+RootPN account stream; see [docs/tech-specs/indexer.md](docs/tech-specs/indexer.md#server-side-capture-scope).
 
 Logging is environment-driven: `RUST_LOG` sets verbosity, and `LOG_DIR`
 (optional) makes each service also write rotated log files into a directory —

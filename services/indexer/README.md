@@ -22,8 +22,8 @@ Config sections:
 
 - `app`: environment name and log level.
 - `database`: Postgres URL and pool settings.
-- `graphql`: gateway endpoint, page size, request timeout.
-- `indexer`: polling/reconciliation intervals, `reprojection_batch_size`, `ignored_addresses`, `dapp_id` (optional defence-in-depth scope on `src_dapp_id`; ingestion itself is scoped unconditionally by emitted-event `dst` — see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#ingest-scope-emitted-event-dst-not-configurable)), `ignored_event_types` (event types dropped before decode, matched by `dst`; see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#no-op-filter-indexerignored_event_types)), and the inference reconciler knobs: `inference_reconciliation_interval_ms`, `inference_reference_price_refresh_ms`, `inference_sweep_interval_ms`, `inference_orphan_cutoff_ms` (see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#inference-reconciler)).
+- `graphql`: gateway endpoint, optional bearer token, page size, request timeout.
+- `indexer`: polling/reconciliation intervals, `reprojection_batch_size`, `ignored_addresses`, `ignored_event_types` (event types dropped before decode, matched by `dst`; see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#no-op-filter-indexerignored_event_types)), and the inference reconciler knobs: `inference_reconciliation_interval_ms`, `inference_reference_price_refresh_ms`, `inference_sweep_interval_ms`, `inference_orphan_cutoff_ms` (see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#inference-reconciler)). Event capture is fixed to the DEX `src_dapp_id` plus the legacy RootPN account stream; see [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#server-side-capture-scope).
 
 Logging is configured by environment variables, not YAML: `RUST_LOG` sets the
 filter (default `info`), and `LOG_DIR` (optional) makes the service additionally

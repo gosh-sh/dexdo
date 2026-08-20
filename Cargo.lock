@@ -1858,6 +1858,8 @@ name = "dodex-indexer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dodex-chain",
+ "dodex-contracts",
  "dodex-infrastructure",
  "dodex-logging",
  "dodex-metrics",

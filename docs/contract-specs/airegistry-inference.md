@@ -36,10 +36,12 @@ The `dodex-chain` facade exposes the inference flow behind the `test-helpers`
 feature (`deploy_inference_order_book`, `post_sell_offer`, `place_inference_buy`,
 `token_contract_*`, …). There are **no inference REST endpoints** — the
 write-side SDK support stays behind the `test-helpers` feature flag and out of
-the production binary. Indexer projectors for `InferenceOrderBook.*` and
-`TokenContract.*` events are active; see
-[docs/tech-specs/indexer.md](../tech-specs/indexer.md) for the
-read-model they build (`inference_orders`, `inference_trades`, `inference_deals`, `inference_ticks`).
+the production binary. The indexer captures `InferenceOrderBook.*` through the
+DEX dApp stream and projects the public inference order/trade read-model.
+`TokenContract.*` handlers remain replay-compatible for rows retained from the
+former global capture, but current live capture excludes every TokenContract
+event route before decode. See
+[docs/tech-specs/indexer.md](../tech-specs/indexer.md).
 
 ## Event ids
 
@@ -48,10 +50,12 @@ registry + streaming events occupy the 700s (e.g. `StreamFunded=720`,
 `ProbeAccepted=728`); order-book events occupy `1000`–`1007`. The ABI event
 names differ from the `*Emit` constant names, so the typed decoders in the
 `*_events.rs` wrappers bind each id from the actual `emit … makeAddrExtern(<const>)`
-site. These events are decoded into `raw_events` (`event_type = "TokenContract.<Event>"`,
-`src_address` = the TokenContract address) and projected into the SETTLEMENT
-read-model: `inference_deals` (one row per TokenContract / deal) and
-`inference_ticks` (one row per finalized tick). The deal's `orderbook_address`,
+site. When retained rows are replayed, these events decode into `raw_events`
+(`event_type = "TokenContract.<Event>"`, `src_address` = the TokenContract
+address) and project into the SETTLEMENT read-model: `inference_deals` (one row
+per TokenContract / deal) and `inference_ticks` (one row per finalized tick).
+The current live indexer does not capture new TokenContract event rows. The
+deal's `orderbook_address`,
 `seller_note`, and `buyer_note` are linked from `InferenceOrderBook.InferenceFilled`
 (`sellerTC` + `buyerNote` + the SELL leg's note); per-tick rows and the
 `finalized_ticks` aggregate comes from `TickFinalized` (per-tick `finalized_owed` is stored on each `inference_ticks` row — it is the contract's cumulative `_finalizedOwed`, not a per-tick delta);

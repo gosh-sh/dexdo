@@ -3971,7 +3971,8 @@ async fn reproject_pending_from_honors_after_and_until_bounds() {
 async fn has_pending_above_and_max_pending_chain_order_respect_eligibility() {
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
-    let repo = IndexerRepository::new(pool.clone());
+    let barrier_stream = "reproj_pending_endpoints_barrier";
+    let repo = IndexerRepository::new(pool.clone()).with_capture_stream(barrier_stream);
 
     let test = "reproj_pending_endpoints";
     let addr = format!("0:{test}_oracle");
@@ -4073,6 +4074,8 @@ async fn has_pending_above_and_max_pending_chain_order_respect_eligibility() {
     let co2 = format!("5f80{m2:0>28}");
     let co3 = format!("5f80{m3:0>28}");
 
+    repo.set_capture_barrier(Some(&co2), false).await.expect("set projection barrier");
+
     // max_pending_chain_order returns the highest eligible chain_order (m3's).
     let max = repo.max_pending_chain_order().await.expect("max_pending_chain_order");
     assert_eq!(
@@ -4098,7 +4101,35 @@ async fn has_pending_above_and_max_pending_chain_order_respect_eligibility() {
         "has_pending_above must be true when multiple eligible rows exist above threshold"
     );
 
+    let projectable =
+        repo.max_projectable_chain_order().await.expect("max_projectable_chain_order");
+    assert_eq!(
+        projectable.as_deref(),
+        Some(co2.as_str()),
+        "the aggregate barrier must hold back an eligible row from the faster capture stream"
+    );
+    assert!(
+        repo.has_projectable_pending_above(&co1).await.expect("has_projectable_pending_above co1"),
+        "the row inside the barrier remains immediately projectable"
+    );
+    assert!(
+        !repo.has_projectable_pending_above(&co2).await.expect("has_projectable_pending_above co2"),
+        "the row beyond the barrier must not make the projection loop spin"
+    );
+
+    repo.set_capture_barrier(None, false).await.expect("clear projection barrier");
+    assert_eq!(
+        repo.max_projectable_chain_order().await.expect("null barrier"),
+        None,
+        "a null barrier blocks projection until both capture streams establish progress"
+    );
+
     purge(&pool, &cleanup).await;
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(barrier_stream)
+        .execute(&pool)
+        .await
+        .expect("cleanup barrier");
 }
 
 #[tokio::test]
@@ -4108,7 +4139,9 @@ async fn run_reprojection_loop_drains_pending_and_retries_deferred() {
     // arrives.
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
-    let repo = IndexerRepository::new(pool.clone());
+    let barrier_stream = "reproj_loop_orch_barrier";
+    let repo = IndexerRepository::new(pool.clone()).with_capture_stream(barrier_stream);
+    repo.set_capture_barrier(Some("zzzzzzzz"), true).await.expect("set projection barrier");
 
     let test = "reproj_loop_orch";
     let oracle_addr = format!("0:{test}_oracle");
@@ -4195,6 +4228,11 @@ async fn run_reprojection_loop_drains_pending_and_retries_deferred() {
     h.abort();
     let _ = h.await; // drive the aborted task to completion before purging its rows
     purge(&pool, &cleanup).await;
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(barrier_stream)
+        .execute(&pool)
+        .await
+        .expect("cleanup barrier");
 }
 
 #[tokio::test]
@@ -4212,7 +4250,9 @@ async fn identical_chain_order_both_rows_eventually_drain() {
     // mechanism as defense-in-depth.
     let _guard = REPROJECTION_LOCK.lock().await;
     let Some(pool) = setup().await else { return };
-    let repo = IndexerRepository::new(pool.clone());
+    let barrier_stream = "reproj_dup_chain_order_barrier";
+    let repo = IndexerRepository::new(pool.clone()).with_capture_stream(barrier_stream);
+    repo.set_capture_barrier(Some("zzzzzzzz"), true).await.expect("set projection barrier");
 
     let test = "reproj_dup_chain_order";
     let addr_a = format!("0:{test}_a");
@@ -4293,6 +4333,11 @@ async fn identical_chain_order_both_rows_eventually_drain() {
     );
 
     purge(&pool, &cleanup).await;
+    sqlx::query("delete from indexer_cursors where stream_name = $1")
+        .bind(barrier_stream)
+        .execute(&pool)
+        .await
+        .expect("cleanup barrier");
 }
 
 #[tokio::test]

@@ -37,6 +37,7 @@ dexdo_host_network: false
 
 # --- Acki Nacki endpoints (see docs/deployment.md Step 1) -------------------
 dexdo_graphql_endpoint: https://shellnet.ackinacki.org/graphql
+dexdo_graphql_bearer_token: "{{ vault_dexdo_graphql_bearer_token | default('') }}"
 dexdo_chain_gateway_endpoint: shellnet.ackinacki.org
 
 # --- App knobs --------------------------------------------------------------
