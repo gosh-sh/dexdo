@@ -425,7 +425,8 @@ async fn drain_events(
         stats.type_ignored += filter_stats.type_ignored;
 
         let at_head = !page.page_info.has_next_page;
-        let end_cursor = page.page_info.end_cursor.as_deref();
+        let raw_end_cursor = page.page_info.end_cursor.as_deref();
+        let end_cursor = raw_end_cursor.filter(|end| !end.is_empty());
         let persisted =
             repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder, at_head).await?;
         stats.inserted += persisted.inserted;
@@ -436,7 +437,7 @@ async fn drain_events(
         // An empty `endCursor` is refused rather than stored: it is not a position
         // the gateway can resume from, so persisting it would silently restart the
         // next tick at the oldest retained event and re-ingest the whole window.
-        match page.page_info.end_cursor.as_deref() {
+        match raw_end_cursor {
             Some(end) if !end.is_empty() => *cursor = Some(end.to_string()),
             Some(_) => warn!("graphql page returned an empty endCursor; cursor not advanced"),
             None if !page.edges.is_empty() => {
