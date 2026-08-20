@@ -37,7 +37,7 @@ jobs:
       # Same shape as the PR `tests` job — local read-model the e2e helpers
       # upsert the deployed market into.
       TEST_DATABASE_URL: postgres://dodex:dodex@localhost:5432/dodex_test
-      E2E_NETWORK_ENDPOINT: http://94.156.178.12/
+      E2E_NETWORK_ENDPOINT: http://94.156.178.12
     services:
       postgres:
         image: postgres:16-alpine
@@ -89,11 +89,11 @@ jobs:
         run: |
           cargo run --release --bin mint_pn_pool -- \
             --count 1 --nominal N10000 --token-type nackl --profile PN-API \
-            --endpoint $E2E_NETWORK_ENDPOINT \
+            --endpoint "$E2E_NETWORK_ENDPOINT" \
             --output "$RUNNER_TEMP/pn_pool_api.json"
           cargo run --release --bin mint_pn_pool -- \
             --count 1 --nominal N10000 --token-type shell --profile PN-INF \
-            --endpoint https://shellnet.ackinacki.org \
+            --endpoint "$E2E_NETWORK_ENDPOINT" \
             --output "$RUNNER_TEMP/pn_pool_inf.json"
           jq -s 'add' \
             "$RUNNER_TEMP/pn_pool_api.seed_notes.json" \
@@ -140,5 +140,5 @@ jobs:
             cargo run --release --bin dexdo -- withdraw \
               --pn-state-file "$RUNNER_TEMP/pn_state.json" \
               --dest "$dest" \
-              --endpoint shellnet.ackinacki.org || echo "teardown withdraw failed for note $i (non-fatal)"
+              --endpoint "$E2E_NETWORK_ENDPOINT" || echo "teardown withdraw failed for note $i (non-fatal)"
           done
