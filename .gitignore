@@ -56,3 +56,4 @@ params/
 # into crates/contracts); these are large, regenerable, and not read by anything.
 contracts/**/*.code
 contracts/**/*.debug.json
+prod/scripts.txt

@@ -37,6 +37,7 @@ jobs:
       # Same shape as the PR `tests` job — local read-model the e2e helpers
       # upsert the deployed market into.
       TEST_DATABASE_URL: postgres://dodex:dodex@localhost:5432/dodex_test
+      E2E_NETWORK_ENDPOINT: http://94.156.178.12/
     services:
       postgres:
         image: postgres:16-alpine
@@ -88,7 +89,7 @@ jobs:
         run: |
           cargo run --release --bin mint_pn_pool -- \
             --count 1 --nominal N10000 --token-type nackl --profile PN-API \
-            --endpoint https://shellnet.ackinacki.org \
+            --endpoint $E2E_NETWORK_ENDPOINT \
             --output "$RUNNER_TEMP/pn_pool_api.json"
           cargo run --release --bin mint_pn_pool -- \
             --count 1 --nominal N10000 --token-type shell --profile PN-INF \
