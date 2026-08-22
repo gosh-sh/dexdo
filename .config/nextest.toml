@@ -60,10 +60,15 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 # instead of one after another. The exceptions are collected here and pinned to
 # one at a time:
 #
-#   * `e2e_inference`, `e2e_inference_clob` and `e2e_register_account` all take
-#     the SAME note. A note serialises its own operations through `_busy` and
-#     rejects a repeated message body outright, so two of these at once would
-#     have one of them silently dropped;
+#   * `e2e_inference` and `e2e_inference_clob` used to take the SAME `PN-INF`
+#     note (both index 9). A note serialises its own operations through `_busy`
+#     and rejects a repeated message body outright, so two of these at once
+#     would have one of them silently dropped. The clob suite moved to index 13,
+#     so the sharing is gone and neither is here for that reason any more — they
+#     stay for the database and the oracle below. Note that
+#     `e2e_register_account` is NOT a third party to this: it draws index 9 out
+#     of `PN-API` via `TestPnPool::load()`, a different pool and a different
+#     row, and only looked like a collision while the pool was unprofiled;
 #   * the trader-path binaries read and write the shared test database;
 #   * everything that deploys a market sends an external `deployOracle` to the
 #     ONE `RootOracle` the whole stand shares. An external message carries a

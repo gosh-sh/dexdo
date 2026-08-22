@@ -55,7 +55,17 @@ const ERR_NO_LIQUIDITY: u32 = 334;
 fn note_and_signer() -> (common::test_pns::TestPn, KeyPair) {
     let note = {
         let p = TestPnPool::load_inference();
-        p.notes[9 % p.notes.len()].clone()
+        // 13, not 9: `e2e_inference` takes 9 out of the same `PN-INF` pool, so
+        // the two binaries were drawing the same note. That was never a bug
+        // while both sat in the `serial-e2e-shared` group — a note serialises
+        // its own operations through `_busy`, so sharing cost latency, not
+        // correctness. It becomes one the moment either leaves the group, and
+        // the stand now runs four tests at a time (`--test-threads 4` in
+        // acki-nacki's `tests/dexdo/e2e-on-host.sh`), which makes the group the
+        // only thing standing between them. Distinct notes are cheaper than
+        // that dependency: the pool has the rows, and the index map lives in
+        // `pn_pool_split.rs`.
+        p.notes[13 % p.notes.len()].clone()
     };
     let keys = KeyPair {
         public: note.owner_public_key_hex.clone(),

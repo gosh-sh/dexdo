@@ -85,6 +85,61 @@ fn the_stand_spec_gives_every_test_here_a_note_of_its_own() {
     );
 }
 
+/// The inference binaries index their own note the same way, out of `PN-INF`
+/// rather than `PN-API`: 6 (`e2e_inference_match`), 9 (`e2e_inference`),
+/// 12 (`e2e_inference_orders`), 13 (`e2e_inference_clob`),
+/// 18 (`e2e_inference_funding`), 19 and 20 (`e2e_inference_stream` — seller and
+/// buyer), 21 (`e2e_inference_expiry_sweep`), 22 (`e2e_inference_range_link`);
+/// 23 is spare. Twenty-four notes give each of those indices a row of its own.
+///
+/// Wave 5 CREATED this group — before it the spec declared no `PN-INF` at all,
+/// so `TestPnPool::load_inference()` panicked on the woodpecker stand and every
+/// inference binary there died on the pool rather than on anything it tests.
+///
+/// Unlike the `PN-API` case above, a short pool here is not merely a change of
+/// who shares with whom. `e2e_inference_stream` exists to prove that a deal's
+/// two sides are told apart, and `k % len` folds 19 and 20 onto one note as
+/// soon as `len` divides their difference — turning the scenario back into the
+/// self-trade it was written to stop being. It asserts the two addresses differ
+/// rather than trusting this constant, but the constant is what keeps the
+/// assertion from being the thing that fails.
+const INFERENCE_NOTES_FOR_ONE_EACH: u64 = 24;
+
+#[test]
+fn the_stand_spec_gives_every_inference_test_a_note_of_its_own() {
+    let groups: Vec<serde_json::Value> = serde_json::from_str(STAND_NOTES_SPEC).unwrap();
+    let declared = groups
+        .iter()
+        .find(|g| g["profile"] == INFERENCE_PROFILE)
+        .map(|g| g["count"].as_u64().unwrap())
+        .unwrap_or(0);
+    assert!(
+        declared >= INFERENCE_NOTES_FOR_ONE_EACH,
+        "the stand spec declares {declared} `{INFERENCE_PROFILE}` note(s); \
+         {INFERENCE_NOTES_FOR_ONE_EACH} keep one per test"
+    );
+}
+
+#[test]
+fn the_stand_spec_mints_inference_notes_in_shell() {
+    // The count alone is not the whole precondition. `_balance[CURRENCIES_ID_SHELL]`
+    // is written only by the constructor, so a `PN-INF` group baked as NACKL
+    // would pass the guard above and still fail every inference test on chain
+    // with ERR_LOW_VALUE — the exact trap
+    // `an_unprofiled_pool_holds_no_inference_note` guards on the loader side.
+    let groups: Vec<serde_json::Value> = serde_json::from_str(STAND_NOTES_SPEC).unwrap();
+    let group = groups
+        .iter()
+        .find(|g| g["profile"] == INFERENCE_PROFILE)
+        .expect("the spec must declare a PN-INF group");
+    assert_eq!(
+        group["tokenType"].as_u64(),
+        Some(2),
+        "PN-INF must be minted as SHELL (tokenType 2), not {:?}",
+        group["tokenType"]
+    );
+}
+
 #[test]
 fn an_unprofiled_pool_belongs_to_this_suite_whole() {
     // A pool baked by note count rather than from a spec: every note is

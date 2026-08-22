@@ -35,10 +35,25 @@ decided by the file itself:
 - **Rows carry a `profile`** — the pool was baked from a
   `DEX_TEST_NOTES_SPEC`, whose groups differ in token type, balance and ECC
   seeding. Position then means nothing and `E2E_SDK_TAIL_COUNT` is ignored:
-  each suite takes the rows labelled for it and nothing else. `PN-API` is the
-  api-e2e suite's label; `PN-DEP`, `PN-TRD`, `PN-CONS`, `PN-CPN`, `PN-SHELL`,
-  `PN-USDC`, `PN-INF` and `PN-ROT` are the sdk harness's roles, which it also
-  matches against what a scenario asks for.
+  each suite takes the rows labelled for it and nothing else. `PN-API` and
+  `PN-INF` are the api-e2e suite's labels — the first for the trader path, the
+  second for the inference binaries, which need SHELL rather than NACKL because
+  an inference buy is paid out of `_balance[CURRENCIES_ID_SHELL]`. `PN-DEP`,
+  `PN-TRD`, `PN-CONS`, `PN-CPN`, `PN-SHELL`, `PN-USDC` and `PN-ROT` are the sdk
+  harness's roles, which it also matches against what a scenario asks for.
+
+  **`PN-INF` is the one label both sides claim, and the separation above does
+  not cover it.** The sdk harness lists `PnProfile::Inf → "PN-INF"` in its own
+  `ALL` (`sdk/tests/integration/common/allocator.rs`), so its allocator reads
+  those rows as leasable; the api-e2e inference binaries index the same rows by
+  fixed position (`TestPnPool::load_inference()`). Nothing leases it today — no
+  scenario asks for `PnProfile::Inf` — so the overlap is latent rather than
+  live, and it was invisible before wave 5 because the stand spec declared no
+  `PN-INF` group at all and the rows did not exist. Creating that group is what
+  makes the two claims meet. If an sdk scenario ever asks for `Inf`, the
+  allocator may taint or drain a row an inference binary addresses by index,
+  and the failure will surface as a chain error inside that binary rather than
+  as a pool conflict.
 
 A suite that finds no note of its own in a profiled pool fails at load with
 the pool's label census, rather than running against notes baked for someone
