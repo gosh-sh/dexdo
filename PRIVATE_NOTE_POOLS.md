@@ -74,7 +74,11 @@ did not declare them until 2026-08-24, so the three were labels with no rows —
 the mirror of the `PN-INF` problem above and the louder half of it: `rent`
 answers a missing group with the pool's census, not with a note somebody else
 owns. They are seeded now so a scenario that wants one finds it rather than
-discovering the gap on the stand.
+discovering the gap on the stand. The stand confirms it: pipeline #299
+(2026-08-24) baked all nine groups at their declared counts (`wrote 125 note
+keys`) and `sdk_proof` passed, so the generator credited `RootPN._deployedValues`
+for the added rows — a group the stand bakes but the root is not credited for
+fails the next `withdrawTokens` in the run, not the test that rented it.
 
 `PN-CPN` is the only group whose `value` carries meaning. `generateCoupon`
 (`PrivateNote.sol:2015-2017`) walks the whole `_balance` map and requires every
