@@ -1268,7 +1268,6 @@ steps:
       # here rather than inlined below for the same reason ACKI_DIR is: the host
       # path is deployment configuration, and a copy buried in a quoted ssh command
       # is the copy nobody updates.
-      DEXDO_DIR: /opt/dexdo
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
       - >
@@ -1298,12 +1297,35 @@ steps:
       # model stayed empty and nothing in this dump could say why, because the
       # indexer was the one process not being asked.
       #
-      # Two sources per service, and both are needed. `docker compose logs` carries
-      # what a crash-looping container printed before it died, which the file log
-      # never receives; the file log under `/opt/dexdo/logs/<svc>` is what
-      # `dodex-logging` writes and survives a container restart, which the docker
-      # log does not. Deploy paths come from `deploy/ansible/roles/dexdo/defaults`
-      # (`dexdo_deploy_dir` / `dexdo_logs_dir`).
+      # NOTHING IS ADDRESSED BY DEPLOY PATH, and that is the correction pipeline #303
+      # forced. The first version of this block drove `docker compose -f
+      # $DEXDO_DIR/compose.yml`, taking `/opt/dexdo` from
+      # `deploy/ansible/roles/dexdo/defaults/main.yml`. On the stand it produced four
+      # empty sections and no explanation: the e2e inventory lives in a private repo
+      # (`inventory_clone`) and is free to override `dexdo_deploy_dir` — the shipped
+      # `stage.example` already does, to `/opt/dodex-stage`. A diagnostic that has to
+      # guess a path it cannot read is a diagnostic that reports nothing on the run it
+      # was added for.
+      #
+      # `docker ps -a --filter name=…` needs no path and no compose file, and `-q`
+      # keeps it free of Go templates (`--format '{{.Names}}'`), which appear nowhere
+      # else in this file and whose interaction with Woodpecker's own templating is
+      # not worth discovering during an incident.
+      #
+      # Two sources per service, and both are needed. `docker logs` carries what a
+      # crash-looping container printed before it died, which the file log never
+      # receives; the file log is what `dodex-logging` writes and survives a container
+      # restart, which the docker log does not. It is read through `docker exec` at
+      # the container's own `/app/logs` — the in-container path is fixed by the
+      # compose bind mount, so it holds whatever the host path turns out to be.
+      # The glob is `*.log*`, not `*.log`: `dodex-logging` rotates daily and writes
+      # `<svc>.log.<date>` (plus `<svc>.noise.log`), so the narrower pattern matches
+      # nothing at all. `ls -la` runs beside it so the next reader learns the real
+      # names from the dump instead of from this comment.
+      #
+      # NO `2>/dev/null` ANYWHERE BELOW. That was the second half of the #303 failure:
+      # every command was silenced, so a wrong path and a genuinely empty log were the
+      # same output. stderr is the answer here, not noise.
       #
       # The indexer goes first and gets the larger tail: it ticks capture every 3s,
       # so its recent history is dense and it is the service most read-model
@@ -1311,14 +1333,16 @@ steps:
       - >
         ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$E2E_CI_USER@$E2E_HOST"
         "set +e;
-        echo '===== dexdo compose ps -a =====';
-        docker compose -f $DEXDO_DIR/compose.yml ps -a 2>/dev/null;
+        echo '===== every container on the host (docker ps -a) =====';
+        docker ps -a;
         for svc in indexer api; do
           case \$svc in indexer) N=300;; *) N=120;; esac;
-          echo \"===== dexdo \$svc (docker logs, tail \$N) =====\";
-          docker compose -f $DEXDO_DIR/compose.yml logs --tail=\$N \$svc 2>/dev/null;
-          echo \"----- \$svc file log (tail \$N) -----\";
-          tail -n \$N $DEXDO_DIR/logs/\$svc/*.log 2>/dev/null;
+          for id in \$(docker ps -a --filter name=\$svc -q); do
+            echo \"===== dexdo \$svc [\$id] (docker logs, tail \$N) =====\";
+            docker logs --tail=\$N \$id 2>&1;
+            echo \"----- \$svc [\$id] file log, /app/logs (tail \$N) -----\";
+            docker exec \$id sh -c \"ls -la /app/logs; tail -n \$N /app/logs/*.log*\" 2>&1;
+          done;
         done;
         true"
 
