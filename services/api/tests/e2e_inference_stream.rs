@@ -153,7 +153,10 @@ const SCENE_CEILING: Duration = Duration::from_secs(560);
 /// the scene serves that purpose exactly: at the last phase this leaves roughly
 /// `SCENE_CEILING - elapsed` of polling, and the test still reaches its
 /// `assert!`.
-const STREAM_READ_BUDGET: Duration = Duration::from_secs(540);
+/// Recalibrated 2026-08-24 from 540s. Green runtime of this test is 221.0s
+/// (#299); with the read model dead it burned the whole budget (#300). 285s
+/// keeps ~60s over the measured figure — PROBE_WINDOW alone is 180s of that, and it is chain time inside this window.
+const STREAM_READ_BUDGET: Duration = Duration::from_secs(285);
 
 // A limit price must be a positive whole multiple of `PRICE_STEP` (1 SHELL =
 // 1e9); the book rejects sub-SHELL dust with ERR_BAD_PARAM before assigning an

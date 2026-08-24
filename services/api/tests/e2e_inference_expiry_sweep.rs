@@ -60,7 +60,20 @@ const FILL_TICKS: u32 = 30;
 
 /// The expiry scene's own read budget. See the budget note on that test for why
 /// the 240s default cannot serve it.
-const EXPIRY_READ_BUDGET: Duration = Duration::from_secs(520);
+/// The sweep test's own budget, split out from `DEFAULT_READ_BUDGET` on
+/// 2026-08-24. It had been sharing the default with three binaries that finish
+/// in 19–29s, while its own green runtime is 105.0s (#299) — most of it the
+/// `inference_sweep_interval_ms` cycle it exists to wait for. When the default
+/// was recalibrated to 90s against those three, this test would have been the
+/// one casualty: a budget BELOW its healthy time, red on a working stand.
+///
+/// 170s keeps ~65s over the measurement, the same margin the others carry.
+const SWEEP_READ_BUDGET: Duration = Duration::from_secs(170);
+
+/// Recalibrated 2026-08-24 from 520s. Green runtime of this test is 205.2s
+/// (#299); with the read model dead it burned the whole budget (#300). 270s
+/// keeps ~60s over the measured figure — the bulk of that is waiting out the order's own deadline on chain, not polling.
+const EXPIRY_READ_BUDGET: Duration = Duration::from_secs(270);
 
 const PRICE_PER_TICK: u128 = 1_000_000_000;
 const MAX_SELL_TTL: u64 = 3600;
@@ -465,7 +478,7 @@ async fn a_taker_remainder_nothing_closes_is_ended_by_the_sweep_and_says_so() {
 
     let mut failures: Vec<String> = Vec::new();
     let read = read_surfaces("e2e_sweep", &mut failures).await;
-    let budget = ReadBudget::start();
+    let budget = ReadBudget::with_total(SWEEP_READ_BUDGET);
 
     let (ob, model_hash, _first_id) = fresh_book(&dex, &note, signer(), &model_name).await;
     eprintln!("[e2e_sweep] order_book={ob}");

@@ -75,7 +75,40 @@ pub enum Probe<T> {
 /// `left() = 0` and return on their first probe. If it burns out on the
 /// first phase, the remaining phases return `Err` immediately, and the
 /// binary still reaches order settlement and its own `assert!`.
-pub const DEFAULT_READ_BUDGET: Duration = Duration::from_secs(240);
+/// **Recalibrated 2026-08-24 from 240s, against measured runs rather than an
+/// estimate.** The original figure came from "the matrix rates such a fact at
+/// order of a minute" — a rating, not an observation. Pipelines #299 (green) and
+/// #300 (read model dead) give the real numbers, and they are far apart:
+///
+/// | binary                    | green | with a dead read model |
+/// |---------------------------|-------|------------------------|
+/// | `e2e_inference`           |  19.1s|                 243.9s |
+/// | `e2e_inference_clob`      |  18.9s|                 239.6s |
+/// | `e2e_inference_orders`    |  28.8s|                 243.2s |
+///
+/// Two things follow. The dead-run durations land ON the budget — 243.9 ≈ 240 —
+/// so this constant, not the chain, is what a stuck read model costs. And the
+/// green totals are WHOLE-TEST times, chain waits included, so the read-model
+/// facts themselves arrive in single-digit seconds: 240s was roughly twelve
+/// times the entire runtime of the binaries it governs.
+///
+/// 90s keeps ~60s over the slowest of them. That is ~10× the observed latency of
+/// the facts, against a stand whose chain waits repeat within ±2s across runs
+/// (every test that passed in both #299 and #300 did so within two seconds of
+/// its own previous time). The slack is for a slower stand, not for a broken one.
+///
+/// WHY THIS IS NOT MERELY TIDINESS. Six binaries burning 240s each is 24 minutes
+/// added to a run that has a 120-minute ceiling; #300 finished at 126.8 and was
+/// killed, which skipped `net_down`, which strands the host lease for its full
+/// 90-minute TTL and kills every pipeline behind it. The budget is a term in
+/// that sum.
+///
+/// Binaries whose own chain waits exceed this hold their own constant —
+/// `SWEEP_READ_BUDGET`, `EXPIRY_READ_BUDGET`, `RANGE_READ_BUDGET`,
+/// `STREAM_READ_BUDGET` — each derived the same way and carrying its green
+/// measurement. Adding a binary with long chain waits means adding one, NOT
+/// raising this: the three above are fast and would silently inherit the cost.
+pub const DEFAULT_READ_BUDGET: Duration = Duration::from_secs(90);
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 

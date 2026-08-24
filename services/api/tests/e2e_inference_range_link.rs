@@ -69,7 +69,10 @@ const RANGE_BOUND: &str = "1000";
 //   read phase                    120s   (what remains of the read budget)
 //                                ────
 //                                450s of the 600s `ci-e2e` kill, leaving 150s.
-const RANGE_READ_BUDGET: Duration = Duration::from_secs(420);
+/// Recalibrated 2026-08-24 from 420s. Green runtime of this test is 79.3s
+/// (#299); with the read model dead it burned the whole budget (#300). 150s
+/// keeps ~60s over the measured figure — the market deploy and the >=60s the range event needs dominate it.
+const RANGE_READ_BUDGET: Duration = Duration::from_secs(150);
 
 fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)

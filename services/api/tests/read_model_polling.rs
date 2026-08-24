@@ -374,7 +374,7 @@ fn read_phases_need_an_indexer_not_merely_a_database() {
     // the shellnet lane sets it for a Postgres nobody writes to, and the phases
     // there polled for facts only an indexer produces until the whole budget was
     // gone. Every binary this gate governs is `#[ignore]`, so this unit is the
-    // only thing standing between a mistake here and a lane that burns 240s per
+    // only thing standing between a mistake here and a lane that burns its whole
     // phase to conclude nothing.
     assert!(!read_phases_enabled_from(None), "unset means off — the default must be the safe one");
     assert!(!read_phases_enabled_from(Some("")), "an empty value is not an opt-in");
