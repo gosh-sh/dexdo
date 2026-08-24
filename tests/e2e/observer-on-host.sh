@@ -11,6 +11,23 @@
 # is inlined for the same reason rather than sourced from the host's disk.
 set -euo pipefail
 
+# NAME THE FAILURE, ALWAYS. Every explicit refusal below prints a FATAL and its
+# own exit code, but the statements between them had no voice: a command that
+# dies on its own leaves `set -e` to end the script silently, and the step log
+# stops mid-sentence with a bare number in Woodpecker.
+#
+# Added after pipeline #300, where this script exited 126 twenty-two seconds in
+# and said nothing. The cause turned out NOT to be this script — the run had
+# overrun the repository's 120-minute timeout and Woodpecker was killing it, so
+# 126 was the shape of the interruption rather than a fault here. That is exactly
+# why the trap is worth having: two wrong diagnoses were argued from the absence
+# of a message. A trap cannot report a SIGKILL, but it names everything short of
+# one, which is the difference between reading a log and guessing at it.
+#
+# `$BASH_COMMAND` is the command about to run, `$LINENO` its line. Printed to
+# stderr so it survives even when stdout is being consumed.
+trap 'rc=$?; echo "FATAL: line $LINENO exited $rc while running: $BASH_COMMAND" >&2' ERR
+
 : "${DEXDO_SHA:?}" "${PIPELINE_ID:?}" "${TEST_DATABASE_URL:?}" "${E2E_ELAPSED_SECONDS:?}"
 
 case "$PIPELINE_ID" in
@@ -42,6 +59,17 @@ LEASE=/var/lock/dexdo-e2e.lease
 # `exit` — for the same reason as in the template (sdk-proof-on-host.sh): bash drops
 # `errexit` inside the left-hand side of `||`, so a failure through it would not stop
 # the function.
+# THE RUN'S TIME BUDGET IS AN INPUT TO CORRECTNESS, NOT A BACKGROUND FACT.
+# Woodpecker kills the whole pipeline at the repository's timeout (120 min as of
+# 2026-08-24). Steps still queued at that moment do not run — including
+# `net_down`, which is what releases the host lease. So a run that overruns does
+# not merely fail: it leaves the lease held for its full 90-minute TTL and every
+# subsequent pipeline dies on `lease_acquire` in two seconds. That happened in
+# #300 -> #301.
+#
+# This script is last in the DAG, so it is the step most likely to be cut off. It
+# prints its own wall clock at the end for exactly that reason — a run that ends
+# without that line ended by force, not by choice.
 lease_assert() {
   exec 9>"$GUARD"
   flock -w 30 9 || { echo "FATAL: guard busy (flock on $GUARD not acquired within 30s)"; exit 70; }
@@ -61,8 +89,28 @@ echo "==> sync dexdo @ ${DEXDO_SHA}"
 git -C "$DIR" fetch --depth 1 origin "$DEXDO_SHA" && git -C "$DIR" checkout -f FETCH_HEAD
 [ "$(git -C "$DIR" rev-parse HEAD)" = "$DEXDO_SHA" ] || { echo "FATAL: checkout HEAD != DEXDO_SHA"; exit 66; }
 
-command -v cargo-nextest >/dev/null 2>&1 \
-  || curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$HOME/.cargo/bin"
+# VERIFY BY RUNNING IT, NOT BY FINDING IT. `command -v` answers "a file of that
+# name is on PATH and has the exec bit" — which is also what a truncated or
+# half-written download looks like, and exec'ing one of those is how a shell
+# produces 126. This is hardening, not the fix for any observed failure: #300's
+# 126 came from the pipeline timeout, not from here. It stays because the check
+# it replaces cannot tell a healthy binary from a corrupt one, and the same
+# untested pattern sits in `sdk-proof-on-host.sh`.
+#
+# Reinstall once and re-verify. Twice is not a retry loop: a download that lands
+# broken twice is not a flake, and looping would only delay the report.
+ensure_nextest() {
+  cargo nextest --version >/dev/null 2>&1 && return 0
+  echo "==> installing cargo-nextest"
+  curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$HOME/.cargo/bin"
+  cargo nextest --version >/dev/null 2>&1 && return 0
+  echo "FATAL: cargo-nextest is present but will not run -- the download is corrupt"
+  echo "--- cargo nextest --version ---"
+  cargo nextest --version || true
+  ls -l "$HOME/.cargo/bin/cargo-nextest" || true
+  exit 69
+}
+ensure_nextest
 
 cd "$DIR"
 START=$(date +%s)
