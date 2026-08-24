@@ -101,7 +101,6 @@ pub async fn project_event(
         | "PrivateNote.BookCredited"
         | "PrivateNote.InferenceOrderRemoved"
         | "PrivateNote.InferenceOrderRejectedMirror"
-        | "PrivateNote.InferenceDealClosed"
         | "PrivateNote.InferenceOrderPlacedConfirmed"
         | "PrivateNote.InferenceFilledConfirmed"
         | "RootPN.DealWriteOffReported"
@@ -113,6 +112,17 @@ pub async fn project_event(
         // deploy event must not create a deal.
         | "RootModel.ContractDeployed"
         | "RootModel.TokenContractRegistered" => Ok(ProjectionOutcome::Applied),
+        // The one note-side mirror that is NOT observability-only. Since ingest
+        // stopped capturing TokenContract routes this is the only live signal that
+        // a deal ended, so it carries `settled_at_chain` on its own. It lives with
+        // the settlement projectors rather than here because that is the module
+        // that owns the columns — see `project_deal_closed_from_note` for why it
+        // reads the deal out of the PAYLOAD and why it writes no `close_kind`.
+        "PrivateNote.InferenceDealClosed" => {
+            crate::token_contract_projectors::project_deal_closed_from_note(tx, event, node)
+                .await
+                .context("project PrivateNote.InferenceDealClosed")
+        }
         et if et.starts_with("TokenContract.") => {
             crate::token_contract_projectors::project_token_contract_event(tx, event, node)
                 .await

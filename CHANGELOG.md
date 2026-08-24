@@ -4,6 +4,11 @@ All notable changes to DEX.DO are recorded here. Entries are date-based, newest 
 
 ## [2026-08-24]
 
+### Fixed
+
+- **`inference_deals.settled_at_chain` fills again.** It is written by the four `TokenContract` close events, which the indexer's ingest scope no longer captures, so since that scope landed every deal read as never settled — including for the `resolve_deal` query in `dodex-points-rewards`, which asks exactly `settled_at_chain is not null`. It now comes from `PrivateNote.InferenceDealClosed`, which IS captured: the dying deal calls `onDealClosed` on both of its notes before self-destructing, so no close can happen without it whatever branch produced the close. Deals closed while the column was unfilled are not backfilled by this — the events that would carry it were dropped at ingest and are not replayable.
+- `close_kind` and `clean_settlement` are still NULL and stay that way. `InferenceDealClosed` names the deal and nothing else, so it records that a deal closed and never how; the close kind is not recoverable from any captured event, and this deliberately does not guess it from surrounding payments.
+
 ### Added
 
 - Storage, migrations `0006` and `0007` — applied by the indexer at startup, so a deploy runs them; no manual step. **`0007` blocks writes:** it builds `raw_events_created_at_idx` under a SHARE lock on the largest table in the schema, and `CONCURRENTLY` is deliberately not used (a failed concurrent build leaves an INVALID index to find and drop by hand). On a large database expect a noticeably longer deploy rather than investigating it.

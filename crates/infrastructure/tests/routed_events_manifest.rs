@@ -162,6 +162,7 @@ async fn every_in_scope_abi_event_reaches_an_arm() {
     // a number — the threshold drifts along with the scope.
     let mut book_reached = false;
     let mut settlement_reached = false;
+    let mut deal_closed_reached = false;
 
     for event_type in in_scope_event_types() {
         let mut tx = pool.begin().await.unwrap();
@@ -177,8 +178,17 @@ async fn every_in_scope_abi_event_reaches_an_arm() {
         // For no-op types an arm alone is not enough: it must also be empty, otherwise
         // "no-op" turns into a silent write. `txid_current_if_assigned()` returns NULL
         // exactly when the transaction wrote nothing.
-        let is_declared_no_op =
-            event_type.starts_with("PrivateNote.") || event_type.starts_with("RootModel.");
+        //
+        // THE `PrivateNote.` PREFIX HAS ONE EXCEPTION, and naming it here is the
+        // point. Every note-side mirror is observability-only — the book is the
+        // authority on an order and the note's copy exists for its owner — except
+        // `InferenceDealClosed`, which since ingest stopped capturing TokenContract
+        // routes is the only live signal that a deal ended, and therefore writes
+        // `settled_at_chain`. Left inside the prefix rule it would be asserted to
+        // write nothing, which is the opposite of its job.
+        let is_declared_no_op = (event_type.starts_with("PrivateNote.")
+            && event_type != "PrivateNote.InferenceDealClosed")
+            || event_type.starts_with("RootModel.");
         let write_xid: Option<i64> = if is_declared_no_op {
             sqlx::query_scalar("select txid_current_if_assigned()")
                 .fetch_one(&mut *tx)
@@ -214,6 +224,13 @@ async fn every_in_scope_abi_event_reaches_an_arm() {
                 settlement_reached = true;
             }
         }
+        // Counted whether it returned Ok or Err: an empty payload has no `deal`
+        // field, so this arm legitimately errors on the probe. What is checked is
+        // that it did not fall into the no-op branch above — see the exception
+        // there.
+        if event_type == "PrivateNote.InferenceDealClosed" {
+            deal_closed_reached = true;
+        }
     }
 
     // INSURANCE AGAINST AN EMPTY GUARD. The assert above rejects only `Ok(Unknown)`,
@@ -228,5 +245,13 @@ async fn every_in_scope_abi_event_reaches_an_arm() {
     assert!(
         settlement_reached,
         "no TokenContract.* returned Ok — the same for the fifteen settlement events"
+    );
+    // The exception is asserted to EXIST, not merely to be excluded: if
+    // `InferenceDealClosed` ever leaves the scoped set, the carve-out above becomes
+    // dead and this says so instead of silently protecting nothing.
+    assert!(
+        deal_closed_reached,
+        "PrivateNote.InferenceDealClosed is no longer in the scoped set, so the no-op \
+         carve-out above protects nothing and should go with it"
     );
 }

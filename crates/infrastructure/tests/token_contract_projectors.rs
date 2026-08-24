@@ -65,6 +65,17 @@ fn iob_ev(event_name: &str, value: serde_json::Value) -> DecodedEvent {
     }
 }
 
+/// Build a `PrivateNote.InferenceDealClosed` event (the `ev` helper hardcodes
+/// TokenContract, and this one is emitted by the NOTE).
+fn pn_deal_closed(deal: &str) -> DecodedEvent {
+    DecodedEvent {
+        contract_kind: "PrivateNote",
+        event_name: "InferenceDealClosed".to_string(),
+        event_type: "PrivateNote.InferenceDealClosed".to_string(),
+        value: serde_json::json!({ "deal": deal }),
+    }
+}
+
 fn node(src: &str, chain_order: &str) -> EventNode {
     EventNode {
         msg_id: format!("m_{chain_order}"),
@@ -1168,4 +1179,202 @@ async fn a_real_endpoint_set_body_is_skeleton_only() {
     .unwrap();
     assert!(close_kind.is_none(), "EndpointSet carries no deal-level state the read model needs");
     assert!(settled.is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PrivateNote.InferenceDealClosed — the only LIVE settlement signal since ingest
+// stopped capturing TokenContract routes. Every test below pins a property that
+// distinguishes it from the TokenContract close handlers above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn deal_closed_is_keyed_by_the_payload_deal_not_by_the_emitting_note() {
+    // THE WHOLE POINT OF THIS TEST. Every other handler in the settlement module
+    // keys on `node.src`, because there the emitter IS the deal. Here the emitter
+    // is the note. A handler that kept the `src` habit would stamp the settlement
+    // onto a row named after a party and leave the deal unsettled — and both rows
+    // exist here, so that mistake fails rather than passes by absence.
+    let Some(pool) = setup().await else { return };
+    let deal = "0:tc_dealclosed_key";
+    let note = "0:pn_dealclosed_key";
+    for a in [deal, note] {
+        sqlx::query("delete from inference_deals where token_contract_address=$1")
+            .bind(a)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("insert into inference_deals (token_contract_address) values ($1), ($2)")
+        .bind(deal)
+        .bind(note)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    project(&mut tx, &pn_deal_closed(deal), &node(note, "co-dc-1")).await;
+    tx.commit().await.unwrap();
+
+    let settled_deal: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "select settled_at_chain from inference_deals where token_contract_address=$1",
+    )
+    .bind(deal)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let settled_note: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "select settled_at_chain from inference_deals where token_contract_address=$1",
+    )
+    .bind(note)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(settled_deal.is_some(), "the deal named in the payload must be settled");
+    assert!(settled_note.is_none(), "the emitting note must not be settled");
+}
+
+#[tokio::test]
+async fn deal_closed_says_that_it_closed_and_never_how() {
+    // `close_kind` and `clean_settlement` must stay NULL. The event carries one
+    // field and the branch is not among the things it can be asked. Inferring it
+    // from surrounding payments would be indistinguishable from a fact downstream,
+    // so the absence is pinned here rather than left to a reviewer to notice.
+    let Some(pool) = setup().await else { return };
+    let deal = "0:tc_dealclosed_how";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(deal)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    project(&mut tx, &pn_deal_closed(deal), &node("0:pn_any", "co-dc-2")).await;
+    tx.commit().await.unwrap();
+
+    let (kind, clean, settled): (
+        Option<String>,
+        Option<bool>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "select close_kind, clean_settlement, settled_at_chain from inference_deals \
+             where token_contract_address=$1",
+    )
+    .bind(deal)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(settled.is_some(), "the fact of closing is the one thing it does carry");
+    assert_eq!(kind, None, "close_kind is not derivable from this event");
+    assert_eq!(clean, None, "clean_settlement is not derivable from this event");
+}
+
+#[tokio::test]
+async fn both_notes_report_the_same_close_and_the_first_one_wins() {
+    // `_die` calls `onDealClosed` on the buyer's note AND the seller's, so this
+    // event arrives twice for one deal, at two different chain moments. The second
+    // must not move `settled_at_chain` — the same property that makes it idempotent
+    // under replay.
+    let Some(pool) = setup().await else { return };
+    let deal = "0:tc_dealclosed_twice";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(deal)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    project(&mut tx, &pn_deal_closed(deal), &node_at("0:pn_buyer", "co-dc-3a", 1_700_000_000))
+        .await;
+    project(&mut tx, &pn_deal_closed(deal), &node_at("0:pn_seller", "co-dc-3b", 1_700_009_999))
+        .await;
+    tx.commit().await.unwrap();
+
+    let (settled, order): (Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
+        "select settled_at_chain, last_chain_order from inference_deals where token_contract_address=$1")
+        .bind(deal).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        settled.map(|t| t.timestamp()),
+        Some(1_700_000_000),
+        "the second note must not overwrite the moment the first one recorded"
+    );
+    assert_eq!(order.as_deref(), Some("co-dc-3b"), "last_chain_order still advances");
+    let rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_deals where token_contract_address=$1")
+            .bind(deal)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 1, "two reports are one deal");
+}
+
+#[tokio::test]
+async fn a_close_for_a_deal_never_filled_records_a_skeleton_rather_than_deferring() {
+    // The deal row normally exists — `InferenceFilled` precedes this on chain. It
+    // can legitimately be absent when the fill happened before this indexer's
+    // captured history, and there `Deferred` would be wrong twice: the parent is
+    // unreachable rather than late, and this type is not in the dead-letter
+    // allow-list, so the row would stay pending forever. The fact it carries is
+    // kept; what it cannot fill stays NULL.
+    let Some(pool) = setup().await else { return };
+    let deal = "0:tc_dealclosed_orphan";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(deal)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let outcome =
+        project_event(&mut tx, &pn_deal_closed(deal), &node("0:pn_any", "co-dc-4")).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(outcome, ProjectionOutcome::Applied, "must not defer on a missing parent");
+
+    let (settled, seller, buyer): (
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "select settled_at_chain, seller_note, buyer_note from inference_deals \
+             where token_contract_address=$1",
+    )
+    .bind(deal)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(settled.is_some());
+    assert_eq!(seller, None, "the parties are unknown and must read as unknown");
+    assert_eq!(buyer, None);
+}
+
+#[tokio::test]
+async fn a_zero_deal_address_creates_no_row() {
+    // Unreachable on the live path — the note emits only inside
+    // `if (_liveDeals.exists(msg.sender))` — but a replayed or hand-built row can
+    // carry anything, and a zero-keyed row would be a permanent phantom in a table
+    // keyed by address.
+    let Some(pool) = setup().await else { return };
+    let zero = "0:0000000000000000000000000000000000000000000000000000000000000000";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(zero)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let outcome =
+        project_event(&mut tx, &pn_deal_closed(zero), &node("0:pn_any", "co-dc-5")).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        outcome,
+        ProjectionOutcome::Applied,
+        "a nonsense payload is not a retryable failure"
+    );
+
+    let rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_deals where token_contract_address=$1")
+            .bind(zero)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0);
 }

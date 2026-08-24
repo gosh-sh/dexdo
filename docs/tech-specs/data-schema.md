@@ -445,7 +445,11 @@ The inference settlement side can track the lifecycle of each deal escrow (`Toke
 
 ### `inference_deals`
 
-One row per `TokenContract` address. `InferenceOrderBook.InferenceFilled` from the live DEX dApp stream creates or enriches the deal cross-link — `orderbook_address`, `seller_note`, `buyer_note`. If retained `TokenContract.*` rows are replayed, the first one seeds a skeleton keyed by `src_address`, and the SETTLEMENT projector fills the settlement columns: `deposit`/`funded_at_chain` (`StreamFunded`), `price_per_tick`/`opened_at_chain` (`StreamOpened`), `trusted_ticks`/`claimed_ticks` (`TicksClaimed`) and `close_kind`/`settled_at_chain`/`clean_settlement` (the stream-close events `StreamStopped`/`DisputeResolved`/`ContractDestroyed`/`ProbeBurned`). Those columns have no other writer, so without a replay they stay NULL.
+One row per `TokenContract` address. Three writers, and which columns fill depends on which of them is live.
+
+- **`InferenceOrderBook.InferenceFilled`** (live) creates or enriches the deal cross-link — `orderbook_address`, `seller_note`, `buyer_note`.
+- **`PrivateNote.InferenceDealClosed`** (live) sets `settled_at_chain`. The deal is the event's PAYLOAD, not its `src` — the emitter is the note. `TokenContract._die` is the single funnel every close path ends in and it notifies both notes, so the event arrives twice per deal and the first write wins. It says only THAT the deal closed: `close_kind` and `clean_settlement` are not derivable from it and stay NULL.
+- **`TokenContract.*`** (replay only) seeds a skeleton keyed by `src_address` and fills `deposit`/`funded_at_chain` (`StreamFunded`), `price_per_tick`/`opened_at_chain` (`StreamOpened`), `trusted_ticks`/`claimed_ticks` (`TicksClaimed`), `disputed_at_chain` (`StreamDisputed`) and `close_kind`/`clean_settlement` (the stream-close events). Ingest excludes every TokenContract route, so without a replay of retained rows these columns stay NULL.
 
 | Column | Type | Notes |
 | --- | --- | --- |

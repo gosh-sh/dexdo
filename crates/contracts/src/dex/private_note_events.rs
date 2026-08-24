@@ -538,3 +538,21 @@ pub struct OrderPlaceRejectedData {
     #[serde(deserialize_with = "deserialize_u64")]
     pub op_nonce: u64,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(test, serde(deny_unknown_fields))]
+/// Payload of `PrivateNote.InferenceDealClosed` (external id 166).
+///
+/// ONE FIELD, AND THAT IS THE WHOLE EVENT. The note is told by a deal in the act
+/// of self-destructing (`TokenContract._die`), so the deal both authenticates and
+/// identifies itself as `msg.sender`, and there is nothing else to pass. What it
+/// does NOT carry is the reason: `close_kind` and `clean_settlement` are not
+/// derivable from this event, and the reader must leave them alone rather than
+/// infer them from surrounding payments.
+pub struct InferenceDealClosedData {
+    /// Address of the `TokenContract` that closed — the deal, not the note. The
+    /// note is the event's `src`; confusing the two writes the settlement onto a
+    /// row keyed by the wrong party.
+    pub deal: String,
+}

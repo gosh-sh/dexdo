@@ -56,7 +56,12 @@ address) and project into the SETTLEMENT read-model: `inference_deals` (one row
 per TokenContract / deal) and `inference_ticks` (one row per `TickFinalized`
 **event** — the emit follows the week loop in `_chargeWeeksThrough`, so one row
 can stand for a batch of closed boundaries, not one week).
-The current live indexer does not capture new TokenContract event rows. The
+The current live indexer does not capture new TokenContract event rows, so those
+settlement columns fill only on a replay. One settlement fact survives live and by
+another route: `settled_at_chain` comes from `PrivateNote.InferenceDealClosed`,
+which the note emits when the dying deal calls `onDealClosed` on it. That event
+names the deal and nothing else, so it records THAT the deal closed and never how
+— `close_kind` and `clean_settlement` stay NULL without a replay. The
 deal's `orderbook_address`,
 `seller_note`, and `buyer_note` are linked from `InferenceOrderBook.InferenceFilled`
 (`sellerTC` + `buyerNote` + `sellerNote`). The SELL leg's note in `inference_orders`

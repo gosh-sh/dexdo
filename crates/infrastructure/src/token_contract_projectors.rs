@@ -8,6 +8,13 @@
 // The orderbook_address + seller_note link is filled by the
 // InferenceOrderBook.Filled handler (the only event carrying sellerTC +
 // buyerNote together).
+//
+// SINCE 2026-08-24 THE TokenContract.* HALF OF THIS MODULE HAS NO LIVE INPUT.
+// Ingest scopes capture to a `dst` allow-list (`config::SCOPED_EVENT_IDS`) that
+// excludes every TokenContract route, so those handlers run only when retained
+// rows are replayed. `project_deal_closed_from_note` below is the exception and
+// the reason this module still writes on the live path: it is fed by
+// `PrivateNote.InferenceDealClosed`, which IS captured.
 
 use anyhow::Context;
 use dodex_contracts::airegistry::token_contract_events::StreamFundedData;
@@ -15,8 +22,10 @@ use dodex_contracts::airegistry::token_contract_events::StreamOpenedData;
 use dodex_contracts::airegistry::token_contract_events::TickFinalizedData;
 use dodex_contracts::airegistry::token_contract_events::TicksClaimedData;
 use dodex_contracts::airegistry::token_contract_events::TokenContractEvent;
+use dodex_contracts::dex::private_note_events::InferenceDealClosedData;
 use sqlx::Postgres;
 use sqlx::Transaction;
+use tracing::warn;
 
 use crate::decoder::DecodedEvent;
 use crate::graphql::EventNode;
@@ -230,6 +239,85 @@ async fn apply_tick_finalized(
         .await
         .context("bump inference_deals finalized_ticks")?;
     }
+    Ok(ProjectionOutcome::Applied)
+}
+
+/// `PrivateNote.InferenceDealClosed` — the only live signal that a deal ended.
+///
+/// WHY THIS EXISTS AT ALL. `settled_at_chain` used to come from the deal's own
+/// close events (`StreamStopped` / `DisputeResolved` / `ContractDestroyed` /
+/// `ProbeBurned`). Ingest no longer captures any TokenContract route, so all four
+/// stopped arriving and every deal read as never settled — including for
+/// `dodex-points-rewards`, which asks exactly `settled_at_chain is not null`
+/// (see `tests/rewards_query_compat.rs`).
+///
+/// WHY IT IS COMPLETE FOR ITS ONE FACT. `TokenContract._die` is the single funnel
+/// every close path ends in (`TokenContract.sol:459-467`): it calls
+/// `onDealClosed` on BOTH notes, then emits `ContractDestroyed` and
+/// self-destructs. The note drops the deal from `_liveDeals` and emits this. So
+/// no close can happen without it, whatever branch produced the close.
+///
+/// THE ADDRESS IS IN THE PAYLOAD, NOT IN `src`. Every other handler in this file
+/// keys on `node.src`, because there the emitter IS the deal. Here the emitter is
+/// the NOTE and the deal is the payload's only field. Keying on `src` would stamp
+/// the settlement onto a row named after a party.
+///
+/// FIRES TWICE PER DEAL — once from the buyer's note, once from the seller's.
+/// Both writes are the same fact, so `coalesce` keeps the first and the second is
+/// a no-op; the same property makes it idempotent under replay.
+///
+/// WHAT IT DELIBERATELY DOES NOT WRITE: `close_kind` and `clean_settlement`. This
+/// event says THAT the deal closed, never HOW. The surrounding signals cannot
+/// settle it either — telling `STOPPED` from `PROBE_BURNED` from
+/// `DISPUTE_RESOLVED` from `cleanupUnopened` would mean reading the shape of the
+/// `DealCredited` payments plus the presence of `RootPN.DealWriteOffReported`,
+/// and those patterns overlap and depend on amounts. `DealCredited` also lost the
+/// earmark parameter in v4.0.33. A guess here would be indistinguishable from a
+/// fact to every reader downstream, so the columns stay NULL until the chain
+/// names the branch.
+pub async fn project_deal_closed_from_note(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let InferenceDealClosedData { deal } = serde_json::from_value(event.value.clone())
+        .context("InferenceDealClosed: payload does not parse against the ABI")?;
+    // A zero address is not a deal. The note only emits inside
+    // `if (_liveDeals.exists(msg.sender))`, so this cannot occur on the live path
+    // — it is here because a replayed or hand-built row can carry anything, and a
+    // zero-keyed row would be a permanent phantom in a table keyed by address.
+    let Some(deal) = crate::inference_projectors::non_zero_address(Some(deal.as_str())) else {
+        warn!(
+            msg_id = %node.msg_id,
+            "InferenceDealClosed carried the zero address as its deal; nothing to settle"
+        );
+        return Ok(ProjectionOutcome::Applied);
+    };
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    let chain_order = node_chain_order(node, "InferenceDealClosed")?;
+    // UPSERT, not UPDATE, and NOT `Deferred` when the row is missing. The deal row
+    // is created by `InferenceOrderBook.InferenceFilled`, which precedes this on
+    // chain, so normally the row is here and this is an update. It can legitimately
+    // be absent in exactly one case — the fill happened before this indexer's
+    // captured history — and there deferring would be wrong twice over: the parent
+    // is not late but unreachable, and `InferenceDealClosed` is not in the
+    // dead-letter allow-list, so the row would stay pending forever. Recording a
+    // skeleton keeps the one fact this event carries; the columns it cannot fill
+    // stay NULL, which is what they mean.
+    sqlx::query(
+        r#"insert into inference_deals (token_contract_address, settled_at_chain, last_chain_order)
+           values ($1, to_timestamp($2::double precision), $3)
+           on conflict (token_contract_address) do update
+              set settled_at_chain = coalesce(inference_deals.settled_at_chain, excluded.settled_at_chain),
+                  last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
+                  updated_at = now()"#,
+    )
+    .bind(deal)
+    .bind(chain_seconds)
+    .bind(&chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("apply InferenceDealClosed")?;
     Ok(ProjectionOutcome::Applied)
 }
 
