@@ -168,10 +168,16 @@ cargo build --workspace
 
 ```sh
 cargo +nightly fmt --all -- --check
-cargo clippy --workspace --all-targets --no-deps -- -D warnings
+cargo clippy --workspace --all-targets --no-deps -- -D warnings -A clippy::double_must_use
 ```
 
 `rustfmt.toml` uses unstable features, so `fmt` needs nightly. `clippy` runs on the default toolchain.
+
+`-A clippy::double_must_use` silences a lint nobody here can annotate away: `#[async_trait]` expands
+every trait method into a `#[must_use]` function returning `Pin<Box<dyn Future>>`, a type already
+considered `must_use`, and the offending attribute exists only in the expansion. Stable clippy does
+not fire it and nightly does, so without the flag the two toolchains disagree about a codebase
+neither of them has a complaint about. `make check` carries the same flag.
 
 ## Test Postgres
 

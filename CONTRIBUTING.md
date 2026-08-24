@@ -181,7 +181,8 @@ From [`.github/workflows/pr-tests.yml`](.github/workflows/pr-tests.yml):
 
 ```sh
 cargo +nightly fmt --all --check                                  # rustfmt.toml uses nightly features
-cargo clippy --workspace --all-targets --no-deps -- -D warnings   # warnings are errors
+cargo clippy --workspace --all-targets --no-deps -- -D warnings \
+      -A clippy::double_must_use                                  # warnings are errors; the -A is an async_trait expansion nobody can annotate
 cargo nextest run --workspace                                     # unit + DB integration (test Postgres up)
 cargo test --workspace --doc                                      # doctests (nextest skips these)
 ```
