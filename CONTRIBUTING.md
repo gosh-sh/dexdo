@@ -350,6 +350,9 @@ not optional and not narrowable to "the obviously relevant doc."
 2. Keep the change **scoped to what was asked** — a focused PR beats a sprawling
    one ([`AGENT_REQUIREMENTS.md`](AGENT_REQUIREMENTS.md#avoid-perfectionism)).
 3. Green locally: fmt, clippy, tests, doctests, and OpenAPI drift (above).
-4. Add a [`CHANGELOG.md`](CHANGELOG.md) entry under today's date if the change is
-   user-visible.
+4. Add a [`CHANGELOG.md`](CHANGELOG.md) entry under today's date describing the
+   branch's diff against `dev` — written for a devops engineer or a developer who
+   runs DEX.DO, not for the author. What counts as observable, and what to leave
+   out, is in
+   [`AGENT_REQUIREMENTS.md`](AGENT_REQUIREMENTS.md#write-for-the-reader-not-for-the-author).
 5. Run the doc sweep and commit doc updates **in the same commit** as the code.

@@ -13,6 +13,7 @@ database:
 
 graphql:
   endpoint: https://shellnet.ackinacki.org/graphql
+  # bearer_token: "<gateway-token>" # only for protected GraphQL endpoints
   page_size: 100
   request_timeout_ms: 10000
 
@@ -25,11 +26,6 @@ indexer:
   # (and trust_addr) by calling OEL._events getter — `EventAdded` does not
   # carry these fields, they live only in contract state.
   oracle_event_list_reconciliation_interval_ms: 60000
-  # DEXDO dapp_id. When set, only events whose src_dapp_id matches are kept
-  # (foreign chain traffic is dropped before decode); edges with no src_dapp_id
-  # are kept. Leave commented out to disable dapp scoping locally. An empty
-  # string is rejected at startup — omit/comment the key instead to disable.
-  # dapp_id: "<dexdo-dapp-id>"   # set at deploy time; unset locally
   # Source addresses whose events are dropped before raw_events insert and
   # projector dispatch. Keep this list narrow — only addresses that emit
   # confirmed noise.

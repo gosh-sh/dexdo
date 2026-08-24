@@ -26,6 +26,27 @@ Its machine-readable counterpart [`docs/openapi.yaml`](docs/openapi.yaml) is **g
 
 README files are entry points only: keep a short service definition, links to canonical specs, config locations/variables, and maintenance commands such as run/test/deploy. Do not put implementation details in README files. Functional requirements belong in `docs/api-spec.md`; implementation details belong in `docs/tech-specs/` (`read-api.md`, `write-api.md`, `indexer.md`, `auth.md`); schema details belong in `docs/tech-specs/data-schema.md`.
 
+## Changelog
+
+Every branch opened as a pull request into `dev` must describe its diff against `dev` in [`CHANGELOG.md`](CHANGELOG.md). No PR is complete without it.
+
+Entries are **date-based, newest first** — add yours under today's date, creating the `## [YYYY-MM-DD]` heading if it is not there yet, grouped under `Breaking Changes` / `Added` / `Changed` / `Fixed` / `Removed`. Dates, not release numbers, are the unit here precisely because nobody knows at merge time which release the change ships in. Do not invent a version heading and do not bump `version` in any `Cargo.toml` — if a release number is ever assigned, a human does it at release time. Entries under a past date are history: do not rewrite them or append to them.
+
+### Write for the reader, not for the author
+
+The reader is a devops engineer or a developer who runs DEX.DO and integrates with it. They did not write the code and will not read it. Describe the surface they can observe, briefly — a few lines, not a commit dump:
+
+- **REST API**: routes, query/body parameters, response DTOs, pagination and filter semantics, error codes. (The contract itself lives in [`docs/api-spec.md`](docs/api-spec.md); the changelog says what moved.)
+- **On-chain behaviour**: contract entrypoints, events and their external ids, ABI changes, renamed getters/errors, code-hash re-pins.
+- **Indexer behaviour**: what is ingested and what is not, projectors, cursors, backfill and reconciliation semantics.
+- **Storage**: Postgres schema, indexes, migrations — and whether a migration has to be run.
+- **Operations**: config files and environment variables, `docker-compose*.yml`, `deploy/`, `Makefile` targets, exported metrics, dashboards and alerts an operator would page on.
+- **SDK**: the public surface under `sdk/`.
+
+Say what changed and what the reader has to do about it — run a migration, carry a setting over by hand, switch to a new field, redeploy a contract, re-pin a code hash. Name routes, fields, events, tables and options exactly as they appear in the product.
+
+Leave out internal refactors, private renames, test-only changes and implementation detail. If nothing observable changed, there is nothing to write.
+
 ## Before every `git commit`
 
 Re-read **every** file under `docs/`, the root [`README.md`](README.md), and the `README.md` of every touched component, then update each one the staged diff invalidates. Default is "check all"; only skip a doc after re-reading it and confirming it is unaffected.

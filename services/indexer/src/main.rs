@@ -6,6 +6,8 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dodex_chain::DEX_DAPP_ID;
+use dodex_contracts::dex::root_pn::RootPn;
 use dodex_infrastructure::config::IndexerConfig;
 use dodex_infrastructure::database;
 use dodex_infrastructure::decoder::Decoder;
@@ -13,6 +15,8 @@ use dodex_infrastructure::graphql::EventEdge;
 use dodex_infrastructure::graphql::EventsPage;
 use dodex_infrastructure::graphql::GraphqlClient;
 use dodex_infrastructure::indexer_repo::IndexerRepository;
+use dodex_infrastructure::indexer_repo::DAPP_CAPTURE_STREAM;
+use dodex_infrastructure::indexer_repo::ROOT_PN_CAPTURE_STREAM;
 use dodex_infrastructure::inference_reconciler::InferenceReconciler;
 use dodex_infrastructure::oracle_event_list_reconciler::OracleEventListReconciler;
 use dodex_infrastructure::reconciler::MarketReconciler;
@@ -28,6 +32,34 @@ mod metrics_refresh;
 // this stream's `at_head` — they must name the same cursor row.
 const STREAM_NAME: &str = dodex_infrastructure::indexer_repo::CAPTURE_STREAM;
 const MAX_PAGES_PER_TICK: u32 = 100;
+
+#[derive(Clone, Copy, Debug)]
+enum CaptureSource {
+    DexDapp,
+    RootPn,
+}
+
+impl CaptureSource {
+    fn stream_name(self) -> &'static str {
+        match self {
+            Self::DexDapp => DAPP_CAPTURE_STREAM,
+            Self::RootPn => ROOT_PN_CAPTURE_STREAM,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::DexDapp => "dex_dapp",
+            Self::RootPn => "root_pn",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CaptureBarrier {
+    cursor: Option<String>,
+    at_head: bool,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -46,7 +78,14 @@ async fn main() -> anyhow::Result<()> {
     database::run_migrations(&pool).await?;
     let repo = IndexerRepository::new(pool.clone());
     let decoder = Decoder::new()?;
-    info!(known_events = decoder.known_events(), "abi decoder initialized");
+    // Ingest scope: the `dst` of every event our contracts emit. Static for the
+    // process, so it is built once and matched per edge before decode.
+    let scoped_event_dsts = dodex_infrastructure::config::scoped_event_dsts();
+    info!(
+        known_events = decoder.known_events(),
+        scoped_dsts = scoped_event_dsts.len(),
+        "abi decoder initialized"
+    );
 
     // Spawn the market reconciler as an independent task. It keeps its own
     // GraphQL client and Decoder instance, so config-reload that swaps the
@@ -54,11 +93,18 @@ async fn main() -> anyhow::Result<()> {
     let reconciler_graphql = GraphqlClient::new(
         config.graphql.endpoint.clone(),
         Duration::from_millis(config.graphql.request_timeout_ms),
-    )?;
+    )?
+    .with_bearer_token(config.graphql.bearer_token.clone());
     let reconciler = MarketReconciler::new(pool.clone(), reconciler_graphql, decoder.clone());
     let reconciler_interval = Duration::from_millis(config.indexer.reconciliation_interval_ms);
     tokio::spawn(reconciler.run_loop(reconciler_interval));
     info!(interval_ms = config.indexer.reconciliation_interval_ms, "market reconciler started");
+
+    // The old single-stream cursor is not a valid barrier for the new pair of
+    // filtered streams. On the first dual-stream start, clear it before the
+    // projector can apply rows; later restarts preserve the last synchronized
+    // barrier but close `at_head` until both streams poll successfully again.
+    repo.initialize_capture_barrier(&[DAPP_CAPTURE_STREAM, ROOT_PN_CAPTURE_STREAM]).await?;
 
     // Spawn the projection loop. It is the SOLE projector: it drains the
     // raw_events rows the capture loop writes (processed_at IS NULL) in
@@ -84,7 +130,8 @@ async fn main() -> anyhow::Result<()> {
     let oel_graphql = GraphqlClient::new(
         config.graphql.endpoint.clone(),
         Duration::from_millis(config.graphql.request_timeout_ms),
-    )?;
+    )?
+    .with_bearer_token(config.graphql.bearer_token.clone());
     let oel_reconciler = OracleEventListReconciler::new(pool.clone(), oel_graphql, decoder.clone());
     let oel_interval =
         Duration::from_millis(config.indexer.oracle_event_list_reconciliation_interval_ms);
@@ -97,7 +144,8 @@ async fn main() -> anyhow::Result<()> {
     let inf_graphql = GraphqlClient::new(
         config.graphql.endpoint.clone(),
         Duration::from_millis(config.graphql.request_timeout_ms),
-    )?;
+    )?
+    .with_bearer_token(config.graphql.bearer_token.clone());
     let inference_reconciler = InferenceReconciler::new(
         pool.clone(),
         inf_graphql,
@@ -134,11 +182,16 @@ async fn main() -> anyhow::Result<()> {
         None => info!("no OTLP endpoint configured; metrics not collected"),
     }
 
-    let mut cursor = repo.load_cursor(STREAM_NAME).await?;
-    info!(cursor = cursor.as_deref().unwrap_or(""), "indexer resumed from cursor");
+    let mut dapp_cursor = repo.load_cursor(DAPP_CAPTURE_STREAM).await?;
+    let mut root_pn_cursor = repo.load_cursor(ROOT_PN_CAPTURE_STREAM).await?;
+    let mut published_barrier_cursor = repo.load_cursor(STREAM_NAME).await?;
+    let mut pending_head_barrier: Option<CaptureBarrier> = None;
+    log_resume_cursor(CaptureSource::DexDapp, dapp_cursor.as_deref());
+    log_resume_cursor(CaptureSource::RootPn, root_pn_cursor.as_deref());
 
     let mut current_endpoint = String::new();
     let mut current_timeout_ms: u64 = 0;
+    let mut current_bearer_token: Option<String> = None;
     let mut client: Option<GraphqlClient> = None;
 
     loop {
@@ -147,16 +200,19 @@ async fn main() -> anyhow::Result<()> {
         if client.is_none()
             || current_endpoint != cfg.graphql.endpoint
             || current_timeout_ms != cfg.graphql.request_timeout_ms
+            || current_bearer_token != cfg.graphql.bearer_token
         {
             match GraphqlClient::new(
                 cfg.graphql.endpoint.clone(),
                 Duration::from_millis(cfg.graphql.request_timeout_ms),
             ) {
                 Ok(new_client) => {
+                    let new_client = new_client.with_bearer_token(cfg.graphql.bearer_token.clone());
                     info!(endpoint = %cfg.graphql.endpoint, "graphql client (re)built");
                     client = Some(new_client);
                     current_endpoint = cfg.graphql.endpoint.clone();
                     current_timeout_ms = cfg.graphql.request_timeout_ms;
+                    current_bearer_token = cfg.graphql.bearer_token.clone();
                 }
                 Err(err) => {
                     error!(?err, "failed to build graphql client; will retry next tick");
@@ -169,56 +225,50 @@ async fn main() -> anyhow::Result<()> {
                 cfg.indexer.ignored_addresses.iter().map(String::as_str).collect();
             let ignored_event_dsts =
                 dodex_infrastructure::config::ignored_event_dsts(&cfg.indexer.ignored_event_types);
-            let dapp_id = cfg.indexer.dapp_id.as_deref();
-            match drain_events(
+
+            let dapp_drain = drain_events(
+                CaptureSource::DexDapp,
                 client,
                 &repo,
                 &decoder,
                 cfg.graphql.page_size,
-                dapp_id,
+                &scoped_event_dsts,
                 &ignored,
                 &ignored_event_dsts,
-                &mut cursor,
-            )
-            .await
-            {
-                Ok(stats) => {
-                    info!(
-                        edges = stats.edges,
-                        ignored = stats.ignored,
-                        foreign_skipped = stats.foreign_skipped,
-                        inserted = stats.inserted,
-                        skipped = stats.skipped,
-                        decoded = stats.decoded,
-                        undecoded = stats.undecoded,
-                        type_ignored = stats.type_ignored,
-                        pages = stats.pages,
-                        cursor = cursor.as_deref().unwrap_or(""),
-                        "capture tick"
-                    );
-                    if let Some(drop_rate) =
-                        foreign_drop_warning(stats.edges, stats.foreign_skipped)
-                    {
-                        warn!(
-                            edges = stats.edges,
-                            foreign_skipped = stats.foreign_skipped,
-                            drop_rate,
-                            "indexer dropped foreign-dapp edges"
-                        );
-                    }
-                    if let Some(drop_rate) =
-                        ignored_type_drop_warning(stats.edges, stats.type_ignored)
-                    {
-                        warn!(
-                            edges = stats.edges,
-                            type_ignored = stats.type_ignored,
-                            drop_rate,
-                            "indexer dropped high share of ignored event-type edges"
-                        );
-                    }
-                }
-                Err(err) => {
-                    error!(?err, "graphql fetch / persist failed");
+                &mut dapp_cursor,
+            );
+            let root_pn_drain = drain_events(
+                CaptureSource::RootPn,
+                client,
+                &repo,
+                &decoder,
+                cfg.graphql.page_size,
+                &scoped_event_dsts,
+                &ignored,
+                &ignored_event_dsts,
+                &mut root_pn_cursor,
+            );
+            let (dapp_result, root_pn_result) = tokio::join!(dapp_drain, root_pn_drain);
+
+            report_drain_result(CaptureSource::DexDapp, &dapp_result, dapp_cursor.as_deref());
+            report_drain_result(CaptureSource::RootPn, &root_pn_result, root_pn_cursor.as_deref());
+
+            if let (Ok(dapp), Ok(root_pn)) = (&dapp_result, &root_pn_result) {
+                let barrier = synchronized_capture_barrier(&[
+                    (dapp_cursor.as_deref(), dapp.at_head),
+                    (root_pn_cursor.as_deref(), root_pn.at_head),
+                ]);
+                let publishable = stabilized_capture_barrier(
+                    barrier,
+                    published_barrier_cursor.as_deref(),
+                    &mut pending_head_barrier,
+                );
+                match repo
+                    .set_capture_barrier(publishable.cursor.as_deref(), publishable.at_head)
+                    .await
+                {
+                    Ok(()) => published_barrier_cursor = publishable.cursor,
+                    Err(err) => error!(?err, "failed to persist synchronized capture barrier"),
                 }
             }
         }
@@ -227,48 +277,114 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+fn log_resume_cursor(source: CaptureSource, cursor: Option<&str>) {
+    match cursor {
+        Some(cursor) if !cursor.is_empty() => {
+            info!(source = source.label(), cursor, "capture stream resumed from cursor")
+        }
+        Some(_) => warn!(
+            source = source.label(),
+            "stored capture cursor is empty; restarting from the earliest retained event"
+        ),
+        None => info!(
+            source = source.label(),
+            "capture stream cold start; capturing from the earliest retained event"
+        ),
+    }
+}
+
+fn synchronized_capture_barrier(states: &[(Option<&str>, bool)]) -> CaptureBarrier {
+    let at_head = states.iter().all(|(_, at_head)| *at_head);
+    let cursor = if at_head {
+        states.iter().filter_map(|(cursor, _)| *cursor).max().map(str::to_owned)
+    } else {
+        let limiting: Vec<Option<&str>> =
+            states.iter().filter(|(_, at_head)| !*at_head).map(|(cursor, _)| *cursor).collect();
+        if limiting.iter().any(Option::is_none) {
+            None
+        } else {
+            limiting.into_iter().flatten().min().map(str::to_owned)
+        }
+    };
+    CaptureBarrier { cursor, at_head }
+}
+
+fn stabilized_capture_barrier(
+    candidate: CaptureBarrier,
+    published_cursor: Option<&str>,
+    pending_head: &mut Option<CaptureBarrier>,
+) -> CaptureBarrier {
+    if !candidate.at_head {
+        *pending_head = None;
+        return candidate;
+    }
+
+    let previous = pending_head.replace(candidate);
+    CaptureBarrier {
+        cursor: previous
+            .and_then(|barrier| barrier.cursor)
+            .or_else(|| published_cursor.map(str::to_owned)),
+        at_head: true,
+    }
+}
+
+fn report_drain_result(
+    source: CaptureSource,
+    result: &anyhow::Result<DrainStats>,
+    cursor: Option<&str>,
+) {
+    match result {
+        Ok(stats) => {
+            info!(
+                source = source.label(),
+                edges = stats.edges,
+                ignored = stats.ignored,
+                out_of_scope = stats.out_of_scope,
+                dst_missing = stats.dst_missing,
+                inserted = stats.inserted,
+                skipped = stats.skipped,
+                decoded = stats.decoded,
+                undecoded = stats.undecoded,
+                type_ignored = stats.type_ignored,
+                pages = stats.pages,
+                at_head = stats.at_head,
+                cursor = cursor.unwrap_or(""),
+                "capture stream tick"
+            );
+            if stats.dst_missing > 0 {
+                warn!(
+                    source = source.label(),
+                    dst_missing = stats.dst_missing,
+                    edges = stats.edges,
+                    "scoped GraphQL edges arrived with no `dst` and could not be decoded"
+                );
+            }
+        }
+        Err(err) => error!(source = source.label(), ?err, "graphql fetch / persist failed"),
+    }
+}
+
 #[derive(Debug, Default)]
 struct DrainStats {
     edges: usize,
     ignored: u64,
-    foreign_skipped: u64,
+    out_of_scope: u64,
+    dst_missing: u64,
     inserted: u64,
     skipped: u64,
     decoded: u64,
     undecoded: u64,
     type_ignored: u64,
     pages: u32,
+    at_head: bool,
 }
 
 #[derive(Debug, Default)]
 struct FilterStats {
     ignored: u64,
-    foreign_skipped: u64,
+    out_of_scope: u64,
+    dst_missing: u64,
     type_ignored: u64,
-}
-
-/// Whether an event edge belongs to the configured DEXDO dapp. Edges with no
-/// `src_dapp_id` are kept (treated as in-scope) so a gateway that omits the
-/// field never costs us our own events.
-///
-/// A **self-rooted** edge is kept too, and that is the whole settlement path: a
-/// `TokenContract` is deployed by an external message, so the gateway reports its
-/// `src_dapp_id` as its own account id — which can never equal the configured
-/// `dapp_id`. Comparing strictly would drop every `inference_deals` /
-/// `inference_ticks` event BEFORE the `raw_events` insert, i.e. outside the
-/// recovery boundary: no replay and no reprojection brings it back.
-///
-/// The rule admits a foreign self-rooted contract too, and that is a deliberate
-/// trade rather than an oversight: self-rootedness is a property of how a contract
-/// was deployed, not of who owns it. Such an edge reaches `raw_events` and is then
-/// dropped by the decoder — none of its events are in any loaded ABI — so the cost
-/// is a stored row, against the alternative cost of losing settlement entirely.
-fn edge_in_scope(edge: &EventEdge, dapp_id: &str) -> bool {
-    match edge.node.src_dapp_id.as_deref() {
-        Some(d) if d == dapp_id => true,
-        Some(d) => Some(d) == edge.node.src.as_deref(),
-        None => true,
-    }
 }
 
 /// Whether an edge is a configured no-op event to drop, matched by its external
@@ -280,26 +396,9 @@ fn edge_is_ignored_noop(edge: &EventEdge, ignored_dsts: &HashSet<String>) -> boo
     }
 }
 
-fn drop_rate(edges: usize, dropped: u64) -> Option<f64> {
-    if edges == 0 || dropped == 0 {
-        return None;
-    }
-    Some(dropped as f64 / edges as f64)
-}
-
-fn foreign_drop_warning(edges: usize, dropped: u64) -> Option<f64> {
-    drop_rate(edges, dropped)
-}
-
-fn ignored_type_drop_warning(_edges: usize, _dropped: u64) -> Option<f64> {
-    // Configured no-op event types are expected to be dropped during normal
-    // OrderBook floods; the per-tick info log still carries the count.
-    None
-}
-
 fn apply_ingest_filters(
     mut edges: Vec<EventEdge>,
-    dapp_id: Option<&str>,
+    scoped_event_dsts: &HashSet<String>,
     ignored_src: &HashSet<&str>,
     ignored_event_dsts: &HashSet<String>,
 ) -> (Vec<EventEdge>, FilterStats) {
@@ -317,13 +416,28 @@ fn apply_ingest_filters(
         stats.ignored += (before - edges.len()) as u64;
     }
 
-    // Scope to the DEXDO dapp: drop foreign chain traffic before decode.
-    // Inert when no dapp_id is configured.
-    if let Some(dapp_id) = dapp_id {
-        let before = edges.len();
-        edges.retain(|edge| edge_in_scope(edge, dapp_id));
-        stats.foreign_skipped += (before - edges.len()) as u64;
-    }
+    // The GraphQL query has already selected either the DEX dApp or RootPN.
+    // Keep the existing ABI destination check as a cheap, local discriminator
+    // before decode, so unrelated/no-op messages from those sources never reach
+    // the decoder or raw_events.
+    //
+    // `dst` is a 1:1 discriminator of event type readable from the message header,
+    // so this costs no decode. An edge with no `dst` is dropped: every event we emit
+    // is routed to `makeAddrExtern(EVENT_ID, 256)`, so a missing `dst` cannot be ours.
+    let before = edges.len();
+    let mut dst_missing = 0u64;
+    edges.retain(|edge| match edge.node.dst.as_deref() {
+        Some(dst) => scoped_event_dsts.contains(dst),
+        // Counted apart from ordinary out-of-route traffic. An external event
+        // without a `dst` should not exist; if the gateway stops reporting the
+        // field, losing our events must be loud rather than silently decoded.
+        None => {
+            dst_missing += 1;
+            false
+        }
+    });
+    stats.out_of_scope += (before - edges.len()) as u64;
+    stats.dst_missing += dst_missing;
 
     // Drop configured no-op event types by dst before decode. dst is in the
     // message header, so this costs no decode. PartialFill is excluded by
@@ -337,35 +451,54 @@ fn apply_ingest_filters(
     (edges, stats)
 }
 
-/// The cursor decision for one drained page, extracted pure so a unit can pin
-/// it (IX-CAP-09): the cursor advances to the page's `endCursor` whenever one
-/// is present — `endCursor` comes from `page_info`, not from the edges, so a
-/// page whose every edge the ingest filters dropped still advances past the
-/// noise. Without an `endCursor` the cursor stays; `retained_edges` is the
-/// POST-filter count, so only a page that still carries edges earns the warn
-/// (the return value) — a fully filtered page with no `endCursor` is a silent
+/// What one drained page did to the resume cursor. Returned rather than logged
+/// so the decision stays pure and a unit can pin it (IX-CAP-09); the caller owns
+/// the `warn!` because only it knows which source stream to name.
+#[derive(Debug, PartialEq, Eq)]
+enum CursorMove {
+    /// The cursor moved to the page's `endCursor`.
+    Advanced,
+    /// The gateway sent an empty `endCursor`. It is not a position anything can
+    /// resume from, so storing it would silently restart the next tick at the
+    /// oldest retained event and re-ingest the whole window.
+    EmptyEndCursor,
+    /// The page carried edges but no `endCursor` at all.
+    MissingEndCursor,
+    /// Nothing to do: no `endCursor` and nothing retained.
+    Idle,
+}
+
+/// The cursor decision for one drained page: the cursor advances to the page's
+/// `endCursor` whenever a usable one is present — `endCursor` comes from
+/// `page_info`, not from the edges, so a page whose every edge the ingest filters
+/// dropped still advances past the noise. Without one the cursor stays;
+/// `retained_edges` is the POST-filter count, so only a page that still carries
+/// edges earns a warn — a fully filtered page with no `endCursor` is a silent
 /// no-op, deliberately: recurring noise pages would otherwise flood the log.
 fn advance_cursor(
     cursor: &mut Option<String>,
-    end_cursor: Option<String>,
+    end_cursor: Option<&str>,
     retained_edges: usize,
-) -> bool {
+) -> CursorMove {
     match end_cursor {
-        Some(end) => {
-            *cursor = Some(end);
-            false
+        Some(end) if !end.is_empty() => {
+            *cursor = Some(end.to_string());
+            CursorMove::Advanced
         }
-        None => retained_edges > 0,
+        Some(_) => CursorMove::EmptyEndCursor,
+        None if retained_edges > 0 => CursorMove::MissingEndCursor,
+        None => CursorMove::Idle,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn drain_events(
+    source: CaptureSource,
     client: &GraphqlClient,
     repo: &IndexerRepository,
     decoder: &Decoder,
     page_size: u32,
-    dapp_id: Option<&str>,
+    scoped_event_dsts: &HashSet<String>,
     ignored_src: &HashSet<&str>,
     ignored_event_dsts: &HashSet<String>,
     cursor: &mut Option<String>,
@@ -373,29 +506,53 @@ async fn drain_events(
     let mut stats = DrainStats::default();
 
     while stats.pages < MAX_PAGES_PER_TICK {
-        let mut page: EventsPage = client.fetch_events(page_size, cursor.as_deref()).await?;
+        let mut page: EventsPage = match source {
+            CaptureSource::DexDapp => {
+                client.fetch_dapp_events(DEX_DAPP_ID, page_size, cursor.as_deref()).await?
+            }
+            CaptureSource::RootPn => {
+                let account_id = RootPn::DEFAULT_ADDRESS
+                    .strip_prefix("0:")
+                    .expect("RootPN default address has a workchain prefix");
+                client
+                    .fetch_account_events(account_id, DEX_DAPP_ID, page_size, cursor.as_deref())
+                    .await?
+            }
+        };
         stats.pages += 1;
         let edges_seen = page.edges.len();
         stats.edges += edges_seen;
 
         let (retained, filter_stats) =
-            apply_ingest_filters(page.edges, dapp_id, ignored_src, ignored_event_dsts);
+            apply_ingest_filters(page.edges, scoped_event_dsts, ignored_src, ignored_event_dsts);
         page.edges = retained;
         stats.ignored += filter_stats.ignored;
-        stats.foreign_skipped += filter_stats.foreign_skipped;
+        stats.out_of_scope += filter_stats.out_of_scope;
+        stats.dst_missing += filter_stats.dst_missing;
         stats.type_ignored += filter_stats.type_ignored;
 
         let at_head = !page.page_info.has_next_page;
-        let end_cursor = page.page_info.end_cursor.as_deref();
-        let persisted =
-            repo.persist_page(STREAM_NAME, &page.edges, end_cursor, decoder, at_head).await?;
+        stats.at_head = at_head;
+        let raw_end_cursor = page.page_info.end_cursor.as_deref();
+        let end_cursor = raw_end_cursor.filter(|end| !end.is_empty());
+        let persisted = repo
+            .persist_page(source.stream_name(), &page.edges, end_cursor, decoder, at_head)
+            .await?;
         stats.inserted += persisted.inserted;
         stats.skipped += persisted.skipped;
         stats.decoded += persisted.decoded;
         stats.undecoded += persisted.undecoded;
 
-        if advance_cursor(cursor, page.page_info.end_cursor.clone(), page.edges.len()) {
-            warn!("graphql page has edges but missing endCursor; cursor not advanced");
+        match advance_cursor(cursor, raw_end_cursor, page.edges.len()) {
+            CursorMove::Advanced | CursorMove::Idle => {}
+            CursorMove::EmptyEndCursor => warn!(
+                source = source.label(),
+                "graphql page returned an empty endCursor; cursor not advanced"
+            ),
+            CursorMove::MissingEndCursor => warn!(
+                source = source.label(),
+                "graphql page has edges but missing endCursor; cursor not advanced"
+            ),
         }
 
         if !page.page_info.has_next_page {
@@ -405,6 +562,7 @@ async fn drain_events(
 
     if stats.pages >= MAX_PAGES_PER_TICK {
         warn!(
+            source = source.label(),
             pages = stats.pages,
             "graphql drain hit MAX_PAGES_PER_TICK; will continue on next tick"
         );
@@ -420,38 +578,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn a_self_rooted_settlement_edge_survives_the_dapp_filter() {
-        // A TokenContract is deployed by an external message, so its `src_dapp_id`
-        // equals its own address and will NEVER match the configured dapp_id. A strict
-        // comparison throws away the whole settlement path before raw_events — outside
-        // the recovery boundary: no replay brings it back.
-        let edge = edge_with_all(Some("0:deadbeef"), Some("0:deadbeef"), None);
-        assert!(edge_in_scope(&edge, "0:our_dapp"), "a self-rooted edge must stay in scope");
-    }
-
-    #[test]
-    fn a_foreign_non_self_rooted_edge_is_still_dropped() {
-        let edge = edge_with_all(Some("0:their_contract"), Some("0:someone_else"), None);
-        assert!(!edge_in_scope(&edge, "0:our_dapp"), "a foreign edge must be dropped");
-    }
-
-    #[test]
-    fn a_foreign_self_rooted_edge_is_admitted_and_that_is_the_trade() {
-        // THIS IS THE PRICE OF THE RELAXATION, and the test exists so it is recorded
-        // rather than discovered later. `src_dapp_id == src` does not distinguish our
-        // self-rooted contract from a foreign one: the trait is how it was deployed,
-        // not who owns it. Such an edge reaches `raw_events` and is then dropped by the
-        // decoder (none of its events are in any loaded ABI) — the cost is a stored
-        // row, not a wrong read model. The opposite trade — losing all of settlement —
-        // is an order of magnitude worse.
-        let edge =
-            edge_with_all(Some("0:foreign_self_rooted"), Some("0:foreign_self_rooted"), None);
-        assert!(edge_in_scope(&edge, "0:our_dapp"));
-    }
-
-    fn edge_with(src_dapp_id: Option<&str>, dst: Option<&str>) -> EventEdge {
-        edge_with_all(None, src_dapp_id, dst)
+    fn edge_with(dst: Option<&str>) -> EventEdge {
+        edge_with_all(None, None, dst)
     }
 
     fn edge_with_all(src: Option<&str>, src_dapp_id: Option<&str>, dst: Option<&str>) -> EventEdge {
@@ -470,41 +598,17 @@ mod tests {
     }
 
     #[test]
-    fn edge_in_scope_keeps_own_dapp_and_null_drops_foreign() {
-        assert!(edge_in_scope(&edge_with(Some("dexdo"), None), "dexdo"));
-        assert!(!edge_in_scope(&edge_with(Some("other"), None), "dexdo"));
-        assert!(edge_in_scope(&edge_with(None, None), "dexdo"), "null dapp is kept");
-    }
-
-    #[test]
     fn edge_is_ignored_noop_matches_exact_dst_only() {
         use std::collections::HashSet;
         let queued = dodex_infrastructure::config::event_type_dst(159);
         let ignored: HashSet<String> = [queued.clone()].into_iter().collect();
 
-        assert!(edge_is_ignored_noop(&edge_with(None, Some(&queued)), &ignored));
+        assert!(edge_is_ignored_noop(&edge_with(Some(&queued)), &ignored));
         // a different dst (OrderPlaced, 143) is not dropped
         let placed = dodex_infrastructure::config::event_type_dst(143);
-        assert!(!edge_is_ignored_noop(&edge_with(None, Some(&placed)), &ignored));
+        assert!(!edge_is_ignored_noop(&edge_with(Some(&placed)), &ignored));
         // no dst -> kept
-        assert!(!edge_is_ignored_noop(&edge_with(None, None), &ignored));
-    }
-
-    #[test]
-    fn foreign_drop_warning_trips_on_any_nonzero_drop() {
-        assert!(foreign_drop_warning(10, 1).is_some());
-        assert!(foreign_drop_warning(10, 4).is_some());
-    }
-
-    #[test]
-    fn foreign_drop_warning_stays_quiet_for_empty_or_zero_drop_ticks() {
-        assert!(foreign_drop_warning(0, 1).is_none());
-        assert!(foreign_drop_warning(10, 0).is_none());
-    }
-
-    #[test]
-    fn ignored_type_drop_warning_is_disabled_for_expected_noop_floods() {
-        assert!(ignored_type_drop_warning(10, 10).is_none());
+        assert!(!edge_is_ignored_noop(&edge_with(None), &ignored));
     }
 
     #[test]
@@ -514,9 +618,9 @@ mod tests {
         // move the cursor — otherwise the capture loop would re-fetch the same
         // noise page forever.
         let mut cursor = Some("c1".to_string());
-        let warn = advance_cursor(&mut cursor, Some("c2".to_string()), 0);
+        let moved = advance_cursor(&mut cursor, Some("c2"), 0);
         assert_eq!(cursor.as_deref(), Some("c2"), "the dropped page must be passed, not re-read");
-        assert!(!warn, "advancing is the healthy path — no warn");
+        assert_eq!(moved, CursorMove::Advanced, "advancing is the healthy path — no warn");
     }
 
     #[test]
@@ -528,14 +632,29 @@ mod tests {
         // through the cursor-age gauge, not the log — recorded here so a future
         // reader finds a decision, not an accident.
         let mut cursor = Some("c1".to_string());
-        let warn = advance_cursor(&mut cursor, None, 0);
+        let moved = advance_cursor(&mut cursor, None, 0);
         assert_eq!(cursor.as_deref(), Some("c1"), "no endCursor — the cursor must not move");
-        assert!(!warn, "a fully filtered page without endCursor is a silent no-op");
+        assert_eq!(
+            moved,
+            CursorMove::Idle,
+            "a fully filtered page without endCursor is a silent no-op"
+        );
 
         // Contrast case, same function: edges retained + no endCursor => warn.
         let mut cursor2 = Some("c1".to_string());
-        assert!(advance_cursor(&mut cursor2, None, 3), "retained edges without endCursor warn");
+        assert_eq!(advance_cursor(&mut cursor2, None, 3), CursorMove::MissingEndCursor);
         assert_eq!(cursor2.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn an_empty_end_cursor_is_refused_rather_than_stored() {
+        // An empty string is not a position the gateway can resume from. Storing
+        // it would silently restart the next tick at the oldest retained event
+        // and re-ingest the whole window — the cursor must stay where it was.
+        let mut cursor = Some("c1".to_string());
+        let moved = advance_cursor(&mut cursor, Some(""), 3);
+        assert_eq!(cursor.as_deref(), Some("c1"), "an empty endCursor must not move the cursor");
+        assert_eq!(moved, CursorMove::EmptyEndCursor);
     }
 
     #[test]
@@ -555,12 +674,138 @@ mod tests {
             edge_with_all(Some("own"), None, Some(&placed)),
         ];
 
+        // Both dsts are real DEXDO event ids, so the scope filter passes them all
+        // through and each drop below is attributable to the filter under test.
+        let known: HashSet<String> = [queued.clone(), placed.clone()].into_iter().collect();
+
         let (retained, stats) =
-            apply_ingest_filters(edges, Some("dexdo"), &ignored_src, &ignored_event_dsts);
+            apply_ingest_filters(edges, &known, &ignored_src, &ignored_event_dsts);
 
         assert_eq!(retained.len(), 2);
         assert_eq!(stats.ignored, 1);
-        assert_eq!(stats.foreign_skipped, 1);
-        assert_eq!(stats.type_ignored, 1);
+        assert_eq!(stats.out_of_scope, 0);
+        assert_eq!(stats.type_ignored, 2);
+    }
+
+    #[test]
+    fn apply_ingest_filters_keeps_only_dsts_our_abis_declare() {
+        use std::collections::HashSet;
+
+        // 143 is OrderBook.OrderPlaced; 5 is an id no DEXDO contract emits — it is
+        // one of the ids actually observed on mainnet, where such traffic outnumbers
+        // ours by orders of magnitude.
+        let placed = dodex_infrastructure::config::event_type_dst(143);
+        let foreign = dodex_infrastructure::config::event_type_dst(5);
+        let known: HashSet<String> = [placed.clone()].into_iter().collect();
+
+        let edges = vec![
+            edge_with_all(Some("own"), None, Some(&placed)),
+            edge_with_all(Some("someone-else"), None, Some(&foreign)),
+            edge_with_all(Some("someone-else"), None, None),
+        ];
+
+        let (retained, stats) =
+            apply_ingest_filters(edges, &known, &HashSet::new(), &HashSet::new());
+
+        assert_eq!(retained.len(), 1, "only the event our ABI declares survives");
+        assert_eq!(retained[0].node.dst.as_deref(), Some(placed.as_str()));
+        // A missing dst is dropped too — every event we emit carries one — but it
+        // is counted apart so a gateway that stops reporting the field is loud
+        // rather than indistinguishable from ordinary foreign traffic.
+        assert_eq!(stats.out_of_scope, 2);
+        assert_eq!(stats.dst_missing, 1);
+    }
+
+    #[test]
+    fn apply_ingest_filters_drops_token_contract_routes_before_decode() {
+        use std::collections::HashSet;
+
+        let order_placed = dodex_infrastructure::config::event_type_dst(1000);
+        let token_stream_funded = dodex_infrastructure::config::event_type_dst(720);
+        let edges = vec![
+            edge_with_all(Some("orderbook"), Some(DEX_DAPP_ID), Some(&order_placed)),
+            edge_with_all(Some("token-contract"), Some(DEX_DAPP_ID), Some(&token_stream_funded)),
+        ];
+
+        let (retained, stats) = apply_ingest_filters(
+            edges,
+            &dodex_infrastructure::config::scoped_event_dsts(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].node.dst.as_deref(), Some(order_placed.as_str()));
+        assert_eq!(stats.out_of_scope, 1);
+    }
+
+    #[test]
+    fn synchronized_barrier_uses_highest_cursor_when_both_streams_are_at_head() {
+        assert_eq!(
+            synchronized_capture_barrier(&[(Some("10"), true), (Some("20"), true)]),
+            CaptureBarrier { cursor: Some("20".to_string()), at_head: true }
+        );
+    }
+
+    #[test]
+    fn synchronized_barrier_is_limited_only_by_streams_still_backfilling() {
+        assert_eq!(
+            synchronized_capture_barrier(&[(Some("10"), false), (Some("20"), true)]),
+            CaptureBarrier { cursor: Some("10".to_string()), at_head: false }
+        );
+        assert_eq!(
+            synchronized_capture_barrier(&[(Some("30"), false), (Some("20"), false)]),
+            CaptureBarrier { cursor: Some("20".to_string()), at_head: false }
+        );
+    }
+
+    #[test]
+    fn empty_head_stream_does_not_block_but_empty_backfill_stream_does() {
+        assert_eq!(
+            synchronized_capture_barrier(&[(Some("10"), false), (None, true)]),
+            CaptureBarrier { cursor: Some("10".to_string()), at_head: false }
+        );
+        assert_eq!(
+            synchronized_capture_barrier(&[(Some("10"), true), (None, false)]),
+            CaptureBarrier { cursor: None, at_head: false }
+        );
+    }
+
+    #[test]
+    fn head_barrier_is_published_only_after_the_next_successful_poll() {
+        let mut pending = None;
+        let first = stabilized_capture_barrier(
+            CaptureBarrier { cursor: Some("20".to_string()), at_head: true },
+            Some("10"),
+            &mut pending,
+        );
+        assert_eq!(
+            first,
+            CaptureBarrier { cursor: Some("10".to_string()), at_head: true },
+            "the first head observation keeps the previously proven barrier"
+        );
+
+        let second = stabilized_capture_barrier(
+            CaptureBarrier { cursor: Some("30".to_string()), at_head: true },
+            first.cursor.as_deref(),
+            &mut pending,
+        );
+        assert_eq!(
+            second,
+            CaptureBarrier { cursor: Some("20".to_string()), at_head: true },
+            "the next poll proves the prior candidate safe even if a newer event arrived"
+        );
+    }
+
+    #[test]
+    fn backfill_barrier_is_immediate_and_resets_head_stabilization() {
+        let mut pending = Some(CaptureBarrier { cursor: Some("20".to_string()), at_head: true });
+        let barrier = stabilized_capture_barrier(
+            CaptureBarrier { cursor: Some("25".to_string()), at_head: false },
+            Some("10"),
+            &mut pending,
+        );
+        assert_eq!(barrier, CaptureBarrier { cursor: Some("25".to_string()), at_head: false });
+        assert!(pending.is_none());
     }
 }

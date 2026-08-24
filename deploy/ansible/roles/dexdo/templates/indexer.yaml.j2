@@ -12,6 +12,9 @@ database:
 
 graphql:
   endpoint: {{ dexdo_graphql_endpoint }}
+{% if dexdo_graphql_bearer_token | length > 0 %}
+  bearer_token: "{{ dexdo_graphql_bearer_token }}"
+{% endif %}
   page_size: 100
   request_timeout_ms: 10000
 

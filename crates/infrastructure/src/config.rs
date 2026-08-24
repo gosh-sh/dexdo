@@ -196,6 +196,11 @@ fn default_max_batch_size() -> u16 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphqlSection {
     pub endpoint: String,
+    /// Optional bearer credential for gateways whose GraphQL endpoint is not
+    /// public. Kept separate from the URL so it never appears in request/error
+    /// URLs or endpoint logs.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
     /// Batch page size for paginated GraphQL queries (indexer path).
     /// Optional at the API tier, which does not paginate; defaults to 100.
     #[serde(default = "default_graphql_page_size")]
@@ -255,12 +260,6 @@ pub struct IndexerSection {
     /// typos all fail loudly at startup rather than silently doing nothing.
     #[serde(default)]
     pub ignored_event_types: Vec<String>,
-    /// The DEXDO `dapp_id`. When set, the indexer keeps only event edges whose
-    /// `src_dapp_id` matches it — foreign chain traffic is dropped before
-    /// decode. Edges with no `src_dapp_id` are kept (so a gateway that omits the
-    /// field never costs us our own events). When unset, no dapp scoping runs.
-    #[serde(default)]
-    pub dapp_id: Option<String>,
     /// Inference reconciler tick cadence (Queue A discovery + Queue B refresh).
     #[serde(default = "default_inference_reconciliation_interval_ms")]
     pub inference_reconciliation_interval_ms: u64,
@@ -489,6 +488,31 @@ pub fn event_type_dst(event_id: u32) -> String {
     format!(":{event_id:064x}")
 }
 
+/// Every external EVENT_ID indexed from the DEX dApp and legacy RootPN streams.
+/// `TokenContract.*` destinations are intentionally absent: per-deal settlement
+/// contracts are outside the indexer's capture scope. The GraphQL queries first
+/// scope traffic by source; this set then selects supported routes before decode
+/// or `raw_events` insertion.
+///
+/// Ids, not names, because routing depends on the id alone — see
+/// `docs/contract-specs/dex-events-routing.md`. Declared here rather than derived
+/// from the ABI bundle because the ABI carries the *signature-hash* event id, which
+/// is a different number from the EVENT_ID constant that forms the `dst`.
+/// `tests/ingest_scope.rs` re-derives this set from the indexed contract sources
+/// on every run and separately pins every TokenContract route as excluded.
+pub const SCOPED_EVENT_IDS: [u32; 69] = [
+    101, 102, 104, 106, 107, 111, 112, 113, 114, 115, 118, 119, 120, 121, 122, 124, 126, 132, 133,
+    135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 146, 147, 148, 149, 150, 151, 152, 153, 154,
+    155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 700, 702, 703,
+    1000, 1001, 1002, 1003, 1004, 1008, 1009, 1010, 1011, 1100, 1101, 1102,
+];
+
+/// The `dst` set the capture loop scopes ingest to, derived from
+/// [`SCOPED_EVENT_IDS`]. Built once at startup and matched per edge.
+pub fn scoped_event_dsts() -> HashSet<String> {
+    SCOPED_EVENT_IDS.iter().copied().map(event_type_dst).collect()
+}
+
 /// The set of external `dst` strings to drop before decode, derived from the
 /// configured `ignored_event_types`. A name not in [`IGNORABLE_EVENT_IDS`] is
 /// skipped — it cannot occur, because `validate` restricts the config to
@@ -563,14 +587,6 @@ impl IndexerConfig {
         anyhow::ensure!(
             i.inference_orphan_cutoff_ms > 0,
             "indexer.inference_orphan_cutoff_ms must be > 0"
-        );
-        // `dapp_id: ""` deserializes to Some(""), which would enable the scope
-        // filter and drop every edge with a real src_dapp_id while the cursor
-        // still advances — silent, unrecoverable data loss. An empty string is
-        // never valid; omit the key to disable dapp scoping.
-        anyhow::ensure!(
-            i.dapp_id.as_deref() != Some(""),
-            "indexer.dapp_id must not be empty; omit the key to disable dapp scoping"
         );
         // Every configured ignored type must be a known droppable no-op
         // (`IGNORABLE_EVENT_TYPES`). This rejects, at startup: metric-critical
@@ -1644,31 +1660,6 @@ indexer:
         assert_eq!(set.len(), 1);
         assert!(set.contains(&event_type_dst(159)));
         assert!(ignored_event_dsts(&[]).is_empty());
-    }
-
-    #[test]
-    fn indexer_dapp_id_defaults_to_none() {
-        // indexer_cfg_with_ignored builds a config YAML with no dapp_id key.
-        let cfg = indexer_cfg_with_ignored(&[]);
-        assert_eq!(cfg.indexer.dapp_id, None);
-    }
-
-    #[test]
-    fn indexer_validate_rejects_blank_dapp_id() {
-        // A templated deploy rendering an unset var to "" must fail loudly, not
-        // silently enable scoping and drop every real-dapp edge.
-        let mut cfg = indexer_cfg_with_ignored(&[]);
-        cfg.indexer.dapp_id = Some(String::new());
-        let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("dapp_id must not be empty"), "got: {err}");
-    }
-
-    #[test]
-    fn indexer_validate_accepts_absent_or_nonempty_dapp_id() {
-        let mut cfg = indexer_cfg_with_ignored(&[]);
-        cfg.validate().expect("absent dapp_id validates");
-        cfg.indexer.dapp_id = Some("dexdo-dapp".to_string());
-        cfg.validate().expect("non-empty dapp_id validates");
     }
 
     #[test]

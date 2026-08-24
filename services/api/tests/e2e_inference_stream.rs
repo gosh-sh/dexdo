@@ -7,10 +7,11 @@
 //               DIFFERENT notes. Every other inference binary here is one note
 //               playing both sides, so a projector that wrote the same address
 //               into both columns would pass all of them.
-//   IX-SEQ-06 — the deal closes `STOPPED` with `clean_settlement = true`, which
-//               is the branch a stop takes only AFTER the probe was accepted.
-//               Stopping before acceptance burns the probe instead, so this
-//               also pins which of the two branches ran.
+//   IX-SEQ-06 — WAS: the deal closes `STOPPED` with `clean_settlement = true`.
+//               No longer assertable: those columns are written only from
+//               TokenContract events, and ingest scope excludes every
+//               TokenContract route. The scene still drives the close on chain;
+//               only the read-model assertion is gone. See the removed phase 9.
 //
 // Flow:
 //   1. seller note (19) deploys the per-model InferenceOrderBook;
@@ -26,7 +27,8 @@
 //   8. optional: seller withdraws 1 SHELL, producing a post-upgrade
 //      `ShellWithdrawn` body (see the note on OPTIONAL_STEP_RESERVE);
 //   9. buyer stops the stream ⇒ the `_probeAccepted` branch ⇒ StreamStopped;
-//  10. ── read phase, IX-SEQ-06 ── close_kind STOPPED, clean_settlement true.
+//  10. the close is verified on chain (the TC settles and self-destructs); the
+//      read-model half of it is no longer captured — see phase 9 below.
 //
 // `inference_deals` has no HTTP surface and neither does `swept_at`, so the
 // assertions here are direct SQL against the same pool `common::setup()` hands
@@ -187,39 +189,31 @@ fn unique_suffix() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
 
-/// The deal row as the read model holds it. Every column this scene asserts on,
-/// read in one shot — polling for presence and asserting content are separate
-/// steps (the `read_model` rule), so the probe returns the whole row and the
-/// caller judges it.
+/// The deal row as the read model holds it — the two columns this scene can
+/// still assert on, read in one shot. Polling for presence and asserting content
+/// are separate steps (the `read_model` rule), so the probe returns the row and
+/// the caller judges it.
+///
+/// The settlement columns (`close_kind`, `clean_settlement`, `settled_at_chain`)
+/// are deliberately NOT selected: their only writer is fed by TokenContract
+/// events, which ingest no longer captures — see the note at the removed
+/// IX-SEQ-06 phase below. Selecting them would suggest a scene could still wait
+/// for them.
 struct DealRow {
     seller_note: Option<String>,
     buyer_note: Option<String>,
-    close_kind: Option<String>,
-    clean_settlement: Option<bool>,
-    /// Whether `settled_at_chain` is set, not what it holds. Read as a boolean
-    /// in SQL on purpose: the assertion is only ever "the projector recorded
-    /// WHEN this happened", and materialising a `timestamptz` would drag a
-    /// date-time crate into this binary for a fact that is a null check.
-    settled_at_chain_present: bool,
 }
 
 async fn read_deal(pool: &PgPool, tc: &str) -> Result<Option<DealRow>, String> {
     let row = sqlx::query(
-        "select seller_note, buyer_note, close_kind, clean_settlement, \
-         settled_at_chain is not null as settled_present \
+        "select seller_note, buyer_note \
          from inference_deals where token_contract_address = $1",
     )
     .bind(tc)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("inference_deals query failed: {e}"))?;
-    Ok(row.map(|r| DealRow {
-        seller_note: r.get("seller_note"),
-        buyer_note: r.get("buyer_note"),
-        close_kind: r.get("close_kind"),
-        clean_settlement: r.get("clean_settlement"),
-        settled_at_chain_present: r.get::<Option<bool>, _>("settled_present").unwrap_or(false),
-    }))
+    Ok(row.map(|r| DealRow { seller_note: r.get("seller_note"), buyer_note: r.get("buyer_note") }))
 }
 
 #[tokio::test]
@@ -687,56 +681,33 @@ async fn a_two_sided_deal_settles_clean_and_names_both_of_its_parties() {
         started.elapsed()
     );
 
-    // ── 9. read phase, IX-SEQ-06 ──────────────────────────────────────────
+    // ── 9. read phase, IX-SEQ-06 ── REMOVED, and the reason is not tidiness.
     //
-    // The row outlives the contract, so this is read after the close rather
-    // than raced against it. This is the phase the enlarged budget exists for:
-    // the fact is seconds old, and a capture tick plus a projection pass have
-    // to happen before it can be true.
-    if let Some(pool) = read.as_ref() {
-        let closed = poll_read_with("IX-SEQ-06 clean stop", budget.left(), || async {
-            match read_deal(pool, &tc).await {
-                Err(why) => Probe::Fatal(why),
-                Ok(None) => Probe::Pending(format!("no inference_deals row for {tc}")),
-                Ok(Some(row)) => match row.close_kind {
-                    // Poll for presence of a verdict, assert WHICH verdict
-                    // below. Waiting here for `close_kind = 'STOPPED'` would
-                    // turn a wrong verdict — a burned probe, say — into an
-                    // expired budget, and the message would blame the indexer
-                    // for a settlement that closed the wrong way.
-                    Some(_) => Probe::Ready(row),
-                    None => Probe::Pending("deal row still has no close_kind".to_string()),
-                },
-            }
-        })
-        .await;
-
-        match closed {
-            Err(why) => failures.push(why),
-            Ok(row) => {
-                let kind = row.close_kind.unwrap_or_default();
-                if kind != "STOPPED" {
-                    failures.push(format!(
-                        "deal close_kind: want STOPPED, got {kind}. PROBE_BURNED means the stop \
-                         landed before the probe was accepted"
-                    ));
-                }
-                if row.clean_settlement != Some(true) {
-                    failures.push(format!(
-                        "deal clean_settlement: want true, got {:?}",
-                        row.clean_settlement
-                    ));
-                }
-                if !row.settled_at_chain_present {
-                    failures.push(
-                        "deal settled_at_chain is null on a closed deal: the projector recorded \
-                         the verdict without the moment it happened"
-                            .to_string(),
-                    );
-                }
-            }
-        }
-    }
+    // This phase asserted `close_kind = STOPPED` + `clean_settlement = true` +
+    // `settled_at_chain` present. All three columns have exactly one writer,
+    // `token_contract_projectors.rs`, fed by `TokenContract.StreamStopped` — and
+    // that event no longer reaches the indexer at all. `config::SCOPED_EVENT_IDS`
+    // scopes ingest to a `dst` allow-list that excludes every TokenContract route
+    // (720..732), pinned by `token_contract_event_ids_are_all_out_of_scope` in
+    // `crates/infrastructure/tests/ingest_scope.rs`.
+    //
+    // So this is not a slow fact, it is an absent one: an edge dropped at ingest
+    // never reaches `raw_events`, and the indexer's own docs record that such a
+    // drop is unrecoverable — the gateway's event window is finite, so no replay
+    // brings it back either. Polling for it would burn the whole remaining budget
+    // and then blame the indexer for a settlement that closed correctly.
+    //
+    // IX-SEQ-06 is therefore not covered by anything, and is recorded that way in
+    // the matrix rather than left as a test that fails for a decided reason. The
+    // scene above still runs to the close: step 8 proves the contract settled and
+    // self-destructed on chain, which is what makes the missing ROW the finding.
+    //
+    // Restoring it means restoring live TokenContract capture (a capture source
+    // that reaches self-rooted contracts, plus 720..732 back in the allow-list) —
+    // at which point this block comes back unchanged. Same for the external
+    // consumer: `dodex-points-rewards` reads `clean_settlement` and
+    // `settled_at_chain` from this table (`rewards_query_compat.rs`), and both
+    // now stay NULL forever.
 
     eprintln!("[e2e_stream] scene finished at {:?}", started.elapsed());
     finish(

@@ -46,6 +46,7 @@ jobs:
       # `read_phases_enabled` in services/api/tests/common/read_model.rs for why a
       # reachable database is not the same fact.
       TEST_DATABASE_URL: postgres://dodex:dodex@localhost:5432/dodex_test
+      E2E_NETWORK_ENDPOINT: https://shellnet.ackinacki.org
     services:
       postgres:
         image: postgres:16-alpine
@@ -109,11 +110,11 @@ jobs:
         run: |
           cargo run --release --bin mint_pn_pool -- \
             --count 1 --nominal N10000 --token-type nackl --profile PN-API \
-            --endpoint https://shellnet.ackinacki.org \
+            --endpoint "$E2E_NETWORK_ENDPOINT" \
             --output "$RUNNER_TEMP/pn_pool_api.json"
           cargo run --release --bin mint_pn_pool -- \
             --count 27 --nominal N10000 --token-type shell --profile PN-INF \
-            --endpoint https://shellnet.ackinacki.org \
+            --endpoint "$E2E_NETWORK_ENDPOINT" \
             --output "$RUNNER_TEMP/pn_pool_inf.json"
           jq -s 'add' \
             "$RUNNER_TEMP/pn_pool_api.seed_notes.json" \
@@ -162,5 +163,5 @@ jobs:
             cargo run --release --bin dexdo -- withdraw \
               --pn-state-file "$RUNNER_TEMP/pn_state.json" \
               --dest "$dest" \
-              --endpoint shellnet.ackinacki.org || echo "teardown withdraw failed for note $i (non-fatal)"
+              --endpoint "$E2E_NETWORK_ENDPOINT" || echo "teardown withdraw failed for note $i (non-fatal)"
           done

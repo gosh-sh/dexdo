@@ -15,14 +15,15 @@ use anyhow::bail;
 use anyhow::Context;
 use dodex_chain::DEX_DAPP_ID;
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
 
-const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
+const DAPP_EVENTS_QUERY: &str = r#"query Events($src_dapp_id: String!, $first: Int!, $after: String) {
   blockchain {
-    events(first: $first, after: $after) {
+    events(src_dapp_id: $src_dapp_id, first: $first, after: $after) {
       edges {
         cursor
         node {
@@ -43,10 +44,78 @@ const EVENTS_QUERY: &str = r#"query Events($first: Int!, $after: String) {
   }
 }"#;
 
+const ACCOUNT_EVENTS_QUERY: &str = r#"query AccountEvents($account_id: String!, $dapp_id: String!, $first: Int!, $after: String) {
+  blockchain {
+    account(account_id: $account_id, dapp_id: $dapp_id) {
+      events(first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            msg_id
+            msg_chain_order
+            src
+            src_dapp_id
+            dst
+            body
+            created_at
+          }
+        }
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
+      }
+    }
+  }
+}"#;
+
+/// `after` value sent when the indexer has no saved cursor yet.
+///
+/// `blockchain.events(after: null)` is a legal query, but the >= 1.2.0 gateway
+/// cannot answer it on a chain the size of mainnet: it replies
+/// `{"data":{"blockchain":null},"errors":[{"extensions":{"code":"TIMEOUT"}}]}`
+/// after ~2s (its own server-side limit), deterministically. An empty string
+/// behaves identically. A cursor-bounded page, by contrast, returns in ~0.1s.
+/// Since the cursor is a `msg_chain_order` — lex-sortable and length-prefixed,
+/// so always ordered above `"0"` — this sentinel asks for the same range
+/// `after: null` means (everything the gateway still retains) while staying on
+/// the fast path. That a cursor below every `chain_order` is accepted as a plain
+/// lower bound is observed behaviour, not a documented guarantee: verified
+/// against mainnet and shellnet, and worth re-checking on a gateway upgrade.
+///
+/// Without it a fresh deployment deadlocks: no cursor -> `after: null` -> the
+/// page fails -> no cursor is ever persisted, so the read-model stays empty
+/// indefinitely rather than degrading.
+const EARLIEST_CURSOR: &str = "0";
+
+/// Resolves the `after` argument, substituting [`EARLIEST_CURSOR`] for both
+/// "no saved cursor" and a stored empty string (which the gateway rejects the
+/// same way as `null`).
+fn after_or_earliest(after: Option<&str>) -> &str {
+    match after {
+        Some(cursor) if !cursor.is_empty() => cursor,
+        _ => EARLIEST_CURSOR,
+    }
+}
+
+/// How much of a gateway body to carry into an error message. Enough for the
+/// `{"error":"..."}` and `{"errors":[...]}` shapes gateways actually return,
+/// short enough that a stray HTML page or a large payload cannot flood the log.
+const MAX_LOGGED_BODY: usize = 512;
+
+fn truncate_for_log(body: &str) -> String {
+    let body = body.trim();
+    match body.char_indices().nth(MAX_LOGGED_BODY) {
+        Some((cut, _)) => format!("{}… ({} bytes total)", &body[..cut], body.len()),
+        None => body.to_string(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GraphqlClient {
     http: Client,
     endpoint: String,
+    bearer_token: Option<String>,
     // Lazily-built tvm_client context for account-state reads. Account
     // BOCs are NOT fetched over GraphQL: the >= 1.0.0 gateway's
     // `account(){info{boc}}` sub-resolver hangs server-side, while the
@@ -63,31 +132,85 @@ impl GraphqlClient {
             .user_agent(concat!("dodex-indexer/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("build http client")?;
-        Ok(Self { http, endpoint: endpoint.into(), tvm_ctx: Arc::new(OnceLock::new()) })
+        Ok(Self {
+            http,
+            endpoint: endpoint.into(),
+            bearer_token: None,
+            tvm_ctx: Arc::new(OnceLock::new()),
+        })
     }
 
-    pub async fn fetch_events(
+    pub fn with_bearer_token(mut self, bearer_token: Option<String>) -> Self {
+        self.bearer_token = bearer_token.filter(|token| !token.is_empty());
+        self
+    }
+
+    pub async fn fetch_dapp_events(
         &self,
+        src_dapp_id: &str,
         first: u32,
         after: Option<&str>,
     ) -> anyhow::Result<EventsPage> {
         let payload = json!({
-            "query": EVENTS_QUERY,
-            "variables": { "first": first, "after": after },
+            "query": DAPP_EVENTS_QUERY,
+            "variables": {
+                "src_dapp_id": src_dapp_id,
+                "first": first,
+                "after": after_or_earliest(after),
+            },
         });
 
-        let response: GraphqlResponse<EventsData> = self
-            .http
-            .post(&self.endpoint)
-            .json(&payload)
-            .send()
-            .await
-            .context("graphql request failed")?
-            .error_for_status()
-            .context("graphql returned http error")?
-            .json()
-            .await
-            .context("graphql response is not valid json")?;
+        let data: EventsData = self.execute(&payload).await?;
+        let blockchain = data.blockchain.context("graphql response missing blockchain")?;
+        blockchain.events.context("graphql response missing blockchain.events")
+    }
+
+    pub async fn fetch_account_events(
+        &self,
+        account_id: &str,
+        dapp_id: &str,
+        first: u32,
+        after: Option<&str>,
+    ) -> anyhow::Result<EventsPage> {
+        let payload = json!({
+            "query": ACCOUNT_EVENTS_QUERY,
+            "variables": {
+                "account_id": account_id,
+                "dapp_id": dapp_id,
+                "first": first,
+                "after": after_or_earliest(after),
+            },
+        });
+
+        let data: AccountEventsData = self.execute(&payload).await?;
+        let blockchain = data.blockchain.context("graphql response missing blockchain")?;
+        let account = blockchain.account.context("graphql response missing blockchain.account")?;
+        account.events.context("graphql response missing blockchain.account.events")
+    }
+
+    async fn execute<T: DeserializeOwned>(&self, payload: &Value) -> anyhow::Result<T> {
+        let mut request = self.http.post(&self.endpoint).json(payload);
+        if let Some(token) = self.bearer_token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+
+        let http_response = request.send().await.context("graphql request failed")?;
+
+        // Read the body before judging the status. `error_for_status` reports the
+        // status and URL only, and gateways put the reason in the body — a
+        // restricted endpoint answers 403 with
+        // `{"error":"GraphQL field is outside the Dexdo read surface"}`, which that
+        // path would discard, leaving an operator with a bare status code.
+        let status = http_response.status();
+        let body = http_response.text().await.context("read graphql response body")?;
+
+        if !status.is_success() {
+            bail!("graphql returned http {status}: {}", truncate_for_log(&body));
+        }
+
+        let response: GraphqlResponse<T> = serde_json::from_str(&body).with_context(|| {
+            format!("graphql response is not valid json: {}", truncate_for_log(&body))
+        })?;
 
         if let Some(errors) = response.errors
             && !errors.is_empty()
@@ -95,8 +218,7 @@ impl GraphqlClient {
             bail!("graphql errors: {errors:?}");
         }
 
-        let data = response.data.context("graphql response missing data")?;
-        Ok(data.blockchain.events)
+        response.data.context("graphql response missing data")
     }
 
     /// Fetches the account state BOC (base64) for off-chain getter execution.
@@ -170,12 +292,36 @@ pub struct GraphqlError {
 
 #[derive(Debug, Deserialize)]
 struct EventsData {
-    blockchain: Blockchain,
+    /// Null whenever the gateway fails the `blockchain` resolver — it then
+    /// carries the reason in `errors`. This must stay optional: as a required
+    /// field, serde fails the whole response with a type error and the real
+    /// message is lost before the `errors` check can report it.
+    #[serde(default)]
+    blockchain: Option<Blockchain>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Blockchain {
-    events: EventsPage,
+    #[serde(default)]
+    events: Option<EventsPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountEventsData {
+    #[serde(default)]
+    blockchain: Option<AccountEventsBlockchain>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountEventsBlockchain {
+    #[serde(default)]
+    account: Option<AccountEventsAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountEventsAccount {
+    #[serde(default)]
+    events: Option<EventsPage>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -258,7 +404,7 @@ mod tests {
         });
 
         let parsed: GraphqlResponse<EventsData> = serde_json::from_value(raw).unwrap();
-        let page = parsed.data.unwrap().blockchain.events;
+        let page = parsed.data.unwrap().blockchain.unwrap().events.unwrap();
         assert_eq!(page.edges.len(), 1);
         assert_eq!(page.edges[0].node.msg_id, "msg-1");
         assert_eq!(page.edges[0].cursor, "cursor-1");
@@ -292,7 +438,7 @@ mod tests {
         });
 
         let parsed: GraphqlResponse<EventsData> = serde_json::from_value(raw).unwrap();
-        let page = parsed.data.unwrap().blockchain.events;
+        let page = parsed.data.unwrap().blockchain.unwrap().events.unwrap();
         assert!(page.edges[0].node.src.is_none());
         assert!(page.page_info.end_cursor.is_none());
         assert!(page.page_info.has_next_page);
@@ -309,5 +455,32 @@ mod tests {
         let errors = parsed.errors.unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "oops");
+    }
+
+    #[test]
+    fn surfaces_gateway_error_when_blockchain_is_null() {
+        // The exact shape the gateway returns when a resolver fails: the
+        // failed branch is nulled and the reason moves to `errors`. With
+        // `blockchain` required, serde rejected the whole body with "invalid
+        // type: null, expected struct Blockchain" before the `errors` check
+        // could run, so the real cause never reached the log.
+        let raw = serde_json::json!({
+            "data": { "blockchain": null },
+            "errors": [{ "message": "Request timeout", "path": ["blockchain", "events"] }]
+        });
+
+        let parsed: GraphqlResponse<EventsData> = serde_json::from_value(raw).unwrap();
+        assert!(parsed.data.unwrap().blockchain.is_none());
+        assert_eq!(parsed.errors.unwrap()[0].message, "Request timeout");
+    }
+
+    #[test]
+    fn cold_start_asks_for_the_earliest_cursor_not_null() {
+        // Both ways the indexer can express "no saved position" must reach
+        // the gateway as the sentinel; either one sent verbatim wedges a
+        // fresh deployment on the resolver's slow path.
+        assert_eq!(after_or_earliest(None), EARLIEST_CURSOR);
+        assert_eq!(after_or_earliest(Some("")), EARLIEST_CURSOR);
+        assert_eq!(after_or_earliest(Some("76a83e6cf006700")), "76a83e6cf006700");
     }
 }

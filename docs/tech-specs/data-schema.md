@@ -47,7 +47,7 @@ Seeded values: `(1, NACKL, 9, ...)`, `(2, SHELL, 9, ...)`, `(3, USDC, 6, ...)`. 
 
 ### `raw_events`
 
-The append-only event log. Every message edge the indexer pulls from the GraphQL stream lands here, decoded or not, before any projector runs. It is the recovery boundary for the read-model: reprojection replays decoded but unprojected rows here, and downstream tables can always be rebuilt from this one plus a clean schema.
+The append-only event log. Every **in-scope** message edge from either filtered GraphQL stream lands here, decoded or not, before any projector runs. The gateway first selects the DEX `src_dapp_id` or legacy RootPN source; the indexer then keeps only the indexed `dst` allow-list, which explicitly excludes every `TokenContract.*` route. See [Server-side capture scope](indexer.md#server-side-capture-scope) and [Ingest scope](indexer.md#ingest-scope-emitted-event-dst-not-configurable). It is the recovery boundary for the read-model: reprojection replays decoded but unprojected rows here, and downstream tables can always be rebuilt from this one plus a clean schema.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -78,14 +78,22 @@ Indices:
 
 ### `indexer_cursors`
 
-Resume-points per ingestion stream. The indexer's main fetch loop persists the cursor after every page so a restart does not reprocess the full history.
+Resume-points and the synchronized projection barrier. The indexer persists each source cursor after every page so a restart does not reprocess the full retained history. When no row exists for a source, capture bootstraps from the oldest matching event the gateway still retains rather than from a null cursor — see [Cold start](indexer.md#cold-start).
+
+The production rows are:
+
+| `stream_name` | Role |
+| --- | --- |
+| `blockchain_events_dex_dapp` | Resume cursor and `at_head` for `blockchain.events(src_dapp_id = DEX_DAPP_ID)`. |
+| `blockchain_events_root_pn` | Resume cursor and `at_head` for `RootPN.account.events`. |
+| `blockchain_events` | Aggregate ordering/freshness row. Its cursor is the largest globally ordered prefix proved complete by both source streams; its `at_head` is true only when both streams reached head in one successful tick. The projector, metrics, inference orphan gate, and read API consume this row. |
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `stream_name` | `text` PK | Logical stream identifier (e.g. one per filter-set the indexer subscribes to). |
-| `cursor` | `text` | Opaque cursor returned by GraphQL server. |
-| `updated_at` | `timestamptz` | Last successful page commit. |
-| `at_head` | `boolean` NOT NULL default `false` | Set to `true` by the capture loop after a drain that returned `has_next_page=false` (the cursor is caught up to the chain tip); reset to `false` whenever more pages follow. Read by the inference reconciler as the `at_head` sweep catch-up gate: phantom-cancel sweeps must not fire while the gateway still has older pages ahead of the cursor. |
+| `cursor` | `text` | Source rows: opaque `msg_chain_order` cursor returned by GraphQL. Aggregate row: synchronized projection watermark computed from the source cursors. |
+| `updated_at` | `timestamptz` | Source rows: last successful page commit. Aggregate row: last tick in which both source drains completed successfully. |
+| `at_head` | `boolean` NOT NULL default `false` | Source rows mirror that stream's `has_next_page=false`. Aggregate row is true only when both source streams are at head; the inference reconciler and read API use that aggregate state as their catch-up gate. |
 
 ## Read-model — discovery
 
@@ -433,11 +441,11 @@ Recovery notes for on-call:
 
 ## Read-model — inference deals
 
-The inference settlement side tracks the lifecycle of each deal escrow (`TokenContract` — a per-deal streaming-payment contract auto-deployed when a SELL offer is matched) and the individual finalized ticks within it. These tables are written by the SETTLEMENT projector and are intended to back the forthcoming rewards service as its primary read-model.
+The inference settlement side can track the lifecycle of each deal escrow (`TokenContract` — a per-deal streaming-payment contract auto-deployed when a SELL offer is matched) and the individual finalized ticks within it. The SETTLEMENT projector still replays `TokenContract.*` rows already retained in `raw_events`, but the current two-stream live capture excludes every TokenContract `dst` before decode and therefore does not add new settlement-event rows. These tables are not used by the current public inference endpoints.
 
 ### `inference_deals`
 
-One row per `TokenContract` address. Seeded as a skeleton from the first observed `TokenContract.*` event (keyed by `src_address`); remaining columns filled by the SETTLEMENT projector as `InferenceOrderBook.InferenceFilled`, `TokenContract.StreamOpened`, and the stream-close events (`StreamStopped`/`DisputeResolved`/`ContractDestroyed`/`ProbeBurned`), and related events arrive.
+One row per `TokenContract` address. `InferenceOrderBook.InferenceFilled` from the live DEX dApp stream creates or enriches the deal cross-link — `orderbook_address`, `seller_note`, `buyer_note`. If retained `TokenContract.*` rows are replayed, the first one seeds a skeleton keyed by `src_address`, and the SETTLEMENT projector fills the settlement columns: `deposit`/`funded_at_chain` (`StreamFunded`), `price_per_tick`/`opened_at_chain` (`StreamOpened`), `trusted_ticks`/`claimed_ticks` (`TicksClaimed`) and `close_kind`/`settled_at_chain`/`clean_settlement` (the stream-close events `StreamStopped`/`DisputeResolved`/`ContractDestroyed`/`ProbeBurned`). Those columns have no other writer, so without a replay they stay NULL.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -469,7 +477,7 @@ Indices:
 
 ### `inference_ticks`
 
-One row per `TokenContract.TickFinalized` **event** within a deal, written by the SETTLEMENT projector. A row is not a week: `_chargeWeeksThrough` walks week boundaries in a loop and the emit sits after the loop, so a single event — and a single row — can represent a batch of closed boundaries. The composite PK `(token_contract_address, chain_order)` is idempotent against redelivery.
+One row per `TokenContract.TickFinalized` **event** within a deal, written by the SETTLEMENT projector when a retained row is replayed. A row is not a week: `_chargeWeeksThrough` walks week boundaries in a loop and the emit sits after the loop, so a single event — and a single row — can represent a batch of closed boundaries. The composite PK `(token_contract_address, chain_order)` is idempotent against redelivery. Current live capture does not add these rows.
 
 | Column | Type | Notes |
 | --- | --- | --- |

@@ -22,7 +22,8 @@ Implementation-facing requirements for the indexer side of the market-data path.
 
 ```mermaid
 flowchart LR
-    chain[Acki Nacki GraphQL event stream] --> ingest[Indexer fetch loop]
+    dapp_stream[blockchain.events by DEX src_dapp_id] --> ingest[Indexer fetch loop]
+    root_stream[RootPN account.events] --> ingest
     ingest --> raw[raw_events]
     raw --> project[Projection loop]
     project --> projectors[Projectors]
@@ -50,17 +51,54 @@ flowchart LR
 
 ## Ingestion
 
-The indexer follows a GraphQL message-edge stream. Every edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema. Two pre-decode filters can drop edges before they reach the decoder; both are outside the rebuild boundary by design (see [Pre-decode filters](#pre-decode-filters) below).
+The indexer follows two independently paginated GraphQL message-edge streams. Every in-scope edge becomes one row in [`raw_events`](data-schema.md#raw_events) regardless of whether it could be decoded — the raw log is the recovery boundary, and any downstream table can be rebuilt from `raw_events` plus a clean schema. The unique `raw_events.msg_id` constraint deduplicates an event if the streams ever overlap.
+
+### Server-side capture scope
+
+The primary stream uses the gateway's indexed ExtOutV2 source-dApp field:
+
+```graphql
+blockchain {
+  events(src_dapp_id: "0000000000000000000000000000000000000000000000000000000000000004", first: $first, after: $after) { ... }
+}
+```
+
+The value comes from `dodex_chain::DEX_DAPP_ID` (`SystemDapp::Dex`), not configuration. This one query selects events from every current DEX contract without issuing one request per event `dst`.
+
+`RootPN` is the sole legacy contract whose ExtOut messages do not carry `src_dapp_id`, so the primary query cannot return them. Its events come from a second, address-scoped query:
+
+```graphql
+blockchain {
+  account(
+    account_id: "1010101010101010101010101010101010101010101010101010101010101010"
+    dapp_id: "0000000000000000000000000000000000000000000000000000000000000004"
+  ) {
+    events(first: $first, after: $after) { ... }
+  }
+}
+```
+
+The account id is `RootPn::DEFAULT_ADDRESS` without its `0:` workchain prefix. The account-events query deliberately has no `dst` argument; local routing filters run after this server-side source selection and before ABI decode. A protected gateway may use optional `graphql.bearer_token`; the indexer sends it as `Authorization: Bearer ...` on both GraphQL queries.
+
+These are the only live capture queries. In particular, the indexer does not issue one query per OrderBook event route or per-deal `TokenContract`: OrderBook traffic is covered by the DEX dApp stream, and the legacy RootPN traffic is covered by its fixed account address. If a TokenContract edge is nevertheless present in a source page, the local `dst` allow-list drops it before decode.
 
 ### Pre-decode filters
 
-Two filters run against the raw message edge — before any ABI decode — and drop matching edges entirely. The page cursor still advances past every dropped edge, so the indexer makes forward progress without storing or projecting them. Dropped edges do not produce a `raw_events` row and are outside the recovery boundary (they cannot be reprojected or rebuilt from `raw_events`).
+Three local filters run against the already source-scoped message edge — before any ABI decode — and drop matching edges entirely: `ignored_addresses`, the emitted-event `dst` allow-list, and `ignored_event_types`. The page cursor still advances past every dropped edge, so the indexer makes forward progress without storing or projecting them. Dropped edges do not produce a `raw_events` row and are outside the recovery boundary (they cannot be reprojected or rebuilt from `raw_events`).
 
-#### Scope filter: `indexer.dapp_id`
+Only the first **selects**; the other two subtract. That asymmetry is the point — on a shared chain a set of deny-lists cannot bound what is ingested.
 
-`indexer.dapp_id` (optional string; omit or leave unset to disable) scopes ingestion to one DEXDO application. When set, an edge is kept when its `src_dapp_id` matches the configured value, when it is **self-rooted** (`src_dapp_id` equal to its own `src` — see [Self-rooted edges](#self-rooted-edges-are-in-scope)), or when it carries no `src_dapp_id`; edges with no `src_dapp_id` field are also kept (so a gateway that omits the field does not silently drop everything); edges with a mismatching `src_dapp_id` are dropped before decode. When unset (the local default), the filter is inert and every edge is processed. Each per-tick log line includes a `foreign_skipped` count of edges dropped by this filter, and any nonzero `foreign_skipped` emits a `warn!` with the tick drop rate because a correctly scoped single-dapp deployment should see effectively no foreign traffic.
+#### Ingest scope: emitted-event `dst` (not configurable)
 
-Setting `dapp_id` to an empty string is rejected at startup by `IndexerConfig::validate` (it would otherwise deserialize to `Some("")` and treat every edge with a real `src_dapp_id` as foreign); omit the key to disable scoping.
+After the gateway has selected the DEX dApp or RootPN source, capture keeps an edge only when its `dst` is one of the 69 routing destinations in `config::SCOPED_EVENT_IDS`. Every `TokenContract.*` destination is deliberately excluded, so per-deal settlement events are dropped before decode and never written to `raw_events`. Everything else outside the allow-list is also dropped before decode and counted as `out_of_scope`. `dst` is a 1:1 discriminator of event type readable from the message header, so this costs no decode.
+
+An edge with **no** `dst` is dropped too — every event we emit is routed to one — but counted separately as `dst_missing`, and any nonzero count emits a `warn!`.
+
+This filter is unconditional and has no config key. Server-side source selection prevents the global-chain scan; the local `dst` allow-list prevents unrelated DEX-dApp or RootPN outbound messages from reaching decode or storage.
+
+The id list is pinned by `crates/infrastructure/tests/ingest_scope.rs`, which re-derives it from the indexed `makeAddrExtern` call sites under `contracts/**` on every run and separately asserts that all TokenContract call sites remain excluded. It cannot be derived from the ABI bundle: the ABI carries the event's *signature-hash* id, which is a different number from the EVENT_ID constant that forms the `dst`.
+
+The list is load-bearing in both directions. An indexed id missing from it is lost before `raw_events` and is **not** recoverable by reprojection; a stale id admits a route the indexer does not intend to store. The pinning test fails on either, while the explicit TokenContract exclusion test prevents those 15 routes from being added accidentally.
 
 #### Self-rooted edges are in scope
 
@@ -82,7 +120,7 @@ in our dapp nor self-rooted is still dropped at ingest.
 
 `indexer.ignored_event_types` accepts a list of event-type names (e.g. `"OrderBook.Queued"`). An edge whose external `dst` matches a configured entry is dropped before decode. The `dst` of an external event is `makeAddrExtern(EVENT_ID, 256)`, rendered as `:` followed by 64 lowercase hex digits; because the width is fixed, each `EVENT_ID` yields one stable `dst` string that acts as a 1:1 discriminator of event type — readable from the message header before the body is decoded. See [dex-events-routing.md](../contract-specs/dex-events-routing.md) for the full `dst` derivation and per-event values.
 
-Matching is by `dst` alone — it is not namespaced by contract or dapp — so a foreign contract that emits an event with the same `EVENT_ID` produces the same `dst` and is dropped too (no `raw_events` row). This is intentional: only DEXDO events are of interest, and our own non-no-op events use distinct EVENT_IDs outside the no-op set, so a wanted event is never dropped by this filter. To confine dropping to your own contracts, pair it with the `indexer.dapp_id` scope filter, which runs first (note that it no longer confines this in one case: a self-rooted foreign contract passes the scope filter, so its events reach the decoder and are dropped there instead).
+Matching is by `dst` alone, but it runs only after the GraphQL query has selected the DEX dApp or RootPN source. Our own non-no-op events use distinct EVENT_IDs outside the no-op set, so a wanted event is never dropped by this filter.
 
 Each per-tick log line includes a `type_ignored` count of edges dropped by this filter. A high `type_ignored` rate is not warned by itself because this filter is deliberately used to shed observability-only floods such as `OrderBook.Queued`.
 
@@ -96,11 +134,38 @@ Intended use: shed confirmed observability-only floods (e.g. `OrderBook.Queued`,
 
 ### Ingestion sequence per edge
 
-1. If `indexer.dapp_id` is set, drop the edge unless one of three holds: its `src_dapp_id` matches, it is self-rooted (`src_dapp_id == src`), or it has no `src_dapp_id`. The page cursor still advances (step 4). `foreign_skipped` is incremented.
-2. If the edge's `dst` matches a configured `indexer.ignored_event_types` entry, drop the edge. The page cursor still advances (step 4). `type_ignored` is incremented.
-3. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). The decoder is **route-aware**: when an event id is ambiguous it resolves `event_type` by the message's `dst` address (the external `makeAddrExtern(EVENT_ID, 256)` in the message header) rather than a flat event-name scan. **One loaded pair does collide, by construction:** `RootModel.ContractDeployed(address self)` and `TokenContract.ContractDeployed(address self)` are byte-identical in their ABIs, so they share a body id and only `dst` tells them apart (`ContractDeployedEmit` = 703 for the root model, `DealDeployedEmit` = 732 for a deal). Both routes are pinned and both are mandatory: with `RootModel` unloaded the id looked unique and every root-model deploy decoded as a deal deploy, seeding a phantom [`inference_deals`](data-schema.md#inference_deals) row keyed on the root model's address — silently, because `indexer_decode_ambiguous_collisions` only fires when two *loaded* ABIs collide. The `InferenceOrderBook` events, by contrast, carry an `Inference` prefix, so `InferenceOrderBook.InferenceOrderCancelled` no longer shares an event id with `OrderBook.OrderCancelled`; the two `OrderCancelled` dsts stay pinned defensively to keep the path exercised. The id index tolerates collisions (one id may map to several `(contract, event)` entries) and reports an unrouted collision as ambiguous rather than guessing the first ABI. Each route records the event's expected id, so a decoded body whose own id does not match its route is left undecoded with a warning rather than mis-attributed. `RootModel` is loaded for disambiguation only — neither of its two events is projected; both carry explicit no-op arms so they cannot fall through to `Unknown`, which would mark them processed and lose them forever. On success, store the decoded JSON payload alongside `event_type`.
-4. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches.
-5. After the page commits, persist the resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). The cursor tracks capture progress, not projection; a restart resumes capture from it while the projection loop independently drains whatever rows remain `processed_at NULL`.
+1. The gateway selects the edge through either the DEX `src_dapp_id` stream or the RootPN account stream.
+2. If the edge's `src` is in `indexer.ignored_addresses`, drop it. The page cursor still advances.
+3. If the edge's `dst` is not one of the emitted-event destinations in `config::SCOPED_EVENT_IDS` — including when the edge carries no `dst` at all — drop it. `out_of_scope` is incremented, and a missing `dst` additionally increments `dst_missing`.
+4. If the edge's `dst` matches a configured `indexer.ignored_event_types` entry, drop it and increment `type_ignored`.
+5. Try to decode the message body against the ABI bundle (`crates/infrastructure/src/decoder.rs`). The decoder is **route-aware**: when an event id is ambiguous it resolves `event_type` by the message's `dst` address (the external `makeAddrExtern(EVENT_ID, 256)` in the message header) rather than a flat event-name scan. **One loaded pair does collide, by construction:** `RootModel.ContractDeployed(address self)` and `TokenContract.ContractDeployed(address self)` are byte-identical in their ABIs, so they share a body id and only `dst` tells them apart (`ContractDeployedEmit` = 703 for the root model, `DealDeployedEmit` = 732 for a deal). Both routes are pinned and both are mandatory: with `RootModel` unloaded the id looked unique and every root-model deploy decoded as a deal deploy, seeding a phantom [`inference_deals`](data-schema.md#inference_deals) row keyed on the root model's address — silently, because `indexer_decode_ambiguous_collisions` only fires when two *loaded* ABIs collide. The `InferenceOrderBook` events, by contrast, carry an `Inference` prefix, so `InferenceOrderBook.InferenceOrderCancelled` no longer shares an event id with `OrderBook.OrderCancelled`; the two `OrderCancelled` dsts stay pinned defensively to keep the path exercised. The id index tolerates collisions (one id may map to several `(contract, event)` entries) and reports an unrouted collision as ambiguous rather than guessing the first ABI. Each route records the event's expected id, so a decoded body whose own id does not match its route is left undecoded with a warning rather than mis-attributed. `RootModel` is loaded for disambiguation only — neither of its two events is projected; both carry explicit no-op arms so they cannot fall through to `Unknown`, which would mark them processed and lose them forever. On success, store the decoded JSON payload alongside `event_type`.
+6. Persist the row in `raw_events` with `processed_at = NULL`. The unique `msg_id` constraint deduplicates overlapping page fetches and any cross-stream overlap.
+7. After the page commits, persist that source stream's resume cursor in [`indexer_cursors`](data-schema.md#indexer_cursors). An empty `endCursor` is refused before persistence and local assignment (`warn!`, cursor not advanced).
+8. Only after both streams complete successfully in the same tick, update the aggregate `blockchain_events` projection barrier and `at_head` state. A failed stream leaves the aggregate row unchanged and eventually makes the API freshness gate fail closed.
+
+### Dual-stream ordering barrier
+
+The DEX-dApp and RootPN queries have independent `after` cursors because either filtered stream can advance without returning an event from the other. Their source rows are `blockchain_events_dex_dapp` and `blockchain_events_root_pn`. The existing `blockchain_events` row is retained as an aggregate compatibility row consumed by the projector, metrics, inference orphan gate, and read API.
+
+The aggregate cursor is the largest globally ordered prefix known complete across both streams:
+
+- While one or both streams are still backfilling (`at_head=false`), the barrier is the minimum cursor among only those backfilling streams. A stream already at head imposes no bound; otherwise a quiet RootPN stream would freeze projection at its last event forever.
+- When both streams are at head, the maximum of their last event cursors becomes a **candidate** barrier. A head stream with no cursor is ignored because it has proved that it currently has no matching events.
+- A backfilling stream with no cursor makes the aggregate cursor NULL and blocks projection until that stream establishes progress.
+
+The all-head candidate is published only after the **next** successful poll of both streams. The two filtered queries do not share a database snapshot: if one answer returns before the other, a new event for the first stream can have a lower `chain_order` than an event observed by the second. The next poll captures any such event before releasing the previous candidate. Backfill barriers are safe immediately because their limiting cursor is behind the chain head. This one-poll stabilization is process-local; after a restart, the persisted safe barrier remains in place and the first all-head poll establishes a new candidate.
+
+`run_reprojection_loop` always caps its SQL scan at `raw_events.chain_order <= blockchain_events.cursor`. Rows captured by the faster stream or the current all-head poll remain pending above the barrier; they neither project out of order nor cause a busy loop. The aggregate `at_head` is true only when both source drains reached `hasNextPage=false` in the same successful tick.
+
+On the first deployment of this design, the old global-scan `blockchain_events` cursor is not a valid cross-stream barrier. Startup clears it when either source row is absent. On later restarts it preserves the last synchronized cursor but resets aggregate `at_head=false` until both streams have polled again.
+
+### Cold start
+
+With no source [`indexer_cursors`](data-schema.md#indexer_cursors) row — a fresh deployment, or a database restored without one — that source has no resume point. It does **not** ask for `after: null`. That is a legal query, but an unfiltered gateway query cannot answer it on a chain the size of mainnet: it fails the `blockchain` resolver with a `TIMEOUT` extension after ~2s. A stored empty-string cursor is treated as no resume point and logs a `warn!`. Capture sends the sentinel `after: "0"` instead (`EARLIEST_CURSOR`, `crates/infrastructure/src/graphql.rs`): cursors are `msg_chain_order` values — lex-sortable and always ordered above `"0"` — so the sentinel names the earliest retained matching event while staying on the indexed cursor path. Each source logs its cold start separately.
+
+The sentinel is load-bearing, not a tidiness fix. Sent verbatim, `after: null` deadlocks the deployment: the page fails, so no cursor is persisted, so the next tick asks the same unanswerable question. The read-model stays empty indefinitely instead of degrading, and every page failure is retried forever at the polling interval.
+
+A cold start recovers only what the gateway still holds. The event index keeps a bounded window (~39h on mainnet as measured 2026-08-19), so events older than that window are unreachable at any cursor; replaying them requires an archive node.
 
 ### Noise log
 
@@ -278,7 +343,9 @@ The inference reconciler closes this gap: it sweeps the book's `OPEN` rows with 
 
 ## Projection — TokenContract SETTLEMENT events
 
-`TokenContract.*` events drive [`inference_deals`](data-schema.md#inference_deals) and [`inference_ticks`](data-schema.md#inference_ticks) — the per-deal read model for the inference SETTLEMENT phase. A `TokenContract` is deployed per matched SELL offer; its address is the PK for `inference_deals`.
+The handlers in this section apply only when `TokenContract.*` rows already exist in `raw_events` (for example, rows retained from the earlier global capture design and replayed during a rebuild). The current two-stream live capture excludes every TokenContract `dst` before decode, so it does not ingest new `TokenContract.*` events. Public inference endpoints continue to derive their order and trade data from `InferenceOrderBook.*`; they do not depend on settlement-event capture.
+
+For retained rows, `TokenContract.*` events drive [`inference_deals`](data-schema.md#inference_deals) and [`inference_ticks`](data-schema.md#inference_ticks) — the per-deal read model for the inference SETTLEMENT phase. A `TokenContract` is deployed per matched SELL offer; its address is the PK for `inference_deals`.
 
 The projector seeds a skeleton `inference_deals` row on the **first** `TokenContract.*` event it sees for a given address (keyed by `src_address = event.src`), so out-of-order or early delivery still records the deal. The `orderbook_address`, `seller_note`, and `buyer_note` cross-link columns are filled by the `InferenceOrderBook.InferenceFilled` handler (see the table above) — it is the only event carrying `sellerTC` + `buyerNote` together; the SETTLEMENT projector does not touch those columns. Both sides use `coalesce`-guarded upserts so whichever event arrives first preserves the other side's contribution.
 
@@ -611,7 +678,7 @@ Two outcomes leave a `raw_events` row pending:
 - **`Deferred`** — the projector knows it cannot apply this event yet (typically a child arriving before its parent). `processed_at` stays NULL and the projection loop retries it on a later pass. Forward passes resume above the last-drained ceiling; a separate retry pass rewinds to the front of the pending queue on a timer — roughly every `polling_interval_ms`, independent of whether the loop idled, so stuck rows are re-attempted on that cadence even under sustained ingest. A permanently deferred row is therefore retried at most once per interval, not on every ingest batch.
 - **`Err`** — the projector hit an unexpected error. Same effect on `processed_at`, plus a warn log and an increment in the failure counter. Useful for spotting ABI drift.
 
-The projection loop (`indexer_repo.rs::run_reprojection_loop`, draining via `reproject_pending_from`) picks pending rows in `chain_order` sequence, holds them with `for update skip locked` so a row is never projected twice even if a second consumer is ever added, and reuses the already-decoded payload from `raw_events.decoded` — bodies are not re-decoded. It is the sole projector: the capture path writes `raw_events` rows with `processed_at NULL` and never projects inline.
+The projection loop (`indexer_repo.rs::run_reprojection_loop`, draining via `reproject_pending_from`) picks pending rows in `chain_order` sequence up to the synchronized dual-stream barrier, holds them with `for update skip locked` so a row is never projected twice even if a second consumer is ever added, and reuses the already-decoded payload from `raw_events.decoded` — bodies are not re-decoded. It is the sole projector: the capture path writes `raw_events` rows with `processed_at NULL` and never projects inline.
 
 A batch is drained optimistically in a single transaction with **no per-row savepoint**, so an applied row costs only its projector statements — not an extra `SAVEPOINT`/`RELEASE` round-trip pair, which matters when the database is far (high per-round-trip latency). If a projector returns `Err`, that transaction is rolled back untouched and the same range is replayed with per-row savepoints, which applies the clean rows and leaves the failing one pending — the identical outcome to savepointing every row, paid for only when a failure actually occurs. The savepointed replay is paid only on passes that hit a projector error — in practice the periodic retry pass re-attempting a stuck row, though a newly captured row that errors on first sight also drops its forward pass to the fallback. A clean forward drain stays on the savepoint-free fast path.
 
@@ -638,7 +705,7 @@ Four gauges complement the counters, covering projection health and connection s
 | --- | --- | --- | --- |
 | `indexer_projection_backlog` | gauge | `raw_events` rows waiting for the projection loop (typed + decoded, `processed_at NULL`) | `count(*)` from `raw_events` |
 | `indexer_projection_lag_seconds` | gauge | Wall-clock age of the oldest eligible-but-unprojected `raw_events` row; read-model staleness | `extract(epoch from now() - min(created_at_chain))` over pending rows |
-| `indexer_capture_cursor_age_seconds` | gauge | Seconds since the capture cursor last advanced | `extract(epoch from now() - updated_at)` from `indexer_cursors` |
+| `indexer_capture_cursor_age_seconds` | gauge | Seconds since both capture streams last completed a synchronized tick | `extract(epoch from now() - updated_at)` from the aggregate `blockchain_events` cursor row |
 | `indexer_db_pool_connections{state=in_use\|idle}` | gauge | sqlx DB pool connections by state | `pool.size()` / `pool.num_idle()` — in-memory, no DB query |
 
 All four ride the same OTLP path as the counters: exported only when `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set, refreshed every `REFRESH_INTERVAL` (15s). The pool gauge is sampled in the refresh loop (≤15s granularity). Diagnostic shape: backlog rising + pool `in_use` at max + cursor age small = projection stalled on connection exhaustion.
@@ -728,7 +795,7 @@ The same gate applies to inference markets: an [`inference_markets`](data-schema
 
 ## Capture-freshness / polling-interval coupling
 
-`GET /api/v1/inference/orders` fails closed whenever it cannot vouch for the completeness of its view of a book — see [read-api.md § Fail-closed gate](read-api.md#fail-closed-gate). One of that gate's three arms reads the same [`indexer_cursors`](data-schema.md#indexer_cursors) row the capture loop maintains for `CAPTURE_STREAM` (`crates/infrastructure/src/indexer_repo.rs`): `at_head` alone only records that the *last* poll saw no next page, so the gate additionally requires that poll to have landed within `CAPTURE_FRESHNESS_SECS` (30s, `crates/infrastructure/src/config.rs`) of the request. A capture loop that stops polling — crashed, wedged, or simply configured with too coarse a `polling_interval_ms` — therefore turns every book's TokenContract-filtered live-SELL queries into `MarketInconsistent` / 503 once the last poll ages past that bound, independent of whether the loop is actually behind.
+`GET /api/v1/inference/orders` fails closed whenever it cannot vouch for the completeness of its view of a book — see [read-api.md § Fail-closed gate](read-api.md#fail-closed-gate). One of that gate's three arms reads the aggregate [`indexer_cursors`](data-schema.md#indexer_cursors) row for `CAPTURE_STREAM` (`blockchain_events`). Its `at_head` is true only when both the DEX-dApp and RootPN drains reached head in the same successful tick; its `updated_at` is refreshed only after that synchronization. The gate additionally requires the row to be newer than `CAPTURE_FRESHNESS_SECS` (30s, `crates/infrastructure/src/config.rs`). A failed or stopped source therefore turns every book's TokenContract-filtered live-SELL queries into `MarketInconsistent` / 503 once the aggregate row ages past that bound.
 
 `IndexerConfig::validate` refuses to start a config whose `indexer.polling_interval_ms` cannot land at least two polls inside that window: `2.0 * polling_interval_ms / 1000.0 <= CAPTURE_FRESHNESS_SECS`. Two polls, not one, because a single slow poll near the boundary must not be able to make every book unqueryable on its own — the margin absorbs one missed or delayed tick. The shipped configs poll every 3 s (`polling_interval_ms: 3000`), ten polls inside the 30 s window; raising it above 15 s trips this check at startup rather than failing silently at request time with no indication of why.
 

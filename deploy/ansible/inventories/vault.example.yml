@@ -21,3 +21,7 @@ vault_dexdo_db_password: "CHANGE-ME"
 # 32-byte KEK (64 hex chars) that encrypts api_secret / pn_seckey at rest.
 # Generate a fresh one per environment:  openssl rand -hex 32
 vault_dexdo_kek_hex: "REPLACE-with-64-hex-chars"
+
+# Optional bearer credential for protected GraphQL gateways. Leave empty when
+# the endpoint is public. It is rendered only into the indexer config.
+vault_dexdo_graphql_bearer_token: ""

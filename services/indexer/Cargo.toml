@@ -10,6 +10,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 dodex-infrastructure = { path = "../../crates/infrastructure" }
+dodex-chain.workspace = true
+dodex-contracts.workspace = true
 dodex-logging = { path = "../../crates/logging" }
 dodex-metrics = { path = "../../crates/metrics" }
 
@@ -21,4 +23,3 @@ sqlx.workspace = true
 # database test in the workspace loads .env first; without this one they skipped
 # silently on a developer's machine while their infrastructure neighbours ran.
 dotenvy.workspace = true
-

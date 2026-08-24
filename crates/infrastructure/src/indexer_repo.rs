@@ -31,6 +31,8 @@ use crate::projectors::ProjectionOutcome;
 /// `at_head` flag to avoid dropping an orphan whose parent may still be ahead of
 /// the cursor during a backfill (see `is_dead_letterable_orphan`).
 pub const CAPTURE_STREAM: &str = "blockchain_events";
+pub const DAPP_CAPTURE_STREAM: &str = "blockchain_events_dex_dapp";
+pub const ROOT_PN_CAPTURE_STREAM: &str = "blockchain_events_root_pn";
 
 #[derive(Debug, Clone)]
 pub struct IndexerRepository {
@@ -359,6 +361,52 @@ impl IndexerRepository {
                 .await
                 .context("select indexer_cursors")?;
         Ok(row.and_then(|(c,)| c))
+    }
+
+    /// Prepares the aggregate capture row before the projector starts. An
+    /// existing aggregate cursor is preserved only when every source stream has
+    /// already been initialized by the dual-stream capture loop. This makes the
+    /// first deployment discard the old global-scan cursor instead of treating
+    /// it as a valid cross-stream projection barrier.
+    pub async fn initialize_capture_barrier(&self, source_streams: &[&str]) -> anyhow::Result<()> {
+        let source_count: i64 =
+            sqlx::query_scalar("select count(*) from indexer_cursors where stream_name = any($1)")
+                .bind(source_streams)
+                .fetch_one(&self.pool)
+                .await
+                .context("count initialized capture source streams")?;
+        let cursor = if source_count == source_streams.len() as i64 {
+            self.load_cursor(&self.capture_stream).await?
+        } else {
+            None
+        };
+        self.set_capture_barrier(cursor.as_deref(), false).await
+    }
+
+    /// Replaces the aggregate projection barrier after both source streams have
+    /// completed a successful drain. Unlike `persist_page`, a null cursor must
+    /// replace the previous value: it means no chain-order prefix is known to be
+    /// complete yet, so projecting through the old cursor would be unsafe.
+    pub async fn set_capture_barrier(
+        &self,
+        cursor: Option<&str>,
+        at_head: bool,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"insert into indexer_cursors (stream_name, cursor, at_head, updated_at)
+               values ($1, $2, $3, now())
+               on conflict (stream_name) do update
+                 set cursor = excluded.cursor,
+                     at_head = excluded.at_head,
+                     updated_at = now()"#,
+        )
+        .bind(&self.capture_stream)
+        .bind(cursor)
+        .bind(at_head)
+        .execute(&self.pool)
+        .await
+        .context("upsert aggregate capture barrier")?;
+        Ok(())
     }
 
     /// Returns `true` when the capture loop's most recent drain for `stream_name`
@@ -1455,6 +1503,26 @@ impl IndexerRepository {
         Ok(max)
     }
 
+    /// Highest pending row that is safe to project through the aggregate
+    /// capture barrier. A missing/null barrier yields `None` even when pending
+    /// rows exist: one source stream has not established its ordered prefix yet.
+    pub async fn max_projectable_chain_order(&self) -> anyhow::Result<Option<String>> {
+        let max: Option<String> = sqlx::query_scalar(
+            r#"select max(chain_order) from raw_events
+                where processed_at is null
+                  and event_type is not null
+                  and decoded is not null
+                  and chain_order <= (
+                      select cursor from indexer_cursors where stream_name = $1
+                  )"#,
+        )
+        .bind(&self.capture_stream)
+        .fetch_one(&self.pool)
+        .await
+        .context("max pending chain_order through capture barrier")?;
+        Ok(max)
+    }
+
     /// Whether any pending row exists with `chain_order` above the argument. The
     /// drain loop calls this after a cycle to decide whether to idle: rows at or
     /// below the just-drained ceiling are stuck (Deferred/failed, already
@@ -1475,6 +1543,29 @@ impl IndexerRepository {
         .fetch_one(&self.pool)
         .await
         .context("has pending above chain_order")?;
+        Ok(exists)
+    }
+
+    /// Whether newly captured work exists above `chain_order` but still inside
+    /// the current aggregate capture barrier. Rows beyond the barrier belong to
+    /// a source stream that has run ahead and must not make the projector spin.
+    pub async fn has_projectable_pending_above(&self, chain_order: &str) -> anyhow::Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            r#"select exists(
+                   select 1 from raw_events
+                    where processed_at is null
+                      and event_type is not null
+                      and decoded is not null
+                      and chain_order > $1
+                      and chain_order <= (
+                          select cursor from indexer_cursors where stream_name = $2
+                      ))"#,
+        )
+        .bind(chain_order)
+        .bind(&self.capture_stream)
+        .fetch_one(&self.pool)
+        .await
+        .context("has pending above chain_order through capture barrier")?;
         Ok(exists)
     }
 
@@ -1509,9 +1600,10 @@ impl IndexerRepository {
                 last_retry = tokio::time::Instant::now();
             }
 
-            // Ceiling = highest pending chain_order now; bounds this pass so it
-            // terminates even while capture keeps appending above it.
-            let ceiling = match self.max_pending_chain_order().await {
+            // Ceiling = highest pending chain_order inside the synchronized
+            // capture barrier. Rows from a faster source stream stay pending
+            // until the slower stream proves the preceding range complete.
+            let ceiling = match self.max_projectable_chain_order().await {
                 Ok(Some(c)) => c,
                 Ok(None) => {
                     tokio::time::sleep(idle_interval).await;
@@ -1578,7 +1670,7 @@ impl IndexerRepository {
             // Idle only if no new rows arrived above the ceiling. If they did, run
             // the next pass immediately so the projector never idles with
             // applicable work queued. The retry timer still fires on schedule.
-            match self.has_pending_above(&ceiling).await {
+            match self.has_projectable_pending_above(&ceiling).await {
                 Ok(true) => {}
                 Ok(false) => tokio::time::sleep(idle_interval).await,
                 Err(err) => {
