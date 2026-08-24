@@ -1264,6 +1264,11 @@ steps:
       E2E_HOST: { from_secret: e2e_host }
       E2E_CI_USER: { from_secret: e2e_ci_user }
       ACKI_DIR: *acki_dir_on_host
+      # `dexdo_deploy_dir` from deploy/ansible/roles/dexdo/defaults/main.yml. Named
+      # here rather than inlined below for the same reason ACKI_DIR is: the host
+      # path is deployment configuration, and a copy buried in a quoted ssh command
+      # is the copy nobody updates.
+      DEXDO_DIR: /opt/dexdo
     commands:
       - cp -ar $CI_WORKSPACE/.ssh ~/.ssh && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
       - >
@@ -1286,6 +1291,35 @@ steps:
         tail -n 200 $ACKI_DIR/logs/bm0/bm.log 2>/dev/null;
         echo '----- docker logs block_manager (tail 100) -----';
         docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=100 block_manager 2>/dev/null;
+        true"
+      # DEXDO'S OWN SERVICES, and their absence here is why #300 took three guesses
+      # to diagnose. Everything above is the CHAIN — five nodes and the block
+      # manager — while the failure being investigated was in our indexer: the read
+      # model stayed empty and nothing in this dump could say why, because the
+      # indexer was the one process not being asked.
+      #
+      # Two sources per service, and both are needed. `docker compose logs` carries
+      # what a crash-looping container printed before it died, which the file log
+      # never receives; the file log under `/opt/dexdo/logs/<svc>` is what
+      # `dodex-logging` writes and survives a container restart, which the docker
+      # log does not. Deploy paths come from `deploy/ansible/roles/dexdo/defaults`
+      # (`dexdo_deploy_dir` / `dexdo_logs_dir`).
+      #
+      # The indexer goes first and gets the larger tail: it ticks capture every 3s,
+      # so its recent history is dense and it is the service most read-model
+      # symptoms trace back to.
+      - >
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$E2E_CI_USER@$E2E_HOST"
+        "set +e;
+        echo '===== dexdo compose ps -a =====';
+        docker compose -f $DEXDO_DIR/compose.yml ps -a 2>/dev/null;
+        for svc in indexer api; do
+          case \$svc in indexer) N=300;; *) N=120;; esac;
+          echo \"===== dexdo \$svc (docker logs, tail \$N) =====\";
+          docker compose -f $DEXDO_DIR/compose.yml logs --tail=\$N \$svc 2>/dev/null;
+          echo \"----- \$svc file log (tail \$N) -----\";
+          tail -n \$N $DEXDO_DIR/logs/\$svc/*.log 2>/dev/null;
+        done;
         true"
 
   # The observer. It creates no traffic — it checks what the scenarios left behind,
