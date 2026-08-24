@@ -51,6 +51,17 @@ async fn seed_raw(pool: &PgPool, msg: &str, src: &str, event_type: Option<&str>,
     .unwrap();
 }
 
+/// Marks a seeded row as drained by the projection loop. Separate from
+/// `seed_raw` rather than a sixth parameter to it: seven call sites seed
+/// unprocessed rows and none of them has an opinion about `processed_at`.
+async fn mark_projected(pool: &PgPool, msg: &str) {
+    sqlx::query("update raw_events set processed_at = now() where msg_id = $1")
+        .bind(msg)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 async fn seed_book(
     pool: &PgPool,
     ob: &str,
@@ -369,6 +380,81 @@ async fn the_anchor_finds_a_visible_book_with_orders_and_events_in_the_window() 
         .unwrap();
     sqlx::query("delete from inference_markets where orderbook_address = $1")
         .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_dex_anchor_counts_this_runs_order_book_rows_and_is_not_fed_by_inference() {
+    let Some(pool) = setup().await else { return };
+    let src = "0:obsq_dex";
+    // A type of this test's own, for the reason the pending-window test gives
+    // itself one: the query returns every `OrderBook.%` type in the window, and a
+    // neighbour writing a real `OrderBook.OrderPlaced` would make the equalities
+    // below flaky. All assertions read this type only.
+    let ty = "OrderBook.ObsDexProbe";
+    sqlx::query("delete from raw_events where msg_id like 'obsq-dex-%'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from raw_events where src_address = $1")
+        .bind(src)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let repo = IndexerRepository::new(pool.clone());
+    let now = chrono::Utc::now().timestamp();
+    let of = |rows: &[(String, i64, i64)]| -> (i64, i64) {
+        rows.iter().filter(|(t, _, _)| t == ty).fold((0, 0), |(c, p), (_, rc, rp)| (c + rc, p + rp))
+    };
+
+    // Ingested before the run: outside the window, and the stand's database
+    // outlives pipelines, so this is the row that would otherwise answer for a
+    // run that captured nothing.
+    seed_raw(&pool, "obsq-dex-old", src, Some(ty), 7200).await;
+    mark_projected(&pool, "obsq-dex-old").await;
+    assert_eq!(
+        of(&repo.dex_capture_progress_since(now - 60).await.unwrap()),
+        (0, 0),
+        "a projected row from an earlier run must not satisfy this run's anchor"
+    );
+
+    // Captured in the window, not yet drained: visible, and honestly not projected.
+    seed_raw(&pool, "obsq-dex-new", src, Some(ty), 5).await;
+    assert_eq!(
+        of(&repo.dex_capture_progress_since(now - 60).await.unwrap()),
+        (1, 0),
+        "an ingested row counts as captured and, until the loop drains it, not as projected"
+    );
+
+    mark_projected(&pool, "obsq-dex-new").await;
+    assert_eq!(
+        of(&repo.dex_capture_progress_since(now - 60).await.unwrap()),
+        (1, 1),
+        "draining the row moves it into the projected count without duplicating it"
+    );
+
+    // The wide window holds both, so the narrowing above was the window doing its
+    // job rather than the query ignoring rows.
+    assert_eq!(of(&repo.dex_capture_progress_since(now - 86_400).await.unwrap()), (2, 2));
+
+    // The prefix anchors at the START. This is the assertion that keeps the anchor
+    // meaningful: widened to a contains-match, inference traffic would answer for
+    // the DEX half and the whole point of having two anchors would be gone.
+    let inference_ty = "InferenceOrderBook.InferenceOrderPlaced";
+    seed_raw(&pool, "obsq-dex-inference", src, Some(inference_ty), 5).await;
+    mark_projected(&pool, "obsq-dex-inference").await;
+    let rows = repo.dex_capture_progress_since(now - 60).await.unwrap();
+    assert!(
+        rows.iter().all(|(t, _, _)| t != inference_ty),
+        "`InferenceOrderBook.` must not match the `OrderBook.` prefix: {rows:?}"
+    );
+    assert_eq!(of(&rows), (1, 1), "and the DEX counts are unchanged by it");
+
+    sqlx::query("delete from raw_events where src_address = $1")
+        .bind(src)
         .execute(&pool)
         .await
         .unwrap();

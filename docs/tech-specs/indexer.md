@@ -441,11 +441,15 @@ budget.
 
 Two properties make it usable as a blocking step:
 
-- it **polls to convergence** with a deadline (`OBSERVER_DEADLINE_SECS`; the default
-  lives in one place, `DEFAULT_DEADLINE_SECS` in the test, and the step prints the
-  effective value) rather than taking one snapshot. Capture ticks at 3s, the inference
-  reconciler at 15s, and visibility is stamped only after a full sweep cycle, so a book
-  seeded seconds before the tail is legitimately still `discovering`;
+- it **polls to convergence** with a deadline rather than taking one snapshot. Capture
+  ticks at 3s, the inference reconciler at 15s, and visibility is stamped only after a
+  full sweep cycle, so a book seeded seconds before the tail is legitimately still
+  `discovering`. The deadlines live in one place, the test's `DEFAULT_DEADLINE_SECS`
+  (240s, overridable with `OBSERVER_DEADLINE_SECS`) and `CAPTURE_DEADLINE_SECS` (30s,
+  not overridable), and every test prints both the value it was handed and the step's
+  worst case, which is their sum — the step runs `--test-threads 1`. The capture anchor
+  below is the short one, and deliberately so: it waits for a projection drain, not for
+  a reconciler cycle, and the pipeline has a 120-minute ceiling;
 - every assertion is scoped to the **run window**. The stand's Postgres outlives
   pipelines, so a book abandoned in `discovering` by a cancelled run would otherwise
   fail the next one for a foreign reason. The window is compared against
@@ -479,6 +483,21 @@ a particular scenario's book is the one it found, and not that the order itself 
 projected during this run. When it fails it prints the diagnostic line first: "books in
 window = 0" means traffic never reached the indexer at all, a non-zero count means it
 arrived but nothing became visible.
+
+A **second anchor covers the DEX half**: at least one `OrderBook.*` event ingested in
+the window was decoded and projected. The two anchors exist separately because
+`config::SCOPED_EVENT_IDS` is a single list spanning `contracts/dex` and
+`contracts/airegistry` and one capture loop feeds both, so an edit that drops the DEX
+ids leaves the inference anchor green. Nothing else in the suite would catch it either:
+the DEX scenarios verify placement by polling the **contract**
+(`OrderBook.getOrdersByOwner`), never the read model, so a run in which DEX capture is
+dark passes every one of them. Its failure text separates three cases from the numbers
+it prints — no rows and no undecodable rows means nothing our order book emitted reached
+the indexer at all (the capture query or the `dst` allow-list); no rows with undecodable
+rows present means events arrived and none decoded (ABI drift); rows present but none
+projected means the projection loop never drained them. A run in which every DEX order
+scenario failed on chain emits no `OrderPlaced` to begin with, so the scenario results
+are read before the indexer is blamed.
 
 ## In-scene end-to-end assertions
 

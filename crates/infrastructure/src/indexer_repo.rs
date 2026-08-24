@@ -244,6 +244,15 @@ impl IndexerRepository {
     /// set) below build their query from this one constant, so the whole-table
     /// production count and the scoped query a test exercises can never drift
     /// apart — edit the predicate here only, never duplicate it.
+    /// The event-type prefix [`Self::dex_capture_progress_since`] is taken over.
+    /// `OrderBook.` is the prediction-market order book
+    /// (`contracts/dex/OrderBook.sol`) — deliberately NOT `InferenceOrderBook.`,
+    /// the airegistry book the inference anchor already covers. The distinction
+    /// is load-bearing: matched as a LIKE prefix it anchors at the start, so
+    /// `InferenceOrderBook.*` cannot satisfy the DEX anchor. Widening this to a
+    /// contains-match would make inference traffic answer for the DEX side and
+    /// quietly void the anchor; `observer_queries.rs` pins that it does not.
+    const DEX_ANCHOR_EVENT_PREFIX: &'static str = "OrderBook.";
     const WEDGED_BOOKS_WHERE: &'static str = r#"m.last_reconciled_at is not null
                   and m.superseded_at is null
                   and exists(
@@ -1468,6 +1477,53 @@ impl IndexerRepository {
             .await
             .context("inference anchored books since")?;
         Ok(addrs)
+    }
+
+    /// Per-type progress of DEX order-book events INGESTED in the window:
+    /// `(event_type, captured, projected)`.
+    ///
+    /// The DEX counterpart of [`Self::inference_anchored_books_since`]. The two
+    /// cover the two halves of `config::SCOPED_EVENT_IDS` — `contracts/dex` and
+    /// `contracts/airegistry` — and the split is the reason this exists: one
+    /// ingest scope feeds both sides, so an edit that drops the DEX ids while
+    /// keeping the inference ones leaves the inference anchor green.
+    ///
+    /// One query serves both the anchor's assertion and the line it prints, so
+    /// what is claimed and what is shown cannot drift apart.
+    ///
+    /// There is no `decoded` counter, and its absence is the point. `persist_page`
+    /// fills `event_type` and `decoded` from one and the same `Option`, so a row
+    /// is typed exactly when it is decoded — and a row whose decode failed carries
+    /// no type at all, which is why it cannot match a prefix and never appears
+    /// here. A `decoded` column would therefore always equal `captured` while
+    /// suggesting the anchor covers decode failures. It does not:
+    /// [`Self::count_undecodable_since`] does, and the anchor's failure message
+    /// sends the reader there.
+    ///
+    /// Unlike [`Self::PENDING_PROJECTION_WHERE`] and its neighbours this is not
+    /// built from a shared constant. Those are shared because a production gauge
+    /// reads the same predicate and IX-MET-03 requires the two to match; this one
+    /// backs no gauge, so there is no second definition to drift away from.
+    pub async fn dex_capture_progress_since(
+        &self,
+        since: i64,
+    ) -> anyhow::Result<Vec<(String, i64, i64)>> {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            r#"select event_type,
+                      count(*) as captured,
+                      count(*) filter (where processed_at is not null) as projected
+                 from raw_events
+                where created_at >= to_timestamp($1::double precision)
+                  and event_type like $2
+                group by event_type
+                order by event_type"#,
+        )
+        .bind(since as f64)
+        .bind(format!("{}%", Self::DEX_ANCHOR_EVENT_PREFIX))
+        .fetch_all(&self.pool)
+        .await
+        .context("dex capture progress since")?;
+        Ok(rows)
     }
 
     /// (in_use, idle) sqlx pool connections — cheap in-memory reads, no DB query.

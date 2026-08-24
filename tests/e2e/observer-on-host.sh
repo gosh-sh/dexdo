@@ -116,13 +116,15 @@ cd "$DIR"
 START=$(date +%s)
 FILTER='binary(e2e_observer)'
 
-# There is deliberately NO deadline here. Its value lives in one place — the test's
-# `DEFAULT_DEADLINE_SECS` constant — and is printed from there together with the step's
-# worst case (two `#[ignore]` tests under `--test-threads 1`, i.e. the sum of the
-# deadlines). A second source of the same quantity would drift silently: editing the
-# Rust side would leave this script honestly printing an untruth. To override the
-# deadline on the stand, add `OBSERVER_DEADLINE_SECS` to the ssh call's variable list
-# in e2e.yml — the script forwards it while knowing nothing about the value.
+# There is deliberately NO deadline here. The values live in one place — the test's
+# `DEFAULT_DEADLINE_SECS` and `CAPTURE_DEADLINE_SECS` constants — and are printed from
+# there together with the step's worst case (three `#[ignore]` tests under
+# `--test-threads 1`, i.e. the sum of the three deadlines). A second source of the same
+# quantity would drift silently: editing the Rust side would leave this script honestly
+# printing an untruth. To override the deadline on the stand, add
+# `OBSERVER_DEADLINE_SECS` to the ssh call's variable list in e2e.yml — the script
+# forwards it while knowing nothing about the value, and the Rust side applies it to the
+# two convergence tests only (the capture anchor does not wait on convergence).
 
 # An empty selection is not a harmless no-op: `--run-ignored only` with a filter that
 # matches nothing exits zero, and the step would report success having checked nothing
