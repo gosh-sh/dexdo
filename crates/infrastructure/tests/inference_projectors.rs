@@ -2569,3 +2569,227 @@ async fn a_real_order_placed_body_projects_into_inference_orders() {
     );
     assert_eq!(row.9, "OPEN", "status <- constant 'OPEN' on placement");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// price_per_tick and deposit — the two settlement columns recovered from events
+// the book still emits, after ingest stopped capturing TokenContract routes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_sell_offer_records_the_deal_price_and_a_buy_records_nothing() {
+    // The SELL placement is what REGISTERS a deal: it names the TokenContract and
+    // carries the per-tick ask its constructor was given. A BUY carries the zero
+    // address there, so it must not touch any deal row — and the assertion is on a
+    // BUY at a DIFFERENT price, so a projector that ignored `is_buy` would
+    // overwrite the ask with the bid and fail here rather than pass by coincidence.
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_deal_price_ob";
+    let tc = "0:tc_deal_price";
+    for q in ["delete from inference_deals where token_contract_address=$1"] {
+        sqlx::query(q).bind(tc).execute(&pool).await.unwrap();
+    }
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev(
+            "InferenceOrderPlaced",
+            serde_json::json!({
+        "orderId":"1","isBuy":false,"price":"7000000000","ticks":"10","note":"0:seller",
+        "tokenContract":tc,"deadline":"0","flags":"0"}),
+        ),
+        &node(ob, "co-dp-1"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &ev(
+            "InferenceOrderPlaced",
+            serde_json::json!({
+        "orderId":"2","isBuy":true,"price":"9000000000","ticks":"10","note":"0:buyer",
+        "tokenContract":ZERO_ADDRESS,"deadline":"0","flags":"0"}),
+        ),
+        &node(ob, "co-dp-2"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let price: Option<String> = sqlx::query_scalar(
+        "select price_per_tick::text from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        price.as_deref(),
+        Some("7000000000"),
+        "the deal's price is the SELL offer's ask, never the crossing bid"
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "select count(*) from inference_deals where price_per_tick = 9000000000",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 0, "a BUY placement registers no deal");
+}
+
+#[tokio::test]
+async fn deposit_reproduces_the_books_own_arithmetic_fee_included() {
+    // Worked by hand against `_match`: unit = p + p*250/10000, cost = ticks*unit.
+    // p = 1_000_000_000 -> fee 25_000_000 -> unit 1_025_000_000; ticks 4 ->
+    // deposit 4_100_000_000. A projector that forgot the platform fee would say
+    // 4_000_000_000, which is why the numbers are chosen so the two differ.
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_deal_dep_ob";
+    let tc = "0:tc_deal_dep";
+    sqlx::query("delete from inference_deals where token_contract_address=$1")
+        .bind(tc)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from inference_markets where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &ev(
+            "InferenceOrderPlaced",
+            serde_json::json!({
+        "orderId":"1","isBuy":false,"price":"1000000000","ticks":"4","note":"0:seller",
+        "tokenContract":tc,"deadline":"0","flags":"0"}),
+        ),
+        &node(ob, "co-dd-1"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &ev(
+            "InferenceOrderPlaced",
+            serde_json::json!({
+        "orderId":"2","isBuy":true,"price":"1000000000","ticks":"4","note":"0:buyer",
+        "tokenContract":ZERO_ADDRESS,"deadline":"0","flags":"0"}),
+        ),
+        &node(ob, "co-dd-2"),
+    )
+    .await;
+    project(
+        &mut tx,
+        &ev(
+            "InferenceFilled",
+            serde_json::json!({
+        "makerId":"1","takerId":"2","ticks":"4","clearingPrice":"1000000000","sellerTC":tc,
+        "buyerNote":"0:buyer","sellerNote":"0:seller"}),
+        ),
+        &node(ob, "co-dd-3"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let deposit: Option<String> = sqlx::query_scalar(
+        "select deposit::text from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(deposit.as_deref(), Some("4100000000"));
+}
+
+#[tokio::test]
+async fn a_subscription_deposit_carries_the_buyers_bond_and_an_ordinary_one_does_not() {
+    // The bond is `2 * clearingPrice` and rides along with the escrow ONLY for a
+    // subscription. Both cases run here with identical ticks and price, so the
+    // difference in the answer is the bond and nothing else.
+    let Some(pool) = setup().await else { return };
+    const FLAG_SUBSCRIPTION: &str = "64"; // 0x40, and the payload carries it as decimal
+    for (tag, flags, want) in [
+        ("sub", FLAG_SUBSCRIPTION, "6100000000"), // 4_100_000_000 + 2 * 1_000_000_000
+        ("ord", "0", "4100000000"),
+    ] {
+        let ob = format!("0:t_deal_bond_ob_{tag}");
+        let tc = format!("0:tc_deal_bond_{tag}");
+        sqlx::query("delete from inference_deals where token_contract_address=$1")
+            .bind(&tc)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("delete from inference_orders where orderbook_address=$1")
+            .bind(&ob)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("delete from inference_markets where orderbook_address=$1")
+            .bind(&ob)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        project(
+            &mut tx,
+            &ev(
+                "InferenceOrderPlaced",
+                serde_json::json!({
+            "orderId":"1","isBuy":false,"price":"1000000000","ticks":"4","note":"0:seller",
+            "tokenContract":tc,"deadline":"0","flags":"0"}),
+            ),
+            &node(&ob, &format!("co-db-{tag}-1")),
+        )
+        .await;
+        // The SUBSCRIPTION bit lives on the BUY placement — that is the leg the
+        // deposit projector reads it off.
+        project(
+            &mut tx,
+            &ev(
+                "InferenceOrderPlaced",
+                serde_json::json!({
+            "orderId":"2","isBuy":true,"price":"1000000000","ticks":"4","note":"0:buyer",
+            "tokenContract":ZERO_ADDRESS,"deadline":"0","flags":flags}),
+            ),
+            &node(&ob, &format!("co-db-{tag}-2")),
+        )
+        .await;
+        project(
+            &mut tx,
+            &ev(
+                "InferenceFilled",
+                serde_json::json!({
+            "makerId":"1","takerId":"2","ticks":"4","clearingPrice":"1000000000","sellerTC":tc,
+            "buyerNote":"0:buyer","sellerNote":"0:seller"}),
+            ),
+            &node(&ob, &format!("co-db-{tag}-3")),
+        )
+        .await;
+        tx.commit().await.unwrap();
+
+        let deposit: Option<String> = sqlx::query_scalar(
+            "select deposit::text from inference_deals where token_contract_address=$1",
+        )
+        .bind(&tc)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(deposit.as_deref(), Some(want), "case {tag}");
+    }
+}

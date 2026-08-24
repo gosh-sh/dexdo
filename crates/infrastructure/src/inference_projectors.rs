@@ -10,6 +10,8 @@ use dodex_contracts::airegistry::inference_order_book_events::FilledData;
 use dodex_contracts::airegistry::inference_order_book_events::InferenceOrderBookEvent;
 use dodex_contracts::airegistry::inference_order_book_events::OrderPlacedData;
 use dodex_contracts::airegistry::inference_order_book_events::RefundedData;
+use dodex_contracts::airegistry::inference_order_book_events::BPS_DENOMINATOR;
+use dodex_contracts::airegistry::inference_order_book_events::PLATFORM_FEE_BPS;
 use sqlx::Postgres;
 use sqlx::Transaction;
 use tracing::error;
@@ -219,7 +221,50 @@ async fn apply_inference_order_placed(
         chain_seconds,
     )
     .await?;
+    // A SELL offer is the placement that REGISTERS a deal: `token_contract` is the
+    // TokenContract the seller deployed, and `price` is the per-tick ask its
+    // constructor was given (`TokenContract.sol:308`). That is the same number
+    // `StreamOpened.pricePerTick` used to report, so it is the column's value and
+    // not an approximation of it.
+    //
+    // NOT `InferenceFilled.clearingPrice`, which is the nearest-looking
+    // alternative and is wrong: clearing is the price the MATCH struck. It equals
+    // the ask only when the seller was the maker; a taker SELL crossing a resting
+    // BUY clears at the bid.
+    if let Some(tc) = token_contract.filter(|_| !is_buy) {
+        record_deal_price(tx, tc, &price, &chain_order).await?;
+    }
     Ok(ProjectionOutcome::Applied)
+}
+
+/// Seed or enrich the deal row with the per-tick ask its SELL offer carried.
+///
+/// Upsert rather than update: the placement precedes the fill, so on a normal
+/// timeline this is the FIRST thing that knows the deal exists at all — before
+/// `InferenceFilled` links its parties. `coalesce` keeps whatever a re-listing
+/// or a replay already recorded, so the first price to arrive is the one that
+/// stays.
+async fn record_deal_price(
+    tx: &mut Transaction<'_, Postgres>,
+    token_contract: &str,
+    price: &str,
+    chain_order: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"insert into inference_deals (token_contract_address, price_per_tick, last_chain_order)
+           values ($1, $2::numeric, $3)
+           on conflict (token_contract_address) do update
+               set price_per_tick = coalesce(inference_deals.price_per_tick, excluded.price_per_tick),
+                   last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
+                   updated_at = now()"#,
+    )
+    .bind(token_contract)
+    .bind(price)
+    .bind(chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("record inference_deals price_per_tick from the SELL offer")?;
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]
@@ -229,6 +274,10 @@ struct LockedOrder {
     /// The leg's side. `isBuyerMaker` is not carried by `InferenceFilled`, so the tape
     /// takes it from whichever leg is locked here.
     is_buy: bool,
+    /// Whether this leg was placed as a subscription. Read for the same reason as
+    /// `is_buy`: `InferenceFilled` does not carry the deal flags, and the buyer's
+    /// bond — and therefore the deal's deposit — depends on this bit.
+    is_subscription: bool,
 }
 
 /// Parsed `Filled` event fields, shared by the normal projector and the
@@ -305,7 +354,8 @@ async fn lock_filled_rows(
     ids: &[String],
 ) -> anyhow::Result<Vec<LockedOrder>> {
     sqlx::query_as(
-        r#"select order_id::text as order_id, (swept_at is not null) as is_sweep_cancel, is_buy
+        r#"select order_id::text as order_id, (swept_at is not null) as is_sweep_cancel,
+                  is_buy, is_subscription
              from inference_orders
             where orderbook_address = $1 and order_id = any($2::numeric[])
             for update"#,
@@ -422,6 +472,9 @@ async fn apply_filled_decrement(
 async fn link_deal_from_filled(
     tx: &mut Transaction<'_, Postgres>,
     f: &FilledFields,
+    // Whether the BUY leg was a subscription, or `None` when no leg is present to
+    // ask — the orphan-repair path. See `record_deal_deposit`.
+    buy_is_subscription: Option<bool>,
 ) -> anyhow::Result<()> {
     let Some(seller_tc) = f.seller_tc.as_deref() else {
         warn!(
@@ -470,6 +523,86 @@ async fn link_deal_from_filled(
     .execute(&mut **tx)
     .await
     .context("link inference_deals from Filled")?;
+
+    record_deal_deposit(tx, f, seller_tc, buy_is_subscription).await
+}
+
+/// Recover the deal's `deposit` — the escrow figure the book sent it — by
+/// REPRODUCING the book's own arithmetic.
+///
+/// WHY IT HAS TO BE COMPUTED. No event carries it. `_match` derives
+/// `debit = cost + bond` and passes it to `fundFromOrderBook`, the deal stores it
+/// as `_deposit` and reported it in `StreamFunded` — the event ingest no longer
+/// captures. Every INPUT is emitted, though: `ticks` and `clearingPrice` come off
+/// this `InferenceFilled`, and the two rate constants are pinned against the
+/// Solidity source by `dodex-contracts/tests/order_book_fee_constants.rs`.
+///
+/// THE ARITHMETIC IS SOLIDITY'S, NOT AN APPROXIMATION OF IT. `_unit(p) = p +
+/// (p * PLATFORM_FEE_BPS) / BPS_DENOMINATOR` truncates once, on the fee, and
+/// `cost = ticks * unit` is exact. `div()` is Postgres integer division, so the
+/// truncation lands in the same place; doing this in `numeric` rather than in
+/// Rust also keeps it clear of the 128-bit ceiling the chain works under.
+///
+/// `bond` is `2 * clearingPrice` for a subscription and zero otherwise
+/// (`InferenceOrderBook.sol:745-746`) — the buyer's bond rides along with the
+/// escrow only on that path, and the deal separates them after.
+///
+/// UNKNOWN IS NOT ZERO. `InferenceFilled` does not carry the deal flags, so the
+/// subscription bit is read off the BUY leg. On the orphan path no leg is present
+/// and the answer is `None` — there the deposit is SKIPPED, because assuming "not
+/// a subscription" would silently record a figure short by the bond, and a wrong
+/// number is worse here than a NULL that says "not known".
+///
+/// WHAT THIS RECORDS IS WHAT THE BOOK SENT, and on one narrow path that differs
+/// from what the deal kept: `fundFromOrderBook` refuses a fill it cannot fund
+/// (nonce reuse, under two ticks, over `maxTicks`, a subscription whose bond did
+/// not arrive) and refunds the buyer in full without ever setting `_deposit`.
+/// The refusal is invisible from the book's events — it happens after the fill is
+/// emitted — so this column then names an escrow that came straight back. The
+/// book validates most of those conditions before matching, so the path is
+/// narrow; it is named here rather than left for someone to discover from a
+/// deposit on a deal that never opened.
+async fn record_deal_deposit(
+    tx: &mut Transaction<'_, Postgres>,
+    f: &FilledFields,
+    seller_tc: &str,
+    buy_is_subscription: Option<bool>,
+) -> anyhow::Result<()> {
+    let Some(is_subscription) = buy_is_subscription else {
+        warn!(
+            token_contract = %seller_tc,
+            chain_order = %f.chain_order,
+            "InferenceFilled orphan: no BUY leg to read the subscription flag from, so the deal's \
+             deposit is left NULL rather than computed without its possible bond"
+        );
+        return Ok(());
+    };
+    let fee_bps = i64::from(PLATFORM_FEE_BPS);
+    let bps_denominator = i64::from(BPS_DENOMINATOR);
+    let bond_multiple: i64 = if is_subscription { 2 } else { 0 };
+    sqlx::query(
+        r#"insert into inference_deals (token_contract_address, deposit, last_chain_order)
+           values (
+               $1,
+               $2::numeric * ($3::numeric + div($3::numeric * $4::numeric, $5::numeric))
+                   + $6::numeric * $3::numeric,
+               $7
+           )
+           on conflict (token_contract_address) do update
+               set deposit = coalesce(inference_deals.deposit, excluded.deposit),
+                   last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
+                   updated_at = now()"#,
+    )
+    .bind(seller_tc)
+    .bind(&f.ticks)
+    .bind(&f.clearing_price)
+    .bind(fee_bps)
+    .bind(bps_denominator)
+    .bind(bond_multiple)
+    .bind(&f.chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("record inference_deals deposit from Filled")?;
     Ok(())
 }
 
@@ -554,7 +687,8 @@ async fn apply_inference_filled(
         return Ok(ProjectionOutcome::Deferred); // parent(s) not seen yet — zero writes
     }
     apply_filled_decrement(tx, &f, &locked).await?;
-    link_deal_from_filled(tx, &f).await?;
+    let buy_is_subscription = locked.iter().find(|r| r.is_buy).map(|r| r.is_subscription);
+    link_deal_from_filled(tx, &f, buy_is_subscription).await?;
     // Both legs are present on this path (checked above), so the direction always resolves.
     // The append is not gated on what apply_filled_decrement did to the order rows: a
     // FULL no-op there (terminal maker, real-cancel override) still leaves a genuine
@@ -640,7 +774,10 @@ pub async fn repair_expired_inference_orphan(
             // walk is only the fallback for events older than the `sellerNote` field,
             // and it is exactly the case the orphan path cannot satisfy. The normal
             // deferred path never reruns.
-            link_deal_from_filled(tx, &f).await?;
+            // `None`: no leg is present on this path — that is what makes it an
+            // orphan — so the subscription bit cannot be read and the deposit is
+            // skipped rather than assumed. See `record_deal_deposit`.
+            link_deal_from_filled(tx, &f, None).await?;
             outcome
         }
         "InferenceOrderCancelled" => ExpiredOrphanOutcome::CancelLost,

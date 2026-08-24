@@ -367,3 +367,26 @@ pub struct OrderRejectedData {
     #[serde(deserialize_with = "deserialize_u128")]
     pub refund: u128,
 }
+
+/// Platform fee in basis points, charged on top of every tick's price
+/// (`InferenceOrderBook._tickFee`). Mirrors `PLATFORM_FEE_BPS` in
+/// `contracts/airegistry/modifiers/modifiers.sol`.
+///
+/// A COPY OF A CONTRACT CONSTANT, AND THAT IS A LIABILITY, NOT A CONVENIENCE.
+/// The indexer needs it because the escrow figure the book sends a deal —
+/// `debit`, which the deal records as its `deposit` — is emitted by no event: it
+/// is computed inside `_match` from values that ARE emitted. Reproducing that
+/// arithmetic is the only way to recover the number, and a silent drift in either
+/// constant would make every recovered deposit quietly wrong. `tests/order_book_fee_constants.rs`
+/// re-derives both from the Solidity source on every run so the drift is loud.
+pub const PLATFORM_FEE_BPS: u32 = 250;
+
+/// Denominator for [`PLATFORM_FEE_BPS`] — `BPS_DENOMINATOR` in
+/// `contracts/airegistry/modifiers/modifiers.sol`.
+pub const BPS_DENOMINATOR: u32 = 10_000;
+
+/// Flag bit marking a placement as a subscription (`FLAG_SUBSCRIPTION`). The
+/// buyer of a subscription posts a `2 × clearingPrice` bond that rides along with
+/// the escrow, so the deal's deposit is larger than the tick cost by exactly that
+/// much; every other deal type carries no bond on this path.
+pub const FLAG_SUBSCRIPTION: u8 = 0x40;
