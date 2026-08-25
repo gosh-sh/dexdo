@@ -33,8 +33,17 @@ variables:
   # carried a real `chain_order` cursor, which is also what cleared the
   # cold-start sentinel of suspicion.
   #
-  # So this pin is a MERGE of acki-nacki dev (87dd3f9fd, "Remove transitioning
-  # #2567") into test/dex-4.0.30, taken for `gql-server`'s `src_dapp_id` argument.
+  # So this pin is a MERGE of acki-nacki dev into test/dex-4.0.30, taken for
+  # `gql-server`'s `src_dapp_id` argument. The first such merge (cbd25eafe, dev at
+  # 87dd3f9fd "Remove transitioning #2567") is what took the stand green again:
+  # pipeline #307 ran 19/19 e2e tests and all three observer anchors. This pin is
+  # the second (a30002a96, dev at 72ee221c1 "Latest DEX/Bridge fixes #2423"), which
+  # moves `config/zerostate`, `contracts/giver/GiverV3`, and airegistry python
+  # tests this pipeline does not run — none of the four couplings dodex has to
+  # acki-nacki is touched by it: `src_dapp_id` on `events`, `call-internal` in
+  # zerostate-helper, the two `exchange/` trees, and the vanity addresses
+  # `gen_manifest.py` reads out of the generator by regex. Check those four before
+  # bumping this, not just that the images exist.
   #
   # THE FOUR DIGESTS BELOW GENUINELY COME FROM THIS SHA, and that is new. Images
   # are tagged in docker.gosh.sh by full commit sha and carry
@@ -77,11 +86,11 @@ variables:
   # "the versions may drift freely" is the wrong reading: the staging holds for two
   # directories, and a contract added outside those two allowlists would be taken
   # from the pin instead.
-  - &acki_sha "cbd25eafe235590a74b653cce293d258f0c63fa0"
-  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:d4ba90fe2b1c252d41b79b72a05b48b4ed430c0dc09e22c4ec10dedae0704087"
-  - &node_img "docker.gosh.sh/ackinacki-node@sha256:a016fb64957ac55b44cdefc0e09dbe4bdbda4416fa94e0e927d446df1effa25c"
-  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:146bf7e7b46e4579afeceb1d27ce496cdd69008671decbf9f9ebc62fc113c3ba"
-  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:995e15c13e0b0f6245d01f0716c626d617ab66e863cece6a363b08dbe82ac08e"
+  - &acki_sha "a30002a96acbfb036b9d8c946a828fda28368eb3"
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:ddbbb900d37bf69920d697b564b93228b48bf7a2fd3c4ad01804092231bde480"
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:e28d8223c50421ce46699f3595d9d28addf8bbf17b91c12859c6df198f2062c3"
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:459e4da53e0d3eb59ec01e4f91536bfaebf74aa0c6ddd3c416a38bec9638e889"
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:c21b6df4b23f6e2a76a9eb1250c08173c6f27033c726351e48fd377872b1a05a"
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
