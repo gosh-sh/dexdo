@@ -14,14 +14,35 @@ variables:
   # booking, the sold-0.80.0 build of RootPN, the profiled test-note fixture
   # (DEX_TEST_NOTES_SPEC, which gen_zerostate below feeds the group list this
   # stand's pool is baked from), and the stand fixes this pipeline needs to
-  # run at all: the
-  # block-producer API is advertised and published on the host interface (a
-  # client outside the docker network cannot follow a redirect to
+  # run at all: the block-producer API is advertised and published on the host
+  # interface (a client outside the docker network cannot follow a redirect to
   # `nodeN:8600`), and each node waits for its gossip seeds' DNS before
   # `node-helper config` resolves them, which otherwise kills whichever nodes
-  # lose that race at boot. All four digests below were read off the registry
-  # for this SHA and each image's own org.opencontainers.image.revision label
-  # confirms it built from it.
+  # lose that race at boot.
+  #
+  # WHY THIS PIN MOVED: the gateway did not know `src_dapp_id`. `blockchain.events`
+  # gained that argument in dodex `a47ec92`, which was validated against shellnet;
+  # the image pinned here was older and answered every request with
+  # `Unknown argument "src_dapp_id" on field "events" of type "BlockchainQuery"` —
+  # a GraphQL VALIDATION error, so the whole query was refused rather than answered
+  # empty. Pipeline #304 caught it 300 ticks out of 300: the `dex_dapp` capture
+  # stream had not landed a single page since that commit, the read model stayed
+  # empty, and every e2e binary that reads it went red while the chain-only ones
+  # passed. `root_pn` kept working throughout — it reaches events through
+  # `account(account_id, dapp_id)`, which takes no such argument — and its ticks
+  # carried a real `chain_order` cursor, which is also what cleared the
+  # cold-start sentinel of suspicion.
+  #
+  # So this pin is a MERGE of acki-nacki dev (87dd3f9fd, "Remove transitioning
+  # #2567") into test/dex-4.0.30, taken for `gql-server`'s `src_dapp_id` argument.
+  #
+  # THE FOUR DIGESTS BELOW GENUINELY COME FROM THIS SHA, and that is new. Images
+  # are tagged in docker.gosh.sh by full commit sha and carry
+  # `org.opencontainers.image.revision`; all four were read off the tag for this
+  # commit and every label was checked against it. The previous pin did NOT have
+  # this property — its digests were built from `e0f3c47e`, five commits behind the
+  # `acki_sha` it sat next to — so do not read a matching pair here as an invariant
+  # that has always held.
   #
   # allbin_img's digest is load-bearing beyond running the network:
   # copy_helpers takes zerostate-helper out of this image, and the booking fix
@@ -30,62 +51,37 @@ variables:
   # discards the resulting state). Verified present in this exact digest. An
   # older all-bin fails the generator rather than the preflight.
   #
+  # It is also why all four images come from the merge rather than from dev's own
+  # build, which would have been available without waiting for CI: `call-internal`
+  # is +121 lines that exist ONLY on this test branch, so a `latest-dev` all-bin
+  # would take `gen_zerostate` down. Outside `contracts/`, the merge differs from
+  # dev in six files and the only Rust among them is that helper — node, gql-server
+  # and block-manager are source-identical either way — but pinning one image from a
+  # different commit than the other three buys nothing and has to be explained
+  # forever.
+  #
   # The digests are immutable, but ACKI_SHA is a commit on a TEST branch:
   # acki_clone fetches it by SHA, so a force-push that makes it unreachable
   # breaks the clone step while the images keep working. That branch was
-  # already rewritten once (the commits this pin replaced no longer exist), so
-  # the risk is real, not theoretical -- move the pin to a `dev` commit once
+  # already rewritten once (the commits an earlier pin replaced no longer exist),
+  # so the risk is real, not theoretical -- move the pin to a `dev` commit once
   # this work lands there.
   #
-  # This pin is five commits ahead of the last, and ALL FIVE are inert for
-  # the zerostate this pipeline bakes:
-  #
-  # - `fix(dexdo): raise the free-space floor above the size of one build`
-  #   is the newest. The guard added two commits earlier had a 20 GiB floor,
-  #   which two runs then showed to be SMALLER than one build: #293 started
-  #   with 119736 MiB free and #294 with 71446 MiB, so a cold build of the
-  #   workspace writes ~47 GiB. A 20 GiB floor would wave through a build
-  #   that cannot fit. Raised to 60 GiB, which cleans more often on purpose.
-  # - `fix(dexdo): print the database host instead of the database password`
-  #   is the newest and the reason to move the pin promptly. The runner's
-  #   `==> cargo nextest run …` line meant to name the database without its
-  #   credential and did the opposite: `${TEST_DATABASE_URL%%@*}` keeps
-  #   `postgres://<user>:<password>` and discards the host, so every
-  #   `e2e_tests` log published the password in clear text. Fixed to
-  #   `##*@`. Rotating the secret is a separate action — this stops new
-  #   log lines, it does not clean the old ones.
-  # - `fix(dexdo): drop the e2e build dir when the host disk cannot hold
-  #   another build` is the newest. Nothing ever removed `~/dexdo-e2e/target`
-  #   on host B, so it grew run over run until pipeline #290 ran the disk out
-  #   mid-link: rustc reported an LLVM IO failure, ld died with SIGBUS, and
-  #   `e2e_tests` and `observer` exited 101 and 65 with no rustc diagnostic
-  #   anywhere and not one test having run — indistinguishable at a glance
-  #   from broken code on this side. The runner now drops `target` only when
-  #   free space is below a floor, so the warm cache survives the normal case
-  #   rather than trading a disk failure for a timeout.
-  # - `test(dexdo): drop the nextest filter naming a deleted suite` is the one
-  #   that matters. `e2e-on-host.sh` carried `-E 'not
-  #   binary(e2e_inference_dispute)'` for a suite the v4.0.33 sync deleted, and
-  #   a `binary()` predicate matching nothing is an error in nextest rather
-  #   than an empty match — so `e2e_tests` died on the filter in about a second
-  #   having run nothing. The same stale filter was removed from
-  #   `.github/workflows/e2e-shellnet.yml` in the v4.0.35 sync; this side runs
-  #   a script that lives in acki-nacki, so it needed its own fix and its own
-  #   pin bump.
-  # - `feat(contracts): v4.0.34` touches ONLY `contracts/{dex,airegistry}` and
-  #   the three `*_compiled` directories under them. Every one of those paths
-  #   is `rm -rf`ed and rewritten from THIS dodex checkout by
-  #   `tests/e2e/stage_contracts.sh` before the generator runs, so the pinned
-  #   commit's own contract version is irrelevant — v4.0.34 here does not put a
-  #   4.0.34 stand under a 4.0.35 dodex. Do not read this as "the versions may
-  #   drift freely": it holds because stage_contracts.sh replaces those exact
-  #   directories, and a contract added outside its two allowlists would be
-  #   taken from the pin instead.
-  - &acki_sha "a4e16add82680db310a3a1dd1f7fd08526fdbbdb"
-  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:1ee9cec484f27659e4b4d0e2182ca79485929b23c659bd772e58786f9bb1d2c7"
-  - &node_img "docker.gosh.sh/ackinacki-node@sha256:00af55c1fb597d89f8afb469a43eb21c991c9db911ff7a6161ad934218fc4a03"
-  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:a45e15d363cb6f4ef4aca5bdc82d7fe225cca2b6dea97c1838ffbf7208dea962"
-  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:536daa6b37a70f3170274ad5bcd906c4ed367d041e9d216c63a61cd6f53e997a"
+  # WHAT THE MERGE CHANGES IN WHAT THE STAND BAKES. `tests/e2e/stage_contracts.sh`
+  # `rm -rf`s and rewrites `contracts/{dex,airegistry}` from THIS dodex checkout
+  # before the generator runs, so the pinned commit's own version of those is
+  # irrelevant. Everything else under `contracts/` is NOT staged and comes from the
+  # pin — and dev moves it here: `USDCBridge` is renamed to `eccUSDCBridge` (source,
+  # ABI and TVC), `DepositVoucher` is rebuilt, and Sepolia bridge constants are
+  # added. None of that is on any path this pipeline exercises, but it is the reason
+  # "the versions may drift freely" is the wrong reading: the staging holds for two
+  # directories, and a contract added outside those two allowlists would be taken
+  # from the pin instead.
+  - &acki_sha "cbd25eafe235590a74b653cce293d258f0c63fa0"
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:d4ba90fe2b1c252d41b79b72a05b48b4ed430c0dc09e22c4ec10dedae0704087"
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:a016fb64957ac55b44cdefc0e09dbe4bdbda4416fa94e0e927d446df1effa25c"
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:146bf7e7b46e4579afeceb1d27ce496cdd69008671decbf9f9ebc62fc113c3ba"
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:995e15c13e0b0f6245d01f0716c626d617ab66e863cece6a363b08dbe82ac08e"
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
