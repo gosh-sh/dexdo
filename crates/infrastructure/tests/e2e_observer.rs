@@ -127,11 +127,18 @@ fn reconciler_deadline_secs() -> u64 {
 /// returns it.
 ///
 /// Printed by every test, because the three no longer share one number. The worst
-/// case is their SUM — the script calls the binary with `--test-threads 1` — and
-/// it is computed here from the same values the tests are handed rather than
-/// written down a second time. The pipeline budget is tight enough that this
-/// total must be visible in the output instead of derived by the reader from
-/// source.
+/// case is their SUM — the script calls the binary with `--test-threads 1` AND
+/// `--no-fail-fast` — and it is computed here from the same values the tests are
+/// handed rather than written down a second time. The pipeline budget is tight
+/// enough that this total must be visible in the output instead of derived by the
+/// reader from source.
+///
+/// The `--no-fail-fast` half of that is load-bearing, not incidental. These are
+/// three independent diagnoses; under the default, pipeline #304 reported
+/// `Summary 1/3 tests run` — the inference anchor failed and took the other two
+/// down with it, including the one that would have named which half of the ingest
+/// scope was dark. Order is alphabetical, so without the flag every anchor after
+/// the first failing one is unreachable exactly on the runs it exists for.
 fn announce(secs: u64) -> Duration {
     let worst = reconciler_deadline_secs() * 2 + CAPTURE_DEADLINE_SECS;
     eprintln!(

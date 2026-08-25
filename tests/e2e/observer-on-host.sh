@@ -156,9 +156,18 @@ lease_assert                                   # immediately before reading the 
 # that line, so neither `RC=$?` nor the budget print below would execute. The print is
 # needed most on a red run, and the first run on the stand is the most likely to be
 # red. The step's exit code is unchanged — it is restored by an explicit `exit`.
+#
+# `--no-fail-fast` because this binary is THREE independent diagnoses, not a suite
+# with a first failure worth stopping at. Pipeline #304 showed the default doing
+# exactly the wrong thing: `Summary 1/3 tests run` — the inference anchor failed,
+# and nextest skipped both the convergence diagnostic and the DEX anchor, the two
+# that would have said which half of the ingest scope was dark. On a run where
+# every anchor fails this costs the sum of the deadlines instead of just the first
+# one; that is the price of getting all three answers from one 110-minute run
+# rather than one answer per run.
 set +e
 cargo nextest run --profile ci-e2e --color never -p dodex-infrastructure \
-  --run-ignored only --test-threads 1 -E "$FILTER"
+  --run-ignored only --test-threads 1 --no-fail-fast -E "$FILTER"
 RC=$?
 set -e
 # The pipeline budget is described as tight. `START` is taken before `nextest list`,
