@@ -34,7 +34,10 @@ write daily-rotated `indexer.log.<date>` files into that directory, retaining
 
 Metrics are OpenTelemetry/OTLP and also environment-driven: when
 `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) is set,
-the service exports `orders_created_event_cnt` and
+the service exports the full metric set — nineteen counters and gauges covering
+ingestion, the projection pipeline, the DB pool and the inference markets, catalogued
+in [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#metrics) — starting with
+`orders_created_event_cnt` and
 `order_partially_filled_event_cnt`; with neither set, no metrics are collected.
 See [docs/tech-specs/indexer.md](../../docs/tech-specs/indexer.md#metrics).
 

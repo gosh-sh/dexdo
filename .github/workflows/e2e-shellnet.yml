@@ -36,6 +36,15 @@ jobs:
     env:
       # Same shape as the PR `tests` job — local read-model the e2e helpers
       # upsert the deployed market into.
+      #
+      # `E2E_READ_MODEL` is deliberately NOT set here, and that is what keeps the
+      # inference binaries' read-model phases off in this lane: nothing populates
+      # this database. It exists for helpers that upsert a market row directly,
+      # while the read phases poll for facts only an indexer produces — a book in
+      # /markets, an order in /orders, a trade in /trades. Enabled on the
+      # woodpecker stand instead (.woodpecker/e2e.yml), where an indexer runs; see
+      # `read_phases_enabled` in services/api/tests/common/read_model.rs for why a
+      # reachable database is not the same fact.
       TEST_DATABASE_URL: postgres://dodex:dodex@localhost:5432/dodex_test
       E2E_NETWORK_ENDPOINT: https://shellnet.ackinacki.org
     services:
@@ -73,7 +82,7 @@ jobs:
       # deployPMP (ERR_INVALID_STATE), so any long-lived hosted note goes stale.
       # Fresh notes per run sidestep cross-run poisoning and need no secret.
       # They are drained in the teardown step below.
-      # TWO NOTES, AND THE CURRENCY IS NOT INTERCHANGEABLE. The trader path
+      # TWO CURRENCIES, AND THEY ARE NOT INTERCHANGEABLE. The trader path
       # deploys NACKL markets and stakes out of `_balance[NACKL]`; an inference
       # buy is paid out of `_balance[CURRENCIES_ID_SHELL]`. Only the constructor
       # writes that ledger (`_balance[tokenType] = value`), so the deposit
@@ -84,6 +93,18 @@ jobs:
       # to append a different token type), so they are minted separately and the
       # two seed_notes arrays concatenated; `--profile` is what tells the loader
       # which rows belong to which suite.
+      #
+      # PN-INF is minted twenty-seven deep, PN-API one, and the asymmetry is not
+      # an oversight. Every test picks its note as `notes[k % len]`, so a pool of
+      # one folds every index onto the same row — harmless while each binary is
+      # one-sided and the lane is single-threaded, which is what PN-API still is.
+      # `e2e_inference_stream` is not: it is a deal between a seller (index 19)
+      # and a buyer (index 20) that exists to prove the indexer tells the two
+      # apart, and `19 % 1 == 20 % 1` would hand it one note and turn the
+      # scenario back into the self-trade it was written to stop being. The
+      # count matches `INFERENCE_NOTES_FOR_ONE_EACH` in
+      # `services/api/tests/pn_pool_split.rs`, which carries the index map and
+      # guards the woodpecker spec against the same folding.
       - name: Mint fresh e2e seed notes
         working-directory: sdk
         run: |
@@ -92,14 +113,14 @@ jobs:
             --endpoint "$E2E_NETWORK_ENDPOINT" \
             --output "$RUNNER_TEMP/pn_pool_api.json"
           cargo run --release --bin mint_pn_pool -- \
-            --count 1 --nominal N10000 --token-type shell --profile PN-INF \
+            --count 27 --nominal N10000 --token-type shell --profile PN-INF \
             --endpoint "$E2E_NETWORK_ENDPOINT" \
             --output "$RUNNER_TEMP/pn_pool_inf.json"
           jq -s 'add' \
             "$RUNNER_TEMP/pn_pool_api.seed_notes.json" \
             "$RUNNER_TEMP/pn_pool_inf.seed_notes.json" \
             > "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
-          test "$(jq 'length' "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json")" = 2
+          test "$(jq 'length' "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json")" = 28
           jq -r '.[] | "minted \(.profile) tokenType=\(.tokenType) \(.pn_address)"' \
             "$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
 
@@ -117,10 +138,10 @@ jobs:
       - name: cargo nextest run (e2e, single-threaded)
         run: cargo nextest run -p dodex-api --run-ignored only --test-threads 1 --no-fail-fast
 
-      # Teardown: drain the throwaway note to a random (uninit) address so the
-      # plaintext key surfaced in the mint step / fixture controls no funds after
-      # the run — and the note ends in the hasWithdrawn state, unusable. Runs even
-      # if the suite failed; best-effort (the next run mints a fresh note anyway),
+      # Teardown: drain every throwaway note to a random (uninit) address so the
+      # plaintext keys surfaced in the mint step / fixture control no funds after
+      # the run — and each note ends in the hasWithdrawn state, unusable. Runs even
+      # if the suite failed; best-effort (the next run mints fresh notes anyway),
       # so a drain failure never fails the job.
       - name: Drain e2e seed notes (teardown)
         if: always()
@@ -128,9 +149,11 @@ jobs:
         run: |
           seed="$GITHUB_WORKSPACE/tests/fixtures/seed_notes.json"
           [ -s "$seed" ] || { echo "no seed note to drain — skip"; exit 0; }
-          # Every row, not just the first: the file holds one note per profile
-          # and each one's key is in the clear. Draining only row 0 would leave
-          # the other spendable by anyone who read the log.
+          # Every row, not just the first: the file holds one PN-API note and
+          # twenty-seven PN-INF ones, and every key in it is in the clear.
+          # Draining only row 0 would leave the other twenty-four spendable by
+          # anyone who read the log — the loop is what keeps that from scaling
+          # with the pool.
           for i in $(jq -r 'to_entries[].key' "$seed"); do
             jq --argjson i "$i" \
               '{pn_address: .[$i].pn_address, owner_public_key_hex: .[$i].pn_pubkey_hex, owner_secret_key_hex: .[$i].pn_seckey_hex}' \

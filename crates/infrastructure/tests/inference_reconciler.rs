@@ -169,6 +169,34 @@ async fn pending_events_gate_detects_unprojected_rows() {
         .await
         .unwrap();
     assert!(!r.pending_events_exist(ob).await.unwrap());
+    // Fourth state — the narrowing conjuncts (IX-REC-15). An undecodable row
+    // (event_type NULL, decoded NULL, processed_at NULL) must NOT close the
+    // sweep gate: it can never be projected, so it would wedge the sweep
+    // forever (the rationale documented at inference_read_repo.rs and
+    // indexer.md). The READ gate deliberately counts exactly such rows — its
+    // half of the asymmetry is pinned by
+    // gate_refuses_while_any_message_for_the_book_is_unprojected
+    // (inference_orders_repo.rs); this is the sweep half of IX-REC-28.
+    sqlx::query(
+        "insert into raw_events (msg_id, chain_order, src_address, event_type, body_json, decoded, processed_at)
+                 values ('pg-undecodable','co-u', $1, null,'{}'::jsonb, null, null)",
+    )
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !r.pending_events_exist(ob).await.unwrap(),
+        "an undecodable row must not close the sweep gate — it can never be projected"
+    );
+    // Unlike pg-1 (left processed, harmless), this row is pending forever and
+    // its fresh created_at would land the book in the e2e observer's
+    // inference_books_with_events_since window — delete it, not just this
+    // test's next run's purge.
+    sqlx::query("delete from raw_events where msg_id='pg-undecodable'")
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1130,7 +1158,7 @@ async fn failure_stamps_backoff_and_excludes_from_reselection() {
     assert!(before.contains(&ob.to_string()), "price-due book must be selected before failure");
 
     // Stamp a failure.
-    r.stamp_failure(ob).await.unwrap();
+    r.stamp_failure(ob, "probe: stamped by the attempts test").await.unwrap();
 
     // Within backoff window ⇒ must be excluded.
     let after = r.select_refresh_candidates_within(&scope).await.unwrap();
@@ -1615,6 +1643,91 @@ async fn sweep_repairs_token_contract_and_deadline_independently() {
 }
 
 #[tokio::test]
+async fn repair_conflates_a_sell_null_with_a_buy_null_when_the_getter_answers_zero() {
+    // IX-REC-18, pinned deliberately (not fixed). A SELL with a NULL
+    // token_contract whose getter answers the zero address is indistinguishable
+    // from a BUY's intentional NULL: the repair consults the getter's normalized
+    // answer, never the row's own is_buy (neither the candidate SELECT, nor the
+    // needs-nothing skip, nor the UPDATE reads it). So the SELL gap stays — no
+    // repair, no warn, no counter — and read-gate arm 1 (inference_read_repo.rs)
+    // is what keeps serving MarketInconsistent for exactly this row. Changing
+    // this is a reconciler-semantics decision, not a test's; the row's
+    // normative "repair must close the SELL gap" half stays unimplemented and
+    // the matrix keeps IX-REC-18 amber.
+    let Some(pool) = setup().await else { return };
+    let _guard = AT_HEAD_GATE_LOCK.lock().await;
+    let ob = "0:t_sweep_conflation";
+    seed_market(&pool, ob, true).await;
+    set_at_head(&pool, true).await;
+    sqlx::query("delete from raw_events where src_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    open_sell_order(&pool, ob, 1).await; // SELL with NULL TC — the gap repair SHOULD close
+                                         // POSITIVE CONTROL. Every assert about order 1 below is a negative — the row
+                                         // was not touched — and a sweep that never ran satisfies all of them: a
+                                         // refused gate, a getter never called, an early return would each leave the
+                                         // test green while proving nothing. Order 2 is a row the SAME pass MUST
+                                         // repair, so a no-op pass turns this test red on the control instead of
+                                         // passing it vacuously.
+    open_sell_order(&pool, ob, 2).await;
+
+    let g = std::sync::Arc::new(FnGetter(|name: &str, a: &Value| match name {
+        "getQueueSize" => Ok(json!({ "value0": "0" })),
+        "getStats" => Ok(json!({ "nextOrderId": "9" })),
+        "getOrder" => Ok(match a.get("id").and_then(|v| v.as_str()) {
+            // Order 1: the getter answers what a BUY would answer — zero TC, zero
+            // deadline. This is the conflation under test.
+            Some("1") => json!({ "amount": "5", "tokenContract": ZERO_ADDRESS, "deadline": "0" }),
+            // Order 2: a real answer, so the repair has something to write.
+            _ => json!({ "amount": "5", "tokenContract": "0:control-tc", "deadline": "0" }),
+        }),
+        _ => Ok(json!({})),
+    }));
+    let r = InferenceReconciler::for_test_with_getter(pool.clone(), g);
+
+    let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "select updated_at from inference_orders where orderbook_address=$1 and order_id=1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    r.run_sweep_step(ob, "boc", false).await.unwrap();
+
+    let (tc, dl, after): (Option<String>, Option<String>, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as(
+            "select token_contract, deadline::text, updated_at from inference_orders \
+             where orderbook_address=$1 and order_id=1",
+        )
+        .bind(ob)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(tc.is_none(), "the SELL's NULL token_contract stays NULL — the conflation");
+    assert!(dl.is_none(), "zero deadline normalizes to nothing to write");
+    assert_eq!(before, after, "no repair happened: the row was not touched at all");
+
+    // The control: the same pass repaired the row whose getter answered. Without
+    // this the three negatives above are satisfied by a sweep that never ran.
+    let control_tc: Option<String> = sqlx::query_scalar(
+        "select token_contract from inference_orders where orderbook_address=$1 and order_id=2",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        control_tc.as_deref(),
+        Some("0:control-tc"),
+        "the sweep pass did not run at all — the negatives above prove nothing until this \
+         control row is repaired"
+    );
+}
+
+#[tokio::test]
 async fn sweep_skips_the_repair_entirely_for_rows_that_need_nothing() {
     let Some(pool) = setup().await else { return };
     let _guard = AT_HEAD_GATE_LOCK.lock().await;
@@ -1699,4 +1812,291 @@ async fn sweep_still_cancels_phantoms_and_partially_filled_buy_takers() {
     .await
     .unwrap();
     assert_eq!(statuses, vec!["CANCELLED", "CANCELLED"]);
+}
+
+#[tokio::test]
+async fn a_clean_cycle_clears_a_failure_mark_left_by_an_earlier_one() {
+    // The state this covers is the one the observer could not describe: a book that
+    // went visible, failed once, and then recovered. Before this, nothing cleared
+    // the mark for a visible book — `select_discovery_candidates` requires
+    // `last_reconciled_at is null`, and both sites that null it set `superseded_at`
+    // in the same UPDATE, so a visible row never returns to discovery. The mark
+    // therefore meant "failed at least once, ever", and the observer's predicate
+    // had to choose between naming recovered books and hiding broken ones. With the
+    // clear on a clean cycle it means "the most recent cycle failed", and both
+    // readings become correct.
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_clear_failure";
+    seed_market(&pool, ob, true).await;
+
+    let r = InferenceReconciler::for_test(pool.clone());
+    r.stamp_failure(ob, "getOrder reverted").await.unwrap();
+    let (marked, text): (bool, Option<String>) = sqlx::query_as(
+        "select last_reconcile_failed_at is not null, last_reconcile_error
+           from inference_markets where orderbook_address = $1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(marked && text.as_deref() == Some("getOrder reverted"), "precondition");
+
+    r.clear_failure(ob).await.unwrap();
+
+    let (still_marked, text_after, still_visible): (bool, Option<String>, bool) = sqlx::query_as(
+        "select last_reconcile_failed_at is not null, last_reconcile_error,
+                last_reconciled_at is not null
+           from inference_markets where orderbook_address = $1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!still_marked, "a clean cycle must clear the timestamp");
+    assert!(text_after.is_none(), "the text goes with its timestamp — a text alone is stale");
+    assert!(still_visible, "clearing a failure must not touch visibility");
+
+    // Idempotent and quiet: an unmarked book is not rewritten, so a clean pass does
+    // not churn the row of every book it touches.
+    //
+    // The witness is `xmin`, not `updated_at`. This schema has no triggers at all
+    // (`grep 'create trigger' migrations/` is empty) and `clear_failure`'s UPDATE
+    // does not set `updated_at`, so an `updated_at` comparison holds whatever the
+    // `where` clause does — it would pass with the clause deleted, which is the one
+    // thing it is supposed to catch. `xmin` is the transaction that wrote the live
+    // row version, so it changes on ANY rewrite: drop `and last_reconcile_failed_at
+    // is not null` and the UPDATE matches, writes a new version, and this goes red.
+    let before: String =
+        sqlx::query_scalar("select xmin::text from inference_markets where orderbook_address = $1")
+            .bind(ob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    r.clear_failure(ob).await.unwrap();
+    let after: String =
+        sqlx::query_scalar("select xmin::text from inference_markets where orderbook_address = $1")
+            .bind(ob)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after, "clearing an unmarked book must not rewrite the row");
+
+    sqlx::query("delete from inference_markets where orderbook_address = $1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_visibility_stamp_clears_the_failure_text_with_its_timestamp() {
+    // The one path that can clear this text, and it had no test. `clear_failure` is
+    // gated on `last_reconcile_failed_at is not null`, so a text the stamp leaves
+    // behind is unreachable for the rest of the row's life — no later pass, in either
+    // queue, can ever see it again.
+    //
+    // The seed is the ORDINARY cold start, not a contrived failure: a book's first
+    // discovery tick routinely hits `NoBoc` (the account is not on chain yet) and
+    // stamps both columns with NO_BOC_REASON. So before this clause the common
+    // outcome was a perfectly healthy visible book answering "account BOC not served
+    // yet" forever, and neither observer predicate fires on it — nothing goes red,
+    // the column just lies to whoever reads it.
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_stamp_clears_text";
+    let r = InferenceReconciler::for_test(pool.clone());
+
+    seed_market(&pool, ob, false).await;
+    r.stamp_failure(ob, InferenceReconciler::NO_BOC_REASON).await.unwrap();
+    sqlx::query(
+        "update inference_markets set sweep_cursor=null, sweep_cycle_max=10, sweep_override_seq=0
+          where orderbook_address=$1",
+    )
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Not stamping yet: an incomplete cycle must leave BOTH columns exactly as they
+    // are — otherwise the assertions below would pass on a clause that clears
+    // unconditionally, which is a different bug in the same UPDATE.
+    let stamped =
+        r.advance_sweep_and_maybe_stamp(ob, None, "10", Some("3"), false, true, 0).await.unwrap();
+    assert!(!stamped, "an incomplete cycle does not stamp");
+    let (marked, text): (bool, Option<String>) = sqlx::query_as(
+        "select last_reconcile_failed_at is not null, last_reconcile_error
+           from inference_markets where orderbook_address = $1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(marked, "a non-stamping pass must leave the mark");
+    assert_eq!(
+        text.as_deref(),
+        Some(InferenceReconciler::NO_BOC_REASON),
+        "and must leave its text"
+    );
+
+    let stamped =
+        r.advance_sweep_and_maybe_stamp(ob, Some("3"), "10", None, true, true, 0).await.unwrap();
+    assert!(stamped, "a clean discovery cycle stamps visibility");
+
+    let (visible, marked, text): (bool, bool, Option<String>) = sqlx::query_as(
+        "select last_reconciled_at is not null, last_reconcile_failed_at is not null,
+                last_reconcile_error
+           from inference_markets where orderbook_address = $1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(visible, "the book became visible");
+    assert!(!marked, "the stamp clears the failure timestamp");
+    assert!(
+        text.is_none(),
+        "and its text with it — this is the only writer that can, so a text surviving here \
+         is orphaned permanently: clear_failure will not touch a row whose timestamp is \
+         already NULL. Got {text:?}"
+    );
+
+    sqlx::query("delete from inference_markets where orderbook_address = $1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// The two tests below hold the CALL in place, not just the query. The test above
+/// calls `clear_failure` directly, so deleting the only call site left the suite
+/// green with nothing but an unused-function warning — verified by deleting it.
+/// The call now lives at the tail of `refresh_against_boc`, which
+/// `reconcile_refresh_with_boc` reaches; `run_once`'s `Ok(_)` arm never was
+/// reachable here, because `reconcile_refresh` fetches the BOC over GraphQL.
+#[tokio::test]
+async fn a_refresh_pass_that_completes_clears_the_book_it_refreshed() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_refresh_clears";
+    seed_market(&pool, ob, true).await;
+    // Price DUE, sweep FRESH: the pass does real work (a re-price) and then falls
+    // through to the clear, rather than clearing after doing nothing.
+    sqlx::query(
+        "update inference_markets
+            set reference_price = 12345, reference_price_at = now() - interval '2 hours',
+                last_swept_at = now(),
+                last_reconcile_failed_at = now(), last_reconcile_error = 'getStats reverted'
+          where orderbook_address = $1",
+    )
+    .bind(ob)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
+        "getWeeklyMedianPrice" => Ok(json!({"value0":"0x270f"})),
+        _ => Ok(json!({})),
+    }));
+    InferenceReconciler::for_test_with_getter(pool.clone(), g)
+        .reconcile_refresh_with_boc(ob, "boc")
+        .await
+        .expect("a clean refresh must not error");
+
+    let (marked, text, priced): (bool, Option<String>, Option<String>) = sqlx::query_as(
+        "select last_reconcile_failed_at is not null, last_reconcile_error, reference_price::text
+           from inference_markets where orderbook_address = $1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(priced.as_deref(), Some("9999"), "the pass must have actually re-priced");
+    assert!(!marked, "a completed refresh pass must clear the mark of the book it refreshed");
+    assert!(text.is_none(), "the reason text goes with its timestamp");
+
+    sqlx::query("delete from inference_markets where orderbook_address = $1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_refresh_pass_that_errors_leaves_the_mark_standing() {
+    let Some(pool) = setup().await else { return };
+    let ob = "0:t_refresh_keeps_mark";
+    seed_market(&pool, ob, true).await;
+    let stamped_at = "2020-01-01T00:00:00Z";
+    sqlx::query(
+        "update inference_markets
+            set reference_price_at = now() - interval '2 hours', last_swept_at = now(),
+                last_reconcile_failed_at = $2::timestamptz, last_reconcile_error = 'getStats reverted'
+          where orderbook_address = $1",
+    )
+    .bind(ob)
+    .bind(stamped_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The price refresh is the first thing the pass does and it propagates with `?`,
+    // so the clear at the tail is never reached. Without that ordering the mark
+    // would be cleared by a pass that failed — the exact false "recovered" the
+    // observer's failing-books list must never show.
+    let g = std::sync::Arc::new(FnGetter(|name: &str, _a: &Value| match name {
+        "getWeeklyMedianPrice" => Err(anyhow::anyhow!("getter unavailable")),
+        _ => Ok(json!({})),
+    }));
+    let outcome = InferenceReconciler::for_test_with_getter(pool.clone(), g)
+        .reconcile_refresh_with_boc(ob, "boc")
+        .await;
+    assert!(outcome.is_err(), "a getter error must propagate, not be swallowed into a clean pass");
+
+    let (marked, text): (bool, Option<String>) = sqlx::query_as(
+        "select last_reconcile_failed_at is not null, last_reconcile_error
+           from inference_markets where orderbook_address = $1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(marked, "a failed pass must leave the mark standing");
+    assert_eq!(
+        text.as_deref(),
+        Some("getStats reverted"),
+        "and must leave the earlier reason readable"
+    );
+
+    sqlx::query("delete from inference_markets where orderbook_address = $1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_reconcile_failure_records_its_reason() {
+    // The observer is a DB-tail step and does not read logs. If the reason lives
+    // only in the logs, "failing with a reason" (IX-SEQ-10) is checkable only as
+    // "a stamp is present" — i.e. the matrix row would be closed by a weakened
+    // version of itself, silently.
+    let Some(pool) = setup().await else { return };
+    let ob = "0:reconcile_err";
+    seed_market(&pool, ob, false).await;
+
+    let r = InferenceReconciler::for_test(pool.clone());
+    r.stamp_failure(ob, "getModelName reverted: exit code 78").await.unwrap();
+
+    let (failed_at, err): (Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
+        "select last_reconcile_failed_at, last_reconcile_error
+               from inference_markets where orderbook_address = $1",
+    )
+    .bind(ob)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(failed_at.is_some(), "the failure timestamp must be stamped");
+    assert_eq!(
+        err.as_deref(),
+        Some("getModelName reverted: exit code 78"),
+        "the reason must sit next to the stamp, not only in the logs"
+    );
 }

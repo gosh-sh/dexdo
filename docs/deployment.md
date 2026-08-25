@@ -486,9 +486,9 @@ The repository ships a ready dashboard and alert rules under `deploy/grafana/`:
 | File | What it is | How to use |
 | --- | --- | --- |
 | [`deploy/grafana/dodex-indexer-dashboard.json`](../deploy/grafana/dodex-indexer-dashboard.json) | Grafana dashboard covering every indexer metric — ingestion (`raw_events` counters), projection pipeline (backlog/lag/cursor age/fallbacks), DB pool, and inference markets (state, order depth, reconcile failures, price/sweep staleness) | Grafana → Dashboards → Import → Upload JSON; pick your Prometheus when prompted |
-| [`deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml`](../deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml) | 12 Grafana-managed alert rules (projection/cursor lag, decode errors, inference markets `failing`, reference-price & sweep staleness), warning→critical | Copy to Grafana's `/etc/grafana/provisioning/alerting/` and restart Grafana |
+| [`deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml`](../deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml) | 20 Grafana-managed alert rules (projection/cursor lag, decode errors, unclaimed events, refresh-loop liveness, inference markets `failing`, reference-price & sweep staleness, dropped orphans), warning→critical | Copy to Grafana's `/etc/grafana/provisioning/alerting/` and restart Grafana |
 
-Two setup notes, also documented in the files themselves:
+Three setup notes, also documented in the files themselves:
 
 - **Counter suffix.** The OTel→Prometheus exporter appends `_total` to monotonic
   counters by default (`add_metric_suffixes: true`). The dashboard exposes a
@@ -502,6 +502,15 @@ Two setup notes, also documented in the files themselves:
   sed -i 's/REPLACE_WITH_PROMETHEUS_DS_UID/<your-uid>/g' \
     deploy/grafana/provisioning/alerting/dodex-indexer-alerts.yaml
   ```
+- **Liveness is the heartbeat, not `up`.** The indexer is never scraped — it pushes
+  OTLP to the collector — so Prometheus has no `up` series for it, and any rule
+  written against one would either match nothing or watch the collector's health
+  instead of the indexer's. `dodex-refresh-loop-dead` is the liveness rule: it
+  watches `indexer_metrics_refresh_passes`, which the indexer increments once per
+  completed refresh, and it is the only rule with `noDataState: Alerting` — a dead
+  process stops the counter first and loses the series second, and either one fires
+  it. If you also run a real scrape target for the indexer, add an `up` rule of your
+  own; nothing here assumes one exists.
 
 Alert thresholds (lag/age cutoffs, `failing > 0`, decode-error rate) mirror the
 dashboard's panel thresholds and are conservative starting points — retune them

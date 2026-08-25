@@ -289,6 +289,13 @@ async fn gate_refuses_while_the_book_has_captured_but_unprojected_events() {
     repo.list_inference_orders(&query(ob).token_contract("0:tc").status(&[Live])).await.unwrap();
 }
 
+// The (None, None) row below is the READ half of the IX-REC-28 asymmetry: the
+// read gate deliberately refuses on an undecodable row, while the SWEEP gate
+// deliberately ignores exactly the same row (it can never be projected, so it
+// would wedge the sweep forever) — the mirror is pinned by the fourth state of
+// pending_events_gate_detects_unprojected_rows (inference_reconciler.rs). The
+// two tests live in different nextest serial groups (serial-capture-cursor vs
+// serial-inference-reconciler), which is why the pair cannot be one test.
 #[tokio::test]
 async fn gate_refuses_while_any_message_for_the_book_is_unprojected() {
     let Some(pool) = test_pool().await else { return };

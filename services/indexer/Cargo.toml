@@ -14,3 +14,12 @@ dodex-chain.workspace = true
 dodex-contracts.workspace = true
 dodex-logging = { path = "../../crates/logging" }
 dodex-metrics = { path = "../../crates/metrics" }
+
+# Dev-only: the refresh-failure test builds a lazy, never-connected pool and
+# closes it, so it needs PgPoolOptions::connect_lazy — no database, no env.
+[dev-dependencies]
+sqlx.workspace = true
+# The DB-backed tests in metrics_refresh read TEST_DATABASE_URL. Every other
+# database test in the workspace loads .env first; without this one they skipped
+# silently on a developer's machine while their infrastructure neighbours ran.
+dotenvy.workspace = true

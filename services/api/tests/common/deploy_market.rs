@@ -40,6 +40,7 @@ use dodex_contracts::dex::oracle::Oracle;
 use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
 use dodex_contracts::dex::oracle_event_list::OracleEventList;
 use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::oracle_event_list::ParamsOfAddRangeEvent;
 use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
 use dodex_contracts::dex::pmp::Pmp;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
@@ -91,11 +92,32 @@ pub struct DeployOptions {
     /// Total market lifetime (from `submitSetTimings` to `result_end`).
     /// Defaults to [`DEFAULT_LIFETIME_SECS`].
     pub lifetime: Duration,
+    /// When set, the market's event is a RANGE event resolving from an
+    /// `InferenceOrderBook` instead of an ordinary one resolved by a submitted
+    /// answer. `None` — the default — leaves every existing call site on
+    /// exactly the path it was on.
+    pub range: Option<RangeLink>,
+}
+
+/// The inference book a range market settles from, and the bounds that split
+/// its reference price into outcomes.
+///
+/// `OracleEventList.sol:194-211` is strict about the shape: at least one bound
+/// and fewer than nineteen, the first strictly above zero (outcome 0 wins on
+/// `price < bounds[0]`, and a zero first bound would mint an outcome that can
+/// be staked on and can never win), each bound strictly greater than the last,
+/// and exactly `bounds.len() + 1` densely numbered outcome labels.
+#[derive(Debug, Clone)]
+pub struct RangeLink {
+    /// Address of the `InferenceOrderBook` whose weekly median settles this.
+    pub inference_order_book: String,
+    /// `uint256[]` as decimal strings, strictly increasing, first above zero.
+    pub bounds: Vec<String>,
 }
 
 impl Default for DeployOptions {
     fn default() -> Self {
-        Self { lifetime: Duration::from_secs(DEFAULT_LIFETIME_SECS) }
+        Self { lifetime: Duration::from_secs(DEFAULT_LIFETIME_SECS), range: None }
     }
 }
 
@@ -139,7 +161,7 @@ pub async fn deploy_ephemeral_market(
 
     // 1. Oracle + EventList[0] + add 2-outcome event.
     eprintln!("[deploy_market] 1/8 oracle + event…");
-    let oracle = deploy_oracle_with_event(&dex, context.clone()).await?;
+    let oracle = deploy_oracle_with_event(&dex, context.clone(), options.range.as_ref()).await?;
     eprintln!("[deploy_market]     oracle={} event_id={}", oracle.address, oracle.event_id);
 
     let deployer_keys = KeyPair {
@@ -311,6 +333,7 @@ struct DeployedOracle {
 async fn deploy_oracle_with_event(
     dex: &Dex,
     context: Arc<ClientContext>,
+    range: Option<&RangeLink>,
 ) -> anyhow::Result<DeployedOracle> {
     let oracle_keys =
         generate_random_sign_keys(context.clone()).map_err(|e| anyhow!("oracle keys: {e:?}"))?;
@@ -357,20 +380,59 @@ async fn deploy_oracle_with_event(
     outcome_names.insert(0_u32, "Team A".to_string());
     outcome_names.insert(1_u32, "Team B".to_string());
 
-    dex.add_event(
-        &event_list_address,
-        ParamsOfAddEvent {
-            event_name: event_name.clone(),
-            oracle_fee: ORACLE_FEE,
-            deadline: ORACLE_FEE_DEADLINE,
-            describe: "dodex e2e seed".to_string(),
-            outcome_names: outcome_names.clone(),
-            trust_addr: None,
-        },
-        Signer::Keys { keys: oracle_keys.clone() },
-    )
-    .await
-    .map_err(|e| anyhow!("add_event: {e:?}"))?;
+    // Two paths, one event. The range variant announces itself through BOTH
+    // `EventAdded` and `RangeEventAdded` (`OracleEventList.sol:223-224`), so
+    // the polling below — which looks for the event by name — works unchanged
+    // for either.
+    match range {
+        None => {
+            dex.add_event(
+                &event_list_address,
+                ParamsOfAddEvent {
+                    event_name: event_name.clone(),
+                    oracle_fee: ORACLE_FEE,
+                    deadline: ORACLE_FEE_DEADLINE,
+                    describe: "dodex e2e seed".to_string(),
+                    outcome_names: outcome_names.clone(),
+                    trust_addr: None,
+                },
+                Signer::Keys { keys: oracle_keys.clone() },
+            )
+            .await
+            .map_err(|e| anyhow!("add_event: {e:?}"))?;
+        }
+        Some(link) => {
+            // The two-outcome label map above is already the shape a single
+            // bound demands: `outcomeNames` must be dense `0..=bounds.len()`,
+            // so one bound and two labels agree by construction. A caller
+            // passing more bounds than that would need more labels, which is
+            // why this asserts rather than silently deploying an event the
+            // contract will refuse.
+            assert_eq!(
+                outcome_names.len(),
+                link.bounds.len() + 1,
+                "a range event needs exactly one more outcome label than it has bounds \
+                 (OracleEventList.sol:206); got {} labels for {} bound(s)",
+                outcome_names.len(),
+                link.bounds.len()
+            );
+            dex.add_range_event(
+                &event_list_address,
+                ParamsOfAddRangeEvent {
+                    event_name: event_name.clone(),
+                    oracle_fee: ORACLE_FEE,
+                    deadline: ORACLE_FEE_DEADLINE,
+                    describe: "dodex e2e range seed".to_string(),
+                    bounds: link.bounds.clone(),
+                    outcome_names: outcome_names.clone(),
+                    ob: link.inference_order_book.clone(),
+                },
+                Signer::Keys { keys: oracle_keys.clone() },
+            )
+            .await
+            .map_err(|e| anyhow!("add_range_event: {e:?}"))?;
+        }
+    }
 
     // Poll EventList until `addEvent` shows up; the chain emits a
     // record into the `_events` map asynchronously. 30 × 2s = 60s

@@ -107,6 +107,7 @@ where
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, serde(deny_unknown_fields))]
 /// Payload of `RootModelEvent::TokenContractRegistered`.
 pub struct TokenContractRegisteredData {
     pub token_contract_address: String,
@@ -114,6 +115,7 @@ pub struct TokenContractRegisteredData {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, serde(deny_unknown_fields))]
 /// Payload of `RootModelEvent::ContractDeployed`.
 pub struct ContractDeployedData {
     #[serde(rename = "self")]

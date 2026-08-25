@@ -20,6 +20,20 @@
 //     emptied slot — while the other still holds its size;
 //   * the best bid falls from the cancelled price to the surviving one.
 //
+// ## Read model: does a precise cancel show up as precise?
+//
+// The chain readings above prove the BOOK told the truth. A read-model phase
+// after the point cancel asks a different question: did that truth reach the
+// public API? It polls the production router (`common::setup()`, raised
+// in-process) until `/orders` reports the cancelled id as CANCELLED, then
+// asserts on BOTH orders — the neighbour staying LIVE is the load-bearing
+// half, since `cancelAllInferenceOrders` would make that same assertion a
+// coin flip. Runs only where E2E_READ_MODEL=1 (an indexer is filling the read
+// model) AND TEST_DATABASE_URL is reachable: unset E2E_READ_MODEL skips it with
+// a printed reason, set with no database is a failure rather than a skip. Its
+// failures join `failures` like every other check here — nothing in it may panic
+// before the note's resting orders are cleared by `finish`.
+//
 // ## A deadline already past
 //
 // `placeBuyOrder` requires `deadline == 0 || deadline > block.timestamp`, and
@@ -34,8 +48,12 @@
 // as `_opNonce` on a note: a counter that moves exactly where the thing under
 // test succeeded, and nowhere else.
 //
-// The control is the pair of buys above: they advance the counter and the
-// count, which is what makes their standing still afterwards mean something.
+// A negative needs a positive control, and this one is a second buy issued
+// AFTER the stale one, with a deadline far in the future, that the book must
+// accept. The test then reads which of the two took the contested id — the
+// deadline stored on that order names its owner. Not "did the counter move":
+// that question has a wrong answer available to it whenever the poll lands
+// between the two messages.
 //
 //   cargo test -p dodex-api --test e2e_inference_orders -- --ignored --nocapture
 //
@@ -52,6 +70,13 @@ use ackinacki_kit::tvm_client::crypto::KeyPair;
 use common::airegistry::wait_inference_book_live;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
+use common::read_model::api;
+use common::read_model::get_json;
+use common::read_model::poll_read_with;
+use common::read_model::read_phases_enabled;
+use common::read_model::GetOutcome;
+use common::read_model::Probe;
+use common::read_model::ReadBudget;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
 use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
@@ -158,6 +183,45 @@ async fn a_book_cancels_the_order_it_was_asked_to_and_never_takes_an_expired_one
 
     let mut failures: Vec<String> = Vec::new();
 
+    // Router for the read-model phase. `None` does not exit the test: below,
+    // `finish(...)` cancels the resting orders and only then asserts
+    // `failures.is_empty()`, so an early `return` here would skip both the
+    // cleanup and any chain-phase failures already collected.
+    // Two conditions, not one: a reachable database AND an indexer filling it.
+    // See `read_model::read_phases_enabled` — the shellnet lane sets
+    // TEST_DATABASE_URL for a Postgres nobody writes to, and running the read phase
+    // there burns the whole budget proving the lane has no indexer.
+    // An opt-in that cannot be honoured is a FAILURE, not a skip. Being told to run
+    // the read phase and finding no database means the one lane that can check the
+    // read model did not check it — and a printed line on a green run is exactly
+    // how that goes unnoticed. Not set at all is the ordinary case and stays quiet.
+    let read: Option<std::sync::Arc<salvo::Service>> = if read_phases_enabled() {
+        let service = common::setup().await.map(|(s, _pool, _kek, _pn)| std::sync::Arc::new(s));
+        if service.is_none() {
+            failures.push(
+                "E2E_READ_MODEL asks for the read phase, but common::setup() found no database \
+                 (TEST_DATABASE_URL unset, empty, or unreachable). This is the only lane that \
+                 runs an indexer, so skipping here leaves the read model unchecked on the one \
+                 run that could check it"
+                    .to_string(),
+            );
+        }
+        service
+    } else {
+        eprintln!(
+            "[e2e_orders] read phase skipped: E2E_READ_MODEL is not set, so no indexer is filling \
+             the read model on this lane"
+        );
+        None
+    };
+    if read.is_none() {
+        eprintln!(
+            "[e2e_orders] read phase skipped: needs E2E_READ_MODEL=1 (an indexer is filling \
+             the read model) and TEST_DATABASE_URL"
+        );
+    }
+    let budget = ReadBudget::start();
+
     // ── two bids, and the ids the book gave them ──────────────────────────
     //
     // The id a placement receives is the counter's value before it, so each is
@@ -263,9 +327,8 @@ async fn a_book_cancels_the_order_it_was_asked_to_and_never_takes_an_expired_one
     // ── a buy whose deadline has already passed ───────────────────────────
     //
     // Refused by the book before it accepts the message, so nothing about it
-    // reaches the queue where ids are handed out. Both of the book's counters
-    // therefore have to stand exactly still — and they are the same two the
-    // pair of accepted buys above moved.
+    // reaches the queue where ids are handed out. The next id the book hands out
+    // must therefore go to the NEXT accepted placement, not to this one.
     let before_stale = dex.inference_get_stats(&ob).await.expect("stats before the expired buy");
     let stale_deadline = now_unix().saturating_sub(STALE_BY);
     place_buy(
@@ -278,22 +341,211 @@ async fn a_book_cancels_the_order_it_was_asked_to_and_never_takes_an_expired_one
         signer(),
     )
     .await;
-    // Give it the time a placement that worked would have needed.
-    tokio::time::sleep(Duration::from_secs(20)).await;
 
-    let after_stale = dex.inference_get_stats(&ob).await.expect("stats after the expired buy");
-    if after_stale.order_count != before_stale.order_count {
-        failures.push(format!(
-            "the book rested a buy whose deadline had passed: order count {} -> {}",
-            before_stale.order_count, after_stale.order_count
-        ));
+    // A POSITIVE CONTROL, not a wait. The claim here is a negative — the book
+    // must not rest a buy whose deadline has passed — and a fixed sleep proves
+    // it only if the chain is never slower than the sleep. It is not: on a
+    // loaded stand the stale placement can land after the window and the test
+    // goes green over a real defect. So a placement that MUST work is issued
+    // after it. `finish` cancels every resting order, so the control leaves
+    // nothing behind.
+    //
+    // What is read is the CONTESTED ID, not a counter. Polling "has next_order_id
+    // moved" breaks on the first increment whoever caused it: if the book
+    // regresses and rests the stale buy, the counter walks before → +1 (stale) →
+    // +2 (control), and a tick landing in the gap between the two messages reads
+    // +1 and satisfies both "moved by exactly one" assertions — green on precisely
+    // the defect this exists to catch, and likelier on the loaded stand that
+    // motivated the control in the first place. Reading which placement TOOK
+    // `before_stale.next_order_id` has no such gap: exactly one of the two can
+    // own it, its deadline says which, and neither the poll cadence nor the chain's
+    // speed can change the answer.
+    let control_deadline = now_unix() + 3600;
+    place_buy(
+        &dex,
+        &note.address,
+        &model_hash,
+        WORSE_PRICE,
+        WORSE_ESCROW,
+        control_deadline,
+        signer(),
+    )
+    .await;
+
+    // Poll the contested id until SOMETHING owns it. A book that has not handed it
+    // out yet answers with an unreadable or zeroed order (the getter either reverts
+    // on the missing key or returns a default-constructed struct — both are "not
+    // yet", and neither can be mistaken for a resting order, whose deadline is
+    // always non-zero here).
+    let contested_id = before_stale.next_order_id;
+    let mut owner_deadline = None;
+    for _ in 0..POLL_TICKS {
+        if let Ok(order) = dex.inference_get_order(&ob, contested_id).await
+            && order.deadline != 0
+        {
+            owner_deadline = Some(order.deadline);
+            break;
+        }
+        tokio::time::sleep(POLL_TICK).await;
     }
-    if after_stale.next_order_id != before_stale.next_order_id {
+    let Some(owner_deadline) = owner_deadline else {
         failures.push(format!(
-            "the book gave an id to a buy whose deadline had passed: next id {} -> {}; the id is \
-             assigned past the validation that was supposed to refuse it",
-            before_stale.next_order_id, after_stale.next_order_id
+            "nothing took order id {contested_id} within {}s — the control placement never \
+             landed, so this run measured the chain rather than the deadline check and the \
+             stale-deadline claim is unproven rather than disproven",
+            POLL_TICKS as u64 * POLL_TICK.as_secs()
         ));
+        finish(&dex, &note.address, &model_hash, signer(), failures).await;
+        return;
+    };
+
+    if owner_deadline == stale_deadline {
+        failures.push(format!(
+            "order id {contested_id} carries deadline {stale_deadline}, which is the buy whose \
+             deadline had already passed — the book rested it and pushed the control to \
+             {}. It is refused before tvm.accept(), so it must never take an id",
+            contested_id + 1
+        ));
+    } else if owner_deadline != control_deadline {
+        failures.push(format!(
+            "order id {contested_id} carries deadline {owner_deadline}, which is neither the \
+             stale buy's {stale_deadline} nor the control's {control_deadline} — something \
+             else placed into this book during the test and the check below is not scoped \
+             to what it thinks it is"
+        ));
+    } else {
+        // The control owns the contested id, so both messages have been processed
+        // and the counters are settled: the control accounts for exactly one, and
+        // the stale buy for none. Read them only now — asked earlier, the same
+        // numbers would be racing the second message.
+        let after_stale =
+            dex.inference_get_stats(&ob).await.expect("stats once the control took its id");
+        if after_stale.order_count != before_stale.order_count + 1 {
+            failures.push(format!(
+                "order count moved from {} to {} — the control placement accounts for exactly \
+                 one, so anything else means the book rested a second order in this window",
+                before_stale.order_count, after_stale.order_count
+            ));
+        }
+        if after_stale.next_order_id != before_stale.next_order_id + 1 {
+            failures.push(format!(
+                "next id moved from {} to {} — the control took {contested_id} and nothing \
+                 else may have taken one",
+                before_stale.next_order_id, after_stale.next_order_id
+            ));
+        }
+    }
+
+    // ---- read model: the cancel arrived ----
+    //
+    // IX-SEQ-08. TWO facts are checked, and the second matters more than the
+    // first: the cancelled order becomes CANCELLED, while its neighbour stays
+    // LIVE. Cancelling ALL orders would have produced the first fact too —
+    // that is exactly why this reads the point `cancelInferenceOrder`, not
+    // the sweep.
+    if let Some(service) = read.as_ref() {
+        let cancelled_id = better_id.to_string();
+        let survivor_id = worse_id.to_string();
+        let orders = poll_read_with("IX-SEQ-08 cancel in /orders", budget.left(), || {
+            let service = std::sync::Arc::clone(service);
+            let ob = ob.clone();
+            let want = cancelled_id.clone();
+            async move {
+                let url = api(&format!("orders?inferenceOrderBookAddress={ob}"));
+                match get_json(&service, &url).await {
+                    GetOutcome::Retry(why) => Probe::Pending(why),
+                    GetOutcome::Fatal(why) => Probe::Fatal(why),
+                    GetOutcome::Ok(body) => {
+                        let all = body["orders"].as_array().cloned().unwrap_or_default();
+                        // Poll for PRESENCE of the fact — the order left `LIVE`,
+                        // i.e. some terminal verdict was projected — and leave
+                        // WHICH verdict to the asserts below. Requiring
+                        // "CANCELLED" here instead would report a wrong terminal
+                        // status (an EXPIRED where a CANCELLED belongs) as an
+                        // expired budget, which names the indexer's speed for
+                        // what is actually a projector defect.
+                        //
+                        // `LIVE`, not `OPEN`: `OPEN` is the DB value, and the
+                        // wire carries the public name
+                        // (`OrderStatus::as_public`). Comparing against `OPEN`
+                        // here is always true, which would make this poll return
+                        // on the placement itself and drop the wait for the
+                        // cancel entirely — see the neighbour check below, which
+                        // reads `LIVE` for the same reason.
+                        let settled = all.iter().find(|o| {
+                            o["orderId"].as_str() == Some(want.as_str())
+                                && o["status"].as_str() != Some("LIVE")
+                        });
+                        match settled {
+                            Some(_) => Probe::Ready(all),
+                            None => Probe::Pending(format!(
+                                "order {want} still LIVE or absent from /orders"
+                            )),
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+
+        match orders {
+            Err(why) => failures.push(why),
+            Ok(all) => {
+                let by_id = |id: &str| all.iter().find(|o| o["orderId"].as_str() == Some(id));
+                match by_id(&cancelled_id) {
+                    None => failures.push(format!("order {cancelled_id} missing from /orders")),
+                    Some(o) => {
+                        // THE status assert, not a defensive re-read: the poll
+                        // above waits only for the order to leave `LIVE` (the
+                        // wire name — see the note on the poll), so a wrong
+                        // terminal verdict lands here, named as a wrong status
+                        // rather than reported as a read-model timeout.
+                        if o["status"].as_str() != Some("CANCELLED") {
+                            failures.push(format!(
+                                "cancelled order: want CANCELLED, got {}",
+                                o["status"]
+                            ));
+                        }
+                        // The remainder is PRESERVED, not zeroed: a cancel is
+                        // not a fill. The order was never crossed, so both
+                        // `ticks` and `ticksInitial` must still read the
+                        // original size. Comparing them only to EACH OTHER
+                        // would also pass if the projector zeroed both —
+                        // exactly the failure this is meant to catch, since a
+                        // cancelled order would then be indistinguishable
+                        // from one that filled completely.
+                        let want_ticks = TICKS.to_string();
+                        if o["ticks"].as_str() != Some(want_ticks.as_str()) {
+                            failures.push(format!(
+                                "cancelled order's remainder not preserved: ticks={}, want \
+                                 {want_ticks}",
+                                o["ticks"]
+                            ));
+                        }
+                        if o["ticksInitial"].as_str() != Some(want_ticks.as_str()) {
+                            failures.push(format!(
+                                "cancelled order's ticksInitial changed: ticksInitial={}, want \
+                                 {want_ticks}",
+                                o["ticksInitial"]
+                            ));
+                        }
+                    }
+                }
+                match by_id(&survivor_id) {
+                    None => failures
+                        .push(format!("neighbour order {survivor_id} disappeared from /orders")),
+                    Some(o) => {
+                        if o["status"].as_str() != Some("LIVE") {
+                            failures.push(format!(
+                                "the neighbour order must stay LIVE, but it is {} — meaning ALL \
+                                 orders were cancelled, not just one",
+                                o["status"]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     finish(&dex, &note.address, &model_hash, signer(), failures).await;

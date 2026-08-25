@@ -88,6 +88,7 @@ where
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, serde(deny_unknown_fields))]
 /// Payload of `SuperRootEvent::RootRegistered`.
 pub struct RootRegisteredData {
     pub root_address: String,

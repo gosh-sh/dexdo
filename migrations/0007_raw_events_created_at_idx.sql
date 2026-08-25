@@ -1,0 +1,30 @@
+-- 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
+--
+-- A window over INGEST time. Before this migration `raw_events` could answer "what
+-- arrived by chain time" (`raw_events_created_at_chain_idx`) but not "what arrived in
+-- the last N minutes": there was no index on `created_at` at all, and both
+-- `src_address` indexes are partial on `processed_at is null` and cannot see
+-- processed rows.
+--
+-- The index is full rather than partial, and that is a deliberate price: `raw_events`
+-- is the most write-heavy table in the schema, and a tenth btree on it costs writes
+-- (seven explicit indexes from 0001, plus the primary key and the msg_id unique).
+-- It is taken because there is no predicate that would narrow it without losing the
+-- point: a run window needs rows in any processing state. Its users are the e2e
+-- observer (`pending_projection_since`, `count_undecodable_since`,
+-- `inference_books_with_events_since`, `inference_anchored_books_since`) and an
+-- operator who until now had no way to ask "what arrived in the last hour" other than
+-- a full scan.
+--
+-- Building it takes a SHARE lock on `raw_events` and blocks writes for its duration.
+-- `CONCURRENTLY` is deliberately NOT used, and it is not unavailable: sqlx runs a
+-- migration outside a transaction when its file opens with `-- no-transaction`
+-- (sqlx-core `migrate::source`), which is what `create index concurrently` needs. It
+-- is declined because a concurrent build that fails leaves an INVALID index behind,
+-- which then has to be found and dropped by hand — a worse failure mode than a slow
+-- deploy for an index this cheap to build. The blocking build costs a running system
+-- nothing anyway: the indexer applies migrations before starting its loops
+-- (`services/indexer/src/main.rs`). On a large database expect the deploy to take
+-- noticeably longer, rather than investigating it.
+
+create index raw_events_created_at_idx on raw_events (created_at);

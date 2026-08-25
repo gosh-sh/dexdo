@@ -13,9 +13,22 @@
 # Each rule = a query node (refId A, instant) + a math condition node (refId C).
 # Counter alerts use a __name__=~"...(_total)?" matcher so they fire whether or
 # not the OTel→Prometheus exporter appends _total. Thresholds mirror the Grafana
-# dashboard (deploy/grafana/dodex-indexer-dashboard.json). noDataState is OK so a
-# fully-down indexer (series gone) does not flap these — pair with a separate
-# `up == 0` liveness alert for that case.
+# dashboard (deploy/grafana/dodex-indexer-dashboard.json).
+#
+# LIVENESS. The indexer is not scraped: it PUSHES OTLP to a collector, which
+# forwards to Prometheus (docs/deployment.md § Metrics & Grafana). So there is no
+# `up` series for it — an `up{job=~"...indexer..."}` rule would either match
+# nothing at all or, once pointed at the collector's own scrape job, report up==1
+# while the indexer is dead. A rule like that was here and is deliberately gone.
+#
+# `dodex-refresh-loop-dead` is the liveness rule instead, and it is the only one
+# with noDataState: Alerting. It watches indexer_metrics_refresh_passes, which the
+# indexer increments once per completed refresh (every 15s) — so a dead process
+# reaches it twice over: the counter stops growing while its series lives, and
+# once the collector expires the series, NoData fires the same rule. Its `for: 10m`
+# absorbs a collector or Prometheus restart. Every OTHER rule uses noDataState: OK
+# on purpose, so a vanished series does not flap twenty alerts at once when this
+# one already says the process is gone.
 
 apiVersion: 1
 
@@ -249,6 +262,46 @@ groups:
               expression: "$A > 0"
               datasource: { type: __expr__, uid: __expr__ }
 
+      # Same shape and threshold as dodex-orphans-dropped, and for the same reason:
+      # an Unknown row is marked processed and never re-asked, so recovering it needs
+      # an explicit backfill. Detection cannot come from the logs — warn_unknown
+      # demotes every repeat of a type to the noise target after its first sighting —
+      # which leaves this counter as the only durable signal. `> 0` over an hour
+      # rather than a tuned rate: there is no healthy non-zero value for a projector
+      # arm that does not exist, and one event of a new type is as much a signal as a
+      # thousand.
+      - uid: dodex-unknown-events
+        title: Indexer dropped events no projector claims
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Indexer is dropping decoded events with no projector arm"
+          description: "{{ $values.A.Value }} decoded events/hour matched no projector arm on {{ $labels.instance }} and were marked processed. Each is a permanent read-model loss — unlike a decode error or an ambiguous id, the row is not replayable once marked. Expect this after a contract upgrade adds an event, or when an arm is removed while its type still arrives; the first sighting of each type is in the logs at warn, later ones only in the noise log."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: increase({__name__=~"indexer_unknown_events(_total)?"}[1h])
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
       - uid: dodex-metrics-refresh-failures
         title: Indexer metrics-refresh loop failing
         condition: C
@@ -279,6 +332,38 @@ groups:
               refId: C
               type: math
               expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-refresh-loop-dead
+        title: Indexer metrics refresh loop is not running
+        condition: C
+        for: 10m
+        noDataState: Alerting
+        execErrState: Error
+        labels: { severity: critical, service: dodex-indexer }
+        annotations:
+          summary: "Indexer metrics refresh loop has stopped"
+          description: "No completed refresh pass in 10 minutes on {{ $labels.instance }} (the loop runs every 15s), or the heartbeat series is gone entirely. The task is dead or wedged, so every DB-derived gauge is frozen at its last value AND indexer_metrics_refresh_failures cannot rise — the failure counter dies with the task it reports on, which is why this rule watches growth rather than a value. THE liveness rule for this indexer, and the only one with noDataState: Alerting: the indexer pushes OTLP rather than being scraped, so there is no `up` series to watch and a dead process shows up here as NoData once the collector expires its series."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: increase({__name__=~"indexer_metrics_refresh_passes(_total)?"}[10m])
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A < 1"
               datasource: { type: __expr__, uid: __expr__ }
 
   - orgId: 1
@@ -580,3 +665,36 @@ groups:
               type: math
               expression: "$A > 0"
               datasource: { type: __expr__, uid: __expr__ }
+
+      - uid: dodex-orphans-dropped
+        title: Indexer dead-lettered orphan events
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels: { severity: warning, service: dodex-indexer }
+        annotations:
+          summary: "Indexer is dead-lettering orphan events"
+          description: "{{ $values.A.Value }} orphan events/hour dropped on {{ $labels.instance }}. Each is a permanent read-model loss: a missing counterparty (Filled), a lost cancel or expiry, an unattributable refund, or a lost range-to-book linkage. Check whether capture started mid-history or the orphan cutoff is too short."
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: REPLACE_WITH_PROMETHEUS_DS_UID
+            model:
+              refId: A
+              editorMode: code
+              expr: increase({__name__=~"indexer_inference_orphans_dropped(_total)?"}[1h])
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              datasource: { type: prometheus, uid: REPLACE_WITH_PROMETHEUS_DS_UID }
+          - refId: C
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 0"
+              datasource: { type: __expr__, uid: __expr__ }
+

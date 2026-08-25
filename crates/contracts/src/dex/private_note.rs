@@ -243,6 +243,18 @@ pub struct ParamsOfInitTransfer {
     pub dest_deposit_hash: String,
     pub token_type: u32,
     pub amount: u128,
+    /// Physical ECC of `token_type` to travel with the record, added by the
+    /// v4.0.33 sync. Before it, the transfer moved the `_balance` figure and
+    /// left the currency backing it behind — a note could hand its whole
+    /// balance away and keep the coins.
+    ///
+    /// NAMED, not "whatever is in the pocket", because the owner decides how
+    /// much; `0` is legal and reproduces the old record-only transfer. It is
+    /// checked against `address(this).currencies[token_type]`, which is the
+    /// PHYSICAL balance and not the `_balance` ledger the `amount` above is
+    /// taken from — the two can differ, so passing `amount` here is not
+    /// automatically safe.
+    pub ecc_amount: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -542,6 +554,31 @@ pub struct ParamsOfCancelAllInferenceOrders {
 /// `TokenContract`).
 pub struct ParamsOfStreamDeal {
     pub token_contract: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// Parameters for `PrivateNote.fundDeal` (seller note → its deal
+/// `TokenContract`), `PrivateNote.sol:1055`.
+///
+/// Only the SELLER needs this call. The buyer's side of the bond is funded by
+/// the buyer's own note without anyone asking: the fill path calls
+/// `IInferenceDeal.fundBuyerBond` from inside the note (`:752`), so a scenario
+/// that crosses an offer has already paid it by the time the deal exists.
+pub struct ParamsOfFundDeal {
+    /// Ties the call to the deal the note derives internally; the deal address
+    /// is computed from it rather than passed, so a wrong nonce addresses a
+    /// contract that does not exist and the message bounces (`:1050`).
+    pub nonce: u64,
+    /// SHELL forwarded to cover the deal's own gas, separate from `amount`.
+    /// The contract requires `gasShell > 0 || amount > 0` (`:1060`).
+    pub gas_shell: u128,
+    /// Seller bond, paid out of `_balance[CURRENCIES_ID_SHELL]` — the note
+    /// reverts with `ERR_LOW_VALUE` if that ledger is short (`:1061`).
+    pub amount: u128,
+    /// `optional(bytes)` as a hex string: an opaque blob forwarded unchanged
+    /// to the deal for the buyer. Nothing in the note reads it.
+    pub endpoint_cipher: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1274,6 +1311,30 @@ impl PrivateNote {
         self.send_message(Some(call_set), None, signer).await
     }
 
+    /// # Seller note funds its deal contract (spec §3.1.1)
+    ///
+    /// Original contract method: `fundDeal`
+    ///
+    /// Should be signed with PrivateNote owner keys.
+    ///
+    /// The seller's half of the bond only. The buyer's half never travels this
+    /// road: the fill path inside the buyer's own note calls
+    /// `IInferenceDeal.fundBuyerBond` directly (`PrivateNote.sol:752`), so a
+    /// scenario that crosses an offer has already funded the buyer side before
+    /// it reaches this call.
+    pub async fn fund_deal(
+        &self,
+        params: ParamsOfFundDeal,
+        signer: Signer,
+    ) -> KitResult<ResultOfSendMessage> {
+        let call_set = CallSet {
+            function_name: "fundDeal".to_string(),
+            header: None,
+            input: Some(json!(params)),
+        };
+        self.send_message(Some(call_set), None, signer).await
+    }
+
     /// # Buyer note stops the stream (amicable exit, spec §4.1)
     ///
     /// Original contract method: `streamStop`
@@ -1538,5 +1599,36 @@ mod inference_abi_tests {
         ] {
             assert!(!names.contains(func), "{func} is back in the ABI but has no wrapper");
         }
+    }
+
+    #[test]
+    fn transfer_params_match_abi() {
+        // `eccAmount` was added to `initTransfer` by the v4.0.33 sync and the
+        // struct kept its three fields. Nothing caught it: the call NAME was
+        // still in the ABI, so `wrapper_calls_exist_in_abi` stayed green, and
+        // this file's params tests covered only the inference calls. The
+        // serialized input then reached the encoder a field short, which reads
+        // as `null` rather than as absent:
+        //
+        //   tvm_code=306 … Wrong data format in `eccAmount` parameter: null
+        //
+        // — a runtime failure on the first e2e transfer, not a compile error.
+        assert_eq!(
+            keys(&ParamsOfInitTransfer {
+                dest_deposit_hash: "1".into(),
+                token_type: 1,
+                amount: 1,
+                ecc_amount: 0,
+            }),
+            abi_input_names("initTransfer")
+        );
+        assert_eq!(
+            keys(&ParamsOfOfferTransfer {
+                token_type: 1,
+                amount: 1,
+                sender_deposit_hash: "1".into(),
+            }),
+            abi_input_names("offerTransfer")
+        );
     }
 }

@@ -216,8 +216,19 @@ const DEFAULT_SDK_TAIL: usize = 3;
 /// [`PnProfile::seed_label`] is the whole coupling to the generator: the
 /// label it returns is what `DEX_TEST_NOTES_SPEC` writes into each note's
 /// `profile` field.
-// Only Dep/Trd/Shell are constructed anywhere; Cons/Cpn/Usdc/Inf/Rot name the
-// rest of the role vocabulary a scenario may declare.
+// Only Dep/Trd/Usdc are constructed anywhere; Cons/Cpn/Shell/Rot name the rest
+// of the role vocabulary a scenario may declare.
+//
+// `PN-INF` IS DELIBERATELY ABSENT, and its absence is what routes those notes.
+// The label belongs to the api-e2e suite, which addresses its rows by fixed
+// index out of the same seed file (`TestPnPool::load_inference()`), so a lease
+// taken here would hand out a note that suite expects to find untouched — and
+// since almost nothing in this harness returns what it rents, it would hand it
+// back spent. This harness will never want them: the inference surface lives
+// entirely in `dodex_chain::test_helpers` and `dodex_sdk` carries none of it,
+// which is why the inference scenarios were written in the api suite in the
+// first place. Naming the role here would be claiming rows for a scenario that
+// cannot exist.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PnProfile {
@@ -227,7 +238,6 @@ pub enum PnProfile {
     Cpn,
     Shell,
     Usdc,
-    Inf,
     Rot,
 }
 
@@ -241,7 +251,6 @@ impl PnProfile {
         PnProfile::Cpn,
         PnProfile::Shell,
         PnProfile::Usdc,
-        PnProfile::Inf,
         PnProfile::Rot,
     ];
 
@@ -256,7 +265,6 @@ impl PnProfile {
             PnProfile::Cpn => "PN-CPN",
             PnProfile::Shell => "PN-SHELL",
             PnProfile::Usdc => "PN-USDC",
-            PnProfile::Inf => "PN-INF",
             PnProfile::Rot => "PN-ROT",
         }
     }
@@ -1550,11 +1558,15 @@ mod tests {
     fn every_label_in_the_stand_spec_belongs_to_a_suite() {
         // A typo'd label is not a parse error anywhere — it just bakes notes
         // nobody owns, and the suite that wanted them fails to rent much
-        // later. `PN-API` is the api-e2e suite's; everything else has to be a
-        // role this harness knows.
+        // later. The api-e2e suite owns TWO labels — `PN-API` for its NACKL
+        // notes and `PN-INF` for the SHELL ones its inference binaries index
+        // by position — and everything else has to be a role this harness
+        // knows.
+        const API_SUITE_LABELS: &[&str] = &["PN-API", "PN-INF"];
         for label in stand_spec_counts().keys() {
             assert!(
-                label == "PN-API" || PnProfile::from_seed_label(label).is_some(),
+                API_SUITE_LABELS.contains(&label.as_str())
+                    || PnProfile::from_seed_label(label).is_some(),
                 "`{label}` is owned by neither suite"
             );
         }
@@ -1612,7 +1624,6 @@ mod tests {
             | PnProfile::Cpn
             | PnProfile::Shell
             | PnProfile::Usdc
-            | PnProfile::Inf
             | PnProfile::Rot => {}
         }
     }
@@ -1622,6 +1633,11 @@ mod tests {
         // The api-e2e suite draws from the same file. Its notes must read as
         // "someone else's", not as a parse failure and not as a wildcard.
         assert_eq!(PnProfile::from_seed_label("PN-API"), None);
+        // `PN-INF` is the second label that suite owns, and the one this
+        // harness used to claim: it sat in `ALL` while no scenario asked for
+        // it, so the collision stayed invisible until the group was seeded.
+        // A lease here would spend a note the api suite addresses by index.
+        assert_eq!(PnProfile::from_seed_label("PN-INF"), None);
     }
 
     #[test]

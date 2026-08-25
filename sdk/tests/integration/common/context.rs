@@ -14,11 +14,11 @@ fn endpoint_from(v: Option<&str>) -> String {
     }
 }
 
-/// e2e network endpoint — полный URL со схемой (зеркало контракта
-/// `services/api/tests/common/e2e_setup.rs`). Потребители схему не дописывают.
-/// Bare host гонит tvm_client на REST `/v2/account` по plain-http → таймаут.
-/// Читает переменную окружения `E2E_NETWORK_ENDPOINT`; если не задана или пуста,
-/// возвращает Shellnet по умолчанию.
+/// The e2e network endpoint — a full URL including the scheme (mirroring the
+/// contract in `services/api/tests/common/e2e_setup.rs`). Consumers do not append the
+/// scheme themselves. A bare host drives tvm_client to the REST `/v2/account` over
+/// plain HTTP, which times out. Reads the `E2E_NETWORK_ENDPOINT` environment
+/// variable; when unset or empty, returns the Shellnet default.
 pub fn network_endpoint() -> String {
     endpoint_from(std::env::var("E2E_NETWORK_ENDPOINT").ok().as_deref())
 }

@@ -269,6 +269,88 @@ fn parse_emit(rest: &str) -> Option<(&str, &str)> {
 
 // ────────────────────────────────── checks ──────────────────────────────────
 
+/// `"Kind.EventName" -> routing id`, derived from the already-parsed manifest rows.
+fn id_by_event_type() -> BTreeMap<String, u32> {
+    let mut out = BTreeMap::new();
+    for e in MANIFEST {
+        for emit in e.emits {
+            out.insert((*emit).to_string(), e.id);
+        }
+    }
+    out
+}
+
+/// A Rust enum's discriminant must equal the id the contract actually emits that
+/// event on. The "variant -> event" correspondence comes from the rule
+/// `crates/contracts` pins: the variant name matches the ABI event name, and the
+/// book's events additionally carry an `Inference` prefix.
+///
+/// There is deliberately no hand-written table here: it would be a third list of
+/// ids after `modifiers.sol` and `MANIFEST`, and duplication is exactly what let
+/// `TokenContractEvent::ContractDeployed` drift away from the contract.
+#[test]
+fn typed_event_enums_carry_the_ids_the_contracts_emit_on() {
+    use dodex_contracts::airegistry::inference_order_book_events::InferenceOrderBookEvent as Iob;
+    use dodex_contracts::airegistry::token_contract_events::TokenContractEvent as Tc;
+
+    let ids = id_by_event_type();
+    let mut checked = 0usize;
+
+    for v in Tc::ALL {
+        let event_type = format!("TokenContract.{v:?}");
+        let expected = ids
+            .get(&event_type)
+            .unwrap_or_else(|| panic!("{event_type} is not emitted on any id in modifiers.sol"));
+        assert_eq!(
+            *v as u32, *expected,
+            "TokenContractEvent::{v:?} is declared on {}, but the contract emits it on {expected}",
+            *v as u32
+        );
+        checked += 1;
+    }
+
+    for v in Iob::ALL {
+        let name = format!("{v:?}");
+        let name = if name.starts_with("Inference") { name } else { format!("Inference{name}") };
+        let event_type = format!("InferenceOrderBook.{name}");
+        let expected = ids
+            .get(&event_type)
+            .unwrap_or_else(|| panic!("{event_type} is not emitted on any id in modifiers.sol"));
+        assert_eq!(*v as u32, *expected, "{v:?} disagrees with {event_type}");
+        checked += 1;
+    }
+
+    assert!(checked >= 19, "checked {checked} variants — ALL went empty and the guard went blind");
+}
+
+/// The `variant -> Display -> TryFrom -> variant` round trip for EVERY variant.
+///
+/// Needed because `TryFrom` matches on the number with `_ => Err`, not on the
+/// variant: adding a variant to the enum does not break it, the file compiles, the
+/// tests pass — and `try_from` keeps rejecting the new id. The arm in
+/// `Decoded*Event::from_event` then becomes UNREACHABLE, i.e. a dead branch
+/// nothing turns red.
+#[test]
+fn every_declared_variant_round_trips_through_try_from() {
+    use dodex_contracts::airegistry::inference_order_book_events::InferenceOrderBookEvent as Iob;
+    use dodex_contracts::airegistry::token_contract_events::TokenContractEvent as Tc;
+
+    for v in Tc::ALL {
+        assert_eq!(
+            Tc::try_from(v.to_string()).unwrap_or_else(|e| panic!("{v:?}: {e}")),
+            *v,
+            "{v:?} is a declared variant, but TryFrom does not know its id — the from_event arm is unreachable"
+        );
+    }
+    for v in Iob::ALL {
+        assert_eq!(
+            Iob::try_from(v.to_string()).unwrap_or_else(|e| panic!("{v:?}: {e}")),
+            *v,
+            "{v:?} is a declared variant, but TryFrom does not know its id — the from_event arm is unreachable"
+        );
+    }
+}
+
 #[test]
 fn the_manifest_lists_exactly_the_declared_event_ids() {
     let declared: Vec<(String, u32)> = declared_event_ids();
@@ -316,7 +398,12 @@ fn emitted_events_match_their_emit_sites() {
     assert_eq!(
         actual, expected,
         "an emit routes somewhere the manifest does not say. Whatever reads that `dst` is now \
-         being handed a different payload than it was written for"
+         being handed a different payload than it was written for. A key present on the left \
+         and absent on the right is a constant emitted to but missing from the manifest — \
+         either new, or declared in a form `declared_event_ids` does not recognise. A separate \
+         `every_emit_resolves_to_a_manifest_row` used to assert that case alone; it was removed \
+         because its failures are a strict subset of this one's — it could never be the only \
+         red — and its diagnosis lives here instead"
     );
 }
 
@@ -347,21 +434,5 @@ fn every_id_carries_one_payload() {
         stale.is_empty(),
         "these are listed as known collisions but no longer collide — drop them from \
          KNOWN_SHARED: {stale:?}"
-    );
-}
-
-#[test]
-fn every_emit_resolves_to_a_manifest_row() {
-    let (sites, unresolved) = emit_sites();
-    assert!(unresolved.is_empty(), "unresolved emit destinations: {unresolved:#?}");
-
-    let known: BTreeSet<&str> = MANIFEST.iter().map(|e| e.konst).collect();
-    let missing: BTreeSet<String> =
-        sites.iter().map(|s| s.konst.clone()).filter(|k| !known.contains(k.as_str())).collect();
-
-    assert!(
-        missing.is_empty(),
-        "these constants are emitted to but absent from the manifest — either they are new, or \
-         they are declared in a form `declared_event_ids` does not recognise: {missing:?}"
     );
 }

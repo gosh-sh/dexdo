@@ -16,8 +16,10 @@ test-group = 'serial-reprojection'
 # `indexer_cursors` row for CAPTURE_STREAM, and one of them flips `at_head` to false to
 # exercise the read gate's capture-lag arm. Under nextest's per-process parallelism a
 # sibling binary would observe that flip and receive -1500 for a lookup it expects to
-# succeed. Both binaries are pinned to one one-thread group so they run sequentially and
-# never race the cursor row; the in-process mutexes then cover the rest.
+# succeed. `read_model_polling` joined them for the same reason — its gate test seeds
+# `at_head` on the same singleton row. All THREE binaries are pinned to one one-thread
+# group so they run sequentially and never race the cursor row; the in-process mutexes
+# then cover the rest.
 #
 # `inference_market_metrics` used to join this group too: its state-count tests asserted
 # whole-table aggregate DELTAS, which any concurrent writer to `inference_markets`
@@ -26,7 +28,7 @@ test-group = 'serial-reprojection'
 # `inference_order_status_counts_for`), so the test no longer needs exclusive access to
 # the table and runs fully parallel.
 [[profile.default.overrides]]
-filter = 'binary(inference_orders_repo) | binary(inference_orders_http)'
+filter = 'binary(inference_orders_repo) | binary(inference_orders_http) | binary(read_model_polling)'
 test-group = 'serial-capture-cursor'
 
 # `inference_reconciler`'s at-head gate tests read a single shared `indexer_cursors`
@@ -39,6 +41,41 @@ test-group = 'serial-capture-cursor'
 [[profile.default.overrides]]
 filter = 'binary(inference_reconciler)'
 test-group = 'serial-inference-reconciler'
+
+# `observer_queries` holds globally visible pending `raw_events` rows for the
+# duration of its window test — without them there is nothing to test the window
+# with. `reprojection` is the only binary in this crate that calls
+# `reproject_pending` WITHOUT `chain_order` bounds, i.e. it drains everything it
+# can see. Run in parallel it would not merely move somebody's counter: it would
+# project and mark processed the rows `observer_queries` seeded
+# (`InferenceOrderBook.ObsWindowProbe` goes to `Unknown`), and the window test
+# would fail having said nothing about the window. Skipping when two snapshots
+# disagree — the trick used by `projection_lag_seconds_*` — therefore does not
+# apply here: only a reader has nothing to lose, and this test writes.
+#
+# `capture` is here for the same reason and was missed when this group was
+# written. Three of its tests assert `processed_at IS NULL` on rows `persist_page`
+# just wrote — that assertion IS the subject ("capture must not project"), so an
+# unbounded drain landing between the write and the read turns the test red for
+# somebody else's work. Worse than a flake for the inference case: projecting
+# `InferenceOrderPlaced` seeds `inference_markets` / `inference_orders` rows the
+# test does not know to delete, so a race leaks them into the shared database
+# permanently.
+[[profile.default.overrides]]
+filter = 'binary(observer_queries) | binary(capture)'
+test-group = 'serial-reprojection'
+
+# Same exposure, different crate, so it cannot ride the filter above:
+# `refresh_once_on_a_live_pool_…` seeds one decoded `raw_events` row and drains it
+# through its own bounded `reproject_pending_from` to make the unknown-events
+# gauge non-zero. Between the insert and that drain the row is globally visible,
+# and `reprojection`'s unbounded drain would take it first — leaving the bounded
+# drain with nothing and the assertion on `stats.unknown` red. Scoped to the one
+# test rather than the binary: the other seventeen are pure unit tests that touch
+# no database and have no reason to queue behind anything.
+[[profile.default.overrides]]
+filter = 'binary_id(=dodex-indexer::bin/dodex-indexer) & test(refresh_once_on_a_live_pool)'
+test-group = 'serial-reprojection'
 
 [test-groups]
 serial-reprojection = { max-threads = 1 }
@@ -60,11 +97,30 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 # instead of one after another. The exceptions are collected here and pinned to
 # one at a time:
 #
-#   * `e2e_inference`, `e2e_inference_clob` and `e2e_register_account` all take
-#     the SAME note. A note serialises its own operations through `_busy` and
-#     rejects a repeated message body outright, so two of these at once would
-#     have one of them silently dropped;
-#   * the trader-path binaries read and write the shared test database;
+#   * `e2e_inference` and `e2e_inference_clob` used to take the SAME `PN-INF`
+#     note (both index 9). A note serialises its own operations through `_busy`
+#     and rejects a repeated message body outright, so two of these at once
+#     would have one of them silently dropped. Wave 5 moved `e2e_inference_clob`
+#     to index 13, so the sharing is gone and neither is here for that reason
+#     any more — they stay for the database and the oracle below. Note that
+#     `e2e_register_account` is NOT a third party to this: it draws index 9 out
+#     of `PN-API` via `TestPnPool::load()`, a different pool and a different
+#     row, and only looked like a collision while the pool was unprofiled;
+#   * the trader-path binaries read and write the shared test database — and so
+#     does `e2e_inference_orders`, whose read-model phase raises the production
+#     router against it on the stand (`E2E_READ_MODEL`). It holds a note of its
+#     own, so it is here for the database alone. The three wave-5 binaries join
+#     it on the same ground and then some: `e2e_inference_stream` and
+#     `e2e_inference_expiry_sweep` assert over SQL rather than HTTP, because
+#     `inference_deals` and `swept_at` have no public surface at all, and
+#     `e2e_inference_range_link` reads the database AND deploys an oracle;
+#   * `e2e_inference_range` is here for the oracle alone. It touches no
+#     database — its whole reading is on chain — but it deploys an oracle of
+#     its own, which is the singleton below. `e2e_inference_recovery` deploys
+#     no oracle and reads no database, and it is here for neither: it holds two
+#     notes of its own and would be safe in parallel. It is pinned because its
+#     money readings are ECC DELTAS on those two notes across a sweep, and a
+#     delta is only the sweep's if nothing else moved the account meanwhile;
 #   * everything that deploys a market sends an external `deployOracle` to the
 #     ONE `RootOracle` the whole stand shares. An external message carries a
 #     `timestamp` the contract compares against the last it accepted, so two
@@ -78,14 +134,45 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 # here at all.
 [[profile.ci-e2e.overrides]]
 filter = '''
-    binary(e2e_inference) | binary(e2e_inference_clob) | binary(e2e_register_account)
+    binary(e2e_inference) | binary(e2e_inference_clob) | binary(e2e_inference_orders)
+  | binary(e2e_inference_stream) | binary(e2e_inference_expiry_sweep)
+  | binary(e2e_inference_range_link) | binary(e2e_inference_range)
+  | binary(e2e_inference_recovery)
+  | binary(e2e_register_account)
   | binary(e2e_batch_orders) | binary(e2e_buy_full_set) | binary(e2e_cancel_batch_orders)
   | binary(e2e_cancel_order) | binary(e2e_order)
 '''
 test-group = 'serial-e2e-shared'
 
+# `e2e_inference_range` waits two on-chain clocks in sequence, and neither is
+# negotiable. First a deal has to reach a CLOSE before the book has a reference
+# price at all — a match publishes nothing, by design — which costs the 190s
+# probe window. Then the range event needs a deadline far enough out that the
+# list still sees `MIN_RESULT_GAP` of lead when the market is deployed against
+# it, which is another 240s. Neither clock can overlap the other: the deadline
+# is only meaningful once the price it resolves from exists.
+#
+# This override was written for the pre-v4.0.33 version of the binary, deleted
+# with it by that sync, and restored with it. 20 minutes against a run that
+# measured 514s (#220) is a cap for a hang, not an expectation — and the
+# restored version adds one wait the old one did not have (both bonds before
+# `open`), so the headroom is smaller than it was.
+[[profile.ci-e2e.overrides]]
+filter = 'binary(e2e_inference_range)'
+slow-timeout = { period = "60s", terminate-after = 20 }
 
-
+# `e2e_inference_recovery` outwaits `MATCH_OPEN_TIMEOUT` — 600s from the match,
+# before which no funded deal may be swept. The deleted version needed 30
+# minutes because it also outwaited the reclaim window (the deal's own
+# `settleWindow` plus grace, 900s from the open); `reclaimOnTimeout` left the
+# ABI at v4.0.33 and that clock went with it.
+#
+# 15 rather than 10, and the arithmetic is not a sum: the control deal is set up
+# INSIDE the first deal's window, so the wall clock is roughly the longer of
+# (setup + 600) and (setup ×2), plus the sweep and its payout.
+[[profile.ci-e2e.overrides]]
+filter = 'binary(e2e_inference_recovery)'
+slow-timeout = { period = "60s", terminate-after = 15 }
 
 # The sdk-e2e profile (used by the sdk workspace's proof/acceptance suites)
 # lives in sdk/.config/nextest.toml, not here: sdk/ is a separate Cargo

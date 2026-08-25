@@ -319,7 +319,7 @@ mod tests {
     fn stale_run_reads_nothing_writes_nothing() {
         let d = TempDir::new().unwrap();
         Ledger::bootstrap(d.path(), "run-2", None).unwrap();
-        // помечаем ноту, затем процесс "старого запуска" пытается писать
+        // mark a note, then a process from the "old run" tries to write
         let led2 = Ledger::open(d.path(), "run-2");
         led2.with_txn(|f| {
             f.notes.insert("0:aa".into(), NoteState::Leased { pid: 1, test: "t".into() });
@@ -329,7 +329,7 @@ mod tests {
         let ledger_json = d.path().join("ledger.json");
         let before = fs::read(&ledger_json).unwrap();
 
-        let stale = Ledger::open(d.path(), "run-1"); // старый RUN_ID
+        let stale = Ledger::open(d.path(), "run-1"); // the old RUN_ID
         let err = stale
             .with_txn(|f| {
                 f.notes.clear();
@@ -353,9 +353,9 @@ mod tests {
                 f.notes.insert("0:aa".into(), NoteState::Quarantined { reason: "x".into() });
             })
             .unwrap();
-        Ledger::bootstrap(d.path(), "run-2", None).unwrap(); // новое поколение
+        Ledger::bootstrap(d.path(), "run-2", None).unwrap(); // a new generation
         Ledger::open(d.path(), "run-2")
-            .with_txn(|f| assert!(f.notes.is_empty(), "старые записи не переживают поколение"))
+            .with_txn(|f| assert!(f.notes.is_empty(), "old entries do not survive a generation"))
             .unwrap();
     }
 
@@ -363,10 +363,10 @@ mod tests {
     fn rendezvous_stale_mark_is_not_a_peer() {
         let d = TempDir::new().unwrap();
         Ledger::bootstrap(d.path(), "run-2", None).unwrap();
-        // метка чужого поколения, вписанная вручную (симулируем выжившего)
+        // a mark from a foreign generation, written by hand (simulating a survivor)
         Ledger::open(d.path(), "run-2")
             .with_txn(|f| {
-                // ключ = "{slot}/{peer}" — ровно тот, что читает реализация
+                // the key is "{slot}/{peer}" — exactly the one the implementation reads
                 f.rendezvous.insert(
                     "pair/peer".into(),
                     RendezvousMark { run_id: "run-1".into(), pid: 9, test: "peer".into() },
@@ -375,7 +375,7 @@ mod tests {
             .unwrap();
         let led = Ledger::open(d.path(), "run-2");
         let err = led.rendezvous("pair", "me", "peer", Duration::from_millis(300)).unwrap_err();
-        // строго StaleRun — таймаут означал бы, что ветка не упражнялась
+        // strictly StaleRun — a timeout would mean the branch was not exercised
         assert!(matches!(err, LedgerError::StaleRun { .. }));
     }
 

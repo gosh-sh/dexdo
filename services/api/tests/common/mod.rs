@@ -14,6 +14,7 @@ pub mod airegistry;
 pub mod cleanup;
 pub mod deploy_market;
 pub mod e2e_setup;
+pub mod read_model;
 pub mod test_pns;
 
 use std::collections::HashMap as StdHashMap;

@@ -2,6 +2,37 @@
 
 All notable changes to DEX.DO are recorded here. Entries are date-based, newest first.
 
+## [2026-08-24]
+
+### Fixed
+
+- **`inference_deals.settled_at_chain` fills again.** It is written by the four `TokenContract` close events, which the indexer's ingest scope no longer captures, so since that scope landed every deal read as never settled — including for the `resolve_deal` query in `dodex-points-rewards`, which asks exactly `settled_at_chain is not null`. It now comes from `PrivateNote.InferenceDealClosed`, which IS captured: the dying deal calls `onDealClosed` on both of its notes before self-destructing, so no close can happen without it whatever branch produced the close. Deals closed while the column was unfilled are not backfilled by this — the events that would carry it were dropped at ingest and are not replayable.
+- **`inference_deals.price_per_tick` and `deposit` fill again**, from the two book events that survived the scope change. `price_per_tick` comes from the SELL placement that registers the deal (`InferenceOrderPlaced`, whose `price` is the per-tick ask the deal's constructor was given) — not from `InferenceFilled.clearingPrice`, which is the price the match struck. `deposit` is REPRODUCED from `InferenceFilled`: the book derives `ticks * (price + platform fee) + bond` inside its matcher and emits none of it while emitting every input. For a subscription the bond is `2 * clearingPrice`; the bit that says so is read off the BUY leg, so on an orphaned fill (no leg projected) the deposit is left NULL rather than computed short. `deposit` records what the book SENT — on the narrow path where the deal refuses the fill and refunds in full, it names an escrow that came straight back.
+- `close_kind` and `clean_settlement` are still NULL and stay that way. `InferenceDealClosed` names the deal and nothing else, so it records that a deal closed and never how; the close kind is not recoverable from any captured event, and this deliberately does not guess it from surrounding payments.
+
+### Added
+
+- Storage, migrations `0006` and `0007` — applied by the indexer at startup, so a deploy runs them; no manual step. **`0007` blocks writes:** it builds `raw_events_created_at_idx` under a SHARE lock on the largest table in the schema, and `CONCURRENTLY` is deliberately not used (a failed concurrent build leaves an INVALID index to find and drop by hand). On a large database expect a noticeably longer deploy rather than investigating it.
+  - `inference_markets.last_reconcile_error text` — why a market last failed to reconcile. The reason previously existed only in pod logs, which made "this book is not visible, why" undiagnosable from the database. Written and cleared as a pair with `last_reconcile_failed_at`; NULL means no failure is current (never failed, or recovered).
+  - `raw_events (created_at)` — a window over INGEST time. `raw_events_created_at_chain_idx` answers "what happened by chain time" and both `src_address` indexes are partial on `processed_at is null`, so until now "what arrived in the last hour" meant a full scan.
+- Indexer metric `indexer_unknown_events` (OTLP) — events stored under the `Unknown` arm, which marks them processed and drops them for good. Alert rule **"Indexer dropped events no projector claims"** fires on any increase over an hour: the loss is not replayable.
+- Indexer metric `indexer_metrics_refresh_passes` (OTLP) — a heartbeat for the metrics refresh loop. A panicked refresh task freezes every gauge it feeds *and* stops `indexer_metrics_refresh_failures`, so the failure counter cannot report its own death. Alert rule **"Indexer metrics refresh loop is not running"** fires on fewer than one pass in ten minutes — on the absence of growth, not on a value. The `up == 0` liveness rule it replaces never matched anything and is removed.
+- Alert rule **"Indexer dead-lettered orphan events"** on `indexer_inference_orphans_dropped`, and an `EXPIRED` bucket in the `indexer_inference_orders` status gauge, which now reports all four statuses (`OPEN`, `FILLED`, `CANCELLED`, `EXPIRED`) rather than leaving expired orders uncounted.
+
+### Fixed
+
+Indexer projection of the inference read model. Each of these was live: the read model answered, and answered wrongly.
+
+- **`inference_orders.is_subscription` was always `false`.** It was set from a `PrivateNote` subscription event the contract does not emit. It now comes from the placement flags bit, so subscriptions are distinguishable from ordinary orders for the first time.
+- **Continuation expiry was invisible.** An order resumed past its deadline emits `InferenceRefunded` and no expiry event at all, so those orders sat `OPEN` forever. A past-deadline `InferenceRefunded` now expires the order. The deadline is compared to the chain's own report, never to the clock — elapsed time by itself still closes nothing (migration `0005` restates the column comment accordingly).
+- **`EXPIRED` was not terminal.** A replayed placement, a late cancel or a late fill could move an expired order back out of its terminal state.
+- **Root-model deploys seeded phantom deals.** `RootModel.ContractDeployed` and `TokenContract.ContractDeployed` are byte-identical in their ABIs, so every root-model deploy decoded as a deal deploy and created an `inference_deals` row keyed on the root model's address. The two are now told apart by the message `dst` (`703` vs `732`).
+- **Two `PrivateNote` inference confirmations were marked processed and lost forever** — they fell through to the `Unknown` arm. They now carry explicit no-op arms.
+- **`inference_deals.seller_note` came from walking the sell leg** and is now taken from the fill event itself, which carries it.
+- **Orphan events were dead-lettered by an implicit rule.** They now go by an explicit allow-list, which adds `OracleEventList.RangeEventAdded` — its loss drops the range-to-book linkage, and it was previously uncounted.
+- **The reconcile failure mark could outlive the failure.** A clean cycle and the discovery visibility stamp now both clear the mark and its text together, so a market that recovered stops reading as failing.
+- Removed the projector arm for `TokenContract.StreamReclaimed`, an event the contract no longer declares.
+
 ## [2026-07-25]
 
 ### Changed

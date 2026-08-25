@@ -556,7 +556,12 @@ fn build_snapshot_query<'a>(
     b.push_bind(ob);
     // The fail-closed gate. Three ways this book's state cannot vouch for an absence:
     //
-    //  1. a resting SELL whose TokenContract the indexer does not know;
+    //  1. a resting SELL whose TokenContract the indexer does not know. NOT a race with
+    //     the placement — `placeSellOffer` passes the TokenContract as `msg.sender` and
+    //     the event carries it verbatim, so a current-projector SELL always has it. The
+    //     rows this arm exists for predate 9350896, where `upsert_resting_order` began
+    //     writing the column at all; they carry NULL until the reconciler's sweep repair
+    //     fills them from `getOrder`;
     //  2. captured events for this book that are decoded but not yet projected — the very
     //     placement being asked about may sit there, so no row exists to be found;
     //  3. capture is behind the chain head, so the placement may not even be captured.

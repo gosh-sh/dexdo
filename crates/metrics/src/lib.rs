@@ -6,8 +6,9 @@
 //! path, and so the OpenTelemetry dependency stays out of crates that don't
 //! emit metrics.
 //!
-//! Exposes `orders_created_event_cnt` and `order_partially_filled_event_cnt`
-//! as observable counters pushed over OTLP. When no OTLP endpoint env var is
+//! Exposes nineteen observable counters and gauges pushed over OTLP — ingestion,
+//! the projection pipeline, the DB pool and the inference markets; the catalogue
+//! with what each one measures is in `docs/tech-specs/indexer.md`. When no OTLP endpoint env var is
 //! set, `init()` returns `None` and nothing is collected.
 
 use std::env;
@@ -64,6 +65,7 @@ pub struct IndexerMetrics {
     projection_fallbacks: Arc<AtomicU64>,
     inference_orphans_dropped: Arc<AtomicU64>,
     decode_errors: Arc<AtomicU64>,
+    unknown_events: Arc<AtomicU64>,
     decode_ambiguous_collisions: Arc<AtomicU64>,
     inference_markets_discovering: Arc<AtomicU64>,
     inference_markets_visible: Arc<AtomicU64>,
@@ -73,9 +75,11 @@ pub struct IndexerMetrics {
     inference_orders_open: Arc<AtomicU64>,
     inference_orders_filled: Arc<AtomicU64>,
     inference_orders_cancelled: Arc<AtomicU64>,
+    inference_orders_expired: Arc<AtomicU64>,
     inference_reconcile_failures: Arc<AtomicU64>,
     inference_wedged_books: Arc<AtomicU64>,
     metrics_refresh_failures: Arc<AtomicU64>,
+    metrics_refresh_passes: Arc<AtomicU64>,
     // Retain the observable-counter and gauge handles for the lifetime of the
     // provider, mirroring the reference metrics setup. The observe callbacks
     // themselves are registered with the meter at `build()` time.
@@ -89,6 +93,7 @@ pub struct IndexerMetrics {
     _projection_fallbacks_counter: ObservableCounter<u64>,
     _inference_orphans_dropped_counter: ObservableCounter<u64>,
     _decode_errors_counter: ObservableCounter<u64>,
+    _unknown_events_counter: ObservableCounter<u64>,
     _decode_ambiguous_collisions_counter: ObservableCounter<u64>,
     _inference_markets_gauge: ObservableGauge<u64>,
     _inference_reference_price_lag_gauge: ObservableGauge<u64>,
@@ -97,6 +102,7 @@ pub struct IndexerMetrics {
     _inference_reconcile_failures_counter: ObservableCounter<u64>,
     _inference_wedged_books_gauge: ObservableGauge<u64>,
     _metrics_refresh_failures_counter: ObservableCounter<u64>,
+    _metrics_refresh_passes_counter: ObservableCounter<u64>,
 }
 
 impl IndexerMetrics {
@@ -111,6 +117,7 @@ impl IndexerMetrics {
         let projection_fallbacks = Arc::new(AtomicU64::new(0));
         let inference_orphans_dropped = Arc::new(AtomicU64::new(0));
         let decode_errors = Arc::new(AtomicU64::new(0));
+        let unknown_events = Arc::new(AtomicU64::new(0));
         let decode_ambiguous_collisions = Arc::new(AtomicU64::new(0));
         let inference_markets_discovering = Arc::new(AtomicU64::new(0));
         let inference_markets_visible = Arc::new(AtomicU64::new(0));
@@ -120,9 +127,11 @@ impl IndexerMetrics {
         let inference_orders_open = Arc::new(AtomicU64::new(0));
         let inference_orders_filled = Arc::new(AtomicU64::new(0));
         let inference_orders_cancelled = Arc::new(AtomicU64::new(0));
+        let inference_orders_expired = Arc::new(AtomicU64::new(0));
         let inference_reconcile_failures = Arc::new(AtomicU64::new(0));
         let inference_wedged_books = Arc::new(AtomicU64::new(0));
         let metrics_refresh_failures = Arc::new(AtomicU64::new(0));
+        let metrics_refresh_passes = Arc::new(AtomicU64::new(0));
 
         let created_cache = Arc::clone(&orders_created);
         let orders_created_counter = meter
@@ -205,7 +214,7 @@ impl IndexerMetrics {
         let inference_orphans_dropped_counter = meter
             .u64_observable_counter("indexer_inference_orphans_dropped")
             .with_description(
-                "Inference orphan events (Filled/OrderCancelled) dead-lettered after their parent OrderPlaced never arrived within the cutoff. A Filled first decrements any present resting leg, so book depth stays correct; what is unrecorded is the missing counterparty (Filled) or the lost cancel (OrderCancelled)",
+                "Orphan events dead-lettered after their parent never arrived within the cutoff: the four inference events (InferenceFilled, InferenceOrderCancelled, InferenceOrderExpired, InferenceRefunded) plus OracleEventList.RangeEventAdded, which is counted here rather than left uncounted because a dropped row is a dropped row whichever contract emitted it. Each loses something different: a Filled first decrements any present resting leg (so book depth stays correct) and what goes unrecorded is the missing counterparty; a cancel or an expiry is lost outright, so the order never reaches its terminal status; a refund cannot be attributed to any order; and a RangeEventAdded loses the range-to-book linkage",
             )
             .with_callback(move |observer| {
                 observer.observe(orphans_cache.load(Ordering::Relaxed), &[]);
@@ -220,6 +229,17 @@ impl IndexerMetrics {
             )
             .with_callback(move |observer| {
                 observer.observe(decode_errors_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
+        let unknown_events_cache = Arc::clone(&unknown_events);
+        let unknown_events_counter = meter
+            .u64_observable_counter("indexer_unknown_events")
+            .with_description(
+                "Decoded rows that matched no projector arm. Unknown marks the row processed and never retries it, so a rising count means events are being dropped for good — a new contract event without an arm, or an arm removed while its type still arrives. Distinct from indexer_decode_errors (the body failed to decode) and indexer_decode_ambiguous_collisions (a shared id with no dst route): those rows keep their payload and stay replayable, these do not",
+            )
+            .with_callback(move |observer| {
+                observer.observe(unknown_events_cache.load(Ordering::Relaxed), &[]);
             })
             .build();
 
@@ -283,10 +303,11 @@ impl IndexerMetrics {
         let open_cache = Arc::clone(&inference_orders_open);
         let filled_cache = Arc::clone(&inference_orders_filled);
         let cancelled_cache = Arc::clone(&inference_orders_cancelled);
+        let expired_cache = Arc::clone(&inference_orders_expired);
         let inference_orders_gauge = meter
             .u64_observable_gauge("indexer_inference_orders")
             .with_description(
-                "Resting inference orders by status: open (live depth), filled, cancelled",
+                "Resting inference orders by status: open (live depth), filled, cancelled, expired",
             )
             .with_callback(move |observer| {
                 observer.observe(
@@ -300,6 +321,10 @@ impl IndexerMetrics {
                 observer.observe(
                     cancelled_cache.load(Ordering::Relaxed),
                     &[KeyValue::new("status", "cancelled")],
+                );
+                observer.observe(
+                    expired_cache.load(Ordering::Relaxed),
+                    &[KeyValue::new("status", "expired")],
                 );
             })
             .build();
@@ -337,6 +362,17 @@ impl IndexerMetrics {
             })
             .build();
 
+        let metrics_refresh_passes_cache = Arc::clone(&metrics_refresh_passes);
+        let metrics_refresh_passes_counter = meter
+            .u64_observable_counter("indexer_metrics_refresh_passes")
+            .with_description(
+                "Completed passes of the metrics refresh loop. A counter that stops growing is the only signal a dead refresh task gives: a panicked task freezes every gauge it feeds AND stops indexer_metrics_refresh_failures, so the failure counter cannot report its own death. Alert on the absence of growth, not on a value",
+            )
+            .with_callback(move |observer| {
+                observer.observe(metrics_refresh_passes_cache.load(Ordering::Relaxed), &[]);
+            })
+            .build();
+
         Self {
             orders_created,
             orders_partially_filled,
@@ -348,6 +384,7 @@ impl IndexerMetrics {
             projection_fallbacks,
             inference_orphans_dropped,
             decode_errors,
+            unknown_events,
             decode_ambiguous_collisions,
             inference_markets_discovering,
             inference_markets_visible,
@@ -357,9 +394,11 @@ impl IndexerMetrics {
             inference_orders_open,
             inference_orders_filled,
             inference_orders_cancelled,
+            inference_orders_expired,
             inference_reconcile_failures,
             inference_wedged_books,
             metrics_refresh_failures,
+            metrics_refresh_passes,
             _orders_created_counter: orders_created_counter,
             _orders_partially_filled_counter: orders_partially_filled_counter,
             _projection_backlog_gauge: projection_backlog_gauge,
@@ -369,6 +408,7 @@ impl IndexerMetrics {
             _projection_fallbacks_counter: projection_fallbacks_counter,
             _inference_orphans_dropped_counter: inference_orphans_dropped_counter,
             _decode_errors_counter: decode_errors_counter,
+            _unknown_events_counter: unknown_events_counter,
             _decode_ambiguous_collisions_counter: decode_ambiguous_collisions_counter,
             _inference_markets_gauge: inference_markets_gauge,
             _inference_reference_price_lag_gauge: inference_reference_price_lag_gauge,
@@ -377,6 +417,7 @@ impl IndexerMetrics {
             _inference_reconcile_failures_counter: inference_reconcile_failures_counter,
             _inference_wedged_books_gauge: inference_wedged_books_gauge,
             _metrics_refresh_failures_counter: metrics_refresh_failures_counter,
+            _metrics_refresh_passes_counter: metrics_refresh_passes_counter,
         }
     }
 
@@ -430,6 +471,12 @@ impl IndexerMetrics {
         self.decode_errors.store(value, Ordering::Relaxed);
     }
 
+    /// Set the cumulative value reported by `indexer_unknown_events` — the running
+    /// total of decoded rows dropped by the projector's `Unknown` arm.
+    pub fn set_unknown_events(&self, value: u64) {
+        self.unknown_events.store(value, Ordering::Relaxed);
+    }
+
     /// Set the cumulative value reported by `indexer_decode_ambiguous_collisions`
     /// — bodies left undecoded due to a colliding event id with no dst route.
     pub fn set_decode_ambiguous_collisions(&self, value: u64) {
@@ -456,10 +503,11 @@ impl IndexerMetrics {
 
     /// Set the values reported by `indexer_inference_orders` — the count of
     /// resting inference orders in each status.
-    pub fn set_inference_order_counts(&self, open: u64, filled: u64, cancelled: u64) {
+    pub fn set_inference_order_counts(&self, open: u64, filled: u64, cancelled: u64, expired: u64) {
         self.inference_orders_open.store(open, Ordering::Relaxed);
         self.inference_orders_filled.store(filled, Ordering::Relaxed);
         self.inference_orders_cancelled.store(cancelled, Ordering::Relaxed);
+        self.inference_orders_expired.store(expired, Ordering::Relaxed);
     }
 
     /// Set the cumulative value reported by `indexer_inference_reconcile_failures`.
@@ -473,12 +521,122 @@ impl IndexerMetrics {
         self.inference_wedged_books.store(value, Ordering::Relaxed);
     }
 
+    /// Increment the cumulative value reported by `indexer_metrics_refresh_passes`.
+    /// Called at the END of a refresh pass, so what it counts is a pass that
+    /// reached the end. A panic anywhere in the pass leaves it flat, which is
+    /// exactly the signal: the failure counter cannot report its own task's death.
+    pub fn inc_metrics_refresh_passes(&self) {
+        self.metrics_refresh_passes.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Increment the cumulative value reported by `indexer_metrics_refresh_failures`.
     /// Called by the metrics-refresh loop itself on every failed DB query so a
     /// DB outage that freezes the other gauges (skipped `set_` on `Err`) still
     /// shows up as a rising counter rather than reading as healthy.
     pub fn inc_metrics_refresh_failures(&self) {
         self.metrics_refresh_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Test-only snapshot getters: plain atomic reads of the caches the indexer's
+    // refresh tests assert on (its sentinels are unreadable from another crate
+    // otherwise). NOT every cache — seven have no getter because nothing asserts
+    // on them yet: the two pool gauges, `projection_fallbacks`, `decode_errors`,
+    // `decode_ambiguous_collisions`, `inference_orphans_dropped` and
+    // `inference_reconcile_failures`. Of the thirteen that exist, ten mirror the
+    // eight fallible DB-backed sections (two sections fill two caches each); the
+    // other three are not DB-backed at all — `metrics_refresh_failures_count` is
+    // the loop's own error counter, `metrics_refresh_passes_count` its heartbeat,
+    // and `unknown_events_value` an in-process count the loop only copies across.
+    // Same precedent as `IndexerRepository::decode_errors_count`: `#[doc(hidden)]`,
+    // no features or cfg bridges. Tuple getters mirror the tuple setters.
+
+    #[doc(hidden)]
+    pub fn orders_created_value(&self) -> u64 {
+        self.orders_created.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn orders_partially_filled_value(&self) -> u64 {
+        self.orders_partially_filled.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn projection_backlog_value(&self) -> u64 {
+        self.projection_backlog.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn projection_lag_seconds_value(&self) -> u64 {
+        self.projection_lag_seconds.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn capture_cursor_age_seconds_value(&self) -> u64 {
+        self.capture_cursor_age_seconds.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn inference_market_states_value(&self) -> (u64, u64, u64) {
+        (
+            self.inference_markets_discovering.load(Ordering::Relaxed),
+            self.inference_markets_visible.load(Ordering::Relaxed),
+            self.inference_markets_failing.load(Ordering::Relaxed),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn inference_reference_price_lag_seconds_value(&self) -> u64 {
+        self.inference_reference_price_lag_seconds.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn inference_sweep_lag_seconds_value(&self) -> u64 {
+        self.inference_sweep_lag_seconds.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn inference_order_counts_value(&self) -> (u64, u64, u64, u64) {
+        (
+            self.inference_orders_open.load(Ordering::Relaxed),
+            self.inference_orders_filled.load(Ordering::Relaxed),
+            self.inference_orders_cancelled.load(Ordering::Relaxed),
+            self.inference_orders_expired.load(Ordering::Relaxed),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn inference_wedged_books_value(&self) -> u64 {
+        self.inference_wedged_books.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn unknown_events_value(&self) -> u64 {
+        self.unknown_events.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn metrics_refresh_passes_count(&self) -> u64 {
+        self.metrics_refresh_passes.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn metrics_refresh_failures_count(&self) -> u64 {
+        self.metrics_refresh_failures.load(Ordering::Relaxed)
+    }
+
+    /// Test-only factory: an `IndexerMetrics` on a reader-less in-memory
+    /// provider ("exports nowhere", the same shape as the in-crate setter
+    /// test). Exists because a dependent crate's test (the indexer's
+    /// refresh-failure test) has no opentelemetry dependency to build a
+    /// `Meter` with, and `init()` without an OTLP endpoint returns `None`.
+    /// The provider is returned as owner — dropping it kills the instruments,
+    /// so hold it for the metrics' lifetime.
+    #[doc(hidden)]
+    pub fn new_in_memory_for_tests() -> (SdkMeterProvider, IndexerMetrics) {
+        let provider = SdkMeterProvider::builder().build();
+        let meter = provider.meter("dodex-metrics-test");
+        let metrics = IndexerMetrics::new(&meter);
+        (provider, metrics)
     }
 }
 
@@ -566,7 +724,11 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::data::Gauge;
+    use opentelemetry_sdk::metrics::PeriodicReader;
     use opentelemetry_sdk::metrics::SdkMeterProvider;
+    use opentelemetry_sdk::runtime;
+    use opentelemetry_sdk::testing::metrics::InMemoryMetricExporter;
 
     use super::select_endpoint;
     use super::IndexerMetrics;
@@ -653,7 +815,7 @@ mod tests {
         metrics.set_inference_market_states(11, 22, 33);
         metrics.set_inference_reference_price_lag_seconds(444);
         metrics.set_inference_sweep_lag_seconds(555);
-        metrics.set_inference_order_counts(60, 70, 80);
+        metrics.set_inference_order_counts(60, 70, 80, 90);
         metrics.set_inference_reconcile_failures(99);
         metrics.set_inference_wedged_books(13);
         for _ in 0..5 {
@@ -679,8 +841,64 @@ mod tests {
         assert_eq!(metrics.inference_orders_open.load(Ordering::Relaxed), 60);
         assert_eq!(metrics.inference_orders_filled.load(Ordering::Relaxed), 70);
         assert_eq!(metrics.inference_orders_cancelled.load(Ordering::Relaxed), 80);
+        assert_eq!(metrics.inference_orders_expired.load(Ordering::Relaxed), 90);
         assert_eq!(metrics.inference_reconcile_failures.load(Ordering::Relaxed), 99);
         assert_eq!(metrics.inference_wedged_books.load(Ordering::Relaxed), 13);
         assert_eq!(metrics.metrics_refresh_failures.load(Ordering::Relaxed), 5);
+    }
+
+    // `setters_update_cached_values` above reads the private atomic caches
+    // directly, so it stays green even if the gauge callback forgot to call
+    // `observer.observe(..., "expired")` — the cache would still hold 40, but
+    // the exported series would silently drop the fourth data point. This
+    // test builds a real reader so the callback actually runs, and asserts on
+    // what the OTLP export path produces.
+    // `PeriodicReader::builder(_, runtime::Tokio)` spawns its background export
+    // task via `tokio::spawn` and `force_flush` blocks the calling thread on a
+    // reply from that task. On a current-thread runtime (the `#[tokio::test]`
+    // default) that spawned task can never run while the calling thread is
+    // parked in `force_flush`, so the flush — and the test — hangs forever;
+    // `flavor = "multi_thread"` gives the spawned task its own thread.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exported_series_carries_all_four_status_buckets() {
+        let exporter = InMemoryMetricExporter::default();
+        let reader = PeriodicReader::builder(exporter.clone(), runtime::Tokio).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("test");
+        let metrics = IndexerMetrics::new(&meter);
+
+        metrics.set_inference_order_counts(10, 20, 30, 40);
+        provider.force_flush().expect("force flush");
+
+        let resource_metrics = exporter.get_finished_metrics().expect("finished metrics");
+        let metric = resource_metrics
+            .iter()
+            .flat_map(|rm| rm.scope_metrics.iter())
+            .flat_map(|sm| sm.metrics.iter())
+            .find(|m| m.name == "indexer_inference_orders")
+            .expect("indexer_inference_orders was exported");
+        let gauge = metric
+            .data
+            .as_any()
+            .downcast_ref::<Gauge<u64>>()
+            .expect("indexer_inference_orders is a gauge");
+        assert_eq!(gauge.data_points.len(), 4, "one data point per status bucket");
+
+        let value_for = |status: &str| {
+            gauge
+                .data_points
+                .iter()
+                .find(|dp| {
+                    dp.attributes
+                        .iter()
+                        .any(|kv| kv.key.as_str() == "status" && kv.value.as_str() == status)
+                })
+                .unwrap_or_else(|| panic!("no data point for status={status}"))
+                .value
+        };
+        assert_eq!(value_for("open"), 10);
+        assert_eq!(value_for("filled"), 20);
+        assert_eq!(value_for("cancelled"), 30);
+        assert_eq!(value_for("expired"), 40);
     }
 }

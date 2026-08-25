@@ -21,11 +21,12 @@ set -euo pipefail
 # placed straight from source; airegistry: the 5 AI-inference contracts.
 #
 # The compiler is chosen per CONTRACT, not per directory: RootPN and
-# exchange/USDCBridge are built with 0.80.0, everything else here (plus
+# exchange/eccUSDCBridge (named exchange/USDCBridge before acki-nacki's
+# 2026-08 rename) are built with 0.80.0, everything else here (plus
 # exchange/DepositVoucher) with 0.81.0. Both exchange contracts are outside
 # this list on purpose — this script never rebuilds them, so their committed
 # artifacts survive untouched and the version split cannot be got wrong.
-# Anyone extending the lists below to cover exchange/ must build USDCBridge
+# Anyone extending the lists below to cover exchange/ must build eccUSDCBridge
 # with $SOLD_OLD: the zerostate generator loads its code unconditionally, so
 # a wrong-compiler build lands in every zerostate with nothing to flag it.
 DEX13=(PrivateNote RootPN PMP OrderBook Nullifier RootOracle Oracle OracleEventList)
@@ -74,6 +75,18 @@ for c in "${DEX13[@]}" "${AIR5[@]}"; do
 done
 
 echo "==> [4/5] clean replacement of the versioned paths + allowlist"
+# Content, not just names: a stray `cp` overwriting an exchange artifact is as
+# much a violation of "must not touch exchange/" as deleting one.
+exchange_state() {
+  find "$BUILD_DIR/contracts/0.80.0_compiled/exchange" \
+       "$BUILD_DIR/contracts/0.81.0_compiled/exchange" \
+       -type f 2>/dev/null | sort | xargs -r md5sum
+}
+ex_before=$(exchange_state)
+# An empty listing would make the comparison below pass by saying nothing. The
+# generator loads these unconditionally, so "there are none" is itself a fault.
+[ -n "$ex_before" ] \
+  || { echo "FATAL: no artifacts under either exchange/ tree — the generator loads them unconditionally"; exit 1; }
 D080="$BUILD_DIR/contracts/0.80.0_compiled/dex"; D081="$BUILD_DIR/contracts/0.81.0_compiled"
 rm -rf "$D080" "$D081/dex" "$D081/airegistry"; mkdir -p "$D080" "$D081/dex" "$D081/airegistry"
 cp "$STAGE/RootPN.tvc" "$STAGE/RootPN.abi.json" "$D080/"
@@ -86,13 +99,26 @@ for c in "${AIR5[@]}";  do cp "$STAGE/$c.tvc" "$STAGE/$c.abi.json" "$D081/airegi
 # perfectly staged run over an artifact this script has no business judging.
 n_tvc=$(find "$D080" "$D081/dex" "$D081/airegistry" -name '*.tvc' | wc -l)
 [ "$n_tvc" -eq 13 ] || { echo "FATAL: staged paths hold $n_tvc tvc files, expected 13"; exit 1; }
-# The one artifact outside those three directories that the generator still
-# loads unconditionally, and the only other 0.80.0 contract. This script has
-# no business rebuilding it -- but `rm -rf` on a sibling path is one typo away
-# from taking it out, and its absence would surface as a generator failure
-# well downstream of the cause.
-test -f "$BUILD_DIR/contracts/0.80.0_compiled/exchange/USDCBridge.tvc" \
-  || { echo "FATAL: exchange/USDCBridge.tvc is gone from the 0.80.0 tree — this script must not touch exchange/"; exit 1; }
+# The tripwire for "this script must not touch exchange/". Those trees hold
+# artifacts the generator loads unconditionally and that this script has no
+# business rebuilding -- but `rm -rf` on a sibling path is one typo away from
+# taking them out, and their absence surfaces as a generator failure well
+# downstream of the cause.
+#
+# It compares the trees against themselves, captured before the replacement
+# above, rather than testing for a file by name. It used to do the latter --
+# `test -f exchange/USDCBridge.tvc` -- and when acki-nacki renamed that artifact
+# to `eccUSDCBridge.tvc`, the tripwire fired on a run where nothing whatsoever
+# was wrong and took the whole of pipeline #305 down with it, 99 seconds in. A
+# before/after listing states the claim this check is actually making, catches
+# a modified file as well as a missing one, and cannot be invalidated by a
+# rename upstream.
+ex_after=$(exchange_state)
+if [ "$ex_before" != "$ex_after" ]; then
+  echo "FATAL: the exchange/ trees changed across staging — this script must not touch exchange/"
+  diff <(printf '%s\n' "$ex_before") <(printf '%s\n' "$ex_after") || true
+  exit 1
+fi
 
 echo "==> [5/5] manifest from the staged artifacts"
 # Same tvm-cli binary the pin cascade above was pinned to (not whatever

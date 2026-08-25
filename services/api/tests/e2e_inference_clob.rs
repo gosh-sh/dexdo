@@ -1,11 +1,25 @@
 // End-to-end CLOB-coverage smoke for the AI Registry inference market against a
-// real shellnet, driven through `dodex_chain::Dex` (no DB, no HTTP). Fast (no
-// timed windows) — complements `e2e_inference_match` / `e2e_inference_stream`.
+// real shellnet, driven through `dodex_chain::Dex`, with a read-model phase
+// over the production router (`common::setup()`) added to the partial-fill
+// flow. Fast (no timed windows) — complements `e2e_inference_match`. There is
+// no `e2e_inference_stream` binary: no inference scenario opens a stream yet —
+// that is wave 5's subject.
+//
+// The chain phases assert what the BOOK holds; the read phase in the
+// partial-fill flow asserts that the match reached the read model and the
+// public API — a different claim, since a getter can be right while
+// projection is broken. It runs only where E2E_READ_MODEL=1 (an indexer is
+// filling the read model) AND TEST_DATABASE_URL is reachable: unset
+// E2E_READ_MODEL skips it with a printed reason, set with no database is a
+// failure rather than a skip. Its failures join `failures` like every other
+// check here — nothing in it may panic before `cleanup` clears the resting
+// orders.
 //
 // Two independent flows (self-trade — one note plays every role):
 //   * partial fill — a 2-tick SELL offer is crossed by a 4-tick limit BUY: the
 //     match funds the TokenContract for 2 ticks and the BUY rests with 2 ticks
-//     left. Also reads getBestBidAsk / getWeeklyMedianPrice.
+//     left. Also reads getBestBidAsk / getWeeklyMedianPrice, and a read-model
+//     phase confirms the trade reached the tape and the taker's resting leg.
 //   * Filled event — a match emits a `Filled` ext-out event; it is fetched and
 //     decoded through the airegistry event wrapper and its payload asserted.
 //
@@ -28,6 +42,13 @@ use common::airegistry::wait_sell_offer_rested;
 use common::airegistry::TokenDeal;
 use common::e2e_setup::model_hash_dec;
 use common::e2e_setup::network_endpoint;
+use common::read_model::api;
+use common::read_model::get_json;
+use common::read_model::poll_read_with;
+use common::read_model::read_phases_enabled;
+use common::read_model::GetOutcome;
+use common::read_model::Probe;
+use common::read_model::ReadBudget;
 use common::test_pns::TestPnPool;
 use dodex_chain::Dex;
 use dodex_contracts::airegistry::inference_order_book_events::InferenceOrderBookEvent;
@@ -55,7 +76,17 @@ const ERR_NO_LIQUIDITY: u32 = 334;
 fn note_and_signer() -> (common::test_pns::TestPn, KeyPair) {
     let note = {
         let p = TestPnPool::load_inference();
-        p.notes[9 % p.notes.len()].clone()
+        // 13, not 9: `e2e_inference` takes 9 out of the same `PN-INF` pool, so
+        // the two binaries were drawing the same note. That was never a bug
+        // while both sat in the `serial-e2e-shared` group — a note serialises
+        // its own operations through `_busy`, so sharing cost latency, not
+        // correctness. It becomes one the moment either leaves the group, and
+        // the stand now runs four tests at a time (`--test-threads 4` in
+        // acki-nacki's `tests/dexdo/e2e-on-host.sh`), which makes the group the
+        // only thing standing between them. Distinct notes are cheaper than
+        // that dependency: the pool has the rows, and the index map lives in
+        // `pn_pool_split.rs`.
+        p.notes[13 % p.notes.len()].clone()
     };
     let keys = KeyPair {
         public: note.owner_public_key_hex.clone(),
@@ -120,6 +151,45 @@ async fn inference_partial_fill_leaves_remainder() {
     let dex = Dex::from_endpoints(vec![network_endpoint()]).expect("Dex");
     let model_name = unique_model_name("e2e-clob-partial");
     let mut failures: Vec<String> = Vec::new();
+
+    // Router for the read-model phase. `None` does not exit the test: this
+    // flow already collects into `failures` and always reaches `cleanup`
+    // further down — an early `return` here would skip both the cleanup and
+    // any chain-phase failures collected later.
+    // Two conditions, not one: a reachable database AND an indexer filling it.
+    // See `read_model::read_phases_enabled` — the shellnet lane sets
+    // TEST_DATABASE_URL for a Postgres nobody writes to, and running the read phase
+    // there burns the whole budget proving the lane has no indexer.
+    // An opt-in that cannot be honoured is a FAILURE, not a skip. Being told to run
+    // the read phase and finding no database means the one lane that can check the
+    // read model did not check it — and a printed line on a green run is exactly
+    // how that goes unnoticed. Not set at all is the ordinary case and stays quiet.
+    let read: Option<std::sync::Arc<salvo::Service>> = if read_phases_enabled() {
+        let service = common::setup().await.map(|(s, _pool, _kek, _pn)| std::sync::Arc::new(s));
+        if service.is_none() {
+            failures.push(
+                "E2E_READ_MODEL asks for the read phase, but common::setup() found no database \
+                 (TEST_DATABASE_URL unset, empty, or unreachable). This is the only lane that \
+                 runs an indexer, so skipping here leaves the read model unchecked on the one \
+                 run that could check it"
+                    .to_string(),
+            );
+        }
+        service
+    } else {
+        eprintln!(
+            "[e2e_clob] read phase skipped: E2E_READ_MODEL is not set, so no indexer is filling \
+             the read model on this lane"
+        );
+        None
+    };
+    if read.is_none() {
+        eprintln!(
+            "[e2e_clob] read phase skipped: needs E2E_READ_MODEL=1 (an indexer is filling \
+             the read model) and TEST_DATABASE_URL"
+        );
+    }
+    let budget = ReadBudget::start();
 
     let (ob, model_hash) = deploy_book(&dex, &note.address, &model_name, signer()).await;
     let nonce = unique_nonce();
@@ -227,6 +297,128 @@ async fn inference_partial_fill_leaves_remainder() {
             eprintln!("[e2e_clob] weeklyMedianPrice: dry book (ERR_NO_LIQUIDITY), as expected")
         }
         Err(err) => failures.push(format!("getWeeklyMedianPrice: {err:?}")),
+    }
+
+    // ---- read model: the match arrived ----
+    //
+    // IX-SEQ-03. Nothing here claims the two sides of the trade are different
+    // parties: the traffic is a self-trade — `seller_note == buyer_note` by
+    // construction (see the file header). Such a claim would also pass if one
+    // leg were simply copied into both columns. What self-trade does NOT rule
+    // out is asserted instead: the trade landed on the tape with the right
+    // direction, and the TAKER leg moved — 4 placed, 2 filled, 2 still resting.
+    // The maker leg is deliberately not re-read from `/orders`: it is the same
+    // note under a self-trade, so its row would add no independent fact here.
+    if let Some(service) = read.as_ref() {
+        let trades = poll_read_with("IX-SEQ-03 trade in /trades", budget.left(), || {
+            let service = std::sync::Arc::clone(service);
+            let ob = ob.clone();
+            async move {
+                let url = api(&format!("trades?inferenceOrderBookAddress={ob}"));
+                match get_json(&service, &url).await {
+                    GetOutcome::Retry(why) => Probe::Pending(why),
+                    GetOutcome::Fatal(why) => Probe::Fatal(why),
+                    // The tape is a BARE array, not an envelope (`inference.rs:511`).
+                    GetOutcome::Ok(body) => match body.as_array() {
+                        Some(a) if !a.is_empty() => Probe::Ready(a.clone()),
+                        _ => Probe::Pending("tape still empty".into()),
+                    },
+                }
+            }
+        })
+        .await;
+
+        match trades {
+            Err(why) => failures.push(why),
+            Ok(tape) => {
+                if tape.len() != 1 {
+                    failures.push(format!("one match — one tape row, got {}", tape.len()));
+                }
+                // Safe by construction: `Probe::Ready` above only fires on a
+                // non-empty array, so `tape` always has at least one element.
+                let t = &tape[0];
+                // Trade volume is the CROSS (2 ticks), not either leg's own
+                // size (the SELL was 2, the BUY was 4).
+                if t["qty"].as_str() != Some("2") {
+                    failures.push(format!("qty: want 2 (the cross), got {}", t["qty"]));
+                }
+                // Direction. `isBuyerMaker` is NOT "the taker's side" — it
+                // records whose order was already resting in the book. Here
+                // the SELL offer rests first and the limit BUY crosses it, so
+                // the maker was the seller ⇒ false. Assert the concrete
+                // value, not merely that the field is present: the latter
+                // would also pass under an inverted value.
+                //
+                // If a closer read of the scenario ever shows the opposite,
+                // CHANGE THE ASSERT to match that reading — do not tune it to
+                // whatever the first green run happens to produce. The
+                // authority for the value is the trade projector, not this
+                // phase.
+                if t["isBuyerMaker"].as_bool() != Some(false) {
+                    failures.push(format!(
+                        "isBuyerMaker: the maker was the SELL offer, want false, got {}",
+                        t["isBuyerMaker"]
+                    ));
+                }
+            }
+        }
+
+        // The taker leg: its BUY rests with 2 ticks left out of the original 4.
+        // The maker leg is not re-read — see the phase comment above.
+        // `buy_id` is an `Option`: the chain phase above leaves
+        // it `None` when the match never funded the TokenContract, and that
+        // failure is already recorded there. There is nothing to duplicate,
+        // so this phase simply does not run.
+        if let Some(id) = buy_id {
+            let want_id = id.to_string();
+            let orders = poll_read_with("IX-SEQ-03 taker leg in /orders", budget.left(), || {
+                let service = std::sync::Arc::clone(service);
+                let ob = ob.clone();
+                let want = want_id.clone();
+                async move {
+                    let url = api(&format!("orders?inferenceOrderBookAddress={ob}"));
+                    match get_json(&service, &url).await {
+                        GetOutcome::Retry(why) => Probe::Pending(why),
+                        GetOutcome::Fatal(why) => Probe::Fatal(why),
+                        GetOutcome::Ok(body) => {
+                            let found = body["orders"]
+                                .as_array()
+                                .and_then(|a| {
+                                    a.iter().find(|o| o["orderId"].as_str() == Some(want.as_str()))
+                                })
+                                .cloned();
+                            match found {
+                                Some(o) => Probe::Ready(o),
+                                None => Probe::Pending(format!("BUY {want} not yet in /orders")),
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+
+            match orders {
+                Err(why) => failures.push(why),
+                Ok(o) => {
+                    // Two separate QUANTITIES, not one: the original size and
+                    // the remainder. Here they differ (4 and 2), and that is
+                    // the only thing that tells "2 filled" apart from "2
+                    // remaining" — numerically the two read the same.
+                    if o["ticksInitial"].as_str() != Some("4") {
+                        failures.push(format!("ticksInitial: want 4, got {}", o["ticksInitial"]));
+                    }
+                    if o["ticks"].as_str() != Some("2") {
+                        failures.push(format!("ticks (remainder): want 2, got {}", o["ticks"]));
+                    }
+                    if o["status"].as_str() != Some("LIVE") {
+                        failures.push(format!(
+                            "the taker's remainder must still be resting, status {}",
+                            o["status"]
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     cleanup(&dex, &note.address, &model_hash, &keys).await;

@@ -8,17 +8,29 @@
 // The orderbook_address + seller_note link is filled by the
 // InferenceOrderBook.Filled handler (the only event carrying sellerTC +
 // buyerNote together).
+//
+// SINCE 2026-08-24 THE TokenContract.* HALF OF THIS MODULE HAS NO LIVE INPUT.
+// Ingest scopes capture to a `dst` allow-list (`config::SCOPED_EVENT_IDS`) that
+// excludes every TokenContract route, so those handlers run only when retained
+// rows are replayed. `project_deal_closed_from_note` below is the exception and
+// the reason this module still writes on the live path: it is fed by
+// `PrivateNote.InferenceDealClosed`, which IS captured.
 
 use anyhow::Context;
+use dodex_contracts::airegistry::token_contract_events::StreamFundedData;
+use dodex_contracts::airegistry::token_contract_events::StreamOpenedData;
+use dodex_contracts::airegistry::token_contract_events::TickFinalizedData;
+use dodex_contracts::airegistry::token_contract_events::TicksClaimedData;
+use dodex_contracts::airegistry::token_contract_events::TokenContractEvent;
+use dodex_contracts::dex::private_note_events::InferenceDealClosedData;
 use sqlx::Postgres;
 use sqlx::Transaction;
+use tracing::warn;
 
 use crate::decoder::DecodedEvent;
 use crate::graphql::EventNode;
 use crate::indexer_repo::parse_unix_seconds;
-use crate::projectors::field_str;
 use crate::projectors::node_chain_order;
-use crate::projectors::uint_field_to_decimal;
 use crate::projectors::ProjectionOutcome;
 
 pub async fn project_token_contract_event(
@@ -33,27 +45,37 @@ pub async fn project_token_contract_event(
 
     let suffix =
         event.event_type.strip_prefix("TokenContract.").unwrap_or(event.event_type.as_str());
-    match suffix {
-        "ContractDeployed" => Ok(ProjectionOutcome::Applied), // skeleton only
-        "StreamFunded" => apply_stream_funded(tx, event, node).await,
-        "StreamOpened" => apply_stream_opened(tx, event, node).await,
-        "TickFinalized" => apply_tick_finalized(tx, event, node).await,
-        "TicksClaimed" => apply_ticks_claimed(tx, event, node).await,
-        "StreamStopped" => apply_close(tx, node, "STOPPED", true).await,
-        "DisputeResolved" => apply_close(tx, node, "DISPUTE_RESOLVED", false).await,
-        "StreamReclaimed" => apply_close(tx, node, "RECLAIMED", false).await,
-        "ContractDestroyed" => apply_terminal_close(tx, node, "DESTROYED").await,
-        "StreamDisputed" => apply_disputed(tx, node).await,
-        "ProbeBurned" => apply_terminal_close(tx, node, "PROBE_BURNED").await,
+    // Route by the enum VARIANT, not by a string literal: the variant is pinned to
+    // the ABI (`token_contract_enum_covers_every_abi_event`), so an arm naming an
+    // event that does not exist stops being expressible — that is how
+    // `StreamReclaimed` lived on as a dead arm. The `match` is exhaustive WITHOUT
+    // `_`: a new variant will not compile until someone assigns it an outcome.
+    use TokenContractEvent as E;
+    let Some(kind) = E::ALL.iter().copied().find(|v| format!("{v:?}") == suffix) else {
+        return Ok(ProjectionOutcome::Unknown);
+    };
+    match kind {
+        E::ContractDeployed => Ok(ProjectionOutcome::Applied), // skeleton only
+        E::StreamFunded => apply_stream_funded(tx, event, node).await,
+        E::StreamOpened => apply_stream_opened(tx, event, node).await,
+        E::TickFinalized => apply_tick_finalized(tx, event, node).await,
+        E::TicksClaimed => apply_ticks_claimed(tx, event, node).await,
+        E::StreamStopped => apply_close(tx, node, "STOPPED", true).await,
+        E::DisputeResolved => apply_close(tx, node, "DISPUTE_RESOLVED", false).await,
+        E::ContractDestroyed => apply_terminal_close(tx, node, "DESTROYED").await,
+        E::StreamDisputed => apply_disputed(tx, node).await,
+        E::ProbeBurned => apply_terminal_close(tx, node, "PROBE_BURNED").await,
         // Seller bond / probe accept / withdrawal carry no deal-level state the
         // SETTLEMENT read-model needs; the skeleton seed already recorded the deal.
         // `BuyerBondFunded` is the counterpart of `SellerBondFunded` — v4.0.35 made
         // the bond two-sided — and belongs here for the same reason. `EndpointSet`
         // carries the buyer's endpoint as ciphertext only the two parties can read, so
         // there is nothing in it a read model could serve.
-        "SellerBondFunded" | "BuyerBondFunded" | "ProbeAccepted" | "ShellWithdrawn"
-        | "EndpointSet" => Ok(ProjectionOutcome::Applied),
-        _ => Ok(ProjectionOutcome::Unknown),
+        E::SellerBondFunded
+        | E::BuyerBondFunded
+        | E::ProbeAccepted
+        | E::ShellWithdrawn
+        | E::EndpointSet => Ok(ProjectionOutcome::Applied),
     }
 }
 
@@ -80,8 +102,11 @@ async fn apply_stream_funded(
     node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let tc = node.src.as_deref().context("StreamFunded: src missing")?;
-    let buyer = field_str(&event.value, "buyer")?;
-    let deposit = uint_field_to_decimal(&event.value, "deposit")?;
+    // Exhaustive destructuring: every ABI field must be named.
+    let StreamFundedData { buyer, deposit } = serde_json::from_value(event.value.clone())
+        .context("StreamFunded: payload does not parse against the ABI")?;
+    let buyer = buyer.as_str();
+    let deposit = deposit.to_string();
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     sqlx::query(
         r#"update inference_deals
@@ -107,8 +132,10 @@ async fn apply_stream_opened(
     node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let tc = node.src.as_deref().context("StreamOpened: src missing")?;
-    let buyer = field_str(&event.value, "buyer")?;
-    let ppt = uint_field_to_decimal(&event.value, "pricePerTick")?;
+    let StreamOpenedData { buyer, price_per_tick } = serde_json::from_value(event.value.clone())
+        .context("StreamOpened: payload does not parse against the ABI")?;
+    let buyer = buyer.as_str();
+    let ppt = price_per_tick.to_string();
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     sqlx::query(
         r#"update inference_deals
@@ -143,8 +170,10 @@ async fn apply_ticks_claimed(
     node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let tc = node.src.as_deref().context("TicksClaimed: src missing")?;
-    let trusted = uint_field_to_decimal(&event.value, "trusted")?;
-    let claimed = uint_field_to_decimal(&event.value, "claimed")?;
+    let TicksClaimedData { trusted, claimed } = serde_json::from_value(event.value.clone())
+        .context("TicksClaimed: payload does not parse against the ABI")?;
+    let trusted = trusted.to_string();
+    let claimed = claimed.to_string();
     let chain_order = node_chain_order(node, "TicksClaimed")?;
 
     sqlx::query(
@@ -172,8 +201,10 @@ async fn apply_tick_finalized(
     node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let tc = node.src.as_deref().context("TickFinalized: src missing")?;
-    let finalized_owed = uint_field_to_decimal(&event.value, "finalizedOwed")?;
-    let deposit = uint_field_to_decimal(&event.value, "deposit")?;
+    let TickFinalizedData { finalized_owed, deposit } = serde_json::from_value(event.value.clone())
+        .context("TickFinalized: payload does not parse against the ABI")?;
+    let finalized_owed = finalized_owed.to_string();
+    let deposit = deposit.to_string();
     let chain_order = node_chain_order(node, "TickFinalized")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
 
@@ -208,6 +239,85 @@ async fn apply_tick_finalized(
         .await
         .context("bump inference_deals finalized_ticks")?;
     }
+    Ok(ProjectionOutcome::Applied)
+}
+
+/// `PrivateNote.InferenceDealClosed` — the only live signal that a deal ended.
+///
+/// WHY THIS EXISTS AT ALL. `settled_at_chain` used to come from the deal's own
+/// close events (`StreamStopped` / `DisputeResolved` / `ContractDestroyed` /
+/// `ProbeBurned`). Ingest no longer captures any TokenContract route, so all four
+/// stopped arriving and every deal read as never settled — including for
+/// `dodex-points-rewards`, which asks exactly `settled_at_chain is not null`
+/// (see `tests/rewards_query_compat.rs`).
+///
+/// WHY IT IS COMPLETE FOR ITS ONE FACT. `TokenContract._die` is the single funnel
+/// every close path ends in (`TokenContract.sol:459-467`): it calls
+/// `onDealClosed` on BOTH notes, then emits `ContractDestroyed` and
+/// self-destructs. The note drops the deal from `_liveDeals` and emits this. So
+/// no close can happen without it, whatever branch produced the close.
+///
+/// THE ADDRESS IS IN THE PAYLOAD, NOT IN `src`. Every other handler in this file
+/// keys on `node.src`, because there the emitter IS the deal. Here the emitter is
+/// the NOTE and the deal is the payload's only field. Keying on `src` would stamp
+/// the settlement onto a row named after a party.
+///
+/// FIRES TWICE PER DEAL — once from the buyer's note, once from the seller's.
+/// Both writes are the same fact, so `coalesce` keeps the first and the second is
+/// a no-op; the same property makes it idempotent under replay.
+///
+/// WHAT IT DELIBERATELY DOES NOT WRITE: `close_kind` and `clean_settlement`. This
+/// event says THAT the deal closed, never HOW. The surrounding signals cannot
+/// settle it either — telling `STOPPED` from `PROBE_BURNED` from
+/// `DISPUTE_RESOLVED` from `cleanupUnopened` would mean reading the shape of the
+/// `DealCredited` payments plus the presence of `RootPN.DealWriteOffReported`,
+/// and those patterns overlap and depend on amounts. `DealCredited` also lost the
+/// earmark parameter in v4.0.33. A guess here would be indistinguishable from a
+/// fact to every reader downstream, so the columns stay NULL until the chain
+/// names the branch.
+pub async fn project_deal_closed_from_note(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let InferenceDealClosedData { deal } = serde_json::from_value(event.value.clone())
+        .context("InferenceDealClosed: payload does not parse against the ABI")?;
+    // A zero address is not a deal. The note only emits inside
+    // `if (_liveDeals.exists(msg.sender))`, so this cannot occur on the live path
+    // — it is here because a replayed or hand-built row can carry anything, and a
+    // zero-keyed row would be a permanent phantom in a table keyed by address.
+    let Some(deal) = crate::inference_projectors::non_zero_address(Some(deal.as_str())) else {
+        warn!(
+            msg_id = %node.msg_id,
+            "InferenceDealClosed carried the zero address as its deal; nothing to settle"
+        );
+        return Ok(ProjectionOutcome::Applied);
+    };
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+    let chain_order = node_chain_order(node, "InferenceDealClosed")?;
+    // UPSERT, not UPDATE, and NOT `Deferred` when the row is missing. The deal row
+    // is created by `InferenceOrderBook.InferenceFilled`, which precedes this on
+    // chain, so normally the row is here and this is an update. It can legitimately
+    // be absent in exactly one case — the fill happened before this indexer's
+    // captured history — and there deferring would be wrong twice over: the parent
+    // is not late but unreachable, and `InferenceDealClosed` is not in the
+    // dead-letter allow-list, so the row would stay pending forever. Recording a
+    // skeleton keeps the one fact this event carries; the columns it cannot fill
+    // stay NULL, which is what they mean.
+    sqlx::query(
+        r#"insert into inference_deals (token_contract_address, settled_at_chain, last_chain_order)
+           values ($1, to_timestamp($2::double precision), $3)
+           on conflict (token_contract_address) do update
+              set settled_at_chain = coalesce(inference_deals.settled_at_chain, excluded.settled_at_chain),
+                  last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
+                  updated_at = now()"#,
+    )
+    .bind(deal)
+    .bind(chain_seconds)
+    .bind(&chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("apply InferenceDealClosed")?;
     Ok(ProjectionOutcome::Applied)
 }
 

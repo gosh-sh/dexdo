@@ -66,6 +66,7 @@ reclaim`.
 | --- | --- | --- | --- |
 | `open` | `open` | `ParamsOfOpen { endpoint_cipher }` | Seller opens the stream (freezes the probe tick). |
 | `advance` | `advance` | — | Seller advances one tick (optimistic-accept after the settle window). |
+| `accept_probe` | `acceptProbe` | — | Seller claims the trial tick after `PROBE_WINDOW` of buyer silence. Reverts if the window is still open or the probe is already accepted; accepting it is what makes a later `stop` settle cleanly rather than burn the probe. |
 | `stop` | `stop` | — | Buyer stops the stream cleanly (spec §4.1). |
 | `dispute` | `dispute` | — | Buyer disputes the current ticks (spec §4.2). |
 | `release_dispute` | `releaseDispute` | — | Buyer releases a dispute it raised. |
@@ -81,6 +82,7 @@ reclaim`.
 | --- | --- | --- | --- |
 | `get_state` | `getState` | `funded, opened, probe_accepted, disputed, deposit, prepaid, frozen, finalized_owed, prepaid_time, last_advance, dispute_time` | Full deal state machine + balances. |
 | `get_seller_bond` | `getSellerBond` | `bond_funded, bond_held, bond_required` | Seller mirror-bond state; `bond_required` is `2 * price_per_tick`. |
+| `get_buyer_bond` | `getBuyerBond` | `bond_held, bond_required` | Buyer bond state. **No `bond_funded` flag** — the contract keeps `_buyerBondFunded` private, yet `open()` requires it. For an ordinary deal `fundBuyerBond` writes the amount and the flag together, so `bond_held > 0` stands in; a subscription funds by carve-out at fund time and the equivalence does not carry. `bond_required` is zero unless the deal is a subscription. |
 | `get_offer` | `getOffer` | `offer_posted, closing` | Whether a sell offer is live on the book and whether the deal is closing. |
 | `get_config` | `getConfig` | `platform_fee_bps, settle_window, stream_timeout, dispute_window` | Protocol-wide constants (spec §9.1). |
 | `get_fees` | `getFees` | `fee_accrued, ticks_finalized, ever_disputed, rebate_max_bps, rebate_slope_bps` | Accrued platform fees + rebate parameters. |
@@ -140,6 +142,7 @@ on-chain.
 | `place_inference_subscription` | `placeInferenceSubscription` | `ParamsOfPlaceInferenceSubscription` | Place a subscription (semantic order). |
 | `cancel_inference_order` | `cancelInferenceOrder` | `ParamsOfCancelInferenceOrder` | Cancel one resting inference order owned by this note. |
 | `cancel_all_inference_orders` | `cancelAllInferenceOrders` | `ParamsOfCancelAllInferenceOrders` | Cancel all resting inference orders owned by this note. |
+| `fund_deal` | `fundDeal` | `ParamsOfFundDeal { nonce, gas_shell, amount, endpoint_cipher }` | Seller note funds its own deal `TokenContract`. Seller-only: the buyer's half of the bond is funded inline by the buyer's note on the fill (`fundBuyerBond`), never from here. The deal address is derived from `nonce` rather than passed, so a wrong nonce bounces instead of paying a stranger. |
 | `stream_stop` | `streamStop` | `ParamsOfStreamDeal` | Buyer note stops the stream cleanly (amicable exit, §4.1). |
 | `stream_dispute` | `streamDispute` | `ParamsOfStreamDeal` | Buyer note disputes the current ticks (§4.2). |
 | `stream_reclaim` | `streamReclaim` | `ParamsOfStreamDeal` | Buyer note reclaims a probe tick after the stream timeout (seller no-show). |
@@ -181,7 +184,7 @@ inference e2e tests drive.
 
 - `token_contract_open`, `token_contract_advance`, `token_contract_fund_seller_bond`
 - `token_contract_resolve_dispute_timeout`, `token_contract_withdraw_shell`
-- `token_contract_get_state`, `token_contract_get_seller_bond`, `token_contract_get_parties`, `token_contract_get_shell_balance`
+- `token_contract_get_state`, `token_contract_get_seller_bond`, `token_contract_get_buyer_bond`, `token_contract_get_parties`, `token_contract_get_shell_balance`
 
 **Order-book getters (decoded)**
 

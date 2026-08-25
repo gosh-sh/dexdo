@@ -6,6 +6,12 @@
 // batch tx even on Deferred — see indexer_repo.rs).
 
 use anyhow::Context;
+use dodex_contracts::airegistry::inference_order_book_events::FilledData;
+use dodex_contracts::airegistry::inference_order_book_events::InferenceOrderBookEvent;
+use dodex_contracts::airegistry::inference_order_book_events::OrderPlacedData;
+use dodex_contracts::airegistry::inference_order_book_events::RefundedData;
+use dodex_contracts::airegistry::inference_order_book_events::BPS_DENOMINATOR;
+use dodex_contracts::airegistry::inference_order_book_events::PLATFORM_FEE_BPS;
 use sqlx::Postgres;
 use sqlx::Transaction;
 use tracing::error;
@@ -14,8 +20,8 @@ use tracing::warn;
 use crate::decoder::DecodedEvent;
 use crate::graphql::EventNode;
 use crate::indexer_repo::parse_unix_seconds;
-use crate::projectors::field_str;
 use crate::projectors::node_chain_order;
+use crate::projectors::uint256_maybe_hex;
 use crate::projectors::uint_field_to_decimal;
 use crate::projectors::ProjectionOutcome;
 
@@ -24,7 +30,9 @@ pub(crate) const ZERO_ADDRESS: &str =
     "0:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Map the chain's "absent" encodings onto SQL NULL: a BUY placement carries the zero
-/// address for `tokenContract`, and a resting SELL carries deadline 0.
+/// address for `tokenContract`, and a GTC BUY carries deadline 0. Not a SELL — the
+/// contract rejects a zero-deadline offer as malformed, so a NULL `deadline` on a SELL
+/// row is a gap the reconciler probe fills, never an intentional value.
 pub(crate) fn non_zero_address(raw: Option<&str>) -> Option<&str> {
     raw.filter(|a| *a != ZERO_ADDRESS)
 }
@@ -50,24 +58,35 @@ pub async fn project_inference_event(
     // the live loop and the direct tests.
     let suffix =
         event.event_type.strip_prefix("InferenceOrderBook.").unwrap_or(event.event_type.as_str());
-    match suffix {
-        "InferenceOrderPlaced" => apply_inference_order_placed(tx, event, node).await,
-        "InferenceSubscriptionPlaced" => apply_inference_subscription_placed(tx, event, node).await,
-        "InferenceOrderCancelled" => apply_inference_order_cancelled(tx, event, node).await,
-        "InferenceOrderExpired" => apply_inference_order_expired(tx, event, node).await,
-        "InferenceFilled" => apply_inference_filled(tx, event, node).await,
+    // Route by the enum VARIANT, not by a string literal. The variant is pinned
+    // to the ABI (`inference_order_book_enum_covers_every_abi_event`), so an arm
+    // naming an event that does not exist stops being expressible — that is how
+    // `InferenceSubscriptionPlaced` and `StreamReclaimed` lived on as dead arms.
+    // The `match` is exhaustive WITHOUT `_`: a new variant will not compile until
+    // someone assigns it an outcome.
+    use InferenceOrderBookEvent as E;
+    let Some(kind) = E::ALL.iter().copied().find(|v| {
+        let n = format!("{v:?}");
+        let n = if n.starts_with("Inference") { n } else { format!("Inference{n}") };
+        n == suffix
+    }) else {
+        return Ok(ProjectionOutcome::Unknown);
+    };
+    match kind {
+        E::OrderPlaced => apply_inference_order_placed(tx, event, node).await,
+        E::OrderCancelled => apply_inference_order_cancelled(tx, event, node).await,
+        E::OrderExpired => apply_inference_order_expired(tx, event, node).await,
+        E::Filled => apply_inference_filled(tx, event, node).await,
         // Observability-only. `InferenceOrderCancelRejected` fires from `_doCancel`
         // when the cancel matched no resting order or came from a foreign owner —
         // by construction the book did not change, so there is no row to touch.
         // `InferenceOrderRejected` carries no `orderId` — the placement was refused
         // before anything rested, so there is no row to key on, same as
         // `InferenceOrderCancelRejected`.
-        "InferenceExecuted"
-        | "InferenceRefunded"
-        | "InferenceOrderCancelRejected"
-        | "InferenceOrderRejected"
-        | "InferenceOrderBookDeployed" => Ok(ProjectionOutcome::Applied),
-        _ => Ok(ProjectionOutcome::Unknown),
+        E::Refunded => apply_inference_refunded(tx, event, node).await,
+        E::Executed | E::OrderCancelRejected | E::OrderRejected | E::InferenceOrderBookDeployed => {
+            Ok(ProjectionOutcome::Applied)
+        }
     }
 }
 
@@ -91,8 +110,10 @@ async fn seed_market_skeleton(
     Ok(())
 }
 
-// Shared resting-order upsert for OrderPlaced (is_subscription=false) and
-// SubscriptionPlaced (is_subscription=true). Same still-fresh conflict guard as
+// Shared resting-order upsert. `is_subscription` comes from the FLAG_SUBSCRIPTION
+// bit of the placement event's `flags` field — the ABI carries no separate
+// subscription event.
+// Same still-fresh conflict guard as
 // projectors::apply_order_placed: a replay onto a closed or partially-filled-OPEN
 // row is a no-op, so it never resets amount_remaining and corrupts depth.
 #[allow(clippy::too_many_arguments)]
@@ -125,8 +146,9 @@ async fn upsert_resting_order(
                    amount_remaining = excluded.amount_remaining,
                    is_subscription = excluded.is_subscription,
                    note_address = excluded.note_address,
-                   -- NULL-preserving: a replayed SubscriptionPlaced carries no deadline,
-                   -- and neither may erase a value the reconciler recovered from chain.
+                   -- NULL-preserving: a replayed placement may carry NULL where the
+                   -- reconciler has since recovered a value from chain, and a replay
+                   -- may never erase it.
                    token_contract = coalesce(excluded.token_contract, inference_orders.token_contract),
                    deadline = coalesce(excluded.deadline, inference_orders.deadline),
                    status = 'OPEN',
@@ -134,7 +156,7 @@ async fn upsert_resting_order(
                    chain_created_at = coalesce(inference_orders.chain_created_at, excluded.chain_created_at),
                    chain_updated_at = greatest(inference_orders.chain_updated_at, excluded.chain_updated_at),
                    updated_at = now()
-               where inference_orders.status not in ('FILLED','CANCELLED')
+               where inference_orders.status not in ('FILLED','CANCELLED','EXPIRED')
                  and inference_orders.amount_remaining = inference_orders.amount_initial"#,
     )
     .bind(ob).bind(order_id).bind(is_buy).bind(price).bind(ticks)
@@ -166,27 +188,22 @@ async fn apply_inference_order_placed(
     node: &EventNode,
 ) -> anyhow::Result<ProjectionOutcome> {
     let ob = node.src.as_deref().context("OrderPlaced: src missing")?;
-    let order_id = uint_field_to_decimal(&event.value, "orderId")?;
-    let is_buy = event
-        .value
-        .get("isBuy")
-        .and_then(serde_json::Value::as_bool)
-        .context("OrderPlaced: missing isBuy")?;
-    let price = uint_field_to_decimal(&event.value, "price")?;
-    let ticks = uint_field_to_decimal(&event.value, "ticks")?;
-    // `note` is mandatory in the ABI and the endpoint filters exactly on it; a NULL
-    // would hide the order from every `note=X` listing forever, since the sweep
-    // repairs only `token_contract` and `deadline`.
-    let note = Some(field_str(&event.value, "note")?);
-    // `tokenContract` and `deadline` are mandatory in the ABI too — a BUY carries the
-    // zero address and a resting SELL carries deadline 0, but neither field is ever
-    // absent. Decode strictly and normalize only a successfully decoded zero to NULL:
-    // `.ok()` would map ABI/decoder drift onto a NULL insert and still create the row,
-    // and nothing would ever repair it once it fills or is cancelled before a sweep.
-    let token_contract: Option<&str> =
-        non_zero_address(Some(field_str(&event.value, "tokenContract")?));
-    let deadline: Option<String> =
-        non_zero_uint(Some(uint_field_to_decimal(&event.value, "deadline")?));
+    // Exhaustive destructuring: every ABI field must be named.
+    let OrderPlacedData { order_id, is_buy, price, ticks, note, token_contract, deadline, flags } =
+        serde_json::from_value(event.value.clone())
+            .context("InferenceOrderPlaced: payload does not parse against the ABI")?;
+    let order_id = order_id.to_string();
+    // `price` is a uint256, see `FilledFields::parse`.
+    let price = uint256_maybe_hex(&price)?;
+    let ticks = ticks.to_string();
+    let note = Some(note.as_str());
+    let token_contract: Option<&str> = non_zero_address(Some(token_contract.as_str()));
+    let deadline: Option<String> = non_zero_uint(Some(deadline.to_string()));
+    // `flags` is the event's 8th parameter as of v4.0.33. A subscription is the
+    // FLAG_SUBSCRIPTION bit (0x40, contracts/airegistry/modifiers/modifiers.sol),
+    // not an event of its own.
+    const FLAG_SUBSCRIPTION: u8 = 0x40;
+    let is_subscription = flags & FLAG_SUBSCRIPTION != 0;
     let chain_order = node_chain_order(node, "InferenceOrderPlaced")?;
     let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
     upsert_resting_order(
@@ -196,7 +213,7 @@ async fn apply_inference_order_placed(
         is_buy,
         &price,
         &ticks,
-        false,
+        is_subscription,
         note,
         token_contract,
         deadline.as_deref(),
@@ -204,42 +221,50 @@ async fn apply_inference_order_placed(
         chain_seconds,
     )
     .await?;
+    // A SELL offer is the placement that REGISTERS a deal: `token_contract` is the
+    // TokenContract the seller deployed, and `price` is the per-tick ask its
+    // constructor was given (`TokenContract.sol:308`). That is the same number
+    // `StreamOpened.pricePerTick` used to report, so it is the column's value and
+    // not an approximation of it.
+    //
+    // NOT `InferenceFilled.clearingPrice`, which is the nearest-looking
+    // alternative and is wrong: clearing is the price the MATCH struck. It equals
+    // the ask only when the seller was the maker; a taker SELL crossing a resting
+    // BUY clears at the bid.
+    if let Some(tc) = token_contract.filter(|_| !is_buy) {
+        record_deal_price(tx, tc, &price, &chain_order).await?;
+    }
     Ok(ProjectionOutcome::Applied)
 }
 
-async fn apply_inference_subscription_placed(
+/// Seed or enrich the deal row with the per-tick ask its SELL offer carried.
+///
+/// Upsert rather than update: the placement precedes the fill, so on a normal
+/// timeline this is the FIRST thing that knows the deal exists at all — before
+/// `InferenceFilled` links its parties. `coalesce` keeps whatever a re-listing
+/// or a replay already recorded, so the first price to arrive is the one that
+/// stays.
+async fn record_deal_price(
     tx: &mut Transaction<'_, Postgres>,
-    event: &DecodedEvent,
-    node: &EventNode,
-) -> anyhow::Result<ProjectionOutcome> {
-    let ob = node.src.as_deref().context("SubscriptionPlaced: src missing")?;
-    let order_id = uint_field_to_decimal(&event.value, "orderId")?;
-    let price = uint_field_to_decimal(&event.value, "maxPrice")?;
-    let ticks = uint_field_to_decimal(&event.value, "ticks")?;
-    // `buyerNote` is mandatory in the ABI and the endpoint filters exactly on it; a NULL
-    // would hide the subscription from every `note=X` listing forever.
-    let note = Some(field_str(&event.value, "buyerNote")?);
-    let chain_order = node_chain_order(node, "InferenceSubscriptionPlaced")?;
-    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
-    // InferenceSubscriptionPlaced carries no tokenContract (a subscription is a bid) and
-    // no deadline, though the chain stores one. The reconciler's getter probe is the only
-    // source for a subscription row's deadline.
-    upsert_resting_order(
-        tx,
-        ob,
-        &order_id,
-        true,
-        &price,
-        &ticks,
-        true,
-        note,
-        None,
-        None,
-        &chain_order,
-        chain_seconds,
+    token_contract: &str,
+    price: &str,
+    chain_order: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"insert into inference_deals (token_contract_address, price_per_tick, last_chain_order)
+           values ($1, $2::numeric, $3)
+           on conflict (token_contract_address) do update
+               set price_per_tick = coalesce(inference_deals.price_per_tick, excluded.price_per_tick),
+                   last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
+                   updated_at = now()"#,
     )
-    .await?;
-    Ok(ProjectionOutcome::Applied)
+    .bind(token_contract)
+    .bind(price)
+    .bind(chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("record inference_deals price_per_tick from the SELL offer")?;
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]
@@ -249,6 +274,10 @@ struct LockedOrder {
     /// The leg's side. `isBuyerMaker` is not carried by `InferenceFilled`, so the tape
     /// takes it from whichever leg is locked here.
     is_buy: bool,
+    /// Whether this leg was placed as a subscription. Read for the same reason as
+    /// `is_buy`: `InferenceFilled` does not carry the deal flags, and the buyer's
+    /// bond — and therefore the deal's deposit — depends on this bit.
+    is_subscription: bool,
 }
 
 /// Parsed `Filled` event fields, shared by the normal projector and the
@@ -266,31 +295,53 @@ struct FilledFields {
     /// Deal-link fields (present on the normal `Filled`; unused by orphan repair).
     seller_tc: Option<String>,
     buyer_note: Option<String>,
+    /// The seller named by the event itself (`InferenceFilled`'s 7th field as of
+    /// v4.0.33). Before it, the seller was recovered by walking the SELL leg in
+    /// `inference_orders`, which lost him exactly when that leg had not arrived —
+    /// that is, on orphan repair.
+    seller_note: Option<String>,
 }
 
 impl FilledFields {
     fn parse(event: &DecodedEvent, node: &EventNode) -> anyhow::Result<Self> {
-        let ob = node.src.as_deref().context("Filled: src missing")?.to_string();
-        let maker_id = uint_field_to_decimal(&event.value, "makerId")?;
-        let taker_id = uint_field_to_decimal(&event.value, "takerId")?;
-        let ticks = uint_field_to_decimal(&event.value, "ticks")?;
-        let clearing_price = uint_field_to_decimal(&event.value, "clearingPrice")?;
-        let chain_order = node_chain_order(node, "InferenceFilled")?;
-        let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
-        let seller_tc = field_str(&event.value, "sellerTC").ok().map(str::to_string);
-        let buyer_note = field_str(&event.value, "buyerNote").ok().map(str::to_string);
-        let ids = vec![maker_id.clone(), taker_id.clone()];
-        Ok(Self {
-            ob,
+        // EXHAUSTIVE destructuring — the only form of the "this ABI field is
+        // consumed" guard that actually works. The compiler forces every field to
+        // be named: one that arrives and is needed by nobody cannot be ignored
+        // silently. Checking DTO keys against the ABI does NOT prove this — it
+        // stays green when a field is declared and then thrown away (which is
+        // exactly how `sellerNote` got lost).
+        let FilledData {
             maker_id,
             taker_id,
             ticks,
             clearing_price,
-            chain_order,
-            chain_seconds,
-            ids,
             seller_tc,
             buyer_note,
+            seller_note,
+        } = serde_json::from_value(event.value.clone())
+            .context("InferenceFilled: payload does not parse against the ABI")?;
+
+        let maker_id = maker_id.to_string();
+        let taker_id = taker_id.to_string();
+        let ids = vec![maker_id.clone(), taker_id.clone()];
+        Ok(Self {
+            ob: node.src.as_deref().context("Filled: src missing")?.to_string(),
+            maker_id,
+            taker_id,
+            ticks: ticks.to_string(),
+            // `clearingPrice` is a uint256; the decoder hands it over as
+            // "0x" + 64 hex. The DTO holds the RAW ABI value, so the conversion
+            // stays here: without it the hex would reach
+            // `inference_trades.price`, which numeric will not accept. Tests with
+            // decimal fixtures see no difference — hence the guard
+            // `a_uint256_price_arrives_as_decimal_not_hex`.
+            clearing_price: uint256_maybe_hex(&clearing_price)?,
+            chain_order: node_chain_order(node, "InferenceFilled")?,
+            chain_seconds: parse_unix_seconds(node.created_at.as_ref()),
+            ids,
+            seller_tc: non_zero_address(seller_tc.as_deref()).map(str::to_string),
+            buyer_note: Some(buyer_note),
+            seller_note: non_zero_address(seller_note.as_deref()).map(str::to_string),
         })
     }
 }
@@ -303,7 +354,8 @@ async fn lock_filled_rows(
     ids: &[String],
 ) -> anyhow::Result<Vec<LockedOrder>> {
     sqlx::query_as(
-        r#"select order_id::text as order_id, (swept_at is not null) as is_sweep_cancel, is_buy
+        r#"select order_id::text as order_id, (swept_at is not null) as is_sweep_cancel,
+                  is_buy, is_subscription
              from inference_orders
             where orderbook_address = $1 and order_id = any($2::numeric[])
             for update"#,
@@ -333,11 +385,17 @@ async fn apply_filled_decrement(
         r#"update inference_orders o
               set amount_remaining = case
                       when o.status = 'FILLED' then o.amount_remaining
+                      when o.status = 'EXPIRED' then o.amount_remaining
                       when o.status = 'CANCELLED' and o.swept_at is null then o.amount_remaining
                       else greatest(o.amount_remaining - $3::numeric, 0::numeric)
                   end,
                   status = case
                       when o.status = 'FILLED' then 'FILLED'
+                      -- Expiry is terminal: a late fill does not resurrect the row.
+                      -- It returns ITS OWN status, not 'FILLED' — the outcome differs.
+                      -- This arm sits ABOVE `is_buy = false`, otherwise an expired
+                      -- SELL would be intercepted by that one.
+                      when o.status = 'EXPIRED' then 'EXPIRED'
                       when o.status = 'CANCELLED' and o.swept_at is null then 'CANCELLED'
                       when o.is_buy = false then 'FILLED'
                       when greatest(o.amount_remaining - $3::numeric, 0::numeric) = 0 then 'FILLED'
@@ -345,23 +403,28 @@ async fn apply_filled_decrement(
                   end,
                   swept_at = case
                       when o.status = 'FILLED' then o.swept_at
+                      when o.status = 'EXPIRED' then o.swept_at
                       when o.status = 'CANCELLED' and o.swept_at is null then o.swept_at
                       else null
                   end,
-                  -- A terminal row (FILLED, or real-cancel CANCELLED+swept_at NULL) is a
-                  -- FULL no-op: a late/duplicate Filled must not advance its chain/bookkeeping
-                  -- columns either (mirrors projectors::apply_order_filled). Only OPEN rows
-                  -- and provisional sweep-cancels (swept_at NOT NULL, being overridden) mutate.
+                  -- A terminal row — FILLED, EXPIRED, or a real event-cancel
+                  -- (CANCELLED with swept_at NULL) — is a FULL no-op: a late or duplicate
+                  -- Filled must not advance its chain/bookkeeping columns either (mirrors
+                  -- projectors::apply_order_filled). Only OPEN rows and provisional
+                  -- sweep-cancels (swept_at NOT NULL, being overridden) mutate.
                   last_chain_order = case
-                      when o.status = 'FILLED' or (o.status = 'CANCELLED' and o.swept_at is null) then o.last_chain_order
+                      when o.status = 'FILLED' or o.status = 'EXPIRED'
+                           or (o.status = 'CANCELLED' and o.swept_at is null) then o.last_chain_order
                       else greatest(o.last_chain_order, $4)
                   end,
                   chain_updated_at = case
-                      when o.status = 'FILLED' or (o.status = 'CANCELLED' and o.swept_at is null) then o.chain_updated_at
+                      when o.status = 'FILLED' or o.status = 'EXPIRED'
+                           or (o.status = 'CANCELLED' and o.swept_at is null) then o.chain_updated_at
                       else greatest(o.chain_updated_at, to_timestamp($5::double precision))
                   end,
                   updated_at = case
-                      when o.status = 'FILLED' or (o.status = 'CANCELLED' and o.swept_at is null) then o.updated_at
+                      when o.status = 'FILLED' or o.status = 'EXPIRED'
+                           or (o.status = 'CANCELLED' and o.swept_at is null) then o.updated_at
                       else now()
                   end
             where o.orderbook_address = $1 and o.order_id = any($2::numeric[])"#,
@@ -394,30 +457,38 @@ async fn apply_filled_decrement(
 }
 
 /// Records the deal link a `Filled` uniquely carries: the TokenContract
-/// (`sellerTC`) ↔ its market (`orderbook_address`), seller note (the SELL leg,
-/// `is_buy=false`), and buyer note (`buyerNote`). Upserts so the row survives
+/// (`sellerTC`) ↔ its market (`orderbook_address`), seller note (`sellerNote` from
+/// the event, falling back to a walk of the SELL leg when the event predates the
+/// field), and buyer note (`buyerNote`). Upserts so the row survives
 /// whether the deal was first seen here or via an earlier TokenContract.* event.
-/// On a well-formed `Filled`, `sellerTC` is always present; its absence signals
-/// ABI drift, so that one case alone is logged and skipped with `Ok(())` (not
-/// `Err`): `apply_filled_decrement` has already mutated rows in this transaction,
+/// On a well-formed `Filled`, `sellerTC` is always present and non-zero. It reaches
+/// this function through `non_zero_address`, so `None` here covers two chain states
+/// at once — the field missing (ABI drift) and the field carrying the zero address —
+/// which is why the log names the observation rather than guessing the cause. Either
+/// way that one case is logged and skipped with `Ok(())` (not `Err`): `apply_filled_decrement` has already mutated rows in this transaction,
 /// and failing the event over a decoder/ABI mismatch would defer it forever. A
 /// genuine DB error in the queries below still propagates — the reprojection
 /// savepoint isolates and retries the event.
 async fn link_deal_from_filled(
     tx: &mut Transaction<'_, Postgres>,
     f: &FilledFields,
+    // Whether the BUY leg was a subscription, or `None` when no leg is present to
+    // ask — the orphan-repair path. See `record_deal_deposit`.
+    buy_is_subscription: Option<bool>,
 ) -> anyhow::Result<()> {
     let Some(seller_tc) = f.seller_tc.as_deref() else {
         warn!(
             orderbook_address = %f.ob,
             chain_order = %f.chain_order,
-            "InferenceFilled event missing mandatory sellerTC field; inference_deals orderbook/seller link skipped — possible ABI drift"
+            "InferenceFilled carried no usable sellerTC (field absent, or present as the zero address); inference_deals orderbook/seller link skipped"
         );
         return Ok(());
     };
 
-    // Seller = the note on the SELL leg (is_buy=false) of this match.
-    let seller_note: Option<String> = sqlx::query_scalar(
+    // Walking the SELL leg (is_buy=false) works only if that leg has been
+    // PROJECTED. Kept as a fallback — the event now names the seller in a field
+    // of its own.
+    let seller_from_leg: Option<String> = sqlx::query_scalar(
         r#"select note_address from inference_orders
             where orderbook_address = $1 and order_id = any($2::numeric[]) and is_buy = false
             limit 1"#,
@@ -428,6 +499,10 @@ async fn link_deal_from_filled(
     .await
     .context("resolve seller_note for deal link")?
     .flatten();
+
+    // The event outranks the walk: the walk loses the seller exactly when the leg
+    // has not arrived (orphan repair), whereas `sellerNote` is always there.
+    let seller_note = f.seller_note.clone().or(seller_from_leg);
 
     sqlx::query(
         r#"insert into inference_deals
@@ -448,6 +523,86 @@ async fn link_deal_from_filled(
     .execute(&mut **tx)
     .await
     .context("link inference_deals from Filled")?;
+
+    record_deal_deposit(tx, f, seller_tc, buy_is_subscription).await
+}
+
+/// Recover the deal's `deposit` — the escrow figure the book sent it — by
+/// REPRODUCING the book's own arithmetic.
+///
+/// WHY IT HAS TO BE COMPUTED. No event carries it. `_match` derives
+/// `debit = cost + bond` and passes it to `fundFromOrderBook`, the deal stores it
+/// as `_deposit` and reported it in `StreamFunded` — the event ingest no longer
+/// captures. Every INPUT is emitted, though: `ticks` and `clearingPrice` come off
+/// this `InferenceFilled`, and the two rate constants are pinned against the
+/// Solidity source by `dodex-contracts/tests/order_book_fee_constants.rs`.
+///
+/// THE ARITHMETIC IS SOLIDITY'S, NOT AN APPROXIMATION OF IT. `_unit(p) = p +
+/// (p * PLATFORM_FEE_BPS) / BPS_DENOMINATOR` truncates once, on the fee, and
+/// `cost = ticks * unit` is exact. `div()` is Postgres integer division, so the
+/// truncation lands in the same place; doing this in `numeric` rather than in
+/// Rust also keeps it clear of the 128-bit ceiling the chain works under.
+///
+/// `bond` is `2 * clearingPrice` for a subscription and zero otherwise
+/// (`InferenceOrderBook.sol:745-746`) — the buyer's bond rides along with the
+/// escrow only on that path, and the deal separates them after.
+///
+/// UNKNOWN IS NOT ZERO. `InferenceFilled` does not carry the deal flags, so the
+/// subscription bit is read off the BUY leg. On the orphan path no leg is present
+/// and the answer is `None` — there the deposit is SKIPPED, because assuming "not
+/// a subscription" would silently record a figure short by the bond, and a wrong
+/// number is worse here than a NULL that says "not known".
+///
+/// WHAT THIS RECORDS IS WHAT THE BOOK SENT, and on one narrow path that differs
+/// from what the deal kept: `fundFromOrderBook` refuses a fill it cannot fund
+/// (nonce reuse, under two ticks, over `maxTicks`, a subscription whose bond did
+/// not arrive) and refunds the buyer in full without ever setting `_deposit`.
+/// The refusal is invisible from the book's events — it happens after the fill is
+/// emitted — so this column then names an escrow that came straight back. The
+/// book validates most of those conditions before matching, so the path is
+/// narrow; it is named here rather than left for someone to discover from a
+/// deposit on a deal that never opened.
+async fn record_deal_deposit(
+    tx: &mut Transaction<'_, Postgres>,
+    f: &FilledFields,
+    seller_tc: &str,
+    buy_is_subscription: Option<bool>,
+) -> anyhow::Result<()> {
+    let Some(is_subscription) = buy_is_subscription else {
+        warn!(
+            token_contract = %seller_tc,
+            chain_order = %f.chain_order,
+            "InferenceFilled orphan: no BUY leg to read the subscription flag from, so the deal's \
+             deposit is left NULL rather than computed without its possible bond"
+        );
+        return Ok(());
+    };
+    let fee_bps = i64::from(PLATFORM_FEE_BPS);
+    let bps_denominator = i64::from(BPS_DENOMINATOR);
+    let bond_multiple: i64 = if is_subscription { 2 } else { 0 };
+    sqlx::query(
+        r#"insert into inference_deals (token_contract_address, deposit, last_chain_order)
+           values (
+               $1,
+               $2::numeric * ($3::numeric + div($3::numeric * $4::numeric, $5::numeric))
+                   + $6::numeric * $3::numeric,
+               $7
+           )
+           on conflict (token_contract_address) do update
+               set deposit = coalesce(inference_deals.deposit, excluded.deposit),
+                   last_chain_order = greatest(coalesce(inference_deals.last_chain_order, ''), excluded.last_chain_order),
+                   updated_at = now()"#,
+    )
+    .bind(seller_tc)
+    .bind(&f.ticks)
+    .bind(&f.clearing_price)
+    .bind(fee_bps)
+    .bind(bps_denominator)
+    .bind(bond_multiple)
+    .bind(&f.chain_order)
+    .execute(&mut **tx)
+    .await
+    .context("record inference_deals deposit from Filled")?;
     Ok(())
 }
 
@@ -532,7 +687,8 @@ async fn apply_inference_filled(
         return Ok(ProjectionOutcome::Deferred); // parent(s) not seen yet — zero writes
     }
     apply_filled_decrement(tx, &f, &locked).await?;
-    link_deal_from_filled(tx, &f).await?;
+    let buy_is_subscription = locked.iter().find(|r| r.is_buy).map(|r| r.is_subscription);
+    link_deal_from_filled(tx, &f, buy_is_subscription).await?;
     // Both legs are present on this path (checked above), so the direction always resolves.
     // The append is not gated on what apply_filled_decrement did to the order rows: a
     // FULL no-op there (terminal maker, real-cancel override) still leaves a genuine
@@ -560,6 +716,18 @@ pub enum ExpiredOrphanOutcome {
     /// `OrderPlaced` was dropped), so the authoritative cancel is lost. If a late
     /// placement re-opens the order the phantom sweep reconciles it.
     CancelLost,
+    /// An expiry whose `InferenceOrderPlaced` never arrived: there is nothing to
+    /// close, but the order's status is lost — it will never reach `EXPIRED`.
+    ExpiryLost,
+    /// A refund with no parent: the return happened on chain, but the order it
+    /// concerns is absent from the read model. What exactly was lost CANNOT be
+    /// stated, and the wording must respect that: before the deadline the same
+    /// event type is emitted by `_finalizeTaker` for a taker — including a fully
+    /// filled one — and on its own closes nothing (see `apply_inference_refunded`).
+    /// Without the row the deadline is invisible too, so it is not even known
+    /// whether this is an expiry or the end of a taker's life. What is lost is the
+    /// link between the refund and its order — no more than that.
+    RefundLost,
     /// Any other inference event past cutoff with no resting row to repair.
     Nothing,
 }
@@ -600,13 +768,21 @@ pub async fn repair_expired_inference_orphan(
                     "inference Filled orphan past cutoff: neither leg present, trade direction unrecoverable; match omitted from the public tape",
                 ),
             }
-            // The Filled carries sellerTC + buyerNote; record the deal link even on
-            // the orphan path (orderbook + buyer are leg-independent; seller resolves
-            // from the SELL leg when present) — the normal deferred path never reruns.
-            link_deal_from_filled(tx, &f).await?;
+            // The Filled carries sellerTC + sellerNote + buyerNote; record the deal
+            // link even on the orphan path — every one of them comes off the event
+            // itself, which is why this works with no leg present at all. The SELL-leg
+            // walk is only the fallback for events older than the `sellerNote` field,
+            // and it is exactly the case the orphan path cannot satisfy. The normal
+            // deferred path never reruns.
+            // `None`: no leg is present on this path — that is what makes it an
+            // orphan — so the subscription bit cannot be read and the deposit is
+            // skipped rather than assumed. See `record_deal_deposit`.
+            link_deal_from_filled(tx, &f, None).await?;
             outcome
         }
         "InferenceOrderCancelled" => ExpiredOrphanOutcome::CancelLost,
+        "InferenceOrderExpired" => ExpiredOrphanOutcome::ExpiryLost,
+        "InferenceRefunded" => ExpiredOrphanOutcome::RefundLost,
         _ => ExpiredOrphanOutcome::Nothing,
     };
 
@@ -622,6 +798,14 @@ pub async fn repair_expired_inference_orphan(
         ExpiredOrphanOutcome::CancelLost => warn!(
             msg_id = %node.msg_id, event_type = %event.event_type,
             "inference OrderCancelled orphan past cutoff: authoritative cancel lost (its OrderPlaced was dropped); the phantom sweep reconciles it if a late placement re-opens the order"
+        ),
+        ExpiredOrphanOutcome::ExpiryLost => warn!(
+            msg_id = %node.msg_id, event_type = %event.event_type,
+            "inference OrderExpired orphan past cutoff: the order will never reach EXPIRED (its OrderPlaced was dropped at capture); the phantom sweep is what reconciles the row if a late placement re-opens it"
+        ),
+        ExpiredOrphanOutcome::RefundLost => warn!(
+            msg_id = %node.msg_id, event_type = %event.event_type,
+            "inference Refunded orphan past cutoff: the refund happened on chain but its order was never projected, so the refund cannot be attributed; whether the order expired or was a taker ending its life is unknowable without the row's deadline"
         ),
         ExpiredOrphanOutcome::Nothing => warn!(
             msg_id = %node.msg_id, event_type = %event.event_type,
@@ -679,6 +863,130 @@ async fn apply_inference_order_expired(
     }
 }
 
+/// `InferenceRefunded(orderId, note, amount)` — the money went back to its owner,
+/// and as of v4.0.33 the event carries an id, i.e. it speaks about a SPECIFIC row.
+/// It is NOT a general close signal: the contract emits it from four sites, and
+/// only two of them are about an order disappearing on time
+/// (`InferenceOrderBook.sol`):
+///   * `:1368` — a continuation resumed past its deadline: the ONLY event on this
+///     path, `InferenceOrderExpired` is not emitted for it at all;
+///   * `:1135` — `_removeExpiredBid` -> `_refundAndRemove`: an
+///     `InferenceOrderExpired` follows, so here this is merely an early duplicate;
+///   * `:1183` — `_finalizeTaker` for a BUY: the end of a taker's life, including
+///     a FULLY FILLED one (`remaining < 2` covers zero too, and the event goes out
+///     even with a zero `leftover`);
+///   * `:1223` — `_finalizeTaker` for a taker-only SELL that did not match.
+///
+/// The deadline separates them, and separates them EXACTLY: `:1643` requires
+/// `deadline == 0 || deadline > block.timestamp` at submit, and the re-check on
+/// entry to `_doPlaceHead` (`:1355`) diverts an expired continuation into the
+/// refund branch BEFORE matching. So `_finalizeTaker` is unreachable past the
+/// deadline, and both expiry branches are unreachable before it.
+///
+/// The row is therefore closed ONLY past the deadline and only into `EXPIRED`.
+/// There is deliberately no `CANCELLED` branch here. The refund knows nothing
+/// about whether the taker filled — `InferenceFilled` knows that, and if it is
+/// deferred over a missing leg the drain still moves on (the `Deferred` arms of
+/// `reproject_pending_from` leave the row unmarked and take the next one), so the
+/// refund would be applied BEFORE its own fill.
+/// Closing the row would leave a filled order cancelled forever: on the fill's
+/// retry the terminal guard in `apply_filled_decrement` forbids both the
+/// decrement and the transition to `FILLED`.
+///
+/// An IOC/MARKET leftover and dust are closed by the phantom sweep — by
+/// reconciling against the chain itself, not by guessing from a payload. That is
+/// precisely the sweep's job.
+async fn apply_inference_refunded(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let ob = node.src.as_deref().context("Refunded: src missing")?;
+    let RefundedData {
+        order_id,
+        // Who was refunded is known to the note itself; `inference_orders` has no
+        // column for it.
+        note: _,
+        // The read model does not need the refunded amount: closing the row is
+        // decided by the deadline, not by the size of the return (see the body).
+        amount: _,
+    } = serde_json::from_value(event.value.clone())
+        .context("InferenceRefunded: payload does not parse against the ABI")?;
+    let order_id = order_id.to_string();
+    let chain_order = node_chain_order(node, "InferenceRefunded")?;
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+
+    // THE PARENT IS CHECKED FIRST, regardless of whether the time is known. An
+    // orphan must go to Deferred and from there into the age-based dead letter.
+    // An early return on a missing time would mark it Applied, and a late
+    // placement would then open an order this refund can never close.
+    let parent: Option<(String,)> = sqlx::query_as(
+        r#"select status from inference_orders
+            where orderbook_address = $1 and order_id = $2::numeric for update"#,
+    )
+    .bind(ob)
+    .bind(&order_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("lock inference row for Refunded")?;
+    if parent.is_none() {
+        return Ok(ProjectionOutcome::Deferred);
+    }
+
+    // The parent exists, but the event carries no time: choosing between "it
+    // expired" and "the taker finished" is IMPOSSIBLE, and guessing means writing
+    // a wrong terminal status forever. The row is left as is, the event is marked
+    // Applied, and closing it falls to the sweep — the very one this wave kept
+    // precisely as a reconciliation against chain state.
+    let Some(chain_seconds) = chain_seconds else {
+        warn!(
+            orderbook_address = ob, order_id = %order_id, chain_order = %chain_order,
+            "inference Refunded without chain time: status left to the phantom sweep rather than guessed"
+        );
+        return Ok(ProjectionOutcome::Applied);
+    };
+
+    // The row is already locked by the SELECT above, so the decision can be made
+    // by a predicate in the WHERE: a row that does not qualify is not touched AT
+    // ALL, `updated_at` included. Otherwise a "no-op" lies to an observer and
+    // churns the stamp on every dust refund against an already filled order.
+    //
+    // The "who may be stamped expired" predicate is the same one
+    // `apply_inference_order_expired` uses: `OPEN`, or a PROVISIONAL sweep mark
+    // (`swept_at` NOT NULL). The sweep guessed `CANCELLED` only because the order
+    // had vanished from the book, which is exactly what expiry does — so the
+    // event corrects it and clears `swept_at`. `FILLED`, `EXPIRED` and a REAL
+    // cancel (`swept_at` NULL) stand.
+    sqlx::query(
+        r#"update inference_orders o
+              set status = 'EXPIRED',
+                  swept_at = null,
+                  last_chain_order = greatest(o.last_chain_order, $3),
+                  chain_updated_at = greatest(o.chain_updated_at, to_timestamp($4::double precision)),
+                  updated_at = now()
+            where o.orderbook_address = $1
+              and o.order_id = $2::numeric
+              -- A refund may close ONLY a past-deadline order: before the deadline
+              -- this is `_finalizeTaker`, where `Filled` decides the order's fate.
+              and o.deadline is not null
+              and o.deadline <= $4::numeric
+              and (o.status = 'OPEN' or (o.status = 'CANCELLED' and o.swept_at is not null))"#,
+    )
+    .bind(ob)
+    .bind(&order_id)
+    .bind(&chain_order)
+    .bind(chain_seconds)
+    .execute(&mut **tx)
+    .await
+    .context("inference Refunded update")?;
+
+    // Applied regardless of how many rows were affected: the parent's existence
+    // is already proven by the locking SELECT, and "did not qualify by deadline"
+    // is an answer, not a postponement. Deferred here would mean "wait", and the
+    // event would spin forever.
+    Ok(ProjectionOutcome::Applied)
+}
+
 async fn apply_inference_order_cancelled(
     tx: &mut Transaction<'_, Postgres>,
     event: &DecodedEvent,
@@ -693,14 +1001,18 @@ async fn apply_inference_order_cancelled(
     // makes this an authoritative event-cancel (overriding any provisional sweep).
     let prior: Option<(String,)> = sqlx::query_as(
         r#"with prior as (
-               select status from inference_orders
+               select status,
+                      -- Expiry is terminal on a par with a fill: a late cancel has
+                      -- no right to demote EXPIRED to CANCELLED.
+                      status in ('FILLED','EXPIRED') as terminal
+                 from inference_orders
                 where orderbook_address = $1 and order_id = $2::numeric for update)
            update inference_orders o
-              set status = case when prior.status = 'FILLED' then 'FILLED' else 'CANCELLED' end,
-                  swept_at = case when prior.status = 'FILLED' then o.swept_at else null end,
-                  last_chain_order = case when prior.status = 'FILLED' then o.last_chain_order
+              set status = case when prior.terminal then prior.status else 'CANCELLED' end,
+                  swept_at = case when prior.terminal then o.swept_at else null end,
+                  last_chain_order = case when prior.terminal then o.last_chain_order
                                           else greatest(o.last_chain_order, $3) end,
-                  chain_updated_at = case when prior.status = 'FILLED' then o.chain_updated_at
+                  chain_updated_at = case when prior.terminal then o.chain_updated_at
                                           else greatest(o.chain_updated_at, to_timestamp($4::double precision)) end,
                   updated_at = now()
              from prior

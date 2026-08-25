@@ -123,6 +123,14 @@ pub enum SweepStep {
 }
 
 impl InferenceReconciler {
+    /// Reason recorded for the benign `NoBoc` outcome. Named as a constant rather
+    /// than inlined so the decision stays visible: `NoBoc` is a BENIGN outcome —
+    /// IX-REC-27 keeps it out of the hard-failure counter — yet it does stamp a
+    /// failure. "Failing with a reason" is therefore routinely satisfied by this
+    /// text, and the observer proves the reason is NAMED, not that it is severe.
+    pub const NO_BOC_REASON: &'static str =
+        "account BOC not served yet (book announced, account state not returned by the gateway)";
+
     pub fn new(
         pool: PgPool,
         graphql: GraphqlClient,
@@ -230,13 +238,15 @@ impl InferenceReconciler {
                 Ok(DiscoveryOutcome::Superseded) => stats.superseded += 1,
                 Ok(DiscoveryOutcome::NoBoc) => {
                     stats.skipped += 1;
-                    self.stamp_failure_logged(&book.orderbook_address).await;
+                    self.stamp_failure_logged(&book.orderbook_address, Self::NO_BOC_REASON).await;
                 }
                 Err(err) => {
                     stats.failed += 1;
                     self.reconcile_failures.fetch_add(1, Ordering::Relaxed);
                     warn!(ob = %book.orderbook_address, ?err, "discovery failed");
-                    self.stamp_failure_logged(&book.orderbook_address).await;
+                    // `{err:#}` is the whole `anyhow` chain, not just the top layer:
+                    // the column exists precisely to tell causes apart.
+                    self.stamp_failure_logged(&book.orderbook_address, &format!("{err:#}")).await;
                 }
             }
         }
@@ -247,14 +257,18 @@ impl InferenceReconciler {
             match self.reconcile_refresh(book).await {
                 Ok(DiscoveryOutcome::NoBoc) => {
                     stats.skipped += 1;
-                    self.stamp_failure_logged(&book.orderbook_address).await;
+                    self.stamp_failure_logged(&book.orderbook_address, Self::NO_BOC_REASON).await;
                 }
+                // The mark is cleared inside `refresh_against_boc`, not here: this
+                // arm is unreachable from the test suite (`reconcile_refresh` goes
+                // through the GraphQL BOC fetch), so a clear written here is a
+                // production behaviour no test can hold in place.
                 Ok(_) => stats.refreshed += 1,
                 Err(err) => {
                     stats.failed += 1;
                     self.reconcile_failures.fetch_add(1, Ordering::Relaxed);
                     warn!(ob = %book.orderbook_address, ?err, "refresh failed");
-                    self.stamp_failure_logged(&book.orderbook_address).await;
+                    self.stamp_failure_logged(&book.orderbook_address, &format!("{err:#}")).await;
                 }
             }
         }
@@ -599,16 +613,46 @@ impl InferenceReconciler {
         .context("select sweep batch")?;
 
         // Probe each via getOrder. amount == 0 is a phantom (placed but never rested, or
-        // a taker remainder refunded on chain without an event). A live order is also an
-        // opportunity: the getter carries tokenContract and deadline, so a row missing
-        // either is repaired here at no extra chain cost. The two repairs are independent
-        // — a BUY's TC is zero by design, and a subscription's deadline exists only on
-        // chain.
+        // a taker remainder refunded on chain without an event) — that check is what the
+        // sweep is for, and it runs for EVERY row in the batch. A live order is also an
+        // opportunity: the same response already carries tokenContract and deadline, so
+        // the two `_missing` flags gate nothing but a pair of field extractions off it.
+        // That is the whole meaning of "no extra chain cost".
+        //
+        // The two repairs are independent, and only the mechanism below is asserted here:
+        // a value the getter answers as zero becomes `None` through `non_zero_address` /
+        // `non_zero_uint`, so the `tc.is_some() || deadline.is_some()` gate does not fire
+        // and the row is left alone. A good-till-cancel bid answers zero on both, so it
+        // is never repaired — correctly, because a zero there is the value, not a gap.
+        //
+        // WHICH NULL this repair recovers, established from the contract and from git
+        // rather than from this file — two earlier attempts to answer it by reasoning
+        // from the Rust alone were both wrong:
+        //
+        // Not a live race with the placement. `placeSellOffer` passes `msg.sender` as the
+        // order's TokenContract (`InferenceOrderBook.sol:1605` into `_enqueuePlace`'s
+        // `tc`, and `msg.sender` is verified to be that contract two lines earlier),
+        // `InferenceOrderPlaced` carries `e.tokenContract` verbatim from that queue entry,
+        // and `apply_inference_order_placed` decodes it strictly. So for anything the
+        // current projector writes, a SELL's `token_contract` is never NULL and a BUY's
+        // always is — there is no window in which the indexer "does not know it yet".
+        //
+        // The reachable case is LEGACY ROWS. Before 9350896 `upsert_resting_order` did not
+        // write `token_contract` at all, so every row it inserted has NULL there, SELL
+        // included. Nothing backfilled them: this repair is their migration path, and the
+        // getter supplies what the placement never recorded. `deadline` arrived in the
+        // same commit and reaches its non-NULL values the same way.
         let mut to_cancel: Vec<String> = Vec::new();
-        // Repairs are accumulated, not applied per order. One UPDATE per row would cost a
-        // round trip each — and every subscription is born with a NULL deadline, so a fresh
-        // book needs the whole batch repaired. At ~95 ms per round trip, a 50-row batch
-        // would spend ~5 s here and stall every book behind it.
+        // Repairs are accumulated, not applied per order: one UPDATE per row would cost a
+        // round trip each, and at ~95 ms against the deployed database a 50-row batch
+        // would spend ~5 s here and stall every book behind it. The batch is bounded by
+        // `sweep_batch_n`, so this is the whole cost either way.
+        //
+        // Note what the SELECT does NOT do: `tc_missing` / `deadline_missing` are
+        // select-list expressions, not filters. Every OPEN row in the id window is
+        // returned and probed, because the phantom check needs all of them — narrowing
+        // the query by the repair's interest (`is_buy`, or the NULLs themselves) would
+        // silently remove rows from the phantom sweep, which is the sweep's actual job.
         let mut repairs: Vec<(String, Option<String>, Option<String>)> = Vec::new();
         for (id, tc_missing, deadline_missing) in &ids {
             let o = self.call_getter(boc, "getOrder", &json!({ "id": id }))?;
@@ -793,6 +837,14 @@ impl InferenceReconciler {
     /// `override_seq`. The seq guard closes the first-tick hole: when `prev_cursor` is
     /// NULL, an override that resets the cursor to NULL is invisible to the cursor-CAS,
     /// but it bumped the seq, so the guard fails and the stamp is blocked.
+    ///
+    /// The visibility stamp clears BOTH failure columns, and it is the only place that
+    /// can: `clear_failure` is gated on `last_reconcile_failed_at is not null`, so a
+    /// text left behind here would be unreachable for the rest of the row's life. That
+    /// was the state until this clause existed, and it was not an edge case — `NoBoc`
+    /// is the ordinary cold start, so the common outcome was a healthy visible book
+    /// answering "account BOC not served yet" forever to the one column an operator is
+    /// told to read for why a book is unhealthy.
     /// Returns whether `last_reconciled_at` was stamped.
     #[allow(clippy::too_many_arguments)]
     pub async fn advance_sweep_and_maybe_stamp(
@@ -813,6 +865,7 @@ impl InferenceReconciler {
                       last_swept_at = now(),
                       last_reconciled_at = case when $5 then now() else last_reconciled_at end,
                       last_reconcile_failed_at = case when $5 then null else last_reconcile_failed_at end,
+                      last_reconcile_error = case when $5 then null else last_reconcile_error end,
                       updated_at = now()
                 where orderbook_address = $1
                   and superseded_at is null
@@ -833,24 +886,76 @@ impl InferenceReconciler {
         Ok(stamp && res.rows_affected() == 1)
     }
 
-    pub async fn stamp_failure(&self, ob: &str) -> anyhow::Result<()> {
+    /// Stamps the reconcile failure for a book. `error` is stored next to the
+    /// timestamp: the e2e observer and the operator both read the database, not
+    /// the pod logs, and without the text "the book is failing" cannot be told
+    /// apart from "the book is failing for an unknown reason".
+    pub async fn stamp_failure(&self, ob: &str, error: &str) -> anyhow::Result<()> {
         sqlx::query(
-            "update inference_markets set last_reconcile_failed_at=now(), reconcile_attempts=reconcile_attempts+1 where orderbook_address=$1",
+            "update inference_markets set last_reconcile_failed_at=now(), reconcile_attempts=reconcile_attempts+1, last_reconcile_error=$2 where orderbook_address=$1",
         )
         .bind(ob)
+        .bind(error)
         .execute(&self.pool)
         .await
         .context("stamp inference reconcile failure")?;
         Ok(())
     }
 
+    /// Clear the failure mark for ONE book whose refresh pass just completed
+    /// without an error. Per book, not per cycle: the tick that clears this one
+    /// can stamp a failure on the next book in the same batch.
+    ///
+    /// Without this the mark means "failed at least once, ever". The visibility
+    /// stamp clears it (`advance_sweep_and_maybe_stamp`), but a plain refresh never
+    /// did, and a visible book cannot go back through discovery —
+    /// `select_discovery_candidates` requires `last_reconciled_at is null`, and both
+    /// sites that null it set `superseded_at` in the same UPDATE. So one transient
+    /// getter error after a book went visible marked it for the rest of the row's
+    /// life. That ambiguity is what made the observer's failing-books predicate
+    /// unwinnable: either it named recovered books, or it hid the ones that broke
+    /// after becoming visible.
+    ///
+    /// What a standing mark means therefore depends on where the book is. For a
+    /// VISIBLE book it means the most recent refresh failed — this is its only
+    /// caller, and Queue B is the only queue a visible book enters. For a
+    /// DISCOVERING one it still means "failed at least once since seeding": Queue A
+    /// clears nothing, so a book that failed once and now keeps missing its sweep
+    /// gates (`Ok(WaitingGates)`) stays marked until the visibility stamp lands.
+    ///
+    /// `last_reconcile_error` is cleared together with the timestamp: 0006 keeps the
+    /// text so an operator can read the last failure, and a text whose timestamp is
+    /// gone is exactly the stale artefact that made the text untrustworthy.
+    ///
+    /// The `where` clause makes this a no-op for the common case — an unmarked book
+    /// is not rewritten, so the row is not touched on every clean pass.
+    pub async fn clear_failure(&self, ob: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "update inference_markets
+                set last_reconcile_failed_at = null, last_reconcile_error = null
+              where orderbook_address = $1
+                and last_reconcile_failed_at is not null",
+        )
+        .bind(ob)
+        .execute(&self.pool)
+        .await
+        .context("clear inference reconcile failure")?;
+        Ok(())
+    }
+
+    async fn clear_failure_logged(&self, ob: &str) {
+        if let Err(e) = self.clear_failure(ob).await {
+            warn!(ob = %ob, ?e, "failed to clear inference reconcile failure mark");
+        }
+    }
+
     /// Stamps the reconcile-failure backoff, logging — not swallowing — a write
     /// error. If the backoff stamp itself fails, the book keeps re-entering the
     /// queue every tick with no cooldown, so a silent drop would hide a book
-    /// spinning without backoff. Used by `run_once` where the outcome is already
-    /// a failure and there is nothing further to propagate.
-    async fn stamp_failure_logged(&self, ob: &str) {
-        if let Err(e) = self.stamp_failure(ob).await {
+    /// spinning without backoff. Used where the outcome is already a failure and
+    /// there is nothing further to propagate.
+    async fn stamp_failure_logged(&self, ob: &str, error: &str) {
+        if let Err(e) = self.stamp_failure(ob, error).await {
             warn!(ob = %ob, ?e, "failed to stamp inference reconcile backoff");
         }
     }
@@ -988,6 +1093,15 @@ impl InferenceReconciler {
             // does not touch last_swept_at, so the book stays sweep-due next tick.
             let _ = self.run_sweep_step(ob, boc, /* discovery= */ false).await?;
         }
+        // Reaching here IS the clean pass, and it is the last thing this function
+        // does — every `?` above returns early, so no path clears a mark on a book
+        // that failed. `NoBoc` never arrives (it is decided in `reconcile_refresh`
+        // before the BOC exists) and stays a failure on purpose: the account is not
+        // on chain yet. The clear lives here rather than in `run_once`'s `Ok(_)` arm
+        // because this is the deepest point both the production path and the
+        // BOC-injecting test seam pass through — in `run_once` it would be
+        // untestable, and the mark is what the observer's failing-books list reads.
+        self.clear_failure_logged(ob).await;
         Ok(DiscoveryOutcome::Stamped) // "handled" — reuse the enum; mapped to `refreshed` in run_once
     }
 

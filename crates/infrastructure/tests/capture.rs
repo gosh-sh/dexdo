@@ -18,6 +18,10 @@ use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
+mod fixtures;
+
+use fixtures::chain_bodies::INFERENCE_ORDER_PLACED;
+
 async fn setup() -> Option<PgPool> {
     let _ = dotenvy::dotenv();
     let url = match env::var("TEST_DATABASE_URL") {
@@ -67,6 +71,82 @@ const ORDER_PLACED_BODY: &str = "te6ccgEBAgEAhwAB8xucaVcAAAAAAAAAAAAAAAAAAAACAAA
 // A stream of this test's own: `persist_page` upserts `at_head` into `indexer_cursors`,
 // and the production row is read by the inference orders endpoint's fail-closed gate.
 const CAPTURE_TEST_STREAM: &str = "capture_persist_page_test_stream";
+
+// A stream of this test's own, for the same reason the neighbouring cases have one:
+// `persist_page` upserts `at_head` into `indexer_cursors`, and the production row is
+// read by the inference orders endpoint's fail-closed gate.
+const INFERENCE_BODY_TEST_STREAM: &str = "capture_real_inference_body_test_stream";
+
+#[tokio::test]
+async fn persist_page_stores_a_real_inference_body_as_a_decoded_row() {
+    // IX-CAP-01. The neighbouring cases run a prediction-side `OrderBook.OrderPlaced`
+    // body, so nothing proved capture on an inference payload — the decoder is shared
+    // but the ABI set and the event-id space are not.
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+    let msg_id = "cap-real-inference-1";
+    let orderbook = "0:cap_real_inference_book";
+    // The order-book rows are purged too, at BOTH ends. This test writes a globally
+    // visible pending row and then asserts it is still unprojected, so the one thing
+    // that can go wrong is somebody projecting it first — and projecting
+    // `InferenceOrderPlaced` seeds an `inference_markets` and an `inference_orders`
+    // row under this address. The nextest group makes that race impossible today;
+    // purging makes its leftovers recoverable if the group is ever loosened, instead
+    // of stranding two rows in the shared database forever.
+    let cleanup: [(&str, &str); 3] = [
+        ("delete from raw_events where msg_id = $1", msg_id),
+        ("delete from inference_orders where orderbook_address = $1", orderbook),
+        ("delete from inference_markets where orderbook_address = $1", orderbook),
+    ];
+    purge(&pool, &cleanup).await;
+    purge(
+        &pool,
+        &[("delete from indexer_cursors where stream_name = $1", INFERENCE_BODY_TEST_STREAM)],
+    )
+    .await;
+
+    let edges = vec![edge(
+        msg_id,
+        Some("5f80capreal0000000000000001"),
+        orderbook,
+        Some(INFERENCE_ORDER_PLACED),
+    )];
+    let result = repo
+        .persist_page(INFERENCE_BODY_TEST_STREAM, &edges, Some("cursor-1"), &decoder, false)
+        .await
+        .expect("persist_page");
+    assert_eq!(result.inserted, 1, "one edge in, one row out");
+
+    let (event_type, decoded_is_null, processed_at_is_null, body): (
+        Option<String>,
+        bool,
+        bool,
+        Option<String>,
+    ) = sqlx::query_as(
+        "select event_type, decoded is null, processed_at is null, body_json #>> '{}'
+           from raw_events where msg_id = $1",
+    )
+    .bind(msg_id)
+    .fetch_one(&pool)
+    .await
+    .expect("the captured row");
+
+    assert_eq!(event_type.as_deref(), Some("InferenceOrderBook.InferenceOrderPlaced"));
+    assert!(!decoded_is_null, "a decodable inference body must land decoded, not as an orphan");
+    assert!(processed_at_is_null, "capture must leave the row pending for the projector");
+    // Not decoration: this pins the fact the whole wave's fixture supply rests on —
+    // capture stores the body verbatim, so real bodies can be harvested from any
+    // populated indexer database with a SQL query. If that ever changes, the next
+    // harvest would silently come up empty; this fails first instead.
+    assert_eq!(
+        body.as_deref(),
+        Some(INFERENCE_ORDER_PLACED),
+        "body_json must hold the base64 verbatim"
+    );
+
+    purge(&pool, &cleanup).await;
+}
 
 #[tokio::test]
 async fn captures_decodable_event_without_projecting() {
@@ -186,6 +266,23 @@ async fn bulk_insert_counts_new_and_conflicting_and_dedups_within_page() {
         .await
         .expect("count dup");
     assert_eq!(dup_count, 1, "a within-page duplicate msg_id must land exactly once");
+
+    // Clean up. This test used to purge only at its start, which is enough for
+    // ITS next run and wrong for everyone else's: the three rows stayed in
+    // `raw_events` forever, and `projection_lag_seconds_empty_queue_is_zero`
+    // (reprojection.rs) skips its assert whenever the eligible queue is not
+    // empty — so a leak here silently retires that contract on any long-lived
+    // database.
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", existing.as_str()),
+            ("delete from raw_events where msg_id = $1", fresh.as_str()),
+            ("delete from raw_events where msg_id = $1", dup.as_str()),
+            ("delete from indexer_cursors where stream_name = $1", CAPTURE_TEST_STREAM),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -458,6 +555,139 @@ async fn persist_page_handles_mixed_decodable_and_undecodable_edges() {
             ("delete from live_orders where orderbook_address = $1", orderbook.as_str()),
             ("delete from raw_events where msg_id = $1", msg_decodable.as_str()),
             ("delete from raw_events where msg_id = $1", msg_undecodable.as_str()),
+        ],
+    )
+    .await;
+}
+
+/// `edge` with an explicit `dst` (the decoder's routing key). The shared
+/// helper pins `dst = src`, which is right for order-book events but cannot
+/// express the ambiguous-collision case: a colliding event id whose `dst` no
+/// route knows. Kept separate so the neighbours' calls stay untouched.
+fn edge_with_dst(
+    msg_id: &str,
+    chain_order: Option<&str>,
+    src: &str,
+    dst: Option<&str>,
+    body: Option<&str>,
+) -> EventEdge {
+    EventEdge {
+        cursor: "c".to_string(),
+        node: EventNode {
+            msg_id: msg_id.to_string(),
+            msg_chain_order: chain_order.map(str::to_string),
+            src: Some(src.to_string()),
+            src_dapp_id: None,
+            dst: dst.map(str::to_string),
+            body: body.map(|b| json!(b)),
+            created_at: Some(json!(1_700_000_000_i64)),
+        },
+    }
+}
+
+// Streams of these tests' own, for the reason the neighbours have one:
+// `persist_page` upserts into `indexer_cursors`, and the production row is read
+// by the inference orders endpoint's fail-closed gate.
+const MALFORMED_BODY_TEST_STREAM: &str = "capture_malformed_body_test_stream";
+const AMBIGUOUS_TEST_STREAM: &str = "capture_ambiguous_test_stream";
+
+#[tokio::test]
+async fn a_malformed_body_lands_undecoded_and_bumps_the_decode_error_counter() {
+    // IX-CAP-05 + the decode_errors third of IX-MET-06. The existing mixed test's
+    // undecodable edge is `body: None`, which returns from try_decode BEFORE the
+    // counter — so it can never observe the increment. Only a body that parses as
+    // a string and then fails the decoder reaches the Err arm that counts.
+    // "this-is-not-a-boc" is not valid base64, so `decode_event_body` fails hard
+    // (a decode error, not an unknown/ambiguous id).
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone()); // fresh instance => counters at zero
+    let decoder = Decoder::new().expect("decoder");
+    let msg_id = "cap-malformed-body-1";
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", msg_id),
+            ("delete from indexer_cursors where stream_name = $1", MALFORMED_BODY_TEST_STREAM),
+        ],
+    )
+    .await;
+
+    let edges = vec![edge(
+        msg_id,
+        Some("5f80capmalformed000000000001"),
+        "0:cap_malformed_book",
+        Some("this-is-not-a-boc"),
+    )];
+    let result = repo
+        .persist_page(MALFORMED_BODY_TEST_STREAM, &edges, None, &decoder, false)
+        .await
+        .expect("persist_page");
+    assert_eq!(result.inserted, 1);
+    assert_eq!(result.undecoded, 1, "the row must be stored undecoded, not dropped");
+    assert_eq!(repo.decode_errors_count(), 1, "the counter is the only durable signal (IX-CAP-05)");
+    // IX-MET-06 says the counters grow ON THEIR OWN events only — mutual exclusivity
+    // is half the claim, and the ambiguous test asserts the mirror direction.
+    assert_eq!(
+        repo.decode_ambiguous_collisions_count(),
+        0,
+        "a hard decode failure is not an ambiguity"
+    );
+
+    let (event_type_is_null, decoded_is_null): (bool, bool) = sqlx::query_as(
+        "select event_type is null, decoded is null from raw_events where msg_id = $1",
+    )
+    .bind(msg_id)
+    .fetch_one(&pool)
+    .await
+    .expect("row");
+    assert!(event_type_is_null && decoded_is_null, "a failed decode stores the row bare");
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", msg_id),
+            ("delete from indexer_cursors where stream_name = $1", MALFORMED_BODY_TEST_STREAM),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_colliding_body_with_an_unrouted_dst_bumps_the_ambiguous_counter() {
+    // The ambiguous third of IX-MET-06. TC_CONTRACT_DEPLOYED's event id collides
+    // with RootModel.ContractDeployed; with a dst the router does not know, the
+    // decoder returns AmbiguousCollision and try_decode counts it.
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+    let decoder = Decoder::new().expect("decoder");
+    let msg_id = "cap-ambiguous-collision-1";
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", msg_id),
+            ("delete from indexer_cursors where stream_name = $1", AMBIGUOUS_TEST_STREAM),
+        ],
+    )
+    .await;
+
+    let edges = vec![edge_with_dst(
+        msg_id,
+        Some("5f80capambig0000000000000001"),
+        "0:cap_ambig_src",
+        Some("0:no-such-route-dst"),
+        Some(fixtures::chain_bodies::TC_CONTRACT_DEPLOYED),
+    )];
+    let result = repo
+        .persist_page(AMBIGUOUS_TEST_STREAM, &edges, None, &decoder, false)
+        .await
+        .expect("persist_page");
+    assert_eq!(result.undecoded, 1, "ambiguity stores the row undecoded");
+    assert_eq!(repo.decode_ambiguous_collisions_count(), 1);
+    assert_eq!(repo.decode_errors_count(), 0, "ambiguity is not a decode error");
+    purge(
+        &pool,
+        &[
+            ("delete from raw_events where msg_id = $1", msg_id),
+            ("delete from indexer_cursors where stream_name = $1", AMBIGUOUS_TEST_STREAM),
         ],
     )
     .await;

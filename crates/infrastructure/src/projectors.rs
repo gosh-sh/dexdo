@@ -3,6 +3,7 @@
 
 use anyhow::anyhow;
 use anyhow::Context;
+use dodex_contracts::dex::oracle_event_list_events::RangeEventAddedData;
 use num_bigint::BigUint;
 use serde_json::Value;
 use sqlx::Postgres;
@@ -87,9 +88,12 @@ pub async fn project_event(
         // insert; dodex-rewards reads the stake-forfeit payloads straight out of
         // `raw_events`, so granting that permission would cut it off from them.
         //
-        // The note-side inference mirrors follow `InferenceOrderPlacedConfirmed` /
-        // `InferenceFilledConfirmed`: the book is the authority on an order, the
-        // note's copy exists for its owner.
+        // Note-side inference mirrors: the book is the authority on an order, the
+        // note's copy exists for its owner. `InferenceOrderPlacedConfirmed` and
+        // `InferenceFilledConfirmed` were the STATED PRECEDENT for this whole list
+        // and were themselves missing from it — that is, they fell through to
+        // `_ => Unknown`, which marks the row processed on first sight and never
+        // retries it, so every one of them was lost for good.
         "PMP.StakeForfeited"
         | "PrivateNote.StakeForfeitConfirmed"
         | "PrivateNote.StakeDroppedLocally"
@@ -97,8 +101,28 @@ pub async fn project_event(
         | "PrivateNote.BookCredited"
         | "PrivateNote.InferenceOrderRemoved"
         | "PrivateNote.InferenceOrderRejectedMirror"
-        | "PrivateNote.InferenceDealClosed"
-        | "RootPN.DealWriteOffReported" => Ok(ProjectionOutcome::Applied),
+        | "PrivateNote.InferenceOrderPlacedConfirmed"
+        | "PrivateNote.InferenceFilledConfirmed"
+        | "RootPN.DealWriteOffReported"
+        // The RootModel ABI is loaded to resolve the `ContractDeployed` collision by
+        // `dst` (see decoder.rs), not for projection — none of its events reaches
+        // the read model. The arms must be explicit: without them both fall through
+        // to `_ => Unknown`, where the row is marked processed and lost FOREVER. For
+        // `ContractDeployed` this is also the substance of the fix: a root-model
+        // deploy event must not create a deal.
+        | "RootModel.ContractDeployed"
+        | "RootModel.TokenContractRegistered" => Ok(ProjectionOutcome::Applied),
+        // The one note-side mirror that is NOT observability-only. Since ingest
+        // stopped capturing TokenContract routes this is the only live signal that
+        // a deal ended, so it carries `settled_at_chain` on its own. It lives with
+        // the settlement projectors rather than here because that is the module
+        // that owns the columns — see `project_deal_closed_from_note` for why it
+        // reads the deal out of the PAYLOAD and why it writes no `close_kind`.
+        "PrivateNote.InferenceDealClosed" => {
+            crate::token_contract_projectors::project_deal_closed_from_note(tx, event, node)
+                .await
+                .context("project PrivateNote.InferenceDealClosed")
+        }
         et if et.starts_with("TokenContract.") => {
             crate::token_contract_projectors::project_token_contract_event(tx, event, node)
                 .await
@@ -341,23 +365,20 @@ async fn apply_range_event_added(
 ) -> anyhow::Result<ProjectionOutcome> {
     let eventlist_address =
         node.src.as_deref().context("RangeEventAdded: src missing on event message")?;
-    let event_id_hex = field_str(&event.value, "eventId")?;
-    let event_id_decimal = uint256_hex_to_decimal(event_id_hex)?;
-    let range_ob_address = field_str(&event.value, "ob")?;
-
-    // `bounds` is a `uint256[]` — detokenised to an array of hex strings.
-    // Store the API-facing shape: a JSON array of decimal strings.
-    let bounds_raw = event
-        .value
-        .get("bounds")
-        .and_then(Value::as_array)
-        .context("RangeEventAdded: `bounds` missing or not an array")?;
-    let mut bounds_decimal = Vec::with_capacity(bounds_raw.len());
-    for bound in bounds_raw {
-        let hex = bound.as_str().context("RangeEventAdded: `bounds` entry is not a string")?;
-        bounds_decimal.push(Value::String(uint256_hex_to_decimal(hex)?));
-    }
-    let bounds_json = Value::Array(bounds_decimal);
+    // Exhaustive destructuring: every ABI field must be named.
+    let RangeEventAddedData { event_id, ob, bounds } = serde_json::from_value(event.value.clone())
+        .context("RangeEventAdded: payload does not parse against the ABI")?;
+    // `eventId` and `bounds` are uint256 and uint256[]; the DTO holds the RAW ABI
+    // values ("0x" + 64 hex), so the conversion stays here. The stored form is what
+    // the API serves: decimal strings.
+    let event_id_decimal = uint256_maybe_hex(&event_id)?;
+    let range_ob_address = ob.as_str();
+    let bounds_json = Value::Array(
+        bounds
+            .iter()
+            .map(|b| uint256_maybe_hex(b).map(Value::String))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    );
 
     let parent: Option<(i64,)> =
         sqlx::query_as("select id from oracle_event_lists where address = $1")
@@ -1232,6 +1253,20 @@ pub(crate) fn node_chain_order(node: &EventNode, event_label: &str) -> anyhow::R
 
 pub(crate) fn field_str<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a str> {
     value.get(key).and_then(Value::as_str).with_context(|| format!("missing field `{key}`"))
+}
+
+/// The same rule `uint_field_to_decimal` applies, but to an already-extracted
+/// string — for paths where the value comes from a typed DTO rather than from a
+/// `serde_json::Value`. The decoder hands over a uint256 as "0x" + 64 hex and
+/// anything narrower as decimal; both must be accepted.
+pub(crate) fn uint256_maybe_hex(raw: &str) -> anyhow::Result<String> {
+    if raw.starts_with("0x") || raw.starts_with("0X") {
+        uint256_hex_to_decimal(raw)
+    } else {
+        BigUint::parse_bytes(raw.as_bytes(), 10)
+            .map(|b| b.to_str_radix(10))
+            .ok_or_else(|| anyhow!("invalid uint256: {raw}"))
+    }
 }
 
 pub fn uint256_hex_to_decimal(value: &str) -> anyhow::Result<String> {

@@ -21,6 +21,7 @@ use dodex_contracts::airegistry::inference_order_book::ResultOfGetOrder as IobOr
 use dodex_contracts::airegistry::inference_order_book::ResultOfGetStats as IobStats;
 use dodex_contracts::airegistry::token_contract::ParamsOfOpen;
 use dodex_contracts::airegistry::token_contract::ParamsOfWithdrawShell;
+use dodex_contracts::airegistry::token_contract::ResultOfGetBuyerBond as TcBuyerBond;
 use dodex_contracts::airegistry::token_contract::ResultOfGetConfig as TcConfig;
 use dodex_contracts::airegistry::token_contract::ResultOfGetFees as TcFees;
 use dodex_contracts::airegistry::token_contract::ResultOfGetOffer as TcOffer;
@@ -32,6 +33,7 @@ use dodex_contracts::dex::oracle::Oracle;
 use dodex_contracts::dex::oracle::ParamsOfGetEventListAddress;
 use dodex_contracts::dex::oracle_event_list::OracleEventList;
 use dodex_contracts::dex::oracle_event_list::ParamsOfAddEvent;
+use dodex_contracts::dex::oracle_event_list::ParamsOfAddRangeEvent;
 use dodex_contracts::dex::oracle_event_list::ResultOfGetEvents;
 use dodex_contracts::dex::pmp::ParamsOfSubmitResolve;
 use dodex_contracts::dex::pmp::ParamsOfSubmitSetTimings;
@@ -41,6 +43,7 @@ use dodex_contracts::dex::private_note::ParamsOfCancelAllInferenceOrders;
 use dodex_contracts::dex::private_note::ParamsOfCancelInferenceOrder;
 use dodex_contracts::dex::private_note::ParamsOfDeployInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfDeployPmp;
+use dodex_contracts::dex::private_note::ParamsOfFundDeal;
 use dodex_contracts::dex::private_note::ParamsOfFundDeployShell;
 use dodex_contracts::dex::private_note::ParamsOfInferenceOrderBook;
 use dodex_contracts::dex::private_note::ParamsOfPlaceInferenceBuy;
@@ -269,6 +272,26 @@ impl Dex {
             .map_err(Into::into)
     }
 
+    /// Adds a RANGE event, whose outcome resolves from an
+    /// `InferenceOrderBook`'s reference price rather than from a submitted
+    /// answer (`OracleEventList.addRangeEvent`, `OracleEventList.sol:184`).
+    ///
+    /// The difference from [`Dex::add_event`] that matters to a caller is
+    /// `params.ob`: the address of the book the event resolves from. That link
+    /// is the whole point of the range variant — it is what makes a prediction
+    /// market and an inference book two ends of one fact.
+    pub async fn add_range_event(
+        &self,
+        event_list_address: &str,
+        params: ParamsOfAddRangeEvent,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        OracleEventList::new(self.ctx.clone(), dex_contract_params(event_list_address))
+            .add_range_event(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn get_events(&self, event_list_address: &str) -> ChainResult<OracleEvents> {
         OracleEventList::new(self.ctx.clone(), dex_contract_params(event_list_address))
             .get_events()
@@ -356,6 +379,24 @@ impl Dex {
     ) -> ChainResult<ResultOfSendMessage> {
         PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
             .cancel_all_inference_orders(params, signer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Seller note funds its own deal contract (`PrivateNote.fundDeal`,
+    /// `PrivateNote.sol:1055`).
+    ///
+    /// Seller-only by construction. The buyer's bond is funded by the buyer's
+    /// note without a call from here — the fill path does it inline (`:752`) —
+    /// so a scenario that has already crossed an offer owes only this half.
+    pub async fn fund_deal(
+        &self,
+        pn_address: &str,
+        params: ParamsOfFundDeal,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        PrivateNote::new(self.ctx.clone(), dex_contract_params(pn_address))
+            .fund_deal(params, signer)
             .await
             .map_err(Into::into)
     }
@@ -515,6 +556,26 @@ impl Dex {
             .map_err(Into::into)
     }
 
+    /// Seller claims the trial tick once the probe window has passed
+    /// (`TokenContract.acceptProbe`, `TokenContract.sol:1030`).
+    ///
+    /// Signed with the SELLER's keys, and only after `PROBE_WINDOW` has
+    /// elapsed since the stream opened — the contract reverts with
+    /// `ERR_SETTLE_WINDOW_OPEN` otherwise, so a caller that has not waited gets
+    /// an error rather than a no-op. What it buys is the branch downstream:
+    /// with the probe accepted, the buyer's `stop` settles the stream cleanly
+    /// instead of burning the probe.
+    pub async fn token_contract_accept_probe(
+        &self,
+        token_contract_address: &str,
+        signer: Signer,
+    ) -> ChainResult<ResultOfSendMessage> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .accept_probe(signer)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Seller resolves a dispute after the dispute window
     /// (`TokenContract.resolveDisputeTimeout`).
     pub async fn token_contract_resolve_dispute_timeout(
@@ -547,6 +608,23 @@ impl Dex {
     ) -> ChainResult<TcState> {
         TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
             .get_state()
+            .await
+            .map_err(Into::into)
+    }
+
+    /// The buyer's bond as the deal holds it (`TokenContract.getBuyerBond`).
+    ///
+    /// Read `bond_held > 0` as "the buyer's half has landed" for an ordinary
+    /// deal: the contract exposes no `bond_funded` flag on this side, and
+    /// `fundBuyerBond` writes the amount and the private flag together
+    /// (`TokenContract.sol:957-958`). A subscription funds it by carve-out
+    /// instead (`:727`), where that reading does not hold.
+    pub async fn token_contract_get_buyer_bond(
+        &self,
+        token_contract_address: &str,
+    ) -> ChainResult<TcBuyerBond> {
+        TokenContract::new(self.ctx.clone(), self_rooted_contract_params(token_contract_address))
+            .get_buyer_bond()
             .await
             .map_err(Into::into)
     }

@@ -166,6 +166,26 @@ pub struct ResultOfGetSellerBond {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Result of `TokenContract.getBuyerBond`.
+///
+/// Note what is NOT here: a `bond_funded` flag. `getBuyerBond`
+/// (`TokenContract.sol:2119`) returns only the two amounts, while the contract
+/// keeps `_buyerBondFunded` to itself — and `open()` requires that flag
+/// (`:985`). For an ORDINARY deal the two move together: `fundBuyerBond` sets
+/// `_buyerBond = need` and the flag on adjacent lines (`:957-958`), so
+/// `bond_held > 0` is a faithful stand-in. A SUBSCRIPTION funds the bond by
+/// carve-out at fund time instead (`:727`) and this equivalence does not carry
+/// there.
+pub struct ResultOfGetBuyerBond {
+    #[serde(deserialize_with = "deserialize_u128")]
+    pub bond_held: u128,
+    /// Zero unless the deal is a subscription — `_isSubscription() ? _bondAmount() : 0`.
+    #[serde(deserialize_with = "deserialize_u128")]
+    pub bond_required: u128,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 /// Result of `TokenContract.getConfig` (protocol-wide constants, spec §9.1).
 pub struct ResultOfGetConfig {
     #[serde(deserialize_with = "deserialize_u16")]
@@ -307,6 +327,27 @@ impl TokenContract {
         self.send_message(Some(call_set), None, signer).await
     }
 
+    /// # Seller claims the trial tick after the probe window (spec §3.1.3)
+    ///
+    /// Original contract method: `acceptProbe`
+    ///
+    /// Takes no arguments and must be signed with the SELLER's keys —
+    /// `TokenContract.sol:1030` guards it with `onlyOwnerPubkey(_sellerPubkey)`.
+    /// Two further preconditions are the contract's, not this wrapper's, and
+    /// both revert rather than no-op: the probe may not already be accepted
+    /// (`:1033`), and `PROBE_WINDOW` must have elapsed since `_probeTime`
+    /// (`:1034`, `ERR_SETTLE_WINDOW_OPEN`). A caller that has not waited out
+    /// the window gets a revert, so the wait belongs to the scenario.
+    ///
+    /// Setting `_probeAccepted` is what makes the difference downstream: it is
+    /// the flag `stop` branches on, and it decides whether the buyer's stop
+    /// settles the stream cleanly or burns the probe.
+    pub async fn accept_probe(&self, signer: Signer) -> KitResult<ResultOfSendMessage> {
+        let call_set =
+            CallSet { function_name: "acceptProbe".to_string(), header: None, input: None };
+        self.send_message(Some(call_set), None, signer).await
+    }
+
     /// # Buyer stops the stream cleanly (spec §4.1)
     ///
     /// Original contract method: `stop`
@@ -379,6 +420,11 @@ impl TokenContract {
     /// Original contract method: `getSellerBond`.
     pub async fn get_seller_bond(&self) -> KitResult<ResultOfGetSellerBond> {
         self.call_get_method::<ResultOfGetSellerBond>("getSellerBond").await
+    }
+
+    /// Original contract method: `getBuyerBond`.
+    pub async fn get_buyer_bond(&self) -> KitResult<ResultOfGetBuyerBond> {
+        self.call_get_method::<ResultOfGetBuyerBond>("getBuyerBond").await
     }
 
     /// Original contract method: `getOffer`.

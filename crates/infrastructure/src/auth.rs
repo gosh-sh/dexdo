@@ -590,8 +590,8 @@ mod tests {
         // X-DODEX-APIKEY; the masker must not panic on byte-index
         // slicing at a multibyte boundary. Construct a value where
         // byte index 6 splits a multibyte char.
-        let key = "abcdeё1234567";
-        assert!(!key.is_char_boundary(6), "byte 6 must split the 'ё'");
+        let key = "abcdeé1234567";
+        assert!(!key.is_char_boundary(6), "byte 6 must split the 'é'");
         assert_eq!(mask(key), "***");
     }
 }

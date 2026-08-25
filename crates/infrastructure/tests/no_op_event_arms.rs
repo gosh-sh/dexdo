@@ -26,15 +26,18 @@ use sqlx::PgPool;
 /// none of these are in `IGNORABLE_EVENT_TYPES` — that list is permission to
 /// drop an event at ingest, before `raw_events` is written, and dropping these
 /// would cut rewards off from the payload it settles on.
-const UNPERSISTED_DEX_EVENTS: [&str; 9] = [
+/// Types outside the inference scope whose arm must be empty.
+///
+/// The inference part of this list moved to `routed_events_manifest.rs`, where it
+/// is derived from the ABI. What remains here are four types that are not there
+/// and cannot be: they belong to the prediction path and to an external consumer.
+/// `PMP.StakeForfeited` deserves a separate note: it is deliberately NOT in
+/// `IGNORABLE_EVENT_TYPES`, because dodex-rewards reads its payload straight out
+/// of `raw_events`, and dropping it at ingest would cut it off from that data.
+const UNPERSISTED_DEX_EVENTS: [&str; 4] = [
     "PMP.StakeForfeited",
     "PrivateNote.StakeForfeitConfirmed",
     "PrivateNote.StakeDroppedLocally",
-    "PrivateNote.DealCredited",
-    "PrivateNote.BookCredited",
-    "PrivateNote.InferenceOrderRemoved",
-    "PrivateNote.InferenceOrderRejectedMirror",
-    "PrivateNote.InferenceDealClosed",
     "RootPN.DealWriteOffReported",
 ];
 

@@ -346,6 +346,98 @@ async fn unknown_event_type_is_marked_processed() {
     );
 }
 
+#[tokio::test]
+async fn an_unknown_event_type_bumps_the_unknown_counter() {
+    // The counter is the only durable trace an `Unknown` leaves. The row is marked
+    // processed and never retried, and the warn beside it is deduplicated to once
+    // per type per process — so a new contract event that finds no arm is decoded,
+    // dropped, and shows up nowhere: backlog 0, decode_errors 0, observer green.
+    // Absolute value on a fresh repository instance, like the decode counters
+    // (per-instance `Arc<AtomicU64>`).
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let msg_id = "reproj_unknown_counter-msg";
+    // The deal row is purged too: a `TokenContract.*` event seeds the deal skeleton
+    // BEFORE the arm match, so even a type that falls through to Unknown leaves one
+    // behind, keyed on the event's src. Both ends, so a panic mid-test is recoverable.
+    let src = "0:reproj_unknown_counter_src";
+    let cleanup: [(&str, &str); 2] = [
+        ("delete from raw_events where msg_id = $1", msg_id),
+        ("delete from inference_deals where token_contract_address = $1", src),
+    ];
+    purge(&pool, &cleanup).await;
+    insert_raw(&pool, msg_id, src, "TokenContract.Bogus", &json!({})).await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+    assert_eq!(
+        repo.unknown_events_count(),
+        1,
+        "an unroutable event type must bump indexer_unknown_events exactly once"
+    );
+    assert_eq!(repo.decode_errors_count(), 0, "an unknown arm is not a decode failure");
+
+    purge(&pool, &cleanup).await;
+}
+
+#[tokio::test]
+async fn unknown_inference_scoped_event_type_is_marked_processed_and_never_retried() {
+    // IX-FAIL-06, the inference-scoped variant of the test above: a typed,
+    // decoded row whose `TokenContract.*` suffix matches no settlement arm falls
+    // through to `_ => Unknown` in projectors.rs, which stamps it processed on
+    // first sight — "a handler added later needs an explicit backfill"
+    // (projectors.rs). The stamp is drainage's doing (`mark_processed`), which
+    // is why this lives here and not in token_contract_projectors.rs: projector
+    // tests call project_event directly, bypassing the stamp.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_unknown_tc_event";
+    let msg_id = format!("{test}-msg");
+
+    // Same as its neighbour above: the skeleton seed runs before the arm match, so
+    // this leaves an inference_deals row keyed on the src unless it is purged.
+    let src = "0:reproj_unknown_tc_src";
+    let cleanup: [(&str, &str); 2] = [
+        ("delete from raw_events where msg_id = $1", msg_id.as_str()),
+        ("delete from inference_deals where token_contract_address = $1", src),
+    ];
+    purge(&pool, &cleanup).await;
+
+    insert_raw(&pool, &msg_id, src, "TokenContract.Bogus", &json!({})).await;
+
+    repo.reproject_pending(1000).await.expect("reproject");
+    assert!(
+        processed_at_is_set(&pool, &msg_id).await,
+        "an unroutable TokenContract suffix must stamp processed_at, not defer"
+    );
+
+    // A second pass must not touch the row: the pending SELECT filters
+    // `processed_at is null`, so an unchanged stamp proves the row left the
+    // queue for good (Unknown is terminal, not a retryable deferral).
+    let stamp_after_first: String =
+        sqlx::query_scalar("select processed_at::text from raw_events where msg_id = $1")
+            .bind(&msg_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read stamp");
+    repo.reproject_pending(1000).await.expect("second reproject");
+    let stamp_after_second: String =
+        sqlx::query_scalar("select processed_at::text from raw_events where msg_id = $1")
+            .bind(&msg_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read stamp again");
+    assert_eq!(
+        stamp_after_first, stamp_after_second,
+        "the second pass must not pick the stamped row back up"
+    );
+
+    purge(&pool, &cleanup).await;
+}
+
 /// One captured `warn!` event: its tracing target plus the `message` and
 /// `event_type` fields, enough to assert which sink the no-handler warning
 /// would land in.
@@ -3057,6 +3149,16 @@ async fn fast_path_falls_back_and_isolates_poison_row() {
     assert!(processed_at_is_set(&pool, clean_msg).await, "clean row marked despite the fallback");
     assert!(!processed_at_is_set(&pool, poison_msg).await, "poison row stays pending");
     assert_eq!(repo.projection_fallback_count(), 1, "the batch fell back exactly once");
+    // The COUNTER gets the same treatment as the warning below, and for the same
+    // reason: the rolled-back fast pass saw this row too. An `AtomicU64` bumped
+    // inside the transaction survives its rollback, so counting at the match arm
+    // reports one unknown event as two whenever a later row in the batch forces the
+    // replay. This repo is freshly constructed, so 1 is its whole history.
+    assert_eq!(
+        repo.unknown_events_count(),
+        1,
+        "one unknown row, one count — the rolled-back fast pass must not have counted it too"
+    );
 
     let captured: Vec<CapturedEvent> = events.lock().unwrap().clone();
     // The branch actually taken: the optimistic pass logged its fallback.
@@ -3073,6 +3175,125 @@ async fn fast_path_falls_back_and_isolates_poison_row() {
     assert_eq!(unknown_warnings.len(), 1, "exactly one unknown warning, got {unknown_warnings:?}");
     assert_ne!(unknown_warnings[0].target, dodex_logging::EVENT_NOISE_TARGET);
     assert!(unknown_warnings[0].message.contains("first sighting"));
+
+    purge(&pool, &cleanup).await;
+}
+
+/// The orphan counter's half of the same claim its `unknown_events` twin makes
+/// above: a batch that falls back must count each dropped orphan ONCE, not once
+/// per attempt.
+///
+/// Its own test (`inference_projectors.rs`) drains a clean batch, so it can never
+/// see the double count — the fast pass commits and the savepointed path never
+/// runs. This stages the batch that does: an aged orphan the fast pass
+/// dead-letters, and behind it a poison row that aborts the transaction the
+/// counter was bumped inside. The atomic does not roll back with it, so counting
+/// at the match arm reports one permanent loss as two.
+///
+/// That direction matters more than a cosmetic drift: `dodex-orphans-dropped`
+/// fires at any non-zero hourly rate, so an over-count is a page about data loss
+/// that did not happen at that volume.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dropped_orphan_is_counted_once_across_a_fallback() {
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+
+    let book = "0:reproj_orphan_dbl_book";
+    let ob = "0:reproj_orphan_dbl_iob";
+    let order_id = "93";
+    let orphan_msg = "reproj-orphan-dbl-orphan";
+    let poison_msg = "reproj-orphan-dbl-poison";
+    let after = "zzzz_reproj_orphandbl_0";
+    let orphan_chain = "zzzz_reproj_orphandbl_1_orphan";
+    let poison_chain = "zzzz_reproj_orphandbl_2_poison";
+    let stream = "reproj_orphan_dbl_stream";
+    let deal_tc = "0:reproj_orphan_dbl_tc";
+
+    // `inference_deals` is in here because the orphan path UPSERTS it: a Filled
+    // records its deal link (sellerTC as the PK) whether or not either leg is
+    // present, which is the whole point of that path. The first version of this test
+    // borrowed a neighbour's "0:s" and left a row behind — and because the upsert
+    // advances last_chain_order through `greatest()`, it did not merely leak, it
+    // pinned a `zzzz_` chain order onto ANOTHER test's fixture row for good. Hence
+    // both halves: addresses nothing else uses, and a delete for the row they make.
+    let cleanup: Vec<(&str, &str)> = vec![
+        ("delete from live_orders where orderbook_address = $1", book),
+        ("delete from inference_orders where orderbook_address = $1", ob),
+        ("delete from inference_markets where orderbook_address = $1", ob),
+        ("delete from inference_deals where token_contract_address = $1", deal_tc),
+        ("delete from raw_events where msg_id = $1", orphan_msg),
+        ("delete from raw_events where msg_id = $1", poison_msg),
+        ("delete from indexer_cursors where stream_name = $1", stream),
+    ];
+    purge(&pool, &cleanup).await;
+
+    // The orphan: a Filled whose order never arrived. Dead-letterable once its
+    // INGEST age passes the cutoff, so `created_at` is backdated after the insert
+    // (`insert_raw_at` writes it as now()).
+    insert_raw_at(
+        &pool,
+        orphan_msg,
+        orphan_chain,
+        ob,
+        "InferenceOrderBook.InferenceFilled",
+        // `sellerTC` is the binding, not a copy of it: the cleanup deletes the
+        // inference_deals row this upsert creates, keyed on exactly this value, and a
+        // literal here would let a rename silently stop matching — reintroducing the
+        // very leak this test was fixed for, with nothing going red.
+        &json!({"makerId":"901","takerId":"902","ticks":"1","clearingPrice":"1",
+            "sellerTC": deal_tc, "buyerNote":"0:reproj_orphan_dbl_buyer",
+            "sellerNote":"0:reproj_orphan_dbl_seller"}),
+    )
+    .await;
+    sqlx::query("update raw_events set created_at = now() - interval '1 hour' where msg_id = $1")
+        .bind(orphan_msg)
+        .execute(&pool)
+        .await
+        .expect("age the orphan past the cutoff");
+
+    // The poison row, sorting AFTER the orphan so the fast pass has already counted
+    // the drop by the time this aborts the transaction.
+    insert_open_parent(&pool, book, order_id).await;
+    insert_raw_at(
+        &pool,
+        poison_msg,
+        poison_chain,
+        book,
+        "OrderBook.OrderFilled",
+        &json!({"orderId": order_id, "filledAmount": "30", "clearingPrice": "6150"}),
+    )
+    .await;
+
+    // Dead-lettering only fires once capture has reached head; a per-test stream so
+    // this never reads or writes the shared live cursor row.
+    sqlx::query(
+        "insert into indexer_cursors (stream_name, cursor, at_head, updated_at)
+         values ($1, 'c', true, now())
+         on conflict (stream_name) do update set at_head = true, updated_at = now()",
+    )
+    .bind(stream)
+    .execute(&pool)
+    .await
+    .expect("seed the at-head cursor");
+
+    let repo = IndexerRepository::new(pool.clone())
+        .with_capture_stream(stream)
+        .with_inference_orphan_cutoff(Duration::from_secs(60));
+    let stats = repo
+        .reproject_pending_from(1000, Some(after), Some(poison_chain))
+        .await
+        .expect("reproject");
+
+    assert_eq!(stats.scanned, 2, "only the two in-range rows are drained");
+    assert_eq!(stats.failed, 1, "the poison row isolates in the savepointed replay");
+    assert_eq!(repo.projection_fallback_count(), 1, "the batch fell back exactly once");
+    assert!(processed_at_is_set(&pool, orphan_msg).await, "the aged orphan is dead-lettered");
+    assert_eq!(
+        repo.inference_orphans_dropped_count(),
+        1,
+        "one orphan dropped, one count — the rolled-back fast pass counted it too before the \
+         bump moved past the commit. This repo is freshly constructed, so 1 is its whole history"
+    );
 
     purge(&pool, &cleanup).await;
 }
@@ -4235,6 +4456,163 @@ async fn run_reprojection_loop_drains_pending_and_retries_deferred() {
         .expect("cleanup barrier");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn deferred_retry_rides_the_idle_interval_timer() {
+    // IX-FAIL-01's loop leg — an UPPER bound by construction, deliberately no
+    // lower bound (see next_pass_start's doc in indexer_repo.rs: the timer's
+    // phase resets at the START of a retry pass, so a wall-clock lower bound
+    // flakes on correct code). The triple closing the row: next_pass_start
+    // units (the loop's choice of pass mode), reproject_pending_from_honors_
+    // after_and_until_bounds (the method honors the bound), and this test (a
+    // timer retry actually reaches a row no forward pass can).
+    //
+    // Choreography. A Deferred child (parent invisible) and a marker row with
+    // a chain_order ABOVE the child are seeded committed; the parent's INSERT
+    // sits in a pre-opened, uncommitted transaction with a chain_order BELOW
+    // the child's. Once the marker is processed, the first pass's SELECT is
+    // provably behind (the child earned its Deferred there), and with
+    // batch_size=1000 that pass had no second SELECT — after its clean drain
+    // the floor is at/above the marker, so a forward pass can never reach the
+    // parent below it; only the timer retry (after = None) can. Residual
+    // assumption, accepted: a sweep error in that first pass would leave the
+    // floor unset and this test vacuously green — an under-assert, not a flake.
+    // Only then is the parent committed (INSERT already executed, the COMMIT
+    // is instant); t0 = that commit. The child must be applied within
+    // t0 + 2*idle_interval + allowance: a retry whose SELECT ran before the
+    // commit legally misses it, the next one arrives on the timer, and the
+    // 600ms allowance covers pass latency + scheduler jitter on a loaded CI.
+    let _guard = REPROJECTION_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let repo = IndexerRepository::new(pool.clone());
+
+    let test = "reproj_cadence";
+    // Padded chain_orders (5f80 + zero-left-pad to 28) order the three rows as
+    // parent < child < marker by msg_id length: 18 < 20 < 21 chars.
+    let oracle_addr = format!("0:{test}_oracle");
+    let marker_oracle_addr = format!("0:{test}_marker_oracle");
+    let evlist_addr = format!("0:{test}_evlist");
+    let msg_parent = format!("{test}-par");
+    let msg_child = format!("{test}-child");
+    let msg_marker = format!("{test}-marker");
+
+    let cleanup = [
+        ("delete from oracle_event_lists where address = $1", evlist_addr.as_str()),
+        ("delete from oracles where address = $1", oracle_addr.as_str()),
+        ("delete from oracles where address = $1", marker_oracle_addr.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_parent.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_child.as_str()),
+        ("delete from raw_events where msg_id = $1", msg_marker.as_str()),
+    ];
+    purge(&pool, &cleanup).await;
+
+    // The child: Deferred until its parent oracle exists.
+    insert_raw(
+        &pool,
+        &msg_child,
+        &oracle_addr,
+        "Oracle.OracleEventListDeployed",
+        &json!({
+            "eventListAddress": evlist_addr,
+            "index": "1",
+            "description": "Cadence test event list",
+        }),
+    )
+    .await;
+    // The marker: standalone, applies on the first pass, chain_order above the child.
+    insert_raw(
+        &pool,
+        &msg_marker,
+        &marker_oracle_addr,
+        "RootOracle.OracleDeployed",
+        &json!({
+            "oracle": marker_oracle_addr,
+            "pubkey": "0x0000000000000000000000000000000000000000000000000000000000005678",
+            "name": format!("{test}-marker-oracle"),
+        }),
+    )
+    .await;
+
+    // The parent, INSERTed but NOT committed: invisible to every SELECT until
+    // the commit below, and below the floor from the moment it lands.
+    let mut parent_tx = pool.begin().await.expect("open parent tx");
+    sqlx::query(
+        r#"insert into raw_events
+               (msg_id, chain_order, created_at_chain, src_address, dst_address,
+                event_type, body_json, decoded)
+           values ($1, $2, to_timestamp(1700000000), $3, $3,
+                   'RootOracle.OracleDeployed', '{}'::jsonb, $4)"#,
+    )
+    .bind(&msg_parent)
+    .bind(format!("5f80{msg_parent:0>28}"))
+    .bind(&oracle_addr)
+    .bind(json!({
+        "oracle": oracle_addr,
+        "pubkey": "0x0000000000000000000000000000000000000000000000000000000000009abc",
+        "name": format!("{test}-oracle"),
+    }))
+    .execute(&mut *parent_tx)
+    .await
+    .expect("insert parent inside open tx");
+
+    let idle_interval = Duration::from_millis(300);
+    let h = tokio::spawn(repo.clone().run_reprojection_loop(idle_interval, 1000));
+
+    // Wait for the marker: proof the first pass's SELECT (and Deferred verdict
+    // on the child) is behind us and the floor is at/above the marker.
+    let marker_applied = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if processed_at_is_set(&pool, &msg_marker).await {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    assert!(marker_applied, "the marker must be applied by the first pass within 3s");
+    assert!(
+        !processed_at_is_set(&pool, &msg_child).await,
+        "the child must still be Deferred while its parent is uncommitted"
+    );
+
+    // Commit the parent; from here only the timer retry can reach it.
+    parent_tx.commit().await.expect("commit parent");
+    let t0 = tokio::time::Instant::now();
+
+    // The bound is deliberately loose. What this test proves is that a timer retry
+    // REACHES a row no forward pass can — the parent sits below the floor — and how
+    // promptly it arrives is not asserted here and cannot be: the timer's phase
+    // resets at the start of a retry pass, which is why the lower half of the claim
+    // is carried by the `next_pass_start` units instead. A tight wall-clock bound on
+    // a current_thread runtime sharing one Postgres with the rest of the suite buys
+    // no extra proof and flakes under load; six intervals plus two seconds is still
+    // orders of magnitude below a broken timer, which never fires at all.
+    let bound = idle_interval * 6 + Duration::from_secs(2);
+    let child_applied = {
+        let deadline = t0 + bound;
+        loop {
+            if processed_at_is_set(&pool, &msg_child).await {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    assert!(
+        child_applied,
+        "the timer retry must apply the below-floor parent and its deferred child \
+         within 2 idle intervals (+allowance) of the parent's commit"
+    );
+
+    h.abort();
+    let _ = h.await;
+    purge(&pool, &cleanup).await;
+}
+
 #[tokio::test]
 async fn identical_chain_order_both_rows_eventually_drain() {
     // Verifies that two pending rows sharing the same chain_order are both
@@ -4351,14 +4729,68 @@ async fn projection_lag_seconds_empty_queue_is_zero() {
     // on a shared DB (REPROJECTION_LOCK is in-process only, so it does not cross
     // nextest's process-per-test). Read the count on both sides of the lag read
     // and assert the empty-queue==0 contract only when the queue is observably
-    // empty across both — then it was empty during the lag read too. Otherwise a
-    // concurrent row makes the snapshots disagree and we skip rather than flake.
+    // empty across both — then it was empty during the lag read too.
     let pending_before = repo.count_pending_projection().await.expect("count_pending_projection");
     let lag = repo.projection_lag_seconds().await.expect("projection_lag_seconds");
     let pending_after = repo.count_pending_projection().await.expect("count_pending_projection");
     if pending_before == 0 && pending_after == 0 {
         assert_eq!(lag, 0, "empty eligible queue must return 0");
+        return;
     }
+
+    // Not empty — and skipping unconditionally here is what used to retire this
+    // contract for good. A sibling that panics before its cleanup leaves rows of
+    // exactly the eligible shape, and from that moment this test skips on every
+    // later run without saying so: green, and checking nothing.
+    //
+    // AGE is the discriminator, not a list of msg_id prefixes. A prefix list would
+    // need updating whenever a test seeds under a new name, and the one that forgot
+    // would be exactly the leaker nobody hears about — the same silence this is
+    // meant to end.
+    //
+    // The threshold is a DAY, not the ten minutes this first carried, and the reason
+    // is that siblings deliberately BACKDATE `created_at`. `created_at` is the age of
+    // the row as written, not the wall-clock time anyone has been holding it: an
+    // aged-ingest fixture is an hour "old" the instant it is inserted. Two files do
+    // this today — `observer_queries.rs` seeds at 7200s and `inference_projectors.rs`
+    // at 3600s — and only the first is pinned to this binary's nextest group, so at
+    // ten minutes the second could turn this red for doing its job. A day clears
+    // every deliberate backdate in the crate by a factor of twelve.
+    //
+    // What that costs is detection latency, not detection: a leak is never cleaned by
+    // anyone, so on a long-lived shared database it crosses the threshold and is
+    // named. On a per-run CI Postgres nothing survives to reach a day — but nothing
+    // reached ten minutes there either, so the check was always the shared-database
+    // one. If a sibling ever backdates past a day, it must be added to the group
+    // rather than this bound raised again: past that point the two cases stop being
+    // distinguishable by age at all.
+    let stale: Vec<(String, i64)> = sqlx::query_as(
+        "select msg_id, extract(epoch from now() - created_at)::bigint
+           from raw_events
+          where processed_at is null
+            and event_type is not null
+            and decoded is not null
+            and created_at < now() - interval '1 day'
+          order by created_at
+          limit 20",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("list stale pending rows");
+
+    assert!(
+        stale.is_empty(),
+        "eligible rows have been pending for over a day: {stale:?} (msg_id, age in \
+         seconds). Every deliberate backdate in this crate is two hours or less, so these \
+         are leaks from a test that died before its cleanup. They make the empty-queue \
+         contract untestable for every later run on this database — delete them, and give \
+         the leaking test a purge that survives a panic (a prefix purge at its start, as \
+         observer_queries.rs does)"
+    );
+    eprintln!(
+        "skipping the empty-queue assert: {pending_before}/{pending_after} pending rows, none \
+         of them older than a day, so each is a sibling's own fixture or its leftovers"
+    );
 }
 
 #[tokio::test]

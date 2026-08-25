@@ -451,6 +451,46 @@ fn apply_ingest_filters(
     (edges, stats)
 }
 
+/// What one drained page did to the resume cursor. Returned rather than logged
+/// so the decision stays pure and a unit can pin it (IX-CAP-09); the caller owns
+/// the `warn!` because only it knows which source stream to name.
+#[derive(Debug, PartialEq, Eq)]
+enum CursorMove {
+    /// The cursor moved to the page's `endCursor`.
+    Advanced,
+    /// The gateway sent an empty `endCursor`. It is not a position anything can
+    /// resume from, so storing it would silently restart the next tick at the
+    /// oldest retained event and re-ingest the whole window.
+    EmptyEndCursor,
+    /// The page carried edges but no `endCursor` at all.
+    MissingEndCursor,
+    /// Nothing to do: no `endCursor` and nothing retained.
+    Idle,
+}
+
+/// The cursor decision for one drained page: the cursor advances to the page's
+/// `endCursor` whenever a usable one is present — `endCursor` comes from
+/// `page_info`, not from the edges, so a page whose every edge the ingest filters
+/// dropped still advances past the noise. Without one the cursor stays;
+/// `retained_edges` is the POST-filter count, so only a page that still carries
+/// edges earns a warn — a fully filtered page with no `endCursor` is a silent
+/// no-op, deliberately: recurring noise pages would otherwise flood the log.
+fn advance_cursor(
+    cursor: &mut Option<String>,
+    end_cursor: Option<&str>,
+    retained_edges: usize,
+) -> CursorMove {
+    match end_cursor {
+        Some(end) if !end.is_empty() => {
+            *cursor = Some(end.to_string());
+            CursorMove::Advanced
+        }
+        Some(_) => CursorMove::EmptyEndCursor,
+        None if retained_edges > 0 => CursorMove::MissingEndCursor,
+        None => CursorMove::Idle,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drain_events(
     source: CaptureSource,
@@ -503,22 +543,16 @@ async fn drain_events(
         stats.decoded += persisted.decoded;
         stats.undecoded += persisted.undecoded;
 
-        // An empty `endCursor` is refused rather than stored: it is not a position
-        // the gateway can resume from, so persisting it would silently restart the
-        // next tick at the oldest retained event and re-ingest the whole window.
-        match raw_end_cursor {
-            Some(end) if !end.is_empty() => *cursor = Some(end.to_string()),
-            Some(_) => warn!(
+        match advance_cursor(cursor, raw_end_cursor, page.edges.len()) {
+            CursorMove::Advanced | CursorMove::Idle => {}
+            CursorMove::EmptyEndCursor => warn!(
                 source = source.label(),
                 "graphql page returned an empty endCursor; cursor not advanced"
             ),
-            None if !page.edges.is_empty() => {
-                warn!(
-                    source = source.label(),
-                    "graphql page has edges but missing endCursor; cursor not advanced"
-                )
-            }
-            None => {}
+            CursorMove::MissingEndCursor => warn!(
+                source = source.label(),
+                "graphql page has edges but missing endCursor; cursor not advanced"
+            ),
         }
 
         if !page.page_info.has_next_page {
@@ -575,6 +609,52 @@ mod tests {
         assert!(!edge_is_ignored_noop(&edge_with(Some(&placed)), &ignored));
         // no dst -> kept
         assert!(!edge_is_ignored_noop(&edge_with(None), &ignored));
+    }
+
+    #[test]
+    fn a_fully_filtered_page_still_advances_the_cursor() {
+        // IX-CAP-09: `endCursor` is read from `page_info`, never derived from
+        // the edges, so a page the ingest filters emptied entirely must still
+        // move the cursor — otherwise the capture loop would re-fetch the same
+        // noise page forever.
+        let mut cursor = Some("c1".to_string());
+        let moved = advance_cursor(&mut cursor, Some("c2"), 0);
+        assert_eq!(cursor.as_deref(), Some("c2"), "the dropped page must be passed, not re-read");
+        assert_eq!(moved, CursorMove::Advanced, "advancing is the healthy path — no warn");
+    }
+
+    #[test]
+    fn a_fully_filtered_page_without_end_cursor_stays_silent() {
+        // The current silence is pinned DELIBERATELY: the warn keys on the
+        // post-filter edge count, so a page with edges but no endCursor warns,
+        // while a fully filtered one without endCursor says nothing and leaves
+        // the cursor alone. A gateway stuck emitting such pages is visible only
+        // through the cursor-age gauge, not the log — recorded here so a future
+        // reader finds a decision, not an accident.
+        let mut cursor = Some("c1".to_string());
+        let moved = advance_cursor(&mut cursor, None, 0);
+        assert_eq!(cursor.as_deref(), Some("c1"), "no endCursor — the cursor must not move");
+        assert_eq!(
+            moved,
+            CursorMove::Idle,
+            "a fully filtered page without endCursor is a silent no-op"
+        );
+
+        // Contrast case, same function: edges retained + no endCursor => warn.
+        let mut cursor2 = Some("c1".to_string());
+        assert_eq!(advance_cursor(&mut cursor2, None, 3), CursorMove::MissingEndCursor);
+        assert_eq!(cursor2.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn an_empty_end_cursor_is_refused_rather_than_stored() {
+        // An empty string is not a position the gateway can resume from. Storing
+        // it would silently restart the next tick at the oldest retained event
+        // and re-ingest the whole window — the cursor must stay where it was.
+        let mut cursor = Some("c1".to_string());
+        let moved = advance_cursor(&mut cursor, Some(""), 3);
+        assert_eq!(cursor.as_deref(), Some("c1"), "an empty endCursor must not move the cursor");
+        assert_eq!(moved, CursorMove::EmptyEndCursor);
     }
 
     #[test]

@@ -18,6 +18,8 @@ const SUPER_ROOT_ABI: &str = include_str!("../../../../contracts/airegistry/Supe
 const ROOT_MODEL_ABI: &str = include_str!("../../../../contracts/airegistry/RootModel.abi.json");
 const TOKEN_CONTRACT_ABI: &str =
     include_str!("../../../../contracts/airegistry/TokenContract.abi.json");
+const ORACLE_EVENT_LIST_ABI: &str =
+    include_str!("../../../../contracts/dex/OracleEventList.abi.json");
 const INFERENCE_ORDER_BOOK_ABI: &str =
     include_str!("../../../../contracts/airegistry/InferenceOrderBook.abi.json");
 
@@ -351,7 +353,14 @@ fn event_ids_match_modifiers() {
     assert_eq!(Rm::TokenContractRegistered as u128, 702);
     assert_eq!(Rm::ContractDeployed as u128, 703);
 
-    assert_eq!(Tc::ContractDeployed as u128, 703);
+    // A relic. The id assertions below duplicate
+    // `typed_event_enums_carry_the_ids_the_contracts_emit_on`
+    // (`crates/infrastructure/tests/airegistry_event_manifest.rs`), which derives the
+    // same numbers from `modifiers.sol` instead of repeating them here. New variants
+    // are NOT added here: this table drifting away from the contract is exactly what
+    // defect 703 was — the deal deploy moved to `DealDeployedEmit`, the manifest
+    // recorded it, and the enum and this line did not.
+    assert_eq!(Tc::ContractDeployed as u128, 732);
     assert_eq!(Tc::ContractDestroyed as u128, 709);
     assert_eq!(Tc::ShellWithdrawn as u128, 710);
     assert_eq!(Tc::StreamFunded as u128, 720);
@@ -388,6 +397,15 @@ fn event_address_roundtrips_through_try_from() {
     );
     assert_eq!(Tc::try_from(Tc::ProbeAccepted.to_string()).unwrap(), Tc::ProbeAccepted);
     assert_eq!(Iob::try_from(Iob::Filled.to_string()).unwrap(), Iob::Filled);
+    // The same round trip `every_declared_variant_round_trips_through_try_from` does
+    // over `ALL`: without an arm in `TryFrom` the variant is declared but the decoder
+    // does not know it.
+    use crate::dex::oracle_event_list_events::OracleEventListEvent as Oel;
+    assert_eq!(
+        Oel::try_from(Oel::RangeEventAdded.to_string()).unwrap(),
+        Oel::RangeEventAdded,
+        "RangeEventAdded is a declared variant, but TryFrom does not know its id (162)"
+    );
     assert!(Iob::try_from(
         ":0000000000000000000000000000000000000000000000000000000000000063".to_string()
     )
@@ -395,6 +413,54 @@ fn event_address_roundtrips_through_try_from() {
 }
 
 // ── Event payload decoders (field names vs ABI event inputs) ───────────────
+
+/// The names of every ABI event.
+fn abi_event_names(abi: &str) -> BTreeSet<String> {
+    let v: Value = serde_json::from_str(abi).expect("abi json");
+    let events = v["events"].as_array().expect("abi.events array");
+    // An empty array would make any claim about it true always — that is how a guard
+    // goes blind when the key is renamed.
+    assert!(!events.is_empty(), "events is empty — the ABI key changed");
+    events.iter().map(|e| e["name"].as_str().expect("event name").to_string()).collect()
+}
+
+#[test]
+fn inference_order_book_enum_covers_every_abi_event() {
+    use super::inference_order_book_events::InferenceOrderBookEvent as E;
+    let declared: BTreeSet<String> = E::ALL
+        .iter()
+        .map(|v| {
+            let n = format!("{v:?}");
+            if n.starts_with("Inference") {
+                n
+            } else {
+                format!("Inference{n}")
+            }
+        })
+        .collect();
+    let in_abi = abi_event_names(INFERENCE_ORDER_BOOK_ABI);
+    assert_eq!(
+        declared,
+        in_abi,
+        "extra in enum: {:?}; missing: {:?}",
+        declared.difference(&in_abi).collect::<Vec<_>>(),
+        in_abi.difference(&declared).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn token_contract_enum_covers_every_abi_event() {
+    use super::token_contract_events::TokenContractEvent as E;
+    let declared: BTreeSet<String> = E::ALL.iter().map(|v| format!("{v:?}")).collect();
+    let in_abi = abi_event_names(TOKEN_CONTRACT_ABI);
+    assert_eq!(
+        declared,
+        in_abi,
+        "extra in enum: {:?}; missing: {:?}",
+        declared.difference(&in_abi).collect::<Vec<_>>(),
+        in_abi.difference(&declared).collect::<Vec<_>>()
+    );
+}
 
 #[test]
 fn event_payloads_decode_abi_shape() {
@@ -416,7 +482,14 @@ fn event_payloads_decode_abi_shape() {
     decodes!(iob::OrderPlacedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderPlaced");
     decodes!(iob::OrderCancelledData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderCancelled");
     let filled = decodes!(iob::FilledData, INFERENCE_ORDER_BOOK_ABI, "InferenceFilled");
-    assert_eq!(filled.seller_tc, SAMPLE_ADDRESS);
+    assert_eq!(filled.seller_tc.as_deref(), Some(SAMPLE_ADDRESS));
+    // `sellerNote` is pinned for a different reason than its camelCase neighbour: it
+    // is the field v4.0.33 added so the deal link survives orphan repair, where no
+    // SELL leg exists to walk. Nothing else guards its presence in the ABI, so if it
+    // were dropped the projector would silently fall back to the leg walk — which is
+    // exactly the path that has no leg — and the seller would go missing only on the
+    // orphan path, where no test looks for him.
+    assert_eq!(filled.seller_note.as_deref(), Some(SAMPLE_ADDRESS));
     decodes!(iob::ExecutedData, INFERENCE_ORDER_BOOK_ABI, "InferenceExecuted");
     decodes!(iob::RefundedData, INFERENCE_ORDER_BOOK_ABI, "InferenceRefunded");
     decodes!(iob::OrderBookDeployedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderBookDeployed");
@@ -425,6 +498,16 @@ fn event_payloads_decode_abi_shape() {
         INFERENCE_ORDER_BOOK_ABI,
         "InferenceOrderCancelRejected"
     );
+    decodes!(iob::OrderExpiredData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderExpired");
+    decodes!(iob::OrderRejectedData, INFERENCE_ORDER_BOOK_ABI, "InferenceOrderRejected");
+    decodes!(tc::TicksClaimedData, TOKEN_CONTRACT_ABI, "TicksClaimed");
+    decodes!(tc::EndpointSetData, TOKEN_CONTRACT_ABI, "EndpointSet");
+    decodes!(tc::BuyerBondFundedData, TOKEN_CONTRACT_ABI, "BuyerBondFunded");
+
+    // The aliases above go through `use super::… as …`, where `super` is
+    // `airegistry`. A foreign module needs the full path from the crate root.
+    use crate::dex::oracle_event_list_events as oel;
+    decodes!(oel::RangeEventAddedData, ORACLE_EVENT_LIST_ABI, "RangeEventAdded");
 
     // TokenContract (700-range streaming).
     decodes!(tc::StreamFundedData, TOKEN_CONTRACT_ABI, "StreamFunded");

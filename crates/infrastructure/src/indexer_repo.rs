@@ -29,7 +29,7 @@ use crate::projectors::ProjectionOutcome;
 
 /// The capture loop's cursor stream name. The orphan dead-letter reads its
 /// `at_head` flag to avoid dropping an orphan whose parent may still be ahead of
-/// the cursor during a backfill (see `is_expired_inference_orphan`).
+/// the cursor during a backfill (see `is_dead_letterable_orphan`).
 pub const CAPTURE_STREAM: &str = "blockchain_events";
 pub const DAPP_CAPTURE_STREAM: &str = "blockchain_events_dex_dapp";
 pub const ROOT_PN_CAPTURE_STREAM: &str = "blockchain_events_root_pn";
@@ -72,12 +72,24 @@ pub struct IndexerRepository {
     /// here. A non-zero rate means ABI drift or malformed bodies for an otherwise
     /// known event. Shared across clones via `Arc`, like `projection_fallbacks`.
     decode_errors: Arc<AtomicU64>,
+    /// Running count of decoded rows that matched no projector arm
+    /// (`ProjectionOutcome::Unknown`). `Unknown` marks the row processed and never
+    /// retries it, and the `warn!` beside it is demoted to the noise target after
+    /// the first sighting of each type (`warn_unknown`), so without this counter a
+    /// new contract event is decoded, dropped and leaves no trace anywhere an
+    /// operator looks: backlog 0, decode_errors 0, observer green. Distinct
+    /// from `decode_errors` and `decode_ambiguous_collisions` in the way that
+    /// matters most — those rows keep their payload and stay replayable, these do
+    /// not. Shared across clones via `Arc`, like `decode_errors`.
+    unknown_events: Arc<AtomicU64>,
     /// Running count of event bodies left undecoded because their id collides
     /// across ABIs and no `dst` route disambiguated it (the `AmbiguousCollision`
     /// decode outcome). Distinct from a benign unknown id and from a hard decode
-    /// error. Unreachable today (the only colliding id, `OrderCancelled`, has a
-    /// route); a non-zero value means a new colliding ABI was added without a
-    /// route — alert on it. Shared across clones via `Arc`.
+    /// error. Unreachable today: the collision `decoder.rs` names as REAL is
+    /// `ContractDeployed`, declared byte-identically by `RootModel` and
+    /// `TokenContract`, and both sides carry a mandatory `dst` route. A non-zero
+    /// value means a new colliding ABI was added without a route — alert on it.
+    /// Shared across clones via `Arc`.
     decode_ambiguous_collisions: Arc<AtomicU64>,
     /// Running count of hard inference reconcile failures (`Err` outcomes from
     /// discovery or refresh — not `NoBoc`, which is a benign skip). Bumped by the
@@ -129,7 +141,41 @@ struct PendingRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// What [`IndexerRepository::dead_letter_verdict`] says about a deferred row: not
+/// admitted, or admitted with the repair path that applies to it. Carrying the
+/// path in the verdict is the point — see that function for the drift a bare
+/// `bool` allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeadLetterVerdict {
+    /// Stays Deferred: the type is not dead-letterable, the row has not reached
+    /// the cutoff, or capture is not at head.
+    NotDeadLetterable,
+    /// An `InferenceOrderBook.*` depth update — the book's own repair runs before
+    /// the row is dropped.
+    Book,
+    /// `OracleEventList.RangeEventAdded` — it annotates a row it does not create,
+    /// so there is no partial state to correct, only a loss to name.
+    RangeEvent,
+}
+
 impl IndexerRepository {
+    /// Shared subquery for "addresses that emitted at least one event inside the
+    /// run window". Shared by `inference_books_with_events_since` and
+    /// `inference_anchored_books_since`: their window predicate must be
+    /// identical, or the anchor and the diagnostic would be talking about
+    /// different runs.
+    ///
+    /// Written as `in (subquery)` rather than a per-book `exists(...)` for the
+    /// query plan: `exists` with `src_address = m.orderbook_address` is covered
+    /// by NO existing index — both `src_address` indices are partial on
+    /// `processed_at is null` (`raw_events_pending_src_idx`,
+    /// `raw_events_unprocessed_src_idx`), and processed rows are exactly what a
+    /// run window needs (at the tail of a run they are the majority). This way
+    /// the window is scanned once via `raw_events_created_at_idx` (migration
+    /// 0007) instead of once per book on every poll.
+    const EVENTS_IN_WINDOW: &'static str = r#"select e.src_address from raw_events e
+                       where e.created_at >= to_timestamp($1::double precision)
+                         and e.src_address is not null"#;
     /// Shared `count(*) filter (...)` projection for the three inference-market
     /// lifecycle buckets, in `(discovering, visible, failing)` order. Both
     /// `inference_market_state_counts` (whole-table) and
@@ -146,15 +192,50 @@ impl IndexerRepository {
         count(*) filter (where last_reconciled_at is null
                            and last_reconcile_failed_at is not null
                            and superseded_at is null) as failing"#;
-    /// Shared `count(*) filter (...)` projection for the three inference-order
-    /// status buckets, in `(open, filled, cancelled)` order. Shared by
+    /// Shared WHERE-clause fragment for "this book carries no verdict": not
+    /// visible, not superseded, and not failing **with a reason**. The first
+    /// three states are exactly `MARKET_STATE_COUNTS_SELECT`'s
+    /// `discovering`/`visible`/`failing` buckets; the one difference is that a
+    /// failure stamp without text does not count as failing here, because
+    /// IX-SEQ-10 asks for the reason and the observer cannot read the pod's logs.
+    const NO_VERDICT_WHERE: &'static str = r#"m.last_reconciled_at is null
+                  and m.superseded_at is null
+                  and (m.last_reconcile_failed_at is null or m.last_reconcile_error is null)"#;
+    /// Shared `count(*) filter (...)` projection for the four inference-order
+    /// status buckets, in `(open, filled, cancelled, expired)` order. Shared by
     /// `inference_order_status_counts` (whole-table) and
     /// `inference_order_status_counts_for` (scoped) for the same anti-drift
     /// reason as `MARKET_STATE_COUNTS_SELECT`.
     const ORDER_STATUS_COUNTS_SELECT: &'static str = r#"
         count(*) filter (where status = 'OPEN') as open,
         count(*) filter (where status = 'FILLED') as filled,
-        count(*) filter (where status = 'CANCELLED') as cancelled"#;
+        count(*) filter (where status = 'CANCELLED') as cancelled,
+        count(*) filter (where status = 'EXPIRED') as expired"#;
+    /// Shared WHERE-clause fragment for "a `raw_events` row the projection loop
+    /// will pick up": unprocessed, typed and decoded. `count_pending_projection`
+    /// (whole-table), `projection_lag_seconds` (age of the oldest such row) and
+    /// `pending_projection_since` (the run-window breakdown the e2e observer
+    /// reads) all build from this one constant — edit the predicate here only,
+    /// never duplicate it.
+    const PENDING_PROJECTION_WHERE: &'static str = r#"processed_at is null
+                  and event_type is not null
+                  and decoded is not null"#;
+    /// Shared SELECT projection for the two staleness ages, in
+    /// `(price_lag, sweep_lag)` order. Shared by `inference_staleness_seconds`
+    /// (whole-table) and `inference_staleness_seconds_for` (scoped) for the
+    /// same anti-drift reason as `ORDER_STATUS_COUNTS_SELECT`.
+    const STALENESS_SELECT: &'static str = r#"
+        extract(epoch from now() - min(reference_price_at))::bigint as price_lag,
+        extract(epoch from now() - min(last_swept_at))::bigint as sweep_lag"#;
+    /// Shared WHERE-clause fragment for "a row the projection loop will NOT pick
+    /// up": untyped or undecoded. A deliberate complement to
+    /// [`Self::PENDING_PROJECTION_WHERE`], not a variant of it: a growing count
+    /// here diagnoses ABI drift (IX-CAP-05), but an event from a contract we do
+    /// not know is not our failure, so the observer prints these rather than
+    /// failing on them. `count_undecodable_since` (whole-table) and
+    /// `undecodable_addresses_since` (scoped) both build from it.
+    const UNDECODABLE_WHERE: &'static str = r#"processed_at is null
+                  and (event_type is null or decoded is null)"#;
     /// Shared WHERE-clause fragment for the "wedged inference book" predicate:
     /// visible, not superseded, and with at least one still-unprocessed
     /// `raw_events` row under the book's `orderbook_address`. Both
@@ -163,6 +244,15 @@ impl IndexerRepository {
     /// set) below build their query from this one constant, so the whole-table
     /// production count and the scoped query a test exercises can never drift
     /// apart — edit the predicate here only, never duplicate it.
+    /// The event-type prefix [`Self::dex_capture_progress_since`] is taken over.
+    /// `OrderBook.` is the prediction-market order book
+    /// (`contracts/dex/OrderBook.sol`) — deliberately NOT `InferenceOrderBook.`,
+    /// the airegistry book the inference anchor already covers. The distinction
+    /// is load-bearing: matched as a LIKE prefix it anchors at the start, so
+    /// `InferenceOrderBook.*` cannot satisfy the DEX anchor. Widening this to a
+    /// contains-match would make inference traffic answer for the DEX side and
+    /// quietly void the anchor; `observer_queries.rs` pins that it does not.
+    const DEX_ANCHOR_EVENT_PREFIX: &'static str = "OrderBook.";
     const WEDGED_BOOKS_WHERE: &'static str = r#"m.last_reconciled_at is not null
                   and m.superseded_at is null
                   and exists(
@@ -178,6 +268,7 @@ impl IndexerRepository {
             inference_orphan_cutoff: std::time::Duration::from_millis(1_800_000), /* default; overridden in main */
             inference_orphans_dropped: Arc::new(AtomicU64::new(0)),
             decode_errors: Arc::new(AtomicU64::new(0)),
+            unknown_events: Arc::new(AtomicU64::new(0)),
             decode_ambiguous_collisions: Arc::new(AtomicU64::new(0)),
             inference_reconcile_failures: Arc::new(AtomicU64::new(0)),
             capture_stream: CAPTURE_STREAM.to_string(),
@@ -208,6 +299,12 @@ impl IndexerRepository {
     /// undecoded. Polled by the metrics-refresh loop for `indexer_decode_errors`.
     pub fn decode_errors_count(&self) -> u64 {
         self.decode_errors.load(Ordering::Relaxed)
+    }
+
+    /// Running total of decoded rows dropped by the `Unknown` arm. Polled by the
+    /// metrics-refresh loop for `indexer_unknown_events`.
+    pub fn unknown_events_count(&self) -> u64 {
+        self.unknown_events.load(Ordering::Relaxed)
     }
 
     /// Running total of event bodies left undecoded due to an ambiguous event-id
@@ -556,6 +653,13 @@ impl IndexerRepository {
         // both survive a rollback, so firing them mid-pass would double-warn the
         // same row once a later Err forces the savepointed replay.
         let mut unknown_warnings: Vec<(String, String)> = Vec::new();
+        // Same reason, same discipline, for the two counters this pass owns: an
+        // `AtomicU64` bumped inside the transaction survives its rollback, and the
+        // savepointed replay re-processes the very same rows. Bumped mid-pass, one
+        // dropped orphan would be reported as two the moment any LATER row in the
+        // batch errored — and `indexer_inference_orphans_dropped` carries an alert
+        // whose threshold is zero, so the over-count is not cosmetic.
+        let mut orphans_dropped = 0u64;
 
         for row in rows {
             stats.scanned += 1;
@@ -568,23 +672,47 @@ impl IndexerRepository {
                     stats.applied += 1;
                 }
                 Ok(ProjectionOutcome::Deferred) => {
-                    if Self::is_expired_inference_orphan(
+                    let verdict = Self::dead_letter_verdict(
                         &row,
                         self.inference_orphan_cutoff,
                         capture_at_head,
-                    ) {
+                    );
+                    if verdict != DeadLetterVerdict::NotDeadLetterable {
                         // Repair the present resting leg(s) before dropping the row
                         // whose parent will never arrive (the repair emits the warn
                         // naming the data consequence). A repair DB error aborts this
                         // optimistic batch like a projector error; the savepointed
                         // replay then isolates the row.
-                        match crate::inference_projectors::repair_expired_inference_orphan(
-                            &mut tx, &event, &node,
-                        )
-                        .await
-                        {
-                            Ok(_) => {
-                                self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
+                        let repaired = match verdict {
+                            DeadLetterVerdict::Book => {
+                                crate::inference_projectors::repair_expired_inference_orphan(
+                                    &mut tx, &event, &node,
+                                )
+                                .await
+                                .map(|_| ())
+                            }
+                            DeadLetterVerdict::RangeEvent => {
+                                // Nothing in the read model to repair:
+                                // `RangeEventAdded` annotates a row it does not
+                                // create, so with the parent gone there is no
+                                // partial state to correct. The loss is still
+                                // named — a silent drop is indistinguishable from
+                                // a row that was never captured at all.
+                                warn!(
+                                    msg_id = %row.msg_id,
+                                    event_type = ?event.event_type,
+                                    "orphan past cutoff dead-lettered: the parent never arrived — it lies outside the captured history, or its sibling EventAdded row is captured but not projected; the range-to-book linkage is lost for this event"
+                                );
+                                Ok(())
+                            }
+                            DeadLetterVerdict::NotDeadLetterable => unreachable!(
+                                "the verdict gates this branch: a row that is not \
+                                 dead-letterable never reaches it"
+                            ),
+                        };
+                        match repaired {
+                            Ok(()) => {
+                                orphans_dropped += 1;
                                 to_mark.push(row.id); // mark processed so it stops looping
                                 stats.applied += 1;
                             }
@@ -645,10 +773,14 @@ impl IndexerRepository {
 
         Self::mark_processed(&mut tx, &to_mark).await?;
         tx.commit().await.context("reproject(fast) tx commit")?;
-        // Durably committed — now (and only now) emit the unknown-type warnings
-        // and record first-sightings, in chain_order. A crash between the commit
-        // and this loop loses only log lines (and the first-sighting dedup),
-        // never projection state: the rows are already marked processed.
+        // Durably committed — now (and only now) emit the unknown-type warnings,
+        // record first-sightings, and bump the counters, in chain_order. A crash
+        // between the commit and here loses only log lines (and the first-sighting
+        // dedup) and under-counts by one batch; before the commit it would have
+        // over-counted every batch that fell back, which is the worse direction for
+        // a counter an alert reads.
+        self.unknown_events.fetch_add(unknown_warnings.len() as u64, Ordering::Relaxed);
+        self.inference_orphans_dropped.fetch_add(orphans_dropped, Ordering::Relaxed);
         for (msg_id, event_type) in &unknown_warnings {
             self.warn_unknown(msg_id, event_type);
         }
@@ -677,6 +809,14 @@ impl IndexerRepository {
             ..Default::default()
         };
         let mut to_mark: Vec<i64> = Vec::new();
+        // Buffered until the outer commit, for the same reason as in the fast path:
+        // a savepoint release is not a commit, and neither an atomic nor a log line
+        // rolls back with the transaction. `warn_unknown` in particular mutates the
+        // first-sighting set, so firing it before a commit that then fails would
+        // spend the one loud warning on a pass whose rows stayed pending — every
+        // later sighting of that type is demoted to the noise target.
+        let mut orphans_dropped = 0u64;
+        let mut unknown_warnings: Vec<(String, String)> = Vec::new();
 
         for row in rows {
             stats.scanned += 1;
@@ -693,21 +833,39 @@ impl IndexerRepository {
                     stats.applied += 1;
                 }
                 Ok(ProjectionOutcome::Deferred) => {
-                    if Self::is_expired_inference_orphan(
+                    let verdict = Self::dead_letter_verdict(
                         &row,
                         self.inference_orphan_cutoff,
                         capture_at_head,
-                    ) {
+                    );
+                    if verdict != DeadLetterVerdict::NotDeadLetterable {
                         // Repair the present leg(s) inside this row's savepoint, then
                         // release it; a repair error rolls back only this row.
-                        match crate::inference_projectors::repair_expired_inference_orphan(
-                            &mut sp, &event, &node,
-                        )
-                        .await
-                        {
-                            Ok(_) => {
+                        let repaired = match verdict {
+                            DeadLetterVerdict::Book => {
+                                crate::inference_projectors::repair_expired_inference_orphan(
+                                    &mut sp, &event, &node,
+                                )
+                                .await
+                                .map(|_| ())
+                            }
+                            DeadLetterVerdict::RangeEvent => {
+                                warn!(
+                                    msg_id = %row.msg_id,
+                                    event_type = ?event.event_type,
+                                    "orphan past cutoff dead-lettered: the parent never arrived — it lies outside the captured history, or its sibling EventAdded row is captured but not projected; the range-to-book linkage is lost for this event"
+                                );
+                                Ok(())
+                            }
+                            DeadLetterVerdict::NotDeadLetterable => unreachable!(
+                                "the verdict gates this branch: a row that is not \
+                                 dead-letterable never reaches it"
+                            ),
+                        };
+                        match repaired {
+                            Ok(()) => {
                                 sp.commit().await.context("reproject savepoint release")?;
-                                self.inference_orphans_dropped.fetch_add(1, Ordering::Relaxed);
+                                orphans_dropped += 1;
                                 to_mark.push(row.id); // mark processed so it stops looping
                                 stats.applied += 1;
                             }
@@ -730,8 +888,8 @@ impl IndexerRepository {
                     }
                 }
                 Ok(ProjectionOutcome::Unknown) => {
-                    self.warn_unknown(&row.msg_id, &event.event_type);
                     sp.commit().await.context("reproject savepoint release")?;
+                    unknown_warnings.push((row.msg_id.clone(), event.event_type.clone()));
                     to_mark.push(row.id);
                     stats.unknown += 1;
                 }
@@ -750,29 +908,69 @@ impl IndexerRepository {
 
         Self::mark_processed(&mut tx, &to_mark).await?;
         tx.commit().await.context("reproject tx commit")?;
+        self.unknown_events.fetch_add(unknown_warnings.len() as u64, Ordering::Relaxed);
+        self.inference_orphans_dropped.fetch_add(orphans_dropped, Ordering::Relaxed);
+        for (msg_id, event_type) in &unknown_warnings {
+            self.warn_unknown(msg_id, event_type);
+        }
         Ok(stats)
     }
 
-    /// Returns `true` when the row is an inference event whose parent
-    /// `OrderPlaced` has not arrived, the row's **ingest** age
+    /// What the dead-letter rule says about a deferred row — and, for a row it
+    /// admits, WHICH repair path applies.
+    ///
+    /// The dead letter is an ALLOW-LIST decision, not a property of deferral in
+    /// general: the cutoff asserts "this parent will never arrive", which is a claim
+    /// about a specific parent. `projectors.rs` defers in fourteen places and nearly
+    /// all of them wait for something that legitimately arrives later — `PMPDeployed`
+    /// waits for its `token_type` to show up in `ref_tokens`, and `TimingsSet`,
+    /// `PoolsFrozen`, `Resolved` and the cancellation events wait for their own
+    /// `PMPDeployed`. At the 30-minute production cutoff (`indexer.yaml.j2`),
+    /// dead-lettering those would kill a market silently and permanently: the row is
+    /// marked processed and never re-asked (IX-FAIL-06).
+    ///
+    /// A row is admitted when its type is dead-letterable, its **ingest** age
     /// (`now() - raw_events.created_at`) exceeds the configured cutoff, AND the
     /// capture stream has drained to the chain tip (`capture_at_head`). The
     /// `at_head` requirement keeps a parent that is merely still-ahead in an
     /// in-progress backfill from being mistaken for one that was permanently
     /// dropped at capture — "the parent will never arrive" is only declared once
-    /// capture has reached head. DEX rows (non-`InferenceOrderBook.*`) always
-    /// return `false`.
-    fn is_expired_inference_orphan(
+    /// capture has reached head.
+    ///
+    /// Returned instead of a bare `bool` on purpose. Both call sites used to
+    /// re-derive the repair path with a second, independent
+    /// `starts_with("InferenceOrderBook.")`, so a new entry admitted by the first
+    /// check would fall into the second's "nothing to repair" branch — silently,
+    /// and precisely for the type the allow-list was extended to protect. One
+    /// decision, taken once, removes that class of drift.
+    fn dead_letter_verdict(
         row: &PendingRow,
         cutoff: std::time::Duration,
         capture_at_head: bool,
-    ) -> bool {
-        capture_at_head
-            && row.event_type.as_deref().is_some_and(|t| t.starts_with("InferenceOrderBook."))
-            && (chrono::Utc::now() - row.created_at)
-                .to_std()
-                .map(|age| age > cutoff)
-                .unwrap_or(false)
+    ) -> DeadLetterVerdict {
+        if !capture_at_head {
+            return DeadLetterVerdict::NotDeadLetterable;
+        }
+        let aged =
+            (chrono::Utc::now() - row.created_at).to_std().map(|age| age > cutoff).unwrap_or(false);
+        if !aged {
+            return DeadLetterVerdict::NotDeadLetterable;
+        }
+        // The two arms are the two entries of the old allow-list, and they carry
+        // different promises. `InferenceOrderBook.` is a PREFIX on purpose: every
+        // event the book can defer is a depth update whose parent `OrderPlaced`
+        // lies outside the captured history, so a future book event inherits the
+        // same verdict rather than becoming pending forever.
+        // `OracleEventList.RangeEventAdded` is a FULL name on purpose: its sibling
+        // `OracleEventList.EventAdded` must NOT be dead-letterable — that parent
+        // arrives legitimately later, and dropping it would kill a market
+        // silently. Adding a full name here is a narrow decision; adding a prefix
+        // authorises every present and future event of that contract.
+        match row.event_type.as_deref() {
+            Some(t) if t.starts_with("InferenceOrderBook.") => DeadLetterVerdict::Book,
+            Some("OracleEventList.RangeEventAdded") => DeadLetterVerdict::RangeEvent,
+            _ => DeadLetterVerdict::NotDeadLetterable,
+        }
     }
 
     /// The unknown-event warning: normal target on the first sighting of an
@@ -869,15 +1067,12 @@ impl IndexerRepository {
     /// count reflects exactly what the loop will pick up. Cheap thanks to
     /// `raw_events_pending_chain_order_idx`.
     pub async fn count_pending_projection(&self) -> anyhow::Result<i64> {
-        let count: i64 = sqlx::query_scalar(
-            r#"select count(*) from raw_events
-                where processed_at is null
-                  and event_type is not null
-                  and decoded is not null"#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("count pending projection")?;
+        let sql =
+            format!("select count(*) from raw_events where {}", Self::PENDING_PROJECTION_WHERE);
+        let count: i64 = sqlx::query_scalar(&sql)
+            .fetch_one(&self.pool)
+            .await
+            .context("count pending projection")?;
         Ok(count)
     }
 
@@ -891,16 +1086,15 @@ impl IndexerRepository {
     /// 0 lag while pending work exists. Preferred over `now() - max(processed_at)`,
     /// which under-reports lag while the loop is busy projecting old rows.
     pub async fn projection_lag_seconds(&self) -> anyhow::Result<i64> {
-        let secs: Option<i64> = sqlx::query_scalar(
-            r#"select extract(epoch from now() - min(coalesce(created_at_chain, created_at)))::bigint
-                 from raw_events
-                where processed_at is null
-                  and event_type is not null
-                  and decoded is not null"#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("projection lag seconds")?;
+        let sql = format!(
+            "select extract(epoch from now() - min(coalesce(created_at_chain, created_at)))::bigint \
+               from raw_events where {}",
+            Self::PENDING_PROJECTION_WHERE
+        );
+        let secs: Option<i64> = sqlx::query_scalar(&sql)
+            .fetch_one(&self.pool)
+            .await
+            .context("projection lag seconds")?;
         Ok(secs.unwrap_or(0))
     }
 
@@ -969,27 +1163,47 @@ impl IndexerRepository {
     /// `(reference_price_lag, sweep_lag)`, each 0 when no book is visible yet.
     /// Both values come from one query to keep it to a single round-trip.
     pub async fn inference_staleness_seconds(&self) -> anyhow::Result<(i64, i64)> {
-        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-            r#"select
-                   extract(epoch from now() - min(reference_price_at))::bigint as price_lag,
-                   extract(epoch from now() - min(last_swept_at))::bigint as sweep_lag
-                 from inference_markets
-                where last_reconciled_at is not null"#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("inference staleness seconds")?;
+        let sql = format!(
+            "select {} from inference_markets where last_reconciled_at is not null",
+            Self::STALENESS_SELECT
+        );
+        let row: (Option<i64>, Option<i64>) = sqlx::query_as(&sql)
+            .fetch_one(&self.pool)
+            .await
+            .context("inference staleness seconds")?;
+        Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
+    }
+
+    /// `inference_staleness_seconds` restricted to the `orderbook_address`es in
+    /// `scope`, running the identical `STALENESS_SELECT` age expressions.
+    /// Test-scoping counterpart, same rationale as
+    /// `inference_market_state_counts_for`. The `unwrap_or(0)` empty-set
+    /// behaviour is shared too: a scope with no visible rows reads as zero lag.
+    pub async fn inference_staleness_seconds_for(
+        &self,
+        scope: &[String],
+    ) -> anyhow::Result<(i64, i64)> {
+        let sql = format!(
+            "select {} from inference_markets \
+             where last_reconciled_at is not null and orderbook_address = any($1)",
+            Self::STALENESS_SELECT
+        );
+        let row: (Option<i64>, Option<i64>) = sqlx::query_as(&sql)
+            .bind(scope)
+            .fetch_one(&self.pool)
+            .await
+            .context("inference staleness seconds (scoped)")?;
         Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
     }
 
     /// Resting inference orders grouped by status, backing
-    /// `indexer_inference_orders`. Returns `(open, filled, cancelled)` — the
-    /// three values of the `inference_orders.status` check constraint. `OPEN` is
-    /// live depth; `FILLED` and `CANCELLED` are terminal. The three buckets
+    /// `indexer_inference_orders`. Returns `(open, filled, cancelled, expired)`
+    /// — the four values of the `inference_orders.status` check constraint (see
+    /// `migrations/0002_inference_order_expired.sql`). The four buckets
     /// partition the table.
-    pub async fn inference_order_status_counts(&self) -> anyhow::Result<(i64, i64, i64)> {
+    pub async fn inference_order_status_counts(&self) -> anyhow::Result<(i64, i64, i64, i64)> {
         let sql = format!("select {} from inference_orders", Self::ORDER_STATUS_COUNTS_SELECT);
-        let row: (i64, i64, i64) = sqlx::query_as(&sql)
+        let row: (i64, i64, i64, i64) = sqlx::query_as(&sql)
             .fetch_one(&self.pool)
             .await
             .context("inference order status counts")?;
@@ -1003,12 +1217,12 @@ impl IndexerRepository {
     pub async fn inference_order_status_counts_for(
         &self,
         scope: &[String],
-    ) -> anyhow::Result<(i64, i64, i64)> {
+    ) -> anyhow::Result<(i64, i64, i64, i64)> {
         let sql = format!(
             "select {} from inference_orders where orderbook_address = any($1)",
             Self::ORDER_STATUS_COUNTS_SELECT
         );
-        let row: (i64, i64, i64) = sqlx::query_as(&sql)
+        let row: (i64, i64, i64, i64) = sqlx::query_as(&sql)
             .bind(scope)
             .fetch_one(&self.pool)
             .await
@@ -1069,6 +1283,247 @@ impl IndexerRepository {
             .await
             .context("inference wedged book addresses")?;
         Ok(addrs)
+    }
+
+    /// Breakdown of the unprojected backlog by event type, over rows **ingested**
+    /// inside the run window. Predicate is `PENDING_PROJECTION_WHERE`, the same
+    /// one `count_pending_projection` uses; only the window is added.
+    ///
+    /// The window keys on ingest time, not chain time, so that both it and the
+    /// column it is compared against come from the same clock (the Postgres of
+    /// the host the indexer runs on) — the CI runner's clock offset never enters
+    /// the comparison.
+    pub async fn pending_projection_since(&self, since: i64) -> anyhow::Result<Vec<(String, i64)>> {
+        let sql = format!(
+            "select event_type, count(*) from raw_events \
+              where {} and created_at >= to_timestamp($1::double precision) \
+              group by event_type order by event_type",
+            Self::PENDING_PROJECTION_WHERE
+        );
+        let rows: Vec<(String, i64)> = sqlx::query_as(&sql)
+            .bind(since as f64)
+            .fetch_all(&self.pool)
+            .await
+            .context("pending projection since")?;
+        Ok(rows)
+    }
+
+    /// How many rows ingested inside the window the projection loop will NOT pick
+    /// up. This is the variant the observer calls: an undecodable row can come
+    /// from any contract, and scoping it by address would mean "count some of
+    /// them".
+    pub async fn count_undecodable_since(&self, since: i64) -> anyhow::Result<i64> {
+        let sql = format!(
+            "select count(*) from raw_events \
+              where {} and created_at >= to_timestamp($1::double precision)",
+            Self::UNDECODABLE_WHERE
+        );
+        let count: i64 = sqlx::query_scalar(&sql)
+            .bind(since as f64)
+            .fetch_one(&self.pool)
+            .await
+            .context("count undecodable since")?;
+        Ok(count)
+    }
+
+    /// The addresses among `scope` carrying such a row inside the window. Exists
+    /// for exactly what `inference_wedged_book_addresses` exists for: a test has
+    /// to assert WHICH rows the predicate selected, and a whole-table count can
+    /// only report a delta — which, in the shared test DB, breaks on an unrelated
+    /// writer (`capture.rs` inserts an undecodable row and then purges it, moving
+    /// two successive reads by different amounts).
+    ///
+    /// `distinct` is required, and not as decoration. The analogy with
+    /// `inference_wedged_book_addresses` only half holds: that one selects from
+    /// `inference_markets`, where the address is unique and the result is a set by
+    /// construction, whereas `raw_events` yields a row per EVENT. Without
+    /// `distinct` this would return a bag, and a second undecodable event under
+    /// the same address would break an `assert_eq!` for a reason that has nothing
+    /// to do with the window.
+    pub async fn undecodable_addresses_since(
+        &self,
+        since: i64,
+        scope: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        let sql = format!(
+            "select distinct src_address from raw_events \
+              where {} and created_at >= to_timestamp($1::double precision) \
+                and src_address = any($2) \
+              order by src_address",
+            Self::UNDECODABLE_WHERE
+        );
+        let addrs: Vec<String> = sqlx::query_scalar(&sql)
+            .bind(since as f64)
+            .bind(scope)
+            .fetch_all(&self.pool)
+            .await
+            .context("undecodable addresses since")?;
+        Ok(addrs)
+    }
+
+    /// Books that had at least one `raw_events` row under their address inside the
+    /// run window. This is IX-SEQ-10's "book with events", narrowed to the current
+    /// run: the stand's database outlives pipelines, and a book abandoned by a
+    /// cancelled run would otherwise fail the next one for a foreign reason.
+    pub async fn inference_books_with_events_since(
+        &self,
+        since: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let sql = format!(
+            "select m.orderbook_address from inference_markets m \
+              where m.orderbook_address in ({}) \
+              order by m.orderbook_address",
+            Self::EVENTS_IN_WINDOW
+        );
+        let addrs: Vec<String> = sqlx::query_scalar(&sql)
+            .bind(since as f64)
+            .fetch_all(&self.pool)
+            .await
+            .context("inference books with events since")?;
+        Ok(addrs)
+    }
+
+    /// The addresses among `scope` carrying no verdict. The scope is mandatory:
+    /// the observer feeds this the current run's books, and a whole-table variant
+    /// would mean "fail the run over someone else's leftovers".
+    pub async fn inference_books_without_verdict(
+        &self,
+        scope: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        let sql = format!(
+            "select m.orderbook_address from inference_markets m \
+              where m.orderbook_address = any($1) and {} \
+              order by m.orderbook_address",
+            Self::NO_VERDICT_WHERE
+        );
+        let addrs: Vec<String> = sqlx::query_scalar(&sql)
+            .bind(scope)
+            .fetch_all(&self.pool)
+            .await
+            .context("inference books without verdict")?;
+        Ok(addrs)
+    }
+
+    /// `(address, reason)` for the failing books among `scope`. The observer
+    /// prints these even when it passes: `NoBoc` is a benign outcome that also
+    /// stamps a failure, and without the distribution of reasons "failing with a
+    /// reason" reads stricter than it actually is.
+    ///
+    /// Deliberately WIDER than `MARKET_STATE_COUNTS_SELECT`'s `failing` bucket:
+    /// it carries no `last_reconciled_at is null`. A book that became visible and
+    /// only then started failing is the most alarming class there is, and it is
+    /// the one the gauge cannot show — the bucket counts it as `visible`. It
+    /// reaches this list because `stamp_failure` writes the mark without touching
+    /// `last_reconciled_at`, while the visibility stamp
+    /// (`advance_sweep_and_maybe_stamp`) clears the mark in the same UPDATE, so
+    /// "failed, then recovered through discovery" is already absent here.
+    ///
+    /// For a VISIBLE book the mark means "the most recent refresh failed", which is
+    /// what makes this predicate honest without further clauses. Three writers keep
+    /// it that way: the visibility stamp clears it (`advance_sweep_and_maybe_stamp`),
+    /// a refresh pass that completes clears it (`clear_failure`, at the tail of
+    /// `refresh_against_boc`), and `stamp_failure` sets it. A book that failed and
+    /// recovered therefore leaves this list on its next clean pass, while one that
+    /// broke after becoming visible stays in it.
+    ///
+    /// For a DISCOVERING book it still means "failed at least once since seeding":
+    /// Queue A clears nothing, so a book that failed and now keeps missing its sweep
+    /// gates stays named here until the visibility stamp lands. That is the weaker
+    /// reading, and it is the right one to keep — a book stuck in discovery is worth
+    /// naming whether its last tick failed or merely made no progress.
+    ///
+    /// `NoBoc` remains a failure on purpose: the account is not on chain yet, and
+    /// the observer prints the reason text so a routine `NoBoc` reads as what it
+    /// is rather than as an outage.
+    pub async fn inference_failing_books(
+        &self,
+        scope: &[String],
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"select m.orderbook_address, m.last_reconcile_error
+                 from inference_markets m
+                where m.orderbook_address = any($1)
+                  and m.last_reconcile_failed_at is not null
+                  and m.last_reconcile_error is not null
+                  and m.superseded_at is null
+                order by m.orderbook_address"#,
+        )
+        .bind(scope)
+        .fetch_all(&self.pool)
+        .await
+        .context("inference failing books")?;
+        Ok(rows)
+    }
+
+    /// Visible books carrying at least one projected order AND at least one event
+    /// ingested inside the run window — IX-SEQ-11's positive anchor. It does NOT
+    /// prove the book is the one a particular scenario deployed (scenario
+    /// addresses are recorded nowhere a database-tail step could read them), and
+    /// it does not prove the order itself was projected during this run.
+    pub async fn inference_anchored_books_since(&self, since: i64) -> anyhow::Result<Vec<String>> {
+        let sql = format!(
+            "select distinct m.orderbook_address \
+               from inference_markets m \
+               join inference_orders o on o.orderbook_address = m.orderbook_address \
+              where m.last_reconciled_at is not null \
+                and m.superseded_at is null \
+                and m.orderbook_address in ({}) \
+              order by m.orderbook_address",
+            Self::EVENTS_IN_WINDOW
+        );
+        let addrs: Vec<String> = sqlx::query_scalar(&sql)
+            .bind(since as f64)
+            .fetch_all(&self.pool)
+            .await
+            .context("inference anchored books since")?;
+        Ok(addrs)
+    }
+
+    /// Per-type progress of DEX order-book events INGESTED in the window:
+    /// `(event_type, captured, projected)`.
+    ///
+    /// The DEX counterpart of [`Self::inference_anchored_books_since`]. The two
+    /// cover the two halves of `config::SCOPED_EVENT_IDS` — `contracts/dex` and
+    /// `contracts/airegistry` — and the split is the reason this exists: one
+    /// ingest scope feeds both sides, so an edit that drops the DEX ids while
+    /// keeping the inference ones leaves the inference anchor green.
+    ///
+    /// One query serves both the anchor's assertion and the line it prints, so
+    /// what is claimed and what is shown cannot drift apart.
+    ///
+    /// There is no `decoded` counter, and its absence is the point. `persist_page`
+    /// fills `event_type` and `decoded` from one and the same `Option`, so a row
+    /// is typed exactly when it is decoded — and a row whose decode failed carries
+    /// no type at all, which is why it cannot match a prefix and never appears
+    /// here. A `decoded` column would therefore always equal `captured` while
+    /// suggesting the anchor covers decode failures. It does not:
+    /// [`Self::count_undecodable_since`] does, and the anchor's failure message
+    /// sends the reader there.
+    ///
+    /// Unlike [`Self::PENDING_PROJECTION_WHERE`] and its neighbours this is not
+    /// built from a shared constant. Those are shared because a production gauge
+    /// reads the same predicate and IX-MET-03 requires the two to match; this one
+    /// backs no gauge, so there is no second definition to drift away from.
+    pub async fn dex_capture_progress_since(
+        &self,
+        since: i64,
+    ) -> anyhow::Result<Vec<(String, i64, i64)>> {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            r#"select event_type,
+                      count(*) as captured,
+                      count(*) filter (where processed_at is not null) as projected
+                 from raw_events
+                where created_at >= to_timestamp($1::double precision)
+                  and event_type like $2
+                group by event_type
+                order by event_type"#,
+        )
+        .bind(since as f64)
+        .bind(format!("{}%", Self::DEX_ANCHOR_EVENT_PREFIX))
+        .fetch_all(&self.pool)
+        .await
+        .context("dex capture progress since")?;
+        Ok(rows)
     }
 
     /// (in_use, idle) sqlx pool connections — cheap in-memory reads, no DB query.
@@ -1192,16 +1647,14 @@ impl IndexerRepository {
         let mut force_retry = true; // first pass rewinds to the front
 
         loop {
-            let retry = force_retry || last_retry.elapsed() >= idle_interval;
-            force_retry = false;
             // Forward passes resume above the floor; a rate-limited retry pass
             // rewinds to the front to re-attempt the stuck set below the floor.
-            let mut after: Option<String> = if retry {
+            let (mut after, reset_timer) =
+                next_pass_start(force_retry, last_retry.elapsed(), idle_interval, &floor);
+            force_retry = false;
+            if reset_timer {
                 last_retry = tokio::time::Instant::now();
-                None
-            } else {
-                floor.clone()
-            };
+            }
 
             // Ceiling = highest pending chain_order inside the synchronized
             // capture barrier. Rows from a faster source stream stay pending
@@ -1388,9 +1841,101 @@ fn should_warn_unparseable_created_at(value: Option<&Value>, parsed: Option<f64>
     value.is_some() && parsed.is_none()
 }
 
+/// The pass-mode decision of `run_reprojection_loop`, extracted pure so a unit
+/// can pin it without a clock or a DB (`elapsed` is the caller's
+/// `last_retry.elapsed()`). Returns `(after, reset_timer)`: `after` is the
+/// pass's lower bound — the floor on a forward pass, `None` (the front) on a
+/// retry — and `reset_timer` is true exactly on the retry choice, never on a
+/// forward pass. This is the IX-FAIL-01 negative half: a regression passing
+/// `None` on every pass (or resetting the timer on forward passes, starving
+/// the retry) is caught here deterministically, where a wall-clock lower-bound
+/// assert on the live loop would flake — the timer's phase resets at the START
+/// of a retry pass, so a slow pass legally retries "too early" relative to any
+/// post-pass synchronization point.
+fn next_pass_start(
+    force_retry: bool,
+    elapsed: Duration,
+    idle_interval: Duration,
+    floor: &Option<String>,
+) -> (Option<String>, bool) {
+    if force_retry || elapsed >= idle_interval {
+        (None, true)
+    } else {
+        (floor.clone(), false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `PendingRow` with only the fields the verdict reads.
+    fn pending_row_for_test(
+        event_type: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> PendingRow {
+        PendingRow {
+            id: 1,
+            msg_id: "m".to_string(),
+            chain_order: "co".to_string(),
+            src_address: None,
+            dst_address: None,
+            event_type: Some(event_type.to_string()),
+            decoded: None,
+            ts: None,
+            created_at,
+        }
+    }
+
+    /// The verdict names the repair path, not just admission — which is the whole
+    /// reason it replaced a `bool`. Admission and repair used to be two independent
+    /// `starts_with` checks, so a type the first admitted could reach the second's
+    /// "nothing to repair" branch silently.
+    #[test]
+    fn dead_letter_verdict_names_the_repair_path_not_just_admission() {
+        let cutoff = std::time::Duration::from_secs(1);
+        let old = chrono::Utc::now() - chrono::Duration::seconds(3600);
+
+        let book = pending_row_for_test("InferenceOrderBook.InferenceFilled", old);
+        assert_eq!(
+            IndexerRepository::dead_letter_verdict(&book, cutoff, true),
+            DeadLetterVerdict::Book
+        );
+        // The prefix covers a type nobody has written a projector for yet: that is
+        // what "prefix on purpose" means, and it must hold for a future event too.
+        let future_book = pending_row_for_test("InferenceOrderBook.SomethingNewInV5", old);
+        assert_eq!(
+            IndexerRepository::dead_letter_verdict(&future_book, cutoff, true),
+            DeadLetterVerdict::Book
+        );
+
+        let range = pending_row_for_test("OracleEventList.RangeEventAdded", old);
+        assert_eq!(
+            IndexerRepository::dead_letter_verdict(&range, cutoff, true),
+            DeadLetterVerdict::RangeEvent
+        );
+        // The sibling from the SAME contract must not be admitted: its parent
+        // arrives legitimately later, and dead-lettering it kills a market
+        // silently. This is the assert that makes "full name, not prefix" real.
+        let sibling = pending_row_for_test("OracleEventList.EventAdded", old);
+        assert_eq!(
+            IndexerRepository::dead_letter_verdict(&sibling, cutoff, true),
+            DeadLetterVerdict::NotDeadLetterable
+        );
+
+        // Not at head: nothing is dead-letterable, whatever the type — a parent
+        // still ahead in a backfill is not a parent that will never arrive.
+        assert_eq!(
+            IndexerRepository::dead_letter_verdict(&book, cutoff, false),
+            DeadLetterVerdict::NotDeadLetterable
+        );
+        // Fresh: the cutoff refuses it, not the type.
+        let fresh = pending_row_for_test("InferenceOrderBook.InferenceFilled", chrono::Utc::now());
+        assert_eq!(
+            IndexerRepository::dead_letter_verdict(&fresh, cutoff, true),
+            DeadLetterVerdict::NotDeadLetterable
+        );
+    }
 
     #[test]
     fn parses_integer_unix_seconds() {
@@ -1417,6 +1962,52 @@ mod tests {
     fn handles_missing_value() {
         assert_eq!(parse_unix_seconds(None), None);
         assert_eq!(parse_unix_seconds(Some(&Value::Null)), None);
+    }
+
+    // IX-FAIL-01 is closed by a triple: (1) these units pin the loop's CHOICE
+    // of pass mode; (2) reproject_pending_from_honors_after_and_until_bounds
+    // (tests/reprojection.rs) pins that the method honors the bound it is
+    // given; (3) the loop test's upper bound (deferred_retry_rides_the_idle
+    // _interval_timer, same file) pins that a timer retry actually reaches a
+    // stuck row. No wall-clock lower bound is asserted anywhere — see
+    // `next_pass_start`'s doc for why such an assert flakes on correct code.
+
+    #[test]
+    fn next_pass_start_resumes_above_the_floor_on_a_forward_pass() {
+        let floor = Some("5f80co".to_string());
+        let (after, reset) =
+            next_pass_start(false, Duration::from_millis(299), Duration::from_millis(300), &floor);
+        assert_eq!(after, floor, "a forward pass must resume above the floor");
+        assert!(!reset, "the retry timer must NOT reset on a forward pass");
+    }
+
+    #[test]
+    fn next_pass_start_rewinds_to_the_front_when_the_timer_expires() {
+        let floor = Some("5f80co".to_string());
+        let (after, reset) =
+            next_pass_start(false, Duration::from_millis(300), Duration::from_millis(300), &floor);
+        assert_eq!(after, None, "an expired timer must rewind to the front");
+        assert!(reset, "the retry choice must reset the timer");
+    }
+
+    #[test]
+    fn next_pass_start_rewinds_on_force_retry_regardless_of_elapsed() {
+        let floor = Some("5f80co".to_string());
+        let (after, reset) =
+            next_pass_start(true, Duration::ZERO, Duration::from_millis(300), &floor);
+        assert_eq!(after, None, "force_retry (the first pass) must read from the front");
+        assert!(reset, "force_retry is a retry choice and must reset the timer");
+    }
+
+    #[test]
+    fn next_pass_start_with_no_floor_still_only_resets_on_retry() {
+        // A forward pass over an empty floor also reads from the front, but the
+        // timer reset must stay attached to the retry CHOICE, not to the
+        // resulting bound — resetting here would starve the rate-limited retry.
+        let (after, reset) =
+            next_pass_start(false, Duration::from_millis(1), Duration::from_millis(300), &None);
+        assert_eq!(after, None);
+        assert!(!reset, "a forward pass over an empty floor is not a retry");
     }
 
     #[test]

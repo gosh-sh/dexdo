@@ -121,21 +121,21 @@ mod tests {
     fn exclusive_excludes_shared_and_vice_versa() {
         let d = TempDir::new().unwrap();
         let ex = ChainLockGuard::b0_exclusive(d.path()).unwrap();
-        // второй handle в том же процессе: flock на другом fd конфликтует
+        // a second handle in the same process: flock on another fd conflicts
         assert!(
             ChainLockGuard::try_shared(d.path()).unwrap().is_none(),
-            "shared при живом exclusive"
+            "shared while an exclusive is alive"
         );
         drop(ex);
         let sh = ChainLockGuard::shared(d.path()).unwrap();
         assert!(
             ChainLockGuard::try_b0_exclusive(d.path()).unwrap().is_none(),
-            "exclusive при живом shared"
+            "exclusive while a shared is alive"
         );
         drop(sh);
         assert!(
             ChainLockGuard::try_b0_exclusive(d.path()).unwrap().is_some(),
-            "exclusive не смог взяться после освобождения shared"
+            "exclusive could not be taken after the shared was released"
         );
     }
 }

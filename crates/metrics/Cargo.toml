@@ -12,3 +12,13 @@ opentelemetry = { version = "0.27", features = ["metrics"] }
 opentelemetry-otlp = { version = "0.27", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 tracing = "0.1"
+
+# Dev-only: exercise the OTLP export path with an in-memory reader/exporter.
+# `opentelemetry_sdk`'s `testing` module (InMemoryMetricExporter et al.) is
+# gated on `cfg(any(feature = "testing", test))`, and this crate's production
+# feature set (`rt-tokio` only) does not enable it, so the test-only "testing"
+# feature is pulled in here rather than as a production feature. Does not
+# change the production feature set or dependents' dependency graph.
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.27", features = ["testing"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
