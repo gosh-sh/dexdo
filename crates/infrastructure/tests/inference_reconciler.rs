@@ -68,9 +68,20 @@ async fn seed_market(pool: &sqlx::PgPool, ob: &str, reconciled: bool) {
         .execute(pool)
         .await
         .unwrap();
+    // The trading-rule columns are seeded even though no assertion here reads
+    // them: `last_reconciled_at` is what makes a row VISIBLE to the read model,
+    // and a visible row the read model cannot render fails the whole listing
+    // closed with `MarketInconsistent`. The reconciler writes these in the same
+    // statement that stamps `last_reconciled_at`, so a reconciled row without
+    // them is a shape production never has — and one that used to break any
+    // listing test sharing this database.
     sqlx::query(
-        "insert into inference_markets (orderbook_address, created_at_chain, last_reconciled_at)
-                 values ($1, to_timestamp(1700000000), case when $2 then now() else null end)",
+        "insert into inference_markets
+             (orderbook_address, created_at_chain, last_reconciled_at,
+              model_ref, platform_fee_bps, quote_token_type,
+              price_precision, quantity_precision, tick_size, step_size, min_notional)
+         values ($1, to_timestamp(1700000000), case when $2 then now() else null end,
+                 $1, 250, 2, 9, 0, '0.000000001', '1', '0.000000001')",
     )
     .bind(ob)
     .bind(reconciled)
@@ -316,17 +327,12 @@ async fn fill_params_writes_model_hash_and_constants() {
 // `fill_params` also captures model identity from the `getModelName` getter. The
 // model `version` (3rd part) lands in `model_version`, NOT the `version` column —
 // that one holds the contract version (getVersion) for slot-supersede resolution.
-async fn identity_cols(
-    pool: &sqlx::PgPool,
-    ob: &str,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    sqlx::query_as(
-        "select model_ref, producer, model_name, model_version from inference_markets where orderbook_address=$1",
-    )
-    .bind(ob)
-    .fetch_one(pool)
-    .await
-    .unwrap()
+async fn stored_model_ref(pool: &sqlx::PgPool, ob: &str) -> Option<String> {
+    sqlx::query_scalar("select model_ref from inference_markets where orderbook_address=$1")
+        .bind(ob)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 // Each identity test gets a DISTINCT `model_hash` so they never contend for the
@@ -342,8 +348,12 @@ fn identity_getter(
     }))
 }
 
+/// A name that LOOKS decomposable is still stored whole. It used to be split
+/// into `producer` / `model_name` / `model_version` on exactly three
+/// `--`-separated parts; nothing splits it now, and `modelRefName` serves the
+/// string the book reported.
 #[tokio::test]
-async fn fill_params_captures_three_part_model_identity() {
+async fn fill_params_stores_a_three_part_name_whole() {
     let Some(pool) = setup().await else { return };
     let ob = "0:t_identity_3part";
     seed_market(&pool, ob, false).await;
@@ -352,15 +362,14 @@ async fn fill_params_captures_three_part_model_identity() {
         .fill_params(ob, "boc")
         .await
         .unwrap();
-    let (mref, producer, mname, mver) = identity_cols(&pool, ob).await;
-    assert_eq!(mref.as_deref(), Some("qwen--qwen2.5-32b--instruct"));
-    assert_eq!(producer.as_deref(), Some("qwen"));
-    assert_eq!(mname.as_deref(), Some("qwen2.5-32b"));
-    assert_eq!(mver.as_deref(), Some("instruct"));
+    assert_eq!(
+        stored_model_ref(&pool, ob).await.as_deref(),
+        Some("qwen--qwen2.5-32b--instruct")
+    );
 }
 
 #[tokio::test]
-async fn fill_params_non_three_part_name_keeps_only_ref() {
+async fn fill_params_stores_a_freeform_name_verbatim() {
     let Some(pool) = setup().await else { return };
     let ob = "0:t_identity_freeform";
     seed_market(&pool, ob, false).await;
@@ -369,13 +378,11 @@ async fn fill_params_non_three_part_name_keeps_only_ref() {
         .fill_params(ob, "boc")
         .await
         .unwrap();
-    let (mref, producer, mname, mver) = identity_cols(&pool, ob).await;
-    assert_eq!(mref.as_deref(), Some("freeform name"));
-    assert!(producer.is_none() && mname.is_none() && mver.is_none());
+    assert_eq!(stored_model_ref(&pool, ob).await.as_deref(), Some("freeform name"));
 }
 
 #[tokio::test]
-async fn fill_params_empty_name_leaves_identity_null() {
+async fn fill_params_stores_an_empty_name_as_null() {
     let Some(pool) = setup().await else { return };
     let ob = "0:t_identity_empty";
     seed_market(&pool, ob, false).await;
@@ -384,8 +391,9 @@ async fn fill_params_empty_name_leaves_identity_null() {
         .fill_params(ob, "boc")
         .await
         .unwrap();
-    let (mref, producer, mname, mver) = identity_cols(&pool, ob).await;
-    assert!(mref.is_none() && producer.is_none() && mname.is_none() && mver.is_none());
+    // An empty name is not a name: stored NULL so the read side falls back to
+    // the model hash rather than serving a blank string.
+    assert!(stored_model_ref(&pool, ob).await.is_none());
 }
 
 #[tokio::test]
@@ -1365,8 +1373,10 @@ async fn lower_version_duplicate_is_retired_not_claimed() {
         .unwrap();
     // Incumbent holds model 0x10000 (65536) at v4.0.14, visible.
     sqlx::query(
-        "insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at)
-         values ($1, 65536, '4.0.14', now())",
+        "insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at,
+                model_ref, platform_fee_bps, quote_token_type, price_precision,
+                quantity_precision, tick_size, step_size, min_notional)
+         values ($1, 65536, '4.0.14', now(), $1, 250, 2, 9, 0, '0.000000001', '1', '0.000000001')",
     )
     .bind(canonical)
     .execute(&pool)
@@ -1420,8 +1430,10 @@ async fn higher_version_supersedes_incumbent_and_swaps_slot() {
         .unwrap();
     // Incumbent holds model 0x20000 (131072) at an OLD version, visible.
     sqlx::query(
-        "insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at)
-         values ($1, 131072, '4.0.11', now())",
+        "insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at,
+                model_ref, platform_fee_bps, quote_token_type, price_precision,
+                quantity_precision, tick_size, step_size, min_notional)
+         values ($1, 131072, '4.0.11', now(), $1, 250, 2, 9, 0, '0.000000001', '1', '0.000000001')",
     )
     .bind(old)
     .execute(&pool)
@@ -1519,7 +1531,9 @@ async fn unknown_incoming_version_does_not_retire_on_conflict() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at) values ($1, 65537, '4.0.14', now())")
+    sqlx::query("insert into inference_markets (orderbook_address, model_hash, version, last_reconciled_at,
+                model_ref, platform_fee_bps, quote_token_type, price_precision,
+                quantity_precision, tick_size, step_size, min_notional) values ($1, 65537, '4.0.14', now(), $1, 250, 2, 9, 0, '0.000000001', '1', '0.000000001')")
         .bind(incumbent).execute(&pool).await.unwrap();
     seed_market(&pool, incoming, false).await;
 

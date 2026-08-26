@@ -22,14 +22,11 @@ async fn purge(pool: &PgPool, ob: &str) {
 async fn seed(pool: &PgPool, ob: &str, model_ref: Option<&str>, reference_price: Option<&str>) {
     sqlx::query(
         r#"insert into inference_markets
-               (orderbook_address, model_hash, model_ref, producer, model_name, model_version,
+               (orderbook_address, model_hash, model_ref,
                 version, platform_fee_bps, quote_token_type, price_precision, quantity_precision,
                 tick_size, step_size, min_notional, reference_price,
                 created_at_chain, last_reconciled_at)
            values ($1, null, $2,
-                   case when $2 is null then null else 'qwen' end,
-                   case when $2 is null then null else 'qwen2.5-32b' end,
-                   case when $2 is null then null else 'instruct' end,
                    case when $2 is null then null else '4.0.30' end,
                    250, 2, 9, 0, '0.000000001', '1', '0.000000001', $3::numeric,
                    to_timestamp(1700000000), now())
@@ -59,11 +56,10 @@ async fn happy_path_lists_inference_market() {
     let body: Value = resp.take_json().await.expect("json");
     let m = &body["markets"][0];
     assert_eq!(m["inferenceOrderBookAddress"], ob);
-    assert_eq!(m["model"]["ref"], "qwen--qwen2.5-32b--instruct");
-    assert_eq!(m["model"]["producer"], "qwen");
-    // model.version is the AI model version; contractVersion is the deployed
-    // contract version — surfaced from distinct columns.
-    assert_eq!(m["model"]["version"], "instruct");
+    // One flat field carrying the book's name verbatim, and no `model` object.
+    assert_eq!(m["modelRefName"], "qwen--qwen2.5-32b--instruct");
+    assert!(m["model"].is_null(), "the model object is gone, not merely emptied");
+    // `contractVersion` is the deployed CONTRACT's version, from its own column.
     assert_eq!(m["contractVersion"], "4.0.30");
     assert_eq!(m["status"], "TRADING");
     assert_eq!(m["quoteAsset"], "SHELL");
@@ -96,8 +92,7 @@ async fn ref_falls_back_to_model_hash() {
     assert_eq!(resp.status_code, Some(StatusCode::OK));
     let body: Value = resp.take_json().await.expect("json");
     let m = &body["markets"][0];
-    assert_eq!(m["model"]["ref"], "9943");
-    assert!(m["model"]["producer"].is_null());
+    assert_eq!(m["modelRefName"], "9943");
     assert!(m["referencePrice"].is_null());
     assert!(m["contractVersion"].is_null()); // version column unset -> null
 
@@ -108,7 +103,7 @@ async fn ref_falls_back_to_model_hash() {
 async fn address_with_filter_is_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
     let mut resp = TestClient::get(
-        "http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&producer=qwen",
+        "http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&status=TRADING",
     )
     .send(&service)
     .await;
@@ -140,22 +135,21 @@ async fn unknown_address_is_1121() {
     assert_eq!(body["code"], -1121);
 }
 
-/// Seed a reconciled, listable market with a chosen `producer` and chain time.
-/// `model_ref = ob` (unique, non-null) so `ref` resolves; `model_hash` NULL.
-async fn seed_listed(pool: &PgPool, ob: &str, producer: &str, created_at_chain_secs: Option<i64>) {
+/// Seed a reconciled, listable market with a chosen chain time.
+/// `model_ref = ob` (unique, non-null) so `modelRefName` resolves; `model_hash` NULL.
+async fn seed_listed(pool: &PgPool, ob: &str, created_at_chain_secs: Option<i64>) {
     sqlx::query(
         r#"insert into inference_markets
-               (orderbook_address, model_hash, model_ref, producer, platform_fee_bps,
+               (orderbook_address, model_hash, model_ref, platform_fee_bps,
                 quote_token_type, price_precision, quantity_precision,
                 tick_size, step_size, min_notional, created_at_chain, last_reconciled_at)
-           values ($1, null, $1, $2, 250, 2, 9, 0,
+           values ($1, null, $1, 250, 2, 9, 0,
                    '0.000000001', '1', '0.000000001',
-                   case when $3::bigint is null then null else to_timestamp($3::double precision) end,
+                   case when $2::bigint is null then null else to_timestamp($2::double precision) end,
                    now())
            on conflict (orderbook_address) do nothing"#,
     )
     .bind(ob)
-    .bind(producer)
     .bind(created_at_chain_secs)
     .execute(pool)
     .await
@@ -172,79 +166,54 @@ async fn purge_many(pool: &PgPool, obs: &[&str]) {
 }
 
 #[tokio::test]
-async fn producer_filter_narrows_results() {
-    let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
-    let prod = "inf_http_prodfilter";
-    let a = "0:inf_http_pf_a";
-    let b = "0:inf_http_pf_b";
-    purge_many(&pool, &[a, b]).await;
-    seed_listed(&pool, a, prod, Some(1_700_000_100)).await;
-    seed_listed(&pool, b, "other_producer", Some(1_700_000_200)).await;
-
-    let mut resp = TestClient::get(format!("http://test/api/v1/inference/markets?producer={prod}"))
-        .send(&service)
-        .await;
-    assert_eq!(resp.status_code, Some(StatusCode::OK));
-    let body: Value = resp.take_json().await.expect("json");
-    let addrs: Vec<&str> = body["markets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["inferenceOrderBookAddress"].as_str().unwrap())
-        .collect();
-    assert!(addrs.contains(&a));
-    assert!(!addrs.contains(&b), "producer filter must exclude other producers");
-
-    purge_many(&pool, &[a, b]).await;
-}
-
-#[tokio::test]
 async fn pagination_cursor_round_trip_with_null_chain_time() {
     let Some((service, pool, _kek, _pn)) = common::setup().await else { return };
-    let prod = "inf_http_pgwalk"; // unique producer isolates the seeded rows
     let a = "0:inf_http_pg_a"; // newest
     let b = "0:inf_http_pg_b";
     let c = "0:inf_http_pg_c"; // NULL chain time -> sorts last
     purge_many(&pool, &[a, b, c]).await;
-    seed_listed(&pool, a, prod, Some(1_700_000_200)).await;
-    seed_listed(&pool, b, prod, Some(1_700_000_100)).await;
-    seed_listed(&pool, c, prod, None).await;
+    seed_listed(&pool, a, Some(1_700_000_200)).await;
+    seed_listed(&pool, b, Some(1_700_000_100)).await;
+    seed_listed(&pool, c, None).await;
 
-    // Page 1: newest-first, NULL-time row absent, hasMore + nextCursor present.
-    let mut r1 =
-        TestClient::get(format!("http://test/api/v1/inference/markets?producer={prod}&limit=2"))
-            .send(&service)
-            .await;
-    assert_eq!(r1.status_code, Some(StatusCode::OK));
-    let p1: Value = r1.take_json().await.expect("json");
-    let a1: Vec<&str> = p1["markets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["inferenceOrderBookAddress"].as_str().unwrap())
-        .collect();
-    assert_eq!(a1, vec![a, b]);
-    assert_eq!(p1["hasMore"], Value::Bool(true));
-    let cursor = p1["nextCursor"].as_str().expect("nextCursor present").to_string();
+    // Walked two at a time so every page boundary is actually crossed. The
+    // listing has no filter any more and the database is shared, so the
+    // assertions are about these three rows within the whole ordered result
+    // rather than about the contents of one page.
+    let mut all: Vec<String> = Vec::new();
+    let mut created_at_of_c = None;
+    let mut cursor: Option<String> = None;
+    loop {
+        let url = match &cursor {
+            None => "http://test/api/v1/inference/markets?limit=2".to_string(),
+            Some(cur) => {
+                format!("http://test/api/v1/inference/markets?limit=2&cursor={cur}")
+            }
+        };
+        let mut resp = TestClient::get(url).send(&service).await;
+        assert_eq!(resp.status_code, Some(StatusCode::OK));
+        let page: Value = resp.take_json().await.expect("json");
+        for m in page["markets"].as_array().unwrap() {
+            let addr = m["inferenceOrderBookAddress"].as_str().unwrap().to_string();
+            if addr == c {
+                created_at_of_c = Some(m["createdAt"].clone());
+            }
+            all.push(addr);
+        }
+        if page["hasMore"] != Value::Bool(true) {
+            assert!(page["nextCursor"].is_null(), "the last page must carry no cursor");
+            break;
+        }
+        cursor = Some(page["nextCursor"].as_str().expect("nextCursor present").to_string());
+    }
 
-    // Page 2 via the cursor: NULL-time row appears last with createdAt 0.
-    let mut r2 = TestClient::get(format!(
-        "http://test/api/v1/inference/markets?producer={prod}&limit=2&cursor={cursor}"
-    ))
-    .send(&service)
-    .await;
-    assert_eq!(r2.status_code, Some(StatusCode::OK));
-    let p2: Value = r2.take_json().await.expect("json");
-    let a2: Vec<&str> = p2["markets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["inferenceOrderBookAddress"].as_str().unwrap())
-        .collect();
-    assert_eq!(a2, vec![c]);
-    assert_eq!(p2["markets"][0]["createdAt"], 0);
-    assert_eq!(p2["hasMore"], Value::Bool(false));
-    assert!(p2["nextCursor"].is_null());
+    let unique = all.iter().collect::<std::collections::HashSet<_>>().len();
+    assert_eq!(unique, all.len(), "the cursor repeated a row across a page boundary");
+
+    let at = |ob: &str| all.iter().position(|x| x == ob).expect("seeded row missing");
+    assert!(at(a) < at(b), "newer chain time must sort first");
+    assert!(at(b) < at(c), "a NULL chain time must sort last");
+    assert_eq!(created_at_of_c, Some(Value::from(0)), "a NULL chain time renders as createdAt 0");
 
     purge_many(&pool, &[a, b, c]).await;
 }
@@ -313,14 +282,10 @@ async fn non_numeric_limit_on_listing_is_1130() {
 #[tokio::test]
 async fn oversized_limit_clamps_and_returns_200() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    // Use a producer that will match nothing so the listing is empty — proves
-    // that `limit=99999` is clamped (not rejected as -1130) rather than
-    // returning all DB rows (which may include corrupt task-3 fixtures).
-    let resp = TestClient::get(
-        "http://test/api/v1/inference/markets?limit=99999&producer=__no_such_producer__",
-    )
-    .send(&service)
-    .await;
+    // `limit=99999` must clamp rather than be rejected as -1130. The clamp is
+    // what the 200 proves: without it the page size would be the raw value.
+    let resp =
+        TestClient::get("http://test/api/v1/inference/markets?limit=99999").send(&service).await;
     assert_eq!(resp.status_code, Some(StatusCode::OK));
 }
 
@@ -353,11 +318,12 @@ async fn address_with_blank_limit_is_1102() {
 }
 
 #[tokio::test]
-async fn address_with_blank_producer_is_1102() {
+async fn address_with_blank_status_is_1102() {
     let Some((service, _pool, _kek, _pn)) = common::setup().await else { return };
-    // A present-but-blank `&producer=` still conflicts with single-market lookup.
+    // A present-but-blank `&status=` still conflicts with single-market lookup:
+    // presence beats the blank-collapse, so this is -1102 and not a silent hit.
     let mut resp = TestClient::get(
-        "http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&producer=",
+        "http://test/api/v1/inference/markets?inferenceOrderBookAddress=0:x&status=",
     )
     .send(&service)
     .await;

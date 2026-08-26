@@ -98,11 +98,11 @@ async fn purge(pool: &PgPool, ob: &str) {
 async fn seed_reconciled_market(pool: &PgPool, ob: &str) {
     sqlx::query(
         r#"insert into inference_markets
-               (orderbook_address, model_hash, model_ref, producer, model_name, model_version,
+               (orderbook_address, model_hash, model_ref,
                 platform_fee_bps, quote_token_type, price_precision, quantity_precision,
                 tick_size, step_size, min_notional, created_at_chain, last_reconciled_at,
                 reference_price_at, last_swept_at)
-           values ($1, null, 'ref', 'producer', 'model', 'v1',
+           values ($1, null, 'ref',
                    250, 2, 9, 0,
                    '0.000000001', '1', '0.000000001', now(), now(),
                    now(), now())"#,

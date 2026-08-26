@@ -163,7 +163,7 @@ async fn range_market_exposes_resolves_from_with_model() {
     let market = one(&pool, "rf_with_model").await;
     let rf = market.resolves_from.as_ref().expect("resolvesFrom present for a range market");
     assert_eq!(rf.inference_order_book_address, ob);
-    assert_eq!(rf.model.as_deref(), Some("qwen--qwen3--32b"));
+    assert_eq!(rf.model_ref_name.as_deref(), Some("qwen--qwen3--32b"));
     assert!(matches!(rf.metric, ResolvesFromMetric::WeeklyMedianPrice));
 }
 
@@ -186,7 +186,10 @@ async fn range_market_without_reconciled_inference_book_degrades_model_to_none()
     let rf =
         market.resolves_from.as_ref().expect("market is not hidden when inference book missing");
     assert_eq!(rf.inference_order_book_address, ob);
-    assert!(rf.model.is_none(), "model degrades to null when the inference book is unreconciled");
+    assert!(
+        rf.model_ref_name.is_none(),
+        "modelRefName degrades to null when the inference book is unreconciled"
+    );
 }
 
 #[tokio::test]
