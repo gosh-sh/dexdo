@@ -8,26 +8,27 @@ use ackinacki_kit::contracts::traits::ContractBase;
 use ackinacki_kit::contracts::traits::GetMethodAccessor;
 use ackinacki_kit::contracts::traits::HasContractBase;
 use ackinacki_kit::contracts::traits::ModuleAccessor;
-use ackinacki_kit::contracts::traits::SendMessage;
 use ackinacki_kit::contracts::KitResult;
 use ackinacki_kit::shared::traits::guarded::AsyncGuarded;
 use ackinacki_kit::shared::traits::guarded::AsyncGuardedMut;
 use ackinacki_kit::tvm_client::abi::Abi;
-use ackinacki_kit::tvm_client::abi::CallSet;
-use ackinacki_kit::tvm_client::abi::Signer;
-use ackinacki_kit::tvm_client::processing::ResultOfSendMessage;
 use ackinacki_kit::tvm_client::ClientContext;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::json;
 use tokio::sync::OwnedMutexGuard;
 
 const ABI: &str = include_str!("../../../../contracts/airegistry/RootModel.abi.json");
 
 #[derive(Debug, Clone)]
 /// Wrapper for the AI Registry `RootModel` contract — a per-owner model
-/// registry that derives + registers `TokenContract` children at
-/// deterministic `(sellerPubkey, nonce)` addresses.
+/// registry that derives the deterministic `(sellerPubkey, nonce)` address every
+/// `TokenContract` of that owner lives at.
+///
+/// It no longer creates them. `registerTokenContract` has no wrapper because
+/// nothing off chain can call it: since 4.0.36 it is a `pure` self-announcement
+/// that recomputes the canonical address and requires `msg.sender` to equal it,
+/// which only the already-deployed deal satisfies. Deals are deployed by the
+/// seller's note — see `dex::private_note::PrivateNote::deploy_deal`.
 pub struct RootModel {
     base: ContractBase,
 }
@@ -63,15 +64,6 @@ impl AsyncGuardedMut<Account> for RootModel {
         let guard = self.account().clone().lock_owned().await;
         action(guard).await
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-/// Parameters for `RootModel.registerTokenContract`.
-pub struct ParamsOfRegisterTokenContract {
-    /// `uint256`, decimal or hex string.
-    pub seller_pubkey: String,
-    pub nonce: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,22 +106,6 @@ impl RootModel {
     ) -> Self {
         let params = params.into();
         Self { base: ContractBase::new(context, params, Abi::Json(ABI.to_string())) }
-    }
-
-    /// # Deploy + register a TokenContract for `(sellerPubkey, nonce)`
-    ///
-    /// Original contract method: `registerTokenContract`
-    pub async fn register_token_contract(
-        &self,
-        params: ParamsOfRegisterTokenContract,
-        signer: Signer,
-    ) -> KitResult<ResultOfSendMessage> {
-        let call_set = CallSet {
-            function_name: "registerTokenContract".to_string(),
-            header: None,
-            input: Some(json!(params)),
-        };
-        self.send_message(Some(call_set), None, signer).await
     }
 
     /// # Get deterministic TokenContract address for `(sellerPubkey, nonce)`

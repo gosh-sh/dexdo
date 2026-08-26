@@ -154,12 +154,12 @@ fn super_root_results_decode_abi_shape() {
 #[test]
 fn root_model_params_match_abi() {
     use super::root_model::ParamsOfGetTokenContractAddress;
-    use super::root_model::ParamsOfRegisterTokenContract;
 
-    assert_eq!(
-        serialized_keys(&ParamsOfRegisterTokenContract { seller_pubkey: "1".into(), nonce: 1 }),
-        abi_input_names(ROOT_MODEL_ABI, "registerTokenContract")
-    );
+    // `registerTokenContract` is deliberately absent. It is still in the ABI, so
+    // a shape assertion would pass and read like coverage, but the method turned
+    // into a `pure` callback the deployed deal sends to announce itself: it
+    // requires `msg.sender` to be the canonical address, and an external message
+    // has none. A wrapper for it could only ever revert `ERR_INVALID_SENDER`.
     assert_eq!(
         serialized_keys(&ParamsOfGetTokenContractAddress { seller_pubkey: "1".into(), nonce: 1 }),
         abi_input_names(ROOT_MODEL_ABI, "getTokenContractAddress")
