@@ -204,6 +204,29 @@ async fn apply_inference_order_placed(
         chain_seconds,
     )
     .await?;
+
+    // A FRESH SELL ON A FUNDED DEAL MEANS THE PREVIOUS MATCH IS OVER, and it is
+    // the only thing on chain that says so. Since contracts 4.0.36 a buyer
+    // no-show runs `cleanupUnopened`, which no longer destroys the deal — and
+    // emits nothing at all: no `ContractDestroyed`, and no
+    // `PrivateNote.InferenceDealClosed` either, since that fires only when a
+    // deal dies. Without this the row would keep the dead match's buyer and
+    // deposit and read as "funded, never opened" until the deal is funded
+    // again, which may never happen.
+    //
+    // The inference is sound rather than merely plausible: `postFromNote` opens
+    // with `if (_offerPosted || _funded) { return; }`, and a funded deal never
+    // clears `_offerPosted` (`onSellClosed` returns early while `_funded`). So a
+    // deal that is funded CANNOT put a new ask up, and an ask that reaches the
+    // book naming it proves the funding was undone.
+    //
+    // Only here, not in `apply_inference_subscription_placed`: a subscription is
+    // the buyer's side and never names a seller's deal. The guard would hold
+    // there too — it asks for a SELL carrying a TokenContract — but the call
+    // would be dead weight.
+    if !is_buy && let Some(tc) = token_contract {
+        crate::token_contract_projectors::end_funding_cycle(tx, tc, &chain_order).await?;
+    }
     Ok(ProjectionOutcome::Applied)
 }
 

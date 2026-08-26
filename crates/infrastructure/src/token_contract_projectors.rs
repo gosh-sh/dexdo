@@ -74,49 +74,42 @@ async fn seed_deal_skeleton(
     Ok(())
 }
 
-/// A deal is funded — and, since contracts 4.0.36, possibly not for the first
-/// time at this address.
+/// End the deal's current funding cycle, clearing everything written per cycle.
+/// Returns whether a cycle was actually ended.
 ///
-/// `cleanupUnopened` used to end in `_die`, so a no-show destroyed the deal and
-/// the next match needed a fresh deploy at a fresh address. It no longer does:
-/// it puts the state back to unfunded and the SAME `TokenContract` takes a new
-/// offer through `postFromNote`, with a different buyer and a different deposit.
-/// The address is this table's primary key, so a second cycle lands on the first
-/// cycle's row.
+/// A deal address serves more than one match since contracts 4.0.36.
+/// `cleanupUnopened` used to end in `_die`, so a buyer no-show destroyed the
+/// deal and the next match needed a fresh deploy at a fresh address. It no
+/// longer does: it puts the state back to unfunded, clears `_offerPosted`, and
+/// the SAME `TokenContract` takes a new offer through `postFromNote` with a
+/// different buyer and a different deposit. The address is this table's primary
+/// key, so a second cycle lands on the first cycle's row.
 ///
-/// Everything written per cycle is therefore cleared before the new figures go
-/// in — `buyer_note`, `deposit` and `funded_at_chain` included, since the second
-/// statement writes those three through `coalesce` and would otherwise keep
-/// cycle one's buyer forever while the row went on reporting a settlement that
-/// has been superseded. What is
-/// NOT cleared is what the address itself fixes: `orderbook_address` and
-/// `seller_note` derive from the seller's key and nonce and cannot change while
-/// the address does not.
+/// `buyer_note`, `deposit` and `funded_at_chain` are cleared along with the
+/// rest, because the callers that refill them do so through `coalesce` and
+/// would otherwise keep cycle one's buyer forever while the row went on
+/// reporting a settlement that has been superseded. What is NOT cleared is what
+/// the address itself fixes: `orderbook_address` and `seller_note` derive from
+/// the seller's key and nonce and cannot change while the address does not.
 ///
 /// Guarded by `last_chain_order` rather than run unconditionally, because
-/// reprojection replays rows: only a funding NEWER than everything already
-/// folded into this row starts a cycle, so replaying cycle one's `StreamFunded`
-/// after cycle two began is inert instead of destructive. The first funding of a
-/// deal has no cycle to clear (`funded_at_chain is null`) and skips the reset
-/// outright.
+/// reprojection replays rows: only an event NEWER than everything already
+/// folded into this row may end a cycle, so replaying cycle one after cycle two
+/// began is inert instead of destructive. A deal that has never been funded has
+/// no cycle to end and is skipped outright.
 ///
 /// Known gap, left open deliberately: this orders cycles, not events within
-/// one. A cycle-one event delivered out of order AFTER cycle two's funding still
-/// writes into cycle two through its own `coalesce`. Closing that needs a cycle
-/// number on every deal row and on every event that touches one — a migration
-/// and a wider key — and the case it guards against has not been observed.
-async fn apply_stream_funded(
+/// one. A cycle-one event delivered out of order AFTER cycle two has started
+/// still writes into cycle two through its own `coalesce`. Closing that needs a
+/// cycle number on every deal row and on every event that touches one — a
+/// migration and a wider key — and the case it guards against has not been
+/// observed.
+pub(crate) async fn end_funding_cycle(
     tx: &mut Transaction<'_, Postgres>,
-    event: &DecodedEvent,
-    node: &EventNode,
-) -> anyhow::Result<ProjectionOutcome> {
-    let tc = node.src.as_deref().context("StreamFunded: src missing")?;
-    let buyer = field_str(&event.value, "buyer")?;
-    let deposit = uint_field_to_decimal(&event.value, "deposit")?;
-    let chain_order = node_chain_order(node, "StreamFunded")?;
-    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
-
-    let starts_new_cycle = sqlx::query_scalar::<_, bool>(
+    tc: &str,
+    chain_order: &str,
+) -> anyhow::Result<bool> {
+    let ended = sqlx::query_scalar::<_, bool>(
         r#"update inference_deals
               set buyer_note = null,
                   deposit = null,
@@ -130,6 +123,7 @@ async fn apply_stream_funded(
                   finalized_ticks = 0,
                   trusted_ticks = null,
                   claimed_ticks = null,
+                  last_chain_order = $2,
                   updated_at = now()
             where token_contract_address = $1
               and funded_at_chain is not null
@@ -137,26 +131,45 @@ async fn apply_stream_funded(
         returning true"#,
     )
     .bind(tc)
-    .bind(&chain_order)
+    .bind(chain_order)
     .fetch_optional(&mut **tx)
     .await
-    .context("reset inference_deals for a new funding cycle")?
+    .context("end the deal's funding cycle")?
     .unwrap_or(false);
 
     // The per-tick log goes with the counter it backs: `apply_tick_finalized`
     // increments `finalized_ticks` only when its insert is a real insert, so a
-    // counter reset that left the old rows behind would make the two disagree
-    // forever — the next cycle's first tick would conflict on
-    // `(token_contract_address, chain_order)` only if the gateway ever reused an
-    // ordering key, but the COUNT would read as one cycle's worth of ticks split
-    // across two. The settled history of cycle one is in `inference_trades`.
-    if starts_new_cycle {
+    // counter reset that left the old rows behind would leave the two
+    // disagreeing forever — the COUNT would read as one cycle's worth of ticks
+    // split across two. The settled history of cycle one is in
+    // `inference_trades`.
+    if ended {
         sqlx::query(r#"delete from inference_ticks where token_contract_address = $1"#)
             .bind(tc)
             .execute(&mut **tx)
             .await
-            .context("clear inference_ticks for a new funding cycle")?;
+            .context("clear inference_ticks for the ended cycle")?;
     }
+    Ok(ended)
+}
+
+/// A deal is funded — and, since contracts 4.0.36, possibly not for the first
+/// time at this address, so the previous cycle is ended before the new figures
+/// go in. Ordinarily [`end_funding_cycle`] has already run on the SELL offer
+/// that produced this match (see `inference_projectors`); this call is what
+/// covers the deal whose re-offer we never saw.
+async fn apply_stream_funded(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &DecodedEvent,
+    node: &EventNode,
+) -> anyhow::Result<ProjectionOutcome> {
+    let tc = node.src.as_deref().context("StreamFunded: src missing")?;
+    let buyer = field_str(&event.value, "buyer")?;
+    let deposit = uint_field_to_decimal(&event.value, "deposit")?;
+    let chain_order = node_chain_order(node, "StreamFunded")?;
+    let chain_seconds = parse_unix_seconds(node.created_at.as_ref());
+
+    end_funding_cycle(tx, tc, &chain_order).await?;
 
     sqlx::query(
         r#"update inference_deals

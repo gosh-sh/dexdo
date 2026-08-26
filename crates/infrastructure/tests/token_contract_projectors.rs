@@ -764,3 +764,120 @@ async fn a_replayed_earlier_funding_does_not_reset_a_later_cycle() {
     assert_eq!(deposit.as_deref(), Some("7000"), "a replay must not restore the old deposit");
     assert_eq!(ppt.as_deref(), Some("20"), "a replay must not clear the live cycle");
 }
+
+/// The only signal a buyer no-show leaves on chain.
+///
+/// `cleanupUnopened` emits nothing since contracts 4.0.36 — it no longer dies,
+/// so neither `TokenContract.ContractDestroyed` nor
+/// `PrivateNote.InferenceDealClosed` fires. What it does do is clear
+/// `_offerPosted`, which lets the seller re-list; and since `postFromNote`
+/// refuses to post while `_offerPosted || _funded`, an ask reaching the book for
+/// a deal this table shows as funded proves the funding was undone.
+#[tokio::test]
+async fn a_fresh_sell_offer_ends_a_funded_deals_cycle() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_reoffer_reset";
+    let ob = "0:ob_reoffer_reset";
+    commit_first_cycle(&pool, tc).await;
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // The seller re-lists after the no-show. Chain order is newer than anything
+    // in cycle one, which is what separates this from a late-delivered offer
+    // belonging to the cycle that is already recorded.
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &iob_ev(
+            "InferenceOrderPlaced",
+            serde_json::json!({
+                "orderId": "7",
+                "isBuy": false,
+                "price": "100",
+                "ticks": "10",
+                "note": "0:seller",
+                "tokenContract": tc,
+                "deadline": "0"
+            }),
+        ),
+        &node(ob, "co-9"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, deposit, kind, ticks): (Option<String>, Option<String>, Option<String>, i32) =
+        sqlx::query_as(
+            "select buyer_note, deposit::text, close_kind, finalized_ticks \
+             from inference_deals where token_contract_address=$1",
+        )
+        .bind(tc)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(buyer, None, "the dead match's buyer must not outlive it");
+    assert_eq!(deposit, None, "the dead match's deposit must not outlive it");
+    assert_eq!(kind, None, "a re-listed deal is not a settled one");
+    assert_eq!(ticks, 0, "the tick counter restarts with the cycle");
+
+    let tick_rows: i64 =
+        sqlx::query_scalar("select count(*) from inference_ticks where token_contract_address=$1")
+            .bind(tc)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tick_rows, 0, "the tick log must be cleared with the counter it backs");
+}
+
+/// The offer that PRODUCED a match must not undo it.
+///
+/// In the ordinary flow the SELL offer rests before the funding it leads to, so
+/// its chain order is older — and a late delivery of it says nothing about the
+/// deal having been wound down. Only an offer newer than everything already
+/// folded into the row can end a cycle.
+#[tokio::test]
+async fn the_offer_that_produced_the_match_does_not_end_its_cycle() {
+    let Some(pool) = setup().await else { return };
+    let tc = "0:tc_reoffer_inorder";
+    let ob = "0:ob_reoffer_inorder";
+    commit_first_cycle(&pool, tc).await;
+    sqlx::query("delete from inference_orders where orderbook_address=$1")
+        .bind(ob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // "co-0" predates the cycle-one funding at "co-1": this is the ask that was
+    // matched, arriving late.
+    let mut tx = pool.begin().await.unwrap();
+    project(
+        &mut tx,
+        &iob_ev(
+            "InferenceOrderPlaced",
+            serde_json::json!({
+                "orderId": "8",
+                "isBuy": false,
+                "price": "100",
+                "ticks": "10",
+                "note": "0:seller",
+                "tokenContract": tc,
+                "deadline": "0"
+            }),
+        ),
+        &node(ob, "co-0"),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let (buyer, kind): (Option<String>, Option<String>) = sqlx::query_as(
+        "select buyer_note, close_kind from inference_deals where token_contract_address=$1",
+    )
+    .bind(tc)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(buyer.as_deref(), Some("0:buyer1"), "a late in-cycle offer must change nothing");
+    assert_eq!(kind.as_deref(), Some("STOPPED"), "a late in-cycle offer must not reopen a close");
+}
