@@ -435,12 +435,11 @@ The projection loop applies the `inference_orphan_cutoff_ms` window as a dead-le
 
 #### Model identity (from `getModelName`)
 
-The order book carries only `model_hash`; the human `producer--model--version` name is not in `getParams()`. On the discovery pass the reconciler reads it from the book's `getModelName()` getter and parses it into the identity columns:
+The order book carries only `model_hash`; the human-readable name is not in `getParams()`. On the discovery pass the reconciler reads it from the book's `getModelName()` getter and stores it, trimmed, in `model_ref` — the column the API serves as `modelRefName`. An empty name leaves it NULL and the API renders the model by `model_hash`.
 
-- `model_ref` — the trimmed name verbatim.
-- `producer` / `model_name` / `model_version` — set only when the name is a clean three-part `producer--model--version` (exactly three non-empty `--`-separated parts); otherwise only `model_ref` is filled. An empty name leaves all four NULL, and the API then renders the model by `model_hash`.
+**Nothing is parsed out of the name.** It used to be split on exactly three `--`-separated parts into `producer` / `model_name` / `model_version`, with all three left NULL for anything else. The model registry has since been re-seeded with names that are not in that shape — `Qwen2.5-32B-Instruct`, not `qwen--qwen2.5-32b--instruct` — so the parts would have been NULL for every new market, and the split was a guess at structure the names never guaranteed. The three columns are gone (`0005_drop_inference_model_name_parts.sql`) and the whole string is served instead.
 
-This follows the "getter backfills what events don't carry" pattern: discovery is still triggered by the first order event ([projection](#projection--inference-order-events) routes `InferenceOrderBookDeployed` to observability-only), and the reconciler completes identity from the getter. `model_version` (the model's own version, rendered as the API's `model.version`) is distinct from the `version` column (the **contract** version from `getVersion()`, used only by the supersede logic).
+This follows the "getter backfills what events don't carry" pattern: discovery is still triggered by the first order event ([projection](#projection--inference-order-events) routes `InferenceOrderBookDeployed` to observability-only), and the reconciler completes identity from the getter. Note that `model_ref` is the MODEL's label while the `version` column is the **contract** version from `getVersion()`, used only by the supersede logic — the two are unrelated.
 
 > 🚧 **Still deferred — registry-walk fields.** `owner_pubkey`, `manifest_address`, and `root_model_address` require a registry walk (`SuperRoot` → `RootModel`) that is not yet implemented (the `ManifestMetadata` contract that earlier held the manifest was removed upstream in v4.0.10). These columns stay NULL.
 

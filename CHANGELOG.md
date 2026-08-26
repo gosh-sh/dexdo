@@ -6,6 +6,11 @@ All notable changes to DEX.DO are recorded here. Entries are date-based, newest 
 
 ### Breaking Changes
 
+- **A market's model is one field now, not an object.** `/api/v1/inference/markets` replaces `model: { producer, name, version, ref }` with **`modelRefName`** — a string carrying the model's name exactly as its order book reports it, e.g. `"Qwen2.5-32B-Instruct"`, or the model hash when the book has no name. Treat it as an opaque label: no structure is guaranteed and none is parsed. The same rename lands on `resolvesFrom.model` → **`resolvesFrom.modelRefName`** in `/api/v1/prediction/markets`, which already carried this value under the other name.
+
+  The split was a guess at structure the names never guaranteed: it required exactly three `--`-separated parts and produced three nulls for everything else, and the model registry has been re-seeded with names that are not in that shape at all.
+- **`?producer=` is gone from `/api/v1/inference/markets`.** It filtered on a field the response no longer carries, backed by a column that would have been NULL for every newly registered model. Callers that used it should filter client-side on `modelRefName`. It is also no longer one of the parameters that conflicts with a single-market `?inferenceOrderBookAddress=` lookup.
+
 - **A deal is deployed from the seller's note now, not by an external message** (contracts 4.0.36). `PrivateNote.deployDeal(nonce, modelName, modelHash, pricePerTick, maxTicks, gasReserve)` replaces the off-chain `TokenContract` deploy. The constructor takes a new `depositIdentifierHash` argument and requires `msg.sender` to be the canonical `PrivateNote` for it, so a seller-key-signed external deploy is refused outright. The deal therefore lives in the note's dApp instead of one of its own, and `PrivateNote`'s constructor takes a new `tokenContractCode` cell. Re-pinned code hashes: `PrivateNote → f7a49601`, `TokenContract → 4378e271` (depth 17 → 18), `RootModel → 87c63e32`, `InferenceOrderBook → 91f0af87`.
 - **`RootPN.setTokenContractCode` must run before any note is deployed.** A note minted without it bakes an empty TokenContract code cell, and its `deployDeal` puts a codeless account at a well-formed address. `RootPN.onCodeUpgrade` restores six codes, so every `updateCode` wipes `_inferenceOrderBookCode`, `_tokenContractCode` and the previous-generation note pin: re-run `setInferenceOrderBookCode`, `setTokenContractCode` and `setPrevPrivateNoteCode` after each upgrade.
 - **A BUY order now costs the note 0.025 SHELL**, burned as ECC[2] at placement (`PrivateNote.placeInferenceBuy`), mirroring what posting a SELL offer already cost the seller. Taken from the note's own SHELL, not from its recorded balance, so a note holding none cannot place a buy.
@@ -14,6 +19,10 @@ All notable changes to DEX.DO are recorded here. Entries are date-based, newest 
 
 - `RootPN.setPrevPrivateNoteCode` / `getPrevPrivateNoteCode`: the root serves notes of one previous code generation, so a `PrivateNote` upgrade no longer strands the balances of notes already deployed — `withdrawTokens` accepts a note of either generation.
 - The indexer ingests the 15 `TokenContract.*` settlement routes (external ids 709, 710, 720–725, 727–733). [`inference_deals`](docs/tech-specs/data-schema.md#inference_deals) and [`inference_ticks`](docs/tech-specs/data-schema.md#inference_ticks) are populated from live capture instead of only from retained rows. No config change is needed; expect more `raw_events` volume wherever inference deals are active, since a deal emits ten-plus events per match plus one per claimed tick.
+
+### Removed
+
+- `inference_markets.producer`, `.model_name` and `.model_version` — the parsed name parts behind the retired `model` object. **Migration `0005_drop_inference_model_name_parts.sql` must be run.** Nothing is lost that cannot be recovered: they were derived from `model_ref`, which stays and is re-read from the book's `getModelName()` getter on every reconcile.
 
 ### Changed
 

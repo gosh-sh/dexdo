@@ -522,7 +522,7 @@ Present only on a prediction market whose outcome is decided by a model's refere
 ```json
 {
   "inferenceOrderBookAddress": "0:ob-addr...",
-  "model": "qwen--qwen2.5-32b--instruct",
+  "modelRefName": "Qwen2.5-32B-Instruct",
   "metric": "WEEKLY_MEDIAN_PRICE"
 }
 ```
@@ -530,7 +530,7 @@ Present only on a prediction market whose outcome is decided by a model's refere
 | Field | Type | Description |
 | --- | --- | --- |
 | `inferenceOrderBookAddress` | STRING | The inference market ([`/api/v1/inference/markets`](#inference-markets)) this market settles from. |
-| `model` | STRING \| null | The model `ref` (`producer--model--version`); `null` if the model identity is not yet known on chain. |
+| `modelRefName` | STRING \| null | The model's name as its order book reports it, verbatim; `null` if the inference book is not yet reconciled. Same value and same rules as `modelRefName` in [`/api/v1/inference/markets`](#inference-markets). |
 | `metric` | ENUM | The price metric used to settle. Currently `WEEKLY_MEDIAN_PRICE`. |
 
 ### Prediction Order Book
@@ -836,7 +836,6 @@ Query parameters:
 | Name | Type | Mandatory | Description |
 | --- | --- | --- | --- |
 | `inferenceOrderBookAddress` | STRING | NO | Return one market only. Mutually exclusive with the filter and pagination parameters below. |
-| `producer` | STRING | NO | Filter by model producer (e.g. `qwen`). |
 | `status` | STRING | NO | Comma-separated statuses to include. Currently only `TRADING`. |
 | `sort` | STRING | NO | Sort field. `createdAt` (default, DESC). |
 | `cursor` | STRING | NO | Opaque pagination cursor from a previous call. |
@@ -852,12 +851,7 @@ Response:
   "markets": [
     {
       "inferenceOrderBookAddress": "0:ob-addr...",
-      "model": {
-        "producer": "qwen",
-        "name": "qwen2.5-32b",
-        "version": "instruct",
-        "ref": "qwen--qwen2.5-32b--instruct"
-      },
+      "modelRefName": "Qwen2.5-32B-Instruct",
       "contractVersion": "4.0.30",
       "status": "TRADING",
       "quoteAsset": "SHELL",
@@ -883,8 +877,8 @@ Response fields:
 | `nextCursor` | STRING \| null | Cursor for the next page. `null` when `hasMore` is `false`. |
 | `hasMore` | BOOLEAN | Whether more pages follow. |
 | `inferenceOrderBookAddress` | STRING | Stable market id — the model's order-book address. Pass it as `?inferenceOrderBookAddress=` to fetch this one market, and as the key for [`/api/v1/inference/depth`](#inference-depth). |
-| `model` | OBJECT | Model identity. `ref` is the canonical `producer--model--version`. `producer` / `name` / `version` MAY be `null` if the model identity is not yet known on chain; `ref` then carries the model hash. |
-| `contractVersion` | STRING \| null | Version of the deployed order-book contract backing this market (e.g. `"4.0.30"`). Distinct from `model.version`, which is the AI model's own version. `null` when the contract version is not yet known on chain. |
+| `modelRefName` | STRING | The model's name as its order book reports it, verbatim — e.g. `"Qwen2.5-32B-Instruct"`. Treat it as an opaque label: no structure is guaranteed and none is parsed. Carries the model hash instead when the book reports no name. |
+| `contractVersion` | STRING \| null | Version of the deployed order-book CONTRACT backing this market (e.g. `"4.0.30"`), not of the AI model. `null` when the contract version is not yet known on chain. |
 | `status` | ENUM | `TRADING`. Reserved for future inactive states; clients MUST treat it as opaque. |
 | `quoteAsset` | STRING | Always `SHELL`. |
 | `makerCommission` | DECIMAL | Maker (**seller**) fee rate, a signed decimal string. The seller is never charged; a negative value (`"-0.02"` = −2%) is a **rebate credited to the seller** for delivering ticks cleanly. This is the rebate **cap**: the actual rebate ramps from `0` with delivered ticks and applies only on a clean, non-disputed close, so a given deal may credit less. |
