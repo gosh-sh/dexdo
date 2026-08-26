@@ -1033,8 +1033,8 @@ fn model_name_str(v: &serde_json::Value) -> &str {
     v.get("value0").and_then(|x| x.as_str()).unwrap_or("")
 }
 
-/// The on-chain `modelName` (the `getModelName` getter), trimmed, or `None`
-/// when the book reports an empty name — the read API then falls back to
+/// The on-chain `modelName` (the `getModelName` getter) exactly as reported, or
+/// `None` when the book reports a blank name — the read API then falls back to
 /// `model_hash`.
 ///
 /// Nothing is parsed out of it any more. It used to be split into
@@ -1042,9 +1042,15 @@ fn model_name_str(v: &serde_json::Value) -> &str {
 /// all three left NULL otherwise; the model registry's names are not in that
 /// shape, so the parts were absent more often than present, and the API now
 /// serves the whole string as `modelRefName`.
+///
+/// The `trim` here only DETECTS a blank name; it never alters one that is not.
+/// `modelRefName` is a documented-verbatim opaque label (`docs/api-spec.md`),
+/// and the contract puts no shape on `modelName` beyond
+/// `sha256(modelName) == modelHash` and a 127-byte bound — so `" Qwen "` and `"Qwen"` are two different models with two
+/// different hashes and two different books. Trimming would serve both under
+/// one label and quietly report a collision that is not on chain.
 pub(crate) fn parse_model_ref(model_name: &str) -> Option<String> {
-    let trimmed = model_name.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    (!model_name.trim().is_empty()).then(|| model_name.to_string())
 }
 
 #[cfg(test)]
@@ -1090,9 +1096,13 @@ mod parse_tests {
         assert_eq!(parse_model_ref("a--b").as_deref(), Some("a--b"));
     }
 
+    /// Surrounding whitespace is part of the name, because on chain it is: it
+    /// goes into `sha256(modelName)`, so a padded name is a different model at a
+    /// different book address, not a sloppy spelling of this one.
     #[test]
-    fn surrounding_whitespace_is_trimmed() {
-        assert_eq!(parse_model_ref("  gpt-5.2-pro \n").as_deref(), Some("gpt-5.2-pro"));
+    fn surrounding_whitespace_is_kept() {
+        assert_eq!(parse_model_ref("  gpt-5.2-pro \n").as_deref(), Some("  gpt-5.2-pro \n"));
+        assert_ne!(parse_model_ref(" Qwen "), parse_model_ref("Qwen"));
     }
 
     /// An empty name is not a name: the read side falls back to `model_hash`,

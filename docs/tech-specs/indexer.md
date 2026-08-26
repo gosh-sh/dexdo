@@ -435,7 +435,7 @@ The projection loop applies the `inference_orphan_cutoff_ms` window as a dead-le
 
 #### Model identity (from `getModelName`)
 
-The order book carries only `model_hash`; the human-readable name is not in `getParams()`. On the discovery pass the reconciler reads it from the book's `getModelName()` getter and stores it, trimmed, in `model_ref` — the column the API serves as `modelRefName`. An empty name leaves it NULL and the API renders the model by `model_hash`.
+The order book carries only `model_hash`; the human-readable name is not in `getParams()`. On the discovery pass the reconciler reads it from the book's `getModelName()` getter and stores it **verbatim** in `model_ref` — the column the API serves as `modelRefName`. Surrounding whitespace is kept, because the contract feeds the name into `sha256(modelName) == modelHash`: a padded name is a different model at a different book address, so trimming would serve two markets under one label. A name that is blank or all whitespace leaves the column NULL and the API renders the model by `model_hash`.
 
 **Nothing is parsed out of the name.** It used to be split on exactly three `--`-separated parts into `producer` / `model_name` / `model_version`, with all three left NULL for anything else. The model registry has since been re-seeded with names that are not in that shape — `Qwen2.5-32B-Instruct`, not `qwen--qwen2.5-32b--instruct` — so the parts would have been NULL for every new market, and the split was a guess at structure the names never guaranteed. The three columns are gone (`0005_drop_inference_model_name_parts.sql`) and the whole string is served instead.
 
