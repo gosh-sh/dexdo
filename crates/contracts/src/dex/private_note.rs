@@ -1314,7 +1314,7 @@ impl PrivateNote {
     ///
     /// Original contract method: `streamCleanup`
     ///
-    /// Distinct from [`Self::stream_reclaim`], which exits a deal that WAS
+    /// Distinct from [`Self::stream_stop`], which exits a deal that WAS
     /// opened and then abandoned. This one is scoped to the never-opened case
     /// by a permanent latch on the deal: it refunds the whole deposit, returns
     /// the seller's bond unslashed (nothing was delivered, so no fee and no

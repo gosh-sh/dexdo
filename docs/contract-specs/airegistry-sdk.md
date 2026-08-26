@@ -17,6 +17,10 @@ Mutating methods take a `Signer` and return `ResultOfSendMessage`; getters retur
 their typed `ResultOf…`. Pubkey fields are `uint256` accepted as a decimal or
 `0x` hex string.
 
+Each section lists what the SDK **wraps**. Contract methods with no wrapper are
+called out under the tables — the contracts carry more surface than the SDK
+does, and the gap is where the next e2e test stalls.
+
 ---
 
 ## 1. Per-contract wrappers
@@ -34,55 +38,68 @@ derived from an owner pubkey.
 | `get_owner_pubkey` | `getOwnerPubkey` | → `ResultOfGetOwnerPubkey { owner_pubkey }` | The configured owner pubkey. |
 | `get_version` | `getVersion` | → `ResultOfGetVersion { version, name }` | Contract version + name. |
 
+Not wrapped: `updateCode` (upgrade path, driven from the contracts repo).
+
 ### RootModel — `airegistry/root_model.rs`
 
-Per-owner model registry. Derives + registers `TokenContract` children at
-deterministic `(sellerPubkey, nonce)` addresses.
+Per-owner model registry. Derives the deterministic `(sellerPubkey, nonce)`
+address every `TokenContract` of that owner lives at.
 
 | Method | Contract method | Params / Result | Description |
 | --- | --- | --- | --- |
-| `register_token_contract` | `registerTokenContract` | `ParamsOfRegisterTokenContract { seller_pubkey, nonce }` | Deploy + register a `TokenContract` for `(sellerPubkey, nonce)`. |
-| `get_token_contract_address` | `getTokenContractAddress` | `ParamsOfGetTokenContractAddress { seller_pubkey, nonce }` → `ResultOfGetTokenContractAddress { address }` | Deterministic `TokenContract` address for `(sellerPubkey, nonce)`. |
+| `register_token_contract` | `registerTokenContract` | `ParamsOfRegisterTokenContract { seller_pubkey, nonce }` | **Cannot be called from the SDK.** Since 4.0.36 this no longer deploys anything: it is a `pure` self-announcement that recomputes the canonical address from the pair, requires `msg.sender` to equal it, and emits `TokenContractRegistered`. Only the already-deployed deal can satisfy that, so an external message reverts `ERR_INVALID_SENDER`. The deal is created by the seller's note — see [§2](#2-note-side-inference--dexprivate_noters). |
+| `get_token_contract_address` | `getTokenContractAddress` | `ParamsOfGetTokenContractAddress { seller_pubkey, nonce }` → `ResultOfGetTokenContractAddress { address }` | Deterministic `TokenContract` address for `(seller_pubkey, nonce)`. |
 | `get_owner_pubkey` | `getOwnerPubkey` | → `ResultOfGetOwnerPubkey { owner_pubkey }` | The configured owner pubkey. |
 | `get_version` | `getVersion` | → `ResultOfGetVersion { version, name }` | Contract version + name. |
 
 ### TokenContract — `airegistry/token_contract.rs`
 
-Per-deal streaming escrow. Holds the buyer's SHELL deposit and settles ticks one
-at a time (probe-tick model, spec §3.1.2): `open → advance → stop / dispute /
-reclaim`.
+Per-deal streaming escrow. Holds the buyer's SHELL deposit and settles by
+CLAIMED CONSUMPTION, not by elapsed ticks: the first tick is a probe frozen at
+`open()`, and past it the escrow stays whole until the seller claims cumulative
+consumption (`claimTokens`), which becomes payable only by outliving its
+promote window (`finalize`). Subscriptions settle take-or-pay per week
+(`settleWeek`) instead. See the contract header in
+[`TokenContract.sol`](../../contracts/airegistry/TokenContract.sol) for the
+three-deep claim pipeline and the dispute economics.
 
 **Funding**
 
 | Method | Contract method | Params / Result | Description |
 | --- | --- | --- | --- |
-| `fund` | `fund` | — | Buyer pays the deposit straight to the deal. Argument-less: the buyer is bound beforehand via `authorizeDirectFund` and the deposit rides on the message value. |
-| `fund_from_order_book` | `fundFromOrderBook` | `ParamsOfFundFromOrderBook` | Funded from a matched order-book buy; sender must be the order book. |
-| `fund_seller_bond` | `fundSellerBond` | — | Seller posts the mirror bond of `2 * pricePerTick` (ECC[2] SHELL). |
+| `fund_from_order_book` | `fundFromOrderBook` | `ParamsOfFundFromOrderBook { paid, buyer_note, buyer_pubkey, deal_flags }` | Funded from a matched order-book buy; sender must be the order book. The only funding door the SDK wraps. |
+
+Not wrapped: `fundDeal` (the seller's note ships gas as attached ECC[2] and the
+`2 * pricePerTick` mirror bond as a figure — the door that replaced
+`fundSellerBond`) and `fundBuyerBond` (the buyer's own `2P`, held outside the
+escrow, staked on a dispute). Both are internal-only and value-bearing, so they
+are reached from the note or the giver, never from a signed external call.
 
 **Streaming lifecycle**
 
 | Method | Contract method | Params / Result | Description |
 | --- | --- | --- | --- |
-| `open` | `open` | `ParamsOfOpen { endpoint_cipher }` | Seller opens the stream (freezes the probe tick). |
-| `advance` | `advance` | — | Seller advances one tick (optimistic-accept after the settle window). |
-| `stop` | `stop` | — | Buyer stops the stream cleanly (spec §4.1). |
-| `dispute` | `dispute` | — | Buyer disputes the current ticks (spec §4.2). |
+| `open` | `open` | `ParamsOfOpen { endpoint_cipher }` | Seller posts the endpoint encrypted to the buyer's pubkey and freezes the probe tick. Requires the mirror bond already funded. The note is NOT locked. |
+| `stop` | `stop` | — | Buyer exit: settles trusted ticks and returns the rest of the escrow (spec §4.1). Also the seller-no-show path — silence leaves the last claim unpromoted. |
+| `dispute` | `dispute` | — | Buyer contests the `claimed - trusted` delta (spec §4.2). |
 | `release_dispute` | `releaseDispute` | — | Buyer releases a dispute it raised. |
-| `resolve_dispute_timeout` | `resolveDisputeTimeout` | — | Seller resolves a dispute after the dispute window (50/50 or burn). |
-| `reclaim_on_timeout` | `reclaimOnTimeout` | — | Buyer reclaims on seller no-show after the stream timeout. |
-| `cleanup_unopened` | `cleanupUnopened` | — | Recover funds from a funded-but-unopened deal (seller no-show, §2.1). Residual native is swept to the canonical SuperRoot. |
-| `withdraw_shell` | `withdrawShell` | `ParamsOfWithdrawShell { amount, recipient }` | Seller withdraws finalized SHELL. |
-| `destroy` | `destroy` | `ParamsOfDestroy { payout_address }` | Destroy a settled deal, sweeping any residue to `payout_address`. |
+| `resolve_dispute_timeout` | `resolveDisputeTimeout` | — | Seller resolves a dispute after the dispute window. |
+| `cleanup_unopened` | `cleanupUnopened` | — | Recover funds from a funded-but-unopened deal (seller no-show, §2.1). Residual native gas sweeps to the seller note, not to a fixed sink. Emits nothing — see [indexer.md § Deal-address reuse](../tech-specs/indexer.md#deal-address-reuse). |
+| `withdraw_shell` | `withdrawShell` | `ParamsOfWithdrawShell { amount }` | Seller withdraws finalized SHELL. |
+
+Not wrapped: `claimTokens`, `finalize`, `settleWeek`, `acceptProbe`,
+`sellerStop`, `close`, `destroy`, `touchDeal`, `postFromNote`, `onSellClosed`.
+`finalize` and `settleWeek` are permissionless, so anything may drive them; the
+rest are seller-only or note/book callbacks.
 
 **Getters** (each returns the matching `ResultOf…`)
 
 | Method | Contract method | Returns | Description |
 | --- | --- | --- | --- |
-| `get_state` | `getState` | `funded, opened, probe_accepted, disputed, deposit, prepaid, frozen, finalized_owed, prepaid_time, last_advance, dispute_time` | Full deal state machine + balances. |
+| `get_state` | `getState` | `funded, opened, probe_accepted, disputed, deposit, probe_tick, finalized_owed, tokens_final, tokens_pending, probe_time, last_claim_time, dispute_time, funded_time` | Full deal state machine, escrow, and the claim pipeline (`tokens_final` is the only figure money is computed from). |
 | `get_seller_bond` | `getSellerBond` | `bond_funded, bond_held, bond_required` | Seller mirror-bond state; `bond_required` is `2 * price_per_tick`. |
-| `get_offer` | `getOffer` | `offer_posted, closing` | Whether a sell offer is live on the book and whether the deal is closing. |
-| `get_config` | `getConfig` | `platform_fee_bps, settle_window, stream_timeout, dispute_window` | Protocol-wide constants (spec §9.1). |
+| `get_offer` | `getOffer` | `offer_posted` | Whether a sell offer is live on the book. |
+| `get_config` | `getConfig` | `platform_fee_bps, min_claim_interval, min_seconds_per_tick, dispute_window` | Protocol-wide constants (spec §9.1). The two claim bounds replaced the old settle-window / stream-timeout pair. |
 | `get_fees` | `getFees` | `fee_accrued, ticks_finalized, ever_disputed, rebate_max_bps, rebate_slope_bps` | Accrued platform fees + rebate parameters. |
 | `get_deal` | `getDeal` | `tick_size, price_per_tick, max_ticks` | Deal economics. |
 | `get_parties` | `getParties` | `buyer, seller_note` | Buyer + seller-note addresses. |
@@ -93,23 +110,30 @@ reclaim`.
 | `get_shell_balance` | `getShellBalance` | SHELL balance | The deal's physical SHELL (ECC[2]) balance. |
 | `get_version` | `getVersion` | `version, name` | Contract version + name. |
 
+Not wrapped: `getSubscription` (take-or-pay week accounting), `getBuyerBond`,
+`getModelHash`.
+
 ### InferenceOrderBook — `airegistry/inference_order_book.rs`
 
 Per-model CLOB. Matches SELL offers (each backed by a `TokenContract`) against
-BUY orders / subscriptions paid in SHELL escrow (spec §2 + §8).
+BUY orders paid in SHELL escrow (spec §2 + §8). A subscription is not a separate
+method: it is a BUY order carrying subscription `flags`, which the book hands
+down to the deal at match.
 
 **Matching / orders**
 
 | Method | Contract method | Params / Result | Description |
 | --- | --- | --- | --- |
 | `process_head` | `processHead` | — | Drain the matching queue across continuation txs (`> MAX_MATCHES_PER_CALL`). |
-| `place_sell_offer` | `placeSellOffer` | `ParamsOfPlaceSellOffer { price_per_tick, max_ticks, flags, seller_pubkey, nonce, owner_note }` | Post a SELL offer; the book recomputes the canonical `TokenContract` address from `seller_pubkey + nonce` and requires the **caller** to be it, so the deal address is never taken from the message. Sender is the seller's `TokenContract`, not the note; `owner_note` records the note a fill settles back to. |
-| `place_buy_order` | `placeBuyOrder` | `ParamsOfPlaceBuyOrder { max_price_per_tick, ticks, flags, deadline, buyer_pubkey }` | Place a BUY order; sender (buyer note) forwards the SHELL escrow. `deadline = 0` is good-till-cancel. |
-| `place_subscription` | `placeSubscription` | `ParamsOfPlaceSubscription { max_price_per_tick, ticks, auto_renew, buyer_pubkey }` | Place a subscription (weekly semantic order, spec §8). |
-| `poke_subscription` | `pokeSubscription` | `ParamsOfOrderId { order_id }` | Roll a subscription onto its next cycle; the closing cycle's unspent budget refunds to the buyer. |
+| `place_sell_offer` | `placeSellOffer` | `ParamsOfPlaceSellOffer { price_per_tick, max_ticks, flags, seller_pubkey, nonce, owner_note, deadline }` | Post a SELL offer; the book recomputes the canonical `TokenContract` address from `seller_pubkey + nonce` and requires the **caller** to be it, so the deal address is never taken from the message. Sender is the seller's `TokenContract`, not the note; `owner_note` records the note a fill settles back to. |
+| `place_buy_order` | `placeBuyOrder` | `ParamsOfPlaceBuyOrder { client_order_id, escrow, max_price_per_tick, ticks, flags, deadline, buyer_pubkey, deposit_hash }` | Place a BUY order; sender (buyer note) forwards the SHELL escrow. `deadline = 0` is good-till-cancel. |
 | `cancel_order` | `cancelOrder` | `ParamsOfOrderId { order_id }` | Cancel one resting order and refund its remaining escrow. |
 | `cancel_all_orders` | `cancelAllOrders` | — | Cancel every resting order owned by the caller. |
+| `expire_order` | `expireOrder` | `ParamsOfOrderId { order_id }` | Retire an order whose deadline has passed and refund it. |
 | `request_weekly_median` | `requestWeeklyMedian` | `ParamsOfRequestWeeklyMedian { event_id, oracle_list_hash, token_type }` | Ask the engine to refresh the model's reference price. |
+
+Not wrapped: `reportFinalized` (deal → book settlement report),
+`onHandoverAccepted` / `getHandoverBuyer` (match handover).
 
 **Getters**
 
@@ -120,9 +144,10 @@ BUY orders / subscriptions paid in SHELL escrow (spec §2 + §8).
 | `get_best_bid_ask` | `getBestBidAsk` | `has_bid, bid, has_ask, ask` | Top of book. |
 | `get_stats` | `getStats` | `next_order_id, order_count, executed_notional, executed_ticks` | Book-wide counters. |
 | `get_queue_size` | `getQueueSize` | `size` | Pending match-queue depth. |
-| `get_subscription` | `getSubscription` | `ParamsOfOrderId { order_id }` → `exists, period_start, cur_cycle, cycle_budget, cycle_spent, auto_renew` | Subscription state. |
 | `get_params` | `getParams` | `model_hash, platform_fee_bps` | Per-book parameters. |
 | `get_version` | `getVersion` | `version, name` | Contract version + name. |
+
+Not wrapped: `getModelName`.
 
 ---
 
@@ -134,33 +159,38 @@ on-chain.
 
 | Method | Contract method | Params | Description |
 | --- | --- | --- | --- |
-| `deploy_inference_order_book` | `deployInferenceOrderBook` | `ParamsOfDeployInferenceOrderBook` | Deploy an `InferenceOrderBook` from this note (permissionless at the deterministic per-model address). The book code is baked into the note. |
-| `post_sell_offer` | `postSellOffer` | `ParamsOfPostSellOffer { flags, nonce }` | Post a SELL offer to a book, indirectly: the note authorises its canonical `TokenContract` for `nonce` (`postFromNote`) and that TC posts the offer with its own constructor-pinned `price_per_tick` / `max_ticks` / `model_hash`. The terms cannot be overridden per offer — deploy a TC with different ones. The TC must already exist, or the call is a no-op. |
-| `place_inference_buy` | `placeInferenceBuy` | `ParamsOfPlaceInferenceBuy` | Place a BUY order with SHELL escrow. |
-| `place_inference_subscription` | `placeInferenceSubscription` | `ParamsOfPlaceInferenceSubscription` | Place a subscription (semantic order). |
-| `cancel_inference_order` | `cancelInferenceOrder` | `ParamsOfCancelInferenceOrder` | Cancel one resting inference order owned by this note. |
-| `cancel_all_inference_orders` | `cancelAllInferenceOrders` | `ParamsOfCancelAllInferenceOrders` | Cancel all resting inference orders owned by this note. |
-| `stream_stop` | `streamStop` | `ParamsOfStreamDeal` | Buyer note stops the stream cleanly (amicable exit, §4.1). |
-| `stream_dispute` | `streamDispute` | `ParamsOfStreamDeal` | Buyer note disputes the current ticks (§4.2). |
-| `stream_reclaim` | `streamReclaim` | `ParamsOfStreamDeal` | Buyer note reclaims a probe tick after the stream timeout (seller no-show). |
+| `deploy_inference_order_book` | `deployInferenceOrderBook` | `ParamsOfDeployInferenceOrderBook { model_hash, model_name }` | Deploy an `InferenceOrderBook` from this note (permissionless at the deterministic per-model address). The book code is baked into the note. |
+| `fund_deploy_shell` | `fundDeployShell` | `ParamsOfFundDeployShell { nonce, tc_shell }` | Pre-fund the note's own canonical deal address with SHELL. A deploy message only activates an account that already holds SHELL, so this runs before the deal is created. |
+| `post_sell_offer` | `postSellOffer` | `ParamsOfPostSellOffer { flags, nonce, ttl }` | Post a SELL offer, indirectly: the note authorises its canonical `TokenContract` for `nonce` (`postFromNote`) and that deal posts the offer with its own constructor-pinned `price_per_tick` / `max_ticks` / `model_hash`. The terms cannot be overridden per offer — deploy a deal with different ones. The deal must already exist, or the call is a no-op. `ttl` is mandatory and bounded: `0` or `> MAX_SELL_TTL` (3600 s) reverts `ERR_SELL_DEADLINE_TOO_LONG` — `0` is NOT good-till-cancel here, unlike the BUY deadline it resembles. |
+| `place_inference_buy` | `placeInferenceBuy` | `ParamsOfPlaceInferenceBuy { model_hash, max_price_per_tick, ticks, escrow, flags, deadline }` | Place a BUY order with SHELL escrow. |
+| `cancel_inference_order` | `cancelInferenceOrder` | `ParamsOfCancelInferenceOrder { model_hash, order_id }` | Cancel one resting inference order owned by this note. |
+| `cancel_all_inference_orders` | `cancelAllInferenceOrders` | `ParamsOfCancelAllInferenceOrders { model_hash }` | Cancel all resting inference orders owned by this note. |
+| `stream_stop` | `streamStop` | `ParamsOfStreamDeal { token_contract }` | Buyer note stops the stream cleanly (amicable exit, §4.1). |
+| `stream_dispute` | `streamDispute` | `ParamsOfStreamDeal { token_contract }` | Buyer note disputes the claimed delta (§4.2). |
+| `stream_cleanup` | `streamCleanup` | `ParamsOfStreamDeal { token_contract }` | Buyer note recovers a deal it funded and the seller never opened: refunds the whole deposit, returns the bond unslashed, destroys the deal. Scoped to the never-opened case by a permanent latch on the deal. |
+
+Not wrapped: `deployDeal` (nonce, model name/hash, price per tick, max ticks,
+gas reserve) — the seller-note call that creates the deal, and today the only
+missing piece of a full inference e2e; and `fundDeal`, the buyer's direct
+funding path that bypasses the book.
+
+The three `stream_*` calls name the deal by **address**, not by the
+`(sellerPubkey, nonce)` pair the address derives from, so a wrong address is not
+silently a no-op: the note sends them `bounce: true` and the value comes back.
+Authorisation is on the deal side — `stop` / `dispute` / `cleanup` each require
+`msg.sender` to be the recorded buyer.
 
 **Pending-buy state**
 
 The note-side stream/dispute locks are gone: the seller's collateral is the
 per-deal mirror bond inside the `TokenContract`, so a note is never frozen by an
 inference stream or dispute, and there is nothing for the SDK to take, release,
-or clear.
+or clear. One note runs as many deals at once as its owner cares to open.
 
 | Method | Contract method | Description |
 | --- | --- | --- |
-| `get_pending_place_buy_lock` / `get_pending_place_buy_token_type` | getters | Inspect a pending buy in flight. |
+| `get_pending_place_buy_lock` / `get_pending_place_buy_token_type` | `_pendingPlaceBuyLock` / `_pendingPlaceBuyTokenType` | Inspect a pending buy in flight. |
 | `get_inference_order_book_address` | `getInferenceOrderBookAddress` | Deterministic book address for a `modelHash`. |
-
-The four lock callbacks all take `ParamsOfStreamLock { seller_pubkey, nonce }`:
-the deal is named by the pair its address is derived from, not by the address
-itself. The note recomputes the canonical `TokenContract` from that pair and
-requires `msg.sender` to equal it, so a foreign caller cannot lock the note by
-naming someone else's deal.
 
 ---
 
@@ -173,27 +203,29 @@ inference e2e tests drive.
 **Order book / streaming (note-side, via the facade)**
 
 - `deploy_inference_order_book`, `get_inference_order_book_address`
-- `post_sell_offer`, `place_inference_buy`, `place_inference_subscription`
+- `post_sell_offer`, `place_inference_buy`
 - `cancel_inference_order`, `cancel_all_inference_orders`
-- `stream_stop`, `stream_dispute`, `stream_reclaim`
+- `stream_stop`, `stream_dispute`, `stream_cleanup`
 
 **TokenContract (deal escrow, via the facade)**
 
-- `token_contract_open`, `token_contract_advance`, `token_contract_fund_seller_bond`
-- `token_contract_resolve_dispute_timeout`, `token_contract_withdraw_shell`
-- `token_contract_get_state`, `token_contract_get_seller_bond`, `token_contract_get_parties`, `token_contract_get_shell_balance`
+- `token_contract_open`, `token_contract_resolve_dispute_timeout`, `token_contract_withdraw_shell`
+- `token_contract_get_state`, `token_contract_get_seller_bond`, `token_contract_get_offer`
+- `token_contract_get_fees`, `token_contract_get_config`, `token_contract_get_parties`, `token_contract_get_shell_balance`
 
 **Order-book getters (decoded)**
 
 - `inference_get_order`, `inference_get_stats`, `inference_get_queue_size`
-- `inference_get_best_bid_ask`, `inference_get_subscription`, `inference_get_weekly_median_price`
+- `inference_get_best_bid_ask`, `inference_get_weekly_median_price`
+- `inference_expire_order`, `inference_book_account`
 
 ---
 
-A full deal walks: seller `deploy_root_model` → `register_token_contract` →
-`post_sell_offer`; buyer `place_inference_buy` → match funds the `TokenContract`;
-seller `token_contract_open` → `advance` per tick; buyer `stream_stop` (or
-`stream_dispute` / `stream_reclaim`). The settlement read-model built from the
+A full deal walks: seller `deploy_root_model` → `fund_deploy_shell` →
+`deployDeal` (no wrapper yet) → `post_sell_offer`; buyer `place_inference_buy` →
+the match funds the deal through `fundFromOrderBook`; seller `token_contract_open`
+→ `claimTokens` per claim with `finalize` promoting them; buyer `stream_stop` (or
+`stream_dispute` / `stream_cleanup`). The settlement read-model built from the
 emitted events is described in [`airegistry-inference.md`](airegistry-inference.md).
 
 > Browsing tip: `cargo doc -p dodex-contracts --no-deps --open` renders every
