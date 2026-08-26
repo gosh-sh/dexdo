@@ -140,6 +140,18 @@ impl Decoder {
             "InferenceOrderBook",
             "InferenceOrderCancelled",
         )?;
+        // `TokenContract.ContractDeployed` (732, `DealDeployedEmit`) is pinned for a
+        // reason the loaded-ABI set hides. `RootModel.ContractDeployed` is byte-for-byte
+        // the same signature — same name, same single `address` input, therefore the same
+        // signature id — and its own dst, 703, is in `SCOPED_EVENT_IDS`. `RootModel`'s ABI
+        // is simply not loaded here, so today that id resolves to exactly one entry and
+        // the ambiguity never surfaces: a 703 body would decode as a DEAL and seed an
+        // `inference_deals` row under a root model's address. Nothing arrives on 703
+        // because a RootModel lives in the SuperRoot's own dApp, not the DEX one — an
+        // accident of deployment topology, not a guarantee. Routing the deal by its own
+        // `dst` makes the deal's birth identified by where it was sent rather than by
+        // which ABI happens to be in the bundle.
+        Self::add_route(&mut routes, &contracts, 732, "TokenContract", "ContractDeployed")?;
 
         Ok(Self { contracts, event_index, routes })
     }

@@ -489,21 +489,34 @@ pub fn event_type_dst(event_id: u32) -> String {
 }
 
 /// Every external EVENT_ID indexed from the DEX dApp and legacy RootPN streams.
-/// `TokenContract.*` destinations are intentionally absent: per-deal settlement
-/// contracts are outside the indexer's capture scope. The GraphQL queries first
-/// scope traffic by source; this set then selects supported routes before decode
-/// or `raw_events` insertion.
+/// The GraphQL queries first scope traffic by source; this set then selects
+/// supported routes before decode or `raw_events` insertion.
+///
+/// `TokenContract.*` (the 7xx settlement block) IS included, as of contracts
+/// 4.0.36. It was excluded for as long as a deal was deployed by an external
+/// message and was therefore the root of its own dApp — its ExtOut messages
+/// could not appear on the DEX dApp stream at all, so excluding them cost
+/// nothing and the settlement projectors ran only over retained rows. 4.0.36
+/// deploys the deal from the seller's `PrivateNote` (`deployDeal`), which puts
+/// it in the note's dApp — the DEX one — so every deal event now arrives on the
+/// stream we already drain. Keeping the exclusion would have meant dropping,
+/// every tick, exactly the events `inference_deals` / `inference_ticks` are
+/// built from.
 ///
 /// Ids, not names, because routing depends on the id alone — see
 /// `docs/contract-specs/dex-events-routing.md`. Declared here rather than derived
 /// from the ABI bundle because the ABI carries the *signature-hash* event id, which
 /// is a different number from the EVENT_ID constant that forms the `dst`.
 /// `tests/ingest_scope.rs` re-derives this set from the indexed contract sources
-/// on every run and separately pins every TokenContract route as excluded.
-pub const SCOPED_EVENT_IDS: [u32; 69] = [
+/// on every run.
+pub const SCOPED_EVENT_IDS: [u32; 84] = [
     101, 102, 104, 106, 107, 111, 112, 113, 114, 115, 118, 119, 120, 121, 122, 124, 126, 132, 133,
     135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 146, 147, 148, 149, 150, 151, 152, 153, 154,
     155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 700, 702, 703,
+    // TokenContract (per-deal settlement), `contracts/airegistry/modifiers/modifiers.sol`.
+    // 732 is `DealDeployedEmit`, NOT 703: the deal's `ContractDeployed` carries the same body as
+    // `RootModel`'s and used to share its channel, which the contracts split in 4.0.35.
+    709, 710, 720, 721, 722, 723, 724, 725, 727, 728, 729, 730, 731, 732, 733, //
     1000, 1001, 1002, 1003, 1004, 1008, 1009, 1010, 1011, 1100, 1101, 1102,
 ];
 

@@ -1,8 +1,8 @@
 // 2026 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
 //
 //! Pins the indexer's ingest scope — [`config::SCOPED_EVENT_IDS`] — against the
-//! contract sources it claims to mirror, while explicitly excluding every
-//! `TokenContract.*` route.
+//! contract sources it claims to mirror, `TokenContract.*` included since
+//! contracts 4.0.36 put the per-deal settlement contract in the DEX dApp.
 //!
 //! Capture keeps an edge only when its `dst` is one of those ids, so the list is
 //! load-bearing in both directions and fails silently either way:
@@ -119,9 +119,7 @@ fn emitted_event_ids_matching(include_source: impl Fn(&Path) -> bool) -> BTreeSe
 
 #[test]
 fn scoped_event_ids_match_the_contracts() {
-    let derived = emitted_event_ids_matching(|path| {
-        path.file_name().and_then(|name| name.to_str()) != Some("TokenContract.sol")
-    });
+    let derived = emitted_event_ids_matching(|_| true);
     let declared: BTreeSet<u32> = SCOPED_EVENT_IDS.iter().copied().collect();
 
     let missing: Vec<u32> = derived.difference(&declared).copied().collect();
@@ -140,19 +138,31 @@ fn scoped_event_ids_match_the_contracts() {
     );
 }
 
+/// The settlement block, asserted as a block rather than left to the set
+/// comparison above.
+///
+/// `scoped_event_ids_match_the_contracts` would already fail if one of these
+/// went missing, but it would fail as "a number is absent" — and this is the
+/// one group in the list whose presence is a decision rather than a
+/// consequence. It was deliberately excluded for as long as a deal was
+/// deployed by an external message and lived in a dApp of its own, where no
+/// amount of scoping could have reached it. Naming the group keeps the
+/// deal-side count visible: drop `deployDeal` and put the deal back outside
+/// the DEX dApp, and this is the test that says what has to be reconsidered.
 #[test]
-fn token_contract_event_ids_are_all_out_of_scope() {
+fn token_contract_event_ids_are_all_in_scope() {
     let token_contract_ids = emitted_event_ids_matching(|path| {
         path.file_name().and_then(|name| name.to_str()) == Some("TokenContract.sol")
     });
     let declared: BTreeSet<u32> = SCOPED_EVENT_IDS.iter().copied().collect();
-    let accidentally_scoped: Vec<u32> =
-        token_contract_ids.intersection(&declared).copied().collect();
+    let dropped: Vec<u32> = token_contract_ids.difference(&declared).copied().collect();
 
     assert!(!token_contract_ids.is_empty(), "found no TokenContract event routes");
     assert!(
-        accidentally_scoped.is_empty(),
-        "TokenContract event ids must stay outside indexer capture: {accidentally_scoped:?}"
+        dropped.is_empty(),
+        "TokenContract emits event ids the indexer does not capture: {dropped:?}. Since contracts \
+         4.0.36 the deal lives in the DEX dApp, so these arrive on the stream we already drain and \
+         a missing id is dropped at ingest — not recoverable by reprojection."
     );
 }
 

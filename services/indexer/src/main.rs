@@ -636,15 +636,27 @@ mod tests {
         assert_eq!(stats.dst_missing, 1);
     }
 
+    /// Settlement routes are kept, and the filter still selects rather than
+    /// admits everything.
+    ///
+    /// This test asserted the opposite until contracts 4.0.36: a deal was
+    /// deployed by an external message, lived in a dApp of its own, and its
+    /// events could not reach this stream at all, so the `dst` list excluded
+    /// them. `deployDeal` puts the deal in the note's dApp — the DEX one — and
+    /// dropping them here would now discard, from a stream already being
+    /// drained, exactly what `inference_deals` is built from. The unscoped
+    /// route below keeps the other half honest: this is still an allow-list.
     #[test]
-    fn apply_ingest_filters_drops_token_contract_routes_before_decode() {
+    fn apply_ingest_filters_keeps_token_contract_routes() {
         use std::collections::HashSet;
 
         let order_placed = dodex_infrastructure::config::event_type_dst(1000);
         let token_stream_funded = dodex_infrastructure::config::event_type_dst(720);
+        let unscoped = dodex_infrastructure::config::event_type_dst(999);
         let edges = vec![
             edge_with_all(Some("orderbook"), Some(DEX_DAPP_ID), Some(&order_placed)),
             edge_with_all(Some("token-contract"), Some(DEX_DAPP_ID), Some(&token_stream_funded)),
+            edge_with_all(Some("stranger"), Some(DEX_DAPP_ID), Some(&unscoped)),
         ];
 
         let (retained, stats) = apply_ingest_filters(
@@ -654,8 +666,8 @@ mod tests {
             &HashSet::new(),
         );
 
-        assert_eq!(retained.len(), 1);
-        assert_eq!(retained[0].node.dst.as_deref(), Some(order_placed.as_str()));
+        let kept: Vec<&str> = retained.iter().filter_map(|e| e.node.dst.as_deref()).collect();
+        assert_eq!(kept, vec![order_placed.as_str(), token_stream_funded.as_str()]);
         assert_eq!(stats.out_of_scope, 1);
     }
 
