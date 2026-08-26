@@ -37,14 +37,29 @@ variables:
   # the risk is real, not theoretical -- move the pin to a `dev` commit once
   # this work lands there.
   #
-  # This pin is one commit ahead of the last: its only content is the e2e
-  # runner's `--test-threads`, raised from 1 to 4. Nothing else differs, so it
-  # bakes the same zerostate from the same contracts as the pin before it.
-  - &acki_sha "91d7d5d0e2809dfa83c3c87689cc315ed7527238"
-  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:1ee9cec484f27659e4b4d0e2182ca79485929b23c659bd772e58786f9bb1d2c7"
-  - &node_img "docker.gosh.sh/ackinacki-node@sha256:00af55c1fb597d89f8afb469a43eb21c991c9db911ff7a6161ad934218fc4a03"
-  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:a45e15d363cb6f4ef4aca5bdc82d7fe225cca2b6dea97c1838ffbf7208dea962"
-  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:536daa6b37a70f3170274ad5bcd906c4ed367d041e9d216c63a61cd6f53e997a"
+  # This pin is NOT a small step from the last one, unlike the pin it replaces.
+  # It squashes 156 commits of `contracts/dex_4036` onto the branch and takes the
+  # DEX/airegistry contracts to 4.0.36, which is what dodex needs from it: the
+  # zerostate generator follows the new `PrivateNote` constructor. It passes the
+  # `tokenContractCode` CELL beside the hash/depth pin it already passed, and it
+  # calls `RootPN.setTokenContractCode` next to `setInferenceOrderBookCode`.
+  # Without the first, `gen_zerostate` cannot even encode the constructor call
+  # (`Wrong data format in tokenContractCode parameter: null`) -- which is how
+  # this pin came to be bumped. Without the second, every note the zerostate
+  # issues bakes an empty deal-code cell and its first `deployDeal` puts a
+  # codeless account at a well-formed address.
+  #
+  # All four digests moved WITH the SHA, deliberately. They are the network
+  # binaries and carry no DEX contract, so they look independent of a contracts
+  # bump -- but `zerostate-helper` comes out of all-bin while the generator that
+  # drives it comes from the source pin, and the note above spells out what an
+  # older all-bin does to a newer generator. Pinning the two halves to different
+  # commits is exactly the mismatch that warning describes.
+  - &acki_sha "498899debda0e9500d090b83e986b58dc071de07"
+  - &allbin_img "docker.gosh.sh/ackinacki-all-bin@sha256:5f8cec163f2f1264991ab09eb0b373de1088e7444c393a1665fb62186fb7b043"
+  - &node_img "docker.gosh.sh/ackinacki-node@sha256:406f585f4c0d86b7e3a06477c77c5eb4c52cde50abb2cd9f6f2abee13c7de747"
+  - &gql_img "docker.gosh.sh/ackinacki-gql-server@sha256:f61ebca60685ba39280a7c4cfb4796ac8114607e97eeb03a848912d59b2b2c42"
+  - &bm_img "docker.gosh.sh/ackinacki-block-manager@sha256:dcb25d4ab8d001a59bb0c26911f08a3a7e6d84d8dde263c52d508163f47e87cb"
   - &node_image_tag "latest-dev"
   - &busybox_image "busybox:musl"
   - &tvm_cli_version "v3.0.4-rc.an"
